@@ -22,7 +22,8 @@ async function fixture(t, { beforeDelete = () => {} } = {}) {
   const journal = path.join(directory, 'journal.jsonl');
   const rows = () => fs.readFileSync(journal, 'utf8').trim().split('\n').map(JSON.parse);
   const name = newTemporaryVerifierName(), script = `/workers/scripts/${name}`;
-  let stored = null, enabled = false, tamper = false;
+  let stored = null, enabled = false, tamper = false, paired = false, pairReads = 0, releasePair;
+  const pairBarrier = new Promise(resolve => { releasePair = resolve; });
   const mutations = [], deletes = [];
   const fetchImpl = async (url, init) => {
     const parsed = new URL(url), prefix = `/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}`;
@@ -59,7 +60,14 @@ async function fixture(t, { beforeDelete = () => {} } = {}) {
       enabled = true; return ok({ enabled, previews_enabled: false });
     }
     if (suffix === script) return stored ? ok({ id: version }) : absent();
-    if (suffix === script + '/versions?per_page=1') return ok({ items: [{ id: version }] });
+    if (suffix === script + '/versions?per_page=1') {
+      const response = ok({ items: [{ id: version }] });
+      if (paired && ++pairReads >= 3) { // both callers reached their final ownership read
+        if (pairReads === 4) releasePair();
+        await pairBarrier;
+      }
+      return response;
+    }
     if (suffix === script + '/versions/' + version) return ok({ id: version, resources: { bindings } });
     if (suffix === `/workers/workers/${name}/versions/${version}?include=modules`)
       return ok({ id: version, modules: [{ name: 'index.js', content_base64: (tamper ? Buffer.from('changed') : stored).toString('base64') }] });
@@ -74,7 +82,7 @@ async function fixture(t, { beforeDelete = () => {} } = {}) {
   await provider.createVerifier({ name, workerName: 'ledgetop-ops', origin: 'https://ops.ledgetop.app',
     versionId: version, nonceHash: nonce.nonceHash,
     entries: [{ path: '/assets/synthetic.js', size: 1, sha256: hash('x'), contentType: 'application/javascript' }] });
-  return { provider, name, directory, journal, rows, mutations, deletes, tamper: () => { tamper = true; } };
+  return { provider, name, directory, journal, rows, mutations, deletes, tamper: () => { tamper = true; }, pairCleanup: () => { paired = true; } };
 }
 
 test('manual factory fsyncs cleanup intent before the exact owned helper DELETE and confirms absence', async t => {
@@ -118,4 +126,19 @@ test('manual factory preserves changed-helper readback refusal before cleanup in
   await assert.rejects(state.provider.removeVerifier(state.name), /production_provider_refused_or_uncertain_no_retry/);
   assert.equal(state.rows().filter(row => row.method === 'DELETE').length, 0);
   assert.equal(state.deletes.length, 0);
+});
+
+
+test('paired cleanup calls both finish ownership reads but only one journals and dispatches DELETE', async t => {
+  const state = await fixture(t);
+  state.pairCleanup();
+  const results = await Promise.allSettled([
+    state.provider.removeVerifier(state.name), state.provider.removeVerifier(state.name),
+  ]);
+  assert.equal(results.filter(row => row.status === 'fulfilled').length, 1);
+  assert.equal(results.filter(row => row.status === 'rejected').length, 1);
+  assert.equal(state.mutations.filter(row => row.method === 'DELETE').length, 1);
+  assert.equal(state.rows().filter(row => row.method === 'DELETE').length, 1);
+  assert.equal(state.deletes.length, 1);
+  assert.equal(await state.provider.verifierAbsent(state.name), true);
 });

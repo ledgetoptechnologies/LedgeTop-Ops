@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { generateKeyPairSync, privateDecrypt, createDecipheriv, constants } from 'node:crypto';
-import { reviewedRecipient, manualIdentity, recoveryFetch, sealRecovered } from './team-retained-recovery-once.mjs';
+import { reviewedRecipient, manualIdentity, recoveryFetch, sealRecovered, sealRecoveryCheckpoint } from './team-retained-recovery-once.mjs';
 import { sealProductionProviderResponse } from './production-auto-journal.mjs';
 import { canonical, hash } from './production-deploy.mjs';
 
@@ -93,4 +95,30 @@ test('public workflow uploads only sealed envelopes and is manual main-only unde
   assert.match(workflow, /production-auto-installation-/);
   assert.match(workflow, /sealed_directory }}\/\*\.sealed\.json/);
   assert.doesNotMatch(workflow, /npm ci|wrangler deploy|workflow_run:|pull_request:|^  push:/m);
+});
+
+
+test('encrypted journal checkpoints survive a cleanup hold without a completion marker or plaintext artifact', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'team-recovery-checkpoint-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const journalDirectory = path.join(directory, 'journal'), outputDirectory = path.join(directory, 'sealed');
+  fs.mkdirSync(journalDirectory); fs.mkdirSync(outputDirectory);
+  fs.writeFileSync(path.join(journalDirectory, 'journal.jsonl'), 'synthetic private cleanup intent');
+  const keys = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  const recipient = { schemaVersion: 1, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }),
+    keyIdSha256: hash(keys.publicKey.export({ type: 'spki', format: 'der' })) };
+  const binding = { identity: { sourceCommit: source, workflowRunId: 123, workflowRunAttempt: 1 },
+    verifierName: name, nonceHash: hash(bearer), verifierSourceSHA256: 'a'.repeat(64) };
+  const pin = sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage: 'mutation-intent' });
+  assert.deepEqual(fs.readdirSync(outputDirectory), [pin.filename]);
+  const bytes = fs.readFileSync(path.join(outputDirectory, pin.filename));
+  assert.equal(bytes.length, pin.size); assert.equal(hash(bytes), pin.sha256);
+  assert.equal(bytes.includes(Buffer.from('synthetic private cleanup intent')), false);
+  assert.equal(bytes.includes(Buffer.from(bearer)), false);
+  const envelope = JSON.parse(bytes);
+  assert.equal(envelope.context.releaseId, hash(canonical(binding)), 'nonce/source/run identity are cryptographically bound');
+  assert.equal(envelope.context.status, null, 'a checkpoint never asserts successful cleanup');
+  assert.throws(() => sealRecovered({ assets: new Map(), receipt: { temporaryWorkerRemoved: false, absenceVerified: false },
+    binding, recipient, journalDirectory, outputDirectory, partialAssets: [] }), /refused/);
+  assert.deepEqual(fs.readdirSync(outputDirectory), [pin.filename], 'cleanup hold retains ciphertext without a completion');
 });
