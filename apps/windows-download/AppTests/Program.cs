@@ -8,6 +8,8 @@ using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
+if (args is ["--token-helper-guidance-only"]) { await TokenHelperGuidanceTests.Run(); Console.WriteLine("PASS token helper guidance"); return 0; }
+
 if (args.Length == 1 && args[0] == "--argument-parsing-only") { ScreenshotArgumentTests.Run(); Console.WriteLine("PASS screenshot argument parsing"); return 0; }
 if (args.Length == 1 && args[0] == "--exe-update-policy-only") { await ExeUpdateWindowsPolicyTests.Run(); return 0; }
 if (args.Length == 1 && args[0] == "--hydration-timing-store-only") { await HydrationTimingDiagnosticStoreTests.Run(); Console.WriteLine("PASS hydration timing diagnostic store"); return 0; }
@@ -79,6 +81,7 @@ if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") is null)
     Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetFullPath(screenshots));
 var passed = 0; var failed = 0;
 var groups = new (string Name, Func<Task> Run)[] {
+    ("sign-in helper failures give actionable guidance and preserve cancellation", TokenHelperGuidanceTests.Run),
     ("Staging ignores enabled automatic updates", () => FreshGenerationStagingQualification.UpdaterAvailable ? Task.CompletedTask : ExplorerPreviewWindowTests.StagingScheduleDisabled()),
     ("client and employee backends construct and route only their selected source", BackendModeTests.Run),
     ("file type labels and sizes read like the Operations badges", TextLabels),
