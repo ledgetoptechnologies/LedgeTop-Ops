@@ -29,7 +29,12 @@ OPTIONAL = {
     "LTDSTHUMB_R2_ACCESS_KEY_ID": "synthetic-object-read-id",
     "LTDSTHUMB_R2_SECRET_ACCESS_KEY": "synthetic-object-read-secret",
     "LOGS_BIND_ADDRESS": "192.0.2.10",
+    "LOGS_INGRESS_HOST": "logs.example.test",
+    "NAS_LINK_ENV_FILE": "@link",
 }
+# Synthetic shared NAS link file (never real credentials).
+LINK = {"NAS_LINK_CLIENT_ID": "synthetic-link.access", "NAS_LINK_CLIENT_SECRET": "synthetic-link-secret-0000000000000000",
+    "NAS_LINK_AUDIENCE": "a" * 64, "OPS_BASE_URL": "https://ops.example.test"}
 LOGS = "flight-logs"
 
 
@@ -39,6 +44,10 @@ def render(files, values, expect_success=True):
     env = {key: value for key, value in os.environ.items() if key not in names and key != "COMPOSE_PROJECT_NAME"}
     with tempfile.TemporaryDirectory(prefix="proxy-compose-test-") as temp:
         env_file = Path(temp) / "synthetic.env"
+        if values.get("NAS_LINK_ENV_FILE") == "@link":
+            link_file = Path(temp) / "nas-link.env"
+            link_file.write_text("".join(f"{key}={value}\n" for key, value in LINK.items()))
+            values = values | {"NAS_LINK_ENV_FILE": str(link_file)}
         env_file.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
         command = ["docker", "compose", "--env-file", str(env_file)]
         for file in files:
@@ -158,10 +167,14 @@ class MediaComposeTests(unittest.TestCase):
         self.assertTrue(any(mount.startswith("/scratch:") for mount in queue["tmpfs"]))
 
     def test_required_values_fail_closed(self):
-        for missing in ("MEDIA_JOBS_HOST_PATH", "WORKERS_APP_DATA_HOST_PATH", "THUMBNAIL_INGEST_SECRET"):
+        for missing in ("MEDIA_JOBS_HOST_PATH", "WORKERS_APP_DATA_HOST_PATH"):
             with self.subTest(missing=missing):
                 render([BASE], {key: value for key, value in VALUES.items() if key != missing}, expect_success=False)
                 render([ALL], {key: value for key, value in (VALUES | OPTIONAL).items() if key != missing}, expect_success=False)
+        # The renderer bearer is no longer fatal at interpolation (the worker enforces it unless the NAS link pair is
+        # set); the broker's own ingest secret in the four-service stack still is.
+        render([BASE], {key: value for key, value in VALUES.items() if key != "THUMBNAIL_INGEST_SECRET"})
+        render([ALL], {key: value for key, value in (VALUES | OPTIONAL).items() if key != "THUMBNAIL_INGEST_SECRET"}, expect_success=False)
         render([BASE, PREBUILT], VALUES, expect_success=False)
 
     def test_custom_user_owns_queue_tmpfs(self):
@@ -194,7 +207,9 @@ class MediaComposeTests(unittest.TestCase):
         self.assertEqual(int(logs["mem_limit"]), 2 * 1024**3)
         self.assertEqual(logs["memswap_limit"], logs["mem_limit"], "no swap")
         self.assertEqual(logs["pids_limit"], 256)
-        self.assertFalse(logs.get("environment"))
+        self.assertEqual(logs["environment"], LINK | {"LOGS_INGRESS_HOST": "logs.example.test"},
+            "only the shared NAS link file and the hostname; no per-service secrets")
+        self.assertRegex(ALL.read_text(), r"(?m)^    env_file:\n      - path: \$\{NAS_LINK_ENV_FILE:-[^}]+\}\n        required: false\n")
         self.assertEqual([(port["host_ip"], str(port["published"]), port["target"]) for port in logs["ports"]],
             [("192.0.2.10", "8090", 8080)])
         self.assertEqual([(volume["source"], volume["target"]) for volume in logs["volumes"]], [("/synthetic/workers-app-data", "/app-data")])
@@ -204,6 +219,28 @@ class MediaComposeTests(unittest.TestCase):
                 self.assertFalse(service.get("ports"))
         missing = {key: value for key, value in (VALUES | OPTIONAL).items() if key != "LOGS_BIND_ADDRESS"}
         render([ALL], missing, expect_success=False)
+
+    def test_existing_stack_without_the_nas_link_still_starts_unchanged(self):
+        # Legacy path: an existing stack that sets none of the new values (no shared file yet) renders and starts.
+        legacy_values = {key: value for key, value in (VALUES | OPTIONAL).items() if key not in ("NAS_LINK_ENV_FILE", "LOGS_INGRESS_HOST")}
+        legacy = render([ALL], legacy_values)["services"]
+        logs = legacy[LOGS]
+        self.assertEqual(logs["environment"], {"LOGS_INGRESS_HOST": ""}, "no link values; Logs reads only its own logs.env")
+        self.assertEqual(set(legacy), set(self.all), "the same services")
+        for name in legacy:
+            if name != LOGS:
+                self.assertEqual(legacy[name], self.all[name], f"{name} unchanged by the link")
+        # A named shared file that does not exist yet is skipped, not fatal (required: false).
+        absent = render([ALL], legacy_values | {"NAS_LINK_ENV_FILE": "/synthetic/not-created-yet/nas-link.env"})["services"][LOGS]
+        self.assertEqual(absent["environment"], {"LOGS_INGRESS_HOST": ""})
+
+    def test_migration_to_the_nas_link_adds_only_the_link_values(self):
+        legacy_values = {key: value for key, value in (VALUES | OPTIONAL).items() if key not in ("NAS_LINK_ENV_FILE", "LOGS_INGRESS_HOST")}
+        before = render([ALL], legacy_values)["services"][LOGS]
+        after = self.all[LOGS]
+        self.assertEqual({key: value for key, value in after.items() if key != "environment"},
+            {key: value for key, value in before.items() if key != "environment"}, "only the environment changes")
+        self.assertEqual(after["environment"], LINK | {"LOGS_INGRESS_HOST": "logs.example.test"})
 
     def test_smaller_proxy_profile_override(self):
         smaller = render([ALL], VALUES | OPTIONAL | {"LTDSPROXY_MAX_HEIGHT": "540"})["services"]

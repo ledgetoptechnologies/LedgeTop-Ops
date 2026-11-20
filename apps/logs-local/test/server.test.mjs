@@ -231,7 +231,7 @@ test('config: known keys only, required machine credentials, blank DJI key allow
   assert.equal(config.OPS_DIRECTORY_CLIENT_SECRET, 's'.repeat(32), 'quotes are stripped');
   assert.equal(config.DJI_API_KEY, '');
   assert.deepEqual([config.LOGS_PORT, config.LOGS_HEALTH_PORT, config.UPLOAD_CONCURRENCY], [8080, 8081, 4]);
-  assert.deepEqual(describe(config), { djiKey: false, keychainKey: false, uploadConcurrency: 4 });
+  assert.deepEqual(describe(config), { djiKey: false, keychainKey: false, uploadConcurrency: 4, directoryOrigin: 'https://ops.example.test', tokenProfile: 'separate', nasLink: false });
   const cases = {
     config_unknown_key: `${CONFIG}DJI_APP_KEY=x\n`,
     config_missing: CONFIG.replace(/^OPS_DIRECTORY_CLIENT_SECRET=.*$/m, 'OPS_DIRECTORY_CLIENT_SECRET='),

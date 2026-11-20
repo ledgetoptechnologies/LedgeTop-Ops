@@ -111,15 +111,22 @@ async function runUntilIdle(c, idleRounds = 2) {
     sleep: async () => { if (++idle >= idleRounds) controller.abort(); } });
 }
 
-test('the runner decodes queued logs into flights with stored tracks, and reports closed outcomes for the rest', async () => {
+// The uploader is custody, not the pilot: a decode with no matching flight is stored unassigned and creates no flight.
+const decodedOf = async hash => env.LOGS_DB.prepare('SELECT * FROM decoded_logs WHERE raw_sha256 = ?').bind(hash).first();
+
+test('the runner decodes queued logs into unassigned decode results with stored tracks, and reports closed outcomes for the rest', async () => {
   await freshEnv();
   const good = await addRaw('flight-a'), key = await addRaw('needs-key-b'), corrupt = await addRaw('garbage-c');
   await runUntilIdle(client());
   const done = await statusOf(good);
   assert.equal(done.parse_status, 'decoded');
-  const flight = await env.LOGS_DB.prepare('SELECT * FROM flights WHERE id = ?').bind(done.flight_id).first();
-  assert.deepEqual([flight.pilot_id, flight.file_hash, flight.telemetry_points, flight.duration_seconds], ['staff-beau', good, 3, 2]);
-  const track = JSON.parse(gunzipSync(Buffer.from(await (await env.LOGS_BUCKET.get(flight.telemetry_key)).arrayBuffer())));
+  assert.equal(done.flight_id, null, 'no flight is created from the uploader');
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flights').first()).n, 0);
+  const decoded = await decodedOf(good);
+  assert.equal(decoded.status, 'unassigned');
+  const summary = JSON.parse(decoded.summary_json);
+  assert.deepEqual([summary.telemetry_points, summary.duration_seconds], [3, 2]);
+  const track = JSON.parse(gunzipSync(Buffer.from(await (await env.LOGS_BUCKET.get(decoded.telemetry_key)).arrayBuffer())));
   assert.deepEqual(track.columns.offsetMs, [0, 1000, 2000]);
   assert.match((await env.LOGS_DB.prepare('SELECT decoder_version FROM raw_logs WHERE sha256 = ?').bind(good).first()).decoder_version, /^ltds-dji-decode\//);
   assert.deepEqual(await statusOf(corrupt), { parse_status: 'failed', error_code: 'corrupt_log', parse_attempts: 0, flight_id: null });
@@ -150,7 +157,7 @@ test('a lost claim reply is repeated with the same id and never takes a second l
   assert.equal((await env.LOGS_DB.prepare("SELECT COUNT(*) AS n FROM raw_logs WHERE parse_status = 'leased'").first()).n, 1, 'one lease, not two');
 });
 
-test('a completion whose reply is lost is reconciled, not blindly re-sent; one flight', async () => {
+test('a completion whose reply is lost is reconciled, not blindly re-sent; one decode result', async () => {
   await freshEnv();
   const hash = await addRaw('flight-lost-ack');
   const c = client();
@@ -158,7 +165,7 @@ test('a completion whose reply is lost is reconciled, not blindly re-sent; one f
   dropReply = 'complete';
   assert.equal(await decodeOne(lease, { client: c, parser: fakeParser, workRoot, sleep: noWait }), 'decoded');
   assert.equal((await statusOf(hash)).parse_status, 'decoded');
-  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flights').first()).n, 1);
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM decoded_logs WHERE raw_sha256 = ?').bind(hash).first()).n, 1);
   assert.ok(requests.some(line => line.endsWith('/reconcile')), 'asked Logs what happened');
 });
 

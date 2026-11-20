@@ -51,9 +51,15 @@ Promotion is `.github/workflows/promote-viewer.yml`, run by hand from `main`
 - `commit`: the full 40-character `main` commit SHA;
 - `digest`: the `sha256:` digest from that commit's publish run summary;
 - `approved_by` and `approval_reference` (for example a Hub task or decision
-  id): written into the receipt as a record. The workflow does not enforce
-  them; enforcement would be a GitHub Environment with required reviewers, an
-  owner repository setting that is not part of this workflow.
+  id): typed notes only, kept in the receipt.
+
+Approval is enforced: the job runs in the protected GitHub Environment
+`image-promotion`, so GitHub holds it until a required reviewer approves.
+Before any other step it verifies through the API that the environment exists
+and has a required-reviewers rule, and reads the approver from the deployment
+review into the receipt (`approvedBy`); otherwise it stops and writes nothing.
+The environment is an owner repository setting (Settings > Environments) that
+this workflow never creates or changes.
 
 Run it only after the approvals the release requires. It does not rebuild. It:
 

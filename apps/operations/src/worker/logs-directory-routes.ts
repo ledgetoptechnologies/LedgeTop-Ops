@@ -55,11 +55,15 @@ function canonicalIssuer(value: string | undefined): string | null {
   return issuer.origin;
 }
 
-/** The same service-token claim rules as the reviewed agent verifier, for this app's own audience and client id. */
-export async function verifyDirectoryService(request: Request, env: LogsDirectoryEnv, keyResolver?: JWTVerifyGetKey): Promise<boolean> {
-  const issuer = canonicalIssuer(env.TEAM_DOMAIN);
-  const audience = env.LOGS_DIRECTORY_AUD ?? "";
-  const clientId = env.LOGS_DIRECTORY_CLIENT_ID ?? "";
+/**
+ * One Cloudflare Access service identity: issuer (team domain), audience and the exact service-token client id.
+ * The same claim rules as the reviewed agent verifier. Shared by the logs directory and the thumbnail renderer API.
+ */
+export async function verifyAccessServiceIdentity(request: Request,
+  expected: { teamDomain?: string; audience?: string; clientId?: string }, keyResolver?: JWTVerifyGetKey): Promise<boolean> {
+  const issuer = canonicalIssuer(expected.teamDomain);
+  const audience = expected.audience ?? "";
+  const clientId = expected.clientId ?? "";
   if (!issuer || !/^[A-Za-z0-9_-]{16,128}$/.test(audience) || !/^[A-Za-z0-9._-]{8,256}$/.test(clientId)) return false;
   const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!assertion || assertion.length > 16384 || /\s/.test(assertion)) return false;
@@ -74,6 +78,12 @@ export async function verifyDirectoryService(request: Request, env: LogsDirector
       && Number.isSafeInteger(payload.iat) && Number.isSafeInteger(payload.exp)
       && payload.iat! >= 0 && payload.iat! <= now && payload.exp! > now && payload.iat! < payload.exp!;
   } catch { return false; }
+}
+
+/** The logs directory's own audience and client id. */
+export function verifyDirectoryService(request: Request, env: LogsDirectoryEnv, keyResolver?: JWTVerifyGetKey): Promise<boolean> {
+  return verifyAccessServiceIdentity(request,
+    { teamDomain: env.TEAM_DOMAIN, audience: env.LOGS_DIRECTORY_AUD, clientId: env.LOGS_DIRECTORY_CLIENT_ID }, keyResolver);
 }
 
 class BodyTooLarge extends Error {}

@@ -35,6 +35,17 @@ test("unified queue worker is pinned to approved renderer origins", () => {
   assert.match(script, /Authorization: Bearer \$LTDSTHUMB_API_TOKEN/);
 });
 
+test("queue worker uses the shared NAS link token and sends the bearer only while it is set", () => {
+  assert.doesNotMatch(script, /CF_ACCESS_CLIENT_ID:=/, "no per-field alias that could mix two identities");
+  assert.match(script, /\nresolve_access_pair\n/);
+  assert.match(script, /LTDSTHUMB_API_TOKEN="\$LTDSTHUMB_API_TOKEN" CF_ACCESS_CLIENT_ID="\$CF_ACCESS_CLIENT_ID" CF_ACCESS_CLIENT_SECRET="\$CF_ACCESS_CLIENT_SECRET" \\\n  python3 -c '\nimport http\.server/,
+    "the stream proxy receives the resolved pair explicitly");
+  assert.match(script, /if \[\[ -z "\$CF_ACCESS_CLIENT_ID" \|\| -n "\$LTDSTHUMB_API_TOKEN" \]\]; then\n  valid_secret "\$LTDSTHUMB_API_TOKEN" \|\| die/);
+  assert.equal((script.match(/  if \[\[ -n "\$LTDSTHUMB_API_TOKEN" \]\]; then\n    args\+=\(--header "Authorization: Bearer \$LTDSTHUMB_API_TOKEN"\)\n  fi\n/g) ?? []).length, 3);
+  assert.doesNotMatch(script, /^    --header "Authorization: Bearer/m, "no unconditional bearer header");
+  assert.match(script, /raise SystemExit\("missing renderer API token or NAS link token"\)/);
+});
+
 test("unified queue worker claims all supported media and range-streams videos", () => {
   assert.match(script, /\/claim\?includeKind=all/);
   assert.doesNotMatch(script, /excludeKind=video/);
@@ -122,4 +133,50 @@ test("upload is a bounded WebP and process cleanup is deterministic", () => {
   assert.doesNotMatch(script, /ffmpeg[^\n]*REMOTE_SOURCE_URL/);
   assert.doesNotMatch(script, /ffmpeg[^\n]*r2PresignedUrl/);
   assert.doesNotMatch(script, /ffmpeg[^\n]*-loglevel (?:error|warning|info|verbose|debug|trace)/);
+});
+
+// Behaviour of the real resolve_access_pair (extracted from the script) under bash. Synthetic values only.
+const functionOf = name => {
+  const start = script.indexOf(`${name}() {`);
+  assert.ok(start >= 0, name);
+  return script.slice(start, script.indexOf("\n}\n", start) + 3);
+};
+function runResolver(env, after = 'printf "%s|%s" "$CF_ACCESS_CLIENT_ID" "$CF_ACCESS_CLIENT_SECRET"') {
+  const body = ["log() { printf '%s\\n' \"$*\" >&2; }", "die() { log \"fatal: $*\"; exit 2; }",
+    functionOf("valid_secret"), functionOf("resolve_access_pair"), "resolve_access_pair", after].join("\n");
+  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CF_ACCESS_|NAS_LINK_)/.test(k)));
+  return spawnSync("bash", ["-c", body], { encoding: "utf8", env: { ...clean, ...env } });
+}
+const bashAvailable = () => process.platform !== "win32" && !spawnSync("bash", ["-c", "true"]).error;
+
+test("access pair: one complete pair from one source; partial or conflicting configs stop", (t) => {
+  if (!bashAvailable()) { t.skip("bash is unavailable on this platform"); return; }
+  const LINK = { NAS_LINK_CLIENT_ID: "link-id.access", NAS_LINK_CLIENT_SECRET: "link-secret-0000000000000000000000" };
+  const OLD = { CF_ACCESS_CLIENT_ID: "old-id.access", CF_ACCESS_CLIENT_SECRET: "old-secret-00000000000000000000000" };
+  const ok = (env, expected) => { const r = runResolver(env); assert.equal(r.status, 0, r.stderr); assert.equal(r.stdout, expected); };
+  const stops = (env, message) => {
+    const r = runResolver(env);
+    assert.equal(r.status, 2, `${message}: ${r.stdout}`);
+    assert.match(r.stderr, new RegExp(message));
+    for (const value of [...Object.values(LINK), ...Object.values(OLD)]) assert.ok(!r.stderr.includes(value), "no value in the message");
+  };
+  ok(LINK, "link-id.access|link-secret-0000000000000000000000");
+  ok(OLD, "old-id.access|old-secret-00000000000000000000000");
+  ok({ ...OLD, NAS_LINK_CLIENT_ID: OLD.CF_ACCESS_CLIENT_ID, NAS_LINK_CLIENT_SECRET: OLD.CF_ACCESS_CLIENT_SECRET }, "old-id.access|old-secret-00000000000000000000000");
+  ok({}, "|");
+  stops({ ...OLD, ...LINK }, "differ from the shared NAS link token");
+  stops({ CF_ACCESS_CLIENT_ID: OLD.CF_ACCESS_CLIENT_ID, ...LINK }, "must be set together");
+  stops({ CF_ACCESS_CLIENT_SECRET: OLD.CF_ACCESS_CLIENT_SECRET, ...LINK }, "must be set together");
+  stops({ NAS_LINK_CLIENT_ID: LINK.NAS_LINK_CLIENT_ID }, "NAS_LINK_CLIENT_ID and NAS_LINK_CLIENT_SECRET must be set together");
+  stops({ ...OLD, NAS_LINK_CLIENT_ID: LINK.NAS_LINK_CLIENT_ID }, "differ from the shared NAS link token");
+});
+
+test("access pair: a link-only pair reaches a child process only through the explicit hand-off", (t) => {
+  if (!bashAvailable()) { t.skip("bash is unavailable on this platform"); return; }
+  const LINK = { NAS_LINK_CLIENT_ID: "link-id.access", NAS_LINK_CLIENT_SECRET: "link-secret-0000000000000000000000" };
+  const child = `bash -c 'printf "%s|%s" "\${CF_ACCESS_CLIENT_ID:-}" "\${CF_ACCESS_CLIENT_SECRET:-}"'`;
+  const implicit = runResolver(LINK, child);
+  assert.equal(implicit.stdout, "|", "an alias-filled pair is not exported on its own");
+  const explicit = runResolver(LINK, `CF_ACCESS_CLIENT_ID="$CF_ACCESS_CLIENT_ID" CF_ACCESS_CLIENT_SECRET="$CF_ACCESS_CLIENT_SECRET" ${child}`);
+  assert.equal(explicit.stdout, "link-id.access|link-secret-0000000000000000000000", "the script's hand-off form passes the pair");
 });

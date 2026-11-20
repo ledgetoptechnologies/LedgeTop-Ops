@@ -33,7 +33,7 @@ test('inputs: exact commit and digest, approver record, and an opt-in first-time
   const validate = stepOf('Validate requested candidate');
   assert.ok(validate.includes('^[0-9a-f]{40}$') && validate.includes('^sha256:[0-9a-f]{64}$'));
   assert.ok(validate.includes('approved_by is required') && validate.includes('approval_reference is required'));
-  assert.ok(promote.includes('"approvedBy": "%s"') && promote.includes('"approvalReference": "%s"') && promote.includes('"approvalEnforced": false'));
+  assert.ok(promote.includes('"approvedBy": "%s"') && promote.includes('"approvalReference": "%s"') && promote.includes('"approvalEnforced": true'));
 });
 
 test('only a verified FULL candidate of this repository main is promotable', () => {
@@ -57,9 +57,9 @@ test('fail closed: read latest, persist the rollback receipt, re-read, and only 
   assert.ok(read < persist && persist < upload && upload < move, 'receipt is recorded and uploaded before any mutation');
   assert.ok(!/continue-on-error/.test(promote));
   const writes = [...code.matchAll(/^(?!\s*echo ).*imagetools create[^\n]*/gm)].map(m => m[0].trim());
-  assert.deepEqual(writes, ['docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST" || {'], 'exactly one registry write');
+  assert.deepEqual(writes, ['docker buildx imagetools create --prefer-index=false --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST" || {'], 'exactly one registry write');
   const moveStep = stepOf('Move latest to the verified digest');
-  const reread = moveStep.indexOf('if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]'), write = moveStep.indexOf('docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"');
+  const reread = moveStep.indexOf('if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]'), write = moveStep.indexOf('docker buildx imagetools create --prefer-index=false --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"');
   assert.ok(reread > 0 && write > reread, 'the re-read guard precedes the write');
   assert.ok(moveStep.indexOf('PROMOTED_DIGEST') > write, 'read back after the write');
   const previous = stepOf('Read current latest and resolve the rollback target');
@@ -131,4 +131,11 @@ test("GHCR's real one-line absent-tag answer is accepted only verbatim for the e
   assert.ok(promote.includes('|| not_found_exact "$RUNNER_TEMP/inspect-error.txt" "$ref"; then'));
   assert.ok(promote.includes('|| not_found_exact "$RUNNER_TEMP/reread-error.txt" "$IMAGE_NAME:latest"; }; then'));
   assert.equal((promote.match(/not_found_exact\(\) \{/g) ?? []).length, 2);
+});
+
+test('promotion and rollback keep the candidate digest (single manifests are never re-wrapped in an index)', () => {
+  const code = promote.replace(/^\s*#.*$/gm, '');
+  const creates = [...code.matchAll(/imagetools create[^\n]*/g)].map(m => m[0]);
+  assert.ok(creates.length >= 2);
+  for (const line of creates) assert.match(line, /imagetools create --prefer-index=false /, line);
 });
