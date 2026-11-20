@@ -31,6 +31,19 @@ test('project overview shows folders and tasks at the selected level, and keeps 
   context.can = () => false;
   html = context.selectedProject();
   assert.doesNotMatch(html, /folder-rename|folder-delete/);
+  // While the folder request is pending, the current level's tasks stay visible with the loading status.
+  context.can = () => true;
+  Object.assign(context.folderState, { loading: true, folders: null, currentId: null });
+  html = context.selectedProject();
+  assert.match(html, /role="status">Loading folders/); assert.match(html, /<article>root-task<\/article>/);
+  assert.doesNotMatch(html, /nested-task|other-task|folder-create|folder-rename/);
+  context.folderState.currentId = 'f';
+  html = context.selectedProject();
+  assert.match(html, /<article>nested-task<\/article>/); assert.doesNotMatch(html, /root-task|other-task/);
+  // Errors still fall back to every task of this project only.
+  Object.assign(context.folderState, { loading: false, error: 'Folders could not be loaded.', currentId: null });
+  html = context.selectedProject();
+  assert.match(html, /role="alert"/); assert.match(html, /root-task/); assert.match(html, /nested-task/); assert.doesNotMatch(html, /other-task/);
 });
 
 test('folder URLs round-trip and task history restores the task folder', () => {
