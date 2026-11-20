@@ -163,3 +163,26 @@ test('project trash keeps nested folders for restore; permanent project purge re
   assert.equal(audit.removedFolders,4);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
 });
+
+test('project purge succeeds when user folder names collide with folder ids or repeat under different parents',t=>{
+  const db=openDatabase(':memory:');t.after(()=>db.close());
+  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Synthetic colliding names'}),other=p.createProject({displayName:'Synthetic untouched'});
+  const a=p.createProjectFolder(project.id,{displayName:'Site'},'staff');
+  const b=p.createProjectFolder(project.id,{displayName:'Site',parentId:a.id},'staff');
+  const c=p.createProjectFolder(project.id,{displayName:'Site',parentId:b.id},'staff');
+  p.createProjectFolder(project.id,{displayName:'Other'},'staff');
+  p.createProjectFolder(project.id,{displayName:'Site',parentId:p.projectFolders(project.id).find(row=>row.displayName==='Other').id},'staff');
+  // Root folders literally named with other folders' ids.
+  for(const target of [b,c])p.createProjectFolder(project.id,{displayName:target.id},'staff');
+  p.createProjectFolder(project.id,{displayName:a.id,parentId:c.id},'staff');
+  const untouched=[p.createProjectFolder(other.id,{displayName:'Site'},'staff')];untouched.push(p.createProjectFolder(other.id,{displayName:b.id,parentId:untouched[0].id},'staff'));
+  const otherRows=()=>db.prepare('SELECT * FROM project_folders WHERE project_id=? ORDER BY id').all(other.id).map(row=>({...row}));
+  const otherBefore=otherRows(),count=db.prepare('SELECT COUNT(*) n FROM project_folders WHERE project_id=?').get(project.id).n;
+  assert.equal(count,8);
+  const trash=p.trashProject(project.id,'staff');assert.ok(trash);
+  assert.ok(p.purgeMetadataEntity(trash.id,'staff').permanentlyDeletedAt);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM project_folders WHERE project_id=?').get(project.id).n,0);
+  assert.deepEqual(otherRows(),otherBefore);
+  assert.equal(JSON.parse(db.prepare("SELECT details_json FROM audit_events WHERE action='project.purged' AND entity_id=?").get(project.id).details_json).removedFolders,count);
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+});
