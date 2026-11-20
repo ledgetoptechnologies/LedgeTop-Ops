@@ -1,8 +1,7 @@
 'use strict';
-// Shipping-order proof for migration 48 (folders). The real 46 and 47 are not
-// on main, so small stand-ins are registered in the exported MIGRATIONS array
-// for the duration of each test only. The real runner (applyMigrations) is
-// used throughout; it skips a migration solely when its own version is stamped.
+// Shipping-order proof for migration 48 (folders). Recreate the standalone
+// folder release and inject stand-ins for 46 and 47 only in these fixtures.
+// The composed release's real migrations are covered by the GCP upgrade tests.
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const {DatabaseSync}=require('node:sqlite');
 const {MIGRATIONS,applyMigrations}=require('../server/database');
@@ -17,8 +16,9 @@ const STAND_INS=[
     CREATE TABLE standin_point_roles(task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,role TEXT NOT NULL,PRIMARY KEY(task_id,role));`,
     after(db){db.exec("INSERT INTO standin_point_roles(task_id,role) SELECT id,'control' FROM processing_tasks");}},
 ];
-const real=[...MIGRATIONS];
-function useMigrations(t,list){MIGRATIONS.splice(0,MIGRATIONS.length,...list);t.after(()=>MIGRATIONS.splice(0,MIGRATIONS.length,...real));}
+const composed=[...MIGRATIONS];
+const real=composed.filter(item=>item.version<=42||item.version===48);
+function useMigrations(t,list){MIGRATIONS.splice(0,MIGRATIONS.length,...list);t.after(()=>MIGRATIONS.splice(0,MIGRATIONS.length,...composed));}
 const sorted=list=>[...list].sort((a,b)=>a.version-b.version);
 function populatedAt42(t,label){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),`viewer-folders-order-${label}-`));
@@ -117,7 +117,7 @@ test('a crash inside migration 48 leaves the populated database at its previous 
       const {DatabaseSync}=require('node:sqlite'),{MIGRATIONS,applyMigrations}=require(${JSON.stringify(require.resolve('../server/database'))});
       const db=new DatabaseSync(${JSON.stringify(dbPath)});db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL');
       const index=MIGRATIONS.findIndex(item=>item.version===48),real48=MIGRATIONS[index];
-      MIGRATIONS[index]={...real48,after(database){real48.after(database);process.exit(7);}};
+      MIGRATIONS.splice(0,MIGRATIONS.length,{...real48,after(database){real48.after(database);process.exit(7);}});
       applyMigrations(db);`;
     const child=spawnSync(process.execPath,['-e',script],{encoding:'utf8'});
     assert.equal(child.status,7,child.stderr);
