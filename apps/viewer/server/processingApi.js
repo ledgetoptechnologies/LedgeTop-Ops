@@ -240,14 +240,13 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.get('/api/v1/processing/providers',authorize('viewer.providers.read'),(req,res)=>{const page=pageQuery(req);if(!page)return error(res,400,'invalid_page');const result=processing.listProvidersPage(page);res.json({providers:result.items.map(providerView),nextCursor:result.nextCursor});});
   router.post('/api/v1/processing/providers',authorize('viewer.providers.write'),mutate,async(req,res)=>{const b=req.body||{};if(!onlyKeys(b,['displayName','endpoint','credential']))return error(res,400,'invalid_request');const admitted=providerAdmission(b.endpoint);if(!admitted.ok)return error(res,400,admitted.code);if(typeof b.displayName!=='string'||!b.displayName.trim())return error(res,400,'display_name_required');if(b.credential!==undefined&&(!onlyKeys(b.credential,['token'])||!Object.hasOwn(b.credential,'token')||typeof b.credential.token!=='string'))return error(res,400,'invalid_provider_credential');const id=crypto.randomUUID(),token=b.credential?.token??'';let sealed=null,result;try{if(token)sealed=providerCredentials.seal(id,token);result=await new NodeOdmProvider({endpoint:admitted.origin,token,...(providerFetch?{fetchImpl:providerFetch}:{})}).capabilities();}catch(e){if(e.code==='invalid_provider_credential')return providerCredentialFailure(res,e);return providerProbeFailure(res,e);}const type=result.capabilities.providerType,provider=processing.upsertProvider({id,type,displayName:b.displayName,endpoint:admitted.origin,enabled:false,authEnvKey:sealed?null:NO_AUTH_MARKER,admissionLimit:type==='clusterodm'?4:1,credentialCiphertext:sealed?.ciphertext,credentialKeyId:sealed?.keyId,credentialUpdatedAt:sealed?new Date().toISOString():null,capabilities:result.capabilities,capabilityFingerprint:result.fingerprint,lastHealth:'healthy'},{actorId:req.actorId,action:'provider.created',entityType:'processing_provider',details:{detectedType:type,apiVersion:result.capabilities.apiVersion,engine:result.capabilities.engine,authenticationMode:sealed?'token':'none'}});res.status(201).json({provider:providerView(provider),detection:{providerType:type,apiVersion:result.capabilities.apiVersion,engine:result.capabilities.engine,engineVersion:result.capabilities.engineVersion}});});
   router.patch('/api/v1/processing/providers/:id',authorize('viewer.providers.write'),mutate,(req,res)=>{const current=processing.getProvider(req.params.id);if(!current)return error(res,404,'provider_not_found');if(!onlyKeys(req.body,['displayName','endpoint','enabled','admissionLimit']))return error(res,400,'invalid_patch_fields');if(req.body.enabled!==undefined&&typeof req.body.enabled!=='boolean')return error(res,400,'invalid_provider_enabled');const b={...current,...req.body},admitted=providerAdmission(b.endpoint);if(!admitted.ok)return error(res,400,admitted.code);b.endpoint=admitted.origin;if(typeof b.displayName!=='string'||!b.displayName.trim())return error(res,400,'display_name_required');if(!Number.isSafeInteger(b.admissionLimit)||b.admissionLimit<1||b.admissionLimit>100)return error(res,400,'invalid_admission_limit');const endpointChanged=b.endpoint!==current.endpoint;if(endpointChanged&&current.activeAttempts>0)return error(res,409,'provider_in_use');if(endpointChanged)b.enabled=false;if(b.enabled===true){try{providerCredentials.resolve(current.id);}catch(e){return providerCredentials.configured(current.id)?providerCredentialFailure(res,e):error(res,409,'provider_credential_required');}if(!processing.providerProbeCurrent(current.id))return error(res,409,'provider_probe_required');}try{const provider=processing.updateProviderMetadata(current.id,b,{actorId:req.actorId,action:'provider.updated',entityType:'processing_provider',details:{endpointChanged,enabled:b.enabled}});return res.json({provider:providerView(provider)});}catch(e){if(['provider_in_use','provider_credential_required','provider_probe_required'].includes(e.code))return error(res,409,e.code);throw e;}});
-  router.delete('/api/v1/processing/providers/:id',authorize('viewer.providers.write'),mutate,(req,res)=>{
-    try{
-      if(!processing.deleteUnusedProvider(req.params.id,req.actorId))return error(res,404,'provider_not_found');
-      return res.json({deleted:true});
-    }catch(e){
-      if(e.code==='provider_in_use')return error(res,409,e.code,'This node has active processing work. Wait for it to finish before deleting the node.');
-      throw e;
-    }
+  router.delete('/api/v1/processing/providers/:id',authorize('viewer.providers.write'),requireIdempotencyKey,(req,res)=>{
+    const result=processing.deleteUnusedProvider(req.params.id,req.actorId,{
+      sessionId:req.adminPrincipal.id,key:req.get('Idempotency-Key'),method:req.method,path:req.originalUrl,
+      requestHash:providerCredentials.idempotencyFingerprint(req.method,req.originalUrl,req.rawBody||Buffer.alloc(0)),
+    });
+    if(result.replayed)res.setHeader('Idempotency-Replayed','true');
+    return res.status(result.status).json(result.body);
   });
   router.put('/api/v1/processing/providers/:id/credential',authorize('viewer.providers.write'),mutate,(req,res)=>{const current=processing.getProvider(req.params.id);if(!current)return error(res,404,'provider_not_found');if(!onlyKeys(req.body,['token'])||!Object.hasOwn(req.body,'token'))return error(res,400,'invalid_provider_credential');try{const sealed=providerCredentials.seal(current.id,req.body.token),provider=processing.setProviderCredential(current.id,sealed,{actorId:req.actorId,action:current.credential.configured?'provider.credential_rotated':'provider.credential_configured',entityType:'processing_provider'});return res.json({provider:providerView(provider)});}catch(e){return providerCredentialFailure(res,e);}});
   router.delete('/api/v1/processing/providers/:id/credential',authorize('viewer.providers.write'),mutate,(req,res)=>{const current=processing.getProvider(req.params.id);if(!current)return error(res,404,'provider_not_found');try{const provider=processing.clearProviderCredential(current.id,{actorId:req.actorId,action:'provider.credential_cleared',entityType:'processing_provider'});return res.json({provider:providerView(provider)});}catch(e){return providerCredentialFailure(res,e);}});
@@ -521,7 +520,29 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.use('/api/v1/tasks/:id/attempts',(req,res,next)=>req.method==='POST'&&!processing.workerStatus().live?error(res,503,'processing_worker_unavailable'):next());
   router.post('/api/v1/tasks/:id/attempts',authorize('viewer.processing.write'),mutate,(req,res)=>{const checked=validatedAttemptInput(req.params.id,req.body||{});if(checked.error)return error(res,checked.status,checked.error,checked.message||checked.error);try{const attempt=processing.createAttempt({taskId:req.params.id,providerId:checked.value.provider.id,presetId:checked.value.preset?.id,options:checked.value.options,capabilityFingerprint:checked.value.provider.capabilityFingerprint,createdBy:req.actorId});return res.status(202).json({attempt});}catch(e){return error(res,409,e.code||'attempt_not_created');}});
   router.get('/api/v1/attempts/:id',authorize('viewer.processing.read'),(req,res)=>{const a=processing.getAttempt(req.params.id);return a?res.json({attempt:a,logs:processing.listLogs(a.id,req.query.logLimit)}):error(res,404,'attempt_not_found');});
-  router.post('/api/v1/attempts/:id/cancel',authorize('viewer.processing.write'),mutate,async(req,res)=>{const a=processing.getAttempt(req.params.id);if(!a)return error(res,404,'attempt_not_found');const cancelled=processing.cancelAttempt(a.id,req.actorId);if(a.providerTaskId&&['queued_upstream','running'].includes(a.status)){try{const p=processing.getProvider(a.providerId);if(p)await new NodeOdmProvider({endpoint:p.endpoint,token:providerCredentials.resolve(p.id),providerType:p.type,...(providerFetch?{fetchImpl:providerFetch}:{})}).cancel(a.providerTaskId);}catch(e){processing.appendLog(a.id,'warning',`Upstream cancellation could not be confirmed: ${sanitizeLogMessage(e.message)}`);}}res.json({attempt:cancelled});});
+  router.post('/api/v1/attempts/:id/cancel',authorize('viewer.processing.write'),mutate,async(req,res)=>{
+    const attempt=processing.getAttempt(req.params.id);
+    if(!attempt)return error(res,404,'attempt_not_found');
+    const cancelled=processing.cancelAttempt(attempt.id,req.actorId);
+    const upstream=['queued_upstream','running'].includes(attempt.status);
+    const verify=attempt.providerTaskId&&cancelled&&processing.providerCancellationUnsettled(attempt.providerId,attempt.id);
+    if(upstream||verify){
+      try{
+        const provider=processing.getProvider(attempt.providerId);
+        if(!provider)throw new Error('Processing node is unavailable');
+        const adapter=new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,...(providerFetch?{fetchImpl:providerFetch}:{})});
+        if(upstream)await adapter.cancel(attempt.providerTaskId);
+        if(verify){
+          if(!processing.providerCancellationTargetMatches(attempt,provider))throw new Error('Original processing node could not be verified');
+          const observed=await adapter.status(attempt.providerTaskId);
+          if(!processing.recordProviderCancellationSettled(attempt.id,provider,observed))throw new Error('Upstream task is not confirmed terminal');
+        }
+      }catch(e){
+        processing.appendLog(attempt.id,'warning',`Upstream cancellation could not be confirmed: ${sanitizeLogMessage(e.message)}`);
+      }
+    }
+    return res.json({attempt:cancelled});
+  });
   router.post('/api/v1/attempts/:id/recover-ingest',authorize('viewer.processing.write'),mutate,async(req,res,next)=>{
     if(!onlyKeys(req.body,[]))return error(res,400,'invalid_request');
     try{

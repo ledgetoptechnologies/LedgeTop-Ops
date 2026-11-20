@@ -121,3 +121,32 @@ test('deleting a node waits for confirmation and ignores provider lists fetched 
   await refreshing;
   assert.deepEqual(ctx.state.providers,[]);
 });
+
+
+test('a full workspace load started before node deletion cannot restore the removed node',async()=>{
+  let releaseOldNodes;
+  let firstList=true;
+  const ctx=harness({api:async path=>{
+    if(!path.includes('/providers?'))return {};
+    if(!firstList)return {providers:[]};
+    firstList=false;
+    return new Promise(resolve=>{releaseOldNodes=resolve;});
+  }});
+  ctx.state.token='session';
+  ctx.state.providers=[{id:'node',displayName:'Cluster'}];
+  const noop=()=>{};
+  Object.assign(ctx,{
+    pagedApi:async()=>({}),pagedStorage:async()=>({}),validateWorkspaceView:noop,syncWorkspaceView:noop,
+    setWorkspaceHealth:noop,document:{querySelector:noop},hydrateExpandedTask:noop,scheduleOperationRefresh:noop,
+    dialogs:{confirm:async()=>true},modal:{open:false},
+    mutate:async(_path,_request,onSuccess)=>{onSuccess();await ctx.loadWorkspace();},
+  });
+  vm.runInContext(source.slice(source.indexOf('async function deleteProvider('),source.indexOf('function bindModalActions('))+'\nthis.deleteNode=deleteProvider;',ctx);
+  vm.runInContext(source.slice(source.indexOf('async function load(){'),source.indexOf('function access(){'))+'\nthis.loadWorkspace=load;',ctx);
+  const oldLoad=ctx.loadWorkspace();
+  await ctx.deleteNode('node');
+  assert.equal(ctx.state.providers.length,0);
+  releaseOldNodes({providers:[{id:'node'}]});
+  await oldLoad;
+  assert.equal(ctx.state.providers.length,0);
+});

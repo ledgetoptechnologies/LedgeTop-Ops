@@ -18,6 +18,17 @@ function inputInventory(datasetFiles=[],gcpSnapshot=null){
   const inputFiles=[...selected.filter(file=>photo.test(file.relativePath)),...selected.filter(file=>!photo.test(file.relativePath))].map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256}));
   return{sourceFiles,sourceFilesSha256:sha(sourceFiles),inputFiles,inputManifestSha256:crypto.createHash('sha256').update(JSON.stringify(inputFiles)).digest('hex')};
 }
+function providerOriginSha256(endpoint) {
+  try {
+    const url=new URL(endpoint);
+    if(!['http:','https:'].includes(url.protocol)||url.username||url.password||
+      url.pathname!=='/'||url.search||url.hash||url.origin!==endpoint)return null;
+    return crypto.createHash('sha256').update(url.origin).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
 function acknowledgementEndpoint(provider){
   const marker=provider.capabilities?.viewerAcceptanceAck;
   if(marker?.version!==1||marker.transport!=='https'||marker.pathTemplate!=='/task/{taskId}/viewer-acceptance')return null;
@@ -27,8 +38,8 @@ function submissionProvenance(attempt,provider,createdAt,{dataset,gcpSnapshot}={
   const caps=provider.capabilities||{},schema=Array.isArray(caps.options)?caps.options.map(option=>Object.fromEntries(['name','type','domain','help','value','rawDefault'].filter(key=>Object.hasOwn(option,key)).map(key=>[key,key==='value'||key==='rawDefault'?safe(option[key],option.name):safe(option[key])]))):[];
   const capabilities=Object.fromEntries(['apiVersion','engine','engineVersion','providerType','detectionMethod','maxImages','maxParallelTasks','viewerAcceptanceAck'].filter(key=>Object.hasOwn(caps,key)).map(key=>[key,safe(caps[key])]));
   const defaults=Object.fromEntries(schema.filter(option=>typeof option.name==='string'&&Object.hasOwn(option,'value')&&option.value!==null).map(option=>[option.name,option.value]));
-  const endpoint=acknowledgementEndpoint(provider);
-  const submittedOptions=safe(attempt.options||{}),snapshot={schemaVersion:1,capturedAt:createdAt,attemptId:attempt.id,datasetId:attempt.datasetId,datasetManifestSha256:dataset?.manifestSha256||null,gcpSnapshotSha256:gcpSnapshot?.sha256||null,providerId:provider.id,...(endpoint?{providerEndpoint:endpoint}:{}),providerTaskId:attempt.providerTaskId,providerType:provider.type,
+  const endpoint=acknowledgementEndpoint(provider),originSha256=providerOriginSha256(provider.endpoint);
+  const submittedOptions=safe(attempt.options||{}),snapshot={schemaVersion:1,capturedAt:createdAt,attemptId:attempt.id,datasetId:attempt.datasetId,datasetManifestSha256:dataset?.manifestSha256||null,gcpSnapshotSha256:gcpSnapshot?.sha256||null,providerId:provider.id,...(endpoint?{providerEndpoint:endpoint}:{}),...(originSha256?{providerOriginSha256:originSha256}:{}),providerTaskId:attempt.providerTaskId,providerType:provider.type,
     capabilityFingerprint:attempt.capabilityFingerprint||null,capturedCapabilityFingerprint:provider.capabilityFingerprint||null,
     capabilityFingerprintMatches:Boolean(attempt.capabilityFingerprint&&attempt.capabilityFingerprint===provider.capabilityFingerprint),
     capabilities,schema,schemaSha256:sha(schema),submittedOptions,submittedOptionsSha256:sha(attempt.options||{}),
@@ -44,4 +55,4 @@ function providerResultEvidence(attempt,status,observedAt){
     imagesCount:Number.isSafeInteger(status.imagesCount)&&status.imagesCount>=0?status.imagesCount:null,
     engine:identity(status.engine),engineVersion:identity(status.engineVersion),engineEvidence:'task-info-response',producingEngineVerified:false};
 }
-module.exports={submissionProvenance,providerResultEvidence,inputInventory};
+module.exports={submissionProvenance,providerResultEvidence,inputInventory,providerOriginSha256};

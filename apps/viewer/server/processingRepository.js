@@ -9,7 +9,7 @@ const { NO_AUTH_MARKER } = require('./providerAuth');
 const { lodDerivativeSpecs, lodVerificationReceiptDetails } = require('./lodDerivativePolicy');
 const { LOD_DERIVATIVE_RECOVERY_REVISION, isHeavyDerivativeType, isLodDerivativeType } = require('./lodRecoveryPolicy');
 const { canonicalDerivativeInput } = require('./derivativeInputSnapshot');
-const {submissionProvenance,providerResultEvidence,inputInventory}=require('./processingProvenance');
+const {submissionProvenance,providerResultEvidence,inputInventory,providerOriginSha256}=require('./processingProvenance');
 const {inspectIngestRecovery,ACTION:INGEST_RECOVERY_ACTION}=require('./processingIngestRecovery');
 const { collectRecoveryCompanions } = require('./lodRecoveryCompanions');
 const {
@@ -429,14 +429,85 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     return row?.deleted_at ? undefined : this.provider(row);
   }
 
-  deleteUnusedProvider(id,actorId) {
+  providerCancellationUnsettled(providerId,attemptId=null) {
+    return Boolean(this.database.prepare(`
+      SELECT 1 FROM processing_attempts a
+      WHERE a.provider_id=? AND (? IS NULL OR a.id=?) AND a.status='cancelled'
+        AND a.upstream_completed_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM processing_events e WHERE e.attempt_id=a.id AND e.event_type='provider.cancellation_settled')
+        AND (a.started_at IS NOT NULL OR a.submission_phase<>'new'
+          OR NOT EXISTS (SELECT 1 FROM processing_jobs j WHERE j.attempt_id=a.id AND j.job_type='submit')
+          OR EXISTS (SELECT 1 FROM processing_jobs j WHERE j.attempt_id=a.id AND (j.job_type<>'submit' OR j.attempt_count>0))
+          OR EXISTS (SELECT 1 FROM audit_events e WHERE e.entity_type='processing_attempt' AND e.entity_id=a.id
+            AND e.action='processing_attempt.cancelled' AND json_extract(e.details_json,'$.previousStatus')<>'pending'))
+      LIMIT 1
+    `).get(providerId,attemptId,attemptId));
+  }
+
+  providerFailureUnsettled(providerId) {
+    // A local failure can follow an ambiguous submission or polling failure.
+    // A claimed submit job alone may have failed before it reached the provider.
+    return Boolean(this.database.prepare(`
+      SELECT 1 FROM processing_attempts a
+      WHERE a.provider_id=? AND a.status='failed' AND a.upstream_completed_at IS NULL
+        AND (a.submission_phase<>'new' OR a.progress>0 OR a.provider_output_cursor>0
+          OR EXISTS (SELECT 1 FROM processing_attempt_transfer_provenance p WHERE p.attempt_id=a.id
+            AND json_extract(p.initialization_json,'$.state') IN ('intent','acknowledged'))
+          OR EXISTS (SELECT 1 FROM processing_jobs j WHERE j.attempt_id=a.id AND j.job_type='reconcile'))
+        AND NOT EXISTS (SELECT 1 FROM processing_attempt_provenance p WHERE p.attempt_id=a.id
+          AND json_extract(p.provider_result_json,'$.status')='completed'
+          AND json_extract(p.provider_result_json,'$.providerTaskId')=a.provider_task_id)
+        AND NOT EXISTS (SELECT 1 FROM processing_jobs j WHERE j.attempt_id=a.id AND j.job_type='reconcile'
+          AND j.status='failed' AND j.error_code=a.error_code AND j.error_code IN ('provider_failed','provider_cancelled'))
+      LIMIT 1
+    `).get(providerId));
+  }
+
+  providerCancellationTargetMatches(attempt,provider) {
+    const original=this.getAttemptProvenance(attempt.id)?.submission;
+    if(original?.providerId!==provider.id||original.providerTaskId!==attempt.providerTaskId)return false;
+    if(original.providerEndpoint)return original.providerEndpoint===provider.endpoint;
+    const originSha256=providerOriginSha256(provider.endpoint);
+    return Boolean(originSha256&&original.providerOriginSha256===originSha256);
+  }
+
+  recordProviderCancellationSettled(attemptId,observedProvider,observedTask) {
     return this.transaction(()=>{
-      const provider=this.getProvider(id);
-      if(!provider)return false;
-      const pendingAck=this.database.prepare("SELECT 1 FROM viewer_acceptance_ack_outbox WHERE provider_id=? AND status IN ('pending','leased') LIMIT 1").get(id);
-      if(provider.activeAttempts||pendingAck){
-        throw Object.assign(new Error('This node has active processing work.'),{code:'provider_in_use'});
+      const attempt=this.getAttempt(attemptId);
+      const provider=attempt?.providerId&&this.getProvider(attempt.providerId);
+      if(attempt?.status!=='cancelled'||!provider||provider.id!==observedProvider.id||provider.endpoint!==observedProvider.endpoint||
+        !this.providerCancellationTargetMatches(attempt,observedProvider)||
+        observedTask.uuid!==attempt.providerTaskId||!['cancelled','failed','completed'].includes(observedTask.status))return false;
+      if(!this.providerCancellationUnsettled(provider.id,attemptId))return true;
+      this.recordProcessingEvent({attemptId,eventType:'provider.cancellation_settled',phase:'cancelled',details:{providerId:provider.id,providerTaskId:attempt.providerTaskId,providerStatus:observedTask.status}});
+      return true;
+    });
+  }
+
+  deleteUnusedProvider(id,actorId,receipt) {
+    return this.transaction(()=>{
+      const reservation=this.reserveAdminIdempotency(receipt);
+      if(!reservation.created){
+        const saved=reservation.record;
+        if(saved.method!==receipt.method||saved.path!==receipt.path||saved.request_hash!==receipt.requestHash)
+          return {status:409,body:{error:'idempotency_conflict',code:'idempotency_conflict'}};
+        if(saved.response_status===null)
+          return {status:409,body:{error:'idempotency_in_progress',code:'idempotency_in_progress'}};
+        return {status:saved.response_status,body:JSON.parse(saved.response_json),replayed:true};
       }
+      const finish=(status,body)=>{
+        this.completeAdminIdempotency(receipt.sessionId,receipt.key,status,body);
+        return {status,body};
+      };
+      const provider=this.getProvider(id);
+      if(!provider)return finish(404,{error:'provider_not_found',code:'provider_not_found'});
+      const pendingAck=this.database.prepare("SELECT 1 FROM viewer_acceptance_ack_outbox WHERE provider_id=? AND status IN ('pending','leased') LIMIT 1").get(id);
+      if(provider.activeAttempts||pendingAck)
+        return finish(409,{error:'This node has active processing work. Wait for it to finish before deleting the node.',code:'provider_in_use'});
+      if(this.providerCancellationUnsettled(id))
+        return finish(409,{error:'This node has a cancellation that Viewer could not confirm upstream.',code:'provider_cancellation_unconfirmed'});
+      if(this.providerFailureUnsettled(id))
+        return finish(409,{error:'This node has a failed run whose upstream state Viewer could not confirm.',code:'provider_failure_unconfirmed'});
       // Retain the provider ID for run history and remove the live credential.
       const time=now();
       this.database.prepare(`UPDATE processing_providers SET deleted_at=?, enabled=0,
@@ -444,7 +515,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         credential_updated_at=NULL, credential_cleared=1, credential_revision=credential_revision+1,
         runtime_health_owner=NULL, runtime_health_lease_expires_at=NULL, updated_at=? WHERE id=?`).run(time,time,id);
       this.insertAudit({actorId,action:'provider.deleted',entityType:'processing_provider',entityId:id,details:{displayName:provider.displayName}});
-      return true;
+      return finish(200,{deleted:true});
     });
   }
   getProviderCredential(id) { const row=this.database.prepare('SELECT * FROM processing_providers WHERE id=?').get(id);return row&&!row.deleted_at?{authEnvKey:row.auth_env_key,credentialCiphertext:row.credential_ciphertext,credentialKeyId:row.credential_key_id,credentialUpdatedAt:row.credential_updated_at,credentialRevision:Number(row.credential_revision||0),credentialCleared:Boolean(row.credential_cleared),lastProbeCredentialRevision:row.last_probe_credential_revision===null?null:Number(row.last_probe_credential_revision),lastHealth:row.last_health}:null; }
@@ -1087,7 +1158,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   failReconcileJob(id,owner,code,message,retryAt,{logMessage=null}={}){return this.transaction(()=>{const job=this.eligibleReconcileJob(id,owner);if(!job)return false;if(logMessage!==null)this.appendLog(job.attempt_id,'error',logMessage);return this.failJob(id,owner,code,message,retryAt);});}
   failJobTerminal(id,owner,code,message,event,{reconcile=false,logMessage=null}={}){return this.transaction(()=>{const job=reconcile?this.eligibleReconcileJob(id,owner):this.database.prepare("SELECT * FROM processing_jobs WHERE id=? AND status='leased' AND lease_owner=?").get(id,owner);if(!job||!event?.eventId)return null;if(reconcile&&logMessage!==null)this.appendLog(job.attempt_id,'error',logMessage);const attempt=this.getAttempt(job.attempt_id);if(!attempt||['cancelled','published','failed'].includes(attempt.status))return null;const t=now(),safe=sanitizeLogMessage(message).slice(0,1000),errorCode=bounded(code,80);if(this.database.prepare("UPDATE processing_jobs SET status='failed',lease_owner=NULL,lease_expires_at=NULL,error_code=?,error_message=?,updated_at=? WHERE id=? AND status='leased' AND lease_owner=?").run(errorCode,safe,t,id,owner).changes!==1)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});if(attempt.resultModelVersionId){this.database.prepare("UPDATE model_outputs SET status='failed',updated_at=? WHERE id=? AND attempt_id=? AND status IN ('staged','ready')").run(t,attempt.resultModelVersionId,attempt.id);this.database.prepare("UPDATE model_versions SET status='failed',updated_at=? WHERE id=? AND model_id=? AND NOT EXISTS (SELECT 1 FROM models WHERE id=? AND active_version_id=?)").run(t,attempt.resultModelVersionId,attempt.resultModelId,attempt.resultModelId,attempt.resultModelVersionId);this.database.prepare("UPDATE models SET status='failed',updated_at=? WHERE id=? AND active_version_id IS NULL").run(t,attempt.resultModelId);}if(this.database.prepare("UPDATE processing_attempts SET status='failed',error_code=?,error_message=?,completed_at=COALESCE(completed_at,?),updated_at=? WHERE id=? AND status=?").run(errorCode,safe,t,t,attempt.id,attempt.status).changes!==1)throw Object.assign(new Error('attempt changed during terminal failure'),{code:'failure_conflict'});if(this.database.prepare("UPDATE processing_tasks SET status='failed',updated_at=? WHERE id=? AND active_attempt_id=?").run(t,attempt.taskId,attempt.id).changes!==1)throw Object.assign(new Error('task changed during terminal failure'),{code:'failure_conflict'});this.enqueueEvent('processing.failed',{...event,occurredAt:t,error:{code:errorCode,message:safe}});this.database.prepare('INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),'system',null,'processing_attempt.failed','processing_attempt',attempt.id,JSON.stringify({taskId:attempt.taskId,modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId,eventId:event.eventId,errorCode}),t);return this.getAttempt(attempt.id);});}
   deferSubmitAdmission(id,owner,delayMs=30_000){return this.transaction(()=>{const job=this.database.prepare("SELECT * FROM processing_jobs WHERE id=? AND job_type='submit' AND status='leased' AND lease_owner=?").get(id,owner);if(!job)return false;const t=now(),availableAt=new Date(Date.now()+Math.max(5_000,Math.min(Number(delayMs)||30_000,5*60_000))).toISOString();const changed=this.database.prepare("UPDATE processing_jobs SET status='pending',available_at=?,lease_owner=NULL,lease_expires_at=NULL,error_code='insufficient_storage',error_message='waiting for storage headroom',attempt_count=MAX(0,attempt_count-1),updated_at=? WHERE id=? AND status='leased' AND lease_owner=?").run(availableAt,t,id,owner);if(changed.changes!==1)return false;this.database.prepare("UPDATE processing_attempts SET status='pending',updated_at=? WHERE id=? AND status='admitted'").run(t,job.attempt_id);this.database.prepare("UPDATE processing_tasks SET status='queued',updated_at=? WHERE active_attempt_id=? AND status='processing'").run(t,job.attempt_id);return true;});}
-  cancelAttempt(id,actorId=null) { return this.transaction(()=>{const current=this.getAttempt(id);if(!current||['cancelled','published','failed'].includes(current.status))return current?.status==='cancelled'?current:null;const t=now();if(this.database.prepare("UPDATE processing_attempts SET status='cancelled',completed_at=COALESCE(completed_at,?),updated_at=? WHERE id=? AND status=?").run(t,t,id,current.status).changes!==1)throw Object.assign(new Error('attempt changed during cancellation'),{code:'cancel_conflict'});if(current.resultModelVersionId&&current.resultModelId){this.database.prepare("UPDATE model_outputs SET status='failed',updated_at=? WHERE id=? AND attempt_id=? AND status IN ('staged','ready') AND NOT EXISTS (SELECT 1 FROM models WHERE id=? AND active_version_id=?)").run(t,current.resultModelVersionId,id,current.resultModelId,current.resultModelVersionId);this.database.prepare("UPDATE model_versions SET status='failed',updated_at=? WHERE id=? AND model_id=? AND NOT EXISTS (SELECT 1 FROM models WHERE id=? AND active_version_id=?)").run(t,current.resultModelVersionId,current.resultModelId,current.resultModelId,current.resultModelVersionId);this.database.prepare("UPDATE models SET status='failed',updated_at=? WHERE id=? AND active_version_id IS NULL").run(t,current.resultModelId);}this.database.prepare("UPDATE processing_tasks SET status='cancelled',updated_at=? WHERE id=? AND active_attempt_id=?").run(t,current.taskId,id);this.database.prepare("UPDATE processing_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE attempt_id=? AND status IN ('pending','leased')").run(t,id);this.database.prepare("UPDATE derivative_jobs SET status='cancelled',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE attempt_id=? AND status IN ('pending','leased')").run(t,id);const waitingOperation=this.database.prepare("SELECT id FROM dataset_operations WHERE processing_attempt_id=? AND status='awaiting_derivatives'").get(id);if(waitingOperation){if(this.database.prepare("UPDATE dataset_operations SET status='cancelled',progress=1,completed_at=?,updated_at=? WHERE id=? AND processing_attempt_id=? AND status='awaiting_derivatives'").run(t,t,waitingOperation.id,id).changes!==1)throw Object.assign(new Error('dataset operation changed during cancellation'),{code:'cancel_conflict'});if(!this.failRetainedImportDerivatives(id,t))throw Object.assign(new Error('retained import changed during cancellation'),{code:'cancel_conflict'});}this.database.prepare("DELETE FROM session_grants WHERE session_mode='review' AND review_attempt_id=?").run(id);this.database.prepare("UPDATE viewer_sessions SET revoked_at=COALESCE(revoked_at,?),updated_at=? WHERE session_mode='review' AND review_attempt_id=? AND revoked_at IS NULL").run(t,t,id);this.database.prepare('INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),'admin',actorId,'processing_attempt.cancelled','processing_attempt',id,JSON.stringify({taskId:current.taskId,modelId:current.resultModelId,modelVersionId:current.resultModelVersionId}),t);return this.getAttempt(id);}); }
+  cancelAttempt(id,actorId=null) { return this.transaction(()=>{const current=this.getAttempt(id);if(!current||['cancelled','published','failed'].includes(current.status))return current?.status==='cancelled'?current:null;const t=now();if(this.database.prepare("UPDATE processing_attempts SET status='cancelled',completed_at=COALESCE(completed_at,?),updated_at=? WHERE id=? AND status=?").run(t,t,id,current.status).changes!==1)throw Object.assign(new Error('attempt changed during cancellation'),{code:'cancel_conflict'});if(current.resultModelVersionId&&current.resultModelId){this.database.prepare("UPDATE model_outputs SET status='failed',updated_at=? WHERE id=? AND attempt_id=? AND status IN ('staged','ready') AND NOT EXISTS (SELECT 1 FROM models WHERE id=? AND active_version_id=?)").run(t,current.resultModelVersionId,id,current.resultModelId,current.resultModelVersionId);this.database.prepare("UPDATE model_versions SET status='failed',updated_at=? WHERE id=? AND model_id=? AND NOT EXISTS (SELECT 1 FROM models WHERE id=? AND active_version_id=?)").run(t,current.resultModelVersionId,current.resultModelId,current.resultModelId,current.resultModelVersionId);this.database.prepare("UPDATE models SET status='failed',updated_at=? WHERE id=? AND active_version_id IS NULL").run(t,current.resultModelId);}this.database.prepare("UPDATE processing_tasks SET status='cancelled',updated_at=? WHERE id=? AND active_attempt_id=?").run(t,current.taskId,id);this.database.prepare("UPDATE processing_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE attempt_id=? AND status IN ('pending','leased')").run(t,id);this.database.prepare("UPDATE derivative_jobs SET status='cancelled',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE attempt_id=? AND status IN ('pending','leased')").run(t,id);const waitingOperation=this.database.prepare("SELECT id FROM dataset_operations WHERE processing_attempt_id=? AND status='awaiting_derivatives'").get(id);if(waitingOperation){if(this.database.prepare("UPDATE dataset_operations SET status='cancelled',progress=1,completed_at=?,updated_at=? WHERE id=? AND processing_attempt_id=? AND status='awaiting_derivatives'").run(t,t,waitingOperation.id,id).changes!==1)throw Object.assign(new Error('dataset operation changed during cancellation'),{code:'cancel_conflict'});if(!this.failRetainedImportDerivatives(id,t))throw Object.assign(new Error('retained import changed during cancellation'),{code:'cancel_conflict'});}this.database.prepare("DELETE FROM session_grants WHERE session_mode='review' AND review_attempt_id=?").run(id);this.database.prepare("UPDATE viewer_sessions SET revoked_at=COALESCE(revoked_at,?),updated_at=? WHERE session_mode='review' AND review_attempt_id=? AND revoked_at IS NULL").run(t,t,id);this.database.prepare('INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),'admin',actorId,'processing_attempt.cancelled','processing_attempt',id,JSON.stringify({taskId:current.taskId,modelId:current.resultModelId,modelVersionId:current.resultModelVersionId,previousStatus:current.status}),t);return this.getAttempt(id);}); }
   recoverIngest(id,{expectedFingerprint,providerStatus,sessionId,actor,receipt}){return this.transaction(()=>{
     const session=this.adminSession(this.database.prepare('SELECT * FROM admin_sessions WHERE id=?').get(sessionId));
     if(!this.adminSessionLive(session)||session.subject!==actor||!session.permissions.includes('viewer.processing.write'))throw Object.assign(new Error('recovery authorization changed'),{code:'ingest_recovery_authorization_changed'});

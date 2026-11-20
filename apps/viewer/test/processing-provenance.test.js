@@ -8,9 +8,12 @@ test('only opted-in canonical HTTPS receivers freeze a credential-free ACK endpo
   const capture=(endpoint,capability=marker)=>submissionProvenance(attempt,{id:'provider',type:'nodeodm',endpoint,capabilities:{viewerAcceptanceAck:capability}},'2026-11-09T00:00:00.000Z');
   assert.equal(capture('https://provider.example.test').providerEndpoint,'https://provider.example.test');
   for(const endpoint of ['http://provider.example.test','https://user:DO-NOT-SAVE@provider.example.test','https://provider.example.test?token=DO-NOT-SAVE','https://provider.example.test/path','https://provider.example.test#DO-NOT-SAVE']){
-    const snapshot=capture(endpoint);assert.equal(snapshot.providerEndpoint,undefined);assert.ok(!JSON.stringify(snapshot).includes('DO-NOT-SAVE'));
+    const snapshot=capture(endpoint);assert.equal(snapshot.providerEndpoint,undefined);assert.equal(Boolean(snapshot.providerOriginSha256),endpoint.startsWith('http:'));assert.ok(!JSON.stringify(snapshot).includes('DO-NOT-SAVE'));
   }
-  assert.equal(capture('https://provider.example.test',null).providerEndpoint,undefined);
+  const ordinary=capture('https://provider.example.test',null);
+  assert.equal(ordinary.providerEndpoint,undefined);
+  assert.match(ordinary.providerOriginSha256,/^[a-f0-9]{64}$/);
+  assert.ok(!JSON.stringify(ordinary).includes('https://provider.example.test'));
   assert.equal(capture('https://provider.example.test',{...marker,version:2}).providerEndpoint,undefined);
 });
 function fixture(t){
