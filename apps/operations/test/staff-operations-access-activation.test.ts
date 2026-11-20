@@ -101,7 +101,7 @@ describe("0244 partial or altered fails closed; complete serves (R2.7)", { timeo
     if (object.type === "trigger") return object.sql.replace(/RAISE\(ABORT,'/, "RAISE(ABORT,'altered_");
     if (object.type === "view") return object.sql.replace(/SELECT /, "SELECT DISTINCT ");
     if (object.type === "index") return object.sql.replace(/\(override_id,result_revision\)/, "(override_id)");
-    return object.sql.replace(/\)\s*$/, ",altered_for_test INTEGER)");
+    return object.sql.replace(/\)\s*$/, ",CHECK(1=1))");
   }
 
   it("the installed objects and catalog rows match the reviewed digest", async () => {
