@@ -393,3 +393,11 @@ it("names batteries only for active import-authorized staff, validates bounded i
   expect((await app("owner", fakeBinding(calls))(path, put("1", "bad"))).status).toBe(400);
   expect((await app("owner", { ...fakeBinding([]), setBatteryReference: undefined })(path, put("1"))).status).toBe(503);
 });
+
+
+it("preserves the deterministic battery-name conflict code for editable retry", async () => {
+  const service: FlightLogsBinding = { ...fakeBinding([]), setBatteryReference: () => Promise.resolve({ ok: false as const, error: { code: "battery_name_taken", status: 409, message: "That name is used." } }) };
+  const response = await app("owner", service)("/api/flight-logs/aircraft/a1/batteries/b1/reference", { method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": "battery-reference-key-0001" }, body: JSON.stringify({ referenceName: "1" }) });
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: "That name is used.", code: "battery_name_taken" });
+});

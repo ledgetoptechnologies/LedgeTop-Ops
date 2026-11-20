@@ -220,7 +220,11 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
       throw new HTTPException(400, { message: "Use a battery reference name of up to 40 characters, or clear it." });
     const service = binding(c.env);
     if (!service.setBatteryReference) throw new HTTPException(503, { message: "Battery naming isn’t available on this Logs host yet." });
-    return c.json(unwrap(await service.setBatteryReference(actor, { aircraftId, batteryId, referenceName: body!.referenceName as string | null }, operationOptions(c))), 200, noStore);
+    const result = await service.setBatteryReference(actor, { aircraftId, batteryId, referenceName: body!.referenceName as string | null }, operationOptions(c));
+    // A named business conflict is a definitive refusal, distinct from an uncertain keyed action.
+    if (!result.ok && result.error.code === "battery_name_taken" && result.error.status === 409)
+      return c.json({ error: result.error.message, code: result.error.code }, 409, noStore);
+    return c.json(unwrap(result), 200, noStore);
   });
 
   // Flight reads: any active staff member. The logs service shows owners and admins (flight_logs.view) every

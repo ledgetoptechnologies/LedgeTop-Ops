@@ -73,14 +73,14 @@ export function FlightLogsPage({ canImport, canViewAll = false, isAdministrator 
           <label>From<input type="date" value={filters.from ?? ""} onChange={event => set({ from: event.currentTarget.value || undefined })} /></label>
           <label>To<input type="date" value={filters.to ?? ""} onChange={event => set({ to: event.currentTarget.value || undefined })} /></label>
         </div>
-        <label>Aircraft<select value={filters.aircraft ?? ""} onChange={event => set({ aircraft: event.currentTarget.value || undefined })}>
+        <label>Aircraft<select value={filters.aircraft ?? ""} onChange={event => set({ aircraft: event.currentTarget.value || undefined, battery: undefined })}>
           <option value="">All aircraft</option>{facets?.aircraft.map(item => <option key={item.id} value={item.id}>{equipmentLabel(item)} · {masked(item.serial)} ({item.flights})</option>)}
         </select></label>
         <label>Battery<select value={filters.battery ? `${filters.aircraft ?? ""}:${filters.battery}` : ""} onChange={event => {
           const [aircraft, battery] = event.currentTarget.value.split(":");
           set(battery ? { aircraft: aircraft || undefined, battery } : { battery: undefined });
         }}>
-          <option value="">All batteries</option>{facets?.batteries.map(item => <option key={`${item.aircraftId}:${item.id}`} value={`${item.aircraftId ?? ""}:${item.id}`}>{batteryLabel(item)} · SN {item.serial} ({item.flights})</option>)}
+          <option value="">All batteries</option>{facets?.batteries.map(item => <option key={`${item.aircraftId}:${item.id}`} value={`${item.aircraftId ?? ""}:${item.id}`}>{batteryLabel(item)} ({item.flights})</option>)}
         </select></label>
         {facets && facets.pilots.length > 1 && <label>Pilot<select value={filters.pilot ?? ""} onChange={event => set({ pilot: event.currentTarget.value || undefined })}>
           <option value="">All pilots</option>{facets.pilots.map(item => <option key={item.id} value={item.id}>{item.pilotName ?? "Unknown pilot"} ({item.flights})</option>)}
@@ -102,7 +102,7 @@ export function FlightLogsPage({ canImport, canViewAll = false, isAdministrator 
         <button type="button" aria-current={view.kind === "flight" && view.id === flight.id ? "true" : undefined} onClick={() => openFlight(flight.id)}>
           <strong>{flightTitle(flight)}</strong>
           <small>{shortDate(flight.startedAt)} · {duration(flight.durationSeconds, true)} · {miles(flight.distanceMeters)}</small>
-          {flight.battery && <small>{batteryLabel(flight.battery)} · SN {flight.battery.serial}</small>}
+          {flight.battery && <small>{batteryLabel(flight.battery)}</small>}
           <small>{equipmentLabel(flight.aircraft)}{flight.pilotName ? ` · ${flight.pilotName}` : ""}{flight.hasTrack ? "" : " · no track"}</small>
         </button>
       </li>)}</ol>

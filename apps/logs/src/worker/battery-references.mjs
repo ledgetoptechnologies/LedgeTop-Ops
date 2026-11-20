@@ -1,4 +1,5 @@
 import { LogsError } from './errors.mjs';
+import { normalizeBatteryReference } from '../battery-reference.mjs';
 
 const ID = /^[A-Za-z0-9-]{1,80}$/;
 
@@ -10,13 +11,10 @@ export async function setBatteryReference(env, actor, input = {}) {
   const { aircraftId, batteryId } = input;
   if (!ID.test(aircraftId ?? '') || !ID.test(batteryId ?? ''))
     throw new LogsError('battery_invalid', 400, 'Choose an aircraft and battery.');
-  if (input.referenceName !== null && typeof input.referenceName !== 'string')
-    throw new LogsError('battery_name_invalid', 400, 'Use a battery reference name of up to 40 characters.');
-  const referenceName = input.referenceName?.normalize('NFKC').trim() || null;
-  if (referenceName && (referenceName.length > 40 || /[\p{Cc}\p{Cf}]/u.test(referenceName)))
-    throw new LogsError('battery_name_invalid', 400, 'Use a battery reference name of up to 40 characters without control characters.');
+  let referenceName;
+  try { referenceName = normalizeBatteryReference(input.referenceName); }
+  catch (error) { throw new LogsError('battery_name_invalid', 400, error.message); }
   const normalizedName = referenceName?.toLowerCase() ?? null;
-  if (normalizedName?.length > 40) throw new LogsError('battery_name_invalid', 400, 'Use a shorter battery reference name.');
   const db = env.LOGS_DB;
   const exists = await db.prepare('SELECT 1 FROM flights WHERE aircraft_id = ? AND battery_id = ? LIMIT 1').bind(aircraftId, batteryId).first();
   if (!exists) throw new LogsError('battery_not_found', 404, 'That aircraft battery was not found.');
@@ -30,11 +28,19 @@ export async function setBatteryReference(env, actor, input = {}) {
     await db.batch([write, db.prepare('INSERT INTO audit_events (id, actor_id, action, subject, detail, at) VALUES (?, ?, ?, ?, ?, ?)')
       .bind(crypto.randomUUID(), actor.staffId, 'battery.reference', `aircraft:${aircraftId}:battery:${batteryId}`, JSON.stringify({ aircraftId, batteryId, referenceName }), at)]);
   } catch (error) {
-    // Resolve only the unique-name conflict; storage/audit failures must still fail and roll back.
-    if (referenceName && await db.prepare('SELECT 1 FROM battery_references WHERE aircraft_id = ? AND normalized_name = ? AND battery_id <> ?')
-      .bind(aircraftId, normalizedName, batteryId).first())
-      throw new LogsError('battery_name_taken', 400, 'That reference name is already used by another battery on this aircraft.');
+    // D1 wraps SQLite errors in cause; classify the failed statement itself, without a racy follow-up read.
+    if (referenceName && referenceNameConflict(error))
+      throw new LogsError('battery_name_taken', 409, 'That reference name is already used by another battery on this aircraft.');
     throw error;
   }
   return { aircraftId, batteryId, referenceName };
+}
+
+function referenceNameConflict(error) {
+  const seen = new Set();
+  for (let cause = error; cause && !seen.has(cause); cause = cause.cause) {
+    seen.add(cause);
+    if (/UNIQUE constraint failed:\s*battery_references\.aircraft_id,\s*battery_references\.normalized_name/i.test(String(cause.message))) return true;
+  }
+  return false;
 }

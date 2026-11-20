@@ -2,6 +2,7 @@
 // equipment. Who sees what: staff with flight_logs.view (owners, admins) see every pilot's flights; any other
 // staff member Ops passes in sees only their own (pilot_id = their staff id). Filters are bound parameters only.
 import { LogsError } from './errors.mjs';
+import { normalizeBatteryReference } from '../battery-reference.mjs';
 
 const VIEW = 'flight_logs.view';
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -30,7 +31,10 @@ export function filterClause(filters = {}, scope = { all: true }) {
     add('EXISTS (SELECT 1 FROM flight_tags t WHERE t.flight_id = f.id AND t.tag = ?)', filters.tag.trim());
   if (typeof filters.q === 'string' && filters.q.trim() && filters.q.length <= 100) {
     const like = `%${filters.q.trim().replace(/[\\%_]/g, c => `\\${c}`)}%`;
-    add("(f.display_name LIKE ? ESCAPE '\\' OR f.source_file_name LIKE ? ESCAPE '\\' OR f.notes LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM batteries qb WHERE qb.id = f.battery_id AND qb.serial LIKE ? ESCAPE '\\') OR EXISTS (SELECT 1 FROM battery_references qr WHERE qr.aircraft_id = f.aircraft_id AND qr.battery_id = f.battery_id AND qr.reference_name LIKE ? ESCAPE '\\'))", like, like, like, like, like);
+    let referenceQuery = filters.q.trim();
+    try { referenceQuery = normalizeBatteryReference(referenceQuery) ?? referenceQuery; } catch { /* General search need not be a valid reference name. */ }
+    const referenceLike = `%${referenceQuery.replace(/[\\%_]/g, c => `\\${c}`)}%`;
+    add("(f.display_name LIKE ? ESCAPE '\\' OR f.source_file_name LIKE ? ESCAPE '\\' OR f.notes LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM batteries qb WHERE qb.id = f.battery_id AND qb.serial LIKE ? ESCAPE '\\') OR EXISTS (SELECT 1 FROM battery_references qr WHERE qr.aircraft_id = f.aircraft_id AND qr.battery_id = f.battery_id AND qr.reference_name LIKE ? ESCAPE '\\'))", like, like, like, like, referenceLike);
   }
   for (const [key, column] of [['Duration', 'f.duration_seconds'], ['Altitude', 'f.max_altitude_m'], ['Distance', 'f.distance_m']]) {
     const min = num(filters[`min${key}`]), max = num(filters[`max${key}`]);
@@ -54,7 +58,7 @@ export function flightItem(row) {
     media: { photos: row.photo_count, videos: row.video_count }, hasTrack: Boolean(row.has_track), rawLog: row.raw_log_status, color: row.color,
     home: row.home_lat != null && row.home_lon != null ? { latitude: row.home_lat, longitude: row.home_lon } : null,
     aircraft: row.aircraft_serial ? { id: row.aircraft_id, serial: row.aircraft_serial, model: row.aircraft_model, name: row.aircraft_name } : null,
-    battery: row.battery_serial ? { id: row.battery_id, serial: row.battery_serial, aircraftId: row.aircraft_id ?? null, aircraftName: row.aircraft_name || row.aircraft_model || row.aircraft_serial || null, referenceName: row.battery_reference_name ?? null, lifePercent: row.battery_life_percent } : null,
+    battery: row.battery_serial ? { id: row.battery_id, serial: row.battery_serial, aircraftId: row.aircraft_id ?? null, aircraftName: aircraftName(row.aircraft_name, row.aircraft_model, row.aircraft_serial), referenceName: row.battery_reference_name ?? null, lifePercent: row.battery_life_percent } : null,
     tags: row.tags ? String(row.tags).split('\u001f').sort() : [],
   };
 }
@@ -84,14 +88,14 @@ export async function facets(env, actor) {
   const all = async (sql, own = []) => (await env.LOGS_DB.prepare(sql).bind(...own).all()).results;
   const [aircraft, batteries, tags, pilots, ranges] = scope.all ? await Promise.all([
     all(`SELECT a.id, a.serial, a.model, a.name, COUNT(f.id) AS flights FROM aircraft a LEFT JOIN flights f ON f.aircraft_id = a.id GROUP BY a.id ORDER BY flights DESC`),
-    all(`SELECT b.id, b.serial, f.aircraft_id, COALESCE(NULLIF(a.name, ''), NULLIF(a.model, ''), a.serial) AS aircraft_name, br.reference_name, COUNT(f.id) AS flights FROM batteries b LEFT JOIN flights f ON f.battery_id = b.id LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN battery_references br ON br.aircraft_id = f.aircraft_id AND br.battery_id = b.id GROUP BY b.id, f.aircraft_id ORDER BY flights DESC`),
+    all(`SELECT b.id, b.serial, f.aircraft_id, COALESCE(NULLIF(a.name, ''), NULLIF(a.model, ''), CASE WHEN a.serial IS NOT NULL THEN 'Aircraft …' || substr(a.serial, -4) END) AS aircraft_name, br.reference_name, COUNT(f.id) AS flights FROM batteries b LEFT JOIN flights f ON f.battery_id = b.id LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN battery_references br ON br.aircraft_id = f.aircraft_id AND br.battery_id = b.id GROUP BY b.id, f.aircraft_id ORDER BY flights DESC`),
     all(`SELECT tag, kind, COUNT(*) AS flights FROM flight_tags GROUP BY tag, kind ORDER BY flights DESC, tag LIMIT 200`),
     all(`SELECT pilot_id AS id, COUNT(*) AS flights FROM flights GROUP BY pilot_id ORDER BY flights DESC`),
     all(`SELECT MAX(duration_seconds) AS duration, MAX(max_altitude_m) AS altitude, MAX(distance_m) AS distance, MIN(started_at) AS first, MAX(started_at) AS last FROM flights`),
   ]) : await Promise.all([
     // Own flights only: equipment, tags and ranges come from this pilot's flights, never the whole fleet.
     all(`SELECT a.id, a.serial, a.model, a.name, COUNT(f.id) AS flights FROM flights f JOIN aircraft a ON a.id = f.aircraft_id WHERE f.pilot_id = ? GROUP BY a.id ORDER BY flights DESC`, [scope.pilotId]),
-    all(`SELECT b.id, b.serial, f.aircraft_id, COALESCE(NULLIF(a.name, ''), NULLIF(a.model, ''), a.serial) AS aircraft_name, br.reference_name, COUNT(f.id) AS flights FROM flights f JOIN batteries b ON b.id = f.battery_id LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN battery_references br ON br.aircraft_id = f.aircraft_id AND br.battery_id = b.id WHERE f.pilot_id = ? GROUP BY b.id, f.aircraft_id ORDER BY flights DESC`, [scope.pilotId]),
+    all(`SELECT b.id, b.serial, f.aircraft_id, COALESCE(NULLIF(a.name, ''), NULLIF(a.model, ''), CASE WHEN a.serial IS NOT NULL THEN 'Aircraft …' || substr(a.serial, -4) END) AS aircraft_name, br.reference_name, COUNT(f.id) AS flights FROM flights f JOIN batteries b ON b.id = f.battery_id LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN battery_references br ON br.aircraft_id = f.aircraft_id AND br.battery_id = b.id WHERE f.pilot_id = ? GROUP BY b.id, f.aircraft_id ORDER BY flights DESC`, [scope.pilotId]),
     all(`SELECT t.tag, t.kind, COUNT(*) AS flights FROM flight_tags t JOIN flights f ON f.id = t.flight_id WHERE f.pilot_id = ? GROUP BY t.tag, t.kind ORDER BY flights DESC, t.tag LIMIT 200`, [scope.pilotId]),
     all(`SELECT pilot_id AS id, COUNT(*) AS flights FROM flights WHERE pilot_id = ? GROUP BY pilot_id`, [scope.pilotId]),
     all(`SELECT MAX(duration_seconds) AS duration, MAX(max_altitude_m) AS altitude, MAX(distance_m) AS distance, MIN(started_at) AS first, MAX(started_at) AS last FROM flights WHERE pilot_id = ?`, [scope.pilotId]),
@@ -112,24 +116,33 @@ export async function overview(env, actor, query = {}) {
   const filter = filterClause(query, scope), db = env.LOGS_DB;
   const rows = async (sql, extra = []) => (await db.prepare(sql).bind(...filter.values, ...extra).all()).results;
   const and = filter.sql ? `${filter.sql} AND` : 'WHERE';
-  const [totals, activity, byAircraft, byBattery, buckets, locations, longest, furthest, batteryHealth, byHour] = await Promise.all([
+  const [totals, activity, byAircraft, byBattery, buckets, locations, longest, furthest, batteryHealth, byHour, batteryReferences] = await Promise.all([
     rows(`SELECT COUNT(*) AS flights, COALESCE(SUM(f.duration_seconds), 0) AS seconds, COALESCE(SUM(f.distance_m), 0) AS meters,
       COALESCE(SUM(f.telemetry_points), 0) AS points, MAX(f.max_altitude_m) AS max_altitude, MAX(f.max_speed_mps) AS max_speed,
       SUM(f.photo_count) AS photos, SUM(f.video_count) AS videos FROM flights f ${filter.sql}`),
     rows(`SELECT substr(f.started_at, 1, 10) AS day, COUNT(*) AS flights, SUM(f.duration_seconds) AS seconds FROM flights f ${and} f.started_at IS NOT NULL GROUP BY day ORDER BY day`),
     rows(`SELECT a.id, a.serial, a.model, a.name, COUNT(*) AS flights, SUM(f.duration_seconds) AS seconds FROM flights f JOIN aircraft a ON a.id = f.aircraft_id ${filter.sql} GROUP BY a.id ORDER BY seconds DESC`),
-    rows(`SELECT b.id, b.serial, f.aircraft_id, COALESCE(NULLIF(a.name, ''), NULLIF(a.model, ''), a.serial) AS aircraft_name, br.reference_name, COUNT(*) AS flights, SUM(f.duration_seconds) AS seconds FROM flights f JOIN batteries b ON b.id = f.battery_id LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN battery_references br ON br.aircraft_id = f.aircraft_id AND br.battery_id = b.id ${filter.sql} GROUP BY b.id, f.aircraft_id ORDER BY flights DESC`),
+    rows(`SELECT b.id, b.serial, COUNT(*) AS flights, SUM(f.duration_seconds) AS seconds FROM flights f JOIN batteries b ON b.id = f.battery_id ${filter.sql} GROUP BY b.id ORDER BY flights DESC`),
     rows(`SELECT SUM(f.duration_seconds < 600) AS short, SUM(f.duration_seconds >= 600 AND f.duration_seconds <= 1200) AS mid, SUM(f.duration_seconds > 1200) AS long FROM flights f ${filter.sql}`),
     rows(`SELECT f.id, f.display_name, f.started_at, f.home_lat, f.home_lon FROM flights f ${and} f.home_lat IS NOT NULL AND f.home_lon IS NOT NULL AND NOT (f.home_lat = 0 AND f.home_lon = 0) LIMIT 5000`),
     rows(`SELECT f.id, f.display_name, f.started_at, f.duration_seconds AS value FROM flights f ${and} f.duration_seconds IS NOT NULL ORDER BY f.duration_seconds DESC LIMIT 3`),
     rows(`SELECT f.id, f.display_name, f.started_at, f.distance_m AS value FROM flights f ${and} f.distance_m IS NOT NULL ORDER BY f.distance_m DESC LIMIT 3`),
     // The subquery's own-pilot placeholder comes before the filter's, so bind it first.
-    db.prepare(`SELECT b.id, b.serial, f.aircraft_id, COALESCE(NULLIF(a.name, ''), NULLIF(a.model, ''), a.serial) AS aircraft_name, br.reference_name, b.max_cycle_count AS cycles, COUNT(*) AS flights, SUM(f.duration_seconds) AS seconds,
-      (SELECT f2.battery_life_percent FROM flights f2 WHERE f2.battery_id = b.id AND f2.aircraft_id IS f.aircraft_id AND f2.battery_life_percent IS NOT NULL${scope.all ? '' : ' AND f2.pilot_id = ?'} ORDER BY f2.started_at DESC LIMIT 1) AS life
-      FROM flights f JOIN batteries b ON b.id = f.battery_id LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN battery_references br ON br.aircraft_id = f.aircraft_id AND br.battery_id = b.id ${filter.sql} GROUP BY b.id, f.aircraft_id ORDER BY flights DESC`)
+    db.prepare(`SELECT b.id, b.serial, b.max_cycle_count AS cycles, COUNT(*) AS flights, SUM(f.duration_seconds) AS seconds,
+      (SELECT f2.battery_life_percent FROM flights f2 WHERE f2.battery_id = b.id AND f2.battery_life_percent IS NOT NULL${scope.all ? '' : ' AND f2.pilot_id = ?'} ORDER BY f2.started_at DESC LIMIT 1) AS life
+      FROM flights f JOIN batteries b ON b.id = f.battery_id ${filter.sql} GROUP BY b.id ORDER BY flights DESC`)
       .bind(...(scope.all ? [] : [scope.pilotId]), ...filter.values).all().then(result => result.results),
     rows(`SELECT CAST(substr(f.started_at, 12, 2) AS INTEGER) AS hour, COUNT(*) AS flights FROM flights f ${and} f.started_at IS NOT NULL GROUP BY hour ORDER BY hour`),
+    rows(`SELECT DISTINCT f.battery_id, f.aircraft_id, COALESCE(NULLIF(a.name, ''), NULLIF(a.model, ''), CASE WHEN a.serial IS NOT NULL THEN 'Aircraft …' || substr(a.serial, -4) END) AS aircraft_name, br.reference_name FROM flights f LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN battery_references br ON br.aircraft_id = f.aircraft_id AND br.battery_id = f.battery_id ${filter.sql} ORDER BY f.aircraft_id`),
   ]);
+  const referencesByBattery = new Map();
+  for (const row of batteryReferences) {
+    if (!row.battery_id || !row.aircraft_id) continue;
+    const refs = referencesByBattery.get(row.battery_id) ?? [];
+    refs.push({ aircraftId: row.aircraft_id, aircraftName: row.aircraft_name ?? null, referenceName: row.reference_name ?? null });
+    referencesByBattery.set(row.battery_id, refs);
+  }
+  const physicalBattery = row => ({ id: row.id, serial: row.serial, references: referencesByBattery.get(row.id) ?? [] });
   const t = totals[0] ?? {};
   const top = row => ({ id: row.id, displayName: row.display_name, startedAt: row.started_at, value: row.value });
   return {
@@ -142,14 +155,18 @@ export async function overview(env, actor, query = {}) {
     activity: activity.map(row => ({ day: row.day, flights: row.flights, durationSeconds: row.seconds ?? 0 })),
     byHour: byHour.filter(row => row.hour != null).map(row => ({ hour: row.hour, flights: row.flights })),
     byAircraft: byAircraft.map(row => ({ id: row.id, serial: row.serial, model: row.model, name: row.name, flights: row.flights, durationSeconds: row.seconds ?? 0 })),
-    byBattery: byBattery.map(row => ({ ...batteryEquipment(row), flights: row.flights, durationSeconds: row.seconds ?? 0 })),
+    byBattery: byBattery.map(row => ({ ...physicalBattery(row), flights: row.flights, durationSeconds: row.seconds ?? 0 })),
     byDuration: { short: buckets[0]?.short ?? 0, mid: buckets[0]?.mid ?? 0, long: buckets[0]?.long ?? 0 },
     locations: locations.map(row => ({ id: row.id, displayName: row.display_name, startedAt: row.started_at, latitude: row.home_lat, longitude: row.home_lon })),
-    batteryHealth: batteryHealth.map(row => ({ ...batteryEquipment(row), cycles: row.cycles, lifePercent: row.life, flights: row.flights, durationSeconds: row.seconds ?? 0 })),
+    batteryHealth: batteryHealth.map(row => ({ ...physicalBattery(row), cycles: row.cycles, lifePercent: row.life, flights: row.flights, durationSeconds: row.seconds ?? 0 })),
     longest: longest.map(top), furthest: furthest.map(top),
   };
 }
 
 function batteryEquipment(row) {
   return { id: row.id, serial: row.serial, aircraftId: row.aircraft_id ?? null, aircraftName: row.aircraft_name ?? null, referenceName: row.reference_name ?? null };
+}
+
+function aircraftName(name, model, serial) {
+  return name || model || (serial ? `Aircraft …${String(serial).slice(-4)}` : null);
 }

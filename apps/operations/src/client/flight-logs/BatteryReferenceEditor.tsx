@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { api, sessionScope } from "../api";
+import { api, ApiError, sessionScope } from "../api";
+import { normalizeBatteryReference } from "../../../../logs/src/battery-reference.mjs";
 import { isUncertain, withOperationKey } from "./operation-keys";
 
 /** Keep an uncertain save's input frozen so retrying cannot change its meaning. */
@@ -11,20 +12,31 @@ export function BatteryReferenceEditor({ aircraftId, batteryId, referenceName, o
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   async function save(clear = false) {
-    const name = clear ? null : draft.trim() || null;
+    let name: string | null;
+    try { name = normalizeBatteryReference(clear ? null : draft); }
+    catch { setMessage("Use a reference name of up to 40 characters after the optional Battery prefix."); return; }
     const attempt = pending ?? { referenceName: name, action: `battery-reference:${aircraftId}:${batteryId}:${crypto.randomUUID()}` };
     setPending(attempt); setBusy(true); setMessage("");
     const scope = sessionScope();
     try {
       const result = await withOperationKey(scope, attempt.action, async key => {
-        const result = await api<{ aircraftId: string; batteryId: string; referenceName: string | null }>(`/api/flight-logs/aircraft/${encodeURIComponent(aircraftId)}/batteries/${encodeURIComponent(batteryId)}/reference`, {
-          method: "PUT", headers: { "Idempotency-Key": key }, body: JSON.stringify({ referenceName: attempt.referenceName }),
-        });
+        let result: { aircraftId: string; batteryId: string; referenceName: string | null };
+        try {
+          result = await api<typeof result>(`/api/flight-logs/aircraft/${encodeURIComponent(aircraftId)}/batteries/${encodeURIComponent(batteryId)}/reference`, {
+            method: "PUT", headers: { "Idempotency-Key": key }, body: JSON.stringify({ referenceName: attempt.referenceName }),
+          });
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409 && error.payload.code === "battery_name_taken")
+            return { kind: "conflict" as const, message: error.message };
+          throw error;
+        }
         if (result.aircraftId !== aircraftId || result.batteryId !== batteryId || !(result.referenceName === null || typeof result.referenceName === "string"))
           throw new Error("The save couldn’t be confirmed. Retry to confirm it.");
-        return result;
+        return { kind: "saved" as const, value: result };
       });
-      setPending(null); setDraft(result.referenceName ?? ""); setMessage("Battery reference saved."); onSaved();
+      setPending(null);
+      if (result.kind === "conflict") { setMessage(result.message); return; }
+      setDraft(result.value.referenceName ?? ""); setMessage("Battery reference saved."); onSaved();
     } catch (error) {
       if (!isUncertain(scope, attempt.action)) setPending(null);
       setMessage(error instanceof Error ? error.message : "The save couldn’t be confirmed. Retry to confirm it.");

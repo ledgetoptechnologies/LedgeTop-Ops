@@ -122,7 +122,7 @@ export function FlightDetail({ flightId, canReassign = false, canNameBattery = f
           {canReassign && <ReassignFlight flightId={flight.id} pilotName={flight.pilotName ?? null} onDone={() => setReloaded(n => n + 1)} />}
           <span className="flight-chip">{equipmentLabel(flight.aircraft)}</span>
           {flight.aircraft && <span className="flight-chip">SN {masked(flight.aircraft.serial)}</span>}
-          {flight.battery && <span className="flight-chip">{batteryLabel(flight.battery)} · SN {flight.battery.serial}</span>}
+          {flight.battery && <span className="flight-chip">{batteryLabel(flight.battery)}</span>}
           {flight.tags.map(tag => <span key={tag.tag} className={`flight-chip tag ${tag.kind}`}>{tag.tag}</span>)}
         </p>
       </div>

@@ -1,68 +1,48 @@
-# Battery reference names: source candidate
+# Battery reference names: release and validation notes
 
-Hub task `475e9703-5941-4eed-a85d-0aeee621ad20`, claimed by Codex revision 2,
-independent reviewer Claude. Fresh Hub overview paused=false. This receipt is a
-durable progress handoff; exposed Hub tools do not support task progress/candidate
-writes, so it is not a task update or completion record.
+Battery names belong to the aircraft/battery pair. A shared canonical function
+normalizes presentation and uniqueness, including optional Battery prefixes and
+internal whitespace. Staff with flight_logs.import can save, rename and clear;
+ordinary read access does not grant naming authority. Writes and audit are atomic.
+The local keyed RPC rechecks current directory authority even on replay.
 
-Base: remote main `0bd57d05ae4191dbe8d5bbb78a5e32c732eb6813`, fetched November 19,
-2026. Target UI surfaces are already on main. Local branch
-`codex/logs-battery-reference-20261119`; no shared branch edits, push or deployment.
-Current PR625/650/653 heads were read from GitHub and match the earlier receipts:
-`73925adc`, `654065cc`, `e00e0046`. Enumerated all current local and origin refs
-with `git ls-tree` for domain migration 0007: no collision. Reserve
-`apps/logs/migrations/0007_battery_references.sql` for this task. Keep pairing
-0004 untouched; the local-only migration ledger is separate.
+Serials remain the physical identity and remain searchable. UI labels show each
+serial once using the existing masked display convention. Flight associations and
+history are untouched. Overview usage and health remain one row per physical pack,
+with relevant per-aircraft references shown alongside the existing pack totals.
 
-The new relation keys names by aircraft and battery, with normalized uniqueness
-within aircraft. Save/rename/clear use existing flight_logs.import authority,
-atomic audit+mutation, and keyed local RPC with fresh directory authority even on
-replay. Ordinary viewers cannot write. Battery serials, ids, flights and historical
-associations are untouched. List/detail/filter/overview/health expose aircraft name,
-reference and serial consistently; search includes raw serial and reference.
-The battery selector binds both aircraft and battery when choosing a named pair.
-The detail editor freezes uncertain saves for retry with the same input and key.
-Pending editor input survives component state only, not navigation/full reload;
-the service's keyed receipt remains durable. No claim of cross-reload UI recovery.
+The detail editor retries uncertain saves with the same payload and action key.
+A named duplicate-name conflict is a definitive refusal and permits editing.
+Pending editor input is component state; navigation or full reload does not restore
+it. Server receipts remain durable. Cross-reload editor recovery is not claimed.
 
-## Validation status at source commit
+## Required deployment order
 
-- JS module and plain TypeScript `node --check`, TSX esbuild syntax-only parsing,
-  and `git diff --check` passed. Parsing does not resolve imports or check types.
-- New synthetic SQLite tests cover fallback, rename/clear, normalized uniqueness,
-  cross-aircraft reuse, search/pilot scope, all read feeds, unchanged history,
-  unauthorized/invalid writes and atomic audit rollback.
-- Added local HTTP RPC replay/revocation test, Ops route/remote tests and two
-  browser cases for editable/read-only views, lost response retry and clear.
-- No functional test was run before this commit. Lead admits only the direct
-  in-memory SQLite file next: one process, heap 256 MiB, outer 30 seconds.
-  HTTP/workerd/Vitest/build/Playwright remain queued with Lead QA.
-- Suggested Ops dependency sibling `ops-embedded-load-timeouts-20261119` has
-  different package/lock blobs, so it is not qualified as matching runtime
-  dependencies. Its esbuild executable was used solely for syntax parsing.
+Migration `apps/logs/migrations/0007_battery_references.sql` is additive. Pairing
+migration 0004 remains reserved and unchanged. The Logs domain and local-only
+migration ledgers are separate; do not substitute one ledger for the other.
 
-## Non-device staging entry prerequisites (source/receipt only)
+For the Cloudflare Logs Worker, confirm the actual account and bound database,
+admit the database migration, apply 0007 and verify its ledger entry **before**
+deploying Worker code that queries battery_references. There is no automatic D1
+migration step in the image publisher. Deploying code first breaks read routes.
 
-Read the existing gap-readiness and compose receipts under `P:/Projects/_lead`.
-They identify the healthy existing Logs pilot; do not stand up the compose draft
-as a second pilot. The receipt's account, binding, tunnel and image observations
-are historical evidence, not fresh live verification in this lane. Reverify actual
-account/resource ownership and exact active image before staging changes.
+For logs-local, the reviewed image must include 0007. On an admitted restart the
+startup migrator applies the Logs domain migrations before serving requests,
+checking already-applied checksums. Verify successful migration/startup before
+connecting callers. Do not edit applied migrations or replay deployment receipts.
 
-Source confirms username bootstrap and active, device-eligible directory lookup
-(`device.mjs`, `directory-client.mjs`), with approval in that pilot's own Ops
-session. Confirm existing username/eligibility/registration; never reuse production
-tokens. The private Logs route requires the existing Ops/device-proxy Access
-identities and functioning Logs-to-Ops directory path. Do not expose credentials.
+## Validation boundaries
 
-`config.mjs` allows a blank DJI key; `decoder.mjs` then stays waiting_for_key
-without claiming work. A healthy host or synthetic decoder result therefore does
-not prove real encrypted RC Pro2 decode. Confirm parser/key readiness and egress
-policy before a real sample. Admit one owner-selected sample using a safe selection
-mechanism (the current app scans its granted folder). No real file access/copy,
-upload, app/device/driver changes, key inspection or live pilot mutation occurred.
+Focused synthetic regressions cover canonical uniqueness, cross-aircraft reuse,
+fallback, rename/clear, serial/name search, pilot scope, unchanged historical
+associations and per-pack metrics, authorization, atomic audit rollback, and keyed
+replay/revocation. Ops route/remote and browser cases cover conflict classification,
+editable/read-only views, uncertain response retry and clear.
 
-After independent source review and admitted local checks, stage this exact source
-with migration 0007 on the existing pilot through the authorized release owner.
-Capture real sample decode/display and reference save/rename/clear/search/health
-evidence, then Beau's visual feedback. Task acceptance remains open until then.
+Exact-source test receipts and independent review are release evidence maintained
+outside the product repository. Syntax parsing alone is not type/runtime acceptance.
+Staging acceptance still requires an admitted real-log decode/display, reference
+save/rename/clear/search/health checks, and owner visual review. Reuse the approved
+pilot and its existing authentication path. A healthy keyless host can remain
+waiting_for_key and is not proof of real encrypted-log decode.
