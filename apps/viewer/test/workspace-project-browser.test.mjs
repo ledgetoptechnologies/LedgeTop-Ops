@@ -1,4 +1,5 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
+import { BoundedTestCdp as CdpClient } from './bounded-test-cdp.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -460,51 +461,28 @@ function startFixtureServer() {
   });
 }
 
-class CdpClient {
-  constructor(socket) {
-    this.socket = socket;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.events = [];
-    socket.addEventListener('message', event => {
-      const message = JSON.parse(event.data);
-      if (message.id) {
-        const pending = this.pending.get(message.id);
-        if (!pending) return;
-        this.pending.delete(message.id);
-        if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message}`));
-        else pending.resolve(message.result || {});
-      } else {
-        this.events.push(message);
-      }
-    });
-  }
+async function createDevToolsTarget(devTools, label = 'create browser target') {
+  const origin = new URL(devTools);
+  assert.equal(origin.protocol, 'http:');
+  assert.equal(origin.hostname, '127.0.0.1');
+  const response = await fetch(new URL('/json/new?about:blank', origin), {
+    method: 'PUT',
+    redirect: 'error',
+    signal: AbortSignal.timeout(10_000),
+  });
+  assert.equal(response.ok, true, label);
+  const target = await response.json();
+  const socket = new URL(target.webSocketDebuggerUrl);
+  assert.equal(socket.protocol, 'ws:');
+  assert.equal(socket.host, origin.host);
+  return target;
+}
 
-  static async connect(url) {
-    const socket = new WebSocket(url);
-    await new Promise((resolve, reject) => {
-      socket.addEventListener('open', resolve, { once: true });
-      socket.addEventListener('error', reject, { once: true });
-    });
-    return new CdpClient(socket);
-  }
-
-  command(method, params = {}) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
-      this.socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  async evaluate(expression) {
-    const result = await this.command('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
-    return result.result?.value;
-  }
-
-  close() {
-    this.socket.close();
+async function closeDevToolsTarget(client) {
+  try {
+    await client.command('Page.close').catch(() => {});
+  } finally {
+    client.close();
   }
 }
 
@@ -657,9 +635,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
   runtime.operations = structuredClone(fixtures.operations);
   runtime.derivatives = structuredClone(fixtures.derivatives);
   const requestStart = runtime.requests.length;
-  const targetResponse = await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' });
-  assert.equal(targetResponse.ok, true, `create browser target for ${viewport.name}`);
-  const target = await targetResponse.json();
+  const target = await createDevToolsTarget(devTools, `create browser target for ${viewport.name}`);
   const client = await CdpClient.connect(target.webSocketDebuggerUrl);
   try {
     await client.command('Page.enable');
@@ -764,7 +740,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['View', 'Model report', 'Share'], `${viewport.name}: published task shortcuts must remain focused on viewing and sharing`);
     await client.evaluate(`document.querySelector('.task-more-actions > summary').click()`);
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Details & processing','Files & versions','Processing history','Ground control points']);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Move to folder','Details & processing','Files & versions','Processing history','Ground control points']);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
@@ -1028,8 +1004,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown');
     assert.deepEqual(exceptions, [], `${viewport.name}: uncaught browser exceptions`);
   } finally {
-    await client.command('Page.close').catch(() => {});
-    client.close();
+    await closeDevToolsTarget(client);
   }
 }
 
@@ -1045,7 +1020,7 @@ test('project folders navigate and survive browser history in a real browser', {
     const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));folderServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
     ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
     browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const devTools=await waitForDevTools(profile),target=await(await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json();client=await CdpClient.connect(target.webSocketDebuggerUrl);
+    const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
     await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
     await waitFor(client,`Boolean(document.querySelector('[data-action="folder-open"][data-id="folder-client"]'))`,'client folder unavailable');
@@ -1140,7 +1115,7 @@ test('orthophoto preview settles on the mounted task after navigation during dec
       runtime.requests = [];
       runtime.failOrthophotoResponse = fail;
       runtime.orthophotoResponseGate = new Promise(resolve => { releaseResponse = resolve; });
-      const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+      const target = await createDevToolsTarget(devTools);
       const client = await CdpClient.connect(target.webSocketDebuggerUrl);
       try {
         await client.command('Page.enable');
@@ -1166,8 +1141,7 @@ test('orthophoto preview settles on the mounted task after navigation during dec
         assert.equal(runtime.requests.filter(item => item.path === '/api/v1/processing/outputs/output-johnson/assets/ortho').length, 1, 'Rerender must reuse one in-flight decode rather than issuing duplicate reads');
       } finally {
         releaseResponse?.();
-        await client.command('Page.close').catch(() => {});
-        client.close();
+        await closeDevToolsTarget(client);
       }
     });
   } finally {
@@ -1233,7 +1207,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         attemptCount: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       }] : [];
       const originalOutput = structuredClone(runtime.outputs[0]);
-      const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+      const target = await createDevToolsTarget(devTools);
       const client = await CdpClient.connect(target.webSocketDebuggerUrl);
       try {
         await client.command('Page.enable');
@@ -1307,8 +1281,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         assert.deepEqual(exceptions, []);
       } finally {
         releaseTaskDetail?.();
-        await client.command('Page.close').catch(() => {});
-        client.close();
+        await closeDevToolsTarget(client);
       }
     });
   } finally {
@@ -1330,7 +1303,7 @@ test('recovery UI keeps one request identity across an uncertain response in a r
  try{
   ({server,runtime,origin}=await startFixtureServer());runtime.testIngestRecovery=true;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
   browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-  const devTools=await waitForDevTools(profile),target=await(await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json();client=await CdpClient.connect(target.webSocketDebuggerUrl);
+  const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
   await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
   await client.command('Page.navigate',{url:`${origin}/workspace?section=diagnostics`});
   await waitFor(client,`Boolean(document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]'))`,'diagnostic row unavailable');
