@@ -56,7 +56,7 @@ internal static class TokenHelperGuidanceTests
         public Task SignInAsync(CancellationToken cancellationToken)
         {
             ExplicitAttempts++;
-            if (CancelExplicitSignIn) throw new OperationCanceledException();
+            if (CancelExplicitSignIn) throw new OperationCanceledException("Synthetic helper detail that must stay out of the UI.");
             if (FailAfterExplicitSignIn) return Task.CompletedTask;
             throw new LoginRequiredException(Failure, LoginFailureOperation.ExplicitLogin);
         }

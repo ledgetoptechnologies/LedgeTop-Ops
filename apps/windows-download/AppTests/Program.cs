@@ -81,6 +81,7 @@ if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") is null)
     Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetFullPath(screenshots));
 var passed = 0; var failed = 0;
 var groups = new (string Name, Func<Task> Run)[] {
+    ("sign-in helper failures give actionable guidance and preserve cancellation", TokenHelperGuidanceTests.Run),
     ("Staging ignores enabled automatic updates", () => FreshGenerationStagingQualification.UpdaterAvailable ? Task.CompletedTask : ExplorerPreviewWindowTests.StagingScheduleDisabled()),
     ("client and employee backends construct and route only their selected source", BackendModeTests.Run),
     ("file type labels and sizes read like the Operations badges", TextLabels),
