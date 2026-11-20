@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8').replace(/\r\n/g, '\n');
@@ -186,6 +187,8 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   assert.match(promote, /      initialize_latest:\n[\s\S]*?        default: false\n        type: boolean/);
   assert.ok(promoteSteps.get('Persist the rollback receipt before moving latest').includes('"mode": "%s"'));
   assert.match(previous, /for attempt in 1 2 3/);
+  assert.ok(previous.includes('if manifest_unknown_only "$RUNNER_TEMP/inspect-error.txt" "${ref##*[:@]}"; then'), 'absence only from an unambiguous MANIFEST_UNKNOWN');
+  assert.ok(previous.includes('[[ "$(grep -c . "$file")" == 1 ]] || return 1') && previous.includes('NAME_UNKNOWN') && previous.includes('grep -qF -- "$name" "$file"'));
   assert.ok(previous.includes("cannot read the current latest; nothing was changed'; exit 1"));
   assert.ok(previous.includes('current latest digest is malformed'));
   assert.ok(previous.includes('inspect_digest "$IMAGE_NAME@$PREVIOUS_DIGEST"'));
@@ -205,6 +208,7 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   const write = move.indexOf('docker buildx imagetools create --tag "$IMAGE_NAME:latest"');
   assert.ok(reread > 0 && reread < abort && abort < write, 're-read and abort precede the write');
   assert.ok(move.includes('if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]; then'));
+  assert.ok(move.includes('if [[ "$PREVIOUS_DIGEST" == absent ]] && manifest_unknown_only "$RUNNER_TEMP/reread-error.txt" latest; then'));
   assert.ok(move.includes('NOT an atomic compare-and-swap') && promote.split('\non:\n')[0].includes('NOT an atomic compare-and-swap'));
   assert.ok(move.includes('latest was NOT restored automatically.') && move.includes('It was NOT restored automatically'));
   // Approval is recorded, not enforced.
@@ -299,4 +303,30 @@ test('Container Viewer does not join the Cloudflare application source registry'
   const registry = requirements.match(/export const APP_SOURCE_DIRS = Object\.freeze\(\{([\s\S]*?)\}\);/)?.[1];
   assert.ok(registry);
   assert.doesNotMatch(registry, /viewer/);
+});
+
+test('Latest absence is accepted only from an unambiguous single-line MANIFEST_UNKNOWN naming the reference', (t) => {
+  const bash = spawnSync('bash', ['-c', 'true']);
+  if (bash.error || bash.status !== 0) { t.skip('needs bash'); return; }
+  const promote = read('.github/workflows/promote-viewer.yml');
+  const start = promote.indexOf('          manifest_unknown_only() {');
+  const end = promote.indexOf('\n          }\n', start) + '\n          }\n'.length;
+  assert.ok(start > 0 && end > start);
+  assert.equal(promote.split(promote.slice(start, end)).length - 1, 2, 'the same classifier guards the first read and the pre-write re-read');
+  const classifier = promote.slice(start, end);
+  const classify = message => spawnSync('bash', ['-c', `${classifier}\nf="$(mktemp)"; printf '%s' "$MSG" > "$f"; manifest_unknown_only "$f" latest; r=$?; rm -f "$f"; exit $r`],
+    { env: { ...process.env, MSG: message } }).status;
+  const ref = 'ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest';
+  assert.equal(classify(`ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; map[Tag:latest]`), 0);
+  for (const message of [
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; 401 Unauthorized`,
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; NAME_UNKNOWN: repository name not known`,
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown\nERROR: dial tcp: i/o timeout`,
+    `ERROR: ${ref}: manifest unknown (tls handshake retry)`,
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; 503 Service Unavailable`,
+    'ERROR: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:other: MANIFEST_UNKNOWN: manifest unknown',
+    `ERROR: ${ref}: not found`,
+    'MANIFEST_UNKNOWN',
+    '',
+  ]) assert.notEqual(classify(message), 0, JSON.stringify(message));
 });
