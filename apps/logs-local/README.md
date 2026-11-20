@@ -70,13 +70,18 @@ datasets.
    the settings are incomplete. The template is never overwritten. After filling it, restart the container (or send
    `docker kill -s HUP <container>`); any missing security value keeps it closed, and `/healthz` and the log line
    name the REQUIRED keys that are still blank (names only, never values).
-2. **Required lines.** `LOGS_INGRESS_HOST`, `ACCESS_AUDIENCE`, `OPS_DIRECTORY_CLIENT_ID`, `OPS_DIRECTORY_CLIENT_SECRET`
-   (one Cloudflare Access service token), plus `DJI_API_KEY` to decode. Everything else may stay blank:
-   - `ACCESS_ISSUER` and `OPS_DIRECTORY_BASE_URL` have built-in defaults (written in the file's comments);
-   - **one token for everything:** with both `ACCESS_*_PROXY_CLIENT_ID` lines blank, the directory token's client id is
-     the one accepted from Ops on the staff and device routes. Set them only to accept different tokens (two ids still
-     work; one set id serves both). Trade-off: one credential works in both directions, and rotating it means
-     replacing it everywhere it is used at once.
+2. **Required lines.** `LOGS_INGRESS_HOST`, `ACCESS_AUDIENCE`, `OPS_DIRECTORY_CLIENT_ID`, `OPS_DIRECTORY_CLIENT_SECRET`, plus
+   the token profile, plus `DJI_API_KEY` to decode:
+   - `ACCESS_TOKEN_PROFILE=single` is the operator's explicit choice of **one Access service token for everything**: the
+     directory token's client id is also the id accepted from Ops (staff routes, actor required) and the device proxy
+     (device routes, no actor). The proxy id lines must then be blank or equal to it. Trade-off: one credential works in
+     both directions, and rotating it means replacing it everywhere at once.
+   - Blank or `separate` (the default) keeps the earlier rule exactly: `ACCESS_STAFF_PROXY_CLIENT_ID` and
+     `ACCESS_DEVICE_PROXY_CLIENT_ID` are both required, distinct, and different from the directory token. Blank lines
+     never widen scope, so an upgraded file keeps its effective scope until the operator sets `single`.
+   - `ACCESS_ISSUER` has a built-in default. `OPS_DIRECTORY_BASE_URL` defaults to **production** (`https://ops.ledgetop.app/`):
+     **staging must set its own Ops origin.** The closed and ready reports (`/healthz`, the log lines) show the
+     effective `directoryOrigin` and `tokenProfile` (never a secret); check them before any connected test.
 
    Blank or invalid machine credentials keep the app closed. Authentication is never switched off.
    **Upgrades never touch a value:** on start, an existing file only gains the keys it lacks, appended at the end with

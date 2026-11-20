@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, describe } from './config.mjs';
+import { loadConfig, describe, effectiveSummary } from './config.mjs';
 import { SqliteD1 } from './sqlite-d1.mjs';
 import { migrate, LEDGERS } from './migrations.mjs';
 import { FsR2 } from './fs-r2.mjs';
@@ -44,7 +44,7 @@ export async function start({ configFile } = {}) {
     log: (area, detail) => log(area, { detail }) });
   // The admin status says why accepted logs are waiting (e.g. waiting_for_key), from the live decoder state.
   env.LOGS_DECODER_STATE = () => decoder.state;
-  const health = createHealthServer(() => ({ decoder: decoder.state, uploadsInFlight: logs.uploadsInFlight }));
+  const health = createHealthServer(() => ({ decoder: decoder.state, uploadsInFlight: logs.uploadsInFlight, ...effectiveSummary(config) }));
   await new Promise(resolve => logs.server.listen(config.LOGS_PORT, '0.0.0.0', resolve));
   await new Promise(resolve => health.listen(config.LOGS_HEALTH_PORT, '127.0.0.1', resolve));
   await decoder.start();

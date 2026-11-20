@@ -8,7 +8,7 @@ export class MachineConfigError extends Error {
   constructor(code) { super(code); this.name = 'MachineConfigError'; this.code = code; }
 }
 
-/** Client id -> role(s). One id set for both proxies is accepted for both route families. */
+/** Client id -> role(s). Only the single profile maps one id to both route families. */
 export function machineIdentities(config) {
   const staff = config.ACCESS_STAFF_PROXY_CLIENT_ID, device = config.ACCESS_DEVICE_PROXY_CLIENT_ID;
   return staff === device ? { [staff]: ['staff-proxy', 'device-proxy'] } : { [staff]: 'staff-proxy', [device]: 'device-proxy' };
@@ -17,7 +17,13 @@ export function machineIdentities(config) {
 /** Throws MachineConfigError with a code when the machine configuration would not start the server. */
 export function validateMachineConfig(config) {
   if (!/^[a-z0-9.-]+(:[0-9]{1,5})?$/.test(String(config.LOGS_INGRESS_HOST ?? '').toLowerCase())) throw new MachineConfigError('ingress_host_invalid');
-  // The directory token may be the same Access service token Ops uses to call this host (one token for everything).
+  // separate profile: exactly the earlier rules (two distinct proxy ids, directory token not reused). Only the
+  // operator-selected single profile may use one token for everything.
+  if (config.ACCESS_TOKEN_PROFILE !== 'single') {
+    if (config.ACCESS_STAFF_PROXY_CLIENT_ID === config.ACCESS_DEVICE_PROXY_CLIENT_ID) throw new MachineConfigError('machine_client_ids_not_distinct');
+    if ([config.ACCESS_STAFF_PROXY_CLIENT_ID, config.ACCESS_DEVICE_PROXY_CLIENT_ID].includes(config.OPS_DIRECTORY_CLIENT_ID))
+      throw new MachineConfigError('directory_client_id_reused');
+  }
   try {
     // Constructing these checks every format rule; neither makes a request (no keys are fetched).
     createMachineAuth({ issuer: config.ACCESS_ISSUER, audience: config.ACCESS_AUDIENCE,

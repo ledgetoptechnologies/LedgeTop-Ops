@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DATA_DIR, DEFAULT_ACCESS_ISSUER, DEFAULT_OPS_DIRECTORY_BASE_URL, REQUIRED_KEYS, loadConfig } from './config.mjs';
+import { DATA_DIR, DEFAULT_ACCESS_ISSUER, DEFAULT_OPS_DIRECTORY_BASE_URL, REQUIRED_KEYS, SEPARATE_PROFILE_KEYS, effectiveSummary, loadConfig } from './config.mjs';
 import { validateMachineConfig } from './machine-config.mjs';
 
 export const NOT_READY_EXIT = 78;
@@ -29,12 +29,13 @@ const HEADER = `# Ledge Top flight logs: settings (read by the Logs app itself, 
 export const TEMPLATE_ENTRIES = Object.freeze([
   ['LOGS_INGRESS_HOST', '# REQUIRED. The private Tunnel hostname this backend serves (other Host headers get 404).'],
   ['ACCESS_AUDIENCE', '# REQUIRED. The AUD tag of the Cloudflare Access application protecting this backend.'],
-  ['OPS_DIRECTORY_CLIENT_ID', '# REQUIRED. The Cloudflare Access service token: client id. One token is enough: this host uses it to\n# call the Ops directory, and it is the token accepted from Ops (and the device proxy) unless the lines below are set.'],
-  ['OPS_DIRECTORY_CLIENT_SECRET', '# REQUIRED. The Cloudflare Access service token: client secret.'],
-  ['ACCESS_STAFF_PROXY_CLIENT_ID', '# Optional. Only to accept a different token from Ops; blank = the token above.'],
-  ['ACCESS_DEVICE_PROXY_CLIENT_ID', '# Optional. Only to accept a separate device-proxy token; blank = the staff id (or the token above).'],
+  ['ACCESS_TOKEN_PROFILE', '# REQUIRED CHOICE. "single" = ONE Access service token for everything (the two lines below are also the\n# token Ops and the device proxy use to call this host). Blank or "separate" = separate tokens: then both\n# ACCESS_*_PROXY_CLIENT_ID lines further down are REQUIRED and must differ from the directory token.'],
+  ['OPS_DIRECTORY_CLIENT_ID', '# REQUIRED. The Cloudflare Access service token this host uses to call the Ops directory: client id.'],
+  ['OPS_DIRECTORY_CLIENT_SECRET', '# REQUIRED. That token\'s client secret.'],
+  ['ACCESS_STAFF_PROXY_CLIENT_ID', '# REQUIRED only when ACCESS_TOKEN_PROFILE is separate: client id of the token Ops uses to call this host.'],
+  ['ACCESS_DEVICE_PROXY_CLIENT_ID', '# REQUIRED only when ACCESS_TOKEN_PROFILE is separate: client id of the device-proxy token.'],
   ['ACCESS_ISSUER', `# Default when blank: ${DEFAULT_ACCESS_ISSUER}`],
-  ['OPS_DIRECTORY_BASE_URL', `# Default when blank: ${DEFAULT_OPS_DIRECTORY_BASE_URL}`],
+  ['OPS_DIRECTORY_BASE_URL', `# Default when blank: ${DEFAULT_OPS_DIRECTORY_BASE_URL} (production). Staging MUST set its own Ops origin here.`],
   ['DJI_API_KEY', '# DJI Open API key: paste it here, then restart (or docker kill -s HUP <container>). Blank: decoding waits.'],
 ].map(([key, comment]) => Object.freeze({ key, comment })));
 
@@ -144,19 +145,22 @@ function bootstrapSteps({ dataDir = DATA_DIR, configFile = path.join(dataDir, 'c
       if (error.code !== 'EEXIST') return { ready: false, code: 'config_not_writable', message: `Cannot write ${configFile} (${safeCode(error)}).` };
     }
     return { ready: false, code: 'config_created', message: `Created ${configFile}. Fill in the REQUIRED settings, then restart the container.`,
-      missing: [...REQUIRED_KEYS] };
+      missing: [...REQUIRED_KEYS, ...SEPARATE_PROFILE_KEYS],
+      effective: { directoryOrigin: new URL(DEFAULT_OPS_DIRECTORY_BASE_URL).origin, tokenProfile: 'separate' } };
   }
   // Existing file: only ever append keys it lacks (never touch a value). A failed upgrade leaves it as it was.
   const upgrade = upgradeConfigFile(configFile);
   if (upgrade.code === 'config_upgraded' || upgrade.code === 'config_upgrade_failed')
     console.log(JSON.stringify({ at: new Date().toISOString(), event: upgrade.code, added: upgrade.added, ...(upgrade.error ? { error: upgrade.error } : {}) }));
-  try { validateMachineConfig(loadConfig(configFile, checkOptions)); }
+  let loaded;
+  try { loaded = loadConfig(configFile, checkOptions); validateMachineConfig(loaded); }
   catch (error) {
+    const effective = error?.effective ?? (loaded ? effectiveSummary(loaded) : null);
     // Codes and key names only: config messages never contain values.
     return { ready: false, code: error?.code ?? 'config_invalid', message: `${configFile} is not ready (${error?.code ?? 'config_invalid'}): ${error?.message ?? 'invalid'}`,
-      ...(Array.isArray(error?.missing) ? { missing: [...error.missing] } : {}) };
+      ...(Array.isArray(error?.missing) ? { missing: [...error.missing] } : {}), ...(effective ? { effective: { ...effective } } : {}) };
   }
-  return { ready: true, code: 'ready', message: 'Configuration is complete.' };
+  return { ready: true, code: 'ready', message: 'Configuration is complete.', effective: effectiveSummary(loaded) };
 }
 
 /** Filesystem problems: the closed host stays up but reports unhealthy, because only the operator can fix them. */
@@ -179,7 +183,7 @@ export async function startClosed(first, { port = 8080, healthPort = 8081, host 
   const health = http.createServer((req, res) => {
     req.resume();
     const healthy = !FILESYSTEM_CODES.has(result.code);
-    const body = { ok: healthy, configured: false, state: 'unconfigured', code: result.code, ...(result.missing ? { missing: result.missing } : {}) };
+    const body = { ok: healthy, configured: false, state: 'unconfigured', code: result.code, ...(result.missing ? { missing: result.missing } : {}), ...(result.effective ? { effective: result.effective } : {}) };
     if (req.method === 'GET' && req.url === '/healthz') return reply(res, healthy ? 200 : 503, body);
     if (req.method === 'GET' && req.url === '/readyz') return reply(res, 503, { ...body, ok: false });
     return reply(res, 404, { error: 'Not found' });
@@ -202,7 +206,7 @@ const logLine = (event, fields) => console.log(JSON.stringify({ at: new Date().t
  */
 export async function waitUntilConfigured(first, { recheck, signals = process, exit = code => process.exit(code), log = logLine, ...listen }) {
   const closedHost = await startClosed(first, listen);
-  log('settings_incomplete', { code: first.code, ...(first.missing ? { missing: first.missing } : {}), message: `${first.message} Serving nothing until the settings are complete.` });
+  log('settings_incomplete', { code: first.code, ...(first.missing ? { missing: first.missing } : {}), ...(first.effective ? { effective: first.effective } : {}), message: `${first.message} Serving nothing until the settings are complete.` });
   await new Promise(resolve => {
     let running = false, again = false, done = false;
     const stop = () => { closedHost.close().then(() => exit(0), () => exit(1)); };
@@ -235,7 +239,7 @@ export async function waitUntilConfigured(first, { recheck, signals = process, e
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const configFile = process.env.LOGS_CONFIG_FILE || undefined;
   const result = bootstrap({ configFile });
-  logLine('bootstrap', { code: result.code, message: result.message });
+  logLine('bootstrap', { code: result.code, message: result.message, ...(result.effective ? { effective: result.effective } : {}) });
   // Hold SIGHUP (whose default action would end the process) until the started host installs its own handler.
   const holdHup = () => {};
   process.on('SIGHUP', holdHup);
