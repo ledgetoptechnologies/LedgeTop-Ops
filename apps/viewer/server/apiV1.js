@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const express = require('express');
+const { restrictedSessionScope } = require('./restrictedSessionScope');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const auth = require('./auth');
 const shareTokenVault = require('./shareTokenVault');
@@ -287,6 +288,7 @@ function createApiV1(repository) {
     let accessToken;
     let session;
     const canRenew = existing
+      && existing.session.restrictedScope === undefined && grant.restrictedScope === undefined
       && existing.session.modelId === grant.modelId
       && existing.session.modelVersionId === modelVersionId
       && existing.session.subject === grant.subject
@@ -306,6 +308,7 @@ function createApiV1(repository) {
         reviewAttemptId: target.reviewAttemptId,
         sessionMode: target.sessionMode,
         sourceAuthorization: grant.sourceAuthorization,
+        restrictedScope: grant.restrictedScope,
         subject: grant.subject,
         audience: grant.audience,
         permissions: grantedPermissions,
@@ -344,16 +347,22 @@ function createApiV1(repository) {
     res.json({ model: serviceCatalogModel(model) });
   });
 
-  router.post('/api/v1/models/:id/sessions', serviceOnly, idempotentService, (req, res) => {
+  router.post(['/api/v1/models/:id/sessions', '/api/v1/models/:id/restricted-sessions'], serviceOnly, idempotentService, (req, res) => {
     const model = repository.getModel(req.params.id);
     if (!model || model.status !== 'ready' || !model.activeVersion)
       return res.status(404).json({ error: 'ready model not found' });
     const body = req.body || {};
+    const restrictedRoute = req.path.endsWith('/restricted-sessions');
+    const restrictedScope = restrictedRoute ? restrictedSessionScope(body.restrictedScope) : undefined;
+    if ((restrictedRoute && !restrictedScope) || (!restrictedRoute && body.restrictedScope !== undefined))
+      return res.status(400).json({ error: 'restrictedScope is invalid for this route' });
     const sourceAuthorization = body.sourceAuthorization === undefined
       ? null
       : publishedSessionSourceAuthorization(body.sourceAuthorization);
     if (body.sourceAuthorization !== undefined && !sourceAuthorization)
       return res.status(400).json({ error: 'sourceAuthorization is invalid' });
+    if (restrictedRoute && (body.audience !== 'client' || sourceAuthorization?.type !== 'direct_client_grant'))
+      return res.status(400).json({ error: 'restricted sessions require a direct client grant' });
     if (config.publishedSessionSourceRevocationEnabled && !sourceAuthorization)
       return res.status(400).json({ error: 'sourceAuthorization is required while published-session revocation is enabled' });
     if (!body.modelVersionId) return res.status(400).json({ error: 'modelVersionId is required' });
@@ -385,6 +394,7 @@ function createApiV1(repository) {
         modelVersionId: model.activeVersionId,
         sessionMode: 'published',
         sourceAuthorization,
+        restrictedScope,
         subject: body.subject,
         audience: body.audience,
         permissions: {
@@ -403,6 +413,8 @@ function createApiV1(repository) {
         details: { audience: body.audience, subject: body.subject },
       });
     } catch (error) {
+      if (error?.code === 'restricted_session_scope_denied')
+        return res.status(404).json({ error: 'ready model not found' });
       if (error?.code === 'source_authorization_revoked')
         return res.status(409).json({ error: 'sourceAuthorization is revoked' });
       throw error;

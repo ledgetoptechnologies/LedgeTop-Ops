@@ -96,3 +96,65 @@ test('staff validation accepts only exclusion targets in the active exact projec
   db.prepare("UPDATE processing_tasks SET purged_at='now' WHERE id=?").run(id(15));
   assert.equal(repo.validateProjectExclusions('project', mask), null);
 });
+
+test('restricted grant expiry, redemption and active sessions recheck current exact scope', t => {
+  const { ViewerRepository } = require('../server/repository');
+  const { db } = fixture(t);
+  db.exec(`
+    CREATE TABLE session_grants(id TEXT PRIMARY KEY, model_id TEXT, model_version_id TEXT, review_attempt_id TEXT,
+      session_mode TEXT, source_authorization_type TEXT, source_authorization_id TEXT, source_authorization_version INTEGER,
+      subject TEXT, audience TEXT, permissions_json TEXT, display_units TEXT, expires_at TEXT, created_at TEXT, redeemed_at TEXT);
+    CREATE TABLE viewer_sessions(id TEXT PRIMARY KEY, token_hash TEXT, model_id TEXT, model_version_id TEXT,
+      review_attempt_id TEXT, session_mode TEXT, source_authorization_type TEXT, source_authorization_id TEXT,
+      source_authorization_version INTEGER, subject TEXT, audience TEXT, permissions_json TEXT, display_units TEXT,
+      expires_at TEXT, created_at TEXT, updated_at TEXT, revoked_at TEXT);
+    CREATE TABLE revoked_published_session_authorizations(source_authorization_type TEXT,
+      source_authorization_id TEXT, source_authorization_version INTEGER);
+    CREATE TABLE service_nonces(created_at TEXT);
+    CREATE TABLE service_idempotency(expires_at TEXT);
+  `);
+  const project = id(500);
+  for (const table of ['project_folders', 'processing_tasks', 'model_outputs'])
+    db.prepare(`UPDATE ${table} SET project_id=? WHERE project_id='project'`).run(project);
+  db.prepare('UPDATE projects SET id=?').run(project);
+  const repo = new ViewerRepository(db);
+  const grant = {
+    modelId: id(112), modelVersionId: id(212), subject: 'client:synthetic', audience: 'client',
+    sourceAuthorization: { type: 'direct_client_grant', id: id(600), version: 1 },
+    permissions: { view: true }, expiresAt: new Date(Date.now() + 60000).toISOString(),
+  };
+  const restrictedScope = { version: 1, projectId: project, taskId: id(12), exclusions: mask };
+  const restricted = { ...grant, restrictedScope };
+  const move = db.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?');
+  const first = repo.createSessionGrant(restricted);
+  const encoded = db.prepare('SELECT permissions_json FROM session_grants WHERE id=?').get(first.id).permissions_json;
+  assert.equal(JSON.parse(encoded).view, false);
+  move.run(id(2), id(12));
+  assert.equal(repo.redeemSessionGrant(first.id), null);
+  assert.throws(() => repo.createSessionGrant(restricted), /restricted session scope/);
+
+  move.run(id(3), id(12));
+  const issued = repo.createSessionGrant(restricted);
+  const redeemed = repo.redeemSessionGrant(issued.id);
+  assert.deepEqual(redeemed.restrictedScope, restrictedScope);
+  const live = repo.createViewerSession({ ...redeemed, tokenHash: 'restricted' });
+  const ordinary = repo.createViewerSession({
+    ...grant, tokenHash: 'ordinary', sourceAuthorization: { ...grant.sourceAuthorization, id: id(601) },
+  });
+  assert.equal(repo.viewerSessionLive(live), true);
+  assert.equal(repo.viewerSessionLive(ordinary), true);
+  move.run(id(2), id(12));
+  assert.equal(repo.viewerSessionLive(repo.getViewerSessionByHash('restricted')), false);
+  assert.equal(repo.viewerSessionLive(ordinary), true);
+  move.run(id(3), id(12));
+  db.prepare('INSERT INTO revoked_published_session_authorizations VALUES (?, ?, ?)').run(
+    grant.sourceAuthorization.type, grant.sourceAuthorization.id, grant.sourceAuthorization.version,
+  );
+  assert.equal(repo.viewerSessionLive(live), false);
+  assert.equal(repo.viewerSessionLive(ordinary), true);
+
+  db.prepare('UPDATE viewer_sessions SET permissions_json=? WHERE token_hash=?').run(
+    '{"view":false,"restrictedSession":{"scope":{"version":2},"permissions":{"view":true}}}', 'ordinary',
+  );
+  assert.equal(repo.viewerSessionLive(repo.getViewerSessionByHash('ordinary')), false);
+});

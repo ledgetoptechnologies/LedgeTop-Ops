@@ -712,17 +712,9 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     return exclusions;
   }
 
-  getActivePublishedProjectTask(projectId,taskId,{strictPublished=false,exclusions}={}){const scope=projectExclusionPredicate(this.database,exclusions);strictPublished ||= exclusions !== undefined;return this.activePublishedProjectTask(this.database.prepare(`SELECT
-      p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
-      t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
-      m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
-      o.attempt_id,o.updated_at AS published_at
-      FROM projects p
-      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL
-      JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
-      JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
-        AND o.project_id=p.id AND o.status='published'
-      WHERE p.id=? AND p.status='active' AND t.id=?${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}${scope.sql}`).get(projectId,taskId,...scope.args));}
+  getActivePublishedProjectTask(projectId, taskId, options) {
+    return this.activePublishedProjectTask(activePublishedProjectTaskRow(this.database, projectId, taskId, options));
+  }
   /**
    * Folder path (root first) for tasks the caller has ALREADY filtered to client-visible published tasks. Only the
    * ancestry of those exact tasks is read, so a folder holding no visible task is never named. A chain that is too
@@ -1421,4 +1413,16 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   retryEvent(id,message,attemptCount){const terminal=attemptCount>=12,t=now(),next=new Date(Date.now()+Math.min(3600_000,5000*2**Math.min(attemptCount,10))).toISOString();this.database.prepare('UPDATE event_outbox SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=?').run(terminal?'failed':'pending',next,bounded(sanitizeLogMessage(message),1000),t,id);}
 }
 
-module.exports = { BUILT_IN_PRESETS, ProcessingRepository };
+function activePublishedProjectTaskRow(database,projectId,taskId,{strictPublished=false,exclusions}={}){const scope=projectExclusionPredicate(database,exclusions);strictPublished ||= exclusions !== undefined;return database.prepare(`SELECT
+      p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
+      t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
+      m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
+      o.attempt_id,o.updated_at AS published_at
+      FROM projects p
+      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL
+      JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
+      JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
+        AND o.project_id=p.id AND o.status='published'
+      WHERE p.id=? AND p.status='active' AND t.id=?${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}${scope.sql}`).get(projectId,taskId,...scope.args);}
+
+module.exports = { BUILT_IN_PRESETS, ProcessingRepository, activePublishedProjectTaskRow };
