@@ -184,6 +184,7 @@ services:
         max-file: '3'
         max-size: 10m
     mem_limit: 2g
+    memswap_limit: 2g
     pids_limit: 256
     ports:
       - ${LOGS_BIND_ADDRESS:?Set the NAS LAN address the tunnel connector reaches}:8090:8080

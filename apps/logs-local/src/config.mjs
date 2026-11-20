@@ -15,6 +15,8 @@ import path from 'node:path';
 export const DEFAULT_CONFIG_FILE = '/app-data/flight-logs/config/logs.env';
 /** The only data directory Logs ever uses. The container may see a wider parent mount; Logs never leaves this. */
 export const DATA_DIR = '/app-data/flight-logs';
+/** The pilot profile mounted the same host folder at /data; a pilot config naming it is read as the new path. */
+export const LEGACY_DATA_DIR = '/data/flight-logs';
 
 const SPEC = Object.freeze({
   LOGS_DATA_DIR: { default: DATA_DIR },
@@ -63,6 +65,7 @@ export function parseConfig(text, { allowDataDir = false } = {}) {
     if (spec.required && !value) throw new ConfigError('config_missing', `Config key ${key} is required.`);
     config[key] = value;
   }
+  if (config.LOGS_DATA_DIR === LEGACY_DATA_DIR && !allowDataDir) config.LOGS_DATA_DIR = DATA_DIR;
   if (config.LOGS_DATA_DIR !== DATA_DIR && !allowDataDir) throw new ConfigError('config_value', `LOGS_DATA_DIR must be ${DATA_DIR}.`);
   // Decoder scratch must be the RAM tmpfs mounted at /work (raw logs and the key copy never go to disk).
   if (config.DECODER_WORK_DIR !== '/work') throw new ConfigError('config_value', 'DECODER_WORK_DIR must be /work (the RAM tmpfs).');

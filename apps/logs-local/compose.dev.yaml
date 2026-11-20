@@ -7,7 +7,8 @@
 # Scratch: RAM only (/work for one decode at a time). No swap, no core dumps, read-only root.
 # Network: the stack's existing private network with cloudflared; NO published ports on the NAS. It needs outbound
 # HTTPS to the Cloudflare Access certs, the Ops directory and the DJI API. For the Stage pilot only, Merger may
-# publish 127.0.0.1:18087 -> 8080 on the admitted host.
+# publish 127.0.0.1:18087 -> 8080 on the admitted host. Pilot data written under the old /data mount stays in the
+# same host folder: see "Moving from the pilot profile" in README.md.
 # Logs: tiny rotated json-file logs with event codes only (no keys, payloads, coordinates or tokens). That is small,
 # regular write I/O on the Docker data root.
 services:

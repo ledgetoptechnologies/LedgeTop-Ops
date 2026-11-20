@@ -192,6 +192,7 @@ class MediaComposeTests(unittest.TestCase):
         self.assertEqual(logs["pull_policy"], "always")
         self.assertEqual(float(logs["cpus"]), 2.0)
         self.assertEqual(int(logs["mem_limit"]), 2 * 1024**3)
+        self.assertEqual(logs["memswap_limit"], logs["mem_limit"], "no swap")
         self.assertEqual(logs["pids_limit"], 256)
         self.assertFalse(logs.get("environment"))
         self.assertEqual([(port["host_ip"], str(port["published"]), port["target"]) for port in logs["ports"]],

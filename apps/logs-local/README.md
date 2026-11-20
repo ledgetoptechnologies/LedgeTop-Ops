@@ -77,7 +77,22 @@ datasets.
    decoding later, put the key in the file. Then send `docker kill -s HUP <container>` to apply only the key, or
    restart the container to apply everything.
 5. **Check status.** The app logs event codes only, never values. `docker inspect --format '{{.State.Health.Status}}'`
-   reports health.
+   reports liveness only: a closed (unconfigured) host is alive and healthy. Readiness is separate: inside the
+   container `/readyz` on 127.0.0.1:8081 answers 200 only when the settings are complete and the host is serving
+   (503 while closed), and `/healthz` reports `"configured": true|false`. Check readiness with
+   `docker exec <container> node -e "fetch('http://127.0.0.1:8081/readyz').then(r => process.exit(r.ok ? 0 : 1))"`.
+
+## Moving from the pilot profile
+The pilot profile mounted the same App_Data parent at `/data` and published `127.0.0.1:18087 -> 8080`. The data
+lives in the **host** folder `<App_Data parent>/flight-logs/` either way; only the path inside the container changes.
+1. Stop the pilot container (nothing is deleted).
+2. Mount the same host parent at `/app-data` instead of `/data`. The ledger, originals and `config/logs.env` are found
+   in place: object keys are stored relative to the folder, and a pilot `logs.env` that names
+   `LOGS_DATA_DIR=/data/flight-logs` is read as the new `/app-data/flight-logs`. Nothing is copied or rewritten.
+3. Ports: keep `127.0.0.1:18087` if the tunnel connector runs on the same host network; use the LAN-bound port of the
+   stack (`<LAN address>:8090`) if the connector runs elsewhere. Point the tunnel origin at whichever you publish.
+   Only one container may use the folder at a time.
+4. Start, then check `/readyz` as above.
 
 This file is read by the app itself. It is **not** a Compose `.env`: Compose never interpolates it, so values don't
 show up in `docker inspect`.

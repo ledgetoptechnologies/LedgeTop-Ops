@@ -208,7 +208,8 @@ test('health is a separate listener: /healthz only', async t => {
   await new Promise(resolve => health.listen(0, '127.0.0.1', resolve));
   t.after(() => health.close());
   const base = `http://127.0.0.1:${health.address().port}`;
-  assert.deepEqual(await (await fetch(`${base}/healthz`)).json(), { ok: true, decoder: 'waiting_for_key' });
+  assert.deepEqual(await (await fetch(`${base}/healthz`)).json(), { ok: true, configured: true, state: 'serving', decoder: 'waiting_for_key' });
+  assert.equal((await fetch(`${base}/readyz`)).status, 200, 'configured and serving is ready');
   assert.equal((await fetch(`${base}/api/v1/device/me`)).status, 404);
 });
 

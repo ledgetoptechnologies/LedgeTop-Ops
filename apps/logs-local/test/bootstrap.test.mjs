@@ -5,8 +5,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { bootstrap, startClosed, TEMPLATE, NOT_READY_EXIT } from '../src/bootstrap.mjs';
-import { parseConfig } from '../src/config.mjs';
+import { EventEmitter } from 'node:events';
+import net from 'node:net';
+import { bootstrap, startClosed, waitUntilConfigured, TEMPLATE, NOT_READY_EXIT } from '../src/bootstrap.mjs';
+import { parseConfig, DATA_DIR } from '../src/config.mjs';
 
 function scratch(t) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-bootstrap-'));
@@ -193,7 +195,8 @@ test('a fresh install stays up closed: every request is 404 and health says unco
   const port = host.closed.address().port, healthPort = host.health.address().port;
   for (const route of ['/', '/healthz', '/api/flight-logs', '/v1/device/uploads']) assert.equal((await get(port, route)).status, 404);
   const health = await get(healthPort, '/healthz');
-  assert.deepEqual([health.status, health.body.state, health.body.code], [200, 'unconfigured', 'config_created']);
+  assert.deepEqual([health.status, health.body.state, health.body.configured, health.body.code], [200, 'unconfigured', false, 'config_created']);
+  assert.equal((await get(healthPort, '/readyz')).status, 503, 'closed is alive but never ready');
   assert.equal((await get(healthPort, '/other')).status, 404);
 });
 
@@ -202,4 +205,43 @@ test('a filesystem problem keeps the closed host up but unhealthy', async t => {
   t.after(() => host.close());
   assert.equal((await get(host.health.address().port, '/healthz')).status, 503);
   assert.equal((await get(host.closed.address().port, '/')).status, 404);
+});
+
+const freePort = () => new Promise(resolve => { const probe = net.createServer().listen(0, '127.0.0.1', () => {
+  const { port } = probe.address(); probe.close(() => resolve(port)); }); });
+
+test('repeated SIGHUPs are serialised: listeners stay bound, never rebind, and startup resolves exactly once', async () => {
+  const signals = new EventEmitter();
+  const [port, healthPort] = [await freePort(), await freePort()];
+  let ready = false, checks = 0, resolved = 0;
+  const codes = ['config_missing', 'config_value'];
+  const recheck = () => { checks++; return ready ? { ready: true, code: 'ready', message: 'ok' } : { ready: false, code: codes[checks % 2], message: 'm' }; };
+  const waiting = waitUntilConfigured({ ready: false, code: 'config_created', message: 'm' },
+    { recheck, signals, exit: () => assert.fail('must not exit'), log: () => {}, port, healthPort, host: '127.0.0.1' })
+    .then(() => { resolved++; });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  for (let i = 0; i < 25; i++) signals.emit('SIGHUP');
+  assert.equal(checks, 25, 'each signal is one synchronous check, never overlapping');
+  assert.equal((await get(port, '/')).status, 404, 'the same closed listener still answers');
+  const health = await get(healthPort, '/healthz');
+  assert.deepEqual([health.status, health.body.code], [200, codes[25 % 2]], 'health shows the latest check without rebinding');
+  assert.equal((await get(healthPort, '/readyz')).status, 503);
+  ready = true;
+  for (let i = 0; i < 25; i++) signals.emit('SIGHUP');
+  await waiting;
+  assert.equal(resolved, 1);
+  assert.equal(checks, 26, 'after the ready check, further signals are ignored by the closed host');
+  assert.equal(signals.listenerCount('SIGHUP') + signals.listenerCount('SIGTERM') + signals.listenerCount('SIGINT'), 0);
+  // The configured host can now bind both ports: no EADDRINUSE.
+  for (const p of [port, healthPort]) {
+    const server = net.createServer();
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(p, '127.0.0.1', resolve); });
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a pilot config naming the old /data/flight-logs path reads as the new fixed folder', () => {
+  const parsed = parseConfig(fill(TEMPLATE) + 'LOGS_DATA_DIR=/data/flight-logs\n');
+  assert.equal(parsed.LOGS_DATA_DIR, DATA_DIR);
+  assert.equal(DATA_DIR, '/app-data/flight-logs');
 });
