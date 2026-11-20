@@ -162,6 +162,91 @@ test('signed client catalog preserves project and task scope across folder moves
   assert.deepEqual(publicationState(), before, 'folder moves leave publication, project and source identity unchanged');
 });
 
+test('client catalog carries the folder path of visible tasks only', async t => {
+  const state = fixture(t, 48), { processing, database } = state;
+  const project = processing.createProject({ displayName: 'Path delivery' });
+  const rootTask = publish(state, project, 'Root flight'), deepTask = publish(state, project, 'Deep flight');
+  const other = processing.createProject({ displayName: 'Other path delivery' });
+  const otherTask = publish(state, other, 'Other flight');
+  const outer = processing.createProjectFolder(project.id, { displayName: 'Synthetic outer' }, 'ops:test');
+  const inner = processing.createProjectFolder(project.id, { displayName: 'Synthetic inner', parentId: outer.id }, 'ops:test');
+  const second = processing.createProjectFolder(project.id, { displayName: 'Synthetic second' }, 'ops:test');
+  const hiddenFolder = processing.createProjectFolder(project.id, { displayName: 'Synthetic hidden only' }, 'ops:test');
+  const otherFolder = processing.createProjectFolder(other.id, { displayName: 'Synthetic foreign folder' }, 'ops:test');
+  processing.moveTaskToFolder(otherTask.task.id, otherFolder.id, 'ops:test');
+  const draftDataset = processing.createDataset({ projectId: project.id, displayName: 'Draft source', storageMode: 'managed', rootKey: 'datasets', relativePath: crypto.randomUUID() });
+  database.prepare("UPDATE datasets SET status='finalized',manifest_sha256=?,finalized_at=? WHERE id=?").run('a'.repeat(64), new Date().toISOString(), draftDataset.id);
+  const draft = processing.createTask({ projectId: project.id, datasetId: draftDataset.id, displayName: 'Synthetic draft' });
+  processing.moveTaskToFolder(draft.id, hiddenFolder.id, 'ops:test');
+  processing.moveTaskToFolder(deepTask.task.id, inner.id, 'ops:test');
+  const publication = () => database.prepare('SELECT t.id,t.status,t.published_model_id,o.status AS output_status FROM processing_tasks t LEFT JOIN model_outputs o ON o.task_id=t.id ORDER BY t.id,o.id').all();
+  const before = publication();
+  const app = express(); app.use(createClientDeliveryCatalog(state.repository));
+  const { signed } = await listener(t, app), url = `/api/v1/client-delivery-catalog?projectId=${project.id}`;
+  const paths = async path => Object.fromEntries((await (await signed(path)).json()).tasks.map(task => [task.id, task.folderPath]));
+  assert.deepEqual(await paths(url), { [rootTask.task.id]: [],
+    [deepTask.task.id]: [{ id: outer.id, name: 'Synthetic outer' }, { id: inner.id, name: 'Synthetic inner' }] });
+  assert.deepEqual(await paths(url + `&taskId=${deepTask.task.id}`), { [deepTask.task.id]: [{ id: outer.id, name: 'Synthetic outer' }, { id: inner.id, name: 'Synthetic inner' }] });
+  // Moving changes the path and nothing else.
+  processing.moveTaskToFolder(deepTask.task.id, second.id, 'ops:test');
+  assert.deepEqual((await paths(url))[deepTask.task.id], [{ id: second.id, name: 'Synthetic second' }]);
+  assert.deepEqual(publication(), before, 'a move never publishes, unpublishes or changes outputs');
+  const body = JSON.stringify(await (await signed(url)).json());
+  for (const hidden of ['Synthetic hidden only', hiddenFolder.id, 'Synthetic draft', draft.id, 'Synthetic foreign folder', otherFolder.id,
+    'Synthetic outer', 'Synthetic inner'])
+    assert.equal(body.includes(hidden), false, `client catalog must not include ${hidden}`);
+  // Unpublishing the only task in a folder removes that folder name too.
+  database.prepare('UPDATE processing_tasks SET published_model_id=NULL WHERE id=?').run(deepTask.task.id);
+  assert.equal(JSON.stringify(await (await signed(url)).json()).includes('Synthetic second'), false);
+  // Another project's catalog only names its own folders.
+  const foreign = JSON.stringify(await (await signed(`/api/v1/client-delivery-catalog?projectId=${other.id}`)).json());
+  assert.equal(foreign.includes('Synthetic foreign folder'), true);
+  for (const name of ['Synthetic outer', 'Synthetic inner', 'Synthetic second', 'Synthetic hidden only']) assert.equal(foreign.includes(name), false);
+});
+
+test('after a project is trashed and purged the client catalog returns no folder path data for it', async t => {
+  const state = fixture(t, 48), { processing } = state;
+  const project = processing.createProject({ displayName: 'Purged path delivery' });
+  const task = publish(state, project, 'Purged flight');
+  const folder = processing.createProjectFolder(project.id, { displayName: 'Synthetic purged folder' }, 'ops:test');
+  processing.moveTaskToFolder(task.task.id, folder.id, 'ops:test');
+  const app = express(); app.use(createClientDeliveryCatalog(state.repository));
+  const { signed } = await listener(t, app), url = `/api/v1/client-delivery-catalog?projectId=${project.id}`;
+  assert.deepEqual((await (await signed(url)).json()).tasks[0].folderPath, [{ id: folder.id, name: 'Synthetic purged folder' }]);
+  // Settle the fixture attempt so the project can be trashed.
+  state.database.prepare("UPDATE processing_attempts SET status='ready_for_review' WHERE task_id=?").run(task.task.id);
+  const trash = processing.trashProject(project.id, 'ops:test');
+  assert.ok(processing.purgeMetadataEntity(trash.id, 'ops:test').permanentlyDeletedAt);
+  for (const path of [url, url + `&taskId=${task.task.id}`]) {
+    const response = await signed(path), body = await response.text();
+    assert.equal(response.status, 404);
+    for (const hidden of ['Synthetic purged folder', folder.id, 'folderPath']) assert.equal(body.includes(hidden), false);
+  }
+  assert.deepEqual(processing.clientTaskFolderPaths(project.id, [task.task.id]).get(task.task.id), []);
+});
+
+test('client catalog folder paths stay bounded on corrupt chains and older schemas', async t => {
+  const state = fixture(t, 48), { processing, database } = state;
+  const project = processing.createProject({ displayName: 'Bounded delivery' });
+  const task = publish(state, project, 'Bounded flight');
+  const a = processing.createProjectFolder(project.id, { displayName: 'Synthetic A' }, 'ops:test');
+  const b = processing.createProjectFolder(project.id, { displayName: 'Synthetic B', parentId: a.id }, 'ops:test');
+  processing.moveTaskToFolder(task.task.id, b.id, 'ops:test');
+  database.prepare('UPDATE project_folders SET display_name=? WHERE id=?').run('x'.repeat(400), a.id);
+  assert.equal(processing.clientTaskFolderPaths(project.id, [task.task.id]).get(task.task.id)[0].name.length, 160);
+  // Legacy names written before stricter validation (DEL, other control characters, blank) are emitted as safe labels.
+  database.prepare('UPDATE project_folders SET display_name=? WHERE id=?').run('Old\u007fname\u0007', a.id);
+  database.prepare('UPDATE project_folders SET display_name=? WHERE id=?').run('\u007f\t', b.id);
+  assert.deepEqual(processing.clientTaskFolderPaths(project.id, [task.task.id]).get(task.task.id),
+    [{ id: a.id, name: 'Oldname' }, { id: b.id, name: 'Untitled folder' }]);
+  database.exec('PRAGMA foreign_keys=OFF');
+  database.prepare('UPDATE project_folders SET parent_id=? WHERE id=?').run(b.id, a.id); // cycle
+  assert.deepEqual(processing.clientTaskFolderPaths(project.id, [task.task.id]).get(task.task.id), []);
+  const old = fixture(t, 40), oldProject = old.processing.createProject({ displayName: 'Old schema' });
+  const oldTask = publish(old, oldProject, 'Old flight');
+  assert.deepEqual(old.processing.clientTaskFolderPaths(oldProject.id, [oldTask.task.id]).get(oldTask.task.id), []);
+});
+
 test('signed published-project picker filters before cursor pagination and returns no storage metadata', async t => {
   const state = fixture(t), { database, processing } = state;
   const first = processing.createProject({ displayName: 'Delivery North' });

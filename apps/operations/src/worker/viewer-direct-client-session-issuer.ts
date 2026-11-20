@@ -75,6 +75,10 @@ async function grantScope(context: {contextVersion:string;identityId:string;work
       row.can_measure,row.can_view_cameras,row.can_download])]));
 }
 
+export function directViewerProjectKey(sourceId:string,workspaceId:string,viewerProjectId:string):Promise<string>{
+  return sha256(JSON.stringify(["direct-viewer-project-key-v1",sourceId,workspaceId,viewerProjectId]));
+}
+
 async function grantAuthorizedForContext(env:Env,context:Awaited<ReturnType<typeof contextFor>>,row:Row):Promise<boolean>{
  if(!context)return false;
  const pin=await readDirectViewerClientGrantAuthorityPin(env,row.id);
@@ -112,10 +116,15 @@ export async function listDirectClientViewerItems(env: Env, request: DirectClien
       try { catalog=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,
         ...(row.scope_type==="task"?{taskId:row.task_id!}:{}),...(after?{cursor:after}:{}),limit:25}); }
       catch(error){if(error instanceof ViewerServiceError&&error.code==="not_found"){index++;after=null;continue;}throw error;}
-      for(const task of catalog.tasks)items.push({grantId:row.id,workspaceId:input.workspaceId,taskId:task.id,scopeType:row.scope_type,
+      // Opaque grouping key: a one-way digest bound to this source and workspace, so the raw Viewer project id never
+      // reaches the client, keys differ across workspaces, and no route accepts it as an address.
+      const projectKey=await directViewerProjectKey(input.sourceId,input.workspaceId,row.viewer_project_id);
+      for(const task of catalog.tasks)items.push({grantId:row.id,workspaceId:input.workspaceId,taskId:task.id,scopeType:row.scope_type,projectKey,
         title:clean(task.displayName||task.modelTitle),projectName:clean(catalog.project.displayName),businessName:clean(businessName),
         sharedAt:row.created_at,updatedAt:task.publishedAt,expiresAt:row.authorization_expires_at,
-        permissions:{measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1}});
+        permissions:{measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1},
+        // Validated by the shared parser; passed through unchanged. Grouping only: it never widens access.
+        ...(task.folderPath?{folderPath:task.folderPath.map(folder=>({id:folder.id,name:folder.name}))}:{})});
       if(catalog.nextCursor)after=catalog.nextCursor;else{index++;after=null;}
     }
     const current=await contextFor(env,input);if(!current)return failure("denied");
