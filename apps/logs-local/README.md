@@ -68,17 +68,34 @@ datasets.
 1. **First start.** The app creates its folders, writes `config/logs.env` once as a blank template (0600), and stays
    up **closed**: every request gets 404, health reports `unconfigured`, and one log line (`settings_incomplete`) says
    the settings are incomplete. The template is never overwritten. After filling it, restart the container (or send
-   `docker kill -s HUP <container>`); any missing security value keeps it closed.
-2. **Machine credentials.** Fill in the values Merger provisions:
-   - the ingress host;
-   - the Access audience;
-   - the two allowed service-token client ids;
-   - the Ops directory URL and this host's own directory service token.
+   `docker kill -s HUP <container>`); any missing security value keeps it closed, and `/healthz` and the log line
+   name the REQUIRED keys that are still blank (names only, never values).
+2. **Required lines.** `LOGS_INGRESS_HOST`, `ACCESS_AUDIENCE`, `OPS_DIRECTORY_CLIENT_ID`, `OPS_DIRECTORY_CLIENT_SECRET`, plus
+   the token profile, plus `DJI_API_KEY` to decode:
+   - `ACCESS_TOKEN_PROFILE=single` is the operator's explicit choice of **one Access service token for everything**: the
+     directory token's client id is also the id accepted from Ops (staff routes, actor required) and the device proxy
+     (device routes, no actor). The proxy id lines must then be blank or equal to it. Trade-off: one credential works in
+     both directions, and rotating it means replacing it everywhere at once.
+   - Blank or `separate` (the default) keeps the earlier rule exactly: `ACCESS_STAFF_PROXY_CLIENT_ID` and
+     `ACCESS_DEVICE_PROXY_CLIENT_ID` are both required, distinct, and different from the directory token. Blank lines
+     never widen scope, so an upgraded file keeps its effective scope until the operator sets `single`.
+   - `ACCESS_ISSUER` has a built-in default. `OPS_DIRECTORY_BASE_URL` defaults to **production** (`https://ops.ledgetop.app/`):
+     **staging must set its own Ops origin.** The closed and ready reports (`/healthz`, the log lines) show the
+     effective `directoryOrigin` and `tokenProfile` (never a secret); check them before any connected test.
+
+   - **Shared NAS link file (recommended).** The stack passes one `env_file` (see
+     `apps/media-generation/nas-link.env.example`) to every networked container. `NAS_LINK_CLIENT_ID` /
+     `NAS_LINK_CLIENT_SECRET` (the one token), `NAS_LINK_AUDIENCE`, `OPS_BASE_URL` and the Compose `LOGS_INGRESS_HOST`
+     fill the matching blank lines here, so `logs.env` usually needs only `DJI_API_KEY`. Setting `NAS_LINK_CLIENT_ID` is
+     the explicit choice of the single profile. A different non-blank value in `logs.env`, or
+     `ACCESS_TOKEN_PROFILE=separate`, is a conflict and keeps Logs closed; an existing file without the link keeps its
+     prior scope. The reports show `nasLink: true|false`.
 
    Blank or invalid machine credentials keep the app closed. Authentication is never switched off.
-3. **Upload concurrency.** Set `UPLOAD_CONCURRENCY=1` in this app's `config/logs.env` for the initial 1 CPU / 1 GiB
-   service, matching the tested staging profile. The application default is 4; do not leave that default for this
-   initial resource limit.
+   **Upgrades never touch a value:** on start, an existing file only gains the keys it lacks, appended at the end with
+   their comments (written beside it and renamed over it, same mode; a failed write leaves it as it was).
+   `KEYCHAIN_ENCRYPTION_KEY` is no longer generated but is still honoured if present.
+3. **Upload concurrency.** The application default is 4. For a 1 CPU / 1 GiB profile set `UPLOAD_CONCURRENCY=1`.
 4. **DJI key.** Leave `DJI_API_KEY` blank to start keyless; uploads, history and the Ops API all work. To start
    decoding later, put the key in the file. Then send `docker kill -s HUP <container>` to apply only the key, or
    restart the container to apply everything.

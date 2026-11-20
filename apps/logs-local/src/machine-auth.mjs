@@ -1,5 +1,6 @@
 // Who may call the private Logs backend, and for what. Every request must carry a verified Access service
-// assertion (access-jwt.mjs) from one of the configured client ids, and each client id has exactly one role:
+// assertion (access-jwt.mjs) from one of the configured client ids. Each client id has one role, or both when a
+// single Ops token is configured for both proxies; the request path then selects which role's rules apply:
 //
 //   staff-proxy   Ops server acting for a signed-in staff member: /internal/v1/logs/* only, and it MUST send the
 //                 staff actor (X-Ledge-Top-Actor) that Ops authorised in the staff session.
@@ -38,29 +39,32 @@ export function encodeActor(actor) {
 }
 
 /**
- * @param {{ issuer: string, audience: string, identities: Record<string, keyof ROLES> }} config
+ * @param {{ issuer: string, audience: string, identities: Record<string, keyof ROLES | (keyof ROLES)[]> }} config
  * @param {{ getKey?: Function, now?: () => number, fetch?: typeof fetch }} [deps]
  */
 export function createMachineAuth(config, deps = {}) {
   const issuer = canonicalIssuer(config?.issuer);
   const audience = config?.audience;
   if (typeof audience !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(audience)) throw new Error('machine_audience_invalid');
-  const identities = new Map(Object.entries(config?.identities ?? {}));
+  const identities = new Map(Object.entries(config?.identities ?? {}).map(([id, roles]) => [id, [roles].flat()]));
   if (!identities.size) throw new Error('machine_identities_missing');
-  for (const [clientId, role] of identities) {
+  for (const [clientId, roles] of identities) {
     if (!CLIENT_ID.test(clientId)) throw new Error('machine_client_id_invalid');
-    if (!Object.hasOwn(ROLES, role)) throw new Error('machine_role_invalid');
+    if (!roles.length || roles.some(role => typeof role !== 'string' || !Object.hasOwn(ROLES, role)) || new Set(roles).size !== roles.length)
+      throw new Error('machine_role_invalid');
   }
   const getKey = deps.getKey ?? accessKeyResolver(issuer, { fetch: deps.fetch, now: deps.now });
   return async function authorize(request) {
     let verified;
     try { verified = await verifyAccessService(request, { issuer, audience }, getKey, { now: deps.now }); }
     catch { return denied; }
-    const role = identities.get(verified.clientId);
-    if (!role) return denied;
-    const rule = ROLES[role];
+    const roles = identities.get(verified.clientId);
+    if (!roles) return denied;
     const { pathname } = new URL(request.url);
-    if (!pathname.startsWith(rule.prefix) || pathname.includes('/../') || pathname.includes('//')) return denied;
+    // The role prefixes do not overlap, so at most one of the client's roles matches this path.
+    const role = roles.find(candidate => pathname.startsWith(ROLES[candidate].prefix));
+    if (!role || pathname.includes('/../') || pathname.includes('//')) return denied;
+    const rule = ROLES[role];
     const header = request.headers.get(ACTOR_HEADER);
     if (rule.actor === 'forbidden') {
       if (header !== null) return denied;
