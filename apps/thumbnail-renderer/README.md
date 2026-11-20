@@ -37,9 +37,8 @@ The local pre-generator does not decode videos; the repository-owned
 `queue-renderer` handles video plus R2-only still/PDF jobs through
 `/api/internal/thumbnail-renderer/v1`. The version-controlled queue runtime is
 [`truenas/thumbnail-generation/thumbnail-queue-worker.sh`](truenas/thumbnail-generation/thumbnail-queue-worker.sh),
-and production uses the repository's `queue-worker:latest` image, which moves only
-when someone runs **Promote TrueNAS thumbnail renderer candidate to latest** for a
-verified `main` candidate (the same rule as the Logs host and the Viewer). Never copy or layer the
+and production uses the repository's `queue-worker:latest` image. `main` no longer
+moves that tag (the same rule as the Logs host and the Viewer); see below. Never copy or layer the
 script onto an unrelated image.
 
 ## TrueNAS SCALE installation (UI only)
@@ -53,11 +52,15 @@ TrueNAS thumbnail renderer images** GitHub workflow builds the `decoder`,
 `broker`, and `queue-worker` targets for `linux/amd64` on relevant changes pushed
 to `main`. It publishes immutable commit (`sha-<commit>`) and candidate
 (`candidate-<commit>-<run>-<attempt>`) tags without overwriting them and records
-a digest receipt. It never moves `:latest` (or `:stable`): `:latest` for each image
-moves only through the hand-run `promote-thumbnail-renderer.yml`, which verifies the
-candidate, records a rollback receipt, re-reads `latest` and reads it back. The YAML
-sets `pull_policy: always`, so an app update/redeploy pulls the last **promoted**
-release. A plain container restart does not pull images; this configuration
+a digest receipt. It never moves `:latest` (or `:stable`).
+
+**Until the protected promotion workflow lands (a separate PR), nothing moves these
+images' `:latest`.** The stack keeps the `:latest` it already has: with `pull_policy:
+always` a redeploy pulls that same digest again. To run a specific newer build, pin
+the immutable commit tag in the app's YAML, for example
+`image: ghcr.io/ledgetoptechnologies/thumbnail-queue-worker:sha-<full commit SHA>`
+(every main build is published under `sha-<commit>` and listed in its run summary),
+and change it back to `:latest` once promotion exists. A plain container restart does not pull images; this configuration
 does not install a live automatic updater. Image references are already in the
 YAML, with no digest/image environment values required. Configure a private
 registry credential in the TrueNAS Apps UI if the packages are not anonymously readable.

@@ -135,7 +135,7 @@ jobs:
           IMAGE: ${{ steps.names.outputs.image }}
           EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          # latest moves only by the hand-run promote-thumbnail-renderer.yml (same rule as the Logs host and the Viewer).
+          # main never moves latest or stable: it writes immutable sha and candidate tags only (same rule as Logs and the Viewer).
           tag="candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:${tag}" "${IMAGE}@${EXPECTED_DIGEST}"
           docker buildx imagetools inspect "${IMAGE}:${tag}" --format '{{json .Manifest}}' > candidate-manifest.json
@@ -167,7 +167,7 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Platform: \`linux/amd64\`"
             echo "- Digest: \`${DIGEST}\`"
-            echo "- Candidate (promote to latest with promote-thumbnail-renderer.yml): target \`${TARGET}\`, commit \`${GITHUB_SHA}\`, digest \`${DIGEST}\`"
+            echo "- Immutable candidate: target \`${TARGET}\`, commit \`${GITHUB_SHA}\`, digest \`${DIGEST}\` (pin with \`${IMAGE}:sha-${GITHUB_SHA}\`)"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload the deployment receipt

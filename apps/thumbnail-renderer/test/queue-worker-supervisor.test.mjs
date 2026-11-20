@@ -93,17 +93,18 @@ test("publish is blocked on source checks and proves the exact published all-med
   assert.match(publishWorkflow, /candidate digest does not match verified main image/);
 });
 
-test("proxy latest promotes the canary-tested main image without changing its digest", () => {
+test("proxy main publication writes only immutable sha and candidate tags of the canary-tested digest", () => {
   const canary = proxyPublishWorkflow.indexOf("Run regression and synthetic media tests in the runtime");
   const validation = proxyPublishWorkflow.indexOf("Validate combined stack without credentials or host mounts");
   const publication = proxyPublishWorkflow.indexOf("Publish only the canary-tested image and retain its digest");
-  const promotion = proxyPublishWorkflow.indexOf('imagetools create --prefer-index=false --tag "${image}:latest"');
-  assert.ok(canary >= 0 && validation > canary && publication > validation && promotion > publication);
+  const candidate = proxyPublishWorkflow.indexOf('imagetools create --prefer-index=false --tag "$candidate" "${image}@${digest}"');
+  assert.ok(canary >= 0 && validation > canary && publication > validation && candidate > publication);
   const block = proxyPublishWorkflow.slice(publication, proxyPublishWorkflow.indexOf("Upload immutable deployment receipt"));
   assert.match(block, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
   assert.match(block, /docker tag proxy-generator:canary "\$tag"/);
-  assert.match(block, /"\$\{image\}:latest" "\$\{image\}@\$\{digest\}"/);
-  assert.match(block, /"\$latest_digest" != "\$digest"/);
+  assert.match(block, /candidate="\$\{image\}:candidate-\$\{GITHUB_SHA\}-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"/);
+  assert.match(block, /"\$candidate_digest" != "\$digest"/);
+  assert.doesNotMatch(proxyPublishWorkflow.replace(/^\s*#.*$/gm, ""), /:latest\b/, "main never moves proxy-generator:latest");
   assert.match(proxyPublishWorkflow, /cancel-in-progress: false/);
 });
 
