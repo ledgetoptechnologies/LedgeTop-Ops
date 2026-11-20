@@ -6523,19 +6523,16 @@ function StaffAccessEditor({
     >
       <fieldset className="local-access-toggle viewer-access-toggle" disabled={busy}>
         <legend>3D Models access</legend>
-        {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => STAFF_VIEWER_CONTROLS.has(control)).map(
-          (control) => {
-            const ownerOnly = control === "viewerStoragePurge";
-            return <label key={control} className={ownerOnly ? "danger-control" : undefined}>
-              <input
-                type="checkbox"
-                checked={Boolean(person.localControls?.[control])}
-                disabled={ownerOnly && !person.owner_role}
-                onChange={(event) => update(person, control, event.target.checked)}
-              />
-              {STAFF_CONTROL_LABELS[control]}
-            </label>;
-          },
+        {/* Purge is owner-only and owners are never editable here; owners hold it through role-owner. */}
+        {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => STAFF_VIEWER_CONTROLS.has(control) && control !== "viewerStoragePurge").map(
+          (control) => <label key={control}>
+            <input
+              type="checkbox"
+              checked={Boolean(person.localControls?.[control])}
+              onChange={(event) => update(person, control, event.target.checked)}
+            />
+            {STAFF_CONTROL_LABELS[control]}
+          </label>,
         )}
         <small>Turning off model viewing blocks the Models page and new Viewer workspace sessions. Existing Viewer sessions expire within 30 minutes.</small>
       </fieldset>

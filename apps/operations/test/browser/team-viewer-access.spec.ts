@@ -57,7 +57,7 @@ test("an administrator can grant a synced operator base 3D-model access without 
   const viewer = page.getByRole("group", { name: "3D Models access" });
   await expect(viewer).toBeVisible();
   await expect(viewer.getByLabel("View and open 3D models")).not.toBeChecked();
-  await expect(viewer.getByLabel("Permanently purge Viewer storage (owner only)")).toBeDisabled();
+  await expect(viewer.getByLabel("Permanently purge Viewer storage (owner only)")).toHaveCount(0);
   await viewer.getByLabel("View and open 3D models").click();
   await expect.poll(() => updates.length).toBe(1);
   expect(updates[0]).toMatchObject({
