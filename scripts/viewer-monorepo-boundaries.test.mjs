@@ -234,10 +234,14 @@ function jobWritesRegistry(block) {
 test('Only publish-viewer writes Viewer candidate and sha tags, and only promote-viewer writes latest', () => {
   const viewerWriters = [];
   for (const name of fs.readdirSync(path.join(root, '.github/workflows')).filter(file => /\.ya?ml$/.test(file)).sort()) {
+    // A workflow is in scope when it names the Viewer image anywhere (job, step or
+    // workflow-level env). Other images' own latest tags (logs, thumbnails, ...) are
+    // out of scope here and have their own tests.
+    const viewerWorkflow = read(`.github/workflows/${name}`).includes('ledgetop-ops-viewer');
     for (const [job, block] of workflowJobs(name)) {
-      const viewer = block.includes('ledgetop-ops-viewer') || (name === 'publish-viewer.yml' || name === 'promote-viewer.yml');
+      const viewer = viewerWorkflow;
       if (viewer && jobWritesRegistry(block)) viewerWriters.push(`${name}#${job}`);
-      if (/--tag "?\$IMAGE_NAME:latest|ledgetop-ops-viewer:latest/.test(block) && REGISTRY_WRITE.test(block)) {
+      if (viewer && /--tag "?\$IMAGE_NAME:latest|:latest/.test(block) && REGISTRY_WRITE.test(block)) {
         assert.equal(`${name}#${job}`, 'promote-viewer.yml#promote', 'only the promotion may write the Viewer latest tag');
       }
       if (viewer && /imagetools create --tag (?:"\$tag"|[^\n]*:sha-)/.test(block)) {
@@ -246,6 +250,8 @@ test('Only publish-viewer writes Viewer candidate and sha tags, and only promote
     }
   }
   assert.deepEqual(viewerWriters.sort(), ['promote-viewer.yml#promote', 'publish-viewer.yml#verify-and-build']);
+  // Another image's promotion that writes its own latest stays out of scope.
+  assert.ok(!read('.github/workflows/promote-logs-local.yml').includes('ledgetop-ops-viewer'));
   assert.doesNotMatch(workflow, /:latest\b/);
   const promote = read('.github/workflows/promote-viewer.yml');
   assert.equal((promote.match(/docker buildx imagetools create --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1);
