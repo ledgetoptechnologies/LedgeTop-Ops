@@ -169,38 +169,37 @@ services:
       - "/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777"
 
 
-  # Flight logs (drone logs) backend: the local Logs host with its in-process DJI decoder (apps/logs-local).
-  # Reached only through Ops: the Cloudflare Tunnel forwards the private Logs hostname to the LAN-bound port below
-  # (the same pattern as the Viewer), and every request must carry a Cloudflare Access service-token assertion
-  # (Ops' staff proxy or the device proxy); anything else gets 404. Health is only on 127.0.0.1:8081 inside the
-  # container (image HEALTHCHECK). Its settings live in <WORKERS_APP_DATA_HOST_PATH>/flight-logs/config/logs.env,
-  # written blank on first start (exit 78 until filled); they are not Compose variables. See apps/logs-local/README.md.
+  # Flight logs backend (apps/logs-local). The only service with a port: the tunnel connector is outside this stack,
+  # so it reaches the LAN-bound port (like the Viewer); every request still needs a Cloudflare Access service token.
+  # First start creates /app-data/flight-logs and its settings file, then stays up closed until the file is filled.
   flight-logs:
-    <<: *prebuilt-service
-    image: ${LOGS_LOCAL_IMAGE:-ghcr.io/ledgetoptechnologies/logs-local:full}
-    pull_policy: always
-    platform: linux/amd64
-    cpus: "${LOGS_CPU_LIMIT:-1.0}"
-    mem_limit: ${LOGS_MEMORY_LIMIT:-1g}
-    memswap_limit: ${LOGS_MEMORY_LIMIT:-1g}
-    pids_limit: 64
-    stop_grace_period: 30s
-    ulimits:
-      core: 0
-      nofile: { soft: 1024, hard: 1024 }
-    ports:
-      - "${LOGS_BIND_ADDRESS:?Set the NAS LAN address the tunnel connector reaches}:${LOGS_HOST_PORT:-8090}:8080"
-    volumes:
-      - type: bind
-        source: ${WORKERS_APP_DATA_HOST_PATH:?Select the existing shared workers application dataset}
-        bind:
-          create_host_path: false
-        target: /data
-    tmpfs:
-      - "/work:rw,nosuid,nodev,noexec,size=192m,mode=0700,uid=568,gid=568"
-      - "/tmp:rw,nosuid,nodev,noexec,size=8m,mode=1777"
+    cap_drop:
+      - ALL
+    cpus: '2.0'
+    image: ghcr.io/ledgetoptechnologies/logs-local:latest
+    init: true
     logging:
       driver: json-file
       options:
-        max-size: 1m
-        max-file: "3"
+        max-file: '3'
+        max-size: 10m
+    mem_limit: 2g
+    pids_limit: 256
+    ports:
+      - ${LOGS_BIND_ADDRESS:?Set the NAS LAN address the tunnel connector reaches}:8090:8080
+    pull_policy: always
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    tmpfs:
+      - /work:rw,nosuid,nodev,noexec,size=192m,mode=0700,uid=568,gid=568
+      - /tmp:rw,nosuid,nodev,noexec,size=8m,mode=1777
+    user: '568:568'
+    volumes:
+      - type: bind
+        source: ${WORKERS_APP_DATA_HOST_PATH:?Select the existing shared workers application dataset}
+        target: /app-data
+        bind:
+          create_host_path: false

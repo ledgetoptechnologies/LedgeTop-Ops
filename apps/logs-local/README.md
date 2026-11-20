@@ -43,11 +43,11 @@ layers, provenance or copies already downloaded. Revisit the package policy expl
 that assumes runtime code is private. A package visibility mismatch stops this publisher instead of changing it.
 
 ## Folders
-The stack mounts `/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` at `/data`. The container can see the sibling folders
+The stack mounts `/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` at `/app-data` (the same mount the other worker services use). The container can see the sibling folders
 there; this is application-level confinement, not filesystem isolation. Logs only ever uses:
 
 ```
-/data/flight-logs/
+/app-data/flight-logs/
   db/logs.sqlite      ledger (keep on a local dataset; never SMB/NFS)
   objects/            originals (raw/), tracks, and the object index
   config/logs.env     this app's configuration (0600)
@@ -59,15 +59,17 @@ message. It never changes permissions or ownership and never runs ZFS commands. 
 datasets.
 
 ## First start and configuration
-1. **First start.** The app writes `config/logs.env` once, as a blank template (0600), then stops as **not ready**
-   (exit 78). Docker's restart backoff applies. The template is never overwritten.
+1. **First start.** The app creates its folders, writes `config/logs.env` once as a blank template (0600), and stays
+   up **closed**: every request gets 404, health reports `unconfigured`, and one log line (`settings_incomplete`) says
+   the settings are incomplete. The template is never overwritten. After filling it, restart the container (or send
+   `docker kill -s HUP <container>`); any missing security value keeps it closed.
 2. **Machine credentials.** Fill in the values Merger provisions:
    - the ingress host;
    - the Access audience;
    - the two allowed service-token client ids;
    - the Ops directory URL and this host's own directory service token.
 
-   Blank or invalid machine credentials keep the app not ready. Authentication is never switched off.
+   Blank or invalid machine credentials keep the app closed. Authentication is never switched off.
 3. **Upload concurrency.** Set `UPLOAD_CONCURRENCY=1` in this app's `config/logs.env` for the initial 1 CPU / 1 GiB
    service, matching the tested staging profile. The application default is 4; do not leave that default for this
    initial resource limit.

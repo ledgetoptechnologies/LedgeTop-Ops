@@ -218,22 +218,22 @@ automatic pruning schedule is installed by this stack.
 ## Flight logs backend
 
 `compose.truenas.all.yaml` also runs `flight-logs`, the local Logs host from
-`apps/logs-local` (image `ghcr.io/ledgetoptechnologies/logs-local:full`,
-published by `publish-logs-local.yml`; the in-process DJI decoder waits until a
-key is set). Like the Viewer, it is a private backend: the Cloudflare Tunnel
-forwards the private Logs hostname to `LOGS_BIND_ADDRESS:LOGS_HOST_PORT`
-(container port 8080), and every request must carry a Cloudflare Access
-service-token assertion for Ops (staff proxy) or the device proxy. Anything
-else gets 404; health is only inside the container.
+`apps/logs-local` (image `ghcr.io/ledgetoptechnologies/logs-local:latest`, the
+full image with the DJI parser, published by `publish-logs-local.yml`). Like
+the Viewer it is a private backend: the Cloudflare Tunnel forwards the private
+Logs hostname to `LOGS_BIND_ADDRESS:8090` (container port 8080), and every
+request must carry a Cloudflare Access service-token assertion for Ops (staff
+proxy) or the device proxy. Anything else gets 404; health is only inside the
+container. It is the only service in the stack with a port, because the tunnel
+connector runs outside this stack.
 
-- Compose values: `LOGS_BIND_ADDRESS` (required), optional `LOGS_HOST_PORT`,
-  `LOGS_LOCAL_IMAGE` (set an `@sha256:` reference to pin a digest),
-  `LOGS_CPU_LIMIT`, `LOGS_MEMORY_LIMIT`.
-- Data: the shared workers dataset is mounted at `/data`; the app uses only
-  `/data/flight-logs` (`db/logs.sqlite`, `objects/`, `config/logs.env`).
-- Settings and secrets: not Compose variables. On first start the app writes
-  `flight-logs/config/logs.env` blank (0600, owned by 568) and exits 78 until
-  it is filled. See [apps/logs-local/README.md](../logs-local/README.md).
+- Data: the shared workers dataset at `/app-data`, like the other services;
+  the app creates and uses only `/app-data/flight-logs` (`db/logs.sqlite`,
+  `objects/`, `config/logs.env`).
+- Settings and secrets are not Compose variables. On first start the app
+  writes `flight-logs/config/logs.env` blank (0600, owned by 568) and stays up
+  closed until it is filled and the container is restarted. The DJI key goes in
+  `DJI_API_KEY` in that file. See [apps/logs-local/README.md](../logs-local/README.md).
 - Ops side: `LOGS_BACKEND_MODE=local`, `LOGS_BACKEND_URL` (the private Logs
   hostname), `LOGS_BACKEND_ACCESS_CLIENT_ID` and secret
   `LOGS_BACKEND_ACCESS_CLIENT_SECRET`; plus the `LOGS_DIRECTORY_*` settings

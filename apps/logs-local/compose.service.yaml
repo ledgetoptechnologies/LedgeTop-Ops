@@ -3,8 +3,8 @@
 # comes from the main-only publisher's receipt after the exact source is qualified and Merger admits the release.
 # Nothing here is activated before pilot acceptance. (Development builds: compose.dev.yaml.)
 #
-# Mount: the existing App_Data parent is bind-mounted at /data. The container can therefore SEE every sibling folder
-# under it; isolation is application-level only: Logs creates and opens /data/flight-logs and nothing else.
+# Mount: the existing App_Data parent is bind-mounted at /app-data. The container can therefore SEE every sibling folder
+# under it; isolation is application-level only: Logs creates and opens /app-data/flight-logs and nothing else.
 # Scratch: RAM only (/work, required to be tmpfs; the decoder refuses to run otherwise). No swap, no core dumps.
 # Network: Beau connects the NAS tunnel; NO published ports. Outbound HTTPS is needed to the
 # Cloudflare Access certs, the Ops directory and the DJI API.
@@ -15,14 +15,14 @@ services:
     image: ghcr.io/ledgetoptechnologies/logs-local@sha256:<digest>
     platform: linux/amd64
     pull_policy: missing                # pulled once by digest; never re-pulled or rebuilt by the stack
-    restart: unless-stopped             # a not-ready config (exit 78) retries with Docker's backoff
+    restart: unless-stopped             # incomplete settings: stays up closed (every request 404)
     init: true
     user: "568:568"
     stop_grace_period: 30s
     volumes:
       - type: bind
         source: /mnt/Plugins/App_Data/LedgeTop-Ops-Workers
-        target: /data
+        target: /app-data
         bind:
           create_host_path: false
     tmpfs:

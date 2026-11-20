@@ -3,8 +3,8 @@ name: Publish Logs local host images (keyless and full)
 # Main only. No manual, pull-request, tag or other-branch triggers: every published image is exactly a main commit.
 # Two independent images per commit: keyless (no native DJI parser) and full (keyless plus the reviewed native parser,
 # built from an immutable Rust base by digest and the pinned upstream revision). Each has its own immutable commit tag,
-# its own exact-digest smoke, and its own moving tag (:keyless / :full). Nothing is ever tagged latest, and a keyless
-# image is never promoted as full. Compiling and smoking the parser does NOT prove real DJI decoding.
+# its own exact-digest smoke, and its own moving tag (:keyless / :full). The full image is also tagged latest (what the
+# NAS stack pulls); a keyless image is never tagged latest and never promoted as full. Compiling and smoking the parser does NOT prove real DJI decoding.
 on:
   push:
     branches: [main]
@@ -370,12 +370,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Promote the smoke-tested digest to the full tag (never latest or keyless)
+      - name: Promote the smoke-tested digest to the full and latest tags (never keyless)
         shell: bash
         env:
           IMAGE: ${{ steps.names.outputs.image }}
           EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:full" "${IMAGE}@${EXPECTED_DIGEST}"
-          docker buildx imagetools inspect "${IMAGE}:full" --format '{{json .Manifest}}' > full-manifest.json
-          node -e 'const m=JSON.parse(require("fs").readFileSync("full-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("full tag does not match the smoke-tested digest")'
+          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:full" --tag "${IMAGE}:latest" "${IMAGE}@${EXPECTED_DIGEST}"
+          for tag in full latest; do
+            docker buildx imagetools inspect "${IMAGE}:${tag}" --format '{{json .Manifest}}' > "${tag}-manifest.json"
+            TAG="${tag}" node -e 'const m=JSON.parse(require("fs").readFileSync(process.env.TAG+"-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error(process.env.TAG+" tag does not match the smoke-tested digest")'
+          done

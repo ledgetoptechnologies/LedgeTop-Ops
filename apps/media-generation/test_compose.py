@@ -189,19 +189,14 @@ class MediaComposeTests(unittest.TestCase):
         self.assertIn("ALL", logs["cap_drop"])
         self.assertIn("no-new-privileges:true", logs["security_opt"])
         self.assertFalse(logs.get("depends_on"))
-        self.assertEqual(logs["platform"], "linux/amd64")
         self.assertEqual(logs["pull_policy"], "always")
-        self.assertEqual(float(logs["cpus"]), 1.0)
-        self.assertEqual(int(logs["mem_limit"]), 1024**3)
-        self.assertEqual(logs["memswap_limit"], logs["mem_limit"])
-        self.assertEqual(logs["pids_limit"], 64)
-        # JSON rendering omits zero limits; check the source for the no-core-dumps limit instead.
-        self.assertIn("core", logs["ulimits"])
-        self.assertRegex(ALL.read_text(), r"(?m)^      core: 0$")
+        self.assertEqual(float(logs["cpus"]), 2.0)
+        self.assertEqual(int(logs["mem_limit"]), 2 * 1024**3)
+        self.assertEqual(logs["pids_limit"], 256)
         self.assertFalse(logs.get("environment"))
         self.assertEqual([(port["host_ip"], str(port["published"]), port["target"]) for port in logs["ports"]],
             [("192.0.2.10", "8090", 8080)])
-        self.assertEqual([(volume["source"], volume["target"]) for volume in logs["volumes"]], [("/synthetic/workers-app-data", "/data")])
+        self.assertEqual([(volume["source"], volume["target"]) for volume in logs["volumes"]], [("/synthetic/workers-app-data", "/app-data")])
         self.assertTrue(any(mount.startswith("/work:") for mount in logs["tmpfs"]))
         for name, service in self.all.items():
             if name != LOGS:
@@ -219,7 +214,7 @@ class MediaComposeTests(unittest.TestCase):
             "queue-renderer": "ghcr.io/ledgetoptechnologies/thumbnail-queue-worker:latest",
             "decoder": "ghcr.io/ledgetoptechnologies/thumbnail-decoder:latest",
             "broker": "ghcr.io/ledgetoptechnologies/thumbnail-broker:latest",
-            LOGS: "ghcr.io/ledgetoptechnologies/logs-local:full",
+            LOGS: "ghcr.io/ledgetoptechnologies/logs-local:latest",
         }
         thumbnail_values = VALUES | OPTIONAL | {
             "LTDSTHUMB_JOBS_HOST_PATH": "/synthetic/jobs",

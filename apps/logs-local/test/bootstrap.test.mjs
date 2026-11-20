@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { bootstrap, TEMPLATE, NOT_READY_EXIT } from '../src/bootstrap.mjs';
+import { bootstrap, startClosed, TEMPLATE, NOT_READY_EXIT } from '../src/bootstrap.mjs';
 import { parseConfig } from '../src/config.mjs';
 
 function scratch(t) {
@@ -13,7 +13,7 @@ function scratch(t) {
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   return { parent, dataDir: path.join(parent, 'flight-logs') };
 }
-// Tests run with a temp data dir; the real deployment's fixed /data/flight-logs is checked in config tests.
+// Tests run with a temp data dir; the real deployment's fixed /app-data/flight-logs is checked in config tests.
 const fill = text => text
   .replace('LOGS_INGRESS_HOST=', 'LOGS_INGRESS_HOST=logs-backend-staging.example.test')
   .replace('ACCESS_AUDIENCE=', `ACCESS_AUDIENCE=${'a'.repeat(64)}`)
@@ -53,7 +53,7 @@ test('filled machine credentials are ready with a blank DJI key (keyless start)'
   const { dataDir } = scratch(t);
   bootstrap({ dataDir });
   const config = path.join(dataDir, 'config', 'logs.env');
-  fs.writeFileSync(config, fill(TEMPLATE).replace(/^# Ledge Top/m, `LOGS_DATA_DIR=/data/flight-logs\n# Ledge Top`), { mode: 0o600 });
+  fs.writeFileSync(config, fill(TEMPLATE).replace(/^# Ledge Top/m, `LOGS_DATA_DIR=/app-data/flight-logs\n# Ledge Top`), { mode: 0o600 });
   const ready = bootstrap({ dataDir, checkOptions: { platform: 'win32' } });
   assert.deepEqual([ready.ready, ready.code], [true, 'ready']);
   assert.equal(parseConfig(fs.readFileSync(config, 'utf8')).DJI_API_KEY, '', 'the key may stay blank');
@@ -103,7 +103,7 @@ test('the template parses: every key is known, machine credentials blank, issuer
   assert.throws(() => parseConfig(TEMPLATE), err => err.code === 'config_missing');
   const parsed = parseConfig(fill(TEMPLATE));
   assert.equal(parsed.ACCESS_ISSUER, 'https://ledgetoptechnologies.cloudflareaccess.com');
-  assert.equal(parsed.LOGS_DATA_DIR, '/data/flight-logs');
+  assert.equal(parsed.LOGS_DATA_DIR, '/app-data/flight-logs');
 });
 
 test('malformed machine credentials are not-ready before anything starts, and the message never echoes a value', t => {
@@ -164,4 +164,42 @@ test('a config that is a link (or not a regular file) is refused before it is op
   catch (error) { if (error.code === 'EPERM') { t.diagnostic('file symlinks need privileges on this Windows host; folder case covered'); return; } throw error; }
   assert.deepEqual(bootstrap({ dataDir }).code, 'config_unsafe');
   assert.equal(fs.readFileSync(elsewhere, 'utf8'), 'SECRET=from-elsewhere');
+});
+
+test('partial settings stay closed: any missing security value keeps the host not ready', t => {
+  const { dataDir } = scratch(t);
+  bootstrap({ dataDir });
+  const config = path.join(dataDir, 'config', 'logs.env');
+  for (const key of ['LOGS_INGRESS_HOST', 'ACCESS_AUDIENCE', 'ACCESS_STAFF_PROXY_CLIENT_ID', 'ACCESS_DEVICE_PROXY_CLIENT_ID',
+    'OPS_DIRECTORY_BASE_URL', 'OPS_DIRECTORY_CLIENT_ID', 'OPS_DIRECTORY_CLIENT_SECRET']) {
+    fs.writeFileSync(config, fill(TEMPLATE).replace(new RegExp(`^${key}=.*$`, 'm'), `${key}=`), { mode: 0o600 });
+    const result = bootstrap({ dataDir, checkOptions: { platform: 'win32' } });
+    assert.equal(result.ready, false, `${key} blank must stay closed`);
+  }
+});
+
+test('the template has a clearly named blank DJI key entry with a comment', () => {
+  assert.match(TEMPLATE, /^# DJI Open API key: paste it here.*\nDJI_API_KEY=$/m);
+});
+
+async function get(port, route, host = '127.0.0.1') {
+  const response = await fetch(`http://${host}:${port}${route}`);
+  return { status: response.status, body: await response.json() };
+}
+
+test('a fresh install stays up closed: every request is 404 and health says unconfigured', async t => {
+  const host = await startClosed({ code: 'config_created' }, { port: 0, healthPort: 0, host: '127.0.0.1' });
+  t.after(() => host.close());
+  const port = host.closed.address().port, healthPort = host.health.address().port;
+  for (const route of ['/', '/healthz', '/api/flight-logs', '/v1/device/uploads']) assert.equal((await get(port, route)).status, 404);
+  const health = await get(healthPort, '/healthz');
+  assert.deepEqual([health.status, health.body.state, health.body.code], [200, 'unconfigured', 'config_created']);
+  assert.equal((await get(healthPort, '/other')).status, 404);
+});
+
+test('a filesystem problem keeps the closed host up but unhealthy', async t => {
+  const host = await startClosed({ code: 'data_dir_not_writable' }, { port: 0, healthPort: 0, host: '127.0.0.1' });
+  t.after(() => host.close());
+  assert.equal((await get(host.health.address().port, '/healthz')).status, 503);
+  assert.equal((await get(host.closed.address().port, '/')).status, 404);
 });

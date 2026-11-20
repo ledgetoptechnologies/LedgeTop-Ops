@@ -43,8 +43,9 @@ test('least privilege: read-only by default, packages: write only for the two pu
   for (const line of workflow.split('\n').filter(l => l.includes('uses: '))) assert.match(line, /@[0-9a-f]{40} # v/, line.trim());
 });
 
-test('two independent images, each with an immutable commit tag, exact-digest smoke before its own moving tag; never latest', () => {
-  assert.ok(!workflow.includes(':latest'), 'never promoted to latest');
+test('two independent images, each with an immutable commit tag, exact-digest smoke before its own moving tag; only full is latest', () => {
+  assert.ok(!jobOf('publish-keyless').includes(':latest'), 'keyless is never latest');
+  assert.ok(jobOf('publish-full').includes('--tag "${IMAGE}:full" --tag "${IMAGE}:latest" "${IMAGE}@${EXPECTED_DIGEST}"'), 'full is also latest');
   assert.equal((workflow.match(/imagetools create/g) ?? []).length, 2);
   for (const target of ['keyless', 'full']) {
     const job = jobOf(`publish-${target}`), other = target === 'full' ? 'keyless' : 'full';
@@ -61,7 +62,7 @@ test('two independent images, each with an immutable commit tag, exact-digest sm
       `${target}: smoke, then write the receipt, then persist it (upload), and only then the moving tag`);
     assert.ok(!/continue-on-error|if: always\(\)/.test(job), `${target}: a failed step (including the upload) stops the job`);
     assert.ok(job.includes(`smoke-image.sh "\${{ steps.names.outputs.image }}@\${{ steps.build.outputs.digest }}" "\${GITHUB_SHA}" ${target}`));
-    assert.ok(job.includes(`--tag "\${IMAGE}:${target}" "\${IMAGE}@\${EXPECTED_DIGEST}"`), `${target} promotes only its own tag`);
+    assert.ok(job.includes(`--tag "\${IMAGE}:${target}"`), `${target} promotes its own tag`);
     assert.ok(!job.includes(`:${other}"`), `${target} never touches the ${other} tag`);
     assert.ok(!job.includes(`target: ${other}`));
   }
