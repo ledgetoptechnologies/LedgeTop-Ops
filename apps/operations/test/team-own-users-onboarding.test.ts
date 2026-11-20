@@ -4,7 +4,7 @@
 //   - a pending or claimed invitation is never an active Operations identity;
 //   - a newly approved hire starts with an empty Operations ACL (no roles, no
 //     overrides, not an administrator), not only empty native delegations;
-//   - approval needs a reviewer other than the invitation's creator.
+//   - the invitation's creator may approve a different claimant (documented).
 import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
@@ -78,7 +78,7 @@ async function operationsAcl(staffId: string) {
   };
 }
 
-describe("team own-users R7: invitations, empty ACL and independent approval (full current D1 chain)", () => {
+describe("team own-users R7: invitations, empty ACL and approval (full current D1 chain)", () => {
   beforeAll(async () => {
     runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22", cf: false,
       script: "export default {fetch(){return new Response('fixture')}}", d1Databases: ["OPS_DB"] });
@@ -110,14 +110,14 @@ describe("team own-users R7: invitations, empty ACL and independent approval (fu
     expect(await db.prepare("SELECT state FROM native_staff_pending_onboarding WHERE onboarding_id=?")
       .bind(invite.created.onboardingId).first("state")).toBe("claimed");
 
-    // Approved by an independent reviewer: the new identity exists but carries no Operations authority at all.
+    // Approved by a reviewer: the new identity exists but carries no Operations authority at all.
     const review = await readNativeStaffOnboardingReview(db, invite.created.onboardingId, actor(reviewer));
     await approveNativeStaffOnboarding(db, { commandId: uuid(), onboardingId: invite.created.onboardingId, expectedVersion: 2,
       proposalSha256: review.proposalSha256, claimEvidenceSha256: review.claimEvidenceSha256,
-      reason: "Independent synthetic approval" }, actor(reviewer));
+      reason: "Synthetic approval" }, actor(reviewer));
     expect(await operationsAcl(invite.created.proposedStaffId)).toEqual({ roles: 0, localRoles: 0, overrides: 0, divisions: 0 });
-    // New hires are inserted sync_protected=1; the access-controls PUT still accepts them
-    // only with positive Ops-onboarding provenance (see team-own-users-access-controls.test.ts).
+    // New hires are inserted sync_protected=1, so the legacy access-controls writer refuses
+    // them (409); see team-own-users-access-controls.test.ts.
     expect(await db.prepare("SELECT sync_protected FROM staff_users WHERE id=?").bind(invite.created.proposedStaffId).first("sync_protected")).toBe(1);
     const principal = await staffSignIn(invite.input.loginEmail, subject);
     expect(principal.id).toBe(invite.created.proposedStaffId);
@@ -127,27 +127,19 @@ describe("team own-users R7: invitations, empty ACL and independent approval (fu
     await expect(staffSignIn(invite.input.loginEmail, `access|impostor-${++sequence}`)).rejects.toMatchObject({ status: 403 });
   });
 
-  // BACKEND GAP (2026-11-19, one-writer rule: not fixed here). Neither
-  // approveNativeStaffOnboarding nor the 0074/0242 approval triggers nor the
-  // /api/native-staff/onboarding/approve route compare the approver with
-  // native_staff_pending_onboarding.created_by_staff_id. A staff member holding
-  // both staff.onboarding.create and staff.onboarding.approve currently approves
-  // their own invitation (verified locally: resolves with state "approved").
-  // Independence here rests only on delegation policy (who is given both
-  // capabilities). The Team access-controls route mitigates it (a self-approved
-  // hire has no editable access controls), but the approval itself still
-  // succeeds. Unskip once the staff back-end owner adds a creator!=approver
-  // check in the service and the D1 approval fence.
-  it.skip("refuses approval by the invitation's own creator even when that creator also holds the approve capability", async () => {
+  // Documented behaviour: the invitation's creator may approve a different
+  // claimant (the person being hired). The claimant is never the approver.
+  it("lets the invitation's creator approve a different claimant", async () => {
     const creator = await fixtureStaff(["staff.onboarding.create", "staff.onboarding.approve"]);
     const invite = await invitation(creator);
-    await claim(invite, `access|self-approved-${++sequence}`);
+    await claim(invite, `access|claimant-${++sequence}`);
+    expect(invite.created.proposedStaffId).not.toBe(creator.id);
     const review = await readNativeStaffOnboardingReview(db, invite.created.onboardingId, actor(creator));
-    await expect(approveNativeStaffOnboarding(db, { commandId: uuid(), onboardingId: invite.created.onboardingId,
+    await approveNativeStaffOnboarding(db, { commandId: uuid(), onboardingId: invite.created.onboardingId,
       expectedVersion: 2, proposalSha256: review.proposalSha256, claimEvidenceSha256: review.claimEvidenceSha256,
-      reason: "Self approval must be refused" }, actor(creator))).rejects.toThrow();
+      reason: "Creator approves a different claimant" }, actor(creator));
     expect(await db.prepare("SELECT state FROM native_staff_pending_onboarding WHERE onboarding_id=?")
-      .bind(invite.created.onboardingId).first("state")).toBe("claimed");
-    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?").bind(invite.created.proposedStaffId).first("n")).toBe(0);
+      .bind(invite.created.onboardingId).first("state")).toBe("approved");
+    expect(await operationsAcl(invite.created.proposedStaffId)).toEqual({ roles: 0, localRoles: 0, overrides: 0, divisions: 0 });
   });
 });

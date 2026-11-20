@@ -11,10 +11,10 @@ const roster = [
   // Owner by role, not by any sync flag.
   { id: "staff-role-owner", email: "owner@example.test", display_name: "Role Owner", status: "active",
     roles: "Owner", provisioning_source: "local", sync_protected: 0, owner_role: true, access_controls_editable: false, localControls: controls },
-  // An Ops-native hire is inserted with sync_protected=1 but is not an owner; the server marks it editable.
+  // An Ops-native hire is inserted with sync_protected=1 but is not an owner; the legacy writer refuses it.
   { id: "staff-native-hire", email: "hire@example.test", display_name: "Native Hire", status: "active",
-    roles: "", provisioning_source: "local", sync_protected: 1, owner_role: false, access_controls_editable: true, localControls: controls },
-  // A legacy protected record without native onboarding provenance: the server refuses edits.
+    roles: "", provisioning_source: "local", sync_protected: 1, owner_role: false, access_controls_editable: false, localControls: controls },
+  // A legacy protected record: the server refuses edits.
   { id: "staff-legacy-protected", email: "legacy@example.test", display_name: "Legacy Protected", status: "active",
     roles: "Operator", provisioning_source: "local", sync_protected: 1, owner_role: false, access_controls_editable: false, localControls: controls },
   // Historical imported record: no external manager is implied.
@@ -72,8 +72,9 @@ test("Team derives Protected Owner from the owner role, never from sync protecti
   await expect(card(page, "Imported Operator").getByText("Imported profile", { exact: true })).toBeVisible();
   await expect(card(page, "Native Hire").getByText("No inherited role", { exact: true })).toBeVisible();
   await expect(page.getByText("Protected Owner", { exact: true })).toHaveCount(1);
-  // The access editor follows the server's access_controls_editable flag, not sync protection.
-  await expect(card(page, "Native Hire").getByRole("tablist", { name: "Native Hire access categories" })).toBeVisible();
+  // The access editor follows the server's access_controls_editable flag.
+  await expect(card(page, "Native Hire").getByRole("tablist")).toHaveCount(0);
+  await expect(card(page, "Imported Operator").getByRole("tablist", { name: "Imported Operator access categories" })).toBeVisible();
   await expect(card(page, "Legacy Protected").getByRole("tablist")).toHaveCount(0);
   await expect(card(page, "Role Owner").getByRole("tablist")).toHaveCount(0);
   // Titles only: a locked card carries no explanatory copy.

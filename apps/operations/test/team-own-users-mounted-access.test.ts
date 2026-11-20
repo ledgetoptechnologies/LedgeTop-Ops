@@ -146,13 +146,12 @@ describe("team own-users: mounted Team API with real Access JWT and full local D
     expect((await fetch(new Request(`${origin}/api/admin/staff/${owner.id}`, { method: "PATCH", headers, body: "{}" }))).status).toBe(405);
   });
 
-  it("R4: a protected (sync_protected) staff member's access controls cannot be changed; a look-alike native row stays blocked", async () => {
+  it("R4: a protected (sync_protected) staff member's access controls cannot be changed, native rows included", async () => {
     const admin = await person({ role: "role-admin" }), protectedOwner = await person({ role: "role-owner", syncProtected: true });
     expect((await putControls(admin, protectedOwner.id, controls())).status).toBe(409);
     expect(await overrides(protectedOwner.id)).toEqual([]);
-    // A protected row with only an admission and profile (no approved Ops onboarding) is a
-    // look-alike and stays blocked. Real Ops-onboarded hires are editable; that path is
-    // covered in team-own-users-access-controls.test.ts.
+    // Every sync_protected row stays out of the legacy writer, native rows included; real
+    // Ops-onboarded hires are covered in team-own-users-access-controls.test.ts.
     const nativeHire = await person({ syncProtected: true, native: true });
     expect((await putControls(admin, nativeHire.id, controls({ deliveryBrowse: true }))).status).toBe(409);
   });

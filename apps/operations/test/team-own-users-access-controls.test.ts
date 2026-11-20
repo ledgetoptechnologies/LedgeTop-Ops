@@ -1,8 +1,9 @@
-// Team "own users": access controls for Ops-native hires, through the real mounted
+// Team "own users": the legacy access-controls writer through the real mounted
 // Operations worker fetch path (real RS256 Access assertions from a locally generated
 // key, real authenticateStaff/ACL/CSRF middleware) against every current Operations
 // migration in local D1 (Miniflare). Native hires are created by the real invitation,
-// claim and independent-approval services. Synthetic identities and hosts only.
+// claim and approval services and must stay out of this writer (sync_protected).
+// Synthetic identities and hosts only.
 //
 // The roster flag (access_controls_editable) must equal the PUT route's decision for
 // every row exercised here.
@@ -78,7 +79,7 @@ const authenticated = (who: Person) => ({ identity: { kind: "native", staffId: w
   email: who.email, displayName: who.id, profileVersion: 1 }, admissionVersion: 1, verifiedUntil: expires() });
 
 let creator: Person, reviewer: Person;
-/** A hire created by the real Ops invitation -> claim -> independent approval flow. */
+/** A hire created by the real Ops invitation -> claim -> approval flow (the claimant is a new person). */
 async function nativeHire(by: { creator: Person; approver: Person } = { creator, approver: reviewer }): Promise<Person> {
   const input = { commandId: uuid(), loginEmail: `hire-${++sequence}@example.test`, displayName: `Synthetic hire ${sequence}`,
     expiresAt: expires(), reason: "Team own-users access-controls fixture" };
@@ -92,7 +93,7 @@ async function nativeHire(by: { creator: Person; approver: Person } = { creator,
   const review = await readNativeStaffOnboardingReview(db, created.onboardingId, nativeActor(by.approver));
   await approveNativeStaffOnboarding(db, { commandId: uuid(), onboardingId: created.onboardingId, expectedVersion: 2,
     proposalSha256: review.proposalSha256, claimEvidenceSha256: review.claimEvidenceSha256,
-    reason: "Independent synthetic approval" }, nativeActor(by.approver));
+    reason: "Synthetic approval" }, nativeActor(by.approver));
   const row = await db.prepare("SELECT provisioning_source,sync_protected,project_alpha_user_id FROM staff_users WHERE id=?")
     .bind(created.proposedStaffId).first();
   expect(row).toEqual({ provisioning_source: "local", sync_protected: 1, project_alpha_user_id: null });
@@ -164,48 +165,37 @@ describe("team own-users: access controls for Ops-native hires (full current D1 
   }, 180_000);
   afterAll(async () => runtime?.dispose());
 
-  it("lets a roles.manage administrator edit an Ops-native hire, and keeps every other protected row blocked", async () => {
+  it("keeps every Ops-native hire and other protected row out of the legacy writer; edits only unprotected non-owners", async () => {
     const admin = await person({ role: "role-admin" });
     const hire = await nativeHire();
     const ownerHire = await nativeHire();
     await db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES(?,?,'role-owner','global','global')")
       .bind(uuid(), ownerHire.id).run();
-    const localOwnerHire = await nativeHire();
+    // Unprotected global owners from either role table.
+    const owner = await person({ role: "role-owner" });
+    const localOwner = await person();
     await db.prepare("INSERT INTO local_staff_role_assignments(id,staff_id,role_id,scope,division_id,created_by) VALUES(?,?,'role-owner','global',NULL,?)")
-      .bind(uuid(), localOwnerHire.id, admin.id).run();
-    // Legacy/unknown protected rows: no native records at all; admission+profile but no approved
-    // onboarding; Project Alpha-linked; and a local row that only looks native.
+      .bind(uuid(), localOwner.id, admin.id).run();
+    // Legacy/unknown protected rows: no native records; a local look-alike with admission and
+    // profile only; a Project Alpha-linked row.
     const legacy = await person({ syncProtected: true });
     const lookalike = await person({ syncProtected: true, local: true, native: true });
     const paLinked = await person({ syncProtected: true, local: true, native: true, paLink: "pa-synthetic-1" });
     const ordinary = await person();
-    // A genuinely onboarded row that later gained a Project Alpha link (or lost its local source) is no longer native.
-    const linkedHire = await nativeHire();
-    await db.prepare("UPDATE staff_users SET project_alpha_user_id='pa-synthetic-2' WHERE id=?").bind(linkedHire.id).run();
-    const resourcedHire = await nativeHire();
-    await db.prepare("UPDATE staff_users SET provisioning_source='project-alpha' WHERE id=?").bind(resourcedHire.id).run();
 
     const flags = await rosterFlags(admin);
-    await expectDecision(admin, linkedHire.id, 409, flags);
-    await expectDecision(admin, resourcedHire.id, 409, flags);
-    await expectDecision(admin, hire.id, 200, flags);
-    await expectDecision(admin, fixedOwnerId, 409, flags);
-    await expectDecision(admin, ownerHire.id, 409, flags);
-    await expectDecision(admin, localOwnerHire.id, 409, flags);
-    await expectDecision(admin, legacy.id, 409, flags);
-    await expectDecision(admin, lookalike.id, 409, flags);
-    await expectDecision(admin, paLinked.id, 409, flags);
-    await expectDecision(admin, admin.id, 409, flags);
+    for (const id of [hire.id, ownerHire.id, owner.id, localOwner.id, fixedOwnerId, legacy.id, lookalike.id, paLinked.id, admin.id])
+      await expectDecision(admin, id, 409, flags);
     await expectDecision(admin, ordinary.id, 200, flags);
-    const blocked = await putControls(admin, legacy.id, controls());
+    const blocked = await putControls(admin, hire.id, controls());
     expect(await blocked.json()).toMatchObject({ error: expect.stringContaining("Protected staff access controls cannot be changed") });
   });
 
-  it("refuses the hire's own edit and keeps the purge control owner-only", async () => {
+  it("refuses an administrator's own edit and keeps the purge control owner-only", async () => {
     const hireAdmin = await nativeHire();
     await db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES(?,?,'role-admin','global','global')")
       .bind(uuid(), hireAdmin.id).run();
-    const target = await nativeHire();
+    const target = await person();
     const flags = await rosterFlags(hireAdmin);
     await expectDecision(hireAdmin, hireAdmin.id, 409, flags);
     expect((await putControls(hireAdmin, target.id, controls({ viewerStoragePurge: true }))).status).toBe(403);
@@ -213,37 +203,38 @@ describe("team own-users: access controls for Ops-native hires (full current D1 
     await expectDecision(hireAdmin, target.id, 200, flags);
   });
 
-  it("keeps a self-approved hire (creator == approver) blocked", async () => {
+  it("blocks a hire whose invitation creator approved a different claimant, like any other native hire", async () => {
     const admin = await person({ role: "role-admin" });
     const both = await person({ delegations: ["staff.onboarding.create", "staff.onboarding.approve"] });
-    const selfApproved = await nativeHire({ creator: both, approver: both });
+    const hire = await nativeHire({ creator: both, approver: both });
+    expect(hire.id).not.toBe(both.id);
     expect(await db.prepare("SELECT state FROM native_staff_pending_onboarding WHERE proposed_staff_id=?")
-      .bind(selfApproved.id).first("state")).toBe("approved");
+      .bind(hire.id).first("state")).toBe("approved");
     const flags = await rosterFlags(admin);
-    await expectDecision(admin, selfApproved.id, 409, flags);
+    await expectDecision(admin, hire.id, 409, flags);
   });
 
   it("re-checks eligibility inside the write batch, so a change after the read cannot slip through", async () => {
     const admin = await person({ role: "role-admin" });
-    const hire = await nativeHire(), linked = await nativeHire();
+    const becomesOwner = await person(), becomesProtected = await person();
     beforeBatch = () => db.prepare("INSERT INTO local_staff_role_assignments(id,staff_id,role_id,scope,division_id,created_by) VALUES(?,?,'role-owner','global',NULL,?)")
-      .bind(uuid(), hire.id, admin.id).run().then(() => undefined);
-    const raced = await putControls(admin, hire.id, controls({ deliveryBrowse: true }));
+      .bind(uuid(), becomesOwner.id, admin.id).run().then(() => undefined);
+    const raced = await putControls(admin, becomesOwner.id, controls({ deliveryBrowse: true }));
     expect(raced.status).toBe(409);
-    expect(await overrideCount(hire.id)).toBe(0);
-    expect(await auditCount(hire.id, admin.id)).toBe(0);
-    beforeBatch = () => db.prepare("UPDATE staff_users SET project_alpha_user_id='pa-synthetic-race' WHERE id=?")
-      .bind(linked.id).run().then(() => undefined);
-    expect((await putControls(admin, linked.id, controls({ deliveryBrowse: true }))).status).toBe(409);
-    expect(await overrideCount(linked.id)).toBe(0);
+    expect(await overrideCount(becomesOwner.id)).toBe(0);
+    expect(await auditCount(becomesOwner.id, admin.id)).toBe(0);
+    beforeBatch = () => db.prepare("UPDATE staff_users SET sync_protected=1 WHERE id=?")
+      .bind(becomesProtected.id).run().then(() => undefined);
+    expect((await putControls(admin, becomesProtected.id, controls({ deliveryBrowse: true }))).status).toBe(409);
+    expect(await overrideCount(becomesProtected.id)).toBe(0);
     expect(beforeBatch).toBeUndefined();
   });
 
   it("returns 403 to a caller without global roles.manage and never offers the editor in their roster", async () => {
     const deniedAdmin = await person({ role: "role-admin", deny: ["roles.manage"] });
-    const hire = await nativeHire();
+    const target = await person();
     const flags = await rosterFlags(deniedAdmin);
-    await expectDecision(deniedAdmin, hire.id, 403, flags);
+    await expectDecision(deniedAdmin, target.id, 403, flags);
     expect([...flags.values()].every(value => value === false)).toBe(true);
   });
 });
