@@ -119,10 +119,21 @@ async function assertExpandedPhotoWheelAndPan(client, { diagnostic = null } = {}
   await waitFor(client, `(() => { const img=document.querySelector('#photo-img');
     return img.complete && img.naturalWidth>0 && getComputedStyle(img).opacity==='1'
       && img.getBoundingClientRect().width>0; })()`, 'expanded photo did not finish its initial layout', 10_000);
+  // DIAGNOSTIC VARIANT: controlled input setup. Pin the emulated viewport and
+  // screen to the same 1440x900, front the page, let the Viewer's resize path
+  // relayout the expanded inspector, then hover the wheel point before the
+  // native wheel so the browser has a current pointer target.
+  await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, screenWidth: 1440, screenHeight: 900 });
+  await client.command('Page.bringToFront');
+  await waitFor(client, `(() => { const r=document.querySelector('#photo-imgwrap').getBoundingClientRect();
+    return innerWidth===1440 && innerHeight===900 && Math.abs(r.width-innerWidth)<1 && Math.abs(r.height-innerHeight)<1; })()`,
+  'controlled viewport did not relayout the expanded photo', 10_000);
+  await client.evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
   const before = await client.evaluate(`(() => { const r=document.querySelector('#photo-imgwrap').getBoundingClientRect();
     return {x:r.left+r.width/2,y:r.top+r.height/2,width:document.querySelector('#photo-img').getBoundingClientRect().width}; })()`);
   await client.evaluate(PHOTO_WHEEL_EVIDENCE_INSTALL);
-  emit('before-dispatch', { before, hitTest: await client.evaluate(photoWheelHitEvidence(before.x, before.y)) });
+  await client.command('Input.dispatchMouseEvent', { type:'mouseMoved', x:before.x, y:before.y, button:'none', buttons:0 });
+  emit('before-dispatch', { controlled: true, before, hitTest: await client.evaluate(photoWheelHitEvidence(before.x, before.y)) });
   const dispatched = await client.command('Input.dispatchMouseEvent', { type:'mouseWheel', x:before.x, y:before.y, deltaX:0, deltaY:-420 });
   try {
     await waitFor(client, `document.querySelector('#photo-img').getBoundingClientRect().width > ${before.width * 1.1}`,
