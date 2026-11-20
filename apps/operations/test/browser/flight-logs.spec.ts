@@ -277,7 +277,9 @@ test("Battery references retry an uncertain save unchanged, rename and clear whi
     return route.fulfill({ json: { aircraftId: "a1", batteryId: "b1", referenceName } });
   });
   await page.goto("/fleet");
-  await page.getByRole("button", { name: /Roof survey/ }).click();
+  const flightRow = page.locator(".flight-list").getByRole("button", { name: /Roof survey/ });
+  await expect(flightRow).toHaveCount(1);
+  await flightRow.click();
   const detail = page.locator(".flight-detail");
   await expect(detail).toContainText("Big Orange · Battery …0009");
   await page.getByLabel("Battery reference name").fill(" Battery  1 ");
@@ -302,7 +304,9 @@ test("Battery references retry an uncertain save unchanged, rename and clear whi
 test("Read-only staff see battery labels without the naming editor", async ({ page }) => {
   await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
   await page.goto("/fleet");
-  await page.getByRole("button", { name: /Roof survey/ }).click();
+  const flightRow = page.locator(".flight-list").getByRole("button", { name: /Roof survey/ });
+  await expect(flightRow).toHaveCount(1);
+  await flightRow.click();
   await expect(page.locator(".flight-detail")).toContainText("Battery …0009");
   await expect(page.getByLabel("Battery reference name")).toHaveCount(0);
 });
