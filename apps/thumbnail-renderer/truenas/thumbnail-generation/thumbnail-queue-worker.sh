@@ -20,8 +20,8 @@ readonly HEARTBEAT_SECONDS=60
 
 : "${LTDSTHUMB_API_BASE:=$EXPECTED_API_BASE}"
 : "${LTDSTHUMB_API_TOKEN:=${THUMBNAIL_INGEST_SECRET:-}}"
-: "${CF_ACCESS_CLIENT_ID:=}"
-: "${CF_ACCESS_CLIENT_SECRET:=}"
+# The Access service-token pair is resolved atomically by resolve_access_pair below: either the older
+# CF_ACCESS_CLIENT_ID/SECRET pair or the shared NAS link pair (NAS_LINK_CLIENT_ID/SECRET), never one of each.
 : "${LTDSTHUMB_SCRATCH_DIR:=/scratch}"
 : "${LTDSTHUMB_IDLE_SECONDS:=30}"
 : "${LTDSTHUMB_RENDER_TIMEOUT_SECONDS:=600}"
@@ -39,9 +39,35 @@ valid_secret() {
   [[ -n "$1" && "$1" != *$'\r'* && "$1" != *$'\n'* ]]
 }
 
+# One complete Access pair from ONE source. The older CF_ACCESS_* names win only as a complete pair; if the shared NAS
+# link file is also set, it must name the same token or the worker stops. A half pair from either source stops too.
+# Messages name variables only, never values.
+resolve_access_pair() {
+  local id="${CF_ACCESS_CLIENT_ID:-}" secret="${CF_ACCESS_CLIENT_SECRET:-}"
+  local link_id="${NAS_LINK_CLIENT_ID:-}" link_secret="${NAS_LINK_CLIENT_SECRET:-}"
+  if [[ -n "$id" || -n "$secret" ]]; then
+    [[ -n "$id" && -n "$secret" ]] || die "CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET must be set together"
+    if [[ -n "$link_id" || -n "$link_secret" ]]; then
+      [[ "$link_id" == "$id" && "$link_secret" == "$secret" ]] ||
+        die "CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET differ from the shared NAS link token; set only one of them"
+    fi
+  elif [[ -n "$link_id" || -n "$link_secret" ]]; then
+    [[ -n "$link_id" && -n "$link_secret" ]] || die "NAS_LINK_CLIENT_ID and NAS_LINK_CLIENT_SECRET must be set together"
+    id="$link_id"
+    secret="$link_secret"
+  fi
+  CF_ACCESS_CLIENT_ID="$id"
+  CF_ACCESS_CLIENT_SECRET="$secret"
+}
+
 [[ "$LTDSTHUMB_API_BASE" == "$EXPECTED_API_BASE" || "$LTDSTHUMB_API_BASE" == "$ACCESS_API_BASE" ]] ||
   die "LTDSTHUMB_API_BASE must be an approved renderer endpoint"
-valid_secret "$LTDSTHUMB_API_TOKEN" || die "LTDSTHUMB_API_TOKEN (or THUMBNAIL_INGEST_SECRET) is required"
+resolve_access_pair
+# Transition: the shared bearer secret is optional once the Access service token is set; Ops accepts either until
+# its bearer path is retired (THUMBNAIL_RENDERER_BEARER_RETIRED). Without an Access token the bearer stays required.
+if [[ -z "$CF_ACCESS_CLIENT_ID" || -n "$LTDSTHUMB_API_TOKEN" ]]; then
+  valid_secret "$LTDSTHUMB_API_TOKEN" || die "LTDSTHUMB_API_TOKEN (or THUMBNAIL_INGEST_SECRET) is required without the NAS link token"
+fi
 if [[ -n "$CF_ACCESS_CLIENT_ID" || -n "$CF_ACCESS_CLIENT_SECRET" ]]; then
   valid_secret "$CF_ACCESS_CLIENT_ID" || die "CF_ACCESS_CLIENT_ID must be set with CF_ACCESS_CLIENT_SECRET"
   valid_secret "$CF_ACCESS_CLIENT_SECRET" || die "CF_ACCESS_CLIENT_SECRET must be set with CF_ACCESS_CLIENT_ID"
@@ -246,10 +272,12 @@ _raw_ops_json() {
   local args=(
     --silent --show-error --max-redirs 0 --connect-timeout 10 --max-time 30
     --request "$method"
-    --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
     --header "Accept: application/json"
     --output "$body_file" --write-out '%{http_code}'
   )
+  if [[ -n "$LTDSTHUMB_API_TOKEN" ]]; then
+    args+=(--header "Authorization: Bearer $LTDSTHUMB_API_TOKEN")
+  fi
   if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
     args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
     args+=(--header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
@@ -270,13 +298,15 @@ _raw_ops_upload() {
   local args=(
     --silent --show-error --max-redirs 0 --connect-timeout 10 --max-time 120
     --request PUT
-    --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
     --header "Accept: application/json"
     --header "Content-Type: image/webp"
     --header "Content-Length: $input_size"
     --upload-file "$input_file"
     --output "$body_file" --write-out '%{http_code}'
   )
+  if [[ -n "$LTDSTHUMB_API_TOKEN" ]]; then
+    args+=(--header "Authorization: Bearer $LTDSTHUMB_API_TOKEN")
+  fi
   if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
     args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
     args+=(--header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
@@ -292,12 +322,14 @@ _raw_ops_download() {
   local args=(
     --silent --show-error --max-redirs 0 --connect-timeout 10 --max-time 840
     --request GET
-    --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
     --header "Accept: application/octet-stream"
     --header "Accept-Encoding: identity"
     --max-filesize "$maximum_bytes"
     --output "$output_file" --write-out '%{http_code}'
   )
+  if [[ -n "$LTDSTHUMB_API_TOKEN" ]]; then
+    args+=(--header "Authorization: Bearer $LTDSTHUMB_API_TOKEN")
+  fi
   if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
     args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
     args+=(--header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
@@ -479,6 +511,9 @@ start_stream_proxy() {
   local source_url_file="$CURRENT_JOB_DIR/stream-source-url"
   rm -f -- "$port_file" "$source_url_file"
   (umask 077; printf '%s' "$source_url" >"$source_url_file")
+  # The resolved credentials are passed explicitly: values filled from aliases (THUMBNAIL_INGEST_SECRET, NAS_LINK_*) are
+  # shell variables, not exported, so the child would not otherwise see them.
+  LTDSTHUMB_API_TOKEN="$LTDSTHUMB_API_TOKEN" CF_ACCESS_CLIENT_ID="$CF_ACCESS_CLIENT_ID" CF_ACCESS_CLIENT_SECRET="$CF_ACCESS_CLIENT_SECRET" \
   python3 -c '
 import http.server, os, re, sys, threading, urllib.error, urllib.request
 
@@ -496,11 +531,14 @@ bytes_forwarded = 0
 base_headers = {"Accept-Encoding": "identity"}
 if auth_mode == "ops":
     token = os.environ.get("LTDSTHUMB_API_TOKEN", "")
-    if len(token) < 32:
-        raise SystemExit("missing renderer API token")
-    base_headers["Authorization"] = f"Bearer {token}"
     access_id = os.environ.get("CF_ACCESS_CLIENT_ID", "")
     access_secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
+    if token:
+        if len(token) < 32:
+            raise SystemExit("invalid renderer API token")
+        base_headers["Authorization"] = f"Bearer {token}"
+    elif not (access_id and access_secret):
+        raise SystemExit("missing renderer API token or NAS link token")
     if access_id and access_secret:
         base_headers["CF-Access-Client-Id"] = access_id
         base_headers["CF-Access-Client-Secret"] = access_secret

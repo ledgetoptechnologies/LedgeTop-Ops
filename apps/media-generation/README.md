@@ -34,12 +34,20 @@ This repository change prepares deployment files; it does not install an app,
 alter the Jobs dataset, or stop any existing app.
 
 1. The supplied YAML uses each package's `:latest` tag with `pull_policy:
-   always`. Each tag advances only after that package's verified `main`
-   release passes its publication checks. Updating/redeploying the app pulls
-   the newest verified image; a plain container restart does not pull an image,
-   and this stack is not a live automatic updater. Configure a private registry
-   credential in the Apps UI if required. Commit tags and digest receipts remain
-   available for traceability; deployment requires no image substitutions.
+   always`. `main` no longer moves `:latest` for the proxy generator or the
+   thumbnail images: each `main` build is published only as immutable
+   `sha-<commit>` and `candidate-…` tags. Until a protected promotion workflow
+   exists for them, `:latest` stays where it is. To run a newer build
+   meanwhile: (1) confirm that commit's `main` publish run succeeded end to
+   end, (2) take the image's verified digest from that run's receipt, (3) pin
+   `image: ghcr.io/ledgetoptechnologies/<package>@sha256:<receipt digest>`, never
+   the `sha-<commit>` tag (it can exist even if a later check failed), and
+   (4) get Beau's separate approval before production use.
+   Updating/redeploying the app pulls whatever `:latest` (or the pinned digest)
+   names; a plain container restart does not pull an image, and this stack is
+   not a live automatic updater. Configure a private registry credential in the
+   Apps UI if required. Commit tags and digest receipts remain available for
+   traceability.
 2. Select the existing shared dataset
    `/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` as
    `WORKERS_APP_DATA_HOST_PATH`. Give user/group `568:568` read/write/traverse

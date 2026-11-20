@@ -86,7 +86,9 @@ services:
     stop_grace_period: 5m
     environment:
       LTDSTHUMB_API_BASE: ${LTDSTHUMB_API_BASE:-https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1}
-      LTDSTHUMB_API_TOKEN: ${THUMBNAIL_INGEST_SECRET:?Set the dedicated Operations renderer token}
+      # Non-fatal at interpolation so the retired (NAS link only) mode needs no old value. The worker itself refuses to
+      # start without either this bearer or a complete Access pair, so a missing value still fails closed.
+      LTDSTHUMB_API_TOKEN: ${THUMBNAIL_INGEST_SECRET:-}
       CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID:-}
       CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET:-}
       LTDSTHUMB_WORKER_CONCURRENCY: "${LTDSTHUMB_WORKER_CONCURRENCY:-4}"
@@ -176,6 +178,13 @@ services:
     cap_drop:
       - ALL
     cpus: '2.0'
+    # Optional until the shared NAS link file exists: without NAS_LINK_ENV_FILE / LOGS_INGRESS_HOST the stack starts
+    # exactly as before and Logs uses only its own logs.env (legacy path). Needs Docker Compose 2.24+ (required: false).
+    env_file:
+      - path: ${NAS_LINK_ENV_FILE:-/nonexistent/nas-link.env}
+        required: false
+    environment:
+      LOGS_INGRESS_HOST: ${LOGS_INGRESS_HOST:-}
     image: ghcr.io/ledgetoptechnologies/logs-local:latest
     init: true
     logging:
@@ -187,7 +196,7 @@ services:
     memswap_limit: 2g
     pids_limit: 256
     ports:
-      - ${LOGS_BIND_ADDRESS:?Set the NAS LAN address the tunnel connector reaches}:8090:8080
+      - ${LOGS_BIND_ADDRESS:?Set the NAS LAN address the reverse proxy forwards to}:8090:8080
     pull_policy: always
     read_only: true
     restart: unless-stopped

@@ -160,7 +160,7 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   assert.doesNotMatch(promote, /secrets\.(?!GITHUB_TOKEN\b)/, 'promotion needs no build or licence secrets');
   assert.doesNotMatch(promote, /build-push-action|docker build\b|continue-on-error/);
   assert.deepEqual(promote.match(/always\(\)/g), ['always()'], 'only the result upload runs after a failure');
-  const order = ['Validate requested candidate', 'Check out promotion verifier', 'Require the commit to be on main',
+  const order = ['Require the protected promotion environment and its recorded approval', 'Validate requested candidate', 'Check out promotion verifier', 'Require the commit to be on main',
     'Find the successful main publish run for the commit', "Verify the candidate's release attestation",
     'Log in to GitHub Container Registry', 'Set up Docker Buildx', 'Verify the registry still holds the exact candidate',
     'Read current latest and resolve the rollback target', 'Persist the rollback receipt before moving latest',
@@ -200,14 +200,14 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   assert.match(promoteSteps.get('Upload the rollback receipt'), /if-no-files-found: error/);
   assert.ok(promoteSteps.get('Upload the promotion result').trimStart().startsWith("if: ${{ always() && steps.receipt.outcome == 'success' }}"));
   const move = promoteSteps.get('Move latest to the verified digest');
-  assert.equal((promote.match(/imagetools create --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1, 'only the move step writes latest');
-  assert.ok(move.includes('docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"'));
+  assert.equal((promote.match(/imagetools create --prefer-index=false --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1, 'only the move step writes latest');
+  assert.ok(move.includes('docker buildx imagetools create --prefer-index=false --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"'));
   assert.match(move, /if \[\[ "\$PROMOTED_DIGEST" != "\$PROMOTE_DIGEST" \]\]; then\n\s+record verify-failed[\s\S]*?rollback_help[\s\S]*?exit 1/);
   assert.ok(order.indexOf('Upload the rollback receipt') < order.indexOf('Move latest to the verified digest'), 'receipt is stored before latest moves');
   // Fail-closed re-read immediately before the single write; documented as not an atomic CAS.
   const reread = move.indexOf('CURRENT="$(docker buildx imagetools inspect "$IMAGE_NAME:latest"');
   const abort = move.indexOf('record aborted-latest-changed');
-  const write = move.indexOf('docker buildx imagetools create --tag "$IMAGE_NAME:latest"');
+  const write = move.indexOf('docker buildx imagetools create --prefer-index=false --tag "$IMAGE_NAME:latest"');
   assert.ok(reread > 0 && reread < abort && abort < write, 're-read and abort precede the write');
   assert.ok(move.includes('if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]; then'));
   assert.ok(move.includes('if [[ "$PREVIOUS_DIGEST" == absent ]] && manifest_unknown_only "$RUNNER_TEMP/reread-error.txt" "$IMAGE_NAME:latest"; then'));
@@ -218,8 +218,11 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   assert.ok(promote.includes('APPROVED_BY: ${{ inputs.approved_by }}') && promote.includes('APPROVAL_REFERENCE: ${{ inputs.approval_reference }}'));
   const validate = promoteSteps.get('Validate requested candidate');
   assert.ok(validate.includes('"$APPROVED_BY" =~') && validate.includes('"$APPROVAL_REFERENCE" =~'));
-  for (const field of ['dispatchedBy', 'approvedBy', 'approvalReference', '"approvalEnforced": false']) assert.ok(receipt.includes(field), field);
-  assert.ok(promote.includes('GitHub Environment with required') && promote.includes('not created here'));
+  for (const field of ['dispatchedBy', 'approvedBy', 'typedApprovedBy', 'approvalReference', '"approvalEnvironment": "image-promotion"', '"approvalEnforced": true'])
+    assert.ok(receipt.includes(field), field);
+  assert.ok(promote.includes('    environment: image-promotion\n'));
+  assert.ok(promote.includes('protected GitHub Environment `image-promotion`') && promote.includes('never creates or changes them'));
+  assert.ok(promote.indexOf('Require the protected promotion environment and its recorded approval') < promote.indexOf('Validate requested candidate'));
 });
 
 // Every registry writer in the repository, for the Viewer image's `latest` and
@@ -283,7 +286,7 @@ test('Only publish-viewer writes Viewer candidate and sha tags, and only promote
   assert.ok(!read('.github/workflows/promote-logs-local.yml').includes('ledgetop-ops-viewer'));
   assert.doesNotMatch(workflow, /:latest\b/);
   const promote = read('.github/workflows/promote-viewer.yml');
-  assert.equal((promote.match(/docker buildx imagetools create --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1);
+  assert.equal((promote.match(/docker buildx imagetools create --prefer-index=false --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1);
   // Writers are serialized: promotions never overlap; builds never cancel mid-run.
   assert.match(promote, /^concurrency:\n  group: promote-viewer-latest\n  cancel-in-progress: false$/m);
   assert.match(workflow, /^concurrency:\n  group: publish-viewer-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false$/m);

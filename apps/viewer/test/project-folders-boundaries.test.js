@@ -25,19 +25,19 @@ function seedTask(p,project,label='Task'){
 }
 const folderObjects=db=>db.prepare("SELECT type,name FROM sqlite_master WHERE name IN ('project_folders','project_folders_sibling_name_idx','processing_tasks_folder_idx','processing_task_folder_project_insert','processing_task_folder_project_update') ORDER BY name").all().map(row=>`${row.type}:${row.name}`);
 
-test('folder migration is version 48, the highest declared, and keeps the runner order',()=>{
+test('folder migration is uniquely registered at version 48 and keeps the runner order',()=>{
   const folder=MIGRATIONS.find(item=>item.name==='project_organizational_folders');
   assert.equal(folder.version,48);
   assert.equal(MIGRATIONS.filter(item=>item.version===48).length,1);
-  assert.equal(MIGRATIONS.at(-1).version,48);
-  assert.equal(MIGRATIONS.some(item=>[43,44,45,46,47].includes(item.version)),false,'no other numbers are allocated by this change');
+  const versions=MIGRATIONS.map(item=>item.version);
+  assert.deepEqual(versions,[...new Set(versions)].sort((a,b)=>a-b));
 });
 
 test('migration 48 builds the folder schema on an empty database and is a no-op on re-run',t=>{
   const dbPath=path.join(tempRoot(t,'empty'),'db.sqlite');
   let db=openDatabase(dbPath);
   assert.equal(folderObjects(db).length,5);
-  assert.equal(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v,48);
+  assert.equal(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v,MIGRATIONS.at(-1).version);
   const stamp=db.prepare('SELECT applied_at FROM schema_migrations WHERE version=48').get().applied_at;
   db.close();db=openDatabase(dbPath);t.after(()=>db.close());
   assert.equal(db.prepare('SELECT COUNT(*) n FROM schema_migrations WHERE version=48').get().n,1);
