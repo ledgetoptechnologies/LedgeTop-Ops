@@ -12,9 +12,13 @@ permissions:
   contents: read
   packages: write
 
+# A main build publishes only immutable candidate tags. Moving `latest` is the
+# separate, manually dispatched promote-viewer.yml workflow. Builds are never
+# cancelled mid-run, so a tag step cannot be interrupted; a newer merge queued
+# behind a running build replaces any older queued build.
 concurrency:
   group: publish-viewer-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   verify-and-build:
@@ -68,7 +72,6 @@ jobs:
           tags: |
             type=sha,prefix=sha-,format=long
             type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -122,7 +125,7 @@ jobs:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "42"
+          EXPECTED_SCHEMA_VERSION: "48"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_OBJ2TILES_SOURCE_SHA256: "79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5"
           EXPECTED_OBJ2TILES_PATCH_SHA256: "fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c"
@@ -255,22 +258,33 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE/apps/viewer/test/helpers,target=/app/test/helpers,readonly" \
             --entrypoint node "$VERIFY_IMAGE" --test --test-concurrency=1 /app/test/image/v2-mesh-synthetic.test.mjs
 
-      - name: Promote verified digest to release tags
+      - name: Publish immutable sha tag for verified digest
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         env:
           FINAL_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          EXPECTED_REVISION: ${{ github.sha }}
           PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          test -n "$FINAL_TAGS"
-          while IFS= read -r tag; do
-            test -n "$tag" || continue
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          # This build never moves `latest`; only the one write-once sha tag is published.
+          tag="$IMAGE_NAME:sha-$EXPECTED_REVISION"
+          test "$FINAL_TAGS" = "$tag"
+          if EXISTING_DIGEST="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' 2>inspect-error.txt)"; then
+            EXISTING_DIGEST="$(printf '%s' "$EXISTING_DIGEST" | tr -d '"')"
+            test "$EXISTING_DIGEST" = "$IMAGE_DIGEST" || { echo "::error::$tag already names $EXISTING_DIGEST; immutable sha tags are never moved"; exit 1; }
+          else
+            grep -qi 'not found' inspect-error.txt || { cat inspect-error.txt >&2; exit 1; }
             docker buildx imagetools create --tag "$tag" "$PUBLISHED_IMAGE"
-            PROMOTED_DIGEST="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-            test "$PROMOTED_DIGEST" = "$IMAGE_DIGEST"
-          done <<< "$FINAL_TAGS"
+          fi
+          rm -f inspect-error.txt
+          PROMOTED_DIGEST="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          test "$PROMOTED_DIGEST" = "$IMAGE_DIGEST"
+          printf 'Candidate for promotion: commit `%s`, digest `%s` (tag `%s`). `latest` was not changed.\n\n' "$EXPECTED_REVISION" "$IMAGE_DIGEST" "$tag" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Write verified release attestation
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -280,7 +294,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "42"
+          EXPECTED_SCHEMA_VERSION: "48"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_OBJ2TILES_LOCKSET_SHA256: "b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98"
           EXPECTED_OBJ2TILES_LICENSE_NOTICE_SHA256: "86768eb4bb03feacad31ba6ec90c003abafdebeb5257a1c3eeb1b4f348530a4e"
