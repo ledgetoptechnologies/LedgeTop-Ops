@@ -44,7 +44,6 @@ test('one project link dynamically exposes only active published derivatives and
   const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Published flight' });
   const folder = processing.createProjectFolder(project.id, { displayName: 'Client' }, 'ops:share');
   const nested = processing.createProjectFolder(project.id, { displayName: 'Site', parentId: folder.id }, 'ops:share');
-  processing.moveTaskToFolder(task.id, nested.id, 'ops:share');
   const unpublishedTask = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Private draft in same folder' });
   processing.moveTaskToFolder(unpublishedTask.id, nested.id, 'ops:share');
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
@@ -142,7 +141,21 @@ test('one project link dynamically exposes only active published derivatives and
   assert.equal(JSON.stringify(config).includes(first.reportName), false);
   for (const hidden of [folder.id, nested.id, 'folderId']) assert.equal(JSON.stringify(config).includes(hidden), false);
   const firstAssetUrl = config.assets.glb;
-  assert.equal((await fetch(`${base}${firstAssetUrl}`)).status, 200);
+  assert.equal(await (await fetch(`${base}${firstAssetUrl}`)).text(), 'first-public-mesh');
+  // Keep the existing link, unlocked cookie and already-issued asset capability
+  // while moving the published task from the root into its own project folder.
+  processing.moveTaskToFolder(task.id, nested.id, 'ops:share');
+  response = await fetch(`${base}/api/project-share/${publicToken}`, { headers: { cookie } });
+  assert.equal(response.status, 200);
+  const movedCatalog = await response.json();
+  assert.deepEqual(movedCatalog.tasks.map((item) => item.id), [task.id]);
+  for (const hidden of [unpublishedTask.id, folder.id, nested.id, 'folderId']) assert.equal(JSON.stringify(movedCatalog).includes(hidden), false);
+  assert.equal((await fetch(`${base}/api/project-share/${publicToken}/tasks/${unpublishedTask.id}`, { headers: { cookie } })).status, 404);
+  assert.equal((await fetch(`${base}/api/project-share/${publicToken}`)).status, 401);
+  response = await fetch(`${base}/api/project-share/${publicToken}/tasks/${task.id}`, { headers: { cookie } });
+  assert.equal(response.status, 200);
+  assert.ok((await response.json()).assets.glb);
+  assert.equal(await (await fetch(`${base}${firstAssetUrl}`)).text(), 'first-public-mesh', 'the pre-move capability remains usable');
   const capabilityPrefix = firstAssetUrl.slice(0, firstAssetUrl.indexOf(`/${first.model.id}/`));
   assert.equal((await fetch(`${base}${capabilityPrefix}/${first.model.id}/webodm/${first.reportName}`)).status, 404);
 

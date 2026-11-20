@@ -186,3 +186,19 @@ test('project purge succeeds when user folder names collide with folder ids or r
   assert.equal(JSON.parse(db.prepare("SELECT details_json FROM audit_events WHERE action='project.purged' AND entity_id=?").get(project.id).details_json).removedFolders,count);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
 });
+
+test('folder create and rename refuse control and invisible characters but keep existing stored names',async t=>{
+  const db=openDatabase(':memory:');t.after(()=>db.close());
+  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Synthetic names'});
+  const unsafe=['Site\u007fNorth','Site\nNorth','Site North\n','Site\u0000','Site\u200bNorth','Site\u202eNorth','\ufeffSite','Site\u0085'];
+  for(const name of unsafe)assert.throws(()=>p.createProjectFolder(project.id,{displayName:name},'staff'),{code:'invalid_folder_name'},JSON.stringify(name));
+  const folder=p.createProjectFolder(project.id,{displayName:'Site North'},'staff');
+  for(const name of unsafe)assert.throws(()=>p.renameProjectFolder(project.id,folder.id,name,'staff'),{code:'invalid_folder_name'},JSON.stringify(name));
+  assert.equal(p.projectFolders(project.id)[0].displayName,'Site North');
+  assert.equal(p.createProjectFolder(project.id,{displayName:'Café Ñandú 北'},'staff').displayName,'Café Ñandú 北','ordinary Unicode is allowed');
+  // A legacy stored name is listed unchanged and can be renamed to a safe name.
+  const legacy=crypto.randomUUID(),t0=new Date().toISOString();
+  db.prepare('INSERT INTO project_folders(id,project_id,parent_id,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(legacy,project.id,null,'Legacy\u007fname',t0,t0);
+  assert.equal(p.projectFolders(project.id).find(row=>row.id===legacy).displayName,'Legacy\u007fname');
+  assert.equal(p.renameProjectFolder(project.id,legacy,'Legacy name','staff').displayName,'Legacy name');
+});
