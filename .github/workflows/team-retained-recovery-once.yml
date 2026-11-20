@@ -1,0 +1,74 @@
+name: Exact Team retained bytes recovery (manual, no release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      approved_source_commit:
+        description: Independently reviewed exact main commit containing this workflow and producer
+        required: true
+        type: string
+      acknowledgement:
+        description: recover-exact-active-844a-39-assets-no-release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: production-auto-installation-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: ${{ github.repository == 'ledgetoptechnologies/LedgeTop-Ops' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.approved_source_commit == github.sha && inputs.acknowledgement == 'recover-exact-active-844a-39-assets-no-release' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Check out only the exact approved main source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Use supported dependency-free Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+      - name: Recover the exact active-version static bytes and seal locally
+        id: recovery
+        env:
+          APPROVED_SOURCE_COMMIT: ${{ inputs.approved_source_commit }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NODE_OPTIONS: --max-old-space-size=1024
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          set -euo pipefail
+          umask 077
+          timeout --signal=TERM --kill-after=60s 10m node scripts/team-retained-recovery-once.mjs
+      - name: Preserve encrypted evidence only, including held attempts
+        id: sealed
+        if: ${{ always() && steps.recovery.outputs.sealed_directory != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: team-retained-844a-${{ github.run_id }}-attempt-1-sealed
+          path: ${{ steps.recovery.outputs.sealed_directory }}/*.sealed.json
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+      - name: Record bounded immutable run and ciphertext artifact proof
+        if: ${{ always() }}
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RECOVERY_RESULT: ${{ steps.recovery.outcome }}
+          ARTIFACT_ID: ${{ steps.sealed.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.sealed.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          printf 'source=%s run=%s attempt=%s producer=%s ciphertext_artifact=%s digest=%s\n' "$SOURCE_SHA" "$RUN_ID" "$RUN_ATTEMPT" "$RECOVERY_RESULT" "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          test "$RECOVERY_RESULT" = success
+          test -n "$ARTIFACT_ID"
+          test -n "$ARTIFACT_DIGEST"

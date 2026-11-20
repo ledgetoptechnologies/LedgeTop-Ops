@@ -1,0 +1,248 @@
+{
+  "schemaVersion": 1,
+  "accountId": "846c924bf17bf4f3dd15c97a4c5d1d51",
+  "workerName": "ledgetop-ops",
+  "origin": "https://ops.ledgetop.app",
+  "versionId": "844a999f-eb29-4a67-9166-5b272893c8a5",
+  "deploymentId": "c85dd11b-429e-4237-863e-ac1e06bb53e0",
+  "installedSource": "4a1c05e6f1ff0c32f4c102e54a2c82d4bafba434",
+  "candidateSource": "52d5a57d74814c821d8de39854b6a2a86b25ecab",
+  "ledgerSHA256": "59cecb11cbab5e45556d49ee7b3bf1c89198b85f6c19a6a9babef1488557451b",
+  "localMapSHA256": "858dd459b195852a99d1e649e632723e6e3b1f0aa06611d3380adf235314d448",
+  "entries": [
+    {
+      "path": "/assets/SopMarkdownEditor-BtSQk7gK.js",
+      "size": 1391226,
+      "sha256": "7a2cd31f06a8e87e86ca68a29635c0564843cad78ecc98080fe79bb8c8c3e445",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/SopMarkdownEditor-BtSQk7gK.js.map",
+      "size": 5606391,
+      "sha256": "2f9ab71a2d38c752d9a3d9668e69e7e4da6725007dce6a473445ccb3a8feab55",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-8TtQ6PkV.js",
+      "size": 21146,
+      "sha256": "fa3132264d3ec9f687ea32b50b2bbd0f27a2cfdb8be84ae453c8a9db91421175",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-8TtQ6PkV.js.map",
+      "size": 39073,
+      "sha256": "72432ce056f926f5a001599bb78cacfdaffaa665aef57e1f31cf6b1f5669baca",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-BBpMvH9H.js",
+      "size": 2682,
+      "sha256": "6252523786c9234af5426d0767bf99cd45d354cdc820c9534b08d877192ec006",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-BBpMvH9H.js.map",
+      "size": 5269,
+      "sha256": "fe5b26c4c1b66bf3eab08700e61ddeae08d31f1a851c09d9e66ceaa29e1d12cb",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-BVVoQHMr.js",
+      "size": 30843,
+      "sha256": "aa3124d3c4ddfa2877e7e429ceb11f9937114dd7676b9df61e83c5ed225d0a9c",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-BVVoQHMr.js.map",
+      "size": 45180,
+      "sha256": "970f7e9eb55e40e8706d7879725d48d6f818e0756e2579357882d14417547924",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-Bm3VhEdL.js",
+      "size": 2473,
+      "sha256": "acc7b36539d1a4860609f0682aba69c8d9d17e5d3cd9df1cf7b80a04ae367121",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-Bm3VhEdL.js.map",
+      "size": 5925,
+      "sha256": "481544887cf25bb3168c24e23ec6ecdb4158955f5833859fd92590a06b9ce8f5",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-C14Ad0-e.js",
+      "size": 3333,
+      "sha256": "c048a2c5cf4ecc8a09086ecccfdd0d9ab80658dbdd1f47ea5791809aca9251ee",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-C14Ad0-e.js.map",
+      "size": 7336,
+      "sha256": "937e6f941bc3353efa766a340b5e7f1e0d9172dba5552ea1dc34af61526a55bc",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-C4hHaGMr.js",
+      "size": 70859,
+      "sha256": "7cc6da7d46ad950ecd9b85c37cc9044acfa4c7a325eb08ec6ca843cc9f09ed02",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-C4hHaGMr.js.map",
+      "size": 79622,
+      "sha256": "dbffdf36243e05a3c6a8c9f1d2b2edceb871d42bb9d7a1d3fedaaeaf78010b62",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-COygZJU1.js",
+      "size": 16303,
+      "sha256": "50b0d27552ac956a40f3918a2a36103424bdb6a969a6b7d0c6a21edde4144da2",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-COygZJU1.js.map",
+      "size": 22654,
+      "sha256": "a95b3fed54a0f81cff0a4113515d2299380ea8236782bad988905ece76653985",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-Cac4deCs.js",
+      "size": 5003,
+      "sha256": "56f10b247632eb40ed0dc05a9a61b3d2cd611fc661e3d3df78fc9cee97eab9e5",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-Cac4deCs.js.map",
+      "size": 11598,
+      "sha256": "3e25e8f436ce09786ac11c7dc8bd1cfbf391e092c47dbe38eb7258037b9c9455",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-CfgK4aFw.js",
+      "size": 3645828,
+      "sha256": "6d27e11e8d2f3cca210aa36fb8122c1872bf391270ea6d97076be29e35b16c22",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-CfgK4aFw.js.map",
+      "size": 9519907,
+      "sha256": "1bca01861b89fd27f7d7d0a1e17ee0a676649f69d7a2f02e8f44cfbf86277b73",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-Cjpd0YcD.js",
+      "size": 97817,
+      "sha256": "75f72b8288a034b04ec352f65ad352c361c3fcc7b50c261709e037f24ff53a54",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-Cjpd0YcD.js.map",
+      "size": 114242,
+      "sha256": "3059f91c1429ef1514ac06fa79388f2d3eb4d24463c222d69b89fc0e6d7ce923",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-CvbAwR-6.js",
+      "size": 103966,
+      "sha256": "1b0ce9bb298c1bf43404b89729b5c07d5a6682fe818f2e45b71a61ec05aedf2d",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-CvbAwR-6.js.map",
+      "size": 114057,
+      "sha256": "dc72dda967489a9909e14ca6801b818c7c61869160a520d1a00437ae1ec5d2a6",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-Cxrfb8GY.js",
+      "size": 40782,
+      "sha256": "4102a4ccee06e685387ada4783b8572e65ad3bcf297ff258bbacdff9406eccfc",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-Cxrfb8GY.js.map",
+      "size": 46076,
+      "sha256": "d7392ecf50a904c94f7c651170a81bb59b811dd6e1f4e560282d19362c4532a5",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-D4xQg0P7.js",
+      "size": 45151,
+      "sha256": "30f50b9db167fe24ebcd96a48c1c755c84a0e30afe511cce4ed64559ed8c0c1b",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-D4xQg0P7.js.map",
+      "size": 75514,
+      "sha256": "3e529328ff27c73479f0cd8d24d36f7cbe571cd02e0ec0fb21fd84b4272ea07c",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-DP8vG2ev.js",
+      "size": 23048,
+      "sha256": "653237ef0630e52c9cc73eb4c440c0876f0a4606737b412e16d223fd6f38f853",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-DP8vG2ev.js.map",
+      "size": 39423,
+      "sha256": "97f9d26196c85bd26d1a906b11d2fff80e8126d6d5ecda7f5d60b57eaba037e9",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-Dm7dUTgU.js",
+      "size": 32346,
+      "sha256": "bbb7bb98908064c1b8f705f094dcdd818a68bd20e6832deebd49f822d836587c",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-Dm7dUTgU.js.map",
+      "size": 72451,
+      "sha256": "be92f4d6fb8cb371bd465474a8803a503aa65b2c9c087917229f70b3f9785f59",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-DqrNB7P4.js",
+      "size": 20882,
+      "sha256": "7e779551468eac89a7921f2c8889c66b721abc6a7adc29470300f9d06dd3521a",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-DqrNB7P4.js.map",
+      "size": 36863,
+      "sha256": "f31057c21d2c92522221200338be63ec80fc61c2dea056ad273f988f7d1148fd",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-oiZivFn2.js",
+      "size": 14720,
+      "sha256": "2508f893849782491a1be2a5adc4c3fb4176b5c282dcaab7f202689a3b9b04f8",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-oiZivFn2.js.map",
+      "size": 37550,
+      "sha256": "d09fefc5fd122449a1a774dd73913fa6995983b34aefcf75d0d9895cae1eccc4",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/assets/index-tDtFLvGZ.js",
+      "size": 12760,
+      "sha256": "a351834a526ad5f10b38172902034210c9eb078f6ad2c12982a5d33df8e32136",
+      "contentType": "text/javascript"
+    },
+    {
+      "path": "/assets/index-tDtFLvGZ.js.map",
+      "size": 34075,
+      "sha256": "6299acc3e0c0f2d9ccfb9b6f28d7f47e5caf8468fd4ea1dec09f182c96b1536a",
+      "contentType": "application/json"
+    },
+    {
+      "path": "/index.html",
+      "size": 656,
+      "sha256": "a66fc5464acdce96638e3ba434b68ffbb9c9523d9b35629e5afb5e1cfaa309f7",
+      "contentType": "text/html"
+    }
+  ]
+}
