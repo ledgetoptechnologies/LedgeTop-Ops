@@ -559,10 +559,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Models",
       "3D models, orthophotos and point clouds: their health, quick sharing with clients, and the full Viewer workspace.",
     ],
-    team: [
-      "Team",
-      "Project Alpha-managed staff access, divisions, and role assignments.",
-    ],
+    team: ["Team", ""],
     administration: [
       "Administration",
       "Connected services, integration synchronization, security, and audit history.",
@@ -582,7 +579,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
         ? new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })
         : SECTION_GROUP[page]}</span>
       <h1>{copy[page][0]}</h1>
-      <p>{page === "dashboard" ? `${greeting(displayName)}. Here's what needs attention today.` : copy[page][1]}</p>
+      {(page === "dashboard" || copy[page][1]) && <p>{page === "dashboard" ? `${greeting(displayName)}. Here's what needs attention today.` : copy[page][1]}</p>}
     </div>
   );
 }
@@ -6509,19 +6506,16 @@ function StaffAccessEditor({
     >
       <fieldset className="local-access-toggle viewer-access-toggle" disabled={busy}>
         <legend>3D Models access</legend>
-        {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => STAFF_VIEWER_CONTROLS.has(control)).map(
-          (control) => {
-            const ownerOnly = control === "viewerStoragePurge";
-            return <label key={control} className={ownerOnly ? "danger-control" : undefined}>
-              <input
-                type="checkbox"
-                checked={Boolean(person.localControls?.[control])}
-                disabled={ownerOnly && !person.owner_role}
-                onChange={(event) => update(person, control, event.target.checked)}
-              />
-              {STAFF_CONTROL_LABELS[control]}
-            </label>;
-          },
+        {/* Purge is owner-only and owners are never editable here; owners hold it through role-owner. */}
+        {(Object.keys(STAFF_CONTROL_LABELS) as StaffControl[]).filter(control => STAFF_VIEWER_CONTROLS.has(control) && control !== "viewerStoragePurge").map(
+          (control) => <label key={control}>
+            <input
+              type="checkbox"
+              checked={Boolean(person.localControls?.[control])}
+              onChange={(event) => update(person, control, event.target.checked)}
+            />
+            {STAFF_CONTROL_LABELS[control]}
+          </label>,
         )}
         <small>Turning off model viewing blocks the Models page and new Viewer workspace sessions. Existing Viewer sessions expire within 30 minutes.</small>
       </fieldset>
@@ -6557,13 +6551,6 @@ function Team({ session }: { session: Session }) {
   };
   return (
     <>
-      <ManagedNotice
-        detail={
-          session.user.isAdministrator
-            ? "Project Alpha controls who can sign in. These controls show effective access; every saved unchecked control explicitly denies inherited grants."
-            : "Project Alpha controls who can sign in. Your Operations access is granted locally and may be limited by assigned work."
-        }
-      />
       <ErrorLine error={error} />
       <div className="card-grid">
         {data?.staff.map((person) => (
@@ -6576,33 +6563,29 @@ function Team({ session }: { session: Session }) {
                 >
                   {person.status}
                 </StatusPill>
-                {person.sync_protected || person.id === "staff-beau-koltz" ? (
+                {person.owner_role === true || person.id === "staff-beau-koltz" ? (
                   <span className="protected-badge">Protected Owner</span>
                 ) : (
                   <span className="managed-badge">
-                    Managed in Project Alpha
+                    {person.provisioning_source === "local" ? "Operations profile" : "Imported profile"}
                   </span>
                 )}
               </div>
               <h3>{person.display_name}</h3>
               <p>{person.email}</p>
-              <small>{person.roles || "No Project Alpha role"}</small>
+              <small>{person.roles || "No inherited role"}</small>
               {session.user.isAdministrator &&
               person.id !== session.user.id &&
-              !person.sync_protected &&
-              person.id !== "staff-beau-koltz" ? (
+              person.access_controls_editable === true ? (
                 <>
                   <StaffAccessEditor person={person} busy={busy === person.id} update={(target, control, enabled) => void update(target, control, enabled)} />
                   {person.status !== "active" && (
                     <small>
-                      Saved access will take effect only after Project Alpha
-                      activates this staff member.
+                      Saved access does not activate an inactive employee.
                     </small>
                   )}
                 </>
-              ) : (
-                <small>Access is managed by a system administrator.</small>
-              )}
+              ) : null}
               {allowed(session.user, "operations.view") && (
                 <TeamAssignedWork staffId={person.id} />
               )}
