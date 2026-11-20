@@ -7,9 +7,12 @@ name: Promote TrueNAS thumbnail renderer candidate to latest
 # digest, and nothing else moves it. It does not rebuild or deploy anything. Rollback is a promotion of an older
 # candidate.
 #
-# Approval: the approved_by and approval_reference inputs are written into the rollback receipt as a RECORD of who
-# authorized the promotion. They do not enforce anything. The enforcing mechanism is a GitHub Environment with
-# required reviewers, which is an owner repository setting and is not created here.
+# Approval (enforced): the job runs in the protected GitHub Environment `image-promotion`, so GitHub holds it until a
+# required reviewer approves. Before anything else, and before any registry write, the job verifies through the API
+# that this environment exists AND has a required-reviewers rule, and reads who approved this run from the deployment
+# review; if either is missing it stops and writes nothing. The reviewer is recorded in the receipt as approvedBy.
+# approved_by / approval_reference stay as typed notes only. The environment and its reviewer are a repository
+# security setting that only the owner creates (Settings > Environments); this workflow never creates or changes it.
 #
 # Exclusion: this is the only workflow that writes the thumbnail images' `latest` (a test fails if another writer
 # appears). The per-image `promote-thumbnail-renderer-latest-<target>` concurrency group stops two promotions of the
@@ -62,6 +65,7 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    environment: image-promotion
     permissions:
       contents: read
       actions: read
@@ -74,6 +78,28 @@ jobs:
       APPROVED_BY: ${{ inputs.approved_by }}
       APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
     steps:
+      - name: Require the protected promotion environment and its recorded approval
+        id: approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTION_ENVIRONMENT: image-promotion
+        run: |
+          set -euo pipefail
+          # Fail closed, before any other step and any registry write. A missing environment, one without a
+          # required-reviewers rule, an unreadable answer, or no recorded approval of THIS run all stop here.
+          RULES="$(gh api "repos/$GITHUB_REPOSITORY/environments/$PROMOTION_ENVIRONMENT" \
+            --jq '[.protection_rules[]? | select(.type == "required_reviewers") | ((.reviewers // []) | length)] | add // 0')" || RULES=unreadable
+          [[ "$RULES" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::The '$PROMOTION_ENVIRONMENT' environment is missing or has no required reviewers. The repository owner creates it (Settings > Environments > New environment, Required reviewers). Nothing was changed."
+            exit 1; }
+          APPROVERS="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq "[.[] | select(.state == \"approved\" and ((.environments // []) | map(.name) | index(\"$PROMOTION_ENVIRONMENT\"))) | .user.login] | unique | join(\",\")")" || APPROVERS=
+          [[ "$APPROVERS" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}(,[A-Za-z0-9][A-Za-z0-9-]{0,38})*$ ]] || {
+            echo "::error::No recorded approval of this run for '$PROMOTION_ENVIRONMENT'. Nothing was changed."
+            exit 1; }
+          echo "approvers=$APPROVERS" >> "$GITHUB_OUTPUT"
+
       - name: Validate requested candidate
         shell: bash
         run: |
@@ -215,20 +241,22 @@ jobs:
           PREVIOUS_DIGEST: ${{ steps.previous.outputs.digest }}
           PROMOTION_MODE: ${{ steps.previous.outputs.mode }}
           CANDIDATE_RUN_ID: ${{ steps.run.outputs.id }}
+          APPROVERS: ${{ steps.approval.outputs.approvers }}
         run: |
           set -euo pipefail
+          [[ -n "$APPROVERS" ]]
           [[ ( "$PROMOTION_MODE" == initialize && "$PREVIOUS_DIGEST" == absent ) || ( "$PROMOTION_MODE" == replace && "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ) ]]
           [[ "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]]
           DIR="$RUNNER_TEMP/thumbnail-renderer-promotion-receipt"
           mkdir -p "$DIR"
-          printf '{\n  "receiptSchemaVersion": 2,\n  "mode": "%s",\n  "image": "%s",\n  "previousDigest": "%s",\n  "newDigest": "%s",\n  "commit": "%s",\n  "candidateRunId": "%s",\n  "promotionRunId": "%s",\n  "promotionRunAttempt": "%s",\n  "dispatchedBy": "%s",\n  "approvedBy": "%s",\n  "approvalReference": "%s",\n  "approvalEnforced": false,\n  "recordedAt": "%s"\n}\n' \
+          printf '{\n  "receiptSchemaVersion": 2,\n  "mode": "%s",\n  "image": "%s",\n  "previousDigest": "%s",\n  "newDigest": "%s",\n  "commit": "%s",\n  "candidateRunId": "%s",\n  "promotionRunId": "%s",\n  "promotionRunAttempt": "%s",\n  "dispatchedBy": "%s",\n  "approvedBy": "%s",\n  "approvalEnvironment": "image-promotion",\n  "typedApprovedBy": "%s",\n  "approvalReference": "%s",\n  "approvalEnforced": true,\n  "recordedAt": "%s"\n}\n' \
             "$PROMOTION_MODE" "$IMAGE_NAME" "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT" "$CANDIDATE_RUN_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
-            "$GITHUB_ACTOR" "$APPROVED_BY" "$APPROVAL_REFERENCE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DIR/thumbnail-renderer-promotion-receipt.json"
+            "$GITHUB_ACTOR" "$APPROVERS" "$APPROVED_BY" "$APPROVAL_REFERENCE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DIR/thumbnail-renderer-promotion-receipt.json"
           {
             printf 'Rollback receipt (recorded before `latest` is changed)\n\n'
             printf -- '- Mode: %s (initialize = first-time creation of latest, explicitly requested)\n' "$PROMOTION_MODE"
             printf -- '- Previous latest (rollback target): `%s`\n- New digest: `%s`\n- Commit: `%s`\n' "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT"
-            printf -- '- Approved by: %s; approval reference: %s (a record, not enforced by this workflow)\n' "$APPROVED_BY" "$APPROVAL_REFERENCE"
+            printf -- '- Approved in environment image-promotion by: %s (from the deployment review); typed note: %s / %s\n' "$APPROVERS" "$APPROVED_BY" "$APPROVAL_REFERENCE"
             printf -- '- Candidate publish run: %s/%s/actions/runs/%s\n\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$CANDIDATE_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -256,7 +284,7 @@ jobs:
               echo "No latest existed before this promotion; delete or repoint latest by hand if needed."
             else
               echo "To roll back, run this workflow with the earlier candidate's commit and digest $PREVIOUS_DIGEST, or (package admin):"
-              echo "  docker buildx imagetools create --tag $IMAGE_NAME:latest $IMAGE_NAME@$PREVIOUS_DIGEST"
+              echo "  docker buildx imagetools create --prefer-index=false --tag $IMAGE_NAME:latest $IMAGE_NAME@$PREVIOUS_DIGEST"
             fi
           }
           # Absence is accepted only from a single-line error that is unambiguously
@@ -303,7 +331,7 @@ jobs:
             exit 1
           fi
           if [[ "$PREVIOUS_DIGEST" != "$PROMOTE_DIGEST" ]]; then
-            docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST" || {
+            docker buildx imagetools create --prefer-index=false --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST" || {
               record write-failed unknown; echo '::error::moving latest failed; its state is unknown'; rollback_help; exit 1; }
           fi
           PROMOTED_DIGEST=unreadable

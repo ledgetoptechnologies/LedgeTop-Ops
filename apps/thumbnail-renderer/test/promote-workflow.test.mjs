@@ -35,7 +35,7 @@ test('inputs: exact commit and digest, approver record, and an opt-in first-time
   const validate = stepOf('Validate requested candidate');
   assert.ok(validate.includes('^[0-9a-f]{40}$') && validate.includes('^sha256:[0-9a-f]{64}$'));
   assert.ok(validate.includes('approved_by is required') && validate.includes('approval_reference is required'));
-  assert.ok(promote.includes('"approvedBy": "%s"') && promote.includes('"approvalReference": "%s"') && promote.includes('"approvalEnforced": false'));
+  assert.ok(promote.includes('"approvedBy": "%s"') && promote.includes('"approvalReference": "%s"') && promote.includes('"approvalEnforced": true'));
 });
 
 test('only a verified candidate of this repository main, for the chosen image, is promotable', () => {
@@ -74,9 +74,9 @@ test('fail closed: read latest, persist the rollback receipt, re-read, and only 
   assert.ok(read < persist && persist < upload && upload < move, 'receipt is recorded and uploaded before any mutation');
   assert.ok(!/continue-on-error/.test(promote));
   const writes = [...code.matchAll(/^(?!\s*echo ).*imagetools create[^\n]*/gm)].map(m => m[0].trim());
-  assert.deepEqual(writes, ['docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST" || {'], 'exactly one registry write');
+  assert.deepEqual(writes, ['docker buildx imagetools create --prefer-index=false --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST" || {'], 'exactly one registry write');
   const moveStep = stepOf('Move latest to the verified digest');
-  const reread = moveStep.indexOf('if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]'), write = moveStep.indexOf('docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"');
+  const reread = moveStep.indexOf('if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]'), write = moveStep.indexOf('docker buildx imagetools create --prefer-index=false --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"');
   assert.ok(reread > 0 && write > reread, 'the re-read guard precedes the write');
   assert.ok(moveStep.indexOf('PROMOTED_DIGEST') > write, 'read back after the write');
   const previous = stepOf('Read current latest and resolve the rollback target');
@@ -161,4 +161,27 @@ test("GHCR's real one-line absent-tag answer is accepted only verbatim for the e
   assert.ok(promote.includes('|| not_found_exact "$RUNNER_TEMP/inspect-error.txt" "$ref"; then'));
   assert.ok(promote.includes('|| not_found_exact "$RUNNER_TEMP/reread-error.txt" "$IMAGE_NAME:latest"; }; then'));
   assert.equal((promote.match(/not_found_exact\(\) \{/g) ?? []).length, 2);
+});
+
+test('approval is enforced: protected environment, verified before any registry write, approver from the review', () => {
+  assert.match(promote, /\n  promote:\n    if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}\n    runs-on: ubuntu-24\.04\n    timeout-minutes: 20\n    environment: image-promotion\n/);
+  const steps = [...promote.matchAll(/\n      - name: ([^\n]+)/g)].map(m => m[1]);
+  assert.equal(steps[0], 'Require the protected promotion environment and its recorded approval', 'the gate is the first step');
+  const gate = stepOf('Require the protected promotion environment and its recorded approval');
+  assert.ok(gate.includes('repos/$GITHUB_REPOSITORY/environments/$PROMOTION_ENVIRONMENT'));
+  assert.ok(gate.includes('select(.type == "required_reviewers")') && gate.includes('[[ "$RULES" =~ ^[1-9][0-9]*$ ]]'));
+  assert.ok(gate.includes('actions/runs/$GITHUB_RUN_ID/approvals') && gate.includes('.state == \\"approved\\"'));
+  assert.ok(gate.includes('PROMOTION_ENVIRONMENT: image-promotion'));
+  assert.ok(!/gh api[^\n]*(-X|--method)\s*(PUT|POST|PATCH|DELETE)/i.test(promote), 'never creates or changes the environment');
+  assert.ok(promote.indexOf('Require the protected promotion environment') < promote.indexOf('imagetools create'));
+  assert.ok(promote.includes('"approvedBy": "%s",\\n  "approvalEnvironment": "image-promotion",\\n  "typedApprovedBy": "%s"'));
+  assert.ok(promote.includes('"$GITHUB_ACTOR" "$APPROVERS" "$APPROVED_BY" "$APPROVAL_REFERENCE"'));
+  assert.ok(promote.includes('APPROVERS: ${{ steps.approval.outputs.approvers }}'));
+});
+
+test('promotion and rollback keep the candidate digest (single manifests are never re-wrapped in an index)', () => {
+  const code = promote.replace(/^\s*#.*$/gm, '');
+  const creates = [...code.matchAll(/imagetools create[^\n]*/g)].map(m => m[0]);
+  assert.ok(creates.length >= 2);
+  for (const line of creates) assert.match(line, /imagetools create --prefer-index=false /, line);
 });
