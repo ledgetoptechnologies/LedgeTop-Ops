@@ -167,15 +167,18 @@ It doesn't need Docker, Rust, a DJI key or a real log. The Rust wrapper is compi
 version-6 log (unencrypted OSD records). Decode it with the built image's parser:
 
 ```
-mkdir -p /tmp/smoke/in
-node scripts/synthetic-dji-log.mjs /tmp/smoke/in/synthetic-v6.txt 600
-docker run --rm --network none --read-only --user 1000:1000 --cap-drop ALL --memory 1g --memory-swap 1g \
-  --tmpfs /work:size=192m,uid=1000,gid=1000,noexec -v /tmp/smoke/in:/in:ro --entrypoint sh <image> \
-  -c 'ltds-dji-decode /in/synthetic-v6.txt /work/out.json; rc=$?; echo rc=$rc; cat /sys/fs/cgroup/memory.peak; exit $rc'
-echo "smoke exit: $?"
+(
+  set -eu
+  mkdir -p /tmp/smoke/in
+  node scripts/synthetic-dji-log.mjs /tmp/smoke/in/synthetic-v6.txt 600
+  exec docker run --rm --network none --read-only --user 1000:1000 --cap-drop ALL --memory 1g --memory-swap 1g \
+    --tmpfs /work:size=192m,uid=1000,gid=1000,noexec -v /tmp/smoke/in:/in:ro --entrypoint sh <image> \
+    -c 'ltds-dji-decode /in/synthetic-v6.txt /work/out.json; rc=$?; echo rc=$rc; cat /sys/fs/cgroup/memory.peak; exit $rc'
+)
 ```
-The container exits with the parser's own status, after printing the peak memory, so a failed decode cannot look like
-success.
+The block runs in one subshell with `set -eu`, so a failed setup step stops it. Docker is the last command, and
+inside the container the parser's own status is returned after the peak memory is printed. The block's exit status
+is therefore the decode's, and a failure cannot look like success.
 
 First measured (2026-11-19, a development PC, not the admitted host): image builds in about 75 s; a 600-record log
 decodes to 599 frames with exit 0; the runner's parser call plus frame mapping peaks at about 55 MiB for 600 records
