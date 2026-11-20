@@ -190,7 +190,7 @@ test('project purge succeeds when user folder names collide with folder ids or r
 test('folder create and rename refuse control and invisible characters but keep existing stored names',async t=>{
   const db=openDatabase(':memory:');t.after(()=>db.close());
   const p=new ProcessingRepository(db),project=p.createProject({displayName:'Synthetic names'});
-  const unsafe=['Site\u007fNorth','Site\nNorth','Site North\n','Site\u0000','Site​North','Site‮North','﻿Site','Site\u0085'];
+  const unsafe=['Site\u007fNorth','Site\nNorth','Site North\n','Site\u0000','Site\u200bNorth','Site\u202eNorth','\ufeffSite','Site\u0085'];
   for(const name of unsafe)assert.throws(()=>p.createProjectFolder(project.id,{displayName:name},'staff'),{code:'invalid_folder_name'},JSON.stringify(name));
   const folder=p.createProjectFolder(project.id,{displayName:'Site North'},'staff');
   for(const name of unsafe)assert.throws(()=>p.renameProjectFolder(project.id,folder.id,name,'staff'),{code:'invalid_folder_name'},JSON.stringify(name));
