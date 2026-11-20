@@ -11,6 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent
 ALL = ROOT / "compose.truenas.all.yaml"
+BASE = ROOT / "compose.truenas.yaml"
 SUCCESSOR = ROOT / "compose.queue-renderer.nas-link.yaml"
 VALUES = {
     "MEDIA_JOBS_HOST_PATH": "/synthetic/jobs",
@@ -29,7 +30,7 @@ LINK = {"NAS_LINK_CLIENT_ID": "synthetic-link.access", "NAS_LINK_CLIENT_SECRET":
 
 
 def render(files, values, link=False):
-    names = set(re.findall(r"\$\{([A-Z0-9_]+)", "".join(file.read_text() for file in (ALL, SUCCESSOR))))
+    names = set(re.findall(r"\$\{([A-Z0-9_]+)", "".join(file.read_text() for file in (ALL, BASE, SUCCESSOR))))
     env = {key: value for key, value in os.environ.items() if key not in names and key != "COMPOSE_PROJECT_NAME"}
     with tempfile.TemporaryDirectory(prefix="renderer-link-test-") as temp:
         if link:
@@ -51,9 +52,8 @@ class RendererNasLinkTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         queue = json.loads(result.stdout)["services"]["queue-renderer"]["environment"]
         self.assertEqual(queue["LTDSTHUMB_API_TOKEN"], "synthetic-renderer-token", "the bearer is kept explicitly")
-        self.assertRegex(ALL.read_text(), r"LTDSTHUMB_API_TOKEN: \$\{THUMBNAIL_INGEST_SECRET:\?")
-        self.assertNotEqual(render([ALL], {k: v for k, v in VALUES.items() if k != "THUMBNAIL_INGEST_SECRET"}).returncode, 0,
-            "the bearer is still required by the current stack")
+        for file in (ALL, BASE):
+            self.assertRegex(file.read_text(), r"LTDSTHUMB_API_TOKEN: \$\{THUMBNAIL_INGEST_SECRET:-\}")
 
     def test_successor_uses_only_the_shared_link_and_drops_the_bearer(self):
         result = render([ALL, SUCCESSOR], VALUES, link=True)
@@ -67,6 +67,20 @@ class RendererNasLinkTests(unittest.TestCase):
         for name in services:
             if name != "queue-renderer":
                 self.assertEqual(services[name], current[name], f"{name} unchanged by the successor")
+
+    def test_retired_mode_needs_no_old_value(self):
+        # Beau's live shape (proxy-generator + queue-renderer) with the successor and NO THUMBNAIL_INGEST_SECRET at all.
+        base_values = {k: VALUES[k] for k in ("MEDIA_JOBS_HOST_PATH", "WORKERS_APP_DATA_HOST_PATH")}
+        result = render([BASE, SUCCESSOR], base_values, link=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        queue = json.loads(result.stdout)["services"]["queue-renderer"]["environment"]
+        self.assertNotIn("LTDSTHUMB_API_TOKEN", queue)
+        self.assertEqual({key: queue[key] for key in LINK}, LINK)
+        # The four-service stack still needs the value for the BROKER's own ingest credential, not for the renderer.
+        all_values = {k: v for k, v in VALUES.items() if k != "THUMBNAIL_INGEST_SECRET"}
+        failed = render([ALL, SUCCESSOR], all_values, link=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("THUMBNAIL_INGEST_SECRET", failed.stderr)
 
     def test_successor_requires_the_shared_file(self):
         self.assertNotEqual(render([ALL, SUCCESSOR], VALUES).returncode, 0)

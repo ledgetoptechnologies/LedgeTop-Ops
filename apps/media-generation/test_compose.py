@@ -158,10 +158,14 @@ class MediaComposeTests(unittest.TestCase):
         self.assertTrue(any(mount.startswith("/scratch:") for mount in queue["tmpfs"]))
 
     def test_required_values_fail_closed(self):
-        for missing in ("MEDIA_JOBS_HOST_PATH", "WORKERS_APP_DATA_HOST_PATH", "THUMBNAIL_INGEST_SECRET"):
+        for missing in ("MEDIA_JOBS_HOST_PATH", "WORKERS_APP_DATA_HOST_PATH"):
             with self.subTest(missing=missing):
                 render([BASE], {key: value for key, value in VALUES.items() if key != missing}, expect_success=False)
                 render([ALL], {key: value for key, value in (VALUES | OPTIONAL).items() if key != missing}, expect_success=False)
+        # The renderer bearer is no longer fatal at interpolation (the worker enforces it unless the NAS link pair is
+        # set); the broker's own ingest secret in the four-service stack still is.
+        render([BASE], {key: value for key, value in VALUES.items() if key != "THUMBNAIL_INGEST_SECRET"})
+        render([ALL], {key: value for key, value in (VALUES | OPTIONAL).items() if key != "THUMBNAIL_INGEST_SECRET"}, expect_success=False)
         render([BASE, PREBUILT], VALUES, expect_success=False)
 
     def test_custom_user_owns_queue_tmpfs(self):
