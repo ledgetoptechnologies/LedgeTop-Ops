@@ -34,12 +34,20 @@ This repository change prepares deployment files; it does not install an app,
 alter the Jobs dataset, or stop any existing app.
 
 1. The supplied YAML uses each package's `:latest` tag with `pull_policy:
-   always`. Each tag advances only after that package's verified `main`
-   release passes its publication checks. Updating/redeploying the app pulls
-   the newest verified image; a plain container restart does not pull an image,
-   and this stack is not a live automatic updater. Configure a private registry
-   credential in the Apps UI if required. Commit tags and digest receipts remain
-   available for traceability; deployment requires no image substitutions.
+   always`. `main` no longer moves `:latest` for the proxy generator or the
+   thumbnail images: each `main` build is published only as immutable
+   `sha-<commit>` and `candidate-…` tags. Until a protected promotion workflow
+   exists for them, `:latest` stays where it is. To run a newer build
+   meanwhile: (1) confirm that commit's `main` publish run succeeded end to
+   end, (2) take the image's verified digest from that run's receipt, (3) pin
+   `image: ghcr.io/ledgetoptechnologies/<package>@sha256:<receipt digest>`, never
+   the `sha-<commit>` tag (it can exist even if a later check failed), and
+   (4) get Beau's separate approval before production use.
+   Updating/redeploying the app pulls whatever `:latest` (or the pinned digest)
+   names; a plain container restart does not pull an image, and this stack is
+   not a live automatic updater. Configure a private registry credential in the
+   Apps UI if required. Commit tags and digest receipts remain available for
+   traceability.
 2. Select the existing shared dataset
    `/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` as
    `WORKERS_APP_DATA_HOST_PATH`. Give user/group `568:568` read/write/traverse
@@ -214,3 +222,28 @@ fails closed; running a decoder and broker alone does not make those files
 eligible. The existing queue/managed path remains available. Verify actual
 single-part/multipart behavior before investing in this optional path. No
 automatic pruning schedule is installed by this stack.
+
+## Flight logs backend
+
+`compose.truenas.all.yaml` also runs `flight-logs`, the local Logs host from
+`apps/logs-local` (image `ghcr.io/ledgetoptechnologies/logs-local:latest`, the
+full image with the DJI parser). `latest` moves only by the hand-run
+`promote-logs-local.yml`; merges to main publish immutable candidates. Like
+the Viewer it is a private backend: the Cloudflare Tunnel forwards the private
+Logs hostname to `LOGS_BIND_ADDRESS:8090` (container port 8080), and every
+request must carry a Cloudflare Access service-token assertion for Ops (staff
+proxy) or the device proxy. Anything else gets 404; health is only inside the
+container. It is the only service in the stack with a port, because the tunnel
+connector runs outside this stack.
+
+- Data: the shared workers dataset at `/app-data`, like the other services;
+  the app creates and uses only `/app-data/flight-logs` (`db/logs.sqlite`,
+  `objects/`, `config/logs.env`).
+- Settings and secrets are not Compose variables. On first start the app
+  writes `flight-logs/config/logs.env` blank (0600, owned by 568) and stays up
+  closed until it is filled and the container is restarted. The DJI key goes in
+  `DJI_API_KEY` in that file. See [apps/logs-local/README.md](../logs-local/README.md).
+- Ops side: `LOGS_BACKEND_MODE=local`, `LOGS_BACKEND_URL` (the private Logs
+  hostname), `LOGS_BACKEND_ACCESS_CLIENT_ID` and secret
+  `LOGS_BACKEND_ACCESS_CLIENT_SECRET`; plus the `LOGS_DIRECTORY_*` settings
+  the Logs host uses to call back into Ops.

@@ -149,7 +149,7 @@ test('the decoder scratch directory can only be the RAM tmpfs at /work', async (
     'ACCESS_STAFF_PROXY_CLIENT_ID=s.access', 'ACCESS_DEVICE_PROXY_CLIENT_ID=d.access', 'OPS_DIRECTORY_BASE_URL=https://ops.example.test/',
     'OPS_DIRECTORY_CLIENT_ID=dir.access', `OPS_DIRECTORY_CLIENT_SECRET=${'s'.repeat(32)}`].join('\n');
   assert.equal(parseConfig(base).DECODER_WORK_DIR, '/work');
-  for (const dir of ['/tmp', '/data/flight-logs/work', '/work/sub'])
+  for (const dir of ['/tmp', '/app-data/flight-logs/work', '/work/sub'])
     assert.throws(() => parseConfig(`${base}\nDECODER_WORK_DIR=${dir}`), err => err instanceof ConfigError && err.code === 'config_value', dir);
 });
 
