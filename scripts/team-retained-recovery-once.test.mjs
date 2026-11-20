@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { generateKeyPairSync, privateDecrypt, createDecipheriv, constants } from 'node:crypto';
 import { reviewedRecipient, manualIdentity, recoveryFetch, sealRecovered, sealRecoveryCheckpoint, finalizeRecoveryEvidence } from './team-retained-recovery-once.mjs';
-import { sealProductionProviderResponse } from './production-auto-journal.mjs';
+import { sealProductionProviderResponse, sealProductionStaticRecoveryEvidence } from './production-auto-journal.mjs';
 import { canonical, hash } from './production-deploy.mjs';
 
 const recipientFile = JSON.parse(fs.readFileSync(new URL('./team-retained-recovery-recipient.json', import.meta.url)));
@@ -77,7 +77,10 @@ test('the reused envelope contains ciphertext only and authenticates the exact c
   const recipient = { schemaVersion: 1, publicKeyPem, keyIdSha256: hash(keys.publicKey.export({ type: 'spki', format: 'der' })) };
   const context = { releaseId: 'a'.repeat(64), requestId: '00000000-0000-4000-8000-000000000001', method: 'GET', pathSha256: 'b'.repeat(64), status: 200 };
   const secret = Buffer.from('synthetic private source map body');
-  const sealed = sealProductionProviderResponse(secret, context, recipient);
+  assert.throws(() => sealProductionProviderResponse(secret, context, recipient), /production_auto_journal_refused_no_retry/,
+    'static recovery does not broaden the existing mutation-response contract');
+  assert.throws(() => sealProductionStaticRecoveryEvidence(secret, { ...context, method: 'DELETE' }, recipient), /production_auto_journal_refused_no_retry/);
+  const sealed = sealProductionStaticRecoveryEvidence(secret, context, recipient);
   assert.equal(sealed.bytes.includes(secret), false);
   const envelope = JSON.parse(sealed.bytes);
   assert.equal(envelope.algorithm, 'RSA-OAEP-256+A256GCM');

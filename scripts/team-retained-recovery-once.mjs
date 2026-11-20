@@ -10,7 +10,7 @@ import { createJournaledAssetVerifierProvider } from './ordinary-frontend-retain
 import { createAssetVerificationNonce, createAssetVerifierSource, executeAssetVerification } from './production-auto-verify.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName } from './production-auto-provider.mjs';
 import { compatibleAssetMime } from './production-auto-assets.mjs';
-import { sealProductionProviderResponse } from './production-auto-journal.mjs';
+import { sealProductionStaticRecoveryEvidence } from './production-auto-journal.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
@@ -118,7 +118,7 @@ export function sealRecoveryCheckpoint({ binding, recipient, journalDirectory, o
   }
   const context = { releaseId: hash(canonical(binding)), requestId: randomUUID(), method: 'GET',
     pathSha256: hash(asset?.entry?.path ?? stage), status: stage === 'complete' ? 200 : null };
-  const encrypted = sealProductionProviderResponse(Buffer.from(JSON.stringify({ schemaVersion: 1,
+  const encrypted = sealProductionStaticRecoveryEvidence(Buffer.from(JSON.stringify({ schemaVersion: 1,
     status: stage === 'complete' ? 'complete-static-recovery-only' : 'incomplete-not-release-acceptance',
     stage, binding, journal, ...(asset ? { asset } : {}), ...(evidence ? { evidence } : {}) })), context, recipient);
   const filename = context.requestId + '.sealed.json'; write(path.join(outputDirectory, filename), encrypted.bytes);
