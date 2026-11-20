@@ -16,14 +16,14 @@ from ..errors import Denied
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS operations (
   operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL, digest TEXT NOT NULL, staff_id TEXT NOT NULL,
-  grant_id TEXT NOT NULL, grant_generation INTEGER NOT NULL,
+  grant_id TEXT NOT NULL, grant_generation INTEGER NOT NULL, grant_path TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('open','intent','applied','rejected','unknown')),
   intent TEXT NOT NULL, status INTEGER, result TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS uploads (
   upload_id TEXT PRIMARY KEY REFERENCES operations(operation_id), staff_id TEXT NOT NULL, grant_id TEXT NOT NULL,
   size INTEGER NOT NULL, sha256 TEXT NOT NULL, chunk_size INTEGER NOT NULL, part_inode INTEGER NOT NULL,
-  state TEXT NOT NULL CHECK (state IN ('open','committing','committed','conflict','expired')),
-  lease_until INTEGER NOT NULL, hard_deadline INTEGER NOT NULL);
+  state TEXT NOT NULL CHECK (state IN ('open','committed','conflict','expired')),
+  lease_until INTEGER NOT NULL, hard_deadline INTEGER NOT NULL, verified TEXT);
 CREATE TABLE IF NOT EXISTS chunks (
   upload_id TEXT NOT NULL REFERENCES uploads(upload_id), idx INTEGER NOT NULL, sha256 TEXT NOT NULL,
   PRIMARY KEY (upload_id, idx));
@@ -38,7 +38,7 @@ CREATE TRIGGER IF NOT EXISTS audit_append_only_delete BEFORE DELETE ON audit BEG
 """
 
 # Uploads whose bytes are still on disk count against quota (purge is off; an expired upload keeps its bytes).
-RESERVED_STATES = ("open", "committing", "conflict", "expired")
+RESERVED_STATES = ("open", "conflict", "expired")
 
 
 def dumps(value) -> str:

@@ -1,16 +1,26 @@
-"""Staff writes over one exclusive, enrolled root: mkdir, chunked uploads, move/rename, delete to trash, restore.
+"""Staff writes over one exclusive, enrolled root: mkdir, chunked create-only uploads, move/rename, delete to trash,
+restore.
 
 Authority arrives already decided by Ops and signed (see signing.py); this module re-checks everything it can locally:
 the root pin and exclusivity, the write right, that every affected path lies inside the grant folder, object identity
-and content preconditions, Windows name rules and case-insensitive sibling collisions.
+and content preconditions, Windows name rules and case-insensitive sibling collisions. The signature's freshness is
+checked at intake (after the body is read) and again immediately before every irreversible filesystem change.
 
-Durability: each change writes an `intent` operation row (and an audit row) before touching the filesystem, then a
-typed result. A restart reconciles every unfinished row from filesystem evidence, or marks it `unknown`, which holds
-all writes until an operator resolves it. Nothing is replayed automatically.
+Coordination: one process owns the root (an exclusive flock a second instance cannot take), and every mutation runs
+under one root-wide write lock, so ancestor and descendant changes are serialized. Folder handles opened for a change
+are bound to the object ids observed when it was checked.
+
+Durability: each change writes an `intent` operation row (and an audit row) before touching the filesystem. Every
+outcome, normal or recovered, goes through one transition (`_settle`) that also applies its upload and trash effects.
+A restart settles unfinished rows from filesystem evidence, or marks them `unknown`, which holds all writes until an
+operator resolves them; resolution also needs filesystem evidence. Nothing is replayed automatically.
+
+Overwrite is DISABLED in v1: uploads are create-only (no atomic replace with restore evidence yet).
 """
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -30,8 +40,8 @@ from .store import RESERVED_STATES, Store, dumps
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 OBJECT_ID = HEX32
-EMPTY_SHA = hashlib.sha256(b"").hexdigest()
 ROUTE = "/v2/op"
+DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 COMMON = {"schemaVersion", "scope", "keyId", "nonce", "issuedAt", "expiresAt", "audience", "servicePrincipal",
           "method", "route", "operationId", "actor", "grant", "root", "operation", "args", "bodySha256"}
 ARGS = {
@@ -45,7 +55,7 @@ ARGS = {
     "trash.restore": {"trashId"},
     "op.status": {"targetOperationId"},
 }
-SIMPLE = {"mkdir", "move", "delete", "trash.restore"}
+PATH_KEYS = ("path", "source", "destination")
 
 
 @dataclass(frozen=True)
@@ -100,28 +110,51 @@ def _inside(path: str, folder: str, strict: bool) -> bool:
 class StaffFiles:
     def __init__(self, config: Config, clock=time.time):
         self.config, self.clock = config, clock
-        self.locks: dict[str, threading.Lock] = {}
-        self.locks_guard = threading.Lock()
+        self.write_lock = threading.RLock()   # one mutation at a time on the whole root (hierarchy-safe)
+        self.committing: set[str] = set()
         self.hash_slots = threading.BoundedSemaphore(2)
-        self.root_fd = open_absolute(config.root_path)
-        self.root_stat = linuxfs.statx(self.root_fd)
-        expected = fingerprint(config.root_id, config.root_generation, os.fstat(self.root_fd).st_dev, self.root_stat.ino)
-        if expected != config.root_fingerprint:
-            raise Denied("root-changed", 503)
-        self.internal_fd = open_absolute(config.internal_path)
-        internal = linuxfs.statx(self.internal_fd)
-        if internal.dev != self.root_stat.dev or internal.mount_id != self.root_stat.mount_id \
-                or os.path.dirname(config.internal_path) != os.path.dirname(config.root_path) \
-                or internal.uid != os.getuid() or stat.S_IMODE(internal.mode) & 0o077:
-            raise Denied("internal-storage-invalid", 503)
-        self.uploads_fd = self._private_child(self.internal_fd, "uploads")
-        self.trash_fd = self._private_child(self.internal_fd, "trash")
-        state_fd = self._private_child(self.internal_fd, "state")
-        os.close(state_fd)
-        state = os.path.join(config.internal_path, "state")
-        self.store = Store(os.path.join(state, "files.sqlite3"), clock)
-        self.replay = ReplayStore(os.path.join(state, "nonces.sqlite3"))
-        self.reconcile()
+        self._fds: list[int] = []
+        try:
+            self.root_fd = self._keep(open_absolute(config.root_path))
+            self.root_stat = linuxfs.statx(self.root_fd)
+            expected = fingerprint(config.root_id, config.root_generation, os.fstat(self.root_fd).st_dev, self.root_stat.ino)
+            if expected != config.root_fingerprint:
+                raise Denied("root-changed", 503)
+            self.internal_fd = self._keep(open_absolute(config.internal_path))
+            internal = linuxfs.statx(self.internal_fd)
+            if internal.dev != self.root_stat.dev or internal.mount_id != self.root_stat.mount_id \
+                    or os.path.dirname(config.internal_path) != os.path.dirname(config.root_path) \
+                    or internal.uid != os.getuid() or stat.S_IMODE(internal.mode) & 0o077:
+                raise Denied("internal-storage-invalid", 503)
+            self.uploads_fd = self._keep(self._private_child(self.internal_fd, "uploads"))
+            self.trash_fd = self._keep(self._private_child(self.internal_fd, "trash"))
+            state_fd = self._keep(self._private_child(self.internal_fd, "state"))
+            # Single writer: a second instance (another container or process) cannot take this lock.
+            owner = self._keep(os.open("owner.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                                       dir_fd=state_fd))
+            try:
+                fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Denied("root-owned-by-another-instance", 503) from None
+            state = os.path.join(config.internal_path, "state")
+            self.store = Store(os.path.join(state, "files.sqlite3"), clock)
+            self.replay = ReplayStore(os.path.join(state, "nonces.sqlite3"))
+            self.reconcile()
+        except BaseException:
+            self.close()
+            raise
+
+    def _keep(self, fd: int) -> int:
+        self._fds.append(fd)
+        return fd
+
+    def close(self) -> None:
+        """Releases the root ownership lock and every held descriptor."""
+        while self._fds:
+            try:
+                os.close(self._fds.pop())
+            except OSError:
+                pass
 
     # ---------- filesystem helpers ----------
 
@@ -130,9 +163,10 @@ class StaffFiles:
             os.mkdir(name, 0o700, dir_fd=parent_fd)
         except FileExistsError:
             pass
-        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+        fd = os.open(name, DIRECTORY, dir_fd=parent_fd)
         info = linuxfs.statx(fd)
-        if info.dev != self.root_stat.dev or info.uid != os.getuid() or stat.S_IMODE(info.mode) & 0o077:
+        if info.dev != self.root_stat.dev or info.mount_id != self.root_stat.mount_id \
+                or info.uid != os.getuid() or stat.S_IMODE(info.mode) & 0o077:
             os.close(fd)
             raise Denied("internal-storage-invalid", 503)
         return fd
@@ -142,13 +176,15 @@ class StaffFiles:
             raise Rejected("mount-crossing", 403)
 
     @contextmanager
-    def folder(self, parts: list[str]):
-        """Opens the folder at `parts` below the root, one component at a time, never following symlinks."""
+    def folder(self, parts: list[str], bound: str | None = None):
+        """Opens the folder at `parts` below the root, one component at a time, never following symlinks.
+
+        With `bound`, the opened folder must still be the object observed when the change was checked."""
         fd = os.dup(self.root_fd)
         try:
             for part in parts:
                 try:
-                    next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    next_fd = os.open(part, DIRECTORY, dir_fd=fd)
                 except FileNotFoundError:
                     raise Rejected("not-found", 404) from None
                 except OSError as error:
@@ -160,6 +196,8 @@ class StaffFiles:
                 os.close(fd)
                 fd = next_fd
                 self._same_fs(linuxfs.statx(fd))
+            if bound is not None and linuxfs.statx(fd).object_id != bound:
+                raise Rejected("parent-changed", 412)
             yield fd
         finally:
             os.close(fd)
@@ -200,23 +238,27 @@ class StaffFiles:
             finally:
                 os.close(fd)
 
-    @contextmanager
-    def locked(self, *folders: str):
-        with self.locks_guard:
-            locks = [self.locks.setdefault(name, threading.Lock()) for name in sorted(set(folders))]
-        with ExitStack() as stack:
-            for lock in locks:
-                stack.enter_context(lock)
-            yield
+    def _parent_id(self, fd: int, expected_id) -> str:
+        if not isinstance(expected_id, str) or not OBJECT_ID.match(expected_id):
+            raise Denied("invalid-request")
+        actual = linuxfs.statx(fd).object_id
+        if actual != expected_id:
+            raise Rejected("parent-changed", 412)
+        return actual
 
     # ---------- request validation ----------
+
+    def fresh(self, envelope: dict) -> None:
+        """The Ops authorization must still be live: checked at intake and at every irreversible boundary."""
+        if int(self.clock()) >= envelope["expiresAt"]:
+            raise Denied("expired", 401)
 
     def validate(self, envelope: dict, body_sha: str) -> dict:
         if set(envelope) != COMMON or envelope["schemaVersion"] != 2 or envelope["method"] != "POST" \
                 or envelope["route"] != ROUTE or envelope["audience"] != self.config.audience \
                 or envelope["servicePrincipal"] != self.config.client_id \
                 or not isinstance(envelope["nonce"], str) or not HEX32.match(envelope["nonce"]) \
-                or envelope["bodySha256"] != body_sha:
+                or type(envelope["expiresAt"]) is not int or envelope["bodySha256"] != body_sha:
             raise Denied("unauthorized", 401)
         canonical_uuid(envelope["operationId"])
         actor, grant, root = envelope["actor"], envelope["grant"], envelope["root"]
@@ -254,15 +296,17 @@ class StaffFiles:
     # ---------- entry point ----------
 
     def execute(self, envelope: dict, body: bytes) -> Result:
+        """Called after the body has been read: the authorization is checked again here (intake)."""
         body_sha = hashlib.sha256(body).hexdigest()
         self.validate(envelope, body_sha)
+        self.fresh(envelope)
         self.replay.claim(envelope["keyId"], envelope["nonce"], envelope["expiresAt"], int(self.clock()))
         operation = envelope["operation"]
         if operation == "op.status":
             return self.status_of(envelope)
         if operation.startswith("upload.") and operation != "upload.begin":
             return getattr(self, operation.replace(".", "_"))(envelope, body)
-        if operation != "upload.chunk" and body:
+        if body:
             raise Denied("invalid-request")
         digest = self.digest(envelope)
         with self.store.transaction() as db:
@@ -281,45 +325,43 @@ class StaffFiles:
             return self.upload_begin(envelope, digest)
         return self.simple(envelope, digest)
 
-    # ---------- single-step operations ----------
-
-    def simple(self, envelope: dict, digest: str) -> Result:
-        operation, args = envelope["operation"], envelope["args"]
-        plan = getattr(self, "plan_" + operation.replace(".", "_"))(envelope, args)
-        with self.locked(*plan["locks"]):
-            try:
-                intent = plan["check"]()
-            except Rejected as rejection:
-                return self._reject_new(envelope, digest, rejection)
-            with self.store.transaction() as db:
-                if self.store.holds(db):
-                    raise Denied("operation-hold", 423)
-                self._record(db, envelope, digest, "intent", intent)
-            try:
-                result = plan["apply"](intent)
-            except Rejected as rejection:
-                with self.store.transaction() as db:
-                    self.store.finish(db, envelope["operationId"], "rejected", rejection.status, {"error": rejection.code})
-                    self.store.audit(db, envelope["operationId"], operation, envelope["actor"]["staffId"], "rejected",
-                                     {"error": rejection.code})
-                return Result(rejection.status, {"error": rejection.code})
-            except BaseException:
-                self.reconcile_one(envelope["operationId"])
-                raise
-            with self.store.transaction() as db:
-                body = {"operationId": envelope["operationId"], "state": "applied", "result": result}
-                self.store.finish(db, envelope["operationId"], "applied", 200, body)
-                self.store.audit(db, envelope["operationId"], operation, envelope["actor"]["staffId"], "applied", result)
-            return Result(200, body)
+    # ---------- outcomes ----------
 
     def _record(self, db, envelope: dict, digest: str, state: str, intent: dict) -> None:
         now = int(self.clock())
-        db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,NULL,NULL,?,?)",
+        db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,?,NULL,NULL,?,?)",
                    (envelope["operationId"], envelope["operation"], digest, envelope["actor"]["staffId"],
-                    envelope["grant"]["grantId"], envelope["grant"]["grantGeneration"], state, dumps(intent), now, now))
+                    envelope["grant"]["grantId"], envelope["grant"]["grantGeneration"], envelope["grant"]["path"],
+                    state, dumps(intent), now, now))
         self.store.audit(db, envelope["operationId"], envelope["operation"], envelope["actor"]["staffId"], state,
                          {"intent": intent, "accessSubject": envelope["actor"]["accessSubject"],
                           "grantId": envelope["grant"]["grantId"]})
+
+    def _settle(self, db, operation_id: str, outcome: str, status: int | None, body: dict | None, phase: str, detail) -> None:
+        """The one durable outcome transition, with its upload and trash effects, for normal and recovered paths.
+
+        outcome: applied | rejected | unknown | open (an upload commit that changed nothing: the upload is open again)."""
+        row = self.store.operation(db, operation_id)
+        kind, intent = row["kind"], json.loads(row["intent"])
+        now = int(self.clock())
+        if kind == "upload.begin":
+            upload_state = {"applied": "committed", "rejected": "conflict", "open": "open"}.get(outcome)
+            if upload_state:
+                db.execute("UPDATE uploads SET state=? WHERE upload_id=?", (upload_state, operation_id))
+        if outcome == "applied" and kind == "delete":
+            db.execute("INSERT OR IGNORE INTO trash VALUES(?,?,?,?,?,?,NULL)",
+                       (intent["trashId"], intent["path"], intent["name"], intent["id"], row["staff_id"], now))
+        if outcome == "applied" and kind == "trash.restore":
+            db.execute("UPDATE trash SET restored_by_operation=? WHERE trash_id=?", (operation_id, intent["trashId"]))
+        if outcome == "open":
+            db.execute("UPDATE operations SET state='open', status=NULL, result=NULL, updated_at=? WHERE operation_id=?",
+                       (now, operation_id))
+        elif outcome == "unknown":
+            db.execute("UPDATE operations SET state='unknown', status=NULL, result=NULL, updated_at=? WHERE operation_id=?",
+                       (now, operation_id))
+        else:
+            self.store.finish(db, operation_id, outcome, status, body)
+        self.store.audit(db, operation_id, kind, row["staff_id"], phase, detail)
 
     def _reject_new(self, envelope: dict, digest: str, rejection: Rejected) -> Result:
         body = {"error": rejection.code}
@@ -328,32 +370,56 @@ class StaffFiles:
             self.store.finish(db, envelope["operationId"], "rejected", rejection.status, body)
         return Result(rejection.status, body)
 
-    def _parent_checked(self, fd: int, expected_id) -> None:
-        if not isinstance(expected_id, str) or not OBJECT_ID.match(expected_id):
-            raise Denied("invalid-request")
-        if linuxfs.statx(fd).object_id != expected_id:
-            raise Rejected("parent-changed", 412)
+    # ---------- single-step operations ----------
+
+    def simple(self, envelope: dict, digest: str) -> Result:
+        operation, operation_id = envelope["operation"], envelope["operationId"]
+        plan = getattr(self, "plan_" + operation.replace(".", "_"))(envelope, envelope["args"])
+        with self.write_lock:
+            try:
+                intent = plan["check"]()
+            except Rejected as rejection:
+                return self._reject_new(envelope, digest, rejection)
+            self.fresh(envelope)  # irreversible boundary: nothing has been recorded or changed yet
+            with self.store.transaction() as db:
+                if self.store.holds(db):
+                    raise Denied("operation-hold", 423)
+                self._record(db, envelope, digest, "intent", intent)
+            try:
+                result = plan["apply"](intent)
+            except Rejected as rejection:
+                # apply refuses only before its single filesystem change, so nothing changed
+                with self.store.transaction() as db:
+                    self._settle(db, operation_id, "rejected", rejection.status, {"error": rejection.code}, "rejected",
+                                 {"error": rejection.code})
+                return Result(rejection.status, {"error": rejection.code})
+            except BaseException:
+                self.reconcile_one(operation_id)
+                raise
+            body = {"operationId": operation_id, "state": "applied", "result": result}
+            with self.store.transaction() as db:
+                self._settle(db, operation_id, "applied", 200, body, "applied", result)
+            return Result(200, body)
 
     def plan_mkdir(self, envelope, args):
         parts = self.scoped(envelope, args["path"], strict=True)
         writable_name(parts[-1])
-        parent = _relative(parts[:-1])
 
         def check():
             with self.folder(parts[:-1]) as fd:
-                self._parent_checked(fd, args["parentId"])
+                parent = self._parent_id(fd, args["parentId"])
                 if self.collision(fd, parts[-1]):
                     raise Rejected("name-exists", 409)
-            return {"path": _relative(parts)}
+            return {"path": _relative(parts), "parentId": parent}
 
         def apply(intent):
-            with self.folder(parts[:-1]) as fd:
+            with self.folder(parts[:-1], bound=intent["parentId"]) as fd:
                 os.mkdir(parts[-1], 0o750, dir_fd=fd)
                 linuxfs.fsync_dir(fd)
                 info = linuxfs.statx(fd, parts[-1])
             return {"path": intent["path"], "id": info.object_id, "kind": "folder"}
 
-        return {"locks": [parent], "check": check, "apply": apply}
+        return {"check": check, "apply": apply}
 
     def _source(self, fd: int, name: str, expected_id, expected_etag):
         info = self.entry(fd, name)
@@ -382,14 +448,17 @@ class StaffFiles:
         def check():
             with self.folder(source[:-1]) as sfd, self.folder(destination[:-1]) as dfd:
                 info = self._source(sfd, source[-1], args["sourceId"], args["sourceEtag"])
-                self._parent_checked(dfd, args["destinationParentId"])
-                same_parent = linuxfs.statx(sfd).object_id == linuxfs.statx(dfd).object_id
+                destination_parent = self._parent_id(dfd, args["destinationParentId"])
+                source_parent = linuxfs.statx(sfd).object_id
+                same_parent = source_parent == destination_parent
                 if self.collision(dfd, destination[-1], allow=source[-1] if same_parent else None):
                     raise Rejected("name-exists", 409)
-            return {"source": _relative(source), "destination": _relative(destination), "id": info.object_id}
+            return {"source": _relative(source), "destination": _relative(destination), "id": info.object_id,
+                    "sourceParentId": source_parent, "destinationParentId": destination_parent}
 
         def apply(intent):
-            with self.folder(source[:-1]) as sfd, self.folder(destination[:-1]) as dfd:
+            with self.folder(source[:-1], bound=intent["sourceParentId"]) as sfd, \
+                    self.folder(destination[:-1], bound=intent["destinationParentId"]) as dfd:
                 current = self.entry(sfd, source[-1])
                 if current is None or current.object_id != intent["id"]:
                     raise Rejected("changed", 412)
@@ -401,7 +470,7 @@ class StaffFiles:
                 linuxfs.fsync_dir(sfd)
             return {"path": intent["destination"], "id": intent["id"]}
 
-        return {"locks": [_relative(source[:-1]), _relative(destination[:-1])], "check": check, "apply": apply}
+        return {"check": check, "apply": apply}
 
     def plan_delete(self, envelope, args):
         parts = self.scoped(envelope, args["path"], strict=True)
@@ -410,25 +479,26 @@ class StaffFiles:
         def check():
             with self.folder(parts[:-1]) as fd:
                 info = self._source(fd, parts[-1], args["id"], args["etag"])
-            return {"path": _relative(parts), "name": parts[-1], "id": info.object_id, "trashId": trash_id}
+                parent = linuxfs.statx(fd).object_id
+            return {"path": _relative(parts), "name": parts[-1], "id": info.object_id, "trashId": trash_id, "parentId": parent}
 
         def apply(intent):
-            os.mkdir(trash_id, 0o700, dir_fd=self.trash_fd)
-            holder = os.open(trash_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.trash_fd)
-            try:
-                with self.folder(parts[:-1]) as fd:
+            with self.folder(parts[:-1], bound=intent["parentId"]) as fd:
+                current = self.entry(fd, parts[-1])
+                if current is None or current.object_id != intent["id"]:
+                    raise Rejected("changed", 412)
+                os.mkdir(trash_id, 0o700, dir_fd=self.trash_fd)
+                holder = os.open(trash_id, DIRECTORY, dir_fd=self.trash_fd)
+                try:
                     linuxfs.rename_noreplace(fd, parts[-1], holder, parts[-1])
                     linuxfs.fsync_dir(fd)
-                linuxfs.fsync_dir(holder)
-                linuxfs.fsync_dir(self.trash_fd)
-            finally:
-                os.close(holder)
-            with self.store.transaction() as db:
-                db.execute("INSERT INTO trash VALUES(?,?,?,?,?,?,NULL)", (trash_id, intent["path"], parts[-1], intent["id"],
-                                                                         envelope["actor"]["staffId"], int(self.clock())))
+                    linuxfs.fsync_dir(holder)
+                    linuxfs.fsync_dir(self.trash_fd)
+                finally:
+                    os.close(holder)
             return {"trashId": trash_id, "path": intent["path"]}
 
-        return {"locks": [_relative(parts[:-1])], "check": check, "apply": apply}
+        return {"check": check, "apply": apply}
 
     def plan_trash_restore(self, envelope, args):
         trash_id = canonical_uuid(args["trashId"])
@@ -440,21 +510,19 @@ class StaffFiles:
 
         def check():
             with self.folder(parts[:-1]) as fd:
+                parent = linuxfs.statx(fd).object_id
                 if self.collision(fd, parts[-1]):
                     raise Rejected("name-exists", 409)
-            holder = os.open(trash_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.trash_fd)
-            try:
-                info = linuxfs.statx(holder, row["name"])
-            finally:
-                os.close(holder)
-            if info.object_id != row["object_id"]:
+            if self._stat_in(self.trash_fd, trash_id, row["name"]) is None \
+                    or self._stat_in(self.trash_fd, trash_id, row["name"]).object_id != row["object_id"]:
                 raise Rejected("changed", 412)
-            return {"path": row["original_path"], "name": row["name"], "id": row["object_id"], "trashId": trash_id}
+            return {"path": row["original_path"], "name": row["name"], "id": row["object_id"], "trashId": trash_id,
+                    "parentId": parent}
 
         def apply(intent):
-            holder = os.open(trash_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.trash_fd)
+            holder = os.open(trash_id, DIRECTORY, dir_fd=self.trash_fd)
             try:
-                with self.folder(parts[:-1]) as fd:
+                with self.folder(parts[:-1], bound=intent["parentId"]) as fd:
                     try:
                         linuxfs.rename_noreplace(holder, row["name"], fd, parts[-1])
                     except FileExistsError:
@@ -463,14 +531,15 @@ class StaffFiles:
                 linuxfs.fsync_dir(holder)
             finally:
                 os.close(holder)
-            os.rmdir(trash_id, dir_fd=self.trash_fd)
-            with self.store.transaction() as db:
-                db.execute("UPDATE trash SET restored_by_operation=? WHERE trash_id=?", (envelope["operationId"], trash_id))
+            try:
+                os.rmdir(trash_id, dir_fd=self.trash_fd)
+            except OSError:
+                pass  # an empty holder left behind is harmless
             return {"path": intent["path"], "id": intent["id"]}
 
-        return {"locks": [_relative(parts[:-1])], "check": check, "apply": apply}
+        return {"check": check, "apply": apply}
 
-    # ---------- uploads ----------
+    # ---------- uploads (create-only in v1) ----------
 
     def upload_begin(self, envelope: dict, digest: str) -> Result:
         args, limits = envelope["args"], self.config.limits
@@ -481,22 +550,12 @@ class StaffFiles:
             raise Denied("too-large", 413)
         if not isinstance(args["sha256"], str) or not HEX64.match(args["sha256"]):
             raise Denied("invalid-request")
-        precondition = args["precondition"]
-        if precondition == {"kind": "create"}:
-            replace = None
-        elif isinstance(precondition, dict) and set(precondition) == {"kind", "id", "etag"} and precondition["kind"] == "replace" \
-                and isinstance(precondition["id"], str) and OBJECT_ID.match(precondition["id"]) \
-                and isinstance(precondition["etag"], str) and HEX64.match(precondition["etag"]):
-            replace = precondition
-        else:
-            raise Denied("invalid-request")
+        if args["precondition"] != {"kind": "create"}:
+            raise Denied("overwrite-unsupported")  # v1: no atomic replace; uploads are create-only
         with self.folder(parts[:-1]) as fd:
-            self._parent_checked(fd, args["parentId"])
-            current = self.entry(fd, parts[-1])
-            if replace is None and self.collision(fd, parts[-1]):
+            self._parent_id(fd, args["parentId"])
+            if self.collision(fd, parts[-1]):
                 return self._reject_new(envelope, digest, Rejected("name-exists", 409))
-            if replace is not None and (current is None or not stat.S_ISREG(current.mode) or current.object_id != replace["id"]):
-                return self._reject_new(envelope, digest, Rejected("changed", 412))
         free = os.statvfs(self.uploads_fd)
         now = int(self.clock())
         operation_id = envelope["operationId"]
@@ -504,28 +563,29 @@ class StaffFiles:
             if self.store.holds(db):
                 raise Denied("operation-hold", 423)
             marks = ",".join("?" * len(RESERVED_STATES))
-            reserved = lambda where, *values: db.execute(  # noqa: E731
-                f"SELECT COALESCE(SUM(size),0) FROM uploads WHERE state IN ({marks}) {where}", (*RESERVED_STATES, *values)).fetchone()[0]
-            if db.execute("SELECT COUNT(*) FROM uploads WHERE state='open' AND staff_id=?", (envelope["actor"]["staffId"],)).fetchone()[0] \
-                    >= limits.sessions_per_staff or \
-                    db.execute("SELECT COUNT(*) FROM uploads WHERE state='open'").fetchone()[0] >= limits.sessions_total:
+
+            def reserved(where="", *values):
+                return db.execute(f"SELECT COALESCE(SUM(size),0) FROM uploads WHERE state IN ({marks}) {where}",
+                                  (*RESERVED_STATES, *values)).fetchone()[0]
+
+            if db.execute("SELECT COUNT(*) FROM uploads WHERE state='open' AND staff_id=?",
+                          (envelope["actor"]["staffId"],)).fetchone()[0] >= limits.sessions_per_staff \
+                    or db.execute("SELECT COUNT(*) FROM uploads WHERE state='open'").fetchone()[0] >= limits.sessions_total:
                 raise Denied("too-many-uploads", 429)
-            total = reserved("")
             if reserved("AND grant_id=?", envelope["grant"]["grantId"]) + size > limits.grant_quota_bytes \
-                    or total + size > limits.global_quota_bytes \
+                    or reserved() + size > limits.global_quota_bytes \
                     or free.f_bavail * free.f_frsize - limits.free_margin_bytes < size:
                 raise Denied("insufficient-storage", 507)
-            part = operation_id + ".part"
-            fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=self.uploads_fd)
+            fd = os.open(operation_id + ".part", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                         dir_fd=self.uploads_fd)
             try:
                 os.fsync(fd)
                 inode = linuxfs.statx(fd).ino
             finally:
                 os.close(fd)
             linuxfs.fsync_dir(self.uploads_fd)
-            intent = {"path": _relative(parts), "name": parts[-1], "parentId": args["parentId"], "replace": replace}
-            self._record(db, envelope, digest, "open", intent)
-            db.execute("INSERT INTO uploads VALUES(?,?,?,?,?,?,?,'open',?,?)",
+            self._record(db, envelope, digest, "open", {"path": _relative(parts), "name": parts[-1], "parentId": args["parentId"]})
+            db.execute("INSERT INTO uploads VALUES(?,?,?,?,?,?,?,'open',?,?,NULL)",
                        (operation_id, envelope["actor"]["staffId"], envelope["grant"]["grantId"], size, args["sha256"],
                         limits.chunk_size, inode, now + limits.lease_seconds, now + limits.upload_lifetime_seconds))
             return self._upload_status(db, operation_id)
@@ -542,13 +602,15 @@ class StaffFiles:
         upload = db.execute("SELECT * FROM uploads WHERE upload_id=?", (envelope["operationId"],)).fetchone()
         if operation is None or upload is None or operation["kind"] != "upload.begin":
             raise Denied("not-found", 404)
-        if (operation["staff_id"], operation["grant_id"], operation["grant_generation"]) != \
-                (envelope["actor"]["staffId"], envelope["grant"]["grantId"], envelope["grant"]["grantGeneration"]):
+        if (operation["staff_id"], operation["grant_id"], operation["grant_generation"], operation["grant_path"]) != \
+                (envelope["actor"]["staffId"], envelope["grant"]["grantId"], envelope["grant"]["grantGeneration"],
+                 envelope["grant"]["path"]):
             raise Denied("upload-context-mismatch", 403)
         intent = json.loads(operation["intent"])
         self.scoped(envelope, intent["path"], strict=True)
         now = int(self.clock())
-        if upload["state"] == "open" and (now > upload["lease_until"] or now > upload["hard_deadline"]):
+        if upload["state"] == "open" and (now > upload["lease_until"] or now > upload["hard_deadline"]) \
+                and upload["upload_id"] not in self.committing:
             db.execute("UPDATE uploads SET state='expired' WHERE upload_id=?", (upload["upload_id"],))
             self.store.audit(db, upload["upload_id"], "upload.begin", upload["staff_id"], "expired", {})
             return operation, dict(upload, state="expired"), intent
@@ -558,7 +620,7 @@ class StaffFiles:
         if body:
             raise Denied("invalid-request")
         with self.store.transaction() as db:
-            operation, upload, _ = self._upload_context(db, envelope)
+            operation, _, _ = self._upload_context(db, envelope)
             if operation["state"] in ("applied", "rejected"):
                 return Result(operation["status"], json.loads(operation["result"]))
             return self._upload_status(db, envelope["operationId"])
@@ -572,7 +634,7 @@ class StaffFiles:
             _, upload, _ = self._upload_context(db, envelope)
             if upload["state"] == "expired":
                 raise Denied("upload-expired", 410)
-            if upload["state"] != "open":
+            if upload["state"] != "open" or upload["upload_id"] in self.committing:
                 raise Denied("upload-closed", 409)
             count = max(1, -(-upload["size"] // upload["chunk_size"]))
             expected = upload["size"] - index * upload["chunk_size"] if index == count - 1 else upload["chunk_size"]
@@ -583,6 +645,7 @@ class StaffFiles:
                 if existing[0] != args["chunkSha256"]:
                     raise Denied("chunk-conflict", 409)
                 return self._upload_status(db, upload["upload_id"])
+            self.fresh(envelope)  # before the bytes are written
             fd = os.open(upload["upload_id"] + ".part", os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.uploads_fd)
             try:
                 if linuxfs.statx(fd).ino != upload["part_inode"]:
@@ -595,9 +658,38 @@ class StaffFiles:
             finally:
                 os.close(fd)
             db.execute("INSERT INTO chunks VALUES(?,?,?)", (upload["upload_id"], index, args["chunkSha256"]))
-            db.execute("UPDATE uploads SET lease_until=MIN(?, hard_deadline) WHERE upload_id=?",
+            db.execute("UPDATE uploads SET lease_until=MIN(?, hard_deadline), verified=NULL WHERE upload_id=?",
                        (int(self.clock()) + self.config.limits.lease_seconds, upload["upload_id"]))
             return self._upload_status(db, upload["upload_id"])
+
+    def _verified_sha(self, upload) -> tuple[str, linuxfs.Stat]:
+        """The staged file's SHA-256, re-hashed only when the staged bytes may have changed since the last check.
+
+        Hashing a large file outlives any single signature; the result is kept so a freshly signed commit retry is
+        short."""
+        fd = os.open(upload["upload_id"] + ".part", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.uploads_fd)
+        try:
+            before = linuxfs.statx(fd)
+            if before.ino != upload["part_inode"]:
+                raise Denied("upload-corrupt", 409)
+            mark = [before.ino, before.size, before.mtime_ns, before.ctime_ns]
+            cached = json.loads(upload["verified"]) if upload["verified"] else None
+            if cached and cached["mark"] == mark:
+                return cached["sha256"], before
+            digest = hashlib.sha256()
+            with self.hash_slots:
+                while chunk := os.read(fd, 4 * 1024 * 1024):
+                    digest.update(chunk)
+            os.fsync(fd)
+            after = linuxfs.statx(fd)
+            if [after.ino, after.size, after.mtime_ns, after.ctime_ns] != mark:
+                raise Denied("upload-changed", 409)
+        finally:
+            os.close(fd)
+        with self.store.transaction() as db:
+            db.execute("UPDATE uploads SET verified=? WHERE upload_id=?",
+                       (dumps({"mark": mark, "sha256": digest.hexdigest()}), upload["upload_id"]))
+        return digest.hexdigest(), after
 
     def upload_commit(self, envelope: dict, body: bytes) -> Result:
         if body:
@@ -611,88 +703,61 @@ class StaffFiles:
                 raise Denied("operation-hold", 423)
             if upload["state"] == "expired":
                 raise Denied("upload-expired", 410)
-            if upload["state"] != "open":
+            if upload["state"] != "open" or operation["state"] != "open" or upload_id in self.committing:
                 raise Denied("operation-in-progress", 409)
             count = max(1, -(-upload["size"] // upload["chunk_size"]))
             if db.execute("SELECT COUNT(*) FROM chunks WHERE upload_id=?", (upload_id,)).fetchone()[0] != count:
                 raise Denied("upload-incomplete", 409)
-            db.execute("UPDATE uploads SET state='committing' WHERE upload_id=?", (upload_id,))
-        part = upload_id + ".part"
-        fd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.uploads_fd)
+            self.committing.add(upload_id)  # in memory only: an interrupted prepare leaves nothing durable behind
         try:
-            digest = hashlib.sha256()
-            with self.hash_slots:
-                while chunk := os.read(fd, 4 * 1024 * 1024):
-                    digest.update(chunk)
-            info = linuxfs.statx(fd)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        if digest.hexdigest() != upload["sha256"] or info.size != upload["size"]:
-            return self._commit_rejected(envelope, Rejected("checksum-mismatch", 422), "open")
-        parts = path_parts(intent["path"])
-        with self.locked(_relative(parts[:-1])):
-            try:
-                with self.folder(parts[:-1]) as pfd:
-                    self._parent_checked(pfd, intent["parentId"])
-                    replace = intent["replace"]
-                    if replace is None:
+            sha, info = self._verified_sha(upload)     # long: may outlive the signature
+            if sha != upload["sha256"] or info.size != upload["size"]:
+                with self.store.transaction() as db:
+                    self.store.audit(db, upload_id, "upload.commit", envelope["actor"]["staffId"], "refused",
+                                     {"error": "checksum-mismatch"})
+                return Result(422, {"error": "checksum-mismatch"})
+            parts = path_parts(intent["path"])
+            with self.write_lock:
+                try:
+                    with self.folder(parts[:-1]) as pfd:
+                        parent = self._parent_id(pfd, intent["parentId"])
                         if self.collision(pfd, parts[-1]):
                             raise Rejected("name-exists", 409)
-                    else:
-                        current = self.entry(pfd, parts[-1])
-                        if current is None or not stat.S_ISREG(current.mode) or current.object_id != replace["id"] \
-                                or self.content_sha(pfd, parts[-1], current) != replace["etag"]:
-                            raise Rejected("changed", 412)
-            except Rejected as rejection:
-                return self._commit_rejected(envelope, rejection, "conflict")
-            step = {"path": intent["path"], "name": parts[-1], "partInode": info.ino,
-                    "oldId": None if intent["replace"] is None else intent["replace"]["id"], "trashId": upload_id}
-            with self.store.transaction() as db:
-                db.execute("UPDATE operations SET state='intent', intent=?, updated_at=? WHERE operation_id=?",
-                           (dumps(step), int(self.clock()), upload_id))
-                self.store.audit(db, upload_id, "upload.commit", envelope["actor"]["staffId"], "intent", step)
-            try:
-                with self.folder(parts[:-1]) as pfd:
-                    if step["oldId"] is not None:
-                        os.mkdir(upload_id, 0o700, dir_fd=self.trash_fd)
-                        holder = os.open(upload_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.trash_fd)
+                except Rejected as rejection:
+                    with self.store.transaction() as db:
+                        self._settle(db, upload_id, "rejected", rejection.status, {"error": rejection.code}, "rejected",
+                                     {"error": rejection.code})
+                    return Result(rejection.status, {"error": rejection.code})
+                self.fresh(envelope)  # irreversible boundary: nothing published if the authorization has lapsed
+                step = {"path": intent["path"], "name": parts[-1], "partInode": info.ino, "parentId": parent}
+                with self.store.transaction() as db:
+                    db.execute("UPDATE operations SET state='intent', intent=?, updated_at=? WHERE operation_id=?",
+                               (dumps(step), int(self.clock()), upload_id))
+                    self.store.audit(db, upload_id, "upload.commit", envelope["actor"]["staffId"], "intent", step)
+                try:
+                    with self.folder(parts[:-1], bound=parent) as pfd:
                         try:
-                            linuxfs.rename_noreplace(pfd, parts[-1], holder, parts[-1])
-                            linuxfs.fsync_dir(holder)
-                        finally:
-                            os.close(holder)
-                        with self.store.transaction() as db:
-                            db.execute("INSERT INTO trash VALUES(?,?,?,?,?,?,NULL)", (upload_id, intent["path"], parts[-1], step["oldId"],
-                                                                                     envelope["actor"]["staffId"], int(self.clock())))
-                    linuxfs.rename_noreplace(self.uploads_fd, part, pfd, parts[-1])
-                    linuxfs.fsync_dir(pfd)
-                    linuxfs.fsync_dir(self.uploads_fd)
-                    placed = linuxfs.statx(pfd, parts[-1])
-            except BaseException:
-                self.reconcile_one(upload_id)
-                raise
-        result = {"operationId": upload_id, "state": "applied",
-                  "result": {"path": intent["path"], "id": placed.object_id, "etag": upload["sha256"], "size": upload["size"],
-                             "replacedTrashId": upload_id if step["oldId"] else None}}
-        with self.store.transaction() as db:
-            self.store.finish(db, upload_id, "applied", 200, result)
-            db.execute("UPDATE uploads SET state='committed' WHERE upload_id=?", (upload_id,))
-            self.store.audit(db, upload_id, "upload.commit", envelope["actor"]["staffId"], "applied", result["result"])
-        return Result(200, result)
-
-    def _commit_rejected(self, envelope: dict, rejection: Rejected, upload_state: str) -> Result:
-        body = {"error": rejection.code}
-        with self.store.transaction() as db:
-            if upload_state == "open":
-                db.execute("UPDATE uploads SET state='open' WHERE upload_id=?", (envelope["operationId"],))
-                self.store.audit(db, envelope["operationId"], "upload.commit", envelope["actor"]["staffId"], "refused", body)
-            else:
-                # The bytes stay in staging (never purged automatically); the app keeps its local conflict copy.
-                db.execute("UPDATE uploads SET state='conflict' WHERE upload_id=?", (envelope["operationId"],))
-                self.store.finish(db, envelope["operationId"], "rejected", rejection.status, body)
-                self.store.audit(db, envelope["operationId"], "upload.commit", envelope["actor"]["staffId"], "rejected", body)
-        return Result(rejection.status, body)
+                            linuxfs.rename_noreplace(self.uploads_fd, upload_id + ".part", pfd, parts[-1])
+                        except FileExistsError:
+                            raise Rejected("name-exists", 409) from None
+                        linuxfs.fsync_dir(pfd)
+                        linuxfs.fsync_dir(self.uploads_fd)
+                        placed = linuxfs.statx(pfd, parts[-1])
+                except Rejected as rejection:
+                    with self.store.transaction() as db:
+                        self._settle(db, upload_id, "rejected", rejection.status, {"error": rejection.code}, "rejected",
+                                     {"error": rejection.code})
+                    return Result(rejection.status, {"error": rejection.code})
+                except BaseException:
+                    self.reconcile_one(upload_id)
+                    raise
+            result = {"operationId": upload_id, "state": "applied",
+                      "result": {"path": intent["path"], "id": placed.object_id, "etag": upload["sha256"], "size": upload["size"]}}
+            with self.store.transaction() as db:
+                self._settle(db, upload_id, "applied", 200, result, "applied", result["result"])
+            return Result(200, result)
+        finally:
+            self.committing.discard(upload_id)
 
     # ---------- status and recovery ----------
 
@@ -700,8 +765,14 @@ class StaffFiles:
         target = canonical_uuid(envelope["args"]["targetOperationId"])
         with self.store.transaction() as db:
             row = self.store.operation(db, target)
-        if row is None or (row["staff_id"], row["grant_id"]) != (envelope["actor"]["staffId"], envelope["grant"]["grantId"]):
-            return Result(404, {"error": "not-found"})
+        not_found = Result(404, {"error": "not-found"})
+        if row is None or (row["staff_id"], row["grant_id"], row["grant_generation"]) != \
+                (envelope["actor"]["staffId"], envelope["grant"]["grantId"], envelope["grant"]["grantGeneration"]):
+            return not_found
+        intent = json.loads(row["intent"])
+        for key in PATH_KEYS:  # never return a path-bearing result outside the caller's current grant folder
+            if key in intent and not _inside(intent[key], envelope["grant"]["path"], strict=True):
+                return not_found
         body = {"operationId": target, "state": row["state"]}
         if row["result"] is not None:
             body["status"], body["result"] = row["status"], json.loads(row["result"])
@@ -720,7 +791,7 @@ class StaffFiles:
         try:
             fd = dir_fd
             for name in names[:-1]:
-                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                fd = os.open(name, DIRECTORY, dir_fd=fd)
                 fds.append(fd)
             return linuxfs.statx(fd, names[-1])
         except (FileNotFoundError, NotADirectoryError):
@@ -729,83 +800,73 @@ class StaffFiles:
             for fd in fds:
                 os.close(fd)
 
-    def decide(self, row) -> str:
-        """applied / rejected from filesystem evidence, or unknown when the evidence cannot tell."""
-        intent = json.loads(row["intent"])
-        kind = row["kind"]
+    def decide(self, row) -> tuple[str, dict]:
+        """(outcome, evidence) from the filesystem: applied / rejected (open for an upload) / unknown."""
+        intent, kind = json.loads(row["intent"]), row["kind"]
         if kind == "mkdir":
             info = self._stat_at(intent["path"])
-            return "applied" if info is not None and stat.S_ISDIR(info.mode) else "rejected"
+            exists = info is not None and stat.S_ISDIR(info.mode)
+            return ("applied" if exists else "rejected"), {"folderAtPath": exists}
         if kind == "move":
-            at_destination, at_source = self._stat_at(intent["destination"]), self._stat_at(intent["source"])
-            if at_destination is not None and at_destination.object_id == intent["id"]:
-                return "applied"
-            return "rejected" if at_source is not None and at_source.object_id == intent["id"] else "unknown"
-        if kind == "delete":
-            in_trash, at_path = self._stat_in(self.trash_fd, intent["trashId"], intent["name"]), self._stat_at(intent["path"])
-            if in_trash is not None and in_trash.object_id == intent["id"]:
-                return "applied"
-            return "rejected" if at_path is not None and at_path.object_id == intent["id"] else "unknown"
-        if kind == "trash.restore":
-            at_path, in_trash = self._stat_at(intent["path"]), self._stat_in(self.trash_fd, intent["trashId"], intent["name"])
-            if at_path is not None and at_path.object_id == intent["id"]:
-                return "applied"
-            return "rejected" if in_trash is not None and in_trash.object_id == intent["id"] else "unknown"
-        if kind == "upload.begin":
-            placed = self._stat_at(intent["path"])
-            part = self._stat_in(self.uploads_fd, row["operation_id"] + ".part")
-            if placed is not None and placed.ino == intent["partInode"]:
-                return "applied"
-            old_in_place = intent["oldId"] is None or (placed is not None and placed.object_id == intent["oldId"])
-            return "rejected" if part is not None and part.ino == intent["partInode"] and old_in_place else "unknown"
-        return "unknown"
+            target, origin = self._stat_at(intent["destination"]), self._stat_at(intent["source"])
+            evidence = {"atDestination": bool(target and target.object_id == intent["id"]),
+                        "atSource": bool(origin and origin.object_id == intent["id"])}
+        elif kind == "delete":
+            target, origin = self._stat_in(self.trash_fd, intent["trashId"], intent["name"]), self._stat_at(intent["path"])
+            evidence = {"atDestination": bool(target and target.object_id == intent["id"]),
+                        "atSource": bool(origin and origin.object_id == intent["id"])}
+        elif kind == "trash.restore":
+            target, origin = self._stat_at(intent["path"]), self._stat_in(self.trash_fd, intent["trashId"], intent["name"])
+            evidence = {"atDestination": bool(target and target.object_id == intent["id"]),
+                        "atSource": bool(origin and origin.object_id == intent["id"])}
+        elif kind == "upload.begin":
+            target, origin = self._stat_at(intent["path"]), self._stat_in(self.uploads_fd, row["operation_id"] + ".part")
+            evidence = {"atDestination": bool(target and target.ino == intent["partInode"]),
+                        "atSource": bool(origin and origin.ino == intent["partInode"])}
+        else:
+            return "unknown", {}
+        if evidence["atDestination"] and not evidence["atSource"]:
+            return "applied", evidence
+        if evidence["atSource"] and not evidence["atDestination"]:
+            return ("open" if kind == "upload.begin" else "rejected"), evidence
+        return "unknown", evidence
 
     def reconcile_one(self, operation_id: str) -> str:
         with self.store.transaction() as db:
             row = self.store.operation(db, operation_id)
             if row is None or row["state"] != "intent":
                 return row["state"] if row is not None else "missing"
-            decision = self.decide(row)
-            intent = json.loads(row["intent"])
-            if decision == "applied" and (row["kind"] == "delete" or (row["kind"] == "upload.begin" and intent.get("oldId"))):
-                # The trash record is written after the move; make sure a restorable record exists.
-                db.execute("INSERT OR IGNORE INTO trash VALUES(?,?,?,?,?,?,NULL)",
-                           (intent["trashId"], intent["path"], intent["name"], intent.get("id") or intent["oldId"],
-                            row["staff_id"], int(self.clock())))
-            if decision == "applied" and row["kind"] == "trash.restore":
-                db.execute("UPDATE trash SET restored_by_operation=? WHERE trash_id=?", (operation_id, intent["trashId"]))
-            if decision == "applied" and row["kind"] == "upload.begin":
-                db.execute("UPDATE uploads SET state='committed' WHERE upload_id=?", (operation_id,))
-            elif decision == "rejected" and row["kind"] == "upload.begin":
-                # Nothing moved: the upload is open again and an identical commit may be retried.
-                db.execute("UPDATE operations SET state='open', updated_at=? WHERE operation_id=?", (int(self.clock()), operation_id))
-                db.execute("UPDATE uploads SET state='open' WHERE upload_id=?", (operation_id,))
-                self.store.audit(db, operation_id, row["kind"], row["staff_id"], "reconciled", {"decision": "not-applied"})
-                return "open"
-            body = {"operationId": operation_id, "state": decision, "reconciled": True}
-            self.store.finish(db, operation_id, decision, {"applied": 200, "rejected": 409, "unknown": 409}[decision], body)
-            if decision == "unknown":
-                db.execute("UPDATE operations SET result=NULL, status=NULL WHERE operation_id=?", (operation_id,))
-            self.store.audit(db, operation_id, row["kind"], row["staff_id"], "reconciled", {"decision": decision})
-            return decision
+            outcome, evidence = self.decide(row)
+            body = {"operationId": operation_id, "state": outcome, "reconciled": True}
+            status = {"applied": 200, "rejected": 409}.get(outcome)
+            self._settle(db, operation_id, outcome, status, body, "reconciled", {"outcome": outcome, "evidence": evidence})
+            return outcome
 
     def reconcile(self) -> dict:
         with self.store.transaction() as db:
             pending = [r["operation_id"] for r in db.execute("SELECT operation_id FROM operations WHERE state='intent'")]
-            db.execute("UPDATE uploads SET state='open' WHERE state='committing' AND upload_id IN "
-                       "(SELECT operation_id FROM operations WHERE state='open')")
         return {operation_id: self.reconcile_one(operation_id) for operation_id in pending}
 
     def resolve_hold(self, operation_id: str, decision: str, operator: str) -> None:
+        """Settles an `unknown` operation. The filesystem must support the decision:
+        if the evidence is now decisive it must agree; otherwise only `rejected` is accepted, and only when the
+        object is not at its destination (an operator can never declare a change applied without evidence)."""
         if decision not in ("applied", "rejected"):
             raise ValueError("decision must be applied or rejected")
         with self.store.transaction() as db:
             row = self.store.operation(db, operation_id)
             if row is None or row["state"] != "unknown":
                 raise ValueError("operation is not on hold")
-            self.store.finish(db, operation_id, decision, 200 if decision == "applied" else 409,
-                              {"operationId": operation_id, "state": decision, "resolvedByOperator": True})
-            self.store.audit(db, operation_id, row["kind"], row["staff_id"], "operator-resolved", {"decision": decision, "operator": operator})
+            outcome, evidence = self.decide(row)
+            normalized = "rejected" if outcome == "open" else outcome
+            if normalized != "unknown" and normalized != decision:
+                raise ValueError(f"filesystem evidence says {normalized}")
+            if normalized == "unknown" and (decision == "applied" or evidence.get("atDestination")):
+                raise ValueError("no filesystem evidence for this decision")
+            final = "open" if outcome == "open" else decision
+            body = {"operationId": operation_id, "state": decision, "resolvedByOperator": True}
+            self._settle(db, operation_id, final, 200 if decision == "applied" else 409, body, "operator-resolved",
+                         {"decision": decision, "operator": operator, "evidence": evidence})
 
     def ready(self) -> bool:
         try:

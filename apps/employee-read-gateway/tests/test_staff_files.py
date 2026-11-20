@@ -155,7 +155,13 @@ class ServiceTests(unittest.TestCase):
         self.files = StaffFiles(self.config, self.clock)
 
     def tearDown(self):
+        self.files.close()
         shutil.rmtree(self.base)
+
+    def restart(self):
+        self.files.close()
+        self.files = StaffFiles(self.config, self.clock)
+        return self.files
 
     def id_of(self, relative):
         parent, name = os.path.split(os.path.join(self.root, relative))
@@ -172,9 +178,12 @@ class ServiceTests(unittest.TestCase):
         finally:
             os.close(fd)
 
-    def run_op(self, operation, args, body=b"", operation_id=None, rights=("read", "write"), grant_path="jobs",
-               exclusive=True, generation=1):
-        envelope = {"schemaVersion": 2, "scope": "files-write", "keyId": "w1", "nonce": uuid.uuid4().hex,
+    def run_op(self, operation, args, body=b"", **kwargs):
+        return self.files.execute(self.envelope(operation, args, body, **kwargs), body)
+
+    def envelope(self, operation, args, body=b"", operation_id=None, rights=("read", "write"), grant_path="jobs",
+                 exclusive=True, generation=1):
+        return {"schemaVersion": 2, "scope": "files-write", "keyId": "w1", "nonce": uuid.uuid4().hex,
                     "issuedAt": int(self.clock()), "expiresAt": int(self.clock()) + 20, "audience": AUDIENCE,
                     "servicePrincipal": CLIENT_ID, "method": "POST", "route": "/v2/op",
                     "operationId": operation_id or str(uuid.uuid4()),
@@ -182,8 +191,7 @@ class ServiceTests(unittest.TestCase):
                     "grant": {"grantId": GRANT, "grantGeneration": generation, "path": grant_path, "rights": list(rights)},
                     "root": {"rootId": ROOT_ID, "rootGeneration": 1, "rootFingerprint": self.config.root_fingerprint,
                              "exclusive": exclusive},
-                    "operation": operation, "args": args, "bodySha256": hashlib.sha256(body).hexdigest()}
-        return self.files.execute(envelope, body)
+                "operation": operation, "args": args, "bodySha256": hashlib.sha256(body).hexdigest()}
 
     def mkdir(self, path, operation_id=None):
         parent = os.path.dirname(path)
@@ -272,18 +280,106 @@ class ServiceTests(unittest.TestCase):
                     body=b"12", operation_id=operation_id)
         self.assertEqual(self.run_op("upload.commit", {}, operation_id=operation_id).status, 422)
 
-    def test_replace_keeps_old_version_in_trash_and_stale_etag_conflicts(self):
+    def test_overwrite_is_disabled_in_v1(self):
         self.upload("jobs/doc.txt", b"version one")
-        old_id = self.id_of("jobs/doc.txt")
-        stale = self.upload("jobs/doc.txt", b"version two",
-                            {"kind": "replace", "id": old_id, "etag": hashlib.sha256(b"something else").hexdigest()})
-        self.assertEqual(stale.status, 412)
-        replaced = self.upload("jobs/doc.txt", b"version two",
-                               {"kind": "replace", "id": old_id, "etag": hashlib.sha256(b"version one").hexdigest()})
-        self.assertEqual(replaced.status, 200, replaced.body)
-        trash_id = replaced.body["result"]["replacedTrashId"]
-        with open(os.path.join(self.internal, "trash", trash_id, "doc.txt"), "rb") as stream:
-            self.assertEqual(stream.read(), b"version one")
+        with self.assertRaises(Denied) as caught:
+            self.upload("jobs/doc.txt", b"version two", {"kind": "replace", "id": self.id_of("jobs/doc.txt"),
+                                                         "etag": hashlib.sha256(b"version one").hexdigest()})
+        self.assertEqual((caught.exception.status, caught.exception.code), (400, "overwrite-unsupported"))
+        self.assertEqual(self.upload("jobs/DOC.txt", b"version two").status, 409)  # create-only, case-folded
+
+    def test_expired_replay_entry_is_rejected(self):
+        with self.assertRaises(Denied) as caught:
+            self.files.replay.claim("w1", "a" * 32, int(self.clock()), int(self.clock()))
+        self.assertEqual(caught.exception.status, 401)
+
+    def test_commit_whose_hash_outlives_the_signature_publishes_nothing_and_a_fresh_retry_reuses_the_hash(self):
+        data = b"0123456789abcdef"
+        operation_id = str(uuid.uuid4())
+        self.run_op("upload.begin", {"path": "jobs/big.bin", "parentId": self.root_id("jobs"), "size": len(data),
+                                     "sha256": hashlib.sha256(data).hexdigest(), "precondition": {"kind": "create"}},
+                    operation_id=operation_id)
+        for index in (0, 1):
+            chunk = data[index * 8:(index + 1) * 8]
+            self.run_op("upload.chunk", {"index": index, "chunkSha256": hashlib.sha256(chunk).hexdigest(), "chunkSize": 8},
+                        body=chunk, operation_id=operation_id)
+        clock, real = self.clock, self.files.hash_slots
+
+        class SlowHash:
+            def __enter__(self):
+                clock.now += 60  # hashing takes longer than the 30-second authorization
+            def __exit__(self, *exc):
+                return False
+
+        self.files.hash_slots = SlowHash()
+        with self.assertRaises(Denied) as caught:
+            self.run_op("upload.commit", {}, operation_id=operation_id)
+        self.assertEqual(caught.exception.code, "expired")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "jobs", "big.bin")))
+        self.assertEqual(self.run_op("upload.status", {}, operation_id=operation_id).body["state"], "open")
+
+        class NoHash:
+            def __enter__(self):
+                raise AssertionError("the verified hash should be reused")
+            def __exit__(self, *exc):
+                return False
+
+        self.files.hash_slots = NoHash()
+        committed = self.run_op("upload.commit", {}, operation_id=operation_id)
+        self.files.hash_slots = real
+        self.assertEqual(committed.status, 200, committed.body)
+        with open(os.path.join(self.root, "jobs", "big.bin"), "rb") as stream:
+            self.assertEqual(stream.read(), data)
+
+    def test_interrupted_prepare_does_not_leave_the_upload_stuck(self):
+        operation_id = str(uuid.uuid4())
+        self.run_op("upload.begin", {"path": "jobs/x.bin", "parentId": self.root_id("jobs"), "size": 1,
+                                     "sha256": hashlib.sha256(b"x").hexdigest(), "precondition": {"kind": "create"}},
+                    operation_id=operation_id)
+        self.run_op("upload.chunk", {"index": 0, "chunkSha256": hashlib.sha256(b"x").hexdigest(), "chunkSize": 1},
+                    body=b"x", operation_id=operation_id)
+        os.unlink(os.path.join(self.internal, "uploads", operation_id + ".part"))
+        with self.assertRaises(OSError):
+            self.run_op("upload.commit", {}, operation_id=operation_id)
+        self.assertEqual(self.files.committing, set())
+        self.assertEqual(self.run_op("upload.status", {}, operation_id=operation_id).body["state"], "open")
+
+    def test_single_writer_per_root(self):
+        with self.assertRaises(Denied) as caught:
+            StaffFiles(self.config, self.clock)
+        self.assertEqual(caught.exception.code, "root-owned-by-another-instance")
+        self.restart()  # once released, a new owner starts normally
+
+    def test_mutations_are_serialized_root_wide(self):
+        import threading
+        self.mkdir("jobs/A")
+        results = []
+        with self.files.write_lock:
+            worker = threading.Thread(target=lambda: results.append(self.mkdir("jobs/A/deep")))
+            worker.start()
+            worker.join(0.3)
+            self.assertTrue(worker.is_alive())  # a descendant change waits for the root-wide lock
+        worker.join(5)
+        self.assertEqual(results[0].status, 200)
+
+    def test_folder_handles_are_bound_to_the_checked_identity(self):
+        envelope = self.envelope("mkdir", {"path": "jobs/new", "parentId": self.root_id("jobs")})
+        plan = self.files.plan_mkdir(envelope, envelope["args"])
+        intent = plan["check"]()
+        os.rename(os.path.join(self.root, "jobs"), os.path.join(self.root, "jobs-old"))
+        os.mkdir(os.path.join(self.root, "jobs"))  # same path, different folder
+        with self.assertRaises(Exception) as caught:
+            plan["apply"](intent)
+        self.assertEqual(getattr(caught.exception, "code", None), "parent-changed")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "jobs", "new")))
+
+    def test_status_needs_the_current_generation_and_scope(self):
+        self.mkdir("jobs/A")
+        done = self.mkdir("jobs/B")
+        target = done.body["operationId"]
+        self.assertEqual(self.run_op("op.status", {"targetOperationId": target}).status, 200)
+        self.assertEqual(self.run_op("op.status", {"targetOperationId": target}, generation=2).status, 404)
+        self.assertEqual(self.run_op("op.status", {"targetOperationId": target}, grant_path="jobs/A").status, 404)
 
     def test_quota_and_session_limits(self):
         with self.assertRaises(Denied) as caught:
@@ -333,30 +429,32 @@ class ServiceTests(unittest.TestCase):
         operation_id = str(uuid.uuid4())
         intent = {"source": "jobs/A", "destination": "jobs/Z", "id": object_id}
         with self.files.store.transaction() as db:
-            db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,'intent',?,NULL,NULL,0,0)",
-                       (operation_id, "move", "d", STAFF, GRANT, 1, json.dumps(intent)))
+            db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,'intent',?,NULL,NULL,0,0)",
+                       (operation_id, "move", "d", STAFF, GRANT, 1, "jobs", json.dumps(intent)))
         os.rename(os.path.join(self.root, "jobs", "A"), os.path.join(self.root, "jobs", "Z"))  # applied before the crash
-        self.assertEqual(StaffFiles(self.config, self.clock).reconcile(), {})  # nothing pending after the decision
+        self.assertEqual(self.restart().reconcile(), {})  # nothing pending after the decision
         with self.files.store.transaction() as db:
             self.assertEqual(self.files.store.operation(db, operation_id)["state"], "applied")
         lost = str(uuid.uuid4())
         with self.files.store.transaction() as db:
-            db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,'intent',?,NULL,NULL,0,0)",
-                       (lost, "move", "d", STAFF, GRANT, 1, json.dumps({"source": "jobs/gone", "destination": "jobs/also-gone",
-                                                                        "id": object_id})))
-        restarted = StaffFiles(self.config, self.clock)
+            db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,'intent',?,NULL,NULL,0,0)",
+                       (lost, "move", "d", STAFF, GRANT, 1, "jobs",
+                        json.dumps({"source": "jobs/gone", "destination": "jobs/also-gone", "id": object_id})))
+        restarted = self.restart()
         with restarted.store.transaction() as db:
             self.assertEqual(restarted.store.operation(db, lost)["state"], "unknown")
         self.assertFalse(restarted.ready())
-        self.files = restarted
         with self.assertRaises(Denied) as caught:
             self.mkdir("jobs/new")
         self.assertEqual(caught.exception.status, 423)
+        with self.assertRaises(ValueError):  # an operator cannot declare it applied without evidence
+            restarted.resolve_hold(lost, "applied", "staging-qa")
         restarted.resolve_hold(lost, "rejected", "staging-qa")
         self.assertTrue(restarted.ready())
         self.assertEqual(self.mkdir("jobs/new").status, 200)
 
     def test_internal_storage_must_be_a_private_sibling(self):
+        self.files.close()
         os.chmod(self.internal, 0o755)
         with self.assertRaises(Denied):
             StaffFiles(self.config, self.clock)
@@ -414,6 +512,31 @@ class HttpTests(unittest.TestCase):
         status, body = self.post({**link, **signed})
         self.assertEqual((status, body["state"]), (200, "applied"))
         self.assertEqual(self.post({**link, **signed})[1]["error"], "replayed-request")  # same nonce again
+
+    def test_a_body_that_arrives_after_the_signature_expired_is_refused(self):
+        import socket
+        now = int(time.time())
+        data = b"slow!"
+        operation_id = str(uuid.uuid4())
+        service = self.service
+        service.clock.now = time.time()
+        service.run_op("upload.begin", {"path": "jobs/slow.bin", "parentId": service.root_id("jobs"), "size": len(data),
+                                        "sha256": hashlib.sha256(data).hexdigest(), "precondition": {"kind": "create"}},
+                       operation_id=operation_id)
+        service.clock.now = None
+        service.files.clock = time.time
+        headers = self.envelope(operationId=operation_id, operation="upload.chunk", issuedAt=now, expiresAt=now + 2,
+                                args={"index": 0, "chunkSha256": hashlib.sha256(data).hexdigest(), "chunkSize": len(data)},
+                                bodySha256=hashlib.sha256(data).hexdigest())
+        headers["Cf-Access-Jwt-Assertion"] = self.access.token()
+        head = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+        with socket.create_connection(("127.0.0.1", self.server.server_address[1]), timeout=10) as connection:
+            connection.sendall(f"POST /v2/op HTTP/1.0\r\nContent-Length: {len(data)}\r\n{head}\r\n".encode())
+            time.sleep(3.2)  # the body arrives after expiresAt
+            connection.sendall(data)
+            reply = connection.makefile("rb").read()
+        self.assertIn(b" 401 ", reply.split(b"\r\n", 1)[0])
+        self.assertIn(b'"expired"', reply)
 
 
 if __name__ == "__main__":
