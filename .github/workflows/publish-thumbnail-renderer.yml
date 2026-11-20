@@ -167,7 +167,7 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Platform: \`linux/amd64\`"
             echo "- Digest: \`${DIGEST}\`"
-            echo "- Immutable candidate: target \`${TARGET}\`, commit \`${GITHUB_SHA}\`, digest \`${DIGEST}\` (pin with \`${IMAGE}:sha-${GITHUB_SHA}\`)"
+            echo "- Verified immutable candidate: target \`${TARGET}\`, commit \`${GITHUB_SHA}\`, digest \`${DIGEST}\`. Use only if this whole run succeeded; pin by digest \`${IMAGE}@${DIGEST}\` (never the sha tag), with Beau's approval for production."
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload the deployment receipt

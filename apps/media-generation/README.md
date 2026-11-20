@@ -37,9 +37,13 @@ alter the Jobs dataset, or stop any existing app.
    always`. `main` no longer moves `:latest` for the proxy generator or the
    thumbnail images: each `main` build is published only as immutable
    `sha-<commit>` and `candidate-…` tags. Until a protected promotion workflow
-   exists for them, `:latest` stays where it is; to run a newer build, pin
-   `image: ghcr.io/ledgetoptechnologies/<package>:sha-<full commit SHA>`.
-   Updating/redeploying the app pulls whatever `:latest` (or the pinned tag)
+   exists for them, `:latest` stays where it is. To run a newer build
+   meanwhile: (1) confirm that commit's `main` publish run succeeded end to
+   end, (2) take the image's verified digest from that run's receipt, (3) pin
+   `image: ghcr.io/ledgetoptechnologies/<package>@sha256:<receipt digest>`, never
+   the `sha-<commit>` tag (it can exist even if a later check failed), and
+   (4) get Beau's separate approval before production use.
+   Updating/redeploying the app pulls whatever `:latest` (or the pinned digest)
    names; a plain container restart does not pull an image, and this stack is
    not a live automatic updater. Configure a private registry credential in the
    Apps UI if required. Commit tags and digest receipts remain available for
