@@ -20,10 +20,8 @@ readonly HEARTBEAT_SECONDS=60
 
 : "${LTDSTHUMB_API_BASE:=$EXPECTED_API_BASE}"
 : "${LTDSTHUMB_API_TOKEN:=${THUMBNAIL_INGEST_SECRET:-}}"
-# The shared NAS link file (one Cloudflare Access service token for every NAS service) supplies the Access headers
-# when the older per-service names are not set.
-: "${CF_ACCESS_CLIENT_ID:=${NAS_LINK_CLIENT_ID:-}}"
-: "${CF_ACCESS_CLIENT_SECRET:=${NAS_LINK_CLIENT_SECRET:-}}"
+# The Access service-token pair is resolved atomically by resolve_access_pair below: either the older
+# CF_ACCESS_CLIENT_ID/SECRET pair or the shared NAS link pair (NAS_LINK_CLIENT_ID/SECRET), never one of each.
 : "${LTDSTHUMB_SCRATCH_DIR:=/scratch}"
 : "${LTDSTHUMB_IDLE_SECONDS:=30}"
 : "${LTDSTHUMB_RENDER_TIMEOUT_SECONDS:=600}"
@@ -41,8 +39,30 @@ valid_secret() {
   [[ -n "$1" && "$1" != *$'\r'* && "$1" != *$'\n'* ]]
 }
 
+# One complete Access pair from ONE source. The older CF_ACCESS_* names win only as a complete pair; if the shared NAS
+# link file is also set, it must name the same token or the worker stops. A half pair from either source stops too.
+# Messages name variables only, never values.
+resolve_access_pair() {
+  local id="${CF_ACCESS_CLIENT_ID:-}" secret="${CF_ACCESS_CLIENT_SECRET:-}"
+  local link_id="${NAS_LINK_CLIENT_ID:-}" link_secret="${NAS_LINK_CLIENT_SECRET:-}"
+  if [[ -n "$id" || -n "$secret" ]]; then
+    [[ -n "$id" && -n "$secret" ]] || die "CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET must be set together"
+    if [[ -n "$link_id" || -n "$link_secret" ]]; then
+      [[ "$link_id" == "$id" && "$link_secret" == "$secret" ]] ||
+        die "CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET differ from the shared NAS link token; set only one of them"
+    fi
+  elif [[ -n "$link_id" || -n "$link_secret" ]]; then
+    [[ -n "$link_id" && -n "$link_secret" ]] || die "NAS_LINK_CLIENT_ID and NAS_LINK_CLIENT_SECRET must be set together"
+    id="$link_id"
+    secret="$link_secret"
+  fi
+  CF_ACCESS_CLIENT_ID="$id"
+  CF_ACCESS_CLIENT_SECRET="$secret"
+}
+
 [[ "$LTDSTHUMB_API_BASE" == "$EXPECTED_API_BASE" || "$LTDSTHUMB_API_BASE" == "$ACCESS_API_BASE" ]] ||
   die "LTDSTHUMB_API_BASE must be an approved renderer endpoint"
+resolve_access_pair
 # Transition: the shared bearer secret is optional once the Access service token is set; Ops accepts either until
 # its bearer path is retired (THUMBNAIL_RENDERER_BEARER_RETIRED). Without an Access token the bearer stays required.
 if [[ -z "$CF_ACCESS_CLIENT_ID" || -n "$LTDSTHUMB_API_TOKEN" ]]; then
@@ -491,6 +511,9 @@ start_stream_proxy() {
   local source_url_file="$CURRENT_JOB_DIR/stream-source-url"
   rm -f -- "$port_file" "$source_url_file"
   (umask 077; printf '%s' "$source_url" >"$source_url_file")
+  # The resolved credentials are passed explicitly: values filled from aliases (THUMBNAIL_INGEST_SECRET, NAS_LINK_*) are
+  # shell variables, not exported, so the child would not otherwise see them.
+  LTDSTHUMB_API_TOKEN="$LTDSTHUMB_API_TOKEN" CF_ACCESS_CLIENT_ID="$CF_ACCESS_CLIENT_ID" CF_ACCESS_CLIENT_SECRET="$CF_ACCESS_CLIENT_SECRET" \
   python3 -c '
 import http.server, os, re, sys, threading, urllib.error, urllib.request
 

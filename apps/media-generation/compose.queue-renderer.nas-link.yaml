@@ -1,0 +1,14 @@
+# SUCCESSOR configuration for queue-renderer, applied only at the bearer-retirement gate (see PR 672):
+#   1. the worker image that reads the shared NAS link is promoted, and
+#   2. Ops accepts the NAS link token on the renderer API (THUMBNAIL_RENDERER_ACCESS_AUD / _CLIENT_ID set), and
+#   3. thumbnails are confirmed flowing with the token, then Ops sets THUMBNAIL_RENDERER_BEARER_RETIRED=true.
+# Until then compose.truenas.all.yaml keeps the shared bearer (LTDSTHUMB_API_TOKEN) on purpose.
+# Use: docker compose -f compose.truenas.all.yaml -f compose.queue-renderer.nas-link.yaml ...
+# (or make the same two edits in the app's single YAML). Needs Docker Compose 2.24+.
+services:
+  queue-renderer:
+    env_file:
+      - path: ${NAS_LINK_ENV_FILE:?Select the shared NAS link settings file}
+        required: true
+    environment:
+      LTDSTHUMB_API_TOKEN: !reset null
