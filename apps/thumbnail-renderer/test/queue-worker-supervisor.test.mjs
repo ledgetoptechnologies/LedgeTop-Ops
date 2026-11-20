@@ -78,21 +78,19 @@ test("publish is blocked on source checks and proves the exact published all-med
   const receipt = publishWorkflow.indexOf("Write the immutable deployment receipt");
   assert.ok(readback > publishWorkflow.indexOf("Build and publish the linux/amd64 image"));
   assert.ok(smoke > readback);
-  const promotion = publishWorkflow.indexOf("Promote canary-verified queue worker to stable");
-  const latest = publishWorkflow.indexOf("Promote verified main image to latest");
-  assert.ok(promotion > smoke);
-  assert.ok(latest > promotion);
-  assert.ok(receipt > latest);
-  assert.match(publishWorkflow, /docker buildx imagetools create --tag "\$\{IMAGE\}:stable"/);
-  assert.match(publishWorkflow, /stable digest does not match canary-tested image/);
+  const candidate = publishWorkflow.indexOf("Tag the verified digest as an immutable candidate (never latest)");
+  assert.ok(candidate > smoke);
+  assert.ok(receipt > candidate);
+  assert.doesNotMatch(publishWorkflow, /:stable"|:latest"/, "main never moves a mutable tag");
   assert.match(publishWorkflow, /docker buildx imagetools inspect "\$\{TAG\}"/);
   assert.match(publishWorkflow, /inspect "\$\{TAG\}" --format '\{\{json \.Manifest\}\}' > commit-manifest\.json/);
   assert.match(publishWorkflow, /readFileSync\("commit-manifest\.json", "utf8"\)/);
   assert.doesNotMatch(publishWorkflow, /\| awk[^\n]+exit/);
   assert.match(publishWorkflow, /"\$\{resolved_digest\}" != "\$\{EXPECTED_DIGEST\}"/);
   assert.match(publishWorkflow, /LTDSTHUMB_SMOKE_IMAGE: \$\{\{ steps\.names\.outputs\.image \}\}@\$\{\{ steps\.build\.outputs\.digest \}\}/);
-  assert.match(publishWorkflow, /imagetools create --prefer-index=false --tag "\$\{IMAGE\}:latest" "\$\{IMAGE\}@\$\{EXPECTED_DIGEST\}"/);
-  assert.match(publishWorkflow, /latest digest does not match verified main image/);
+  assert.match(publishWorkflow, /tag="candidate-\$\{GITHUB_SHA\}-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"/);
+  assert.match(publishWorkflow, /imagetools create --prefer-index=false --tag "\$\{IMAGE\}:\$\{tag\}" "\$\{IMAGE\}@\$\{EXPECTED_DIGEST\}"/);
+  assert.match(publishWorkflow, /candidate digest does not match verified main image/);
 });
 
 test("proxy latest promotes the canary-tested main image without changing its digest", () => {
