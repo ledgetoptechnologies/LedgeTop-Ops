@@ -1,5 +1,7 @@
 import { base64Url, hmac, timingSafeEqual } from "./crypto";
 import { presignR2Get } from "./r2-signing";
+import type { JWTVerifyGetKey } from "jose";
+import { verifyAccessServiceIdentity } from "./logs-directory-routes";
 import {
   THUMBNAIL_HEIGHT,
   THUMBNAIL_FALLBACK_GRACE_SECONDS,
@@ -102,6 +104,21 @@ function authorized(request: Request, env: Env): boolean {
   return configured.length >= 32 && supplied.length >= 32 && timingSafeEqual(configured, supplied);
 }
 
+/**
+ * Who may call the renderer API. The NAS link (one Cloudflare Access service token for every NAS service) is verified
+ * from its Access assertion: Access team domain, THUMBNAIL_RENDERER_ACCESS_AUD and THUMBNAIL_RENDERER_ACCESS_CLIENT_ID.
+ * During the transition the older shared bearer secret is still accepted, until THUMBNAIL_RENDERER_BEARER_RETIRED is
+ * "true"; then only the Access identity is. Both grant exactly the renderer's existing routes, nothing else.
+ */
+export async function authorizeRenderer(request: Request, env: Env, keyResolver?: JWTVerifyGetKey): Promise<"access" | "bearer" | null> {
+  const accessConfigured = Boolean(env.THUMBNAIL_RENDERER_ACCESS_AUD && env.THUMBNAIL_RENDERER_ACCESS_CLIENT_ID);
+  if (accessConfigured && request.headers.has("Cf-Access-Jwt-Assertion")
+    && await verifyAccessServiceIdentity(request, { teamDomain: env.TEAM_DOMAIN, audience: env.THUMBNAIL_RENDERER_ACCESS_AUD,
+      clientId: env.THUMBNAIL_RENDERER_ACCESS_CLIENT_ID }, keyResolver)) return "access";
+  if (env.THUMBNAIL_RENDERER_BEARER_RETIRED === "true") return null;
+  return authorized(request, env) ? "bearer" : null;
+}
+
 function expectedHost(env: Env): string {
   return (env.THUMBNAIL_RENDERER_EXPECTED_HOST || env.THUMBNAIL_INGEST_EXPECTED_HOST || "").trim().toLowerCase();
 }
@@ -111,13 +128,14 @@ function expectedHost(env: Env): string {
  * The TrueNAS thumbnail worker calls these to lease jobs, upload
  * thumbnails to R2, and report completion.
  */
-export async function dispatchThumbnailRendererApi(request: Request, env: Env): Promise<Response | null> {
+export async function dispatchThumbnailRendererApi(request: Request, env: Env,
+  dependencies: { keyResolver?: JWTVerifyGetKey } = {}): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith(RENDERER_API_PREFIX)) return null;
 
   const host = expectedHost(env);
   if (!host || url.hostname.toLowerCase() !== host) return null;
-  if (!authorized(request, env)) return json({ error: "unauthorized" }, 401);
+  if (!(await authorizeRenderer(request, env, dependencies.keyResolver))) return json({ error: "unauthorized" }, 401);
 
   const path = url.pathname.slice(RENDERER_API_PREFIX.length);
 

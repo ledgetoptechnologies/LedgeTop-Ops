@@ -20,8 +20,10 @@ readonly HEARTBEAT_SECONDS=60
 
 : "${LTDSTHUMB_API_BASE:=$EXPECTED_API_BASE}"
 : "${LTDSTHUMB_API_TOKEN:=${THUMBNAIL_INGEST_SECRET:-}}"
-: "${CF_ACCESS_CLIENT_ID:=}"
-: "${CF_ACCESS_CLIENT_SECRET:=}"
+# The shared NAS link file (one Cloudflare Access service token for every NAS service) supplies the Access headers
+# when the older per-service names are not set.
+: "${CF_ACCESS_CLIENT_ID:=${NAS_LINK_CLIENT_ID:-}}"
+: "${CF_ACCESS_CLIENT_SECRET:=${NAS_LINK_CLIENT_SECRET:-}}"
 : "${LTDSTHUMB_SCRATCH_DIR:=/scratch}"
 : "${LTDSTHUMB_IDLE_SECONDS:=30}"
 : "${LTDSTHUMB_RENDER_TIMEOUT_SECONDS:=600}"
@@ -41,7 +43,11 @@ valid_secret() {
 
 [[ "$LTDSTHUMB_API_BASE" == "$EXPECTED_API_BASE" || "$LTDSTHUMB_API_BASE" == "$ACCESS_API_BASE" ]] ||
   die "LTDSTHUMB_API_BASE must be an approved renderer endpoint"
-valid_secret "$LTDSTHUMB_API_TOKEN" || die "LTDSTHUMB_API_TOKEN (or THUMBNAIL_INGEST_SECRET) is required"
+# Transition: the shared bearer secret is optional once the Access service token is set; Ops accepts either until
+# its bearer path is retired (THUMBNAIL_RENDERER_BEARER_RETIRED). Without an Access token the bearer stays required.
+if [[ -z "$CF_ACCESS_CLIENT_ID" || -n "$LTDSTHUMB_API_TOKEN" ]]; then
+  valid_secret "$LTDSTHUMB_API_TOKEN" || die "LTDSTHUMB_API_TOKEN (or THUMBNAIL_INGEST_SECRET) is required without the NAS link token"
+fi
 if [[ -n "$CF_ACCESS_CLIENT_ID" || -n "$CF_ACCESS_CLIENT_SECRET" ]]; then
   valid_secret "$CF_ACCESS_CLIENT_ID" || die "CF_ACCESS_CLIENT_ID must be set with CF_ACCESS_CLIENT_SECRET"
   valid_secret "$CF_ACCESS_CLIENT_SECRET" || die "CF_ACCESS_CLIENT_SECRET must be set with CF_ACCESS_CLIENT_ID"
@@ -246,10 +252,12 @@ _raw_ops_json() {
   local args=(
     --silent --show-error --max-redirs 0 --connect-timeout 10 --max-time 30
     --request "$method"
-    --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
     --header "Accept: application/json"
     --output "$body_file" --write-out '%{http_code}'
   )
+  if [[ -n "$LTDSTHUMB_API_TOKEN" ]]; then
+    args+=(--header "Authorization: Bearer $LTDSTHUMB_API_TOKEN")
+  fi
   if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
     args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
     args+=(--header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
@@ -270,13 +278,15 @@ _raw_ops_upload() {
   local args=(
     --silent --show-error --max-redirs 0 --connect-timeout 10 --max-time 120
     --request PUT
-    --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
     --header "Accept: application/json"
     --header "Content-Type: image/webp"
     --header "Content-Length: $input_size"
     --upload-file "$input_file"
     --output "$body_file" --write-out '%{http_code}'
   )
+  if [[ -n "$LTDSTHUMB_API_TOKEN" ]]; then
+    args+=(--header "Authorization: Bearer $LTDSTHUMB_API_TOKEN")
+  fi
   if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
     args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
     args+=(--header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
@@ -292,12 +302,14 @@ _raw_ops_download() {
   local args=(
     --silent --show-error --max-redirs 0 --connect-timeout 10 --max-time 840
     --request GET
-    --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
     --header "Accept: application/octet-stream"
     --header "Accept-Encoding: identity"
     --max-filesize "$maximum_bytes"
     --output "$output_file" --write-out '%{http_code}'
   )
+  if [[ -n "$LTDSTHUMB_API_TOKEN" ]]; then
+    args+=(--header "Authorization: Bearer $LTDSTHUMB_API_TOKEN")
+  fi
   if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
     args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
     args+=(--header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
@@ -496,11 +508,14 @@ bytes_forwarded = 0
 base_headers = {"Accept-Encoding": "identity"}
 if auth_mode == "ops":
     token = os.environ.get("LTDSTHUMB_API_TOKEN", "")
-    if len(token) < 32:
-        raise SystemExit("missing renderer API token")
-    base_headers["Authorization"] = f"Bearer {token}"
     access_id = os.environ.get("CF_ACCESS_CLIENT_ID", "")
     access_secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
+    if token:
+        if len(token) < 32:
+            raise SystemExit("invalid renderer API token")
+        base_headers["Authorization"] = f"Bearer {token}"
+    elif not (access_id and access_secret):
+        raise SystemExit("missing renderer API token or NAS link token")
     if access_id and access_secret:
         base_headers["CF-Access-Client-Id"] = access_id
         base_headers["CF-Access-Client-Secret"] = access_secret

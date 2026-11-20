@@ -35,6 +35,15 @@ test("unified queue worker is pinned to approved renderer origins", () => {
   assert.match(script, /Authorization: Bearer \$LTDSTHUMB_API_TOKEN/);
 });
 
+test("queue worker uses the shared NAS link token and sends the bearer only while it is set", () => {
+  assert.match(script, /: "\$\{CF_ACCESS_CLIENT_ID:=\$\{NAS_LINK_CLIENT_ID:-\}\}"/);
+  assert.match(script, /: "\$\{CF_ACCESS_CLIENT_SECRET:=\$\{NAS_LINK_CLIENT_SECRET:-\}\}"/);
+  assert.match(script, /if \[\[ -z "\$CF_ACCESS_CLIENT_ID" \|\| -n "\$LTDSTHUMB_API_TOKEN" \]\]; then\n  valid_secret "\$LTDSTHUMB_API_TOKEN" \|\| die/);
+  assert.equal((script.match(/  if \[\[ -n "\$LTDSTHUMB_API_TOKEN" \]\]; then\n    args\+=\(--header "Authorization: Bearer \$LTDSTHUMB_API_TOKEN"\)\n  fi\n/g) ?? []).length, 3);
+  assert.doesNotMatch(script, /^    --header "Authorization: Bearer/m, "no unconditional bearer header");
+  assert.match(script, /raise SystemExit\("missing renderer API token or NAS link token"\)/);
+});
+
 test("unified queue worker claims all supported media and range-streams videos", () => {
   assert.match(script, /\/claim\?includeKind=all/);
   assert.doesNotMatch(script, /excludeKind=video/);
