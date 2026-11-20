@@ -154,6 +154,14 @@ jobs:
             fi
             grep -qF -- "$name" "$file"
           }
+          # GHCR's real answer for an absent tag is exactly one line, `ERROR: <full ref>: not found`, with no
+          # MANIFEST_UNKNOWN. Accept that form only verbatim for the exact full reference requested: any other
+          # reference, any extra line or any other wording stays unknown.
+          not_found_exact() {
+            local file="$1" ref="$2"
+            [[ "$(grep -c . "$file")" == 1 ]] || return 1
+            [[ "$(tr -d '\r' < "$file" | grep .)" == "ERROR: $ref: not found" ]]
+          }
           inspect_digest() {
             local ref="$1" attempt out
             for attempt in 1 2 3; do
@@ -161,7 +169,7 @@ jobs:
                 printf '%s' "$out" | tr -d '"'
                 return 0
               fi
-              if manifest_unknown_only "$RUNNER_TEMP/inspect-error.txt" "${ref##*[:@]}"; then
+              if manifest_unknown_only "$RUNNER_TEMP/inspect-error.txt" "${ref##*[:@]}" || not_found_exact "$RUNNER_TEMP/inspect-error.txt" "$ref"; then
                 printf 'manifest-unknown'
                 return 0
               fi
@@ -251,6 +259,14 @@ jobs:
             fi
             grep -qF -- "$name" "$file"
           }
+          # GHCR's real answer for an absent tag is exactly one line, `ERROR: <full ref>: not found`, with no
+          # MANIFEST_UNKNOWN. Accept that form only verbatim for the exact full reference requested: any other
+          # reference, any extra line or any other wording stays unknown.
+          not_found_exact() {
+            local file="$1" ref="$2"
+            [[ "$(grep -c . "$file")" == 1 ]] || return 1
+            [[ "$(tr -d '\r' < "$file" | grep .)" == "ERROR: $ref: not found" ]]
+          }
           record started unknown
           # Fail-closed re-read immediately before the write: latest must still be
           # exactly what the receipt recorded. This narrows the window for another
@@ -261,7 +277,7 @@ jobs:
               CURRENT="$(printf '%s' "$CURRENT" | tr -d '"')"
               break
             fi
-            if [[ "$PREVIOUS_DIGEST" == absent ]] && manifest_unknown_only "$RUNNER_TEMP/reread-error.txt" latest; then
+            if [[ "$PREVIOUS_DIGEST" == absent ]] && { manifest_unknown_only "$RUNNER_TEMP/reread-error.txt" latest || not_found_exact "$RUNNER_TEMP/reread-error.txt" "$IMAGE_NAME:latest"; }; then
               CURRENT=absent
               break
             fi
