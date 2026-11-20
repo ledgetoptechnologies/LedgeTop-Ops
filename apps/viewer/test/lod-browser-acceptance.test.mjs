@@ -59,7 +59,60 @@ function assertPhotoPanBounds({ wrap, image }) {
   }
 }
 
-async function assertExpandedPhotoWheelAndPan(client) {
+// DIAGNOSTIC ONLY: passive evidence for native wheel delivery. It records what
+// the browser hit-tests at the wheel point and whether a trusted wheel reached
+// the document. It never handles, prevents or alters the event.
+const PHOTO_WHEEL_EVIDENCE_INSTALL = `(() => {
+  const describe = (node) => node && node.nodeType === 1
+    ? node.tagName.toLowerCase() + (node.id ? '#' + node.id : '')
+      + (node.classList?.length ? '.' + [...node.classList].join('.') : '')
+    : String(node?.nodeName || node);
+  window.__ltdsWheelDescribe = describe;
+  window.__ltdsWheelReceipts = [];
+  if (!window.__ltdsWheelReceiptInstalled) {
+    window.__ltdsWheelReceiptInstalled = true;
+    document.addEventListener('wheel', (event) => {
+      if (window.__ltdsWheelReceipts.length >= 20) return;
+      window.__ltdsWheelReceipts.push({
+        isTrusted: event.isTrusted, target: window.__ltdsWheelDescribe(event.target),
+        clientX: event.clientX, clientY: event.clientY, deltaY: event.deltaY,
+        deltaMode: event.deltaMode, timeStamp: event.timeStamp,
+      });
+    }, { capture: true, passive: true });
+  }
+  return true;
+})()`;
+
+function photoWheelHitEvidence(x, y) {
+  return `(() => {
+    const describe = window.__ltdsWheelDescribe;
+    const hit = document.elementFromPoint(${Number(x)}, ${Number(y)});
+    const chain = [];
+    for (let node = hit; node && node.nodeType === 1 && chain.length < 12; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      chain.push({ node: describe(node), pointerEvents: style.pointerEvents, zIndex: style.zIndex,
+        position: style.position, display: style.display, visibility: style.visibility,
+        opacity: style.opacity, transform: style.transform === 'none' ? undefined : style.transform });
+    }
+    const wrap = document.querySelector('#photo-imgwrap').getBoundingClientRect();
+    const img = document.querySelector('#photo-img').getBoundingClientRect();
+    return {
+      point: { x: ${Number(x)}, y: ${Number(y)} },
+      hit: describe(hit), hitInsideWrap: Boolean(hit && document.querySelector('#photo-imgwrap').contains(hit)),
+      chain,
+      presentation: document.querySelector('#photo-modal').dataset.presentation,
+      viewport: { innerWidth, innerHeight, devicePixelRatio, visibility: document.visibilityState, hasFocus: document.hasFocus() },
+      wrap: { l: wrap.left, t: wrap.top, w: wrap.width, h: wrap.height },
+      img: { l: img.left, t: img.top, w: img.width, h: img.height },
+    };
+  })()`;
+}
+
+async function assertExpandedPhotoWheelAndPan(client, { diagnostic = null } = {}) {
+  const emit = (label, value) => {
+    const line = `photo-wheel-evidence ${label}: ${JSON.stringify(value)}`;
+    if (diagnostic) diagnostic(line); else console.log(line);
+  };
   // Image decoding precedes the onload/layout callback, and CDP acknowledges
   // wheel dispatch before its DOM handler necessarily runs. Wait on observable
   // layout transitions rather than using a CSS transform as a zoom indicator.
@@ -68,9 +121,18 @@ async function assertExpandedPhotoWheelAndPan(client) {
       && img.getBoundingClientRect().width>0; })()`, 'expanded photo did not finish its initial layout', 10_000);
   const before = await client.evaluate(`(() => { const r=document.querySelector('#photo-imgwrap').getBoundingClientRect();
     return {x:r.left+r.width/2,y:r.top+r.height/2,width:document.querySelector('#photo-img').getBoundingClientRect().width}; })()`);
-  await client.command('Input.dispatchMouseEvent', { type:'mouseWheel', x:before.x, y:before.y, deltaX:0, deltaY:-420 });
-  await waitFor(client, `document.querySelector('#photo-img').getBoundingClientRect().width > ${before.width * 1.1}`,
-    'expanded wheel did not enlarge the painted camera photo', 5_000);
+  await client.evaluate(PHOTO_WHEEL_EVIDENCE_INSTALL);
+  emit('before-dispatch', { before, hitTest: await client.evaluate(photoWheelHitEvidence(before.x, before.y)) });
+  const dispatched = await client.command('Input.dispatchMouseEvent', { type:'mouseWheel', x:before.x, y:before.y, deltaX:0, deltaY:-420 });
+  try {
+    await waitFor(client, `document.querySelector('#photo-img').getBoundingClientRect().width > ${before.width * 1.1}`,
+      'expanded wheel did not enlarge the painted camera photo', 5_000);
+  } finally {
+    emit('after-wheel', await client.evaluate(`({ cdpResult: ${JSON.stringify(dispatched ?? null)},
+      receipts: window.__ltdsWheelReceipts,
+      imgWidth: document.querySelector('#photo-img').getBoundingClientRect().width,
+      zoomedClass: document.querySelector('#photo-imgwrap').classList.contains('zoomed') })`).catch((error) => ({ evidenceError: error.message })));
+  }
   const zoomed = await client.evaluate(`(() => {const r=document.querySelector('#photo-img').getBoundingClientRect();return {left:r.left,top:r.top};})()`);
   await client.command('Input.dispatchMouseEvent', { type:'mousePressed', x:before.x, y:before.y, button:'left', buttons:1, clickCount:1 });
   await client.command('Input.dispatchMouseEvent', { type:'mouseMoved', x:2, y:2, button:'left', buttons:1 });
@@ -1434,7 +1496,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.ok(Math.abs(dockedPhoto.aspect - 1) < 0.02, 'natural square photo aspect was not preserved');
     await client.evaluate(`document.querySelector('#photo-imgwrap').click()`);
     await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'expanded'`, 'photo click did not open the expanded inspector');
-    await assertExpandedPhotoWheelAndPan(client);
+    await assertExpandedPhotoWheelAndPan(client, { diagnostic: (line) => t.diagnostic(line) });
     await client.evaluate(`document.querySelector('#photo-close').click()`);
     await client.evaluate(`(() => { window.__ltds.state.activeMode='cloud'; window.__ltds.state.cloudMode='direct'; return true; })()`);
     await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 1, clickCount: 1 });
@@ -1997,7 +2059,7 @@ test('browser camera layer preserves all in-view source markers and map anchors 
     assert.ok(Math.abs(dockedPhoto.aspect - 1) < 0.02, 'docked preview did not preserve the photo natural aspect ratio');
     await client.evaluate(`document.querySelector('#photo-imgwrap').click()`);
     await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'expanded'`, 'photo click did not open the expanded inspector');
-    await assertExpandedPhotoWheelAndPan(client);
+    await assertExpandedPhotoWheelAndPan(client, { diagnostic: (line) => t.diagnostic(line) });
     await client.evaluate(`document.querySelector('#photo-close').click(); document.querySelector('#tab-ortho').click()`);
     await waitFor(client, `document.querySelector('#panel-camera-positions').style.display === 'block' && window.__ltdsMapCamDrawn > 0`, 'orthophoto did not expose bounded camera positions', 30_000);
     const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice().sort((a,b)=>a-b),icons:document.querySelectorAll('.map-camera-canvas').length}))()`);
