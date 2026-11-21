@@ -103,6 +103,20 @@ function asModel(row, version, assets = [], lodVerifierReceipt = null, lodVerifi
   };
 }
 
+function normalizeCameraPhotoLinks(photos) {
+  return (photos || []).map((photo) => {
+    const filename = validCameraFilename(photo.filename);
+    const rawRelativePath = String(photo.relativePath || '');
+    const relativePath = path.posix.normalize(rawRelativePath);
+    const rootKey = String(photo.rootKey || '');
+    if (!filename || !rootKey || rawRelativePath.includes('\\') || relativePath !== rawRelativePath
+      || path.posix.isAbsolute(relativePath) || !relativePath || relativePath === '..' || relativePath.startsWith('../')
+      || photo.contentType !== 'image/jpeg' || !Number.isSafeInteger(photo.byteSize) || photo.byteSize < 0
+      || typeof photo.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(photo.sha256)) throw new TypeError('invalid camera photo link');
+    return { filename, rootKey, relativePath, contentType: photo.contentType, byteSize: photo.byteSize, sha256: photo.sha256 };
+  });
+}
+
 class ViewerRepository {
   constructor(database) {
     this.database = database;
@@ -309,19 +323,15 @@ class ViewerRepository {
   }
 
   replaceCameraPhotos(versionId, photos, { onlyIfEmpty = false } = {}) {
+    const normalized = normalizeCameraPhotoLinks(photos);
+    return this.transaction(() => this.writeCameraPhotos(versionId, normalized, { onlyIfEmpty }));
+  }
+
+  // The writes of replaceCameraPhotos without its own transaction. Takes links
+  // already checked by normalizeCameraPhotoLinks.
+  writeCameraPhotos(versionId, normalized, { onlyIfEmpty = false } = {}) {
     const timestamp = now();
-    const normalized = (photos || []).map((photo) => {
-      const filename = validCameraFilename(photo.filename);
-      const rawRelativePath = String(photo.relativePath || '');
-      const relativePath = path.posix.normalize(rawRelativePath);
-      const rootKey = String(photo.rootKey || '');
-      if (!filename || !rootKey || rawRelativePath.includes('\\') || relativePath !== rawRelativePath
-        || path.posix.isAbsolute(relativePath) || !relativePath || relativePath === '..' || relativePath.startsWith('../')
-        || photo.contentType !== 'image/jpeg' || !Number.isSafeInteger(photo.byteSize) || photo.byteSize < 0
-        || typeof photo.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(photo.sha256)) throw new TypeError('invalid camera photo link');
-      return { filename, rootKey, relativePath, contentType: photo.contentType, byteSize: photo.byteSize, sha256: photo.sha256 };
-    });
-    return this.transaction(() => {
+    {
       if (!this.database.prepare('SELECT 1 FROM model_versions WHERE id=?').get(versionId)) return 0;
       if (onlyIfEmpty && this.database.prepare('SELECT 1 FROM model_camera_photos WHERE version_id=? LIMIT 1').get(versionId)) return 0;
       this.database.prepare('DELETE FROM model_camera_photos WHERE version_id=?').run(versionId);
@@ -330,7 +340,7 @@ class ViewerRepository {
       ) VALUES (?,?,?,?,?,?,?,?)`);
       for (const photo of normalized) insert.run(versionId, photo.filename, photo.rootKey, photo.relativePath, photo.contentType, photo.byteSize, photo.sha256, timestamp);
       return normalized.length;
-    });
+    }
   }
 
   publishModelVersion(modelId, versionId, selectedKinds) {
@@ -1070,4 +1080,4 @@ class ViewerRepository {
   }
 }
 
-module.exports = { ViewerRepository, asModel, parseJson };
+module.exports = { ViewerRepository, asModel, parseJson, normalizeCameraPhotoLinks };
