@@ -6,3 +6,4 @@ export function currentDigests(): Record<string, string>;
 export const fixtureDir: string;
 export const repoRoot: string;
 export const PINNED_FILES: string[];
+export function checkProductPin(): string[];

@@ -5,7 +5,7 @@ This is a source-only handoff for staging QA of the sharing composition in #698.
 Codex's QA owns the private launcher, signer custody, the runtime and staff admission. This folder supplies only:
 - the inputs;
 - a disposable seed;
-- an ephemeral test signer;
+- an in-process ephemeral test signer;
 - the expected results.
 
 Folder-aware sharing (#655, #657, #688) is out of scope.
@@ -14,7 +14,7 @@ Folder-aware sharing (#655, #657, #688) is out of scope.
 
 | Input | Pin |
 |---|---|
-| Product commit (#698 head) | `9931fc34bd2e8acd2b40b4c6aa0a99e3c0dbf3ec` |
+| Product commit (#698 head) | `9931fc34eec0e69172dae907ee9be0848dbf9c53` |
 | Product tree | `bf8ccfe5c0f0c3586bb231e4127a2deceb0708d3` |
 | Fixture branch | `claude/sharing-698-qa-fixture`, based on the product commit. It adds only `qa/sharing-698/**` and `apps/operations/test/qa-sharing-698-contract.test.ts`, so `git diff 9931fc34 -- . ':!qa' ':!apps/operations/test/qa-sharing-698-contract.test.ts'` is empty. |
 | Client D1 schema (`DELIVERY_DB`, `apps/client/migrations`) | 161 files, last `0242_client_ops_triage_inquiries.sql` |
@@ -55,19 +55,17 @@ What the seeds create (all names invented, all mail on `example.test`):
 
 ## Signing: test-only, ephemeral keys
 
-`ephemeral-access.mjs` makes a fresh RS256 key pair in memory on every run. The private key is never exported or written.
+`ephemeral-access.mjs` is an in-process API only. It has no command line and writes no files. Each signer makes a fresh RS256 key pair in memory; the private key is created non-extractable and is never exported.
 
+```js
+import { createEphemeralAccessSigner, mintFixtureAssertions } from "./qa/sharing-698/ephemeral-access.mjs";
+const signer = await createEphemeralAccessSigner();                // { jwks, mint }
+const { jwks, assertions } = await mintFixtureAssertions(signer);  // public JWKS + 15-minute assertions per contract principal
 ```
-node qa/sharing-698/ephemeral-access.mjs --out <directory outside the repository>
-```
-
-This writes two files and prints nothing. It refuses a directory inside the repository.
-- `jwks.json`: the public key only.
-- `assertions.json`: 15-minute Access-style assertions for every principal in `contract.json`.
 
 The products verify the assertions with their existing verifiers. Client uses `resolveCloudflareClientPrincipal` (jose `jwtVerify`, RS256, issuer, audience and exp). Ops uses its staff Access verifier.
 
-The QA launcher must serve `jwks.json` at `<issuer>/cdn-cgi/access/certs` for both issuers (or point the verifier at it), and send each assertion as `Cf-Access-Jwt-Assertion`. No persistent key, real account or hosted signer is involved.
+The QA launcher keeps the signer in its own process. It serves `jwks` at `<issuer>/cdn-cgi/access/certs` for both issuers (or points the verifier at it) and sends each assertion as `Cf-Access-Jwt-Assertion`. Custody of the JWKS and assertions is the launcher's. No persistent key, real account or hosted signer is involved.
 
 | Setting | Value |
 |---|---|
@@ -156,6 +154,7 @@ The cases cover:
   - the seed counts match `contract.json`;
   - every address in the seeds is on example.test;
   - the digests below match.
+- **Pin check:** the same command and the contract test both require `contract.json` to pin the exact 40-character commit and tree, that this commit's tree is that tree (`git rev-parse <commit>^{tree}`), that the fixture branch is based on that commit, and that no product file differs from it.
 - **Contract run:** `cd apps/operations && npx vitest run --config vitest.config.ts test/qa-sharing-698-contract.test.ts` runs every case above against the real Ops routes (`registerDirectViewerClientRoutes`), the real Client router (`createClientPortalRouter`) and the real issuer, over the same seeded in-memory databases.
   - Client assertions are minted per run by `ephemeral-access.mjs` and verified by the real Client verifier.
   - Only the external Viewer service is a test double.
@@ -168,13 +167,13 @@ SHA-256, with line endings normalised to LF. `README.md` is hashed with its own 
 
 | File | SHA-256 |
 |---|---|
-| `README.md` | `4814a9cc0add98cb658b5c0e1fcc64eea9241a966c387d59a7b397bb3b091e10` |
-| `contract.json` | `ef24fdc21ce9cf7904f0cd4dcc750e5088fb69aaab5b128eb65c56ec3c429c8b` |
+| `README.md` | `eeb1a15b29cb3c5a7645c06f9937cf05c7e9f8b9a57851f93ec1edd8db99062f` |
+| `contract.json` | `b45b3ae1ed34aa0adf4d8b5b70eb02fb3a082c313ec6321c1f7902f103ecf807` |
 | `seed-delivery.sql` | `565325a31dfc9fb2f7a3b64147da18466cbae06e38e3dd7da29ff86ffd7eb7da` |
 | `seed-ops.sql` | `2bdeb7c2a02a71dc80827f934f709a095dbdbf5b9d861533905e9cc967651e01` |
 | `d1-sqlite.mjs` | `7d1b3fe633f0cf995f64fd7a3d13353766472ee30e235e732a1ba2ec2c121229` |
-| `fixture-db.mjs` | `7bb891e659db5928257d4fcd637dd36b742d1d8b4733adf91b72dbf6e006a212` |
-| `fixture-db.d.mts` | `33a1f94e4821f981e40e8985089fa52973be9e4e287c6cef3fae7bf6d4f61e79` |
-| `ephemeral-access.mjs` | `8cd5515696f63e3852d725df66f16113efb44501ab8d8c50c2ae83c84933b2e8` |
+| `fixture-db.mjs` | `381087d68986a032782539ed9532975f7afa39a85d7d165293a3b3cf388ecc27` |
+| `fixture-db.d.mts` | `2c565a51299cc8f66a6d616a9e8ccd230d4395138ff4759d8c6772f810203388` |
+| `ephemeral-access.mjs` | `33683c82305276135e4ff92defd5e2684c082ef1baff0c0da96a31c6d66636fc` |
 | `ephemeral-access.d.mts` | `85a7e709f85badcfe43b5ee26f6312c3f73d201b5fceb90d5a9d09d2752c1026` |
-| `../../apps/operations/test/qa-sharing-698-contract.test.ts` | `6ae5311ed3894394d92282d1609381dfa99c123030c51a3c32ed9cdb81fbd354` |
+| `../../apps/operations/test/qa-sharing-698-contract.test.ts` | `d1ce0ce701b2fa2c1913d6de8ed793cc12c92d0ffa0e53dc649560e65b1057c2` |

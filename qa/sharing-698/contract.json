@@ -1,6 +1,6 @@
 {
  "fixture": "QA fixture for #698 (not for merge)",
- "product": { "pr": 698, "commit": "9931fc34bd2e8acd2b40b4c6aa0a99e3c0dbf3ec", "tree": "bf8ccfe5" },
+ "product": { "pr": 698, "commit": "9931fc34eec0e69172dae907ee9be0848dbf9c53", "tree": "bf8ccfe5c0f0c3586bb231e4127a2deceb0708d3" },
  "access": {
   "clientIssuer": "https://clients-access.example.test",
   "clientAudience": "qa698-client-portal-aud",

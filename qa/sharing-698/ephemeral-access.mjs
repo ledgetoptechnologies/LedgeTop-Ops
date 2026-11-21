@@ -1,18 +1,14 @@
 // QA fixture for #698 (not for merge). Test-only, ephemeral Cloudflare Access
-// style assertions for the fixture principals. A fresh RS256 key pair is made
-// in memory on every run; the private key is never exported or written.
+// style assertions for the fixture principals. In-process API only: there is no
+// command line and nothing is written to disk. Each signer makes a fresh RS256
+// key pair in memory; the private key is non-extractable and never exported.
 // The products verify these with their existing verifiers (jose jwtVerify,
-// RS256, issuer + audience + exp); only the JWKS source is the QA launcher's.
-//
-//   node qa/sharing-698/ephemeral-access.mjs --out <dir outside the repository>
-// writes <dir>/jwks.json (public key only) and <dir>/assertions.json
-// (15-minute assertions per fixture principal). Nothing is printed.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+// RS256, issuer + audience + exp); serving the JWKS is the QA launcher's job.
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const fixtureDir = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(fixtureDir, "..", "..");
 const encoder = new TextEncoder();
 const base64url = bytes => Buffer.from(bytes).toString("base64url");
 
@@ -49,13 +45,3 @@ export async function mintFixtureAssertions(signer = undefined) {
   return { jwks: active.jwks, assertions };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const index = process.argv.indexOf("--out"), out = index > 0 ? process.argv[index + 1] : undefined;
-  if (!out) { console.error("usage: node qa/sharing-698/ephemeral-access.mjs --out <dir outside the repository>"); process.exit(2); }
-  const target = path.resolve(out), relative = path.relative(repoRoot, target);
-  if (!relative.startsWith("..") && !path.isAbsolute(relative)) { console.error("refusing to write assertions inside the repository"); process.exit(2); }
-  const { jwks, assertions } = await mintFixtureAssertions();
-  mkdirSync(target, { recursive: true });
-  writeFileSync(path.join(target, "jwks.json"), JSON.stringify(jwks, null, 1));
-  writeFileSync(path.join(target, "assertions.json"), JSON.stringify(assertions, null, 1), { mode: 0o600 });
-}

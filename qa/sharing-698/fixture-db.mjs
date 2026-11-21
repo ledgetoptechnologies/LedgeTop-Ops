@@ -3,6 +3,7 @@
 // the seeds. As a CLI it validates the seed and the pinned digests:
 //   node qa/sharing-698/fixture-db.mjs            validate (exit 1 on any failure)
 //   node qa/sharing-698/fixture-db.mjs --digests  print the SHA-256 digests the README pins
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
@@ -57,6 +58,39 @@ export function currentDigests() {
       .update(readFileSync(path.join(fixtureDir, file), "utf8").replace(/\r\n/g, "\n")).digest("hex")]));
 }
 
+const FIXTURE_PATHS = [":(exclude)qa/sharing-698", ":(exclude)apps/operations/test/qa-sharing-698-contract.test.ts"];
+function git(...args) { return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(); }
+function gitSucceeds(...args) { try { execFileSync("git", args, { cwd: repoRoot, stdio: "ignore" }); return true; } catch { return false; } }
+
+/** Binds the fixture to the exact #698 product commit and tree (full 40-hex ids,
+ * never a prefix): the ids in contract.json and the README pin table must be the
+ * real commit and its real tree, this checkout must descend from that commit, and
+ * no product file may differ from it. Returns a list of failures (empty = bound). */
+export function checkProductPin() {
+  const failures = [];
+  const { commit, tree } = JSON.parse(readFileSync(path.join(fixtureDir, "contract.json"), "utf8")).product;
+  if (!/^[0-9a-f]{40}$/.test(commit ?? "")) failures.push(`contract.json product.commit is not a full 40-hex id: ${commit}`);
+  if (!/^[0-9a-f]{40}$/.test(tree ?? "")) failures.push(`contract.json product.tree is not a full 40-hex id: ${tree}`);
+  if (failures.length) return failures;
+  let resolved = "", resolvedTree = "";
+  try {
+    resolved = git("rev-parse", "--verify", `${commit}^{commit}`);
+    resolvedTree = git("rev-parse", "--verify", `${commit}^{tree}`);
+  } catch { failures.push(`product commit ${commit} is not present in this repository`); return failures; }
+  if (resolved !== commit) failures.push(`product commit resolves to ${resolved}, not ${commit}`);
+  if (resolvedTree !== tree) failures.push(`product commit tree is ${resolvedTree}, not the pinned ${tree}`);
+  if (!gitSucceeds("merge-base", "--is-ancestor", commit, "HEAD")) failures.push(`HEAD does not descend from the product commit ${commit}`);
+  if (!gitSucceeds("diff", "--quiet", commit, "--", ".", ...FIXTURE_PATHS)) failures.push("a product file differs from the pinned product commit");
+  const readme = readFileSync(path.join(fixtureDir, "README.md"), "utf8");
+  const commitRow = readme.match(/^\| Product commit \(#698 head\) \| `([^`]+)` \|\s*$/m)?.[1];
+  const treeRow = readme.match(/^\| Product tree \| `([^`]+)` \|\s*$/m)?.[1];
+  if (commitRow !== commit) failures.push(`README product commit row is ${commitRow}, not ${commit}`);
+  if (treeRow !== tree) failures.push(`README product tree row is ${treeRow}, not ${tree}`);
+  for (const id of new Set([...readme.matchAll(/\b9931fc34[0-9a-f]*\b/g)].map(match => match[0])))
+    if (id !== "9931fc34" && id !== commit) failures.push(`README mentions a different #698 commit id ${id}`);
+  return failures;
+}
+
 function pinnedDigests() {
   const text = readFileSync(path.join(fixtureDir, "README.md"), "utf8");
   const pins = {};
@@ -95,6 +129,7 @@ function validate() {
   const seeds = ["seed-delivery.sql", "seed-ops.sql"].map(file => readFileSync(path.join(fixtureDir, file), "utf8")).join("\n");
   for (const email of seeds.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/g) ?? [])
     check(email.endsWith("@example.test"), `non-example.test address in seed: ${email}`);
+  for (const failure of checkProductPin()) failures.push(failure);
   const pins = pinnedDigests(), actual = currentDigests();
   for (const file of PINNED_FILES) check(pins[file] === actual[file], `digest mismatch for ${file}: README ${pins[file]} actual ${actual[file]}`);
   console.log(JSON.stringify({ deliveryMigrations: delivery.migrations.length, opsMigrations: ops.migrations.length,

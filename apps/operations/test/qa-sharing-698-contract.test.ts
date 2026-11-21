@@ -20,13 +20,14 @@ import {registerDirectViewerClientRoutes} from '../src/worker/viewer-direct-clie
 import {issueDirectClientViewerSession,listDirectClientViewerItems} from '../src/worker/viewer-direct-client-session-issuer';
 import {createClientPortalRouter} from '../../client/src/worker/client-portal/routes';
 import {resolveCloudflareClientPrincipal} from '../../client/src/worker/client-portal/access-identity';
-import {buildFixtureDatabases} from '../../../qa/sharing-698/fixture-db.mjs';
+import {buildFixtureDatabases,checkProductPin} from '../../../qa/sharing-698/fixture-db.mjs';
 import {createEphemeralAccessSigner,mintFixtureAssertions} from '../../../qa/sharing-698/ephemeral-access.mjs';
 
 type Expect={status:number;len?:Record<string,number>;equals?:Record<string,unknown>;matches?:Record<string,string>;absent?:string[]};
 type Case={id:string;area:string;actor:string|null;method:string;path:string;body?:unknown;idempotencyKey?:string;
  forgeSignature?:boolean;expect:Expect;save?:Record<string,string>};
 const contract=JSON.parse(readFileSync(new URL('../../../qa/sharing-698/contract.json',import.meta.url),'utf8')) as {
+ product:{pr:number;commit:string;tree:string};
  access:{clientIssuer:string;clientAudience:string;clients:Record<string,unknown>;staff:Record<string,{id:string;subject:string;email:string}>};
  viewer:{project:{id:string;displayName:string};task:{id:string;displayName:string;modelId:string;modelVersionId:string}};
  origins:{clientPortal:string;operations:string};projectGrant:unknown;cases:Case[]};
@@ -109,6 +110,10 @@ async function send(testCase:Case):Promise<{status:number;json:unknown}>{
 }
 
 describe('QA fixture #698 contract (qa/sharing-698/contract.json)',()=>{
+ it('pins the exact #698 product commit and tree (full ids; product files unchanged)',()=>{
+  expect(contract.product).toEqual({pr:698,commit:'9931fc34eec0e69172dae907ee9be0848dbf9c53',tree:'bf8ccfe5c0f0c3586bb231e4127a2deceb0708d3'});
+  expect(checkProductPin()).toEqual([]);
+ });
  it('the contract and the seed agree on every principal and workspace',()=>{
   expect(contract.cases.length).toBeGreaterThan(30);
   expect(new Set(contract.cases.map(item=>item.id)).size).toBe(contract.cases.length);
