@@ -55,40 +55,73 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
 
 function reconcileStorageMutations(processing,storage,limit=20){const results=[];for(const mutation of processing.pendingStorageMutations(limit)){try{results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
 
-function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null}={}){
-  const results=[];
-  for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
+// Items whose purge failed are not retried by this process until this much
+// time has passed, so a handful of persistently failing entries cannot take
+// every slot of every hourly pass. The map lives in memory only: a restart
+// simply retries everything once.
+const TRASH_FAILURE_BACKOFF_MS=6*3600_000;
+const trashRetryAfter=new Map();
+
+// limit counts entries this pass actually attempts. Automatic-supersession
+// items are purged by their own verified step, and items in failure backoff
+// are reported but skipped, so neither consumes a slot.
+function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null,now=Date.now,failureBackoffMs=TRASH_FAILURE_BACKOFF_MS}={}){
+  const results=[],max=Math.max(1,Math.min(Number(limit)||20,100)),current=Number(now())||Date.now();
+  let attempted=0;
+  for(const [trashId,retryAt] of trashRetryAfter)if(retryAt<=current)trashRetryAfter.delete(trashId);
+  for(const item of processing.expiredTrash(current)){
+    if(attempted>=max)break;
+    const before=results.length;
     try{
       if(item.entityType==='output'&&require('./outputSupersession').automaticSupersessionTrash(processing,item.id)){results.push({trashId:item.id,status:'deferred',errorCode:'supersession_reverification_required'});continue;}
-      if(item.entityType==='project'||item.entityType==='task'){
-        const {purgeContainerTrash}=require('./containerLifecycle');
-        const purged=purgeContainerTrash(processing,storage,item.id,actor);
-        if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
-        results.push({trashId:item.id,status:'complete',container:true});
-        if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
-        continue;
-      }
-      const dataset=item.entityType==='dataset'?processing.getDataset(item.entityId):null;
-      const output=item.entityType==='output'?processing.getModelOutput(item.entityId):null;
-      if(!dataset&&!output){results.push({trashId:item.id,status:'failed',errorCode:'entity_not_found'});continue;}
-      if(dataset?.storageMode==='external_reference'){
-        const purged=processing.markTrashPurged(item.id);
-        if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
-        results.push({trashId:item.id,status:'complete',externalReference:true});
-      }else if(output&&output.storageMode!=='managed'){
-        const purged=processing.purgeMetadataOutput(item.id);
-        if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
-        results.push({trashId:item.id,status:'complete',externalReference:true});
-      }else{
-        const mutation=processing.beginPurgeMutation(item.id,actor);
-        if(!mutation){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
-        const completed=applyStorageMutation(processing,storage,mutation);
-        results.push({trashId:item.id,status:completed.status,mutationId:completed.id,externalReference:false});
-      }
-      if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
+      if(trashRetryAfter.has(item.id)){results.push({trashId:item.id,status:'skipped',errorCode:'recent_failure_backoff'});continue;}
+      attempted+=1;
+      purgeOneTrashItem(processing,storage,item,actor,onPurged,results);
     }catch(error){results.push({trashId:item.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}
+    const outcome=results[results.length-1];
+    if(results.length>before&&outcome?.status==='failed')trashRetryAfter.set(item.id,current+Math.max(0,Number(failureBackoffMs)||0));
+    else if(outcome?.status==='complete')trashRetryAfter.delete(item.id);
   }
   return results;
 }
 
-module.exports={applyStorageMutation,reconcileStorageMutations,purgeExpiredTrash};
+function purgeOneTrashItem(processing,storage,item,actor,onPurged,results){
+  const fail=(errorCode)=>results.push({trashId:item.id,status:'failed',errorCode});
+  if(item.entityType==='project'||item.entityType==='task'){
+    const {purgeContainerTrash}=require('./containerLifecycle');
+    const purged=purgeContainerTrash(processing,storage,item.id,actor);
+    if(!purged)return fail('lifecycle_conflict');
+    results.push({trashId:item.id,status:'complete',container:true});
+    if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
+    return;
+  }
+  const dataset=item.entityType==='dataset'?processing.getDataset(item.entityId):null;
+  const output=item.entityType==='output'?processing.getModelOutput(item.entityId):null;
+  if(!dataset&&!output)return fail('entity_not_found');
+  if(dataset?.storageMode==='external_reference'){
+    const purged=processing.markTrashPurged(item.id);
+    if(!purged)return fail('lifecycle_conflict');
+    results.push({trashId:item.id,status:'complete',externalReference:true});
+  }else if(output&&output.storageMode!=='managed'){
+    const purged=processing.purgeMetadataOutput(item.id);
+    if(!purged)return fail('lifecycle_conflict');
+    results.push({trashId:item.id,status:'complete',externalReference:true});
+  }else{
+    const mutation=processing.beginPurgeMutation(item.id,actor);
+    if(!mutation)return fail('lifecycle_conflict');
+    const completed=applyStorageMutation(processing,storage,mutation);
+    results.push({trashId:item.id,status:completed.status,mutationId:completed.id,externalReference:false});
+  }
+  if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
+}
+
+// One summary line per pass plus one line per failed entry, using only ids
+// and stable error codes.
+function summarizeTrashPurge(results){
+  const counts={};
+  for(const result of results||[]){const key=result.errorCode?`${result.status}:${result.errorCode}`:String(result.status);counts[key]=(counts[key]||0)+1;}
+  const parts=Object.keys(counts).sort().map((key)=>`${key}=${counts[key]}`);
+  return{line:`Trash retention purge: ${parts.length?parts.join(' '):'nothing due'}`,failures:(results||[]).filter((result)=>result.status==='failed').map((result)=>`Trash retention purge failed: trash=${result.trashId} code=${result.errorCode||'lifecycle_failed'}`)};
+}
+
+module.exports={applyStorageMutation,reconcileStorageMutations,purgeExpiredTrash,summarizeTrashPurge};
