@@ -7,7 +7,7 @@
 .nav-group { display: grid; gap: 2px; }
 .nav-group-label { margin: 1rem .55rem .35rem; color: var(--muted); font-size: .66rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; white-space: nowrap; }
 .nav-group:first-child .nav-group-label { margin-top: .25rem; }
-.workspace-nav .nav-link { min-height: 40px; gap: .7rem; padding: .45rem .65rem; border: 0; border-radius: 8px; color: var(--text); font-size: .9rem; font-weight: 600; white-space: nowrap; }
+.workspace-nav .nav-link { min-height: 40px; gap: .7rem; padding: .45rem .65rem; border: 0; border-radius: 8px; color: var(--text); font-size: .9rem; font-weight: 600; white-space: nowrap; transition: background-color .15s ease-out, color .15s ease-out; }
 .workspace-nav .nav-link:hover { background: var(--panel); color: #fff; }
 .workspace-nav .nav-link.active { border: 0; background: #1f1f23; color: #fff; }
 .workspace-nav .nav-icon { width: 18px; height: 18px; flex: none; color: var(--muted); transition: color .15s ease; }
@@ -16,6 +16,7 @@
 .nav-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .workspace-nav :is(a, button):focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
 .nav-collapse { display: flex; align-items: center; gap: .7rem; margin-top: auto; min-height: 40px; padding: .45rem .65rem; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; color: var(--muted); font-size: .84rem; text-align: left; white-space: nowrap; cursor: pointer; }
+.nav-collapse { transition: color .15s ease-out; }
 .nav-collapse:hover { color: var(--text); }
 .nav-collapse svg { width: 18px; height: 18px; flex: none; }
 .nav-collapse + .workspace-nav-foot { margin-top: 0; }
@@ -37,4 +38,4 @@
   .nav-collapse + .workspace-nav-foot { margin-top: auto; }
   .workspace-nav .nav-link { min-height: 44px; }
 }
-@media (prefers-reduced-motion: reduce) { .workspace-shell, .workspace-nav .nav-icon { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .workspace-shell, .workspace-nav .nav-icon, .workspace-nav .nav-link, .nav-collapse { transition: none; } }
