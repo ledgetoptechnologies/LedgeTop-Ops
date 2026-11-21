@@ -15,6 +15,11 @@ procedure. Preserve that schema and restore or repair it through a reviewed
 maintenance operation; the legacy missing-table fallback cannot itself remember
 that cutover once happened.
 
+Before cutover, an administrator with global `roles.manage` can set the status
+to inactive from the Team page instead of a direct D1 edit; see
+[legacy-staff-team-management.md](legacy-staff-team-management.md). The change
+record and the manual Access removal below still apply.
+
 ## Prepare the exact change
 
 1. Record the authorized operator, reason, target staff ID, exact existing email
