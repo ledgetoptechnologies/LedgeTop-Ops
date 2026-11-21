@@ -49,6 +49,7 @@ scripts/staging-ops-staff-login-0226-once.mjs text eol=lf
 scripts/production-ops-staff-login-0226-once.mjs text eol=lf
 scripts/fixtures/production-ops-0227-0244-wrangler-wire-statements.json text eol=lf
 scripts/production-ops-0227-0244-*.mjs text eol=lf
+scripts/fixtures/production-ops-copied-226-profile.json text eol=lf
 docs/operations/production-ops-0227-0244-ordered-apply.md text eol=lf
 apps/viewer/third_party/obj2tiles/locks/** text eol=lf
 apps/viewer/third_party/imagesharp/3.2.0/** text eol=lf

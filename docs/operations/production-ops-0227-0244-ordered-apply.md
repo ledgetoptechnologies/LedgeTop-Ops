@@ -372,11 +372,86 @@ tool or plan.
   after the three guards are dropped. Command rows are the audit trail, so
   dropping them loses provenance.
 
+## Rehearsal profile: copied-226
+
+The QA rehearsal starts from a disposable database at exactly ledger 226. Its
+pins are committed in `scripts/fixtures/production-ops-copied-226-profile.json`.
+The builder and verifier is
+`scripts/production-ops-0227-0244-copied-226-fixture.mjs`. Neither contacts
+Cloudflare.
+
+### What is pinned
+
+- **Ordered files.** `migrations` lists the 226 files `0001_operations.sql` to
+  `0226_staff_login_bindings.sql` from `apps/operations/migrations`, in order,
+  with ledger id and source SHA-256. `migrationsContentsSha256` covers the whole
+  list.
+- **Ledger at 226.** There are 226 contiguous rows ending at
+  `0226_staff_login_bindings.sql`, and `sqlite_sequence` for `d1_migrations` is
+  226. `namesSha256` is the same value as the operator's prior-ledger pin.
+- **Schema at 226.** `schema` is the object count and SHA-256 of every
+  `sqlite_master` row with SQL, excluding `sqlite_*` and `_cf_*`. This uses the
+  operator's own schema-row query and digest. At 226 none of the ten files'
+  objects exist, so `existingSchema` equals `schema`.
+- **Preflight values.** `probes` are the operator's probe values on the built
+  copy. `requiredProbes` are the values every 0244 preflight needs:
+  - 15 catalog permission keys;
+  - 0 native-hire override rows and 0 native hires;
+  - one native switch row, set to off;
+  - two owner/admin roles;
+  - no `flight_logs.*` permissions yet;
+  - the three staff-login tables and the five `staff_users` columns.
+- **Seed rows.** None are needed beyond what migrations 0001–0226 seed
+  themselves. The 15 catalog keys, the owner/admin roles and the disabled switch
+  row come from the migrations. `staff_permission_overrides` and native
+  onboarding are empty.
+
+### Commands
+
+From the repository root, with dependencies installed:
+
+```powershell
+node scripts/production-ops-0227-0244-copied-226-fixture.mjs --build "$env:TEMP\ops-rehearsal\copied-226.sqlite"
+```
+
+`--build` checks each of the 226 source files against its pinned SHA-256 first.
+It refuses to overwrite an existing file. It applies the files with the same
+Wrangler splitter the operator uses, then verifies the result against the pins.
+It prints `ok` and any mismatches, and exits 1 on a mismatch.
+
+```powershell
+node scripts/production-ops-0227-0244-copied-226-fixture.mjs --verify "$env:TEMP\ops-rehearsal\copied-226.sqlite"
+```
+
+`--verify` checks any existing SQLite file read-only against the same pins.
+
+```powershell
+node scripts/production-ops-0227-0244-copied-226-fixture.mjs
+```
+
+With no flag, it re-derives the pins and compares them with the committed file.
+`--write` regenerates the file. Regenerate only together with a reviewed change
+to migrations 0001–0226.
+
+### Comparing with production
+
+The pinned schema digest comes from the source files. It is not a reading of
+production. A dry run against production with `--receipt` records production's
+`existingSchema` digest in that receipt. If that value differs from this pin,
+production's schema has drifted from source, and the copy is not production's
+shape. Report that as a finding rather than adjusting the pin.
+
 ## Tests
 
 ```powershell
 node --test scripts/production-ops-0227-0244-ordered-once.test.mjs
 ```
 
+```powershell
+node --test scripts/production-ops-0227-0244-copied-226-fixture.test.mjs
+```
+
 The tests are offline. The synthetic D1 is a local SQLite file built from this
-repository's migrations 0001–0226.
+repository's migrations 0001–0226. The copied-226 tests also run the
+operator's dry run against the built copy, and it passes every preflight
+without writing.
