@@ -1288,6 +1288,22 @@ export function selectLodRecentFrontier(entries, {
   return selected;
 }
 
+export function lodWarmCacheHasHeadroom(cache) {
+  const bytes = Number(cache?.cachedBytes);
+  const softBytes = Number(cache?.softBytesSize);
+  const hardBytes = Number(cache?.maxBytesSize);
+  const items = Number(cache?.itemSet?.size);
+  const maxItems = Number(cache?.maxSize);
+  // Unknown limits preserve the renderer's existing eviction behavior. This
+  // gate applies only to background pruning, never prospective admission.
+  return Number.isFinite(bytes) && bytes >= 0
+    && Number.isFinite(softBytes) && softBytes > 0
+    && Number.isFinite(hardBytes) && hardBytes >= softBytes
+    && Number.isFinite(items) && items >= 0
+    && Number.isFinite(maxItems) && maxItems > 0
+    && bytes < softBytes && items < maxItems;
+}
+
 export function installLodOverviewRetention(tilesRenderer, overviewTilesProvider) {
   const cache = tilesRenderer?.lruCache;
   const original = cache?.scheduleUnload;
@@ -1298,6 +1314,11 @@ export function installLodOverviewRetention(tilesRenderer, overviewTilesProvider
   const wrapped = function (...args) {
     const overviewTiles = overviewTilesProvider();
     retainLodOverviewTiles(tilesRenderer, overviewTiles);
+    // The renderer schedules pruning every frame, even below the soft budget.
+    // Its small minSize/minBytes warm floor otherwise discards recently viewed
+    // tiles after the short replacement-cut pin expires. Keep reusable content
+    // while it fits; direct unloadUnusedContent admission recovery still works.
+    if (lodWarmCacheHasHeadroom(cache)) return;
     return original.apply(cache, args);
   };
   cache.scheduleUnload = wrapped;
