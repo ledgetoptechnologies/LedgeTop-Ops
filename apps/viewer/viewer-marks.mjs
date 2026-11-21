@@ -383,14 +383,19 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     if (point) layer.focus({ type: 'Point', coordinates: point });
   });
 
-  on(pointCoords, 'change', () => {
-    if (!draft || draft.geometry.type !== 'Point') return;
+  // Reads the coordinates field as it is now. Returns false (and shows why)
+  // when the text is not a valid position, leaving the draft untouched.
+  function applyPointCoordinates() {
+    if (!draft || draft.geometry.type !== 'Point') return true;
     const parsed = parseCoordinateInput(pointCoords.value, { georef: georef() });
-    if (!parsed.ok) { message(parsed.error || 'Enter coordinates.'); return; }
+    if (!parsed.ok) { message(parsed.error || 'Enter coordinates.'); return false; }
     draft.geometry = { type: 'Point', coordinates: [Math.round(parsed.longitude * 1e8) / 1e8, Math.round(parsed.latitude * 1e8) / 1e8] };
-    store.clearMessage();
     pointCoords.value = formatDecimal(parsed.latitude, parsed.longitude);
-    render();
+    return true;
+  }
+
+  on(pointCoords, 'change', () => {
+    if (applyPointCoordinates()) { store.clearMessage(); render(); }
   });
   on(categorySelect, 'change', () => {
     const category = categoryById(categorySelect.value);
@@ -420,6 +425,9 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   on(editor, 'submit', async event => {
     event.preventDefault();
     if (!draft) return;
+    // Enter or Save can arrive without a change event: never save the coordinates
+    // the field showed before. Invalid text keeps the editor open and writes nothing.
+    if (!applyPointCoordinates()) return;
     const values = readEditor();
     if (!values.name) { message('Give the mark a label.'); return; }
     if (Number.isNaN(values.elevationNavd88M)) { message('NAVD88 Elevation must be a number.'); return; }
