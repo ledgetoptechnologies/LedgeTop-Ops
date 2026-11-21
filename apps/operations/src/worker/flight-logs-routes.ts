@@ -52,6 +52,24 @@ export interface FlightLogsBinding {
   assignDecodedLog?(actor: FlightLogsActor, input: { rawSha256: string; pilotId: string; reason: string | null }, options?: OperationOptions): Promise<Result<unknown>>;
   reassignFlight?(actor: FlightLogsActor, input: { flightId: string; pilotId: string; reason: string | null }, options?: OperationOptions): Promise<Result<unknown>>;
   resolveConflict?(actor: FlightLogsActor, input: { rawSha256: string; resolution: "keep_existing" | "reassign_existing"; pilotId?: string; reason: string | null }, options?: OperationOptions): Promise<Result<unknown>>;
+  // Pairing codes and clearing waiting codes (Logs: createPairing / cancelPairing / clearPendingSignIns).
+  // Optional: a binding without them (e.g. the local Logs host today) answers 404 like pairing turned off.
+  clearPendingSignIns?(actor: FlightLogsActor): Promise<Result<{ cleared: number }>>;
+  createPairing?(actor: FlightLogsActor): Promise<Result<{ pairingId: string; code: string; expiresAt: string }>>;
+  cancelPairing?(actor: FlightLogsActor, pairingId: string): Promise<Result<{ closed: boolean }>>;
+}
+
+/** Pairing codes and clearing waiting codes are off unless this deployment turns them on explicitly. */
+function controllerPairingEnabled(env: Env): boolean {
+  return (env as Env & { FLIGHT_LOGS_PAIRING_ENABLED?: string }).FLIGHT_LOGS_PAIRING_ENABLED === "true";
+}
+function requirePairing(env: Env): void {
+  if (!controllerPairingEnabled(env)) throw new HTTPException(404, { message: "Not found" });
+}
+function pairingMethod<K extends "clearPendingSignIns" | "createPairing" | "cancelPairing">(logs: FlightLogsBinding, name: K): NonNullable<FlightLogsBinding[K]> {
+  const method = logs[name];
+  if (!method) throw new HTTPException(404, { message: "Not found" });
+  return method.bind(logs) as NonNullable<FlightLogsBinding[K]>;
 }
 
 /** Filters shared by the flight list and the overview. The logs service validates every value again. */
@@ -248,7 +266,29 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
   app.get("/api/flight-logs/controller-sign-ins", async c => {
     const { actor, username } = await pilotFor(c.env, c.get("principal"));
     const deviceEligibility = await getPilotDeviceAuthority(c.env.OPS_DB, actor.staffId);
-    return c.json({ username, deviceEligibility, ...(unwrap(await binding(c.env).pendingSignIns(actor)) as object) }, 200, noStore);
+    return c.json({ username, deviceEligibility, pairing: controllerPairingEnabled(c.env), ...(unwrap(await binding(c.env).pendingSignIns(actor)) as object) }, 200, noStore);
+  });
+
+  // Denies every code still waiting for you (codes you didn't start, holding your username's slots).
+  app.post("/api/flight-logs/controller-sign-ins/clear", async c => {
+    requirePairing(c.env);
+    const { actor } = await pilotFor(c.env, c.get("principal"));
+    return c.json(unwrap(await pairingMethod(binding(c.env), "clearPendingSignIns")(actor)), 200, noStore);
+  });
+
+  // A one-time pairing code to type on a controller with your username. Only for explicitly eligible pilots.
+  app.post("/api/flight-logs/controller-pairings", async c => {
+    requirePairing(c.env);
+    const { actor } = await pilotFor(c.env, c.get("principal"));
+    if (!(await getPilotDeviceAuthority(c.env.OPS_DB, actor.staffId)).eligible)
+      throw new HTTPException(403, { message: "Your account is not allowed to use a Logs controller." });
+    return c.json(unwrap(await pairingMethod(binding(c.env), "createPairing")(actor)), 201, noStore);
+  });
+
+  app.post("/api/flight-logs/controller-pairings/:id/cancel", async c => {
+    requirePairing(c.env);
+    const { actor } = await pilotFor(c.env, c.get("principal"));
+    return c.json(unwrap(await pairingMethod(binding(c.env), "cancelPairing")(actor, id(c.req.param("id"), "Pairing code"))), 200, noStore);
   });
 
   app.post("/api/flight-logs/controller-sign-ins/:id/:decision", async c => {
