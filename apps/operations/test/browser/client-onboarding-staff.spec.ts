@@ -69,6 +69,29 @@ test("closing and reopening keeps an uncertain result instead of creating a seco
   expect(await bodies(page, "reveal")).toHaveLength(1);
 });
 
+test("a generic create denial keeps the original invitation reference after reopen", async ({ page }) => {
+  await render(page, "create-denied", "?dialog=1");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  const dialog = page.getByRole("dialog");
+  await trigger.click();
+  await chooseScope(page);
+  await dialog.getByRole("button", { name: "Create invitation" }).click();
+  const reference = dialog.getByRole("alert").filter({ hasText: "The invitation result isn't confirmed." }).locator("code");
+  await expect(reference).toBeVisible();
+  await expect.poll(async () => (await bodies(page, "session")).length).toBe(2);
+  const issued = await bodies(page, "create");
+  expect(issued).toHaveLength(1);
+  await expect(reference).toHaveText(String(issued[0].commandId));
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await expect(dialog).toHaveCount(0);
+  await trigger.click();
+  await expect(reference).toHaveText(String(issued[0].commandId));
+  await expect(dialog.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Create one-time link" })).toHaveCount(0);
+  expect(await bodies(page, "create")).toEqual(issued);
+  expect(await bodies(page, "reveal")).toHaveLength(0);
+});
+
 test("closing and reopening preserves an uncopied one-time link in memory", async ({ page }) => {
   await render(page, "success", "?dialog=1");
   const trigger = page.getByRole("button", { name: "Onboard client" });

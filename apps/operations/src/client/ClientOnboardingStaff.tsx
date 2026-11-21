@@ -175,7 +175,11 @@ export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { s
       if (!validCreated(value)) throw new Error("invalid_response");
       setCreated(value);
     } catch (caught) {
-      if (uncertainFailure(caught)) setUncertain("create");
+      // A generic denial can also follow an issuance whose receipt could not be verified.
+      if (refusalStatus(caught) === 403) {
+        setUncertain("create");
+        onRefused(caught);
+      } else if (uncertainFailure(caught)) setUncertain("create");
       else { setError("The invitation was refused. Check your permissions and the details, then try again."); onRefused(caught); }
     } finally { setBusy(null); onBusyChange?.(false); }
   };

@@ -111,6 +111,7 @@ window.fetch = async (input, init) => {
     invitationId, submissionId: body.submissionId, clientRecordId: "55555555-5555-4555-8555-555555555555", clientRecordVersion: 1,
     organizationRecordId: "org:ltds", organizationRecordVersion: 6, relationshipVersion: 1, replayed: false, members: [], portalActivation: "pending" }); }
   if (route === "create") {
+    if (mode === "create-denied") return denied();
     if (mode === "delayed-create") await held();
     return Response.json({ invitationId, expiresAt: body.expiresAt, requestSha256: "c".repeat(64), state: "pending" });
   }
