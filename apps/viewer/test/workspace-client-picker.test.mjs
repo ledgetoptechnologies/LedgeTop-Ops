@@ -200,3 +200,18 @@ test('the bound combobox keeps aria-expanded, aria-activedescendant and the chos
   input.value = 'Acme'; input.oninput(); assert.equal(hidden.value, ''); assert.equal(chosen.at(-1), null);
   picker.dispose(); assert.equal(time.pending(), 0);
 });
+
+test('search-first: nothing is fetched or listed until two characters are typed', async () => {
+  const time = clock(), remote = deferredFetch();
+  const picker = createClientPicker({ fetchPage: remote.fetchPage, setTimer: time.setTimer, clearTimer: time.clearTimer, minQuery: 2 });
+  await picker.focus(); assert.equal(remote.calls.length, 0); assert.equal(picker.state.items.length, 0);
+  assert.equal(clientPickerStatus(picker.state), 'Type at least 2 characters to search clients.');
+  picker.input(' a '); time.advance(1000); assert.equal(remote.calls.length, 0); assert.equal(picker.state.loading, false);
+  assert.equal(picker.key('Enter'), true); assert.equal(picker.state.selected, null);
+  await picker.retry(); assert.equal(remote.calls.length, 0);
+  picker.input('ac'); time.advance(250); assert.equal(remote.calls.length, 1); assert.equal(remote.calls[0].query, 'ac');
+  remote.calls[0].resolve({ clients: [client('ws-1', 'Acme')], clientsNextCursor: null }); await settle();
+  assert.equal(picker.state.items.length, 1);
+  // Deleting back below two characters drops the results at once.
+  picker.input('a'); assert.equal(picker.state.items.length, 0); time.advance(1000); assert.equal(remote.calls.length, 1);
+});

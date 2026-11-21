@@ -88,6 +88,11 @@
 .direct-share-tasks{display:grid;gap:.35rem;max-height:14rem;overflow:auto;padding-left:1.4rem}
 .direct-share-summary{margin:0;padding:.65rem .75rem;border-radius:8px;background:rgba(238,80,7,.08);font-weight:600;overflow-wrap:anywhere}
 .direct-share-heading{margin:1rem 0 .25rem;font-size:1rem}
+.direct-share-later{padding-left:1.4rem}
+.direct-share-review{display:grid;gap:.5rem;padding:.75rem;border:1px solid var(--line,#d8dee4);border-radius:8px}
+.direct-share-review[hidden],.direct-share-form [hidden]{display:none}
+.direct-share-review h3{margin:0;font-size:1rem}
+.direct-share-review p{margin:0;overflow-wrap:anywhere}
 .share-legacy{margin-top:1rem}
 .share-legacy>summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600}
 
