@@ -7,17 +7,23 @@ import { UsernamesPanel } from "./flight-logs/UsernamesPanel";
 import { ReviewPanel } from "./flight-logs/ReviewPanel";
 import { FlightDetail } from "./flight-logs/FlightDetail";
 import { Overview } from "./flight-logs/Overview";
+import { AllPilotsAvatar, PilotAvatar } from "./flight-logs/PilotAvatar";
 import { duration, equipmentLabel, FEET, filterQuery, flightTitle, masked, miles, MILE, shortDate, type Facets, type Filters, type FlightItem } from "./flight-logs/format";
 import "./FlightLogsPage.css";
 
 interface Pilot { id: string; displayName: string }
-type View = { kind: "flight"; id: string } | { kind: "overview" };
+type View = { kind: "flight"; id: string } | { kind: "overview" } | { kind: "controllers" };
+export interface FlightLogsViewer { id: string; displayName: string }
 
 /**
- * Fleet and flight logs: a flight list with filters on the left and the open flight (map, telemetry,
- * replay) or the fleet overview on the right. Same filters drive the list and the overview.
+ * Fleet and flight logs. A "Viewing" bar at the top always says whose flights are on screen: managers
+ * switch between every pilot and one person; everyone else sees only their own. Below it, the flight
+ * list and filters sit on the left and the overview, the open flight, or controller management on the right.
+ * The same scope and filters drive the list and the overview.
  */
-export function FlightLogsPage({ canImport, canViewAll = false, isAdministrator = false }: { canImport: boolean; canViewAll?: boolean; isAdministrator?: boolean }) {
+export function FlightLogsPage({ canImport, canViewAll = false, isAdministrator = false, viewer }: {
+  canImport: boolean; canViewAll?: boolean; isAdministrator?: boolean; viewer?: FlightLogsViewer;
+}) {
   const [flights, setFlights] = useState<FlightItem[]>([]);
   const [total, setTotal] = useState(0);
   const [next, setNext] = useState<string | null>(null);
@@ -52,68 +58,116 @@ export function FlightLogsPage({ canImport, canViewAll = false, isAdministrator 
 
   const openFlight = useCallback((id: string) => { setView({ kind: "flight", id }); if (window.matchMedia("(max-width: 900px)").matches) setPanelOpen(false); }, []);
   const set = (patch: Partial<Filters>) => setFilters(current => ({ ...current, ...patch }));
-  const filtered = Object.keys(filters).some(key => filters[key as keyof Filters] !== undefined && filters[key as keyof Filters] !== "");
+  const narrowing = Object.entries(filters).filter(([key, value]) => key !== "pilot" && value !== undefined && value !== "");
+  const filtered = narrowing.length > 0;
+  const activeFilters = narrowing.filter(([key]) => key !== "q").length;
+
+  // Whose flights are on screen.
+  const pilots = facets?.pilots ?? [];
+  const everyone = pilots.reduce((sum, item) => sum + item.flights, 0);
+  const scoped = canViewAll && filters.pilot ? pilots.find(item => item.id === filters.pilot) ?? null : null;
+  const scopedIsYou = !!scoped && scoped.id === viewer?.id;
+  const nameOf = (item: { id: string; pilotName: string | null }) => item.pilotName ?? (item.id === viewer?.id ? viewer.displayName : "Unknown pilot");
+  const showingEveryone = canViewAll && !filters.pilot;
+  const choosePilot = (id: string | undefined) => {
+    if (id === filters.pilot) return;
+    set({ pilot: id });
+    // A flight from the previous scope may not belong to the new one; fall back to the overview.
+    if (view.kind === "flight") setView({ kind: "overview" });
+  };
 
   if (state === "unavailable") return <section className="flight-logs" aria-label="Fleet and flight logs">
     <EmptyState title="Flight logs aren’t connected yet" detail="The flight-log service hasn’t been switched on for Operations. Nothing is lost; flights will appear here once it is." />
   </section>;
 
-  return <section className={`flight-logs flight-workspace${panelOpen ? "" : " panel-closed"}`} aria-label="Fleet and flight logs">
-    <aside className="flight-panel-left" aria-label="Flights and filters">
-      <div className="flight-tabs" role="tablist" aria-label="Flight logs view">
-        <button type="button" role="tab" aria-selected={view.kind === "flight"} onClick={() => { const first = flights[0]; if (view.kind !== "flight" && first) openFlight(first.id); }}>Flights</button>
-        <button type="button" role="tab" aria-selected={view.kind === "overview"} onClick={() => setView({ kind: "overview" })}>Overview</button>
-      </div>
-      {!canViewAll && <p className="flight-logs-scope">These are your flights. Only you and Ledge Top admins can see them.</p>}
-      {canImport && <button type="button" className="button-ghost flight-import-button" onClick={() => setImporting(true)} disabled={importing}>Import from OpenDroneLog</button>}
-      <details className="flight-filters" open>
-        <summary>Filters{filtered && <span className="flight-filter-count"> · on</span>}</summary>
-        <label>Search<input type="search" value={filters.q ?? ""} placeholder="Name, file or notes" onChange={event => set({ q: event.currentTarget.value || undefined })} /></label>
-        <div className="flight-filter-dates">
-          <label>From<input type="date" value={filters.from ?? ""} onChange={event => set({ from: event.currentTarget.value || undefined })} /></label>
-          <label>To<input type="date" value={filters.to ?? ""} onChange={event => set({ to: event.currentTarget.value || undefined })} /></label>
+  const scopeTitle = !canViewAll || scopedIsYou ? "Your flights" : scoped ? `${nameOf(scoped)}’s flights` : "All pilots’ flights";
+  const scopeDetail = !canViewAll ? "These are your flights. Only you and Ledge Top admins can see them."
+    : scoped ? `${scoped.flights.toLocaleString()} ${scoped.flights === 1 ? "flight" : "flights"} flown by ${scopedIsYou ? "you" : nameOf(scoped)}. Choose All pilots to see the whole fleet.`
+      : `Every pilot’s flights together: ${everyone.toLocaleString()} ${everyone === 1 ? "flight" : "flights"} from ${pilots.length} ${pilots.length === 1 ? "pilot" : "pilots"}.`;
+
+  return <section className="flight-logs" aria-label="Fleet and flight logs">
+    <header className={`flight-scope${showingEveryone ? " everyone" : ""}`} aria-label="Whose flights you’re viewing">
+      <div className="flight-scope-who">
+        {showingEveryone ? <AllPilotsAvatar size="lg" />
+          : <PilotAvatar size="lg" id={scoped?.id ?? viewer?.id} name={scoped ? nameOf(scoped) : viewer?.displayName ?? "You"} />}
+        <div>
+          <span className="flight-scope-label">Viewing</span>
+          <h2>{scopeTitle}</h2>
+          <p className="flight-logs-scope">{scopeDetail}</p>
         </div>
-        <label>Aircraft<select value={filters.aircraft ?? ""} onChange={event => set({ aircraft: event.currentTarget.value || undefined })}>
-          <option value="">All aircraft</option>{facets?.aircraft.map(item => <option key={item.id} value={item.id}>{equipmentLabel(item)} · {masked(item.serial)} ({item.flights})</option>)}
-        </select></label>
-        <label>Battery<select value={filters.battery ?? ""} onChange={event => set({ battery: event.currentTarget.value || undefined })}>
-          <option value="">All batteries</option>{facets?.batteries.map(item => <option key={item.id} value={item.id}>Battery {masked(item.serial)} ({item.flights})</option>)}
-        </select></label>
-        {facets && facets.pilots.length > 1 && <label>Pilot<select value={filters.pilot ?? ""} onChange={event => set({ pilot: event.currentTarget.value || undefined })}>
-          <option value="">All pilots</option>{facets.pilots.map(item => <option key={item.id} value={item.id}>{item.pilotName ?? "Unknown pilot"} ({item.flights})</option>)}
-        </select></label>}
-        <label>Tag<select value={filters.tag ?? ""} onChange={event => set({ tag: event.currentTarget.value || undefined })}>
-          <option value="">All tags</option>{facets?.tags.map(item => <option key={`${item.kind}:${item.tag}`} value={item.tag}>{item.tag} ({item.flights})</option>)}
-        </select></label>
-        <RangeFilter label="Duration" unit="min" max={Math.ceil((facets?.ranges.durationSeconds ?? 3600) / 60)} toFilter={v => v * 60}
-          min={filters.minDuration} maxValue={filters.maxDuration} onChange={(a, b) => set({ minDuration: a, maxDuration: b })} fromFilter={v => Math.round(v / 60)} />
-        <RangeFilter label="Max height" unit="ft" max={Math.ceil((facets?.ranges.altitudeMeters ?? 120) * FEET)} toFilter={v => v / FEET}
-          min={filters.minAltitude} maxValue={filters.maxAltitude} onChange={(a, b) => set({ minAltitude: a, maxAltitude: b })} fromFilter={v => Math.round(v * FEET)} />
-        <RangeFilter label="Distance" unit="mi" step={0.1} max={Math.ceil(((facets?.ranges.distanceMeters ?? MILE) / MILE) * 10) / 10} toFilter={v => v * MILE}
-          min={filters.minDistance} maxValue={filters.maxDistance} onChange={(a, b) => set({ minDistance: a, maxDistance: b })} fromFilter={v => Math.round((v / MILE) * 10) / 10} />
-        {filtered && <button type="button" className="portal-text-action" onClick={() => setFilters({})}>Clear filters</button>}
-      </details>
-      <p className="flight-list-count" role="status">{state === "loading" ? "Loading flights…" : `${total.toLocaleString()} ${total === 1 ? "flight" : "flights"}${filtered ? " match" : ""}`}</p>
-      {state === "error" && <p className="flight-logs-status error" role="alert">{message}</p>}
-      <ol className="flight-list">{flights.map(flight => <li key={flight.id}>
-        <button type="button" aria-current={view.kind === "flight" && view.id === flight.id ? "true" : undefined} onClick={() => openFlight(flight.id)}>
-          <strong>{flightTitle(flight)}</strong>
-          <small>{shortDate(flight.startedAt)} · {duration(flight.durationSeconds, true)} · {miles(flight.distanceMeters)}</small>
-          <small>{equipmentLabel(flight.aircraft)}{flight.pilotName ? ` · ${flight.pilotName}` : ""}{flight.hasTrack ? "" : " · no track"}</small>
+      </div>
+      {canViewAll && pilots.length > 0 && <div className="flight-scope-switch" role="radiogroup" aria-label="Show flights for">
+        <button type="button" role="radio" aria-checked={!filters.pilot} onClick={() => choosePilot(undefined)}>
+          <AllPilotsAvatar size="sm" /><span>All pilots</span><small>{everyone.toLocaleString()}</small>
         </button>
-      </li>)}</ol>
-      {next && <button type="button" className="button-ghost flight-logs-more" onClick={() => void load(next)}>Show more</button>}
-      {state === "ready" && !flights.length && !filtered && <EmptyState title="No flights yet" detail={canImport ? "Import an OpenDroneLog backup to bring in your existing flights." : canViewAll ? "Flights appear here once a pilot’s logs are imported." : "Your flights appear here once your controller uploads them. Sign in on the controller with your username."} />}
-    </aside>
-    <button type="button" className="flight-panel-toggle" aria-expanded={panelOpen} aria-label={panelOpen ? "Hide flight list" : "Show flight list"} onClick={() => setPanelOpen(!panelOpen)}>{panelOpen ? "‹" : "›"}</button>
-    <div className="flight-main">
-      <ControllersPanel canManageAll={canImport} />
-      <UsernamesPanel />
-      <ReviewPanel />
-      {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); setRevision(value => value + 1); }} />}
-      {view.kind === "overview"
-        ? <Overview filters={filters} revision={revision} onOpenFlight={openFlight} />
-        : <FlightDetail flightId={view.id} canReassign={isAdministrator} />}
+        {pilots.map(item => <button key={item.id} type="button" role="radio" aria-checked={filters.pilot === item.id} onClick={() => choosePilot(item.id)}>
+          <PilotAvatar size="sm" id={item.id} name={nameOf(item)} /><span>{nameOf(item)}{item.id === viewer?.id ? " (you)" : ""}</span><small>{item.flights.toLocaleString()}</small>
+        </button>)}
+      </div>}
+      {canImport && <button type="button" className="button-ghost flight-import-button" onClick={() => setImporting(true)} disabled={importing}>Import from OpenDroneLog</button>}
+    </header>
+
+    <div className={`flight-workspace${panelOpen ? "" : " panel-closed"}`}>
+      <aside className="flight-panel-left" aria-label="Flights and filters">
+        <input className="flight-search" type="search" aria-label="Search flights" value={filters.q ?? ""} placeholder="Search name, file or notes"
+          onChange={event => set({ q: event.currentTarget.value || undefined })} />
+        <details className="flight-filters">
+          <summary>Filters{activeFilters > 0 && <span className="flight-filter-count">{activeFilters} on</span>}</summary>
+          <div className="flight-filter-dates">
+            <label>From<input type="date" value={filters.from ?? ""} onChange={event => set({ from: event.currentTarget.value || undefined })} /></label>
+            <label>To<input type="date" value={filters.to ?? ""} onChange={event => set({ to: event.currentTarget.value || undefined })} /></label>
+          </div>
+          <label>Aircraft<select value={filters.aircraft ?? ""} onChange={event => set({ aircraft: event.currentTarget.value || undefined })}>
+            <option value="">All aircraft</option>{facets?.aircraft.map(item => <option key={item.id} value={item.id}>{equipmentLabel(item)} · {masked(item.serial)} ({item.flights})</option>)}
+          </select></label>
+          <label>Battery<select value={filters.battery ?? ""} onChange={event => set({ battery: event.currentTarget.value || undefined })}>
+            <option value="">All batteries</option>{facets?.batteries.map(item => <option key={item.id} value={item.id}>Battery {masked(item.serial)} ({item.flights})</option>)}
+          </select></label>
+          <label>Tag<select value={filters.tag ?? ""} onChange={event => set({ tag: event.currentTarget.value || undefined })}>
+            <option value="">All tags</option>{facets?.tags.map(item => <option key={`${item.kind}:${item.tag}`} value={item.tag}>{item.tag} ({item.flights})</option>)}
+          </select></label>
+          <RangeFilter label="Duration" unit="min" max={Math.ceil((facets?.ranges.durationSeconds ?? 3600) / 60)} toFilter={v => v * 60}
+            min={filters.minDuration} maxValue={filters.maxDuration} onChange={(a, b) => set({ minDuration: a, maxDuration: b })} fromFilter={v => Math.round(v / 60)} />
+          <RangeFilter label="Max height" unit="ft" max={Math.ceil((facets?.ranges.altitudeMeters ?? 120) * FEET)} toFilter={v => v / FEET}
+            min={filters.minAltitude} maxValue={filters.maxAltitude} onChange={(a, b) => set({ minAltitude: a, maxAltitude: b })} fromFilter={v => Math.round(v * FEET)} />
+          <RangeFilter label="Distance" unit="mi" step={0.1} max={Math.ceil(((facets?.ranges.distanceMeters ?? MILE) / MILE) * 10) / 10} toFilter={v => v * MILE}
+            min={filters.minDistance} maxValue={filters.maxDistance} onChange={(a, b) => set({ minDistance: a, maxDistance: b })} fromFilter={v => Math.round((v / MILE) * 10) / 10} />
+        </details>
+        <div className="flight-list-head">
+          <p className="flight-list-count" role="status">{state === "loading" ? "Loading flights…" : `${total.toLocaleString()} ${total === 1 ? "flight" : "flights"}${filtered ? " match" : ""}`}</p>
+          {filtered && <button type="button" className="flight-text-action" onClick={() => setFilters(current => ({ pilot: current.pilot }))}>Clear filters</button>}
+        </div>
+        {state === "error" && <p className="flight-logs-status error" role="alert">{message}</p>}
+        <ol className="flight-list">{flights.map(flight => <li key={flight.id}>
+          <button type="button" aria-current={view.kind === "flight" && view.id === flight.id ? "true" : undefined} onClick={() => openFlight(flight.id)}>
+            <strong>{flightTitle(flight)}</strong>
+            <small>{shortDate(flight.startedAt)} · {duration(flight.durationSeconds, true)} · {miles(flight.distanceMeters)}</small>
+            <small className="flight-list-who">{showingEveryone && <PilotAvatar size="sm" id={flight.pilotId} name={flight.pilotName} />}
+              <span>{equipmentLabel(flight.aircraft)}{showingEveryone && flight.pilotName ? ` · ${flight.pilotName}` : ""}{flight.hasTrack ? "" : " · no track"}</span></small>
+          </button>
+        </li>)}</ol>
+        {next && <button type="button" className="button-ghost flight-logs-more" onClick={() => void load(next)}>Show more</button>}
+        {state === "ready" && !flights.length && !filtered && <EmptyState title="No flights yet" detail={canImport ? "Import an OpenDroneLog backup to bring in your existing flights." : canViewAll ? "Flights appear here once a pilot’s logs are imported." : "Your flights appear here once your controller uploads them. Sign in on the controller with your username."} />}
+      </aside>
+      <button type="button" className="flight-panel-toggle" aria-expanded={panelOpen} aria-label={panelOpen ? "Hide flight list" : "Show flight list"} onClick={() => setPanelOpen(!panelOpen)}>{panelOpen ? "‹" : "›"}</button>
+      <div className="flight-main">
+        <div className="flight-tabs" role="tablist" aria-label="Flight logs view">
+          <button type="button" role="tab" aria-selected={view.kind === "overview"} onClick={() => setView({ kind: "overview" })}>Overview</button>
+          <button type="button" role="tab" aria-selected={view.kind === "flight"} disabled={view.kind !== "flight" && !flights.length}
+            onClick={() => { const first = flights[0]; if (view.kind !== "flight" && first) openFlight(first.id); }}>Flight details</button>
+          <button type="button" role="tab" aria-selected={view.kind === "controllers"} onClick={() => setView({ kind: "controllers" })}>Controllers &amp; uploads</button>
+        </div>
+        {/* Sign-in codes waiting for you show on every tab, so a controller is never left waiting. */}
+        {view.kind !== "controllers" && <ControllersPanel canManageAll={canImport} alertsOnly />}
+        {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); setRevision(value => value + 1); }} />}
+        {view.kind === "overview" && <Overview filters={filters} revision={revision} onOpenFlight={openFlight} />}
+        {view.kind === "flight" && <FlightDetail flightId={view.id} canReassign={isAdministrator} />}
+        {view.kind === "controllers" && <div className="flight-admin">
+          <ControllersPanel canManageAll={canImport} expanded />
+          <UsernamesPanel />
+          <ReviewPanel />
+        </div>}
+      </div>
     </div>
   </section>;
 }

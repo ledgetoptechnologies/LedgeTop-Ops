@@ -13,7 +13,7 @@ const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString(undefin
  * your username, and see or sign out your controllers. Requests only ever come to the person they were
  * addressed to, so there is nothing to choose here.
  */
-export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
+export function ControllersPanel({ canManageAll, alertsOnly = false, expanded = false }: { canManageAll: boolean; alertsOnly?: boolean; expanded?: boolean }) {
   const [username, setUsername] = useState<string | null | undefined>(undefined);
   const [signIns, setSignIns] = useState<SignIn[]>([]);
   const [controllers, setControllers] = useState<Controller[]>([]);
@@ -67,6 +67,7 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
   }
 
   if (state === "loading" || state === "unavailable") return null;
+  if (alertsOnly && !signIns.length && !message) return null;
   const active = controllers.filter(c => c.status === "active");
   return <section className="flight-controllers" aria-label="Controllers">
     {signIns.map(signIn => <div key={signIn.id} className="flight-controller-request" role="alert">
@@ -80,7 +81,7 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
       </div>
     </div>)}
     {message && <p className="flight-logs-status" role="status">{message}</p>}
-    <details className="flight-controller-list">
+    {!alertsOnly && <details className="flight-controller-list" open={expanded || undefined}>
       <summary>Controllers <small>{active.length} signed in</small></summary>
       {username === null && <p className="flight-logs-status">You don't have a Ledge Top username yet, so you can't sign in on a controller. Ask an admin to set one.</p>}
       {username && <p className="flight-logs-status">To sign a controller in as you, open Ledge Top Logs on it and type <strong>{username}</strong>.</p>}
@@ -90,6 +91,6 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
           <small>{c.status === "active" ? `Signed in ${when(c.signedInAt)} · last seen ${when(c.lastSeenAt)}` : "Signed out"} · {c.rawLogs.toLocaleString()} logs uploaded</small></span>
         {c.status === "active" && <button type="button" className="button-ghost button-small" disabled={!!busy} onClick={() => void revoke(c)}>Sign out</button>}
       </li>)}</ul> : <p className="flight-logs-status">No controllers yet.</p>}
-    </details>
+    </details>}
   </section>;
 }
