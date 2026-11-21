@@ -201,7 +201,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     visibilitySelect.value = options.includes(draft.visibility) ? draft.visibility : options[0];
     const accounts = store.state.audiences.map(row => row.account);
     if (draft.shareAccount && !accounts.includes(draft.shareAccount)) accounts.unshift(draft.shareAccount);
-    accountSelect.replaceChildren(h(document, 'option', { value: '', text: accounts.length ? 'Choose…' : 'No client has opened Marks here yet' }),
+    accountSelect.replaceChildren(h(document, 'option', { value: '', text: accounts.length ? 'Choose…' : 'No client with a direct grant has opened Marks here' }),
       ...accounts.map(account => h(document, 'option', { value: account, text: accountLabel(account) })));
     accountSelect.value = draft.shareAccount || '';
     writeCoords();

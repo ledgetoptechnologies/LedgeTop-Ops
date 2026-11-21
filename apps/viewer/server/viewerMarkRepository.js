@@ -5,7 +5,7 @@ const { createHash } = require('node:crypto');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COLOR = /^#[0-9a-f]{6}$/i;
 const ICON = /^[a-z0-9-]{1,32}$/;
-const ACCOUNT = /^(model_association|direct_client_grant):[A-Za-z0-9._:-]{1,200}$/;
+const ACCOUNT = /^direct_client_grant:[A-Za-z0-9._:-]{1,200}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const NOTE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const LIMITS = Object.freeze({ perOwner: 1000, perModel: 5000, categories: 100, vertices: 500, batch: 500, accounts: 200 });
@@ -16,10 +16,15 @@ function markError(code, status = 400) {
   return Object.assign(new Error(code), { code, status });
 }
 
-// The portal account a client session was issued under. Staff have none.
+// The client account a session is bound to, as a share recipient key. Only a
+// direct client grant qualifies: Ops issues it to one client workspace and
+// checks it when minting the session. A model_association id is shared by
+// every client account on the same model (Ops authorizes the individual
+// account underneath it), so it is never a recipient key: those sessions keep
+// their own marks but neither appear as share targets nor read shared marks.
 function principalAccount(principal) {
   const source = principal.session?.sourceAuthorization;
-  if (principal.audience !== 'client' || !source || !['model_association', 'direct_client_grant'].includes(source.type)) return null;
+  if (principal.audience !== 'client' || source?.type !== 'direct_client_grant') return null;
   const key = `${source.type}:${source.id}`;
   return ACCOUNT.test(key) ? key : null;
 }

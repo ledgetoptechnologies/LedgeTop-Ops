@@ -14,7 +14,9 @@ import database from '../server/database.js';
 import { projectViewerMark } from '../viewer-mark-position.mjs';
 
 const modelId = 'synthetic-model';
-const ACCOUNT_B = { sourceAuthorization: { type: 'model_association', id: 'account-b', version: 3 } };
+const ACCOUNT_B = { sourceAuthorization: { type: 'direct_client_grant', id: 'grant-b', version: 3 } };
+// Production mints one association id per project model for every client account on it.
+const SHARED_ASSOCIATION = { sourceAuthorization: { type: 'model_association', id: 'project-model-association', version: 2 } };
 const point = (changes = {}) => ({
   id: randomUUID(), geometry: { type: 'Point', coordinates: [-87, 43.05] }, name: 'Synthetic pin',
   color: '#88AA22', icon: 'pin', note: 'Test only', ...changes,
@@ -34,7 +36,7 @@ async function openApi(t) {
     sessions.set(auth.hashToken(token), {
       audience, subject, modelId, modelVersionId: 'synthetic-v1',
       permissions: { view: true, measure: true, personalMeasurements: true },
-      sourceAuthorization: audience === 'client' ? { type: 'model_association', id: 'account-a', version: 1 } : null,
+      sourceAuthorization: audience === 'client' ? { type: 'direct_client_grant', id: 'grant-a', version: 1 } : null,
       ...changes,
     });
     return token;
@@ -100,7 +102,7 @@ test('client privacy: two clients on one model never read each other\'s marks', 
   }
   const seenByStaff = (await request(staff, 'GET', withStaff.id)).body.mark;
   assert.equal(seenByStaff.owner, 'client-a');
-  assert.equal(seenByStaff.ownerAccount, 'model_association:account-a');
+  assert.equal(seenByStaff.ownerAccount, 'direct_client_grant:grant-a');
   assert.equal((await request(clientA, 'GET', withStaff.id)).body.mark.ownerAccount, undefined);
 });
 
@@ -117,15 +119,15 @@ test('staff share a mark with one named client account only', async t => {
 
   assert.equal((await request(clientA, 'GET', 'audiences')).status, 403);
   const audiences = (await request(staff, 'GET', 'audiences')).body.audiences.map(row => row.account).sort();
-  assert.deepEqual(audiences, ['model_association:account-a', 'model_association:account-b']);
+  assert.deepEqual(audiences, ['direct_client_grant:grant-a', 'direct_client_grant:grant-b']);
 
   const internal = (await request(staff, 'POST', '', point({ name: 'Staff only' }))).body.mark;
   assert.equal(internal.visibility, 'internal', 'staff marks default to staff only');
   assert.equal((await request(staff, 'POST', '', point({ visibility: 'client' }))).status, 400, 'a share needs a named account');
-  assert.equal((await request(staff, 'POST', '', point({ visibility: 'client', shareAccount: 'model_association:never-seen' }))).status, 400);
+  assert.equal((await request(staff, 'POST', '', point({ visibility: 'client', shareAccount: 'direct_client_grant:never-seen' }))).status, 400);
   assert.equal((await request(staff, 'POST', '', point({ visibility: 'staff' }))).status, 403);
-  const toA = (await request(staff, 'POST', '', point({ name: 'For A', visibility: 'client', shareAccount: 'model_association:account-a' }))).body.mark;
-  assert.equal(toA.shareAccount, 'model_association:account-a');
+  const toA = (await request(staff, 'POST', '', point({ name: 'For A', visibility: 'client', shareAccount: 'direct_client_grant:grant-a' }))).body.mark;
+  assert.equal(toA.shareAccount, 'direct_client_grant:grant-a');
 
   assert.deepEqual(await list(clientA), ['For A']);
   assert.deepEqual(await list(companyA), ['For A'], 'a company login reads within its account');
@@ -142,10 +144,45 @@ test('staff share a mark with one named client account only', async t => {
 
   // Moving the share to B takes it away from A.
   const moved = await request(staff, 'PUT', toA.id, { ...point({ name: 'For B' }), id: toA.id, revision: 1, visibility: 'client',
-    shareAccount: 'model_association:account-b' });
+    shareAccount: 'direct_client_grant:grant-b' });
   assert.equal(moved.status, 200);
   assert.deepEqual(await list(clientA), []);
   assert.deepEqual(await list(clientB), ['For B']);
+});
+
+test('two accounts on one model under the SAME association id never see each other\'s shares', async t => {
+  const { session, request } = await openApi(t);
+  const list = names(request);
+  const staff = session('ops', 'staff-person');
+  const accountOne = session('client', 'client:identity-one', SHARED_ASSOCIATION);
+  const accountTwo = session('client', 'client:identity-two', SHARED_ASSOCIATION);
+  const companyOne = session('client', 'client:company-one', { ...SHARED_ASSOCIATION, permissions: { view: true, measure: true } });
+
+  const own = (await request(accountOne, 'POST', '', point({ name: 'One only me', visibility: 'private' }))).body.mark;
+  const toStaff = (await request(accountOne, 'POST', '', point({ name: 'One with staff' }))).body.mark;
+  const categoryOne = { id: randomUUID(), name: 'One category', color: '#3366ff', icon: 'flag' };
+  assert.equal((await request(accountOne, 'POST', 'categories', categoryOne)).status, 201);
+  await request(accountTwo);
+  await request(companyOne);
+
+  // No recipient key exists for association sessions: nothing to pick, nothing to share to.
+  assert.deepEqual((await request(staff, 'GET', 'audiences')).body.audiences, []);
+  for (const shareAccount of ['model_association:project-model-association', 'direct_client_grant:never-seen']) {
+    assert.equal((await request(staff, 'POST', '', point({ visibility: 'client', shareAccount }))).status, 400, shareAccount);
+  }
+  const staffCategory = { id: randomUUID(), name: 'Staff category', color: '#43a047', icon: 'gate' };
+  await request(staff, 'POST', 'categories', staffCategory);
+  await request(staff, 'POST', '', point({ name: 'Internal', categoryId: staffCategory.id }));
+
+  assert.deepEqual(await list(accountOne), ['One only me', 'One with staff']);
+  assert.deepEqual(await list(accountTwo), []);
+  assert.deepEqual(await list(companyOne), []);
+  assert.deepEqual(await list(staff), ['Internal', 'One with staff']);
+  for (const id of [own.id, toStaff.id]) assert.equal((await request(accountTwo, 'GET', id)).status, 404);
+  assert.deepEqual((await request(accountTwo)).body.categories, []);
+  assert.deepEqual((await request(accountOne)).body.categories.map(row => row.name), ['One category']);
+  assert.equal((await request(accountTwo, 'PUT', 'categories/' + categoryOne.id, { ...categoryOne, revision: 1 })).status, 404);
+  assert.equal((await request(staff, 'GET', toStaff.id)).body.mark.ownerAccount, null, 'no account key is recorded for associations');
 });
 
 test('clients edit their own marks; staff edit marks they can read; only owners change visibility', async t => {
@@ -225,7 +262,7 @@ test('categories stay with their owner; clients see staff categories only on mar
   await request(staff, 'POST', 'categories', unusedStaff);
   assert.equal((await request(staff, 'POST', '', point({ categoryId: category.id }))).status, 400, 'staff use staff categories');
   assert.deepEqual(await categoryIds(clientA), [category.id]);
-  await request(staff, 'POST', '', point({ categoryId: staffCategory.id, visibility: 'client', shareAccount: 'model_association:account-a' }));
+  await request(staff, 'POST', '', point({ categoryId: staffCategory.id, visibility: 'client', shareAccount: 'direct_client_grant:grant-a' }));
   assert.deepEqual(await categoryIds(clientA), [category.id, staffCategory.id].sort(), 'a shared mark brings its category name');
   assert.deepEqual(await categoryIds(clientB), [categoryB.id]);
   assert.equal((await request(clientA)).body.categories.find(row => row.id === staffCategory.id).editable, false);

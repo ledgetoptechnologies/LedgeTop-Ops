@@ -34,7 +34,7 @@ async function openServer(t) {
   const scope = (audience, subject, permissions = { view: true, measure: true, personalMeasurements: true }) => {
     const token = randomUUID().replaceAll('-', '');
     const record = { audience, subject, modelId: 'synthetic-model', modelVersionId: 'synthetic-v1', permissions,
-      sourceAuthorization: audience === 'client' ? { type: 'model_association', id: 'account-a', version: 1 } : null };
+      sourceAuthorization: audience === 'client' ? { type: 'direct_client_grant', id: 'grant-a', version: 1 } : null };
     sessions.set(auth.hashToken(token), record);
     return { mode: 'session', key: audience + subject, token: () => token, record };
   };
@@ -75,7 +75,7 @@ test('a client shares with staff, staff share back to the client account, and ea
   await client.refresh();
   assert.equal(client.find(internal.id), null);
   await staff.refresh();
-  assert.deepEqual(staff.state.audiences.map(row => row.account), ['model_association:account-a']);
+  assert.deepEqual(staff.state.audiences.map(row => row.account), ['direct_client_grant:grant-a']);
   const forClient = await staff.create(pin('For the client', { visibility: 'client', shareAccount: staff.state.audiences[0].account }));
   await client.refresh();
   assert.equal(client.find(forClient.id).editable, false);
@@ -108,7 +108,7 @@ test('categories and GeoJSON import go through the API; company logins only read
   await client.create(pin('Only for staff'));
   const staff = createMarksStore({ request });
   await staff.setScope(scope('ops', 'staff-person'));
-  await staff.create(pin('Visible', { visibility: 'client', shareAccount: 'model_association:account-a' }));
+  await staff.create(pin('Visible', { visibility: 'client', shareAccount: 'direct_client_grant:grant-a' }));
   const company = createMarksStore({ request });
   await company.setScope(scope('client', 'company-login', { view: true, measure: true }));
   assert.equal(company.canWrite(), false);

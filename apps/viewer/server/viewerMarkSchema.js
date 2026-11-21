@@ -9,9 +9,11 @@
 //   staff    - a client's mark shared with project staff (never other clients)
 //   internal - a staff mark for staff only
 //   client   - a staff mark shared with one named client account (share_account)
-// A client account is the portal authorization a client session was issued
-// under ("model_association:<id>" or "direct_client_grant:<id>"). Clients never
-// read another client's marks or categories.
+// A share recipient is a direct client grant ("direct_client_grant:<id>"),
+// which Ops issues to one client workspace. Model-association sessions have no
+// recipient key (one association serves every account on a model), so they
+// read only their own marks. Clients never read another client's marks or
+// categories.
 const VIEWER_MARKS_SQL = `
   CREATE TABLE viewer_marks (
     id TEXT NOT NULL,
