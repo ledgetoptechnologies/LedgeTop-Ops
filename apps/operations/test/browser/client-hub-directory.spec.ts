@@ -346,6 +346,96 @@ test("typing searches after a debounce without flooding history and popstate res
   await expect(page.getByRole("link", { name: "Open Immediate customer client workspace" })).toBeVisible();
 });
 
+const echoDirectory = (extra: Record<string, unknown> = {}): DirectoryHandler => (route, url) => {
+  const q = url.searchParams.get("q") || "Initial";
+  return route.fulfill({ json: { clients: [client(q, `${q} customer`)], nextCursor: null, capabilities, ...extra } });
+};
+
+test("IME composition searches only composed text, once, on Enter or after the pause", async ({ page }) => {
+  const requested = await mock(page, echoDirectory());
+  const searched = () => requested.filter(url => url.pathname === "/api/client-hub" && url.searchParams.has("q")).map(url => url.searchParams.get("q"));
+  await page.goto("/clients");
+  await expect(page.getByRole("link", { name: "Open Initial customer client workspace" })).toBeVisible();
+  const box = page.getByRole("searchbox", { name: "Search clients" });
+
+  await box.dispatchEvent("compositionstart");
+  await box.fill("kyo");
+  await box.press("Enter");
+  await page.waitForTimeout(600);
+  expect(searched()).toEqual([]);
+  await expect(box).toHaveValue("kyo");
+  await box.fill("Kyoto");
+  await box.dispatchEvent("compositionend");
+  await box.press("Enter");
+  await expect(page.getByRole("link", { name: "Open Kyoto customer client workspace" })).toBeVisible();
+  await page.waitForTimeout(600);
+  expect(searched()).toEqual(["Kyoto"]);
+
+  await box.dispatchEvent("compositionstart");
+  await box.fill("osa");
+  await page.waitForTimeout(600);
+  expect(searched()).toEqual(["Kyoto"]);
+  await box.fill("Osaka");
+  await box.dispatchEvent("compositionend");
+  await expect(page.getByRole("link", { name: "Open Osaka customer client workspace" })).toBeVisible();
+  await page.waitForTimeout(600);
+  expect(searched()).toEqual(["Kyoto", "Osaka"]);
+});
+
+test("changing type, sort or source right after typing keeps the typed search", async ({ page }) => {
+  const requested = await mock(page, echoDirectory({ sources: availableSources }));
+  await page.goto("/clients");
+  await expect(page.getByRole("link", { name: "Open Initial customer client workspace" })).toBeVisible();
+  // Hold the clock so every change lands inside the 250 ms search pause.
+  await page.clock.install({ time: new Date("2034-01-01T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2034-01-01T00:00:01Z"));
+  const box = page.getByRole("searchbox", { name: "Search clients" });
+
+  await box.fill("Pending");
+  await page.getByRole("button", { name: "Organizations", exact: true }).click();
+  await expect(page).toHaveURL(/\/clients\?q=Pending&kind=organization$/);
+  await expect(box).toHaveValue("Pending");
+
+  await box.fill("Pending two");
+  await page.getByRole("combobox", { name: "Sort clients" }).selectOption("name");
+  await expect(page).toHaveURL(/\/clients\?q=Pending\+two&kind=organization&sort=name$/);
+  await expect(box).toHaveValue("Pending two");
+
+  await box.fill("Third");
+  await page.getByRole("combobox", { name: "Client source" }).selectOption("project-alpha:secondary");
+  await expect(page).toHaveURL(/\/clients\?q=Third&kind=organization&source=project-alpha%3Asecondary&sort=name$/);
+  await expect(box).toHaveValue("Third");
+  await page.clock.resume();
+  await expect(page.getByRole("link", { name: "Open Third customer client workspace" })).toBeVisible();
+  const directoryCalls = requested.filter(url => url.pathname === "/api/client-hub");
+  expect(directoryCalls.at(-1)!.searchParams.get("q")).toBe("Third");
+  expect(directoryCalls.filter(url => url.searchParams.get("kind") === "organization" && !url.searchParams.has("q"))).toHaveLength(0);
+});
+
+test("phone width: search works and the compact toolbar keeps visible cues without overflowing", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 780 });
+  const longSources = [{ source_id: "project-alpha:primary", display_name: "A very long business source name that would not fit on a phone screen" },
+    ...availableSources.slice(1)];
+  await mock(page, echoDirectory({ sources: longSources }));
+  await page.goto("/clients");
+  await expect(page.getByRole("link", { name: "Open Initial customer client workspace" })).toBeVisible();
+  const toolbar = page.locator(".client-directory-toolbar");
+  for (const cue of ["Search", "Source", "Sort"]) await expect(toolbar.locator(".client-directory-cue", { hasText: cue })).toBeVisible();
+  await page.getByRole("combobox", { name: "Client source" }).selectOption("project-alpha:primary");
+  await expect(page).toHaveURL(/source=project-alpha%3Aprimary/);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const toolbarBox = (await toolbar.boundingBox())!;
+  for (const control of await toolbar.locator("input, select, button").all()) {
+    const box = (await control.boundingBox())!;
+    expect(box.x + box.width).toBeLessThanOrEqual(toolbarBox.x + toolbarBox.width + 1);
+    expect(box.height).toBeGreaterThanOrEqual(44);
+  }
+  const search = page.getByRole("searchbox", { name: "Search clients" });
+  await search.fill("Mobile");
+  await search.press("Enter");
+  await expect(page.getByRole("link", { name: "Open Mobile customer client workspace" })).toBeVisible();
+});
+
 test("namespace routes stay explicit and older detail links remain refresh-safe", async ({ page }) => {
   const requested = await mock(page, route => route.fulfill({ json: { clients: [], capabilities } }));
   for (const path of [

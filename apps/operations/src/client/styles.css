@@ -1741,12 +1741,14 @@ tbody tr:last-child td { border: 0; }
 /* One compact toolbar row: search, source, sort, type tabs, then Add client profile on the right. */
 .client-directory-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; }
 .client-directory-toolbar :is(input, select) { min-height: 2.25rem; border: 1px solid var(--control-border); border-radius: var(--radius-sm); padding: .35rem .6rem; font: inherit; font-size: .9rem; font-weight: 450; background: #fff; color: var(--ink); }
-.client-directory-source, .client-directory-sort { display: block; min-width: 0; max-width: 14rem; }
-.client-directory-toolbar select { width: 100%; min-width: 0; }
+.client-directory-source, .client-directory-sort { display: flex; align-items: center; gap: .35rem; min-width: 0; max-width: 17rem; }
+/* Short always-visible cues; the full accessible names stay on the controls. */
+.client-directory-cue { flex: none; color: var(--muted); font-size: .8rem; font-weight: 700; }
+.client-directory-toolbar select { flex: 1 1 auto; width: 100%; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .client-directory-update { display: grid; gap: .1rem; margin: 0; font-size: .75rem; }
 .client-directory-update dt { color: var(--muted); }
 .client-directory-update dd { margin: 0; font-weight: 600; }
-.client-directory-search { display: flex; gap: .4rem; flex: 1 1 16rem; min-width: 0; max-width: 26rem; }
+.client-directory-search { display: flex; align-items: center; gap: .4rem; flex: 1 1 16rem; min-width: 0; max-width: 28rem; }
 .client-directory-search input { flex: 1 1 auto; width: 100%; min-width: 0; }
 .client-directory-status { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .client-directory-workspace button { min-height: 44px; }
@@ -1832,7 +1834,8 @@ tbody tr:last-child td { border: 0; }
 }
 @media (max-width: 540px) {
   .client-directory-search { flex-basis: 100%; max-width: none; }
-  .client-directory-source, .client-directory-sort { flex: 1 1 0; max-width: none; }
+  /* Each select gets its own full-width row so long source names truncate inside the control, never past the page. */
+  .client-directory-source, .client-directory-sort { flex: 1 1 100%; max-width: 100%; }
   .client-directory-filters { width: 100%; }
   .client-directory-filters > button { flex: 1 1 0; }
   .client-directory-toolbar > .client-directory-create { margin-left: 0; }

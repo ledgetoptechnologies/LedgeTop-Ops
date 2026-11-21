@@ -196,6 +196,8 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
   const controller = useRef<AbortController | null>(null);
   const requestNumber = useRef(0);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [composing, setComposing] = useState(false);
+  const composingRef = useRef(false);
 
   const load = useCallback(async (selection: DirectoryQuery, cursor: string | null) => {
     controller.current?.abort();
@@ -267,11 +269,12 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
     const href = `/clients${queryString(normalized)}`;
     if (`${location.pathname}${location.search}` !== href)
       history[historyMode === "replace" ? "replaceState" : "pushState"](history.state, "", href);
-    setDraft(normalized.q);
+    // Mid-composition (IME) text is not a search yet: keep the field as typed.
+    if (!composingRef.current) setDraft(normalized.q);
     setQuery(normalized);
   }, []);
   useEffect(() => {
-    if (draft.trim() === query.q) return;
+    if (composing || draft.trim() === query.q) return;
     searchTimer.current = setTimeout(() => {
       searchTimer.current = null;
       changeQuery({ ...query, q: draft }, "replace");
@@ -280,21 +283,28 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
       if (searchTimer.current) clearTimeout(searchTimer.current);
       searchTimer.current = null;
     };
-  }, [draft, query, changeQuery]);
+  }, [draft, query, changeQuery, composing]);
   const search = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    changeQuery({ ...query, q: draft });
+    if (!composingRef.current) changeQuery({ ...query, q: draft });
   };
+  /** Source, sort and type changes carry the typed search along instead of dropping a pending draft. */
+  const changeFilters = (change: Partial<Omit<DirectoryQuery, "q">>) =>
+    changeQuery({ ...query, q: composingRef.current ? query.q : draft, ...change });
+  const setComposition = (value: boolean) => { composingRef.current = value; setComposing(value); };
 
   return <section className="client-directory-workspace" aria-label="Client directory">
     {/* One compact row: search (Enter or a pause searches), source, sort, type tabs, then Add client profile. */}
     <div className="client-directory-toolbar">
       <form className="client-directory-search" role="search" onSubmit={search}>
-        <label className="visually-hidden" htmlFor="client-directory-query">Search clients</label>
+        <label className="client-directory-cue" htmlFor="client-directory-query"><span aria-hidden="true">Search</span><span className="visually-hidden">Search clients</span></label>
         <input id="client-directory-query" type="search" value={draft} maxLength={200} enterKeyHint="search"
-          placeholder={searchCapabilities.businessContacts ? "Search client, contact or project" : "Search client or project"}
+          placeholder={searchCapabilities.businessContacts ? "Client, contact or project" : "Client or project"}
           aria-describedby="client-directory-search-help" autoComplete="off"
-          onChange={event => setDraft(event.target.value)} />
+          onChange={event => setDraft(event.target.value)}
+          onCompositionStart={() => setComposition(true)}
+          onCompositionEnd={event => { setComposition(false); setDraft(event.currentTarget.value); }}
+          onKeyDown={event => { if (event.key === "Enter" && (event.nativeEvent.isComposing || composingRef.current)) event.preventDefault(); }} />
         {(draft || query.q) && <button type="button" className="button-ghost"
           onClick={() => changeQuery({ ...query, q: "" })}>Clear search</button>}
         <small id="client-directory-search-help" className="visually-hidden">
@@ -304,23 +314,24 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
         </small>
       </form>
       {(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
-        <span className="visually-hidden">Client source</span>
+        <span className="client-directory-cue" aria-hidden="true">Source</span><span className="visually-hidden">Client source</span>
         <select id="client-directory-source" value={query.source}
-          onChange={event => changeQuery({ ...query, source: event.target.value })}>
+          onChange={event => changeFilters({ source: event.target.value })}>
           <option value="">All available sources</option>
           {query.source && !sources.some(source => source.source_id === query.source) && <option value={query.source} disabled>Unavailable source</option>}
           {sources.map(source => <option key={source.source_id} value={source.source_id}>{sourceDisplayName(source.display_name, source.source_id)}</option>)}
         </select>
       </label>}
-      <label className="client-directory-sort" htmlFor="client-directory-sort"><span className="visually-hidden">Sort clients</span>
-        <select id="client-directory-sort" value={query.sort} onChange={event => changeQuery({ ...query, sort: event.target.value === "name" ? "name" : "recent" })}>
+      <label className="client-directory-sort" htmlFor="client-directory-sort">
+        <span className="client-directory-cue" aria-hidden="true">Sort</span><span className="visually-hidden">Sort clients</span>
+        <select id="client-directory-sort" value={query.sort} onChange={event => changeFilters({ sort: event.target.value === "name" ? "name" : "recent" })}>
           <option value="recent">Recent business updates</option><option value="name">Name (A–Z)</option>
         </select>
       </label>
       <div className="client-directory-filters ltds-segmented" role="group" aria-label="Client type">
         {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"
           aria-pressed={query.kind === filter.kind}
-          onClick={() => changeQuery({ ...query, kind: filter.kind })}>{filter.label}</button>)}
+          onClick={() => changeFilters({ kind: filter.kind })}>{filter.label}</button>)}
       </div>
       {nativeDirectoryProfileWrites && <NativeDirectoryProfileCreate />}
     </div>

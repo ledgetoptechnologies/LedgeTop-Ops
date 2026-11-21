@@ -30,13 +30,23 @@ describe("Client Hub compact directory toolbar", () => {
     expect(form).not.toMatch(/>Search<\/button>/);
     expect(form).toContain(">Clear search</button>");
     expect(directorySource).toContain("onSubmit={search}");
-    expect(directorySource).toMatch(/const search = \(event: FormEvent<HTMLFormElement>\) => \{\s*event\.preventDefault\(\);\s*changeQuery\(\{ \.\.\.query, q: draft \}\);/);
+    expect(directorySource).toMatch(/const search = \(event: FormEvent<HTMLFormElement>\) => \{\s*event\.preventDefault\(\);\s*if \(!composingRef\.current\) changeQuery\(\{ \.\.\.query, q: draft \}\);/);
   });
 
-  it("keeps accessible names and the search help for screen readers while hiding them visually", async () => {
+  it("commits only composed IME text and carries a pending draft into filter changes", () => {
+    expect(directorySource).toContain("if (composing || draft.trim() === query.q) return;");
+    expect(directorySource).toContain("event.nativeEvent.isComposing || composingRef.current");
+    expect(directorySource).toContain("onCompositionEnd={event => { setComposition(false); setDraft(event.currentTarget.value); }}");
+    expect(directorySource).toContain("changeQuery({ ...query, q: composingRef.current ? query.q : draft, ...change })");
+    for (const call of ["changeFilters({ source: event.target.value })", "changeFilters({ kind: filter.kind })", 'changeFilters({ sort: event.target.value === "name" ? "name" : "recent" })'])
+      expect(directorySource).toContain(call);
+    expect(directorySource).not.toMatch(/changeQuery\(\{ \.\.\.query, (source|sort|kind):/);
+  });
+
+  it("shows short visible cues and keeps full accessible names and search help", async () => {
     const html = await render();
-    expect(html).toContain('<label class="visually-hidden" for="client-directory-query">Search clients</label>');
-    expect(html).toContain('<span class="visually-hidden">Sort clients</span>');
+    expect(html).toContain('<label class="client-directory-cue" for="client-directory-query"><span aria-hidden="true">Search</span><span class="visually-hidden">Search clients</span></label>');
+    expect(html).toContain('<span class="client-directory-cue" aria-hidden="true">Sort</span><span class="visually-hidden">Sort clients</span>');
     expect(html).toContain('aria-describedby="client-directory-search-help"');
     expect(html).toMatch(/<small id="client-directory-search-help" class="visually-hidden">Search by client name/);
     expect(html).toContain('role="group" aria-label="Client type"');
