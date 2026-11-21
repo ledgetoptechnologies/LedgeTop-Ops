@@ -11,6 +11,11 @@ const collaboratorTerms = {kind: "collaborator", mode: "project_end", expiresAt:
 function primaryGrant(overrides: Record<string, unknown> = {}) {return {id: "grant-v1", grantId: "grant-logical", version: 1, folderBindingId: "binding-acme", workspaceId: "workspace-acme", audience: {type: "organization", publicId: "org-acme"}, audienceLabel: "Acme Organization", workspaceLabel: "Acme Workspace", status: "active", expiresAt: null, accessTerms: collaboratorTerms, effectiveAccessExpiresAt: null, recipientCount: 0, dynamicAudience: true, updatedAt: "2026-08-26T12:00:00Z", ...overrides};}
 function primaryPreview(input: Record<string, any>, context = primaryContext) {const exact=input.audienceType==="principal";return {...context, operation: {...input, accessTerms: input.accessTerms ?? null}, contextVersion: "a".repeat(64), workspaceId: "workspace-acme", workspaceLabel: "Acme Workspace", audienceLabel: exact?"Exact Client":"Acme Organization", recipientCount: exact?1:0, dynamicAudience:!exact, recipientPreview:{mode:exact?"exact":"dynamic",currentAuthorizedCount:exact?1:null,truncated:false}, accessTerms: input.accessTerms ?? null, effectiveAccessExpiresAt: input.expiresAt};}
 type GrantCall = {path: string; method: string; body: any; key?: string};
+type Audience = {type: string; publicId: string; displayName: string; email?: string | null};
+/** A Drone Services audience as the combined client search returns it. */
+function primaryRow(audience: Audience, folderBindingId = "binding-acme") {return {key: JSON.stringify(["primary", "project-alpha:primary", "workspace-acme", audience.type, audience.publicId]), backend: "primary", sourceId: "project-alpha:primary", divisionLabel: "Ledge Top Drone Services", workspaceId: "workspace-acme", workspaceName: "Acme Workspace", audienceType: audience.type, publicId: audience.publicId, displayName: audience.displayName, email: audience.type === "principal" ? audience.email ?? null : null, folderBindingId};}
+function recipients(audiences: Audience[], query = "", folderBindingId?: string) {return {recipients: audiences.filter(item => item.displayName.toLowerCase().includes(query.toLowerCase())).map(item => primaryRow(item, folderBindingId)), primary: "ready", native: "unavailable", truncated: {principal: false, organization: false, department: false, client: false, connected: false}};}
+const searchQuery = (route: Route) => new URL(route.request().url()).searchParams.get("q") || "";
 async function mockPrimary(page: Page, override?: (route: Route, call: GrantCall) => Promise<unknown> | undefined) {
   const calls: GrantCall[] = []; let grants: ReturnType<typeof primaryGrant>[] = [];
   await page.route("**/api/**", async route => {
@@ -20,7 +25,7 @@ async function mockPrimary(page: Page, override?: (route: Route, call: GrantCall
     if (call.path === "/api/delivery/folders/locations") return route.fulfill({json: {points: [], imageCount: 0, truncated: false}});
     if (call.path === "/api/delivery/shares/active") return route.fulfill({json: {share: null}});
     if (call.path === "/api/delivery/shares") return route.fulfill({json: {shares: []}});
-    if (call.path.endsWith("/authenticated-grants/audiences")) return route.fulfill({json: {folderBindingId:"binding-acme",workspaceId:"workspace-acme",workspaceLabel:"Acme Workspace",scopeTypeFilter:"organization",audiences: [{type: "organization", publicId: "org-acme", displayName: "Acme Organization"}]}});
+    if (call.path === "/api/delivery/client-share-recipients") return route.fulfill({json: recipients([{type: "organization", publicId: "org-acme", displayName: "Acme Organization"}], searchQuery(route))});
     if (call.path.endsWith("/authenticated-grants/preview")) return route.fulfill({json: primaryPreview(call.body)});
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "POST") {const grant = primaryGrant({accessTerms: call.body.accessTerms ?? null, expiresAt: call.body.expiresAt, effectiveAccessExpiresAt: call.body.accessTerms?.expiresAt ?? call.body.expiresAt}); grants = [grant]; return route.fulfill({status: 201, json: {grant, replayed: false}});}
     if (call.path.endsWith("/grant-logical/revoke")) {const grant = primaryGrant({...grants[0], status: "revoked"}); grants = [grant]; return route.fulfill({json: {grant, replayed: false}});}
@@ -30,8 +35,10 @@ async function mockPrimary(page: Page, override?: (route: Route, call: GrantCall
   });
   return calls;
 }
-async function openPrimary(page: Page) {await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click(); await page.getByRole("tab", {name: "Client Workspace"}).click(); await expect(page.getByRole("button", {name: "Refresh authenticated access"})).toBeEnabled();}
-async function selectPrimary(page: Page) {await page.getByRole("button", {name: "Organization", exact: true}).click(); const input = page.getByRole("combobox", {name: "Search organizations"}); await input.fill("Acme"); await expect(page.getByRole("option", {name: /Acme Organization/})).toBeVisible(); await input.press("ArrowDown"); await page.keyboard.press("Enter");}
+const client = (page: Page) => page.getByRole("combobox", {name: "Client", exact: true});
+const accessList = (page: Page) => page.getByLabel("Client access for this folder");
+async function openPrimary(page: Page) {await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click(); await page.getByRole("tab", {name: "Client Workspace"}).click(); await expect(page.getByRole("button", {name: "Refresh access"})).toBeEnabled(); await expect(page.getByRole("combobox", {name: "Portal connection"})).toHaveCount(0);}
+async function selectPrimary(page: Page, query = "Acme", name: RegExp = /Acme Organization/) {const input = client(page); await input.fill(query); await expect(page.getByRole("option", {name})).toBeVisible(); await input.press("ArrowDown"); await expect(page.getByRole("option").first()).toBeFocused(); await page.getByRole("option", {name}).press("Enter");}
 async function reviewPrimary(page: Page, kind = "collaborator") {await selectPrimary(page); await page.getByRole("combobox", {name: "Recipient role"}).selectOption(kind); await page.getByRole("button", {name: "Review authenticated access"}).click(); await expect(page.getByRole("region", {name: "Review authenticated portal access"})).toBeVisible();}
 async function latePrimary(route: Route, json: unknown) {try {await route.fulfill({json});} catch {/* Aborted after context changed. */}}
 
@@ -50,7 +57,7 @@ test("nonadministrators retain ordinary sharing without probing authenticated gr
   await expect(page.getByRole("button", {name: "Create link", exact: true})).toBeEnabled();
   await page.getByRole("button", {name: "Create link", exact: true}).click(); await expect(page.getByText("Link created", {exact: true})).toBeVisible();
   expect(calls.filter(call => call.path === "/api/delivery/shares" && call.method === "POST")).toHaveLength(1);
-  expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") || call.path.startsWith("/api/delivery/native-grants") || call.path.startsWith("/api/client-portal/folder-grant-targets") || /\/accounts\/[^/]+\/folder-grants/.test(call.path))).toBe(false);
+  expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") || call.path.startsWith("/api/delivery/native-grants") || call.path.startsWith("/api/delivery/client-share-recipients") || call.path.startsWith("/api/client-portal/folder-grant-targets") || /\/accounts\/[^/]+\/folder-grants/.test(call.path))).toBe(false);
 });
 
 test("an unavailable workspace rollout points administrators to safe Client Hub setup without probing grants", async ({page}) => {
@@ -66,7 +73,7 @@ test("an unavailable workspace rollout points administrators to safe Client Hub 
   const status = page.getByRole("status").filter({hasText: "2 existing folder links require migration review"});
   await expect(status).toBeVisible();
   await expect(status.getByRole("link", {name: "Open Client Hub portal setup"})).toHaveAttribute("href", "/clients#client-portal-setup");
-  expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") || call.path.startsWith("/api/delivery/native-grants"))).toBe(false);
+  expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") || call.path.startsWith("/api/delivery/native-grants") || call.path.startsWith("/api/delivery/client-share-recipients"))).toBe(false);
 });
 
 test("a creation pause preserves grant history and revoke while disabling new access and restore", async ({page}) => {
@@ -78,8 +85,8 @@ test("a creation pause preserves grant history and revoke while disabling new ac
     return undefined;
   });
   await openPrimary(page);
-  await expect(page.getByRole("status").filter({hasText: "New Client Workspace access and restores are paused"})).toBeVisible();
-  await expect(page.getByRole("button", {name: "Organization", exact: true})).toBeDisabled();
+  await expect(page.getByRole("status").filter({hasText: "New client access is paused"})).toBeVisible();
+  await expect(client(page)).toBeDisabled();
   await expect(page.getByRole("button", {name: "Restore as new version"})).toBeDisabled();
   await expect(page.getByRole("button", {name: "Revoke", exact: true})).toBeEnabled();
   await page.getByRole("button", {name: "Revoke", exact: true}).click();
@@ -121,6 +128,9 @@ test("an unbound folder can be linked only to its exact signed primary workspace
   expect(calls.some(call => call.path.includes("authenticated-grants/binding"))).toBe(false);
 
   await page.getByRole("tab", {name: "Client Workspace"}).click();
+  // Linking is offered as its own step; it is not shown until asked for.
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toHaveCount(0);
+  await page.getByRole("button", {name: "Link folder to a Ledge Top Drone Services client workspace"}).click();
   await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toBeVisible();
   await expect(page.getByText("Linking grants no access", {exact: false})).toBeVisible();
   const workspaceSearch = page.getByRole("combobox", {name: "Projected workspace or project"});
@@ -134,7 +144,8 @@ test("an unbound folder can be linked only to its exact signed primary workspace
   await expect(review).toContainText("Access created");
   await expect(review).toContainText("None");
   await page.getByRole("button", {name: "Link folder to workspace"}).click();
-  await expect(page.getByRole("button", {name: "Refresh authenticated access"})).toBeEnabled();
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Refresh access"})).toBeEnabled();
 
   const bind = calls.find(call => call.path === "/api/delivery/authenticated-grants/bindings" && call.method === "POST");
   expect(bind?.body).toEqual({folderRef: "folder-acme", workspaceId: "workspace-acme", reasonCode: "client_workspace_link", expectedContextVersion: "b".repeat(64)});
@@ -185,6 +196,7 @@ async function openClientWorkspaceTab(page: Page) {
   await page.getByRole("button", {name: "Actions for Acme"}).click();
   await page.getByRole("menuitem", {name: "Share", exact: true}).click();
   await page.getByRole("tab", {name: "Client Workspace"}).click();
+  await page.getByRole("button", {name: "Link folder to a Ledge Top Drone Services client workspace"}).click();
   await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toBeVisible();
 }
 
@@ -217,7 +229,8 @@ test("an unmapped folder links to an exact client in an authorized division with
   await expect(review).toContainText("Lori Koschnick");
   await expect(review).toContainText("None");
   await page.getByRole("button", {name: "Link folder to workspace"}).click();
-  await expect(page.getByRole("button", {name: "Refresh authenticated access"})).toBeEnabled();
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Refresh access"})).toBeEnabled();
 
   const bind = calls.find(call => call.path === "/api/delivery/authenticated-grants/bindings" && call.method === "POST");
   expect(bind?.body).toEqual({folderRef: "folder-acme", workspaceId: "workspace-coldwell", reasonCode: "client_workspace_link",
@@ -284,7 +297,7 @@ for (const [label, binding] of [
   // The server answered 2xx, so the link may exist: selection and containers stay locked.
   await expect(page.getByRole("combobox", {name: "Business division"})).toBeDisabled();
   await expect(page.getByRole("button", {name: "Link folder to workspace"})).toBeDisabled();
-  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled();
+  await expect(client(page)).toBeDisabled();
   await expect(page.getByRole("button", {name: "Close", exact: true})).toBeDisabled();
   await page.getByRole("button", {name: "Retry same folder link"}).click();
   await expect.poll(() => calls.filter(call => call.path === "/api/delivery/authenticated-grants/bindings").length).toBe(2);
@@ -309,26 +322,26 @@ test("an in-flight or failed link keeps the Share dialog and connection locked u
   // In flight: neither containing surface can unmount the pending operation.
   await expect(page.getByRole("button", {name: "Close", exact: true})).toBeDisabled();
   await expect(page.getByRole("tab", {name: "Public link"})).toBeDisabled();
-  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled();
+  await expect(client(page)).toBeDisabled();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", {name: "Share folder"})).toBeVisible();
 
   releaseFirst!();
   await expect(page.getByRole("alert").filter({hasText: "The workspace link outcome is not confirmed."})).toBeVisible();
   await expect(page.getByRole("button", {name: "Close", exact: true})).toBeDisabled();
-  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled();
+  await expect(client(page)).toBeDisabled();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", {name: "Share folder"})).toBeVisible();
 
   await page.getByRole("button", {name: "Retry same folder link"}).click();
-  await expect(page.getByRole("button", {name: "Refresh authenticated access"})).toBeEnabled();
+  await expect(page.getByRole("button", {name: "Refresh access"})).toBeEnabled();
   await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toHaveCount(0);
   const posts = calls.filter(call => call.path === "/api/delivery/authenticated-grants/bindings");
   expect(posts).toHaveLength(2);
   expect(posts[1]!.body).toEqual(posts[0]!.body);
   expect(posts[1]!.key).toBe(posts[0]!.key);
   await expect(page.getByRole("button", {name: "Close", exact: true})).toBeEnabled();
-  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeEnabled();
+  await expect(client(page)).toBeEnabled();
 });
 
 test("an administrator without revoke permission can review primary grants but has no forbidden revoke action", async ({page}) => {
@@ -338,7 +351,7 @@ test("an administrator without revoke permission can review primary grants but h
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return route.fulfill({json: {...primaryContext, grants: [primaryGrant()]}});
     return undefined;
   });
-  await openPrimary(page); const history = page.getByLabel("Authenticated portal grant history"); await expect(history).toContainText("Acme Organization");
+  await openPrimary(page); const history = accessList(page); await expect(history).toContainText("Acme Organization");
   await expect(history.getByRole("button", {name: "Revoke", exact: true})).toHaveCount(0);
   await reviewPrimary(page); await expect(page.getByRole("button", {name: "Grant authenticated access", exact: true})).toBeEnabled();
   expect(calls.some(call => call.path.endsWith("/revoke"))).toBe(false);
@@ -400,11 +413,11 @@ test("primary unsupported completion requires an explicit choice and nonproject 
     return undefined;
   });
   await openPrimary(page); await selectPrimary(page); await page.getByRole("combobox", {name: "Recipient role"}).selectOption("collaborator"); const duration = page.getByRole("combobox", {name: "Collaborator access duration"}); await expect(duration).toHaveValue(""); await expect(duration.getByRole("option", {name: "Project completion + 7 days"})).toHaveJSProperty("disabled", true); await expect(page.getByRole("button", {name: "Review authenticated access"})).toBeDisabled(); await duration.selectOption("until_revoked"); await page.getByRole("button", {name: "Review authenticated access"}).click(); await expect(page.getByRole("region", {name: "Review authenticated portal access"})).toContainText("Collaborator — until revoked");
-  nonproject = true; await page.getByRole("button", {name: "Refresh authenticated access"}).click(); await expect(page.getByText(/Project-specific access terms require a folder linked to one project/)).toBeVisible(); await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveCount(0); await selectPrimary(page); await page.getByRole("button", {name: "Review authenticated access"}).click(); await expect(page.getByRole("region", {name: "Review authenticated portal access"})).toContainText("Existing access rules — unclassified"); await page.getByRole("button", {name: "Grant authenticated access", exact: true}).click(); await expect(page.getByRole("status").filter({hasText: "Authenticated portal access granted"})).toBeVisible(); expect(calls.find(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")?.body).not.toHaveProperty("accessTerms");
+  nonproject = true; await page.getByRole("button", {name: "Cancel review"}).click(); await page.getByRole("button", {name: "Refresh access"}).click(); await selectPrimary(page); await expect(page.getByText(/Project-specific access terms require a folder linked to one project/)).toBeVisible(); await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveCount(0); await page.getByRole("button", {name: "Review authenticated access"}).click(); await expect(page.getByRole("region", {name: "Review authenticated portal access"})).toContainText("Existing access rules — unclassified"); await page.getByRole("button", {name: "Grant authenticated access", exact: true}).click(); await expect(page.getByRole("status").filter({hasText: "Authenticated portal access granted"})).toBeVisible(); expect(calls.find(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")?.body).not.toHaveProperty("accessTerms");
 });
 
 test("primary project-term upgrade unavailable does not silently issue an unclassified grant", async ({page}) => {
-  const calls = await mockPrimary(page, (route, call) => call.path === "/api/delivery/authenticated-grants" && call.method === "GET" ? route.fulfill({json: {...primaryContext, accessTermsSupported: false, projectEndSupported: false, grants: []}}) : undefined); await openPrimary(page); await expect(page.getByRole("status").filter({hasText: "database update"})).toBeVisible(); await selectPrimary(page); await expect(page.getByRole("combobox", {name: "Recipient role"})).toBeDisabled(); await expect(page.getByRole("button", {name: "Review authenticated access"})).toBeDisabled(); expect(calls.some(call => call.method === "POST")).toBe(false);
+  const calls = await mockPrimary(page, (route, call) => call.path === "/api/delivery/authenticated-grants" && call.method === "GET" ? route.fulfill({json: {...primaryContext, accessTermsSupported: false, projectEndSupported: false, grants: []}}) : undefined); await openPrimary(page); await selectPrimary(page); await expect(page.getByRole("status").filter({hasText: "database update"})).toBeVisible(); await expect(page.getByRole("combobox", {name: "Recipient role"})).toBeDisabled(); await expect(page.getByRole("button", {name: "Review authenticated access"})).toBeDisabled(); expect(calls.some(call => call.method === "POST")).toBe(false);
 });
 
 test("primary preview rejects a changed audience or access classification", async ({page}) => {
@@ -412,7 +425,7 @@ test("primary preview rejects a changed audience or access classification", asyn
 });
 
 test("uncertain primary creation retries the same reviewed terms and key while connection selection is locked", async ({page}) => {
-  let attempts = 0; const calls = await mockPrimary(page, (route, call) => call.path === "/api/delivery/authenticated-grants" && call.method === "POST" && ++attempts === 1 ? route.fulfill({status: 503, json: {error: "Unconfirmed save"}}) : undefined); await openPrimary(page); await reviewPrimary(page); await page.getByRole("button", {name: "Grant authenticated access", exact: true}).dblclick(); await expect(page.getByRole("alert")).toContainText("not confirmed"); await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled(); await expect(page.getByRole("combobox", {name: "Recipient role"})).toBeDisabled(); await page.getByRole("button", {name: "Retry same access operation"}).click(); await expect(page.getByRole("status").filter({hasText: "Authenticated portal access granted"})).toBeVisible(); const writes = calls.filter(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST"); expect(writes).toHaveLength(2); expect(writes[0]?.body).toEqual(writes[1]?.body); expect(writes[0]?.key).toBe(writes[1]?.key);
+  let attempts = 0; const calls = await mockPrimary(page, (route, call) => call.path === "/api/delivery/authenticated-grants" && call.method === "POST" && ++attempts === 1 ? route.fulfill({status: 503, json: {error: "Unconfirmed save"}}) : undefined); await openPrimary(page); await reviewPrimary(page); await page.getByRole("button", {name: "Grant authenticated access", exact: true}).dblclick(); await expect(page.getByRole("alert")).toContainText("not confirmed"); await expect(client(page)).toBeDisabled(); await expect(page.getByRole("combobox", {name: "Recipient role"})).toBeDisabled(); await page.getByRole("button", {name: "Retry same access operation"}).click(); await expect(page.getByRole("status").filter({hasText: "Authenticated portal access granted"})).toBeVisible(); const writes = calls.filter(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST"); expect(writes).toHaveLength(2); expect(writes[0]?.body).toEqual(writes[1]?.body); expect(writes[0]?.key).toBe(writes[1]?.key);
 });
 
 test("restoring a primary legacy grant requires a fresh classified review and preserves its logical version", async ({page}) => {
@@ -423,33 +436,24 @@ test("restoring a primary legacy grant requires a fresh classified review and pr
   }); await openPrimary(page); await expect(page.getByText("Existing access rules — unclassified", {exact: true})).toBeVisible(); await page.getByRole("button", {name: "Restore as new version"}).click(); await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveValue(""); expect(calls.some(call => call.path.endsWith("/restore"))).toBe(false); await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer"); await page.getByRole("button", {name: "Review authenticated access"}).click(); await page.getByRole("button", {name: "Restore authenticated access"}).click(); await expect(page.getByRole("status").filter({hasText: "restored as a new version"})).toBeVisible(); expect(calls.find(call => call.path.endsWith("/restore"))?.body).toMatchObject({expectedVersion: 1, expectedContextVersion: "a".repeat(64), accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null}});
 });
 
-test("editing a historical project restore returns to a visible creation audience mode", async ({page}) => {
+test("choosing a client after starting a historical project restore switches to a new reviewed grant", async ({page}) => {
   const project = primaryGrant({audience: {type: "project", publicId: "project-hilly"}, audienceLabel: "Hilly Haven", status: "revoked"});
   const calls = await mockPrimary(page, (route, call) => {
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return route.fulfill({json: {...primaryContext, grants: [project]}});
-    if (call.path.endsWith("/authenticated-grants/audiences")) {
-      const url = new URL(route.request().url());
-      expect(url.searchParams.get("audienceType")).toBe("principal");
-      return route.fulfill({json: {folderBindingId: "binding-acme", workspaceId: "workspace-acme", workspaceLabel: "Acme Workspace", scopeTypeFilter: "principal",
-        audiences: [{type: "principal", publicId: "principal-craig", displayName: "Craig Director", email: "craig@example.test"}]}});
-    }
+    if (call.path === "/api/delivery/client-share-recipients") return route.fulfill({json: recipients([{type: "principal", publicId: "principal-craig", displayName: "Craig Director", email: "craig@example.test"}], searchQuery(route))});
     return undefined;
   });
   await openPrimary(page);
-  await expect(page.getByLabel("Authenticated portal grant history")).toContainText("Acme Workspace · Project · revoked · version 1");
+  await expect(accessList(page)).toContainText("Acme Workspace · Project · revoked · version 1");
   await page.getByRole("button", {name: "Restore as new version"}).click();
-  const projectSearch = page.getByRole("combobox", {name: "Search projects"});
-  await expect(projectSearch).toHaveValue("Hilly Haven");
-  await projectSearch.fill("Craig");
-  await expect(page.getByRole("button", {name: "Individual", exact: true})).toHaveAttribute("aria-pressed", "true");
-  const individualSearch = page.getByRole("combobox", {name: "Search individuals"});
-  await expect(page.getByRole("option", {name: /Craig Director/})).toBeVisible();
-  await individualSearch.press("ArrowDown"); await page.keyboard.press("Enter");
+  await expect(page.getByRole("status").filter({hasText: "Reviewing a new version for Hilly Haven"})).toBeVisible();
+  await selectPrimary(page, "Craig", /Craig Director/);
+  await expect(page.getByRole("status").filter({hasText: "Reviewing a new version"})).toHaveCount(0);
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
   await page.getByRole("button", {name: "Review authenticated access"}).click();
   await expect(page.getByRole("button", {name: "Grant authenticated access", exact: true})).toBeVisible();
   await expect(page.getByRole("button", {name: "Restore authenticated access"})).toHaveCount(0);
-  expect(calls.filter(call => call.path.endsWith("/authenticated-grants/audiences"))).toHaveLength(1);
+  expect(calls.find(call => call.path.endsWith("/authenticated-grants/preview"))?.body).toMatchObject({audienceType: "principal", audiencePublicId: "principal-craig"});
 });
 
 for (const status of [403, 409]) test(`primary preview ${status} clears old grant context before refresh`, async ({page}) => {
@@ -457,23 +461,30 @@ for (const status of [403, 409]) test(`primary preview ${status} clears old gran
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return route.fulfill({json: {...primaryContext, grants: [primaryGrant()]}});
     if (call.path.endsWith("/preview")) return route.fulfill({status, json: {error: "Project access changed"}});
     return undefined;
-  }); await openPrimary(page); await selectPrimary(page); await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer"); await page.getByRole("button", {name: "Review authenticated access"}).click(); await expect(page.getByRole("alert")).toContainText("Project access changed"); await expect(page.getByLabel("Authenticated portal grant history")).toHaveCount(0); await expect(page.getByRole("button", {name: "Grant authenticated access", exact: true})).toHaveCount(0); await expect(page.getByRole("button", {name: "Refresh authenticated access"})).toBeEnabled();
+  }); await openPrimary(page); await selectPrimary(page); await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer"); await page.getByRole("button", {name: "Review authenticated access"}).click(); await expect(page.getByRole("alert")).toContainText("Project access changed"); await expect(accessList(page)).not.toContainText("Acme Organization"); await expect(page.getByRole("button", {name: "Grant authenticated access", exact: true})).toHaveCount(0); await expect(page.getByRole("button", {name: "Refresh access"})).toBeEnabled();
 });
 
-test("late primary history cannot populate the connected workspace panel", async ({page}) => {
+test("late primary history lands in the shared list labelled by division without disturbing a connected-workspace selection", async ({page}) => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
+  const connected = {key: JSON.stringify(["native", "project-alpha:secondary", "workspace-tech", "principal", "principal-tech"]), backend: "native", sourceId: "project-alpha:secondary", divisionLabel: "Ledge Top Technologies",
+    workspaceId: "workspace-tech", workspaceName: "Acme Technology", audienceType: "principal", publicId: "principal-tech", displayName: "Acme Network Lead", email: "lead@example.test",
+  };
   await mockPrimary(page, (route, call) => {
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return wait.then(() => latePrimary(route, {...primaryContext, grants: [primaryGrant()]}));
     if (call.path === "/api/delivery/native-grants") return route.fulfill({json: {grants: []}});
+    if (call.path === "/api/delivery/client-share-recipients") return route.fulfill({json: {recipients: [connected], primary: "not_permitted", native: "ready", truncated: {principal: false, organization: false, department: false, client: false, connected: false}}});
+    if (call.path === "/api/delivery/client-share-recipients/projects") return route.fulfill({json: {projects: [{projectId: "project-network", projectName: "Network survey", projectEndSupported: false}], bound: false, complete: true}});
     return undefined;
-  }); await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click(); await page.getByRole("tab", {name: "Client Workspace"}).click(); await page.getByRole("combobox", {name: "Portal connection"}).selectOption("native"); release(); await expect(page.getByRole("region", {name: "Connected workspace folder access"})).toBeVisible(); await expect(page.getByLabel("Authenticated portal grant history")).toHaveCount(0);
+  }); await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click(); await page.getByRole("tab", {name: "Client Workspace"}).click();
+  await selectPrimary(page, "Network", /Acme Network Lead/); await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeVisible();
+  release(); await expect(accessList(page)).toContainText("Ledge Top Drone Services · Acme Workspace · Organization");
+  await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeVisible(); await expect(page.getByRole("button", {name: "Review authenticated access"})).toHaveCount(0);
 });
 
 for (const width of [375, 1280]) test(`primary project access review stays readable at ${width}px`, async ({page}, info) => {
   await page.setViewportSize({width, height: 960}); await mockPrimary(page); await openPrimary(page);
-  await page.getByRole("button", {name: "Organization", exact: true}).click();
-  const audience = page.getByRole("combobox", {name: "Search organizations"});
-  for (const control of [page.getByRole("button", {name: "Refresh authenticated access"}), audience]) {
+  const audience = client(page);
+  for (const control of [page.getByRole("button", {name: "Refresh access"}), audience]) {
     await control.scrollIntoViewIfNeeded(); await expect(control).toBeInViewport(); const bounds = (await control.boundingBox())!;
     expect(bounds.height).toBeGreaterThanOrEqual(44); expect(bounds.x).toBeGreaterThanOrEqual(0); expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
   }
@@ -507,9 +518,7 @@ test("creates a distinct authenticated Client Portal grant with keyboard typeahe
     if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
     if (url.pathname === "/api/delivery/shares/active") return route.fulfill({ json: { share: null } });
     if (url.pathname === "/api/delivery/shares") return route.fulfill({ json: { shares: [] } });
-    if (url.pathname === "/api/delivery/authenticated-grants/audiences") return route.fulfill({ json: {folderBindingId:"binding-acme",workspaceId:"workspace-acme",workspaceLabel:"Acme Workspace",scopeTypeFilter:"organization", audiences: [
-      { type: "organization", publicId: "org-acme", displayName: "Acme Organization" },
-    ] } });
+    if (url.pathname === "/api/delivery/client-share-recipients") return route.fulfill({ json: recipients([{ type: "organization", publicId: "org-acme", displayName: "Acme Organization" }], url.searchParams.get("q") || "") });
     if (url.pathname === "/api/delivery/authenticated-grants/preview") {const input = route.request().postDataJSON(); return route.fulfill({json: {operation: input, contextVersion: "a".repeat(64), folderBindingId: "binding-acme", sourceId: "project-alpha:primary", workspaceId: "workspace-acme", workspaceLabel: "Acme Workspace", projectName: "Hilly Haven", accessTermsSupported: true, projectEndSupported: true, accessTerms: input.accessTerms, effectiveAccessExpiresAt: input.expiresAt, audienceLabel: "Acme Organization", recipientCount: 0,dynamicAudience:true,recipientPreview:{mode:"dynamic",currentAuthorizedCount:null,truncated:false}}});}
     if (url.pathname === "/api/delivery/authenticated-grants" && route.request().method() === "POST") {
       posted = route.request().postDataJSON(); created = true;
@@ -529,9 +538,8 @@ test("creates a distinct authenticated Client Portal grant with keyboard typeahe
   await page.getByRole("menuitem", { name: "Share" }).click();
   await expect(page.getByText("Authenticated Client Portal access")).toHaveCount(0);
   await page.getByRole("tab", { name: "Client Workspace" }).click();
-  await expect(page.getByText(/never creates a bearer link/i)).toBeVisible();
-  await page.getByRole("button", {name: "Organization", exact: true}).click();
-  const audience = page.getByRole("combobox", { name: "Search organizations" });
+  await expect(page.getByRole("combobox", { name: "Portal connection" })).toHaveCount(0);
+  const audience = client(page);
   await audience.fill("Acme");
   await expect(page.getByRole("option", { name: /Acme Organization/ })).toBeVisible();
   await audience.press("ArrowDown");
@@ -555,17 +563,8 @@ test("client audiences can be searched, reviewed, granted, revoked, and restored
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") {
       return route.fulfill({json: {...primaryContext, grants}});
     }
-    if (call.path.endsWith("/authenticated-grants/audiences")) {
-      const url = new URL(route.request().url());
-      expect(url.searchParams.get("audienceType")).toBe("client");
-      return route.fulfill({json: {
-        folderBindingId: "binding-acme", workspaceId: "workspace-acme", workspaceLabel: "Acme Workspace", scopeTypeFilter: "client",
-        audiences: [
-          {type: "organization", publicId: "org-acme", displayName: "Acme Organization"},
-          {...clientAudience, displayName: "Acme Client"},
-        ],
-      }});
-    }
+    if (call.path === "/api/delivery/client-share-recipients") return route.fulfill({json: recipients([
+      {type: "organization", publicId: "org-acme", displayName: "Acme Organization"}, {...clientAudience, displayName: "Acme Client"}], searchQuery(route))});
     if (call.path.endsWith("/authenticated-grants/preview")) {
       return route.fulfill({json: {...primaryPreview(call.body), audienceLabel: "Acme Client"}});
     }
@@ -588,15 +587,11 @@ test("client audiences can be searched, reviewed, granted, revoked, and restored
   });
 
   await openPrimary(page);
-  await expect(page.getByRole("button", {name: "Client", exact: true})).toBeVisible();
-  await expect(page.getByRole("button", {name: "Project", exact: true})).toHaveCount(0);
-  await page.getByRole("button", {name: "Client", exact: true}).click();
-  const search = page.getByRole("combobox", {name: "Search clients"});
-  await search.fill("Acme");
-  await expect(page.getByRole("option", {name: /Acme Client/})).toBeVisible();
-  await expect(page.getByRole("option", {name: /Acme Organization/})).toHaveCount(0);
-  await search.press("ArrowDown");
-  await page.keyboard.press("Enter");
+  await client(page).fill("Acme");
+  // Both kinds are offered together, each with its kind and division shown.
+  await expect(page.getByRole("option", {name: /Acme Organization/})).toContainText("organization · current members");
+  await expect(page.getByRole("option", {name: /Acme Client/})).toContainText("Ledge Top Drone Services · Acme Workspace · client · current members");
+  await page.getByRole("option", {name: /Acme Client/}).click();
   await expect(page.getByText(/All currently authorized members of this client/i)).toBeVisible();
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
   await page.getByRole("button", {name: "Review authenticated access"}).click();
@@ -605,7 +600,7 @@ test("client audiences can be searched, reviewed, granted, revoked, and restored
   await expect(review).toContainText("Acme Client");
   await page.getByRole("button", {name: "Grant authenticated access", exact: true}).click();
   await expect(page.getByRole("status").filter({hasText: "Authenticated portal access granted"})).toBeVisible();
-  await expect(page.getByLabel("Authenticated portal grant history")).toContainText("Acme Workspace · Client · active · version 1");
+  await expect(accessList(page)).toContainText("Acme Workspace · Client · active · version 1");
 
   const created = calls.find(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST");
   expect(created?.body).toMatchObject({audienceType: "client", audiencePublicId: "client-acme",
@@ -616,19 +611,18 @@ test("client audiences can be searched, reviewed, granted, revoked, and restored
   await expect(revokeDialog).toContainText("Revoke authenticated portal access for Acme Client?");
   await revokeDialog.getByRole("button", {name: "Revoke access", exact: true}).click();
   await expect(page.getByRole("status").filter({hasText: "Authenticated portal access revoked"})).toBeVisible();
-  await expect(page.getByLabel("Authenticated portal grant history")).toContainText("Acme Workspace · Client · revoked · version 1");
+  await expect(accessList(page)).toContainText("Acme Workspace · Client · revoked · version 1");
   expect(calls.find(call => call.path.endsWith("/grant-logical/revoke"))?.body).toEqual({expectedVersion: 1, reasonCode: "client_delivery_access"});
 
   await page.getByRole("button", {name: "Restore as new version"}).click();
-  await expect(page.getByRole("button", {name: "Client", exact: true})).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("combobox", {name: "Search clients"})).toHaveValue("Acme Client");
+  await expect(page.getByRole("status").filter({hasText: "Reviewing a new version for Acme Client"})).toBeVisible();
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
   await page.getByRole("button", {name: "Review authenticated access"}).click();
   review = page.getByRole("region", {name: "Review authenticated portal access"});
   await expect(review.locator("dt", {hasText: "Target type"}).locator("..").locator("dd")).toHaveText("Client");
   await page.getByRole("button", {name: "Restore authenticated access"}).click();
   await expect(page.getByRole("status").filter({hasText: "restored as a new version"})).toBeVisible();
-  await expect(page.getByLabel("Authenticated portal grant history")).toContainText("Acme Workspace · Client · active · version 2");
+  await expect(accessList(page)).toContainText("Acme Workspace · Client · active · version 2");
   expect(calls.find(call => call.path.endsWith("/grant-logical/restore"))?.body).toMatchObject({expectedVersion: 1,
     expectedContextVersion: "a".repeat(64), accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null}});
 });
@@ -640,14 +634,7 @@ test("department audiences require an explicit reviewed grant and reviewed resto
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") {
       return route.fulfill({json: {...primaryContext, grants}});
     }
-    if (call.path.endsWith("/authenticated-grants/audiences")) {
-      const url = new URL(route.request().url());
-      expect(url.searchParams.get("audienceType")).toBe("department");
-      return route.fulfill({json: {
-        folderBindingId: "binding-acme", workspaceId: "workspace-acme", workspaceLabel: "Acme Workspace", scopeTypeFilter: "department",
-        audiences: [{...departmentAudience, displayName: "Athletics"}],
-      }});
-    }
+    if (call.path === "/api/delivery/client-share-recipients") return route.fulfill({json: recipients([{...departmentAudience, displayName: "Athletics"}], searchQuery(route))});
     if (call.path.endsWith("/authenticated-grants/preview")) {
       return route.fulfill({json: {
         ...primaryPreview(call.body), audienceLabel: "Athletics", recipientCount: 0, dynamicAudience: true,
@@ -674,12 +661,7 @@ test("department audiences require an explicit reviewed grant and reviewed resto
   });
 
   await openPrimary(page);
-  await page.getByRole("button", {name: "Department", exact: true}).click();
-  const search = page.getByRole("combobox", {name: "Search departments"});
-  await search.fill("Athletics");
-  await expect(page.getByRole("option", {name: /Athletics/})).toBeVisible();
-  await search.press("ArrowDown");
-  await page.keyboard.press("Enter");
+  await selectPrimary(page, "Athletics", /Athletics/);
   await expect(page.getByText(/All currently authorized members of this department/i)).toBeVisible();
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
   await page.getByRole("button", {name: "Review authenticated access"}).click();
@@ -699,8 +681,7 @@ test("department audiences require an explicit reviewed grant and reviewed resto
   expect(calls.find(call => call.path.endsWith("/grant-logical/revoke"))?.body).toEqual({expectedVersion: 1, reasonCode: "client_delivery_access"});
 
   await page.getByRole("button", {name: "Restore as new version"}).click();
-  await expect(page.getByRole("button", {name: "Department", exact: true})).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("combobox", {name: "Search departments"})).toHaveValue("Athletics");
+  await expect(page.getByRole("status").filter({hasText: "Reviewing a new version for Athletics"})).toBeVisible();
   await expect(page.getByRole("button", {name: "Restore authenticated access"})).toHaveCount(0);
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
   await page.getByRole("button", {name: "Review authenticated access"}).click();
@@ -709,7 +690,7 @@ test("department audiences require an explicit reviewed grant and reviewed resto
   await expect(review).toContainText("Athletics");
   await page.getByRole("button", {name: "Restore authenticated access"}).click();
   await expect(page.getByRole("status").filter({hasText: "restored as a new version"})).toBeVisible();
-  const history = page.getByLabel("Authenticated portal grant history");
+  const history = accessList(page);
   await expect(history).toContainText("Acme Workspace · Department · active · version 2");
   await expect(history).toContainText("Acme Workspace · Department · revoked · version 1");
   expect(calls.find(call => call.path.endsWith("/grant-logical/restore"))?.body).toMatchObject({
@@ -720,15 +701,11 @@ test("department audiences require an explicit reviewed grant and reviewed resto
 
 test("workspace targeting keeps an individual exact and makes broader scopes an explicit choice", async ({page}) => {
   const calls = await mockPrimary(page, (route, call) => {
-    if (call.path.endsWith("/authenticated-grants/audiences")) {
-      const url = new URL(route.request().url());
-      expect(url.searchParams.get("audienceType")).toBe("principal");
-      return route.fulfill({json: {folderBindingId:"binding-acme",workspaceId:"workspace-acme",workspaceLabel:"Acme Workspace",scopeTypeFilter:"principal",audiences: [
-        {type: "organization", publicId: "org-red-town", displayName: "Red Town School District"},
-        {type: "department", publicId: "dept-athletics", displayName: "Athletics"},
-        {type: "principal", publicId: "principal-craig", displayName: "Craig Director", email: "craig@example.test"},
-      ]}});
-    }
+    if (call.path === "/api/delivery/client-share-recipients") return route.fulfill({json: recipients([
+      {type: "organization", publicId: "org-red-town", displayName: "Red Town School District"},
+      {type: "department", publicId: "dept-athletics", displayName: "Athletics"},
+      {type: "principal", publicId: "principal-craig", displayName: "Craig Director", email: "craig@example.test"},
+    ], searchQuery(route))});
     if (call.path.endsWith("/authenticated-grants/preview")) return route.fulfill({json: {
       ...primaryPreview(call.body), audienceLabel: "Craig Director", recipientCount: 1, dynamicAudience: false,
       recipientPreview: {mode: "exact", currentAuthorizedCount: 1, truncated: false},
@@ -736,17 +713,11 @@ test("workspace targeting keeps an individual exact and makes broader scopes an 
     return undefined;
   });
   await openPrimary(page);
-  await expect(page.getByRole("button", {name: "Individual", exact: true})).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("button", {name: "Department", exact: true})).toBeVisible();
-  await expect(page.getByRole("button", {name: "Organization", exact: true})).toBeVisible();
-  await expect(page.getByRole("button", {name: "Client", exact: true})).toBeVisible();
-  const input = page.getByRole("combobox", {name: "Search individuals"});
-  await input.fill("Craig");
-  await expect(page.getByRole("option", {name: /Craig Director/})).toBeVisible();
+  await client(page).fill("Craig");
+  await expect(page.getByRole("option", {name: /Craig Director/})).toContainText("craig@example.test");
   await expect(page.getByRole("option", {name: /Red Town School District/})).toHaveCount(0);
   await page.getByRole("option", {name: /Craig Director/}).click();
   await expect(page.getByText(/Exact verified person only/)).toBeVisible();
-  await expect(page.getByText(/covers this folder and everything underneath it/i)).toBeVisible();
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
   await page.getByRole("button", {name: "Review authenticated access"}).click();
   const review = page.getByRole("region", {name: "Review authenticated portal access"});
@@ -759,19 +730,16 @@ test("workspace targeting keeps an individual exact and makes broader scopes an 
   expect(calls.some(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")).toBe(false);
 });
 
-test("workspace autocomplete rejects a response for a different folder or audience scope", async ({page}) => {
+test("a client chosen for a different folder link cannot be reviewed on this folder", async ({page}) => {
   const calls = await mockPrimary(page, (route, call) => {
-    if (call.path.endsWith("/authenticated-grants/audiences")) return route.fulfill({json: {
-      folderBindingId: "binding-other", workspaceId: "workspace-acme", workspaceLabel: "Acme Workspace",
-      scopeTypeFilter: "organization", audiences: [{type: "organization", publicId: "org-acme", displayName: "Acme Organization"}],
-    }});
+    if (call.path === "/api/delivery/client-share-recipients") return route.fulfill({json: recipients([{type: "organization", publicId: "org-acme", displayName: "Acme Organization"}], searchQuery(route), "binding-other")});
     return undefined;
   });
   await openPrimary(page);
-  await page.getByRole("button", {name: "Organization", exact: true}).click();
-  await page.getByRole("combobox", {name: "Search organizations"}).fill("Acme");
-  await expect(page.getByRole("alert")).toContainText("could not be verified");
-  await expect(page.getByRole("option", {name: /Acme Organization/})).toHaveCount(0);
+  await selectPrimary(page);
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");
+  await page.getByRole("button", {name: "Review authenticated access"}).click();
+  await expect(page.getByRole("alert")).toContainText("client workspace changed");
   expect(calls.some(call => call.path.endsWith("/authenticated-grants/preview"))).toBe(false);
 });
 

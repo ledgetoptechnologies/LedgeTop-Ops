@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import { Loading } from "@ltds/ui";
+import { projectAlphaSourceName } from "@ltds/shared";
 import { api, ApiError } from "./api";
+import { autoSelectedProject, nativeTargetsForRecipient, validClientShareProjects, type ClientShareProjects, type ClientShareRecipient } from "./client-share-routing";
+
+export type ShareHistoryState = "loading" | "ready" | "hidden" | "failed";
 import "./NativeDeliveryGrantPanel.css";
 
 type AccessTerms = { kind: "customer" | "collaborator"; mode: "specific_date" | "project_end" | "until_revoked"; expiresAt: string | null };
@@ -35,7 +40,10 @@ const errorMessage = (caught: unknown) => {
   return message || "Connected workspace access could not be loaded. Try again.";
 };
 
-export function NativeDeliveryGrantPanel({ folder, creationEnabled, onBusyChange }: { folder: { id: string }; creationEnabled: boolean; onBusyChange?: (busy: boolean) => void }) {
+export function NativeDeliveryGrantPanel({ folder, creationEnabled, onBusyChange, unified = false, preselected = null, historyTarget = null, onGranted, onHistoryState }: { folder: { id: string }; creationEnabled: boolean; onBusyChange?: (busy: boolean) => void; onGranted?: () => void;
+  onHistoryState?: (state: ShareHistoryState, count: number) => void;
+  /** Combined share dialog: the person comes from the client search, and history renders into the shared list. */
+  unified?: boolean; preselected?: ClientShareRecipient | null; historyTarget?: HTMLElement | null }) {
   const [grants, setGrants] = useState<Grant[]>([]), [historyReady, setHistoryReady] = useState(false), [historyBusy, setHistoryBusy] = useState(true), [historyError, setHistoryError] = useState("");
   const [targetQuery, setTargetQuery] = useState(""), [targets, setTargets] = useState<Target[]>([]), [target, setTarget] = useState<Target | null>(null), [targetBusy, setTargetBusy] = useState(false), [targetMessage, setTargetMessage] = useState("");
   const [recipientQuery, setRecipientQuery] = useState(""), [recipients, setRecipients] = useState<Recipient[]>([]), [recipient, setRecipient] = useState<Recipient | null>(null), [recipientBusy, setRecipientBusy] = useState(false), [recipientMessage, setRecipientMessage] = useState("");
@@ -45,13 +53,17 @@ export function NativeDeliveryGrantPanel({ folder, creationEnabled, onBusyChange
   const alive = useRef(false), epoch = useRef(0), operation = useRef<Operation | null>(null), mutationBusy = useRef(false);
   const historyRead = useRef<AbortController | null>(null), targetRead = useRef<AbortController | null>(null), recipientRead = useRef<AbortController | null>(null), previewRead = useRef<AbortController | null>(null), mutationRead = useRef<AbortController | null>(null);
   const reviewTitle = useRef<HTMLHeadingElement>(null);
-  const abortReads = useCallback(() => { historyRead.current?.abort(); targetRead.current?.abort(); recipientRead.current?.abort(); previewRead.current?.abort(); }, []);
+  const projectRead = useRef<AbortController | null>(null);
+  const [projectResult, setProjectResult] = useState<ClientShareProjects | null>(null), [projectBusy, setProjectBusy] = useState(false), [projectMessage, setProjectMessage] = useState(""), [projectQuery, setProjectQuery] = useState("");
+  const [historyState, setHistoryState] = useState<ShareHistoryState>("loading"), [historyNotice, setHistoryNotice] = useState("");
+  useEffect(() => { onHistoryState?.(historyState, grants.length); }, [historyState, grants.length, onHistoryState]);
+  const abortReads = useCallback(() => { historyRead.current?.abort(); targetRead.current?.abort(); recipientRead.current?.abort(); previewRead.current?.abort(); projectRead.current?.abort(); }, []);
   useEffect(() => { alive.current = true; return () => { alive.current = false; epoch.current++; abortReads(); mutationRead.current?.abort(); }; }, [folder.id, abortReads]);
   useEffect(() => { if (preview) reviewTitle.current?.focus(); }, [preview]);
   useEffect(() => { onBusyChange?.(busy || uncertain); return () => onBusyChange?.(false); }, [busy, uncertain, onBusyChange]);
   const invalidate = useCallback((caught: unknown): boolean => {
     if (!(caught instanceof ApiError) || ![401, 403, 404, 409].includes(caught.status)) return false;
-    epoch.current++; abortReads(); setGrants([]); setHistoryReady(false); setHistoryBusy(false); setTargets([]); setTarget(null); setTargetBusy(false); setRecipients([]); setRecipient(null); setRecipientBusy(false); setPreview(null); operation.current = null; mutationBusy.current = false; setBusy(false); setUncertain(false); setMessage(""); setBlocked(true);
+    epoch.current++; abortReads(); setGrants([]); setHistoryReady(false); setHistoryBusy(false); setHistoryState("failed"); setTargets([]); setTarget(null); setTargetBusy(false); setRecipients([]); setRecipient(null); setRecipientBusy(false); setPreview(null); operation.current = null; mutationBusy.current = false; setBusy(false); setUncertain(false); setMessage(""); setBlocked(true);
     setError(caught.status === 401 ? "Your session expired. Sign in again, then refresh folder access."
       : caught.message === "native_delivery_reconciliation_required" ? "This grant needs administrator review because publication could not be confirmed. Do not create another grant. Refresh folder access after the issue is resolved."
       : caught.message === "native_delivery_list_too_large" ? "This folder has too many connected grants to display safely. Ask an administrator to review its access records."
@@ -61,20 +73,59 @@ export function NativeDeliveryGrantPanel({ folder, creationEnabled, onBusyChange
   }, [abortReads]);
   const loadHistory = useCallback(async () => {
     historyRead.current?.abort(); const controller = new AbortController(); historyRead.current = controller;
-    setHistoryBusy(true); setHistoryReady(false); setHistoryError("");
+    setHistoryBusy(true); setHistoryReady(false); setHistoryError(""); setHistoryNotice(""); setHistoryState("loading");
     try {
       const result = await api<{grants: Grant[]}>(`${base}?folderRef=${encodeURIComponent(folder.id)}`, {signal: controller.signal});
       if (controller.signal.aborted || !alive.current) return;
       if (!Array.isArray(result.grants) || result.grants.some(item => !validGrant(item))) throw invalidResponse();
-      setGrants(result.grants); setHistoryReady(true);
-    } catch (caught) { if (!controller.signal.aborted && alive.current && !invalidate(caught)) { setGrants([]); setHistoryError(errorMessage(caught)); } }
+      setGrants(result.grants); setHistoryReady(true); setHistoryState("ready");
+    } catch (caught) {
+      if (controller.signal.aborted || !alive.current) return;
+      // In the combined dialog: no rights here is silent; a missing folder and
+      // an unavailable back end each say so; anything else is an error.
+      if (unified && caught instanceof ApiError && caught.status === 403) { setGrants([]); setHistoryState("hidden"); return; }
+      // A missing folder is not "nothing granted": it must not show the empty state.
+      if (unified && caught instanceof ApiError && caught.status === 404) { setGrants([]); setHistoryState("failed"); setHistoryNotice("This folder could not be found for connected-workspace sharing. It may have moved; refresh access."); return; }
+      setHistoryState("failed");
+      if (!invalidate(caught)) { setGrants([]); setHistoryError(errorMessage(caught)); }
+    }
     finally { if (!controller.signal.aborted && alive.current) setHistoryBusy(false); }
-  }, [folder.id, invalidate]);
+  }, [folder.id, invalidate, unified]);
   useEffect(() => { void loadHistory(); return () => historyRead.current?.abort(); }, [loadHistory]);
   const clearReview = () => { epoch.current++; previewRead.current?.abort(); setPreview(null); setError(""); setMessage(""); };
   const clearTerms = () => { setAccessKind(""); setAccessMode(""); setExpiresAt(""); };
   const clearRecipient = () => { recipientRead.current?.abort(); setRecipients([]); setRecipient(null); setRecipientQuery(""); setRecipientMessage(""); setRecipientBusy(false); clearTerms(); clearReview(); };
   const selectTarget = (next: Target) => { targetRead.current?.abort(); setTargetBusy(false); setTarget(next); clearRecipient(); };
+  const preselectedKey = preselected?.key ?? null;
+  useEffect(() => {
+    if (!unified) return;
+    targetRead.current?.abort(); recipientRead.current?.abort(); setTargetBusy(false); setRecipientBusy(false);
+    setTargetQuery(""); setRecipientQuery(""); setTargetMessage(""); setRecipientMessage(""); setRecipients([]);
+    setAccessKind(""); setAccessMode(""); setExpiresAt(""); epoch.current++; previewRead.current?.abort(); setPreview(null);
+    if (preselected) { setError(""); setMessage(""); }
+    projectRead.current?.abort(); setProjectResult(null); setProjectMessage(""); setProjectQuery(""); setProjectBusy(false); setTargets([]); setTarget(null);
+    setRecipient(preselected ? {principalPublicId: preselected.publicId, displayName: preselected.displayName, email: preselected.email} : null);
+    if (preselected) void loadProjects(preselected, "");
+    // Only a different chosen person (by id-based key) resets this step.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unified, preselectedKey]);
+  /** Projects for the chosen person come from the server; a folder already
+   * bound offers only its project, and a partial list never auto-selects. */
+  const loadProjects = async (person: ClientShareRecipient, name: string) => {
+    projectRead.current?.abort(); const controller = new AbortController(), version = epoch.current; projectRead.current = controller;
+    setProjectBusy(true); setProjectMessage(""); setTarget(null); clearTerms(); clearReview();
+    try {
+      const result = await api<unknown>(`/api/delivery/client-share-recipients/projects?${new URLSearchParams({folderRef: folder.id, sourceId: person.sourceId, workspaceId: person.workspaceId, principalPublicId: person.publicId, q: name})}`, {signal: controller.signal});
+      if (controller.signal.aborted || !alive.current) return;
+      if (!validClientShareProjects(result)) throw invalidResponse();
+      const next = nativeTargetsForRecipient(person, result.projects), auto = autoSelectedProject(result);
+      setProjectResult(result); setTargets(next); setTarget(auto ? next.find(item => item.projectId === auto.project.projectId) ?? null : null);
+      setProjectMessage(next.length === 0 ? (name ? "No grantable project matches this name." : "No project for this person can be granted from this folder.")
+        : !result.complete && !result.bound ? "More projects may match. Search by project name to find the exact one." : "");
+    } catch (caught) { if (!controller.signal.aborted && alive.current && version <= epoch.current) { setTargets([]); setProjectMessage(errorMessage(caught)); } }
+    finally { if (!controller.signal.aborted && alive.current) setProjectBusy(false); }
+  };
+  const chooseProject = (next: Target) => { setTarget(next); setAccessKind(""); setAccessMode(""); setExpiresAt(""); clearReview(); };
   const searchTargets = async (event: FormEvent) => {
     event.preventDefault(); const q = targetQuery.trim(); if (q.length < 2 || q.length > 100 || busy || uncertain || blocked) return;
     targetRead.current?.abort(); clearRecipient(); setTarget(null); setTargets([]); setTargetMessage(""); setTargetBusy(true);
@@ -125,6 +176,7 @@ export function NativeDeliveryGrantPanel({ folder, creationEnabled, onBusyChange
       if (controller.signal.aborted || !alive.current || version !== epoch.current) return;
       if (!validGrant(result.grant) || typeof result.replayed !== "boolean" || targetKey(result.grant) !== targetKey(pending.target) || result.grant.principalPublicId !== pending.principalPublicId || pending.action === "create" && !sameTerms(result.grant.accessTerms, pending.accessTerms) || result.grant.status !== (pending.action === "create" ? "active" : "revoked") || result.grant.publicationState !== (pending.action === "create" ? "active" : "revoked") || result.grant.version !== (pending.action === "create" ? 1 : pending.version) || pending.grantId && result.grant.grantId !== pending.grantId) throw invalidResponse();
       operation.current = null; setPreview(null); setRecipient(null); setRecipients([]); setRecipientQuery(""); setMessage(pending.action === "create" ? "Connected workspace access granted to the selected person. No email or public link was created." : pending.cancelUnpublished ? "Unpublished access cancelled. It was not made available, and files were not changed." : "Connected workspace access revoked. Files were not changed.");
+      if (pending.action === "create") onGranted?.();
       await loadHistory();
     } catch (caught) {
       if (controller.signal.aborted || !alive.current || version !== epoch.current) return;
@@ -150,14 +202,21 @@ export function NativeDeliveryGrantPanel({ folder, creationEnabled, onBusyChange
   const disabled = busy || uncertain || blocked || !historyReady;
 
   return <section className="native-grant-panel" aria-label="Connected workspace folder access">
-    <h3>Connected workspace access</h3><p>Share this folder with one verified person in an explicitly selected source, workspace, and project. This does not create a public link or send a notification.</p>
-    {historyBusy && !blocked && <Loading />}
+    {!unified && <><h3>Connected workspace access</h3><p>Share this folder with one verified person in an explicitly selected source, workspace, and project. This does not create a public link or send a notification.</p></>}
+    {historyBusy && !blocked && (!unified || preselected) && <Loading />}
     {historyError && <p role="alert">{historyError}</p>}
-    <button className="button-ghost button-small" disabled={busy || historyBusy} onClick={refresh}>Refresh folder access</button>
+    {historyNotice && <p role="status">{historyNotice}</p>}
+    {(!unified || uncertain) && <button className="button-ghost button-small" disabled={busy || historyBusy} onClick={refresh}>Refresh folder access</button>}
     {error && <p className="error" role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     {uncertain && operation.current && <><p>Refreshing only checks current grant records. It does not confirm the earlier operation or create access. You can cancel an unpublished grant after reviewing its exact recipient.</p><button className="button-orange" disabled={busy || historyBusy || operation.current.action === "create" && !creationEnabled} onClick={() => void execute(operation.current!)}>Retry same operation</button></>}
-    {!blocked && historyReady && <>
+    {!blocked && historyReady && (!unified || recipient) && <>
       {!creationEnabled && <div className="notice" role="status">New connected-workspace access is paused. Existing access can still be reviewed and revoked.</div>}
+      {unified ? <>
+        {projectResult && !projectResult.bound && !autoSelectedProject(projectResult) && preselected && <form className="form-grid" role="search" aria-label="Find a project for this person" onSubmit={event => { event.preventDefault(); void loadProjects(preselected, projectQuery.trim()); }}><label>Find a project<input type="search" value={projectQuery} maxLength={100} disabled={disabled || projectBusy} onChange={event => setProjectQuery(event.target.value)} /></label><button className="button-ghost" disabled={disabled || projectBusy}>Search projects</button></form>}
+        {projectBusy && <Loading />}{projectMessage && <p role="status">{projectMessage}</p>}
+        {projectResult && !autoSelectedProject(projectResult) && targets.length > 0 && <fieldset disabled={disabled}><legend>Project for {recipient?.displayName}</legend>{targets.map(item => <label className="native-grant-choice" key={targetKey(item)}><input type="radio" name="native-grant-project" checked={target !== null && targetKey(target) === targetKey(item)} onChange={() => chooseProject(item)} /><span><strong>{item.projectName}</strong><small>{projectAlphaSourceName(item.sourceId)} · {item.workspaceName}</small></span></label>)}</fieldset>}
+        {target && <p className="native-grant-selection">{projectResult && autoSelectedProject(projectResult)?.reason === "bound" ? "Project (this folder is already linked to it)" : projectResult && autoSelectedProject(projectResult)?.reason === "only" ? "Project (the only one available for this person)" : "Project"}: {target.projectName} · {projectAlphaSourceName(target.sourceId)} · {target.workspaceName}</p>}
+      </> : <>
       <form className="form-grid" role="search" aria-label="Find connected workspace project" onSubmit={searchTargets}><label>Find a connected project<input type="search" value={targetQuery} minLength={2} maxLength={100} disabled={disabled} onChange={event => { targetRead.current?.abort(); setTargetBusy(false); setTargetQuery(event.target.value); setTargets([]); setTarget(null); setTargetMessage(""); clearRecipient(); }} /></label><button className="button-ghost" disabled={disabled || targetBusy || targetQuery.trim().length < 2}>Search connected projects</button></form>
       {targetBusy && <Loading />}{targetMessage && <p role="status">{targetMessage}</p>}
       {targets.length > 0 && <fieldset disabled={disabled}><legend>Source, workspace, and project</legend>{targets.map(item => <label className="native-grant-choice" key={targetKey(item)}><input type="radio" name="native-grant-project" checked={target !== null && targetKey(target) === targetKey(item)} onChange={() => selectTarget(item)} /><span><strong>{item.projectName}</strong><small>{item.sourceName} · {item.workspaceName}</small></span></label>)}</fieldset>}
@@ -166,6 +225,7 @@ export function NativeDeliveryGrantPanel({ folder, creationEnabled, onBusyChange
         <form className="form-grid" role="search" aria-label="Find verified recipient" onSubmit={searchRecipients}><label>Find a verified recipient<input type="search" value={recipientQuery} minLength={2} maxLength={100} disabled={disabled} onChange={event => { recipientRead.current?.abort(); setRecipientBusy(false); setRecipientQuery(event.target.value); setRecipients([]); setRecipient(null); setRecipientMessage(""); clearReview(); }} /></label><button className="button-ghost" disabled={disabled || recipientBusy || recipientQuery.trim().length < 2}>Search verified recipients</button></form>
         {recipientBusy && <Loading />}{recipientMessage && <p role="status">{recipientMessage}</p>}
         {recipients.length > 0 && <fieldset disabled={disabled}><legend>Exact recipient</legend>{recipients.map(item => <label className="native-grant-choice" key={item.principalPublicId}><input type="radio" name="native-grant-person" checked={recipient?.principalPublicId === item.principalPublicId} onChange={() => { clearReview(); clearTerms(); setRecipient(item); }} /><span><strong>{item.displayName}</strong><small>{item.email || "No email displayed"}</small></span></label>)}</fieldset>}
+      </>}
       </>}
       <div className="form-grid authenticated-grant-fields"><label>Connected access reason<input value={reasonCode} maxLength={80} disabled={disabled} onChange={event => { setReasonCode(event.target.value); clearReview(); }} /></label><label>Recipient role<select value={accessKind} disabled={disabled || !recipient} onChange={event => { const kind = event.target.value as AccessTerms["kind"] | ""; setAccessKind(kind); setAccessMode(kind === "customer" ? "until_revoked" : kind === "collaborator" && target?.projectEndSupported ? "project_end" : ""); setExpiresAt(""); clearReview(); }}><option value="">Choose customer or collaborator</option><option value="customer">Customer</option><option value="collaborator">Collaborator</option></select></label>
       {accessKind === "collaborator" && <label>Collaborator access duration<select value={accessMode} disabled={disabled} onChange={event => { setAccessMode(event.target.value as AccessTerms["mode"] | ""); setExpiresAt(""); clearReview(); }}><option value="">Choose access duration</option><option value="project_end" disabled={!target?.projectEndSupported}>Project completion + 7 days</option><option value="specific_date">Specific date</option><option value="until_revoked">Until revoked</option></select></label>}
@@ -177,6 +237,7 @@ export function NativeDeliveryGrantPanel({ folder, creationEnabled, onBusyChange
       {!preview && <button className="button-orange" disabled={disabled || !creationEnabled || !recipient || !target || !accessKind || !accessMode} onClick={() => void review()}>Review connected workspace access</button>}
       {preview && <section className="native-grant-review" aria-label="Review connected workspace access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm exact folder access</h4><dl>{[["Folder", preview.folderName], ["Source", preview.sourceName], ["Workspace", preview.workspaceName], ["Project", preview.projectName], ["Recipient", `${preview.recipientName}${preview.recipientEmail ? ` (${preview.recipientEmail})` : ""}`], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? new Date(preview.effectiveAccessExpiresAt).toLocaleString() : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Only this verified person receives this folder grant. It does not merge accounts, grant project administration, or send an email.</p><div className="actions"><button className="button-orange" disabled={disabled || !creationEnabled} onClick={create}>Grant connected workspace access</button><button className="button-ghost" disabled={disabled} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
     </>}
-    {historyReady && <section aria-label="Connected workspace grant history"><h4>Current connected workspace grants</h4>{grants.length === 0 ? <p>No connected workspace grants are recorded for this folder.</p> : <div className="authenticated-grant-list">{grants.map(grant => <section className="authenticated-grant-row" key={grant.id}><span><strong>{grant.recipientName}</strong><small>{grant.sourceName} · {grant.workspaceName} · {grant.projectName}</small><small>{termsLabel(grant.accessTerms)}</small><small>{grant.publicationState === "pending" ? "Not published — access is not available" : grant.publicationState === "suspended" ? "Revoked — publication was not confirmed" : grant.status} · {grant.effectiveAccessExpiresAt ? `expires ${new Date(grant.effectiveAccessExpiresAt).toLocaleString()}` : grant.accessTerms?.mode === "project_end" ? "awaiting verified project completion, then 7 days" : grant.expiresAt ? `expires ${new Date(grant.expiresAt).toLocaleString()}` : "no fixed expiry"}</small></span>{grant.canRevoke && <button className="button-danger button-small" disabled={busy || blocked || uncertain && (operation.current?.action !== "create" || grant.publicationState !== "pending")} onClick={() => revoke(grant)}>{grant.publicationState === "pending" ? "Cancel unpublished access" : "Revoke connected access"}<span className="sr-only">: {grant.recipientName}</span></button>}</section>)}</div>}</section>}
+    {historyReady && unified && historyTarget && grants.length > 0 && createPortal(<>{grants.map(grant => <section className="authenticated-grant-row" key={grant.id}><span><strong>{grant.recipientName}</strong><small>{projectAlphaSourceName(grant.sourceId)} · {grant.workspaceName} · {grant.projectName}</small><small>{termsLabel(grant.accessTerms)}</small><small>{grant.publicationState === "pending" ? "Not published — access is not available" : grant.publicationState === "suspended" ? "Revoked — publication was not confirmed" : grant.status} · {grant.effectiveAccessExpiresAt ? `expires ${new Date(grant.effectiveAccessExpiresAt).toLocaleString()}` : grant.accessTerms?.mode === "project_end" ? "awaiting verified project completion, then 7 days" : grant.expiresAt ? `expires ${new Date(grant.expiresAt).toLocaleString()}` : "no fixed expiry"}</small></span>{grant.canRevoke && <button className="button-danger button-small" disabled={busy || blocked || uncertain && (operation.current?.action !== "create" || grant.publicationState !== "pending")} onClick={() => revoke(grant)}>{grant.publicationState === "pending" ? "Cancel unpublished access" : "Revoke connected access"}<span className="sr-only">: {grant.recipientName}</span></button>}</section>)}</>, historyTarget)}
+    {historyReady && !unified && <section aria-label="Connected workspace grant history"><h4>Current connected workspace grants</h4>{grants.length === 0 ? <p>No connected workspace grants are recorded for this folder.</p> : <div className="authenticated-grant-list">{grants.map(grant => <section className="authenticated-grant-row" key={grant.id}><span><strong>{grant.recipientName}</strong><small>{projectAlphaSourceName(grant.sourceId)} · {grant.workspaceName} · {grant.projectName}</small><small>{termsLabel(grant.accessTerms)}</small><small>{grant.publicationState === "pending" ? "Not published — access is not available" : grant.publicationState === "suspended" ? "Revoked — publication was not confirmed" : grant.status} · {grant.effectiveAccessExpiresAt ? `expires ${new Date(grant.effectiveAccessExpiresAt).toLocaleString()}` : grant.accessTerms?.mode === "project_end" ? "awaiting verified project completion, then 7 days" : grant.expiresAt ? `expires ${new Date(grant.expiresAt).toLocaleString()}` : "no fixed expiry"}</small></span>{grant.canRevoke && <button className="button-danger button-small" disabled={busy || blocked || uncertain && (operation.current?.action !== "create" || grant.publicationState !== "pending")} onClick={() => revoke(grant)}>{grant.publicationState === "pending" ? "Cancel unpublished access" : "Revoke connected access"}<span className="sr-only">: {grant.recipientName}</span></button>}</section>)}</div>}</section>}
   </section>;
 }

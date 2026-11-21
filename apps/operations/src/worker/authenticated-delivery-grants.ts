@@ -566,8 +566,9 @@ export async function previewAuthenticatedDeliveryGrant(env:Env,principal:StaffP
   return (await explicitPrimaryReview(env,principal,context,grantOperation(input))).preview;
 }
 
+type AudienceLimits={entityTypes:Exclude<AuthenticatedGrantAudienceType,'principal'>[];perType:number;principals:number};
 export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, principal: StaffPrincipal, bindingId: string, queryValue: string,
-  typeFilter?:AuthenticatedGrantAudienceType) {
+  typeFilter?:AuthenticatedGrantAudienceType,limits?:AudienceLimits) {
   requireEnabled(env);
   const context = await bindingContext(env, bindingId);
   await requirePermission(env, principal, "delivery.share.create", { divisionId: context.divisionId }, true);
@@ -578,16 +579,20 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
   const like = `%${query.replace(/[\\%_]/g, value => `\\${value}`)}%`;
   const db = deliveryDb(env);
   const identitySql=await grantPrincipalIdentitySql(db);
+  // Each kind is limited on its own, after filtering, so one kind cannot crowd out another.
+  const entityTypes=limits?.entityTypes??(typeFilter?(typeFilter==='principal'?[]:[typeFilter]):['organization','department','client','project']);
+  const perType=limits?.perType??SEARCH_LIMIT,principalLimit=limits?.principals??SEARCH_LIMIT;
   const [entities, principals] = await Promise.all([
-    db.prepare(`${ancestrySql()} SELECT ancestry.entity_type,ancestry.public_id,entity.display_name
+    db.prepare(`${ancestrySql()} SELECT entity_type,public_id,display_name FROM (SELECT ancestry.entity_type,ancestry.public_id,entity.display_name,
+        min(ancestry.depth) depth,ROW_NUMBER() OVER (PARTITION BY ancestry.entity_type ORDER BY min(ancestry.depth),lower(entity.display_name),ancestry.public_id) kind_rank
       FROM scope_ancestry ancestry JOIN portal_v2_directory_entities entity
         ON entity.workspace_id=? AND entity.generation_id=? AND (entity.entity_type=ancestry.entity_type OR (entity.entity_type='standalone_client' AND ancestry.entity_type='client'))
         AND entity.public_id=ancestry.public_id
-      WHERE ancestry.entity_type IN ('organization','department','client','project')
+      WHERE ancestry.entity_type IN (SELECT value FROM json_each(?))
         AND lower(entity.display_name) LIKE ? ESCAPE '\\'
-      GROUP BY ancestry.entity_type,ancestry.public_id,entity.display_name
-      ORDER BY min(ancestry.depth),lower(entity.display_name),ancestry.public_id LIMIT ?`)
-      .bind(...ancestryBindings(context), context.workspaceId, context.generationId, like, SEARCH_LIMIT)
+      GROUP BY ancestry.entity_type,ancestry.public_id,entity.display_name)
+      WHERE kind_rank<=? ORDER BY depth,lower(display_name),public_id`)
+      .bind(...ancestryBindings(context), context.workspaceId, context.generationId, JSON.stringify(entityTypes), like, perType)
       .all<{ entity_type: Exclude<AuthenticatedGrantAudienceType, "principal">; public_id: string; display_name: string }>(),
     db.prepare(`${ancestrySql()} SELECT principal.public_id,principal.display_name,identity.verified_email
       FROM pa_portal_principals principal JOIN portal_v2_identities identity
@@ -625,7 +630,7 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
       .bind(...ancestryBindings(context), context.workspaceId, like, like,
         context.workspaceId, context.workspaceId, context.workspaceId, context.workspaceId,
         env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED ?? "false", context.workspaceId, context.workspaceId,
-        SEARCH_LIMIT).all<{ public_id: string; display_name: string; verified_email: string | null }>(),
+        principalLimit).all<{ public_id: string; display_name: string; verified_email: string | null }>(),
   ]);
   const options:AuthenticatedDeliveryGrantAudienceSearchResult[]=[
     ...entities.results.map(row=>({type:row.entity_type,publicId:row.public_id,displayName:row.display_name,
@@ -633,8 +638,25 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
     ...principals.results.map(row=>({type:'principal' as const,publicId:row.public_id,displayName:row.display_name,email:row.verified_email,
       recipientMode:'exact' as const,currentAuthorizedRecipientCount:1,recipientCountTruncated:false})),
   ];
+  const filtered=options.filter(option=>!typeFilter||option.type===typeFilter);
   return {folderBindingId:context.id,workspaceId:context.workspaceId,workspaceLabel:context.workspaceLabel,
-    scopeTypeFilter:typeFilter??null,audiences:options.filter(option=>!typeFilter||option.type===typeFilter).slice(0,SEARCH_LIMIT)};
+    scopeTypeFilter:typeFilter??null,audiences:limits?filtered:filtered.slice(0,SEARCH_LIMIT)};
+}
+
+/** Folder-keyed audience search for the combined share dialog. It resolves the
+ * folder's own primary binding, then runs the unchanged audience search with
+ * its division-scoped permission check; it never accepts a browser binding. */
+export const SHARE_AUDIENCE_KINDS=['principal','organization','department','client'] as const;
+export async function searchAuthenticatedDeliveryGrantAudiencesForFolder(env:Env,principal:StaffPrincipal,folderKey:string,queryValue:string,perKind=8){
+  requireEnabled(env);
+  // One extra row per kind shows that kind has more matches. Project-wide
+  // audiences are never queried, as the share dialog never offered them.
+  const result=await searchAuthenticatedDeliveryGrantAudiences(env,principal,await bindingIdForFolderKey(env,folderKey),queryValue,undefined,
+    {entityTypes:['organization','department','client'],perType:perKind+1,principals:perKind+1});
+  const truncatedKinds:Partial<Record<typeof SHARE_AUDIENCE_KINDS[number],boolean>>={},audiences:typeof result.audiences=[];
+  for(const kind of SHARE_AUDIENCE_KINDS){const rows=result.audiences.filter(row=>row.type===kind);
+    truncatedKinds[kind]=rows.length>perKind;audiences.push(...rows.slice(0,perKind));}
+  return {...result,audiences,truncatedKinds};
 }
 
 function grantTermsColumns(ready:boolean):string {
