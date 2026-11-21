@@ -1045,6 +1045,7 @@ export async function auditControlledObj2Tiles({
   allowExternalSource = false,
   trustedConverterBinarySha256 = CONTROLLED_CONVERTER_BINARY_SHA256,
   converterSerialRetry = false,
+  converterParallelism = 2,
 }) {
   derivativeDir = path.resolve(derivativeDir);
   sourceGlb = path.resolve(sourceGlb);
@@ -1081,10 +1082,8 @@ export async function auditControlledObj2Tiles({
   });
   const artifacts = [...artifactMap.values()].sort((a, b) => a.uri.localeCompare(b.uri));
   const comparison = controlledSurfaceComparison(source, leaves, sourceDigest);
-  const converterContract = converterSerialRetry ? SERIAL_RETRY_CONVERTER : CONTROLLED_CONVERTER;
-  const commandSha256 = converterSerialRetry
-    ? SERIAL_RETRY_CONVERTER_COMMAND_SHA256
-    : CONTROLLED_CONVERTER_COMMAND_SHA256;
+  const selectedContract = converterSerialRetry ? {converter:SERIAL_RETRY_CONVERTER,commandSha256:SERIAL_RETRY_CONVERTER_COMMAND_SHA256} : converterPolicy.parallelConverterContract(converterParallelism);
+  const converterContract = selectedContract.converter, commandSha256 = selectedContract.commandSha256;
   const surfaceEvidence = {
     sourceTriangleCount: source.length,
     leafTriangleCount: leaves.length,
@@ -1155,12 +1154,13 @@ export async function writeLodProvenance({
   allowExternalSource = false,
   controlledObj2Tiles = false,
   converterSerialRetry = false,
+  converterParallelism = 2,
   converterInput,
   converterBinary,
   trustedConverterBinarySha256,
 }) {
   const provenance = controlledObj2Tiles
-    ? await auditControlledObj2Tiles({ derivativeDir, sourceGlb, converterInput, converterBinary, allowExternalSource, trustedConverterBinarySha256, converterSerialRetry })
+    ? await auditControlledObj2Tiles({ derivativeDir, sourceGlb, converterInput, converterBinary, allowExternalSource, trustedConverterBinarySha256, converterSerialRetry, converterParallelism })
     : await auditLodEquivalence({ derivativeDir, sourceGlb, tolerance, allowExternalSource });
   const outputPath = path.resolve(output || path.join(derivativeDir, 'lod-provenance.json'));
   if (!inside(path.resolve(derivativeDir), outputPath)) throw new Error('provenance output must stay inside the derivative directory');
