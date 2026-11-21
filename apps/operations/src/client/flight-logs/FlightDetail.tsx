@@ -3,9 +3,10 @@ import { api, ApiError, sessionScope } from "../api";
 import { requestChoice } from "@ltds/ui";
 import { withOperationKey } from "./operation-keys";
 import { reviewAction } from "./review-model";
+import { BatteryReferenceEditor } from "./BatteryReferenceEditor";
 import { FlightMap } from "./FlightMap";
 import { indexAt, TelemetryChart, type ChartSeries } from "./TelemetryChart";
-import { clock, date, duration, equipmentLabel, FEET, flightTitle, masked, miles, MPH, mph, feet, series, type FlightDetail as Detail, type Track } from "./format";
+import { batteryLabel, clock, date, duration, equipmentLabel, FEET, flightTitle, masked, miles, MPH, mph, feet, series, type FlightDetail as Detail, type Track } from "./format";
 
 const SPEEDS = [1, 2, 4, 8, 16];
 const LEVEL_LABEL = { tip: "Note", caution: "Caution", warn: "Warning" } as const;
@@ -57,7 +58,7 @@ function ReassignFlight({ flightId, pilotName, onDone }: { flightId: string; pil
   </span>;
 }
 
-export function FlightDetail({ flightId, canReassign = false }: { flightId: string; canReassign?: boolean }) {
+export function FlightDetail({ flightId, canReassign = false, canNameBattery = false, onBatterySaved }: { flightId: string; canReassign?: boolean; canNameBattery?: boolean; onBatterySaved?: () => void }) {
   const [reloaded, setReloaded] = useState(0);
   const [flight, setFlight] = useState<Detail | null>(null);
   const [track, setTrack] = useState<Track | null>(null);
@@ -121,12 +122,14 @@ export function FlightDetail({ flightId, canReassign = false }: { flightId: stri
           {canReassign && <ReassignFlight flightId={flight.id} pilotName={flight.pilotName ?? null} onDone={() => setReloaded(n => n + 1)} />}
           <span className="flight-chip">{equipmentLabel(flight.aircraft)}</span>
           {flight.aircraft && <span className="flight-chip">SN {masked(flight.aircraft.serial)}</span>}
-          {flight.battery && <span className="flight-chip">Battery {masked(flight.battery.serial)}</span>}
+          {flight.battery && <span className="flight-chip">{batteryLabel(flight.battery)}</span>}
           {flight.tags.map(tag => <span key={tag.tag} className={`flight-chip tag ${tag.kind}`}>{tag.tag}</span>)}
         </p>
       </div>
       {track && <ExportMenu flight={flight} track={track} />}
     </header>
+
+    {canNameBattery && flight.aircraft && flight.battery && <BatteryReferenceEditor key={`${flight.aircraft.id}:${flight.battery.id}`} aircraftId={flight.aircraft.id} batteryId={flight.battery.id} referenceName={flight.battery.referenceName} onSaved={() => { setReloaded(n => n + 1); onBatterySaved?.(); }} />}
 
     <div className="flight-stats">
       <Stat label="Duration" value={duration(flight.durationSeconds, true)} />

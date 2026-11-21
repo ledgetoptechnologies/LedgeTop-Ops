@@ -261,3 +261,52 @@ test("Aircraft of the same model are told apart in the overview by their serial"
   await expect(overview.locator(".flight-donut li").filter({ hasText: "…0001" })).toHaveCount(1);
   await expect(overview.locator(".flight-donut li").filter({ hasText: "…0002" })).toHaveCount(1);
 });
+
+
+test("Battery references retry an uncertain save unchanged, rename and clear while keeping the serial visible", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view", "flight_logs.import"], flights: [FLIGHT] });
+  let referenceName: string | null = null;
+  const writes: Array<{ body: unknown; key: string | undefined }> = [];
+  await page.route("**/api/flight-logs/flights/f1", route => route.fulfill({ json: { ...FLIGHT, battery: { ...FLIGHT.battery, aircraftId: "a1", aircraftName: "Big Orange", referenceName }, tags: [], messages: [], telemetryPoints: 0, controller: null, notes: null, endedAt: null, batteryCycleCount: 12 } }));
+  await page.route("**/api/flight-logs/aircraft/a1/batteries/b1/reference", async route => {
+    const body = route.request().postDataJSON() as { referenceName: string | null };
+    writes.push({ body, key: route.request().headers()["idempotency-key"] });
+    if (body.referenceName === "taken") return route.fulfill({ status: 409, json: { code: "battery_name_taken", error: "That name is already used." } });
+    referenceName = body.referenceName;
+    if (writes.length === 1) return route.abort("failed");
+    return route.fulfill({ json: { aircraftId: "a1", batteryId: "b1", referenceName } });
+  });
+  await page.goto("/fleet");
+  const flightRow = page.locator(".flight-list").getByRole("button", { name: /Roof survey/ });
+  await expect(flightRow).toHaveCount(1);
+  await flightRow.click();
+  const detail = page.locator(".flight-detail");
+  await expect(detail).toContainText("Big Orange · Battery …0009");
+  await page.getByLabel("Battery reference name").fill(" Battery  1 ");
+  await page.getByRole("button", { name: "Save name", exact: true }).click();
+  await expect(page.getByLabel("Battery reference name")).toBeDisabled();
+  await page.getByRole("button", { name: "Retry save", exact: true }).click();
+  await expect(detail).toContainText("Big Orange · Battery 1 · SN …0009");
+  expect(writes[0]).toEqual(writes[1]);
+  expect(writes[0]!.key).toMatch(/^[a-f0-9]{32}$/);
+  await page.getByLabel("Battery reference name").fill("taken");
+  await page.getByRole("button", { name: "Save name", exact: true }).click();
+  await expect(detail).toContainText("That name is already used.");
+  await expect(page.getByLabel("Battery reference name")).toBeEnabled();
+  await page.getByLabel("Battery reference name").fill("2");
+  await page.getByRole("button", { name: "Save name", exact: true }).click();
+  await expect(detail).toContainText("Big Orange · Battery 2 · SN …0009");
+  await page.getByRole("button", { name: "Clear name", exact: true }).click();
+  await expect(detail).toContainText("Big Orange · Battery …0009");
+  expect(writes.at(-1)!.body).toEqual({ referenceName: null });
+});
+
+test("Read-only staff see battery labels without the naming editor", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
+  await page.goto("/fleet");
+  const flightRow = page.locator(".flight-list").getByRole("button", { name: /Roof survey/ });
+  await expect(flightRow).toHaveCount(1);
+  await flightRow.click();
+  await expect(page.locator(".flight-detail")).toContainText("Battery …0009");
+  await expect(page.getByLabel("Battery reference name")).toHaveCount(0);
+});

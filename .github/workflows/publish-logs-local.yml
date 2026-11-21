@@ -12,6 +12,7 @@ on:
     paths:
       - apps/logs-local/**
       - apps/logs/src/worker/**
+      - apps/logs/src/battery-reference.mjs
       - apps/logs/src/odl/map.mjs
       - apps/logs/src/odl/util.mjs
       - apps/logs/src/odl/contract.mjs

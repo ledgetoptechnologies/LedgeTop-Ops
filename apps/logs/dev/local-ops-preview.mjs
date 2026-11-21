@@ -13,8 +13,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { Miniflare } from 'miniflare';
 import { openOdlBackup, buildImport, streamTelemetry } from '../src/odl/index.mjs';
+import { migratePreviewDatabase } from './preview-migrations.mjs';
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => { const at = args.indexOf(`--${name}`); return at >= 0 ? args[at + 1] : fallback; };
@@ -24,6 +26,8 @@ const BACKUP = option('odl-backup', null);
 const MAPBOX = option('mapbox-token', process.env.MAPBOX_TOKEN ?? null);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.resolve(here, '../../operations/dist/client');
+const requireOperations = createRequire(new URL('../../operations/package.json', import.meta.url));
+const { unstable_splitSqlQuery } = requireOperations('wrangler');
 const PILOTS = { beau: 'Beau', kollin: 'Kollin' };
 const importer = { staffId: 'beau', permissions: ['flight_logs.view', 'flight_logs.import'] };
 const viewer = { staffId: 'beau', permissions: ['flight_logs.view'] };
@@ -74,14 +78,17 @@ async function importBackup(file) {
   console.log(`\nImported: flights in ${flightSeconds} s, everything in ${Math.round((Date.now() - started) / 1000)} s.`, summary);
 }
 
-const state = await (await runtime.dispatchFetch('http://preview/state')).json();
-if (!state.migrated) {
-  const sql = fs.readFileSync(path.resolve(here, '../migrations/0001_flight_logs.sql'), 'utf8').replace(/--.*$/gm, '');
-  await runtime.dispatchFetch('http://preview/sql', { method: 'POST', body: JSON.stringify({ sql }) });
-}
-if (!state.completedImports) {
-  if (!BACKUP) { console.error('No completed import yet: pass --odl-backup <file>.'); process.exit(1); }
-  await importBackup(BACKUP);
+try {
+  const db = await runtime.getD1Database('LOGS_DB');
+  await migratePreviewDatabase(db, unstable_splitSqlQuery);
+  const completedImports = await db.prepare("SELECT COUNT(*) AS n FROM imports WHERE status = 'completed'").first('n');
+  if (!completedImports) {
+    if (!BACKUP) throw new Error('No completed import yet: pass --odl-backup <file>.');
+    await importBackup(BACKUP);
+  }
+} catch (error) {
+  await runtime.dispose();
+  throw error;
 }
 
 const named = item => ({ ...item, pilotName: PILOTS[item.pilotId] ?? null });

@@ -17,6 +17,7 @@ const call = async fn => {
 };
 
 export class FlightLogsService extends WorkerEntrypoint {
+  setBatteryReference(actor, input) { return call(() => service.setBatteryReference(this.env, actor, input ?? {})); }
   inventory(actor) { return call(() => service.inventory(this.env, actor)); }
   startImport(actor, input) { return call(() => service.startImport(this.env, actor, input ?? {})); }
   importFlights(actor, importId, batch) { return call(() => service.importFlights(this.env, actor, importId, batch ?? {})); }
