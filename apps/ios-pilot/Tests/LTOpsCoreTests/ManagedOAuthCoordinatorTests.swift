@@ -51,6 +51,19 @@ private final class BlockingRestartStore: SyntheticAccessStore, @unchecked Senda
     }
     func clear() throws { lock.lock(); defer { lock.unlock() }; record = nil }
 }
+private final class BlockingAccessStore: ManagedAccessOnlyStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var record: ManagedAccessOnlyRecord?
+    let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+    func load() throws -> ManagedAccessOnlyRecord? { lock.lock(); defer { lock.unlock() }; return record }
+    func save(_ value: ManagedAccessOnlyRecord) throws {
+        entered.signal()
+        release.wait()
+        lock.lock(); defer { lock.unlock() }; record = value
+    }
+    func clear() throws { lock.lock(); defer { lock.unlock() }; record = nil }
+    var hasRecord: Bool { lock.lock(); defer { lock.unlock() }; return record != nil }
+}
 private struct FakeExchange: ManagedOAuthExchanging {
     let gate: ExchangeGate?
     var failRevocation = false
@@ -77,6 +90,32 @@ private struct FakeExchange: ManagedOAuthExchanging {
     }
 }
 final class ManagedOAuthCoordinatorTests: XCTestCase {
+    func testInFlightSaveBlocksRestoreAfterSignOut() async throws {
+        let pins = try pins(), pilot = try coordinator(), store = BlockingAccessStore()
+        let session = MobilePilotSession(schemaVersion: 1, readOnly: true,
+            user: MobilePilotUser(id: "staff", displayName: "Pilot", email: "staff@example.test"),
+            expiresAt: Int(Date().addingTimeInterval(120).timeIntervalSince1970))
+        let restore = ManagedAccessOnlyRestore(pins: pins, store: store) { _ in session }
+        try await pilot.signIn()
+        let saving = Task { try await pilot.saveReadOnlySession(to: restore, serverSession: session) }
+        let started = await Task.detached { store.entered.wait(timeout: .now() + 5) == .success }.value
+        guard started else { store.release.signal(); XCTFail("Save did not start"); return }
+        _ = await pilot.signOut()
+        let finished = expectation(description: "restore refuses while save is still blocked")
+        let restoring = Task { () -> MobilePilotError? in
+            defer { finished.fulfill() }
+            do {
+                _ = try await pilot.restoreReadOnlySession(from: restore) { _ in true }
+                return nil
+            } catch { return error as? MobilePilotError }
+        }
+        await fulfillment(of: [finished], timeout: 2)
+        store.release.signal()
+        let result = await restoring.value
+        XCTAssertEqual(result, .unavailable)
+        do { try await saving.value; XCTFail("Sign-out must invalidate the delayed save") } catch {}
+        XCTAssertFalse(store.hasRecord)
+    }
     func testSyntheticRestartSaveStoresOnlyAccessAndRequiresSyntheticPins() async throws {
         let issuer = "https://ledgetoptechnologies.cloudflareaccess.com"
         let pins = try ManagedOAuthPins(resource: SyntheticRefreshExperiment.resource, issuer: issuer,
