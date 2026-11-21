@@ -898,17 +898,17 @@ function clearFolderUndo(){
   document.querySelector('#workspace-folder-undo')?.replaceChildren();
 }
 
-function offerFolderUndo(task,previousFolderId,undoExpiresAt){
+function offerFolderUndo(task,previousFolderId,undoExpiresAt,serverTime){
   clearFolderUndo();
   const target=document.querySelector('#workspace-folder-undo');
   const expiry=Date.parse(undoExpiresAt);
-  const remaining=Math.min(10_000,expiry-Date.now());
+  const remaining=Math.min(10_000,expiry-Date.parse(serverTime));
   if(!target||!Number.isFinite(remaining)||remaining<=0)return;
-  const undo={expiry,deadline:performance.now()+remaining};
+  const undo={deadline:performance.now()+remaining};
   const control=document.createElement('button');
   control.type='button';control.className='toast-action';control.textContent='Undo';
   control.onclick=()=>{
-    if(folderUndo!==undo||performance.now()>=undo.deadline||Date.now()>=undo.expiry||!canDragFolderTask(task)){clearFolderUndo();return;}
+    if(folderUndo!==undo||performance.now()>=undo.deadline||!canDragFolderTask(task)){clearFolderUndo();return;}
     if(state.busy)return;
     clearFolderUndo();
     void moveFolderTask(task,previousFolderId,{}, {undo:true});
@@ -924,7 +924,7 @@ async function moveFolderTask(task,folderId,receipt,{undo=false,originActive=()=
   const current=()=>authorized()&&originActive()&&state.tasks.some(value=>value.id===task.id&&value.projectId===task.projectId&&value.status!=='archived');
   const body={folderId,expectedFolderId:task.folderId??null,expectedFolderRevision:task.folderRevision,...(undo?{undo:true}:{})};
   const result=await mutateFolder(task.projectId,`/api/v1/tasks/${encodeURIComponent(task.id)}/folder`,folderRequestOptions('PATCH',body,receipt),
-    undo?'Task moved back':null,current,({task:updated,undoExpiresAt}={})=>{
+    undo?'Task moved back':null,current,({task:updated,undoExpiresAt,serverTime}={})=>{
       if(updated?.id!==task.id||updated.projectId!==task.projectId||updated.folderId!==folderId||updated.folderRevision!==task.folderRevision+1){
         throw Error('Task move could not be confirmed. Check the current folder.');
       }
@@ -933,7 +933,7 @@ async function moveFolderTask(task,folderId,receipt,{undo=false,originActive=()=
       syncSelectedTaskFolder(task.projectId);
       projectPaintPending=patchProjectFolderView();
       onSuccess?.();
-      if(!undo)offerFolderUndo(updated,body.expectedFolderId,undoExpiresAt);
+      if(!undo)offerFolderUndo(updated,body.expectedFolderId,undoExpiresAt,serverTime);
     },false);
   // Conflicts and lost responses also require a fresh server read.
   scheduleProjectRefresh(0);
