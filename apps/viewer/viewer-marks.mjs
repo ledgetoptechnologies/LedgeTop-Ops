@@ -37,7 +37,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const on = (target, type, handler) => target.addEventListener(type, handler, { signal: listeners.signal });
   let view = { map: false }, mode = 'idle', drawing = null, draft = null, selectedId = null, preview = null;
   let labels = readLabelsPreference(window), filter = '', armedDelete = null, categoryDraft = null;
-  let sessionScope = false, scopeKey;
+  let sessionScope = false, scopeKey, writtenCoords = null;
 
   const store = createMarksStore({ request, newId, onChange: () => render() });
   const layer = createMarkMapLayer({ L, getMap,
@@ -207,10 +207,15 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     writeCoords();
   }
 
+  // The editable field carries the stored precision (8 decimals), unlike the
+  // 6-decimal summaries, and remembers what it showed so unchanged text never
+  // rewrites the geometry.
+  const fixed8 = value => value.toFixed(8).replace(/\.?0+$/, '');
+  const editableCoords = (lat, lon) => `${fixed8(lat)}, ${fixed8(lon)}`;
   function writeCoords() {
     if (draft?.geometry.type !== 'Point') return;
     const [lon, lat] = draft.geometry.coordinates;
-    pointCoords.value = formatDecimal(lat, lon);
+    pointCoords.value = writtenCoords = editableCoords(lat, lon);
   }
 
   function readEditor() {
@@ -387,10 +392,11 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   // when the text is not a valid position, leaving the draft untouched.
   function applyPointCoordinates() {
     if (!draft || draft.geometry.type !== 'Point') return true;
+    if (pointCoords.value === writtenCoords) return true;
     const parsed = parseCoordinateInput(pointCoords.value, { georef: georef() });
     if (!parsed.ok) { message(parsed.error || 'Enter coordinates.'); return false; }
     draft.geometry = { type: 'Point', coordinates: [Math.round(parsed.longitude * 1e8) / 1e8, Math.round(parsed.latitude * 1e8) / 1e8] };
-    pointCoords.value = formatDecimal(parsed.latitude, parsed.longitude);
+    writeCoords();
     return true;
   }
 

@@ -204,7 +204,7 @@ test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeou
   assert.equal(await client.evaluate("document.getElementById('panel-marks').scrollWidth <= document.getElementById('panel-marks').clientWidth + 1"), true);
 }));
 
-test('signed-in client: map-click and typed pins survive a reload; coordinate edits are re-read at Save and Enter', { timeout: 90000 }, async t => {
+test('signed-in client: map-click and typed pins survive a reload at full precision; coordinate edits are re-read at Save and Enter', { timeout: 90000 }, async t => {
   const { app, database } = marksApi();
   t.after(() => database.close());
   const stored = () => database.prepare("SELECT id, visibility, revision, document_json FROM viewer_marks WHERE deleted_at IS NULL ORDER BY created_at, id").all()
@@ -223,8 +223,8 @@ test('signed-in client: map-click and typed pins survive a reload; coordinate ed
     await h.pressText('Save');
     await waitFor('marks.store.state.marks.length === 1', 'clicked pin saved');
 
-    // Decimal coordinates with a label the client chose.
-    await h.type('[name=coordinates]', '43.0503, -86.9997');
+    // Decimal coordinates (8 places) with a label the client chose.
+    await h.type('[name=coordinates]', '43.05031234, -86.99971234');
     await h.pressText('Place pin');
     await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'typed editor');
     await h.type('.viewer-mark-form [name=name]', 'Tree stand');
@@ -232,7 +232,7 @@ test('signed-in client: map-click and typed pins survive a reload; coordinate ed
     await waitFor('marks.store.state.marks.length === 2', 'typed pin saved');
     let rows = stored();
     assert.deepEqual(rows.map(row => [row.name, row.visibility]), [['Pin', 'private'], ['Tree stand', 'private']]);
-    assert.deepEqual(rows[1].geometry.coordinates, [-86.9997, 43.0503]);
+    assert.deepEqual(rows[1].geometry.coordinates, [-86.99971234, 43.05031234], 'typed 8-decimal input is kept exactly');
 
     // Reload: both come back from the server.
     await h.load('?mode=session');
@@ -240,29 +240,47 @@ test('signed-in client: map-click and typed pins survive a reload; coordinate ed
     assert.deepEqual((await h.state()).map(mark => mark.name), ['Pin', 'Tree stand']);
     const treeStand = rows[1];
 
+    const openTreeStand = async () => {
+      await h.client.evaluate(`[...document.querySelectorAll('.viewer-mark-list-item')].find(b => b.textContent.includes('Tree stand')).click(), 0`);
+      await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'edit open');
+    };
+
+    // Rename only: the geometry round-trips exactly (no 6-decimal rounding).
+    await openTreeStand();
+    assert.equal(await h.client.evaluate("document.querySelector('.viewer-mark-form [name=pointCoordinates]').value"), '43.05031234, -86.99971234');
+    await h.type('.viewer-mark-form [name=name]', 'Tree stand north');
+    await h.pressText('Save');
+    await waitFor("document.querySelector('.viewer-mark-form').hidden", 'rename saved');
+    rows = stored();
+    assert.equal(rows[1].name, 'Tree stand north');
+    assert.equal(rows[1].revision, 2);
+    assert.deepEqual(rows[1].geometry.coordinates, [-86.99971234, 43.05031234], 'label-only save keeps exact geometry');
+    await h.load('?mode=session');
+    await waitFor('marks.store.state.ready && marks.store.state.marks.length === 2', 'marks after second reload');
+    assert.deepEqual((await h.state())[1].geometry.coordinates, [-86.99971234, 43.05031234]);
+
     // Invalid text, Save without a change event: nothing is written and the editor stays open.
-    await h.client.evaluate(`[...document.querySelectorAll('.viewer-mark-list-item')].find(b => b.textContent.includes('Tree stand')).click(), 0`);
-    await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'edit open');
+    await openTreeStand();
     await h.setQuietly('.viewer-mark-form [name=pointCoordinates]', 'not a place');
     await h.pressText('Save');
     await delay(200);
     assert.equal(await h.editorOpen(), true);
     assert.match(await h.status(), /latitude|letter|numbers/i);
-    assert.equal(stored()[1].revision, 1, 'Save wrote nothing');
+    assert.equal(stored()[1].revision, 2, 'Save wrote nothing');
     // Same with Enter (implicit form submission).
     await h.client.evaluate("document.querySelector('.viewer-mark-form').requestSubmit(), 0");
     await delay(200);
     assert.equal(await h.editorOpen(), true);
-    assert.equal(stored()[1].revision, 1, 'Enter wrote nothing');
+    assert.equal(stored()[1].revision, 2, 'Enter wrote nothing');
 
     // Valid new text, Enter without a change event: the typed position is saved, not the old one.
-    await h.setQuietly('.viewer-mark-form [name=pointCoordinates]', '43.0504, -86.9996');
+    await h.setQuietly('.viewer-mark-form [name=pointCoordinates]', '43.05041234, -86.99961234');
     await h.client.evaluate("document.querySelector('.viewer-mark-form').requestSubmit(), 0");
     await waitFor("document.querySelector('.viewer-mark-form').hidden", 'editor closed after save');
     rows = stored();
     assert.equal(rows[1].id, treeStand.id);
-    assert.equal(rows[1].revision, 2);
-    assert.deepEqual(rows[1].geometry.coordinates, [-86.9996, 43.0504]);
+    assert.equal(rows[1].revision, 3);
+    assert.deepEqual(rows[1].geometry.coordinates, [-86.99961234, 43.05041234]);
     assert.equal(rows[1].visibility, 'private');
   });
 });
