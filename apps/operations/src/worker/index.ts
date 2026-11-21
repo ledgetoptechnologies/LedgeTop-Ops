@@ -134,6 +134,7 @@ import {
   registerR2CrudRoutes,
 } from "./r2-crud";
 import { requiresAdministratorForMutation } from "./r2-crud-validation";
+import { anyGlobalAdministratorRoleSql, legacyStaffActorSql, legacyStaffAnotherAdministratorSql, legacyStaffPreCutoverSql, legacyStaffReactivationAllowedSql, nativeLifecycleSql, nativeReservedEmailSql } from "./legacy-staff-sql";
 import { cleanupProjectMemoryAttachmentUploads } from "./project-memory-attachments";
 import { listAdminAuditEvents } from "./admin-audit";
 import { registerClientFeedbackRoutes, staffFeedbackEntryEnabled } from "./client-feedback";
@@ -3310,7 +3311,7 @@ app.get("/api/team/staff", async (c) => {
     const divisions = scope.divisions.filter(
       (id) => !scope.deniedDivisions.includes(id),
     );
-    if (!divisions.length) return c.json({ staff: [] });
+    if (!divisions.length) return c.json({ staff: [], can_manage_staff: false });
     conditions.push(
       `EXISTS (SELECT 1 FROM staff_divisions visible_staff_division WHERE visible_staff_division.staff_id=s.id AND visible_staff_division.division_id IN (${placeholders(divisions)}))`,
     );
@@ -3326,8 +3327,12 @@ app.get("/api/team/staff", async (c) => {
   // Same gate as PUT /api/admin/staff/:id/access-controls (administrator + global roles.manage).
   const rolesManageScope = administrator ? await sqlScope(c.env, principal, "roles.manage") : null;
   const canManageAccess = Boolean(rolesManageScope?.global && !rolesManageScope.deniedGlobal);
+  // Same gate as POST/PATCH /api/admin/staff: also false once the native cutover switch is on.
+  const canManageStaff = canManageAccess && await legacyStaffPreCutover(c.env.OPS_DB.withSession("first-primary"));
+  const viewerIsOwner = canManageStaff && await legacyStaffActorIsOwner(c.env.OPS_DB.withSession("first-primary"), principal.id);
   const result = await c.env.OPS_DB.prepare(
-    `SELECT s.id,s.email,s.display_name,s.status,s.last_seen_at,s.provisioning_source,s.sync_protected,
+    `SELECT s.id,s.email,s.display_name,s.status,s.last_seen_at,s.updated_at,s.provisioning_source,s.sync_protected,
+      ${nativeLifecycleSql("s")} native_lifecycle, ${anyGlobalAdministratorRoleSql("s")} administrator_role,
       (EXISTS(SELECT 1 FROM staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
         AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global')
        OR EXISTS(SELECT 1 FROM local_staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
@@ -3338,12 +3343,22 @@ app.get("/api/team/staff", async (c) => {
     .all<any>();
   return c.json({
     staff: result.results.map((row) => {
-      const { inherited_permissions, direct_allows, global_denies, owner_role, ...roster } =
+      const { inherited_permissions, direct_allows, global_denies, owner_role, native_lifecycle, administrator_role, ...roster } =
         row;
       return administrator
         ? {
             ...roster,
             owner_role: Boolean(owner_role),
+            // Same decision as PATCH /api/admin/staff/:id (create uses can_manage_staff).
+            profile_editable:
+              canManageStaff &&
+              legacyStaffProfileDecision(
+                { id: row.id, status: row.status, sync_protected: Number(row.sync_protected),
+                  any_owner_role: Number(owner_role), native_lifecycle: Number(native_lifecycle) },
+                principal.id,
+              ) === "ok",
+            // Same rule as the PATCH reactivation check: an inactive administrator needs an owner to reactivate.
+            reactivate_requires_owner: row.status === "inactive" && Boolean(administrator_role) && !viewerIsOwner,
             access_controls_editable:
               canManageAccess &&
               staffAccessControlsDecision(
@@ -3357,8 +3372,9 @@ app.get("/api/team/staff", async (c) => {
               globalDenies: global_denies,
             }),
           }
-        : roster;
+        : (({ updated_at: _updatedAt, ...visible }) => visible)(roster);
     }),
+    can_manage_staff: canManageStaff,
   });
 });
 
@@ -3453,8 +3469,244 @@ app.put("/api/admin/staff/:id/access-controls", async (c) => {
   }
   return c.json({ success: true, controls: value });
 });
-app.post("/api/admin/staff", () => { throw new HTTPException(405, { message: "Staff are managed in Operations. Complete staff setup before adding people." }); });
-app.patch("/api/admin/staff/:id", () => { throw new HTTPException(405, { message: "Staff are managed in Operations. Use staff profile and access management." }); });
+// Legacy staff create + name/status edit (pre-cutover staff system). Same gate as the
+// access-controls PUT: administrator (middleware) + global roles.manage with deny precedence,
+// rechecked for the actor inside the write batch. Both routes refuse once the native cutover
+// switch is on. Profile edits also refuse every row that belongs to the native lifecycle
+// (admission, profile or native onboarding provenance); those change only through native routes.
+function legacyStaffProfileDecision(
+  target: { id: string; status: string; sync_protected: number; any_owner_role: number; native_lifecycle: number },
+  principalId: string,
+): "ok" | "missing" | "self" | "protected" | "native" {
+  const base = staffAccessControlsDecision(target, principalId);
+  if (base !== "ok") return base;
+  return target.native_lifecycle ? "native" : "ok";
+}
+// Binds: target id, principal id, fixed owner id.
+const legacyStaffProfileEditableSql = `EXISTS(SELECT 1 FROM staff_users staff WHERE staff.id=?
+  AND staff.status IN ('active','inactive') AND staff.id<>? AND staff.id<>?
+  AND NOT ${globalOwnerSql("staff")}
+  AND coalesce(staff.sync_protected,0)=0
+  AND NOT ${nativeLifecycleSql("staff")})`;
+const LEGACY_STAFF_COMMAND_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+// ASCII only, one @, no spaces, at least one dot in the domain.
+const LEGACY_STAFF_EMAIL = /^[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}$/u;
+const legacyStaffDisplayName = z.string().trim().min(1, "Name is required").max(200, "Name is too long")
+  .refine((value) => !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value), "Name contains invalid characters");
+const legacyStaffCreateSchema = z.object({
+  commandId: z.string().regex(LEGACY_STAFF_COMMAND_ID, "commandId must be a lower-case UUID v4"),
+  displayName: legacyStaffDisplayName,
+  email: z.string().max(254, "Email is too long").transform((value) => value.trim().toLowerCase())
+    .refine((value) => value.length >= 6 && value.length <= 254 && LEGACY_STAFF_EMAIL.test(value), "A valid email is required"),
+}).strict();
+const legacyStaffEditSchema = z.object({
+  expectedUpdatedAt: z.string().min(1).max(64),
+  displayName: legacyStaffDisplayName.optional(),
+  status: z.enum(["active", "inactive"]).optional(),
+}).strict().refine((value) => value.displayName !== undefined || value.status !== undefined, "Nothing to change");
+const LEGACY_STAFF_FORBIDDEN_KEYS = ["email", "role", "roles", "roleId", "role_id", "roleIds", "owner", "accessSubject", "syncProtected"];
+function parseLegacyStaffBody<T>(value: unknown, schema: z.ZodType<T>): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success)
+    throw new HTTPException(400, { message: parsed.error.issues.map((issue) => issue.message).join("; ") });
+  return parsed.data;
+}
+async function legacyStaffJson(c: any): Promise<unknown> {
+  return c.req.json().catch(() => {
+    throw new HTTPException(400, { message: "Request body must be JSON" });
+  });
+}
+type LegacyStaffRow = { id: string; email: string; display_name: string; status: string; updated_at: string };
+const legacyStaffDto = (row: LegacyStaffRow) => ({ id: row.id, email: row.email, display_name: row.display_name,
+  status: row.status, updated_at: row.updated_at });
+class LegacyStaffCutoverActive extends Error {}
+// Owner decision: reactivating a row that holds a global admin/owner role needs a global owner actor.
+class LegacyStaffOwnerRequired extends Error {}
+const legacyStaffOwnerRequiredResponse = (c: any) => c.json({ error: "Only an owner can reactivate an administrator",
+  code: "owner_required_to_reactivate_admin" }, 409);
+async function legacyStaffActorIsOwner(db: D1DatabaseSession, principalId: string): Promise<boolean> {
+  return (await db.prepare(`SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id='role-owner' AND scope='global' LIMIT 1`)
+    .bind(principalId).first("ok")) === 1;
+}
+// A pre-0225 schema (no control table) is pre-cutover, as in auth.ts; any value other than 0 is cutover.
+async function legacyStaffControlTable(db: D1DatabaseSession): Promise<boolean> {
+  let enabled: unknown;
+  try { enabled = await db.prepare("SELECT enabled FROM native_staff_access_reconciliation WHERE singleton=1").first("enabled"); }
+  catch (error) {
+    if (error instanceof Error && error.message.includes("no such table: native_staff_access_reconciliation")) return false;
+    throw error;
+  }
+  if (enabled !== 0) throw new LegacyStaffCutoverActive();
+  return true;
+}
+async function legacyStaffPreCutover(db: D1DatabaseSession): Promise<boolean> {
+  try { await legacyStaffControlTable(db); return true; }
+  catch (error) { if (error instanceof LegacyStaffCutoverActive) return false; throw error; }
+}
+const legacyStaffCutoverResponse = (c: any) => c.json({ error: "Staff are managed by employee management in this environment",
+  code: "native_cutover_active" }, 409);
+// Binds: actor id (the cutover clause has no binds).
+const legacyStaffAuthoritySql = (controlTablePresent: boolean) => `${legacyStaffActorSql} AND ${legacyStaffPreCutoverSql(controlTablePresent)}`;
+// After a failed batch: classify a cutover or a lost actor authority before anything else.
+async function legacyStaffAuthorityFailure(db: D1DatabaseSession, principalId: string): Promise<void> {
+  await legacyStaffControlTable(db);
+  const actor = await db.prepare(`SELECT ${legacyStaffActorSql} ok`).bind(principalId).first("ok");
+  if (actor !== 1) throw new HTTPException(403, { message: "Global roles.manage permission required" });
+}
+
+app.post("/api/admin/staff", async (c) => {
+  const principal = c.get("principal");
+  await requireGlobal(c.env, principal, "roles.manage");
+  const value = parseLegacyStaffBody(await legacyStaffJson(c), legacyStaffCreateSchema);
+  const id = `staff-local-${value.commandId}`;
+  const db = c.env.OPS_DB.withSession("first-primary");
+  // A retried command returns its original result; any other use of the same id is a conflict.
+  const replay = async () => {
+    const row = await db.prepare("SELECT id,email,display_name,status,updated_at FROM staff_users WHERE id=?")
+      .bind(id).first<LegacyStaffRow>();
+    if (!row) return null;
+    const original = await db.prepare(`SELECT 1 ok FROM audit_events WHERE action='staff.created' AND entity_type='staff'
+      AND entity_id=? AND actor_id=? AND json_extract(details_json,'$.commandId')=? AND json_extract(details_json,'$.email')=?
+      AND json_extract(details_json,'$.displayName')=? LIMIT 1`)
+      .bind(id, principal.id, value.commandId, value.email, value.displayName).first("ok");
+    if (original !== 1 || row.email !== value.email)
+      throw new HTTPException(409, { message: "This command was already used for a different request" });
+    return c.json({ success: true, replayed: true, staff: legacyStaffDto(row) }, 200);
+  };
+  const conflict = async () => {
+    const existing = await db.prepare(`SELECT
+        EXISTS(SELECT 1 FROM staff_users WHERE email=? COLLATE NOCASE) staff,
+        EXISTS(SELECT 1 FROM staff_login_bindings WHERE status='active' AND login_email=? COLLATE NOCASE) alias,
+        ${nativeReservedEmailSql} native`)
+      .bind(value.email, value.email, value.email, value.email).first<{ staff: number; alias: number; native: number }>();
+    if (existing?.staff) throw new HTTPException(409, { message: "A staff member with this email already exists" });
+    if (existing?.alias) throw new HTTPException(409, { message: "This email is already a sign-in email for another staff member" });
+    if (existing?.native) throw new HTTPException(409, { message: "This email is reserved by employee onboarding" });
+  };
+  try {
+    const controlTable = await legacyStaffControlTable(db);
+    const replayed = await replay();
+    if (replayed) return replayed;
+    await conflict();
+    try {
+      await c.env.OPS_DB.batch([
+        c.env.OPS_DB.prepare(`SELECT CASE WHEN ${legacyStaffAuthoritySql(controlTable)} AND NOT ${nativeReservedEmailSql}
+          THEN 1 ELSE json('') END guard`).bind(principal.id, value.email, value.email),
+        c.env.OPS_DB.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,project_alpha_user_id,status,
+          provisioning_source,sync_protected,updated_at) VALUES(?,?,?,NULL,NULL,'active','local',0,strftime('%Y-%m-%d %H:%M:%f','now'))`)
+          .bind(id, value.email, value.displayName),
+        await auditStatement(c.env, c.req.raw, principal, "staff.created", "staff", id, null,
+          { commandId: value.commandId, email: value.email, displayName: value.displayName, status: "active" }),
+      ]);
+    } catch (error) {
+      await legacyStaffAuthorityFailure(db, principal.id);
+      const again = await replay();
+      if (again) return again;
+      await conflict();
+      if (error instanceof Error && error.message.includes("staff_login_identity_collision"))
+        throw new HTTPException(409, { message: "This email is already a sign-in email for another staff member" });
+      throw error;
+    }
+  } catch (error) {
+    if (error instanceof LegacyStaffCutoverActive) return legacyStaffCutoverResponse(c);
+    throw error;
+  }
+  const created = await db.prepare("SELECT id,email,display_name,status,updated_at FROM staff_users WHERE id=?")
+    .bind(id).first<LegacyStaffRow>();
+  return c.json({ success: true, replayed: false, staff: legacyStaffDto(created!) }, 201);
+});
+
+app.patch("/api/admin/staff/:id", async (c) => {
+  const principal = c.get("principal");
+  await requireGlobal(c.env, principal, "roles.manage");
+  const raw = await legacyStaffJson(c);
+  if (raw && typeof raw === "object" && !Array.isArray(raw)
+    && LEGACY_STAFF_FORBIDDEN_KEYS.some((key) => Object.hasOwn(raw, key)))
+    throw new HTTPException(400, { message: "Only the name and status can be changed here" });
+  const value = parseLegacyStaffBody(raw, legacyStaffEditSchema);
+  try {
+    return await legacyStaffEdit(c, c.env.OPS_DB.withSession("first-primary"), principal, value);
+  } catch (error) {
+    if (error instanceof LegacyStaffCutoverActive) return legacyStaffCutoverResponse(c);
+    if (error instanceof LegacyStaffOwnerRequired) return legacyStaffOwnerRequiredResponse(c);
+    throw error;
+  }
+});
+async function legacyStaffEdit(c: any, db: D1DatabaseSession, principal: StaffPrincipal,
+  value: z.infer<typeof legacyStaffEditSchema>) {
+  const controlTable = await legacyStaffControlTable(db);
+  const readTarget = () => db.prepare(
+    `SELECT staff.id,staff.email,staff.display_name,staff.status,staff.updated_at,staff.sync_protected,
+      ${globalOwnerSql("staff")} any_owner_role, ${nativeLifecycleSql("staff")} native_lifecycle
+      FROM staff_users staff WHERE staff.id=?`,
+  ).bind(c.req.param("id")).first<LegacyStaffRow & { sync_protected: number; any_owner_role: number; native_lifecycle: number }>();
+  const target = await readTarget();
+  const refuse = (decision: ReturnType<typeof legacyStaffProfileDecision>) => {
+    if (decision === "missing") throw new HTTPException(404, { message: "Staff member not found" });
+    if (decision === "self") throw new HTTPException(409, { message: "Administrators cannot change their own profile here" });
+    if (decision === "protected") throw new HTTPException(409, { message: "Protected staff profiles cannot be changed" });
+    if (decision === "native") throw new HTTPException(409, { message: "This staff member is managed by employee management" });
+  };
+  if (!target) throw new HTTPException(404, { message: "Staff member not found" });
+  refuse(legacyStaffProfileDecision(target, principal.id));
+  const displayName = value.displayName ?? target.display_name, status = value.status ?? target.status;
+  // An exact repeat of an applied edit is harmless: it reports the current row and writes nothing.
+  if (displayName === target.display_name && status === target.status)
+    return c.json({ success: true, unchanged: true, staff: legacyStaffDto(target) });
+  const stale = () => new HTTPException(409, { message: "This staff member changed since it was loaded. Reload and try again." });
+  if (target.updated_at !== value.expectedUpdatedAt) throw stale();
+  const deactivating = status === "inactive" && target.status === "active";
+  const reactivating = status === "active" && target.status === "inactive";
+  const lastAdministrator = async () => deactivating && (await db.prepare(`SELECT ${legacyStaffAnotherAdministratorSql} ok`)
+    .bind(target.id, target.id).first("ok")) !== 1;
+  const lastAdministratorError = () => new HTTPException(409, { message: "The last active administrator cannot be deactivated" });
+  if (await lastAdministrator()) throw lastAdministratorError();
+  const reactivationRefused = async () => reactivating && (await db.prepare(`SELECT ${legacyStaffReactivationAllowedSql} ok`)
+    .bind(target.id, principal.id).first("ok")) !== 1;
+  if (await reactivationRefused()) throw new LegacyStaffOwnerRequired();
+  const statements = [
+    // Atomic guard: json('') raises and rolls back the batch when the actor lost authority, the
+    // cutover switch turned on, the row became protected/native, the version changed, or
+    // deactivation would leave no administrator.
+    c.env.OPS_DB.prepare(`SELECT CASE WHEN ${legacyStaffAuthoritySql(controlTable)} AND ${legacyStaffProfileEditableSql}
+        AND EXISTS(SELECT 1 FROM staff_users versioned WHERE versioned.id=? AND versioned.updated_at=?)
+        AND (? = 0 OR ${legacyStaffAnotherAdministratorSql})
+        AND (? = 0 OR ${legacyStaffReactivationAllowedSql})
+      THEN 1 ELSE json('') END guard`)
+      .bind(principal.id, target.id, principal.id, FIXED_PROTECTED_OWNER_ID, target.id, value.expectedUpdatedAt,
+        deactivating ? 1 : 0, target.id, target.id, reactivating ? 1 : 0, target.id, principal.id),
+    c.env.OPS_DB.prepare(`UPDATE staff_users SET display_name=?,status=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
+      WHERE id=? AND updated_at=?`).bind(displayName, status, target.id, value.expectedUpdatedAt),
+  ] as ReturnType<Env["OPS_DB"]["prepare"]>[];
+  if (displayName !== target.display_name)
+    statements.push(await auditStatement(c.env, c.req.raw, principal, "staff.profile.updated", "staff", target.id, null,
+      { email: target.email, from: { displayName: target.display_name }, to: { displayName } }));
+  if (status !== target.status)
+    statements.push(await auditStatement(c.env, c.req.raw, principal, "staff.status.changed", "staff", target.id, null,
+      { email: target.email, from: { status: target.status }, to: { status } }));
+  try {
+    await c.env.OPS_DB.batch(statements);
+  } catch (error) {
+    await legacyStaffAuthorityFailure(db, principal.id);
+    const current = await readTarget();
+    if (!current) throw new HTTPException(404, { message: "Staff member not found" });
+    refuse(legacyStaffProfileDecision(current, principal.id));
+    if (current.updated_at !== value.expectedUpdatedAt) throw stale();
+    if (await lastAdministrator()) throw lastAdministratorError();
+    if (await reactivationRefused()) throw new LegacyStaffOwnerRequired();
+    if (error instanceof Error && error.message.includes("staff_login_identity_collision"))
+      throw new HTTPException(409, { message: "This staff member's email or sign-in is also an active alternate sign-in" });
+    throw error;
+  }
+  const updated = await readTarget();
+  // Reactivation restores everything the row kept (roles, overrides, alternate sign-ins); report it.
+  const retained = reactivating ? await db.prepare(`SELECT
+      (SELECT count(*) FROM staff_role_assignments WHERE staff_id=?) + (SELECT count(*) FROM local_staff_role_assignments WHERE staff_id=?) roles,
+      (SELECT count(*) FROM staff_permission_overrides WHERE staff_id=?) overrides,
+      (SELECT count(*) FROM staff_login_bindings WHERE staff_id=? AND status='active') alternateLogins`)
+    .bind(target.id, target.id, target.id, target.id).first<{ roles: number; overrides: number; alternateLogins: number }>() : null;
+  return c.json({ success: true, unchanged: false, staff: legacyStaffDto(updated!), ...(retained ? { retained } : {}) });
+}
 app.get("/api/admin/roles", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "roles.manage");
   const [roles, permissions] = await Promise.all([
