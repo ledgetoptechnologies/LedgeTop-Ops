@@ -191,8 +191,9 @@ function indexedFileMetadata(file) {
 
 // Control characters (C0, DEL, C1), zero-width, line/paragraph separators and bidi controls are refused in new folder names; stored names are not rewritten.
 const UNSAFE_FOLDER_NAME=/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
-// Each move appends an audit event in the same write transaction, including from older clients.
+// Each audited move advances the revision inside the same write transaction.
 const FOLDER_MOVE_REVISION = "(SELECT COUNT(*) FROM audit_events WHERE entity_type='processing_task' AND entity_id=processing_tasks.id AND action='processing_task.folder_changed')";
+const FOLDER_UNDO_WINDOW_MS = 10_000;
 
 class ProcessingRepository {
   constructor(database, { logMaxBytes = 10 * 1024 * 1024 } = {}) {
@@ -481,6 +482,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     this.insertAudit({actorId,action:'project_folder.deleted',entityType:'project_folder',entityId:folderId,details:{projectId}});
     return true;
   }); }
+  // The HTTP handler always requires a guard. Direct fixture setup can use the repository alone.
   moveTaskToFolder(taskId,folderId,actorId,guard=null) { return this.transaction(()=>{
     const task=this.getTask(taskId);if(!task)return null;const project=this.getProject(task.projectId);
     if(!project||project.status!=='active'||task.status==='archived')throw Object.assign(new Error('task is unavailable'),{code:'task_unavailable'});
@@ -492,15 +494,18 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const previous=this.database.prepare("SELECT actor_id,created_at,details_json FROM audit_events WHERE entity_type='processing_task' AND entity_id=? AND action='processing_task.folder_changed' ORDER BY rowid DESC LIMIT 1").get(taskId);
       const details=json(previous?.details_json);
       if(!previous||previous.actor_id!==actorId||details?.undo||details?.previousFolderId!==folderId||
-          details?.folderId!==task.folderId||!(Date.parse(timestamp)<Date.parse(previous.created_at)+10_000)){
+          details?.folderId!==task.folderId||!(Date.parse(timestamp)<Date.parse(previous.created_at)+FOLDER_UNDO_WINDOW_MS)){
         throw Object.assign(new Error('This move can no longer be undone.'),{code:'folder_undo_conflict'});
       }
     }
     if(folderId!==null&&(typeof folderId!=='string'||!this.database.prepare('SELECT 1 FROM project_folders WHERE id=? AND project_id=?').get(folderId,task.projectId)))throw Object.assign(new Error('folder is unavailable'),{code:'invalid_folder'});
     if(guard&&folderId===task.folderId)return task;
     this.database.prepare('UPDATE processing_tasks SET folder_id=?,updated_at=? WHERE id=?').run(folderId,timestamp,taskId);
-    this.insertAudit({actorId,action:'processing_task.folder_changed',entityType:'processing_task',entityId:taskId,details:{projectId:task.projectId,folderId,previousFolderId:task.folderId,undo:guard?.undo===true}});
-    return this.getTask(taskId);
+    const auditId=this.insertAudit({actorId,action:'processing_task.folder_changed',entityType:'processing_task',entityId:taskId,details:{projectId:task.projectId,folderId,previousFolderId:task.folderId,undo:guard?.undo===true}});
+    const updated=this.getTask(taskId);
+    if(!guard||guard.undo)return updated;
+    const audit=this.database.prepare('SELECT created_at FROM audit_events WHERE id=?').get(auditId);
+    return {...updated,undoExpiresAt:new Date(Date.parse(audit.created_at)+FOLDER_UNDO_WINDOW_MS).toISOString()};
   }); }
   task(row) { return row && { id:row.id,projectId:row.project_id,folderId:row.folder_id??null,...(row.folder_revision===undefined?{}:{folderRevision:row.folder_revision}),datasetId:row.dataset_id,displayName:row.display_name,description:row.description,status:row.status,activeAttemptId:row.active_attempt_id,publishedModelId:row.published_model_id,metadata:json(row.metadata_json),createdBy:row.created_by,createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,purgedAt:row.purged_at }; }
   createTask(input) { const project=this.getProject(input.projectId),dataset=this.getDataset(input.datasetId);if(!project||project.status!=='active'||!dataset||dataset.status!=='finalized'||dataset.projectId!==project.id)throw Object.assign(new Error('task project and finalized dataset must match'),{code:'invalid_project_or_dataset'});const id=input.id||crypto.randomUUID(),t=now();this.database.prepare(`INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,description,status,metadata_json,created_by,created_at,updated_at) VALUES (?,?,?,?,?,'draft',?,?,?,?)`).run(id,input.projectId,input.datasetId,bounded(input.displayName),bounded(input.description,4000)||null,JSON.stringify(input.metadata||{}),input.createdBy||null,t,t);return this.getTask(id); }

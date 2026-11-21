@@ -147,3 +147,34 @@ test('an externally removed selected task waits for an active editor and then cl
   assert.equal(context.state.expandedTaskId,null);assert.equal(context.state.taskPage,null);
   assert.equal(rewrites,1);assert.equal(renders,1);
 });
+
+test('Undo appears after a slow successful response and uses its server expiry', async () => {
+  const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
+  const start=source.indexOf('function clearFolderUndo('),end=source.indexOf('\nfunction clearTaskDrag(',start);
+  const task={id:'one',projectId:'p',folderId:null,folderRevision:0};
+  const target={children:[],replaceChildren(...items){this.children=items;}};
+  let wall=Date.parse('2026-11-20T22:00:00.000Z'),monotonic=0,reply,delay;
+  const context={
+    state:{tasks:[task]},folderUndo:null,folderUndoTimer:null,projectDataGeneration:0,
+    canDragFolderTask:()=>true,folderAuthorizationGuard:()=>()=>true,
+    folderRequestOptions:(_method,body)=>body,Date:{parse:Date.parse,now:()=>wall},performance:{now:()=>monotonic},
+    clearTimeout:()=>{},setTimeout:(_callback,ms)=>{delay=ms;return 1;},
+    document:{querySelector:()=>target,createElement:()=>({}),createTextNode:text=>text},
+    mutateFolder:async (_project,_url,_body,_message,_guard,accept)=>{
+      const result=await new Promise(resolve=>{reply=resolve;});
+      accept(result);return result;
+    },
+    scheduleProjectRefresh:()=>{},patchProjectFolderView:()=>false,syncSelectedTaskFolder:()=>{},
+  };
+  vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+  const pending=context.moveFolderTask(task,'folder',{});
+  wall+=15_000;monotonic+=15_000;
+  assert.deepEqual(target.children,[]);assert.equal(delay,undefined);
+  const moved={...task,folderId:'folder',folderRevision:1};
+  const undoExpiresAt=new Date(wall+10_000).toISOString();
+  reply({task:moved,undoExpiresAt});await pending;
+  assert.equal(target.children[1].textContent,'Undo');assert.equal(delay,10_000);
+  wall+=10_001;monotonic+=10_001;
+  context.offerFolderUndo(moved,null,undoExpiresAt);
+  assert.deepEqual(target.children,[],'an expired server result cannot advertise a new window');
+});
