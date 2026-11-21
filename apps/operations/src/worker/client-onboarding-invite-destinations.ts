@@ -11,7 +11,7 @@ function destinationId(value: unknown): value is DestinationId {
 }
 
 /** Invalid configuration fails closed for the two-destination flow. */
-function bindingsFromConfig(config: string | undefined): readonly Binding[] {
+export function parseInviteDestinationBindings(config: string | undefined): readonly Binding[] {
   if (!config || config.length > 2048) return [];
   let value: unknown;
   try { value = JSON.parse(config); } catch { return []; }
@@ -32,7 +32,7 @@ function bindingsFromConfig(config: string | undefined): readonly Binding[] {
 }
 
 export function allowedInviteDestinationBindings(config: string | undefined, authorized: ClientOnboardingScopeChoices): readonly Binding[] {
-  return bindingsFromConfig(config).filter(binding => authorized.scopes.some(area => area.businessAreaId === binding.businessAreaId
+  return parseInviteDestinationBindings(config).filter(binding => authorized.scopes.some(area => area.businessAreaId === binding.businessAreaId
     && area.divisions.some(division => division.divisionId === binding.divisionId)));
 }
 
@@ -52,7 +52,7 @@ export function inviteDestinationsStillBound(config: string | undefined, authori
 
 export function parseInviteDestinationIntent(value: unknown, scopes: readonly { businessAreaId: string; divisionId: string | null }[] | null): readonly Binding[] | null {
   if (!Array.isArray(value) || !scopes) return null;
-  const bindings = bindingsFromConfig(JSON.stringify(value));
+  const bindings = parseInviteDestinationBindings(JSON.stringify(value));
   return bindings.length > 0 && bindings.length === scopes.length && bindings.every(binding => scopes.some(scope =>
     binding.businessAreaId === scope.businessAreaId && binding.divisionId === scope.divisionId)) ? bindings : null;
 }
