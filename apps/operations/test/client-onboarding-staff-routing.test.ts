@@ -41,6 +41,11 @@ vi.mock("../src/worker/client-onboarding-shared-company-plan",async original=>({
   ...await original<typeof import("../src/worker/client-onboarding-shared-company-plan")>(),
   prepareClientOnboardingSharedCompanyPlan:calls.sharedPlan,readClientOnboardingSharedCompanyChoices:calls.sharedChoices,
 }));
+const targetSchema = vi.hoisted(() => vi.fn());
+vi.mock("../src/worker/client-onboarding-target-schema", async original => ({
+  ...await original<typeof import("../src/worker/client-onboarding-target-schema")>(),
+  targetIssuanceSchemaFence: targetSchema,
+}));
 import worker from "../src/worker/index";
 import { clientOnboardingStaffHttpRequest } from "../src/worker/client-onboarding-staff-http";
 
@@ -99,7 +104,7 @@ it("reports only configured destination bindings that survive the native authori
   expect(calls.issue).not.toHaveBeenCalled();
 });
 
-it("reports target-capable destinations only with both flags, a full connection identity, and exact division access", async () => {
+it("reports target-capable destinations only with both flags, a full connection identity, exact division access, and a reviewed schema", async () => {
   const primary = "project-alpha:primary", secondary = "project-alpha:secondary";
   const bindings = [
     { sourceId: primary, businessAreaId: "area:d", divisionId: "division:d" },
@@ -133,7 +138,16 @@ it("reports target-capable destinations only with both flags, a full connection 
     return response.json();
   };
   const ordinary = { scopes, destinationSourceIds: [secondary] };
-  expect(await read()).toEqual({ ...ordinary, targetDestinationSourceIds: [secondary] });
+  const primarySession = {};
+  const withSession = vi.fn(() => primarySession);
+  const opsDb = { ...database, withSession } as unknown as D1Database;
+  targetSchema.mockRejectedValueOnce(new Error("client_onboarding_target_schema_unavailable"));
+  expect(await read({ OPS_DB: opsDb })).toEqual(ordinary);
+  targetSchema.mockResolvedValueOnce(undefined);
+  expect(await read({ OPS_DB: opsDb })).toEqual({ ...ordinary, targetDestinationSourceIds: [secondary] });
+  expect(withSession.mock.calls).toEqual([["first-primary"], ["first-primary"]]);
+  expect(targetSchema.mock.calls).toEqual([[primarySession], [primarySession]]);
+  targetSchema.mockClear();
   expect(await read({ CLIENT_ONBOARDING_INVITE_TARGET_CHOICES_ENABLED: undefined })).toEqual(ordinary);
   expect(await read({ CLIENT_ONBOARDING_INVITE_TARGET_ISSUANCE_ENABLED: "TRUE" })).toEqual(ordinary);
   expect(await read({ PROJECT_ALPHA_API_V2_CONNECTIONS: undefined })).toEqual(ordinary);
@@ -141,6 +155,7 @@ it("reports target-capable destinations only with both flags, a full connection 
     [secondary]: { ...secondaryConnection, enabled: false } }) })).toEqual(ordinary);
   expect(await read({ PROJECT_ALPHA_API_V2_CONNECTIONS: config({ [primary]: primaryConnection,
     [secondary]: { ...secondaryConnection, historyEpoch: undefined } }) })).toEqual(ordinary);
+  expect(targetSchema).not.toHaveBeenCalled();
   expect(calls.issue).not.toHaveBeenCalled();
 });
 

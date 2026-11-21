@@ -12,7 +12,7 @@ import { authenticateNativeStaffWithAdmissionVersion,
 import { assertInviteMailKeyringsDisjoint, issueClientOnboardingWithHandoff, issueClientOnboardingMailWithHandoff, revealClientOnboardingSecret,
   snapshotClientOnboardingKeyring, type ClientOnboardingKeyring } from "./client-onboarding-handoff";
 import { normalizeInviteDeliveryAddress, snapshotInviteMailKeyring } from "./client-onboarding-invite-mail-crypto";
-import { mailIssuanceSchemaFence } from "./client-onboarding-target-schema";
+import { mailIssuanceSchemaFence, targetIssuanceSchemaFence } from "./client-onboarding-target-schema";
 import { readClientOnboardingSubmissionForReview, listClientOnboardingSubmissionsForReview } from "./client-onboarding-review";
 import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approval";
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
@@ -368,9 +368,13 @@ export async function handleClientOnboardingStaffHttp(request: Request,
           && dependencies.inviteTargetIssuanceEnabled === "true") {
           try {
             const configured = listEnabledProjectAlphaApiV2SourceIds({ PROJECT_ALPHA_API_V2_CONNECTIONS: projectAlphaApiV2Connections });
-            targetDestinationSourceIds = destinationSourceIds.filter(sourceId => configured.includes(sourceId));
+            const eligibleTargets = destinationSourceIds.filter(sourceId => configured.includes(sourceId));
+            if (eligibleTargets.length > 0) {
+              await targetIssuanceSchemaFence(authority.database.withSession("first-primary"));
+              targetDestinationSourceIds = eligibleTargets;
+            }
           } catch {
-            // Targeting needs a complete connection identity. Ordinary invitations still use their existing scope checks.
+            // Targeting needs a complete connection identity and the reviewed issuance schema.
           }
         }
         let mailAvailable = false;
