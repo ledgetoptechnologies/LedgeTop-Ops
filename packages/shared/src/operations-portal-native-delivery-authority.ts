@@ -153,6 +153,7 @@ export interface OperationsPortalNativeCatalogSuccessorReaderBinding {
 }
 export interface OperationsPortalNativeDeliveryAuthorizationReaderBinding {
   readNativeDeliveryAuthorization(input: OperationsPortalNativeDeliveryAuthorizationReadRequest): Promise<string>;
+  readDirectFolderAuthorization?(input: unknown): Promise<string>;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;

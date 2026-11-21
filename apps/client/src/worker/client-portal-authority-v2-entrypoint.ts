@@ -1,6 +1,8 @@
 import {WorkerEntrypoint} from "cloudflare:workers";
 import {readClientPortalAuthorityV2Status,readClientPortalAuthorityV3Status,writeClientPortalAuthorityV2,
   writeClientPortalAuthorityV3} from "./client-portal-authority-v2";
+import {applyDirectWorkspaceFolderGrant,listDirectWorkspaceFolderGrants,readDirectFolderWorkspaceState,readDirectFolderSharingCapability}
+  from "./operations-portal-direct-folder-grants";
 import type {Env} from "./types";
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -83,8 +85,12 @@ export async function getClientPortalAuthorityV3Status(
 }
 
 export class ClientPortalAuthorityV2Ingress extends WorkerEntrypoint<Env>{
+  readDirectFolderSharingCapability(){return readDirectFolderSharingCapability(this.env);}
   applyAuthority(input:unknown){return applyClientPortalAuthorityV2(this.env,input);}
   getAuthorityStatus(input:unknown){return getClientPortalAuthorityV2Status(this.env,input);}
   applyAuthorityV3(input:unknown){return applyClientPortalAuthorityV3(this.env,input);}
   getAuthorityV3Status(input:unknown){return getClientPortalAuthorityV3Status(this.env,input);}
+  readDirectFolderWorkspaceState(input:unknown){return readDirectFolderWorkspaceState(this.env,input);}
+  listDirectWorkspaceFolderGrants(input:unknown){return listDirectWorkspaceFolderGrants(this.env,input);}
+  applyDirectWorkspaceFolderGrant(input:unknown){return applyDirectWorkspaceFolderGrant(this.env,input);}
 }

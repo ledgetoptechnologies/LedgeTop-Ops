@@ -10,7 +10,13 @@ export type ClientPortalAuthorityV3Command=Readonly<{protocolVersion:3;operation
 type ClientPortalAuthorityCommand=ClientPortalAuthorityV2Command|ClientPortalAuthorityV3Command;
 type Success=Readonly<{ok:true;protocolVersion:2|3;status:"recorded"|"duplicate";operationId:string;clientAuthorityId:string;workspaceId:string;issuer:string;subject:string;ownershipEpoch:number;grantRevision:number;state:"active"|"revoked";permissions?:readonly string[]}>;
 type Failure=Readonly<{ok:false;protocolVersion:2|3;code:string;retryable:boolean}>;
-export interface ClientPortalAuthorityV2Binding {applyAuthority(input:ClientPortalAuthorityV2Command):Promise<unknown>;getAuthorityStatus(input:{protocolVersion:2;operationId:string}):Promise<unknown>;applyAuthorityV3?(input:ClientPortalAuthorityV3Command):Promise<unknown>;getAuthorityV3Status?(input:{protocolVersion:3;operationId:string}):Promise<unknown>}
+export interface ClientPortalAuthorityV2Binding {applyAuthority(input:ClientPortalAuthorityV2Command):Promise<unknown>;getAuthorityStatus(input:{protocolVersion:2;operationId:string}):Promise<unknown>;applyAuthorityV3?(input:ClientPortalAuthorityV3Command):Promise<unknown>;getAuthorityV3Status?(input:{protocolVersion:3;operationId:string}):Promise<unknown>;
+  /** Optional until the independently gated Client direct-folder reader ships. */
+  readDirectFolderSharingCapability?():Promise<string>;
+  readDirectFolderWorkspaceState?(input:unknown):Promise<unknown>;
+  listDirectWorkspaceFolderGrants?(input:unknown):Promise<unknown>;
+  applyDirectWorkspaceFolderGrant?(input:unknown):Promise<unknown>;
+}
 export type AuthorityV2Env=Pick<Env,"OPS_DB"|"CLIENT_PORTAL_AUTHORITY_V2"|"CLIENT_PORTAL_AUTHORITY_V2_OUTBOX_ENABLED">;
 export async function enqueueClientPortalAuthorityV2(db:D1Database,actor:AuthenticatedNativeStaffWithAdmissionVersion,input:Omit<ClientPortalAuthorityV2Command,"protocolVersion"|"scopes">&{recipientBindingId:string}){
   if(!UUID.test(input.operationId)||!UUID.test(input.bindingOperationId)||!UUID.test(input.clientAuthorityId)||!UUID.test(input.recipientBindingId)||!text(input.workspaceId,200)||!text(input.issuer)||!text(input.subject)
