@@ -59,7 +59,7 @@ describe('explicit controller eligibility against actual Worker and all current 
     const directory = new URL('../migrations/', import.meta.url);
     reviewedOperationsMigrationNames(directory);
     const names = readdirSync(directory).filter(name => name.endsWith('.sql')).sort();
-    expect(names).toHaveLength(236); expect(names.at(-2)).toBe('0243_staff_logs_device_eligibility.sql');
+    expect(names).toHaveLength(237); expect(names.at(-3)).toBe('0243_staff_logs_device_eligibility.sql');
     for (const name of names) await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), 'utf8')).map(sql => db.prepare(sql)));
     expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
     const pair = await generateKeyPair('RS256'); privateKey = pair.privateKey;

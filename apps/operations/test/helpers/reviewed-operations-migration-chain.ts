@@ -46,6 +46,7 @@ const initialClientMigrations = Object.freeze([
 const operationsSuccessors = Object.freeze({
   "0243_staff_logs_device_eligibility.sql": "60dee9a1e92fc881d52f2f7d21b0307f6afe1571d07421c929c3e0defea179b5",
   "0245_staff_files_write_access.sql": "209443e146dccd9ceaa32589209986a705b5e2c38173d996e2a253a5c1a58da5",
+  "0246_staff_files_write_requests.sql": "4ecdeb188cd2ea3e155dabd3986a8c25989337348ef146e6c657297912591587",
   "0242_native_staff_onboarding_approval_actor_authority.sql": "045db046a21b80e42aec764cb693615cca8737a2a0a4686676d60baf15664cee",
   "0240_flight_logs_permissions.sql": "7dae537a441d929cb8d33390dc88abe2ba766886a5b4d6bf2b0861575e41eb3a",
   "0241_staff_usernames.sql": "44a707432e16ea06c8ea161d4181582baa6fa2b916b654cae92165d5989e53c5",

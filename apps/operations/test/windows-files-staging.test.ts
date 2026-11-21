@@ -15,7 +15,7 @@ const gatewayId = "11111111-1111-4111-8111-111111111111", rootId = "22222222-222
 const config = (): WindowsEmployeeFilesStagingConfiguration => ({ environment: "staging", enabled: true, opsOrigin: origin,
   access: { enabled: true, issuer, staffAudience: audience },
   gateway: { origin: gatewayOrigin, gatewayId, keyId: "synthetic-staging", key: new Uint8Array(32).fill(1) },
-  handleKey: new Uint8Array(32).fill(2), queueKey: new Uint8Array(32).fill(3), adminCsrfSecret: 'synthetic-session-secret-'.padEnd(40, 'x') });
+  handleKey: new Uint8Array(32).fill(2), queueKey: new Uint8Array(32).fill(3), adminCsrfSecret: 'synthetic-session-secret-'.padEnd(40, 'x'), filesWrite: null });
 let pair: Awaited<ReturnType<typeof generateKeyPair>>, localKeys: ReturnType<typeof createLocalJWKSet>, token: string;
 async function signed(claims: Record<string, unknown> = {}, aud: string | string[] = audience) {
   return new SignJWT({ type: "app", email: "synthetic@example.invalid", ...claims }).setProtectedHeader({ alg: "RS256", kid: "staging-test" })
