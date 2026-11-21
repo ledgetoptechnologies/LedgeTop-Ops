@@ -110,12 +110,26 @@ test("the panel follows its own GET when native session readiness is false", asy
   expect(posts).toHaveLength(1);
 });
 
-test("the panel renders nothing when its GET answers 404", async ({ page }) => {
+for (const accessStatus of [404, 403]) test(`the panel renders nothing when its GET answers ${accessStatus}`, async ({ page }) => {
   let reads = 0;
   page.on("request", request => { if (request.url().includes("/api/staff-operations-access/")) reads++; });
-  await mockTeam(page, { nativeReady: false, accessStatus: 404 });
+  await mockTeam(page, { nativeReady: false, accessStatus });
   await page.goto("/team");
   await expect(card(page, "Native Hire").getByRole("heading", { name: "Native Hire", exact: true })).toBeVisible();
   await expect.poll(() => reads).toBeGreaterThan(0);
   await expect(card(page, "Native Hire").getByRole("region", { name: /Operations access/ })).toHaveCount(0);
+  await expect(page.getByText("You can't change Operations access.")).toHaveCount(0);
+});
+
+test("a transient GET failure shows the panel with Reload, which loads it", async ({ page }) => {
+  let failing = true;
+  await mockTeam(page, { nativeReady: false });
+  await page.route("**/api/staff-operations-access/staff-native-hire", route =>
+    failing ? route.fulfill({ status: 503, json: { error: "staff_operations_access_unavailable" } }) : route.fallback());
+  await page.goto("/team");
+  const panel = card(page, "Native Hire").getByRole("region", { name: "Native Hire Operations access" });
+  await expect(panel.getByText("Operations access could not be loaded.")).toBeVisible();
+  failing = false;
+  await panel.getByRole("button", { name: "Reload" }).click();
+  await expect(panel.getByText("View the team roster")).toBeVisible();
 });

@@ -48,7 +48,7 @@ export function NativeTeamOperationsAccess({ staffId, name }: { staffId: string;
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState<Pending | null>(null);
-  /** Nothing renders until the panel's own GET answers; a 404 (0244 absent) keeps it hidden. */
+  /** Nothing renders until the panel's own GET answers; 404 (0244 absent) or 403 (no authority) keeps it hidden. */
   const [visible, setVisible] = useState(false);
   const mounted = useRef(true);
   const request = useRef(0);
@@ -74,9 +74,9 @@ export function NativeTeamOperationsAccess({ staffId, name }: { staffId: string;
       if (!mounted.current || current !== request.current) return;
       const e = cause instanceof OperationsAccessApiError ? cause : null;
       setData(null);
-      if (e?.code === "not_found") { setVisible(false); return; }
+      if (e?.code === "not_found" || e?.code === "denied") { setVisible(false); return; }
       setVisible(true);
-      setError(e?.code === "denied" ? "You can't change Operations access." : "Operations access could not be loaded.");
+      setError("Operations access could not be loaded.");
     } finally { if (mounted.current && current === request.current) setLoading(false); }
   };
 
