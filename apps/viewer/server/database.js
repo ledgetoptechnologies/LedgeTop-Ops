@@ -2152,7 +2152,7 @@ const MIGRATIONS = [
   `},
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
-  {version:51,name:'provider_engine_processing_elapsed',sql:`
+  {version:83,name:'provider_engine_processing_elapsed',sql:`
     CREATE TABLE processing_attempt_engine_timing (
       attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES processing_attempts(id) ON DELETE CASCADE,
       provider_task_id TEXT NOT NULL,

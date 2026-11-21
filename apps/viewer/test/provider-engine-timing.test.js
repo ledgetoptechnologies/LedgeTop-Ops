@@ -1,5 +1,8 @@
 'use strict';
 const assert=require('node:assert/strict');
+const {mkdtempSync,rmSync}=require('node:fs');
+const {tmpdir}=require('node:os');
+const {join}=require('node:path');
 const {DatabaseSync}=require('node:sqlite');
 const test=require('node:test');
 const express=require('express');
@@ -119,31 +122,57 @@ test('node engine milliseconds survive leased reconciliation and reach the same 
   assert.equal(read(),undefined);
 });
 
-test('migration 51 preserves populated schema 42 and refuses incompatible ledger records',t=>{
-  const db=new DatabaseSync(':memory:');
-  t.after(()=>db.close());
+test('migration 83 preserves populated schema 42 and refuses incompatible ledger records',t=>{
+  const root=mkdtempSync(join(tmpdir(),'viewer-timer-migration-'));
+  const databasePath=join(root,'viewer.sqlite');
+  let db=new DatabaseSync(databasePath);
+  t.after(()=>{db?.close();rmSync(root,{recursive:true,force:true});});
   db.exec('PRAGMA foreign_keys=ON');
   const migration=MIGRATIONS.pop();
-  assert.equal(migration.version,51);
+  assert.equal(migration.version,83);
   try{applyMigrations(db);}
   finally{MIGRATIONS.push(migration);}
+  assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,42);
   const c={db,processing:new ProcessingRepository(db)};
   const project=c.processing.createProject({displayName:'Upgrade fixture'}),data=dataset(c,project);
   const task=c.processing.createTask({projectId:project.id,datasetId:data.id,displayName:'Existing task'});
   const provider=c.processing.upsertProvider({type:'nodeodm',displayName:'Fixture',endpoint:'http://127.0.0.1:3000',enabled:true});
   const attempt=c.processing.createAttempt({taskId:task.id,providerId:provider.id});
 
-  db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (51,?,?)')
+  db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (83,?,?)')
     .run('other_migration','2026-11-20T00:00:00Z');
   assert.throws(()=>applyMigrations(db),{code:'viewer_migration_history_conflict'});
   assert.equal(db.prepare("SELECT count(*) n FROM sqlite_schema WHERE name='processing_attempt_engine_timing'").get().n,0);
-  db.prepare('DELETE FROM schema_migrations WHERE version=51').run();
-  applyMigrations(db);
-  applyMigrations(db);
-  assert.deepEqual(c.processing.getAttempt(attempt.id),attempt);
-  assert.equal(c.processing.engineProcessingDurations([attempt.id]).size,0);
+  db.prepare('DELETE FROM schema_migrations WHERE version=83').run();
+  db.close();
+  db=null;
+  db=openDatabase(databasePath);
+  const upgraded=new ProcessingRepository(db);
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=83').get().name,migration.name);
+  assert.deepEqual(upgraded.getAttempt(attempt.id),attempt);
+  assert.equal(upgraded.engineProcessingDurations([attempt.id]).size,0);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
   db.exec('DROP TABLE processing_attempt_engine_timing');
   assert.throws(()=>applyMigrations(db),{code:'viewer_migration_history_conflict'});
+});
+
+test('a historical reference-protocol 51 stamp cannot satisfy the timer migration',t=>{
+  const db=new DatabaseSync(':memory:');
+  t.after(()=>db.close());
+  db.exec('PRAGMA foreign_keys=ON');
+  const migration=MIGRATIONS.pop();
+  try{applyMigrations(db);}
+  finally{MIGRATIONS.push(migration);}
+  const oldIdentity='viewer_reference_protocol_identity';
+  db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (51,?,?)')
+    .run(oldIdentity,'2026-11-02T00:00:00Z');
+  assert.equal(migration.verify(db),false);
+  applyMigrations(db);
+  applyMigrations(db);
+  assert.equal(migration.verify(db),true);
+  assert.deepEqual(db.prepare('SELECT version,name FROM schema_migrations WHERE version IN (51,83) ORDER BY version').all().map(row=>({...row})),[
+    {version:51,name:oldIdentity},
+    {version:83,name:'provider_engine_processing_elapsed'},
+  ]);
 });
