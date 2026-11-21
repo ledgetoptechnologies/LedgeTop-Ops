@@ -35,9 +35,10 @@ async function mockTeam(page: Page, canManage: boolean) {
       writes.push({ method: "PATCH", path, body });
       const target = roster.find(entry => entry.id === decodeURIComponent(patch[1]!))!;
       if (body.displayName) target.display_name = String(body.displayName);
+      const reactivating = body.status === "active" && target.status === "inactive";
       if (body.status) target.status = String(body.status);
-      target.updated_at = "2026-01-03 00:00:00";
-      return route.fulfill({ json: { success: true } });
+      target.updated_at = reactivating ? "2026-01-04 00:00:00" : "2026-01-03 00:00:00";
+      return route.fulfill({ json: { success: true, ...(reactivating ? { retained: { roles: 2, overrides: 1, alternateLogins: 0 } } : {}) } });
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
@@ -68,10 +69,23 @@ test("Team add and edit controls follow the server flags and send versioned comm
   await expect(page.getByRole("heading", { name: "Renamed Person" })).toBeVisible();
   expect(writes.at(-1)!.body).toEqual({ expectedUpdatedAt: "2026-01-01 00:00:00", displayName: "Renamed Person" });
 
-  page.once("dialog", dialog => void dialog.accept());
   await card(page, "Renamed Person").getByRole("button", { name: "Deactivate" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Deactivate" }).click();
   await expect(card(page, "Renamed Person").getByRole("button", { name: "Reactivate" })).toBeVisible();
   expect(writes.at(-1)!.body).toEqual({ expectedUpdatedAt: "2026-01-03 00:00:00", status: "inactive" });
+
+  // Reactivation asks first, says what comes back, and then reports what was retained.
+  const patches = writes.length;
+  await card(page, "Renamed Person").getByRole("button", { name: "Reactivate" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Their previous roles, access and sign-in emails come back with them.");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  expect(writes.length).toBe(patches);
+  await card(page, "Renamed Person").getByRole("button", { name: "Reactivate" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Reactivate" }).click();
+  await expect(card(page, "Renamed Person").getByRole("button", { name: "Deactivate" })).toBeVisible();
+  expect(writes.at(-1)!.body).toEqual({ expectedUpdatedAt: "2026-01-03 00:00:00", status: "active" });
+  await expect(card(page, "Renamed Person").getByRole("status")).toHaveText("Reactivated with 2 role(s), 1 access setting(s) and 0 other sign-in email(s).");
 });
 
 test("Team hides add and edit controls when the server does not allow them", async ({ page }) => {
