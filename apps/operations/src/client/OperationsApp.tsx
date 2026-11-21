@@ -6594,9 +6594,11 @@ function LegacyStaffProfileControls({ person, onChanged }: { person: any; onChan
     if (busy) return;
     setBusy(true); setMessage("");
     try {
-      await api(`/api/admin/staff/${encodeURIComponent(person.id)}`, {
-        method: "PATCH", body: JSON.stringify({ expectedUpdatedAt: person.updated_at, ...change }) });
+      const result = await api<{ retained?: { roles: number; overrides: number; alternateLogins: number } }>(
+        `/api/admin/staff/${encodeURIComponent(person.id)}`, {
+          method: "PATCH", body: JSON.stringify({ expectedUpdatedAt: person.updated_at, ...change }) });
       setEditing(false);
+      if (result.retained) setMessage(`Reactivated with ${result.retained.roles} role(s), ${result.retained.overrides} access setting(s) and ${result.retained.alternateLogins} other sign-in email(s).`);
     } catch (caught) {
       setMessage(legacyStaffUncertain(caught) ? "Result unknown. Check the list before trying again." : (caught as Error).message);
     } finally {
@@ -6605,6 +6607,15 @@ function LegacyStaffProfileControls({ person, onChanged }: { person: any; onChan
     }
   };
   const active = person.status === "active";
+  const changeStatus = async () => {
+    if (busy) return;
+    const choice = await requestChoice<"confirm">(active
+      ? { title: `Deactivate ${person.display_name}?`, choices: [{ value: "confirm", label: "Deactivate", tone: "danger" }] }
+      : { title: `Reactivate ${person.display_name}?`,
+          description: "Their previous roles, access and sign-in emails come back with them.",
+          choices: [{ value: "confirm", label: "Reactivate", tone: "primary" }] });
+    if (choice === "confirm") await send({ status: active ? "inactive" : "active" });
+  };
   return <div className="legacy-staff-profile">
     {editing ? <form onSubmit={(event) => { event.preventDefault(); void send({ displayName: name }); }}>
       <label>Name<input required maxLength={200} value={name} disabled={busy} onChange={(event) => setName(event.target.value)} /></label>
@@ -6615,7 +6626,7 @@ function LegacyStaffProfileControls({ person, onChanged }: { person: any; onChan
     </form> : <div className="actions">
       <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { setName(person.display_name); setEditing(true); }}>Edit name</button>
       <button type="button" className="button-ghost button-small" disabled={busy}
-        onClick={() => { if (!active || confirm(`Deactivate ${person.display_name}?`)) void send({ status: active ? "inactive" : "active" }); }}>
+        onClick={() => void changeStatus()}>
         {active ? "Deactivate" : "Reactivate"}</button>
     </div>}
     {message && <div className="notice" role="status">{message}</div>}
@@ -6665,7 +6676,7 @@ function Team({ session }: { session: Session }) {
         ? <NativeTeamOnboardingPanel onChanged={reload} />
         : <div className="notice" role="status">Employee invitations are not enabled in this environment.</div>)}
       <ErrorLine error={error} />
-      {session.user.isAdministrator && data?.can_manage_staff === true && <LegacyStaffAdd onChanged={reload} />}
+      {session.user.isAdministrator && data?.can_manage_staff === true && native.data?.ready === false && <LegacyStaffAdd onChanged={reload} />}
       <div className="card-grid">
         {data?.staff.map((person) => (
           <Card key={person.id}>
@@ -6689,7 +6700,7 @@ function Team({ session }: { session: Session }) {
               <p>{person.email}</p>
               <small>{person.roles || "No inherited role"}</small>
               {session.user.isAdministrator && person.id !== session.user.id && person.profile_editable === true
-                && <LegacyStaffProfileControls key={`${person.id}:${person.updated_at}`} person={person} onChanged={reload} />}
+                && <LegacyStaffProfileControls key={person.id} person={person} onChanged={reload} />}
               {native.data?.ready && <NativeTeamProfileEditor staffId={person.id}
                 protectedOwner={person.owner_role === true || person.id === "staff-beau-koltz"} onChanged={reload} />}
               {native.data?.ready && session.user.isAdministrator && <NativeTeamLogsEligibility staffId={person.id} />}
