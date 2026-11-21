@@ -152,6 +152,8 @@
 .page-heading { margin-bottom: 1.5rem; }
 .page-heading h1 { font-size: clamp(1.8rem, 4vw, 2.55rem); margin: .25rem 0; }
 .page-heading p { margin: 0; color: var(--muted); }
+.page-heading.page-heading-compact { margin-bottom: .75rem; }
+.page-heading.page-heading-compact h1 { font-size: 1.5rem; line-height: 1.25; margin: 0; }
 
 .eyebrow {
   font-size: .72rem;
@@ -1732,40 +1734,45 @@ tbody tr:last-child td { border: 0; }
 .client-hub-section-heading, .client-hub-title { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 0 0 1rem; }
 .client-hub-section-heading h2, .client-hub-title h2 { margin: 0; }
 .client-hub-section-heading p, .client-hub-title small { margin: .25rem 0 0; color: var(--muted); }
+.client-hub-clients > .client-hub-section-heading { margin-bottom: .5rem; }
+.client-hub-clients > .client-hub-section-heading h2 { font-size: 1.1rem; }
 .client-hub-groups { display: grid; gap: 1rem; }
-.client-directory-workspace { display: grid; gap: 1rem; min-width: 0; }
-.client-directory-toolbar { display: grid; grid-template-columns: minmax(18rem, 1.45fr) minmax(20rem, 1fr); align-items: start; gap: .75rem; min-width: 0; padding: .8rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
-.client-directory-source { display: grid; gap: .35rem; min-width: 0; font-weight: 800; }
-.client-directory-source select { width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--control-border); border-radius: var(--radius-sm); padding: .65rem; font: inherit; font-weight: 450; background: #fff; color: var(--ink); }
-.client-directory-selectors { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); align-items: end; gap: .75rem; min-width: 0; }
-.client-directory-sort { display: grid; gap: .35rem; min-width: 0; font-weight: 800; }
-.client-directory-sort select { width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--control-border); border-radius: var(--radius-sm); padding: .65rem; font: inherit; font-weight: 450; background: var(--paper); color: var(--ink); }
-.client-directory-update { display: grid; gap: .15rem; margin: 0; font-size: .8rem; }
+.client-directory-workspace { display: grid; gap: .6rem; min-width: 0; }
+/* One compact toolbar row: search, source, sort, type tabs, then Add client profile on the right. */
+.client-directory-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; }
+.client-directory-toolbar :is(input, select) { min-height: 2.25rem; border: 1px solid var(--control-border); border-radius: var(--radius-sm); padding: .35rem .6rem; font: inherit; font-size: .9rem; font-weight: 450; background: #fff; color: var(--ink); }
+.client-directory-source, .client-directory-sort { display: flex; align-items: center; gap: .35rem; min-width: 0; max-width: 17rem; }
+/* Short always-visible cues; the full accessible names stay on the controls. */
+.client-directory-cue { flex: none; color: var(--muted); font-size: .8rem; font-weight: 700; }
+.client-directory-toolbar select { flex: 1 1 auto; width: 100%; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+.client-directory-update { display: grid; gap: .1rem; margin: 0; font-size: .75rem; }
 .client-directory-update dt { color: var(--muted); }
 .client-directory-update dd { margin: 0; font-weight: 600; }
-.client-directory-search { display: grid; gap: .35rem; min-width: 0; }
-.client-directory-search > label { font-size: .9rem; font-weight: 800; }
-.client-directory-search > div { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: .5rem; min-width: 0; }
-.client-directory-search input { width: 100%; min-width: 0; min-height: 44px; padding: .75rem .9rem; border: 1px solid var(--control-border); border-radius: var(--radius-sm); background: #fff; color: var(--ink); font: inherit; font-weight: 450; }
-.client-directory-search small, .client-directory-status { color: var(--muted); }
-.client-directory-status { margin: 0; overflow-wrap: anywhere; }
+.client-directory-search { display: flex; align-items: center; gap: .4rem; flex: 1 1 16rem; min-width: 0; max-width: 28rem; }
+.client-directory-search input { flex: 1 1 auto; width: 100%; min-width: 0; }
+.client-directory-status { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .client-directory-workspace button { min-height: 44px; }
-.client-directory-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,17.5rem),1fr)); gap: 1rem; min-width: 0; }
-.client-directory-card { display: flex; flex-direction: column; gap: .85rem; min-width: 0; padding: 1.1rem; border: 1px solid var(--line); border-radius: 14px; background: #fff; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgb(23 43 58 / .03); }
+.client-directory-toolbar :is(.client-directory-search, .client-directory-filters) > button { min-height: 2.25rem; padding: .3rem .75rem; font-size: .88rem; }
+.client-directory-toolbar .client-directory-filters { padding: .15rem; }
+.client-directory-toolbar > .client-directory-create { margin: 0 0 0 auto; }
+.client-directory-toolbar > .client-directory-create .client-directory-create-bar > button { min-height: 2.25rem; padding: .35rem .9rem; font-size: .88rem; }
+/* Live count and directory freshness share one small muted line. */
+.client-directory-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem 1rem; font-size: .82rem; }
+.client-directory-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(min(100%,13rem),1fr)); gap: .6rem; min-width: 0; }
+.client-directory-card { display: flex; flex-direction: column; gap: .45rem; min-width: 0; padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; box-shadow: 0 1px 4px rgb(23 43 58 / .03); font-size: .85rem; }
 .client-directory-skeleton { min-width: 0; }
-.client-directory-skeleton .ltds-skeleton-card { min-height: 10.5rem; padding: 1.1rem; border-radius: 14px; background: #fff; }
-.client-directory-card:hover { border-color: #b5c5d1; box-shadow: 0 6px 18px rgb(23 43 58 / .08); }
+.client-directory-skeleton .ltds-skeleton-card { min-height: 7rem; padding: .7rem .8rem; border-radius: 10px; background: #fff; }
+.client-directory-card:hover { border-color: #b5c5d1; box-shadow: 0 4px 12px rgb(23 43 58 / .08); }
 .client-directory-card:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
-.client-directory-card h3 { margin: 0; font-size: 1.1rem; line-height: 1.4; }
-.client-directory-card > small { color: var(--muted); }
+.client-directory-card h3 { margin: 0; font-size: .95rem; line-height: 1.3; }
+.client-directory-card > small { color: var(--muted); font-size: .75rem; }
 .client-directory-card-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .45rem; }
-.client-directory-card-header > small { color: var(--muted); }
+.client-directory-card-header > small { color: var(--muted); font-size: .72rem; }
 .client-directory-portal-state { display: grid; justify-items: end; gap: .25rem; max-width: min(100%, 28rem); }
 .client-directory-portal-state > small { color: var(--muted); font-size: .72rem; line-height: 1.35; text-align: right; }
-.client-directory-card-counts { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .65rem; margin: auto 0 0; padding-top: .25rem; }
-.client-directory-card-counts dt { color: var(--muted); font-size: .75rem; }
-.client-directory-card-counts dd { margin: .25rem 0 0; font-size: 1.1rem; font-weight: 800; }
-.client-directory-open { display: flex; justify-content: space-between; gap: .5rem; padding-top: .8rem; border-top: 1px solid var(--line); color: var(--accent); font-size: .85rem; font-weight: 800; }
+.client-directory-card-counts { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .4rem; margin: auto 0 0; padding-top: .15rem; }
+.client-directory-card-counts dt { color: var(--muted); font-size: .7rem; }
+.client-directory-card-counts dd { margin: .1rem 0 0; font-size: .95rem; font-weight: 800; }
 .client-directory-more { display: flex; justify-content: center; }
 .business-party-workspace, .business-party-editor, .business-party-review, .business-party-picker { display: grid; gap: 1rem; min-width: 0; overflow-wrap: anywhere; }
 .business-party-workspace > header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; }
@@ -1819,15 +1826,19 @@ tbody tr:last-child td { border: 0; }
   .business-party-section-nav a { width: 100%; }
   .business-party-preview-list li { display: grid; }
 }
-@media (max-width: 900px) {
-  .client-directory-toolbar { grid-template-columns: minmax(0,1fr); }
+/* Touch screens and phones keep 44px targets in the compact toolbar. */
+@media (pointer: coarse), (max-width: 760px) {
+  .client-directory-toolbar :is(input, select),
+  .client-directory-toolbar :is(.client-directory-search, .client-directory-filters) > button,
+  .client-directory-toolbar > .client-directory-create .client-directory-create-bar > button { min-height: 44px; }
 }
 @media (max-width: 540px) {
-  .client-directory-search > div { grid-template-columns: repeat(2,minmax(0,1fr)); }
-  .client-directory-search input { grid-column: 1 / -1; }
-  .client-directory-selectors { grid-template-columns: minmax(0,1fr); }
+  .client-directory-search { flex-basis: 100%; max-width: none; }
+  /* Each select gets its own full-width row so long source names truncate inside the control, never past the page. */
+  .client-directory-source, .client-directory-sort { flex: 1 1 100%; max-width: 100%; }
   .client-directory-filters { width: 100%; }
-  .client-directory-filters > button { flex: 1 1 0; min-height: 44px; }
+  .client-directory-filters > button { flex: 1 1 0; }
+  .client-directory-toolbar > .client-directory-create { margin-left: 0; }
   .client-directory-more button { width: 100%; }
 }
 .client-hub-directory { display: grid; gap: .65rem; }
