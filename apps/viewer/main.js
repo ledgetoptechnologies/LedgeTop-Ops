@@ -80,6 +80,7 @@ import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
 import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUrl } from './view-mode.mjs';
 import { installLodResourceLifecycle } from './lod-resource-lifecycle.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
+import { createCompass, gridToTrueHeading, photoGridHeading, trueNorthGridBearing, viewCompassInput } from './viewer-compass.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
 import { renderProjectSwitcherOptions } from './project-switcher.mjs';
@@ -118,6 +119,10 @@ let POINT_CLOUD_URL = null, POINT_CLOUD_FORMAT = null;
 let RTC = { e: 0, n: 0, z: 0 };
 let C = { x: 0, y: 0, z: 0 };
 let UTM_PROJECTION = createUtmProjection();
+// Grid bearing of true north at the model centre; null when the model has no
+// verified UTM georeference, which puts every 3D/photo compass in its unknown state.
+let COMPASS_NORTH_GRID_BEARING = null;
+let viewCompass = null, photoCompass = null;
 
 const METERS_TO_FT = 3.28084;
 let DISPLAY_UNITS = 'imperial';
@@ -738,10 +743,73 @@ function applyProjectConfig(p) {
     zoneLon0Deg: p.georef?.utmZoneLon0Deg ?? -87,
     hemisphere: p.georef?.hemisphere ?? 'N',
   });
+  COMPASS_NORTH_GRID_BEARING = compassNorthForGeoref(p.georef);
 
   // Pick the best available mesh/point-cloud source for this project.
   state.meshSource = TILES_URL ? 'tiles' : (GLB_URL || OBJ_URL ? 'lod-required' : 'none');
   state.cloudMode = EPT_URL ? 'potree' : (POINT_CLOUD_URL ? 'direct' : 'none');
+}
+
+// The model frame is UTM grid (x east, -z north). Accept it as north only for
+// the same verified zone/hemisphere that measurements trust, at a model centre
+// inside the UTM easting range; otherwise north is unknown, never assumed.
+function compassNorthForGeoref(georef) {
+  if (!Number.isFinite(georef?.utmZoneLon0Deg) || !['N', 'S'].includes(georef?.hemisphere)) return null;
+  const zone = (georef.utmZoneLon0Deg + 183) / 6;
+  if (!Number.isInteger(zone) || zone < 1 || zone > 60) return null;
+  const easting = Number(RTC.e) + Number(C.x), northing = Number(RTC.n) + Number(C.y);
+  if (!(easting >= 100000 && easting <= 900000) || !(northing >= 0 && northing <= 10000000)) return null;
+  return trueNorthGridBearing(UTM_PROJECTION, easting, northing);
+}
+
+function installCompasses() {
+  if (!viewCompass) {
+    viewCompass = createCompass({ className: 'viewer-compass-view' });
+    viewCompass.element.id = 'view-compass';
+    document.getElementById('viewer-wrap')?.appendChild(viewCompass.element);
+  }
+  if (!photoCompass && dom.photoImgwrap) {
+    photoCompass = createCompass({ className: 'viewer-compass-photo' });
+    photoCompass.element.id = 'photo-compass';
+    photoCompass.setVisible(false);
+    dom.photoImgwrap.appendChild(photoCompass.element);
+  }
+}
+
+// Called every animation frame. The component compares whole degrees before
+// building any label and only writes to the DOM when the display changes.
+function updateViewCompass() {
+  if (!viewCompass) return;
+  const mode = state.activeMode;
+  viewCompass.setVisible(Boolean(mode));
+  if (!mode) return;
+  const potree = mode === 'cloud' && state.cloudMode === 'potree';
+  let pointCloudMatrix = null;
+  if (potree) {
+    try { pointCloudMatrix = pcApi()?.getViewMatrix?.() || null; } catch { pointCloudMatrix = null; }
+  }
+  viewCompass.update(viewCompassInput({
+    mode, mapMode: isMapMode(mode), cloudMode: state.cloudMode,
+    northGridBearing: COMPASS_NORTH_GRID_BEARING, pointCloudMatrix,
+    threeMatrix: !potree && camera ? camera.matrixWorld.elements : null,
+  }));
+}
+
+function updatePhotoCompass(feature, visible) {
+  if (!photoCompass) return;
+  photoCompass.setVisible(Boolean(visible));
+  // The photo wrapper is focusable with its own label, so screen readers
+  // announce it rather than its children; describe it by the compass instead.
+  if (visible) dom.photoImgwrap.setAttribute('aria-describedby', 'photo-compass');
+  else dom.photoImgwrap.removeAttribute('aria-describedby');
+  if (COMPASS_NORTH_GRID_BEARING === null) {
+    photoCompass.update({ heading: null, surface: 'photo', unknownReason: 'this model has no verified georeference' });
+    return;
+  }
+  const grid = feature?.properties?.rotationKnown ? photoGridHeading(feature.properties.rotation) : null;
+  photoCompass.update(grid === null
+    ? { heading: null, surface: 'photo', unknownReason: 'this photo has no usable camera orientation' }
+    : { heading: gridToTrueHeading(grid, COMPASS_NORTH_GRID_BEARING), surface: 'photo' });
 }
 
 function init() {
@@ -758,6 +826,7 @@ function init() {
     describe:(plane,axis)=>{const p=worldToUtm(plane.coplanarPoint(new THREE.Vector3())),value=axis==='elevation'?p.alt:axis==='easting'?p.e:p.n;return `${axis[0].toUpperCase()+axis.slice(1)} ${formatElevation(value,DISPLAY_UNITS)}`;},
   });
   bindUI();
+  installCompasses();
   installMeasurementWorkspace();
   const available = applyAvailability();
   const requested = viewerModeFromUrl(location.href);
@@ -2225,6 +2294,7 @@ function openPhoto(idx) {
   dom.photoImg.removeAttribute('src');
   dom.photoDownload.style.display = 'none';
   dom.photoDownload.removeAttribute('href');
+  updatePhotoCompass(feat, false);
   if (!PHOTO_BASE || !photoKey) {
     dom.photoEmpty.textContent = 'No photo available';
     dom.photoEmpty.style.display = 'flex';
@@ -2241,6 +2311,7 @@ function openPhoto(idx) {
     layoutPhotoViewer();
     dom.photoSpinner.style.display = 'none';
     dom.photoImg.style.opacity = '1';
+    updatePhotoCompass(feat, true);
     if (SHARE_PERMISSIONS.download || SHARE_PERMISSIONS.cameraPhotoDownload === true) dom.photoDownload.style.display = '';
   };
   dom.photoImg.onerror = () => {
@@ -2261,6 +2332,7 @@ function closePhoto() {
   dom.photoModal.setAttribute('aria-hidden', 'true');
   dom.photoImg.removeAttribute('src');
   dom.photoEmpty.style.display = 'none';
+  updatePhotoCompass(null, false);
   resetPhotoView();
 }
 
@@ -5061,6 +5133,7 @@ function startLoop() {
   function loop() {
     requestAnimationFrame(loop);
     const dt = Math.min(clock.getDelta(), 0.1);
+    updateViewCompass();
 
     const renderThree = state.activeMode === 'model' || (state.activeMode === 'cloud' && state.cloudMode === 'direct');
     if (renderThree) {

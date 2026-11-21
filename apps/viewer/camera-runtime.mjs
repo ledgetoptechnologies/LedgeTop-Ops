@@ -45,6 +45,9 @@ export function normalizeCameraFeature(feature, { latLonToProjected } = {}) {
       ...properties,
       translation,
       rotation: finiteTriplet(properties.rotation) || [0, 0, 0],
+      // The zero fallback keeps markers drawable; the photo compass must not
+      // treat it as a real orientation.
+      rotationKnown: Boolean(finiteTriplet(properties.rotation)),
       photoKey: normalizeCameraPhotoKey(properties.filename),
     },
   };
