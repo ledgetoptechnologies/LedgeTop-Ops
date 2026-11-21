@@ -376,6 +376,12 @@ test('delete requires write access, blocks queued and running work, and preserve
   const listed = await request(c, '/api/v1/processing/providers?limit=1');
   const firstPage = await listed.json();
   assert.ok(firstPage.nextCursor);
+  const enabledDelete = await remove('delete-enabled-0001');
+  assert.equal(enabledDelete.status, 409);
+  assert.equal((await enabledDelete.json()).code, 'provider_enabled');
+  assert.equal(c.processing.getProvider(provider.id).enabled, true);
+  assert.equal((await request(c, route, { method: 'PATCH', body: { enabled: false }, key: 'disable-idle-0001' })).status, 200);
+  assert.equal((await remove('delete-enabled-0001')).status, 409);
   const deleted = await remove('delete-idle-0001');
   assert.equal(deleted.status, 200);
   assert.deepEqual(await deleted.json(), { deleted: true });
@@ -498,6 +504,7 @@ test('node deletion waits for durable remote cancellation evidence, including le
   assert.equal(c.processing.providerCancellationUnsettled(provider.id, active.id), false);
   assert.equal((await (await remove('legacy-still-held')).json()).code, 'provider_cancellation_unconfirmed');
   assert.equal((await cancel(legacy, 'check-legacy-0001')).status, 200);
+  c.database.prepare('UPDATE processing_providers SET enabled=0 WHERE id=?').run(provider.id);
   assert.equal((await remove('settled-delete-0001')).status, 200);
   assert.equal((await cancel(unknownOrigin, 'check-unknown-0001')).status, 200);
   const unknownDelete = await request(c, `/api/v1/processing/providers/${unknownOriginProvider.id}`, { method: 'DELETE', key: 'unknown-delete-0001', body: {} });
@@ -538,6 +545,7 @@ test('node deletion distinguishes local submission and poll failures from proven
       c.database.prepare("INSERT INTO processing_jobs(id,attempt_id,job_type,status,error_code,available_at,created_at,updated_at) VALUES (?,?,'reconcile','failed',?,?,?,?)")
         .run(crypto.randomUUID(), attempt.id, code, now, now, now);
     }
+    c.database.prepare('UPDATE processing_providers SET enabled=0 WHERE id=?').run(provider.id);
     const result = await request(c, `/api/v1/processing/providers/${provider.id}`, { method: 'DELETE', key: crypto.randomUUID(), body: {} });
     assert.equal(result.status, scenario.terminal ? 200 : 409, scenario.label);
     if (!scenario.terminal) assert.equal((await result.json()).code, 'provider_failure_unconfirmed', scenario.label);

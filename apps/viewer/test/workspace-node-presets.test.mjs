@@ -16,13 +16,14 @@ function harness({write=true,api=async()=>({providers:[],presets:[]})}={}){
   return context;
 }
 test('node detail exposes preset management, stale presets and no raw option list',()=>{
-  const ctx=harness(),provider={id:'node',type:'nodeodm',capabilityFingerprint:'new',capabilities:{options:[{name:'raw-option-secret-label',value:7}]}};
+  const ctx=harness(),provider={id:'node',type:'nodeodm',enabled:false,capabilityFingerprint:'new',capabilities:{options:[{name:'raw-option-secret-label',value:7}]}};
   ctx.state.presets=[{id:'old',providerType:'nodeodm',capabilityFingerprint:'old',displayName:'Old preset'},{id:'builtin',providerType:'nodeodm',capabilityFingerprint:'new',displayName:'Built in',builtIn:true}];
   const html=ctx.subject.providerDetail(provider);
   for(const action of ['view-preset','new-preset','import-preset','duplicate-preset','edit-preset','delete-preset','delete-provider'])assert.ok(html.includes(action));
   assert.ok(html.includes('capabilities changed'));assert.ok(html.includes('Built in · read-only'));
   assert.ok(!html.includes('raw-option-secret-label'));assert.ok(!html.includes('Detected processing options'));
   assert.equal((html.match(/data-action="edit-preset"/g)||[]).length,1);
+  assert.ok(!ctx.subject.providerDetail({...provider,enabled:true}).includes('delete-provider'));
 });
 test('read-only node view can inspect presets and refresh observations without management rights',async()=>{
   const calls=[];const ctx=harness({write:false,api:async path=>{calls.push(path);return {};}});
@@ -96,7 +97,7 @@ test('deleting a node waits for confirmation and ignores provider lists fetched 
     }
     return {};
   }});
-  ctx.state.providers=[{id:'node',displayName:'Cluster'}];
+  ctx.state.providers=[{id:'node',displayName:'Cluster',enabled:true}];
   ctx.dialogs={confirm:async(message,{destructive})=>{
     assert.match(message,/Delete node "Cluster".*Past runs will remain/);
     assert.equal(destructive,true);
@@ -110,6 +111,11 @@ test('deleting a node waits for confirmation and ignores provider lists fetched 
     ctx.state.providers=[];
   };
   vm.runInContext(source.slice(source.indexOf('async function deleteProvider('),source.indexOf('function bindModalActions('))+'\nthis.deleteNode=deleteProvider;',ctx);
+  approve=true;
+  await ctx.deleteNode('node');
+  assert.deepEqual(calls,[]);
+  approve=false;
+  ctx.state.providers[0].enabled=false;
   await ctx.deleteNode('node');
   assert.deepEqual(calls,[]);
   const refreshing=ctx.subject.refreshProviderCapabilities('node');
@@ -133,7 +139,7 @@ test('a full workspace load started before node deletion cannot restore the remo
     return new Promise(resolve=>{releaseOldNodes=resolve;});
   }});
   ctx.state.token='session';
-  ctx.state.providers=[{id:'node',displayName:'Cluster'}];
+  ctx.state.providers=[{id:'node',displayName:'Cluster',enabled:false}];
   const noop=()=>{};
   Object.assign(ctx,{
     pagedApi:async()=>({}),pagedStorage:async()=>({}),validateWorkspaceView:noop,syncWorkspaceView:noop,

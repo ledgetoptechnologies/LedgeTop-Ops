@@ -508,6 +508,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         return finish(409,{error:'This node has a cancellation that Viewer could not confirm upstream.',code:'provider_cancellation_unconfirmed'});
       if(this.providerFailureUnsettled(id))
         return finish(409,{error:'This node has a failed run whose upstream state Viewer could not confirm.',code:'provider_failure_unconfirmed'});
+      if(provider.enabled)
+        return finish(409,{error:'Disable this node before deleting it.',code:'provider_enabled'});
       // Retain the provider ID for run history and remove the live credential.
       const time=now();
       this.database.prepare(`UPDATE processing_providers SET deleted_at=?, enabled=0,
