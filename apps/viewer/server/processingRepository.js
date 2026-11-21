@@ -191,6 +191,9 @@ function indexedFileMetadata(file) {
 
 // Control characters (C0, DEL, C1), zero-width, line/paragraph separators and bidi controls are refused in new folder names; stored names are not rewritten.
 const UNSAFE_FOLDER_NAME=/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+// Each move appends an audit event in the same write transaction, including from older clients.
+const FOLDER_MOVE_REVISION = "(SELECT COUNT(*) FROM audit_events WHERE entity_type='processing_task' AND entity_id=processing_tasks.id AND action='processing_task.folder_changed')";
+
 class ProcessingRepository {
   constructor(database, { logMaxBytes = 10 * 1024 * 1024 } = {}) {
     this.database = database;
@@ -478,19 +481,32 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     this.insertAudit({actorId,action:'project_folder.deleted',entityType:'project_folder',entityId:folderId,details:{projectId}});
     return true;
   }); }
-  moveTaskToFolder(taskId,folderId,actorId) { return this.transaction(()=>{
+  moveTaskToFolder(taskId,folderId,actorId,guard=null) { return this.transaction(()=>{
     const task=this.getTask(taskId);if(!task)return null;const project=this.getProject(task.projectId);
     if(!project||project.status!=='active'||task.status==='archived')throw Object.assign(new Error('task is unavailable'),{code:'task_unavailable'});
+    if(guard&&(guard.expectedFolderId!==task.folderId||guard.expectedFolderRevision!==task.folderRevision)){
+      throw Object.assign(new Error('The task has moved. Check its current folder and try again.'),{code:'folder_conflict'});
+    }
+    const timestamp=now();
+    if(guard?.undo){
+      const previous=this.database.prepare("SELECT actor_id,created_at,details_json FROM audit_events WHERE entity_type='processing_task' AND entity_id=? AND action='processing_task.folder_changed' ORDER BY rowid DESC LIMIT 1").get(taskId);
+      const details=json(previous?.details_json);
+      if(!previous||previous.actor_id!==actorId||details?.undo||details?.previousFolderId!==folderId||
+          details?.folderId!==task.folderId||!(Date.parse(timestamp)<Date.parse(previous.created_at)+10_000)){
+        throw Object.assign(new Error('This move can no longer be undone.'),{code:'folder_undo_conflict'});
+      }
+    }
     if(folderId!==null&&(typeof folderId!=='string'||!this.database.prepare('SELECT 1 FROM project_folders WHERE id=? AND project_id=?').get(folderId,task.projectId)))throw Object.assign(new Error('folder is unavailable'),{code:'invalid_folder'});
-    this.database.prepare('UPDATE processing_tasks SET folder_id=?,updated_at=? WHERE id=?').run(folderId,now(),taskId);
-    this.insertAudit({actorId,action:'processing_task.folder_changed',entityType:'processing_task',entityId:taskId,details:{projectId:task.projectId,folderId}});
+    if(guard&&folderId===task.folderId)return task;
+    this.database.prepare('UPDATE processing_tasks SET folder_id=?,updated_at=? WHERE id=?').run(folderId,timestamp,taskId);
+    this.insertAudit({actorId,action:'processing_task.folder_changed',entityType:'processing_task',entityId:taskId,details:{projectId:task.projectId,folderId,previousFolderId:task.folderId,undo:guard?.undo===true}});
     return this.getTask(taskId);
   }); }
-  task(row) { return row && { id:row.id,projectId:row.project_id,folderId:row.folder_id??null,datasetId:row.dataset_id,displayName:row.display_name,description:row.description,status:row.status,activeAttemptId:row.active_attempt_id,publishedModelId:row.published_model_id,metadata:json(row.metadata_json),createdBy:row.created_by,createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,purgedAt:row.purged_at }; }
+  task(row) { return row && { id:row.id,projectId:row.project_id,folderId:row.folder_id??null,...(row.folder_revision===undefined?{}:{folderRevision:row.folder_revision}),datasetId:row.dataset_id,displayName:row.display_name,description:row.description,status:row.status,activeAttemptId:row.active_attempt_id,publishedModelId:row.published_model_id,metadata:json(row.metadata_json),createdBy:row.created_by,createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,purgedAt:row.purged_at }; }
   createTask(input) { const project=this.getProject(input.projectId),dataset=this.getDataset(input.datasetId);if(!project||project.status!=='active'||!dataset||dataset.status!=='finalized'||dataset.projectId!==project.id)throw Object.assign(new Error('task project and finalized dataset must match'),{code:'invalid_project_or_dataset'});const id=input.id||crypto.randomUUID(),t=now();this.database.prepare(`INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,description,status,metadata_json,created_by,created_at,updated_at) VALUES (?,?,?,?,?,'draft',?,?,?,?)`).run(id,input.projectId,input.datasetId,bounded(input.displayName),bounded(input.description,4000)||null,JSON.stringify(input.metadata||{}),input.createdBy||null,t,t);return this.getTask(id); }
   createTaskDraft({subject,submissionId,requestHash,projectId,datasetId,displayName}){return this.transaction(()=>{const existing=this.database.prepare('SELECT * FROM task_draft_requests WHERE subject=? AND submission_id=?').get(subject,submissionId);if(existing)return existing.request_hash===requestHash?{task:this.getTask(existing.task_id),replayed:true}:{conflict:true};const task=this.createTask({projectId,datasetId,displayName,createdBy:subject}),t=now();this.database.prepare('INSERT INTO task_draft_requests(subject,submission_id,request_hash,task_id,created_at) VALUES (?,?,?,?,?)').run(subject,submissionId,requestHash,task.id,t);this.database.prepare('INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),'admin',subject,'processing_task.created','processing_task',task.id,JSON.stringify({submissionId,projectId,datasetId}),t);return{task,replayed:false};});}
-  getTask(id) { const task=this.task(this.database.prepare('SELECT * FROM processing_tasks WHERE id=?').get(id));return task?.purgedAt?null:(task||null); }
-  listTasksPage({projectId=null,limit=50,cursor=null}={}) { const n=pageLimit(limit),c=decodeCursor(cursor),where=["status<>'archived'","purged_at IS NULL"],args=[];if(projectId){where.push('project_id=?');args.push(projectId);}if(c){where.push('(created_at<? OR (created_at=? AND id<?))');args.push(c.createdAt,c.createdAt,c.id);}const rows=this.database.prepare(`SELECT * FROM processing_tasks WHERE ${where.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT ?`).all(...args,n+1),more=rows.length>n,items=rows.slice(0,n),latest=new Map(),byId=new Map();if(items.length){const attempts=this.database.prepare(`SELECT * FROM processing_attempts WHERE task_id IN (${items.map(()=>'?').join(',')}) ORDER BY task_id,attempt_number DESC`).all(...items.map((r)=>r.id));for(const row of attempts){const value=this.attempt(row);byId.set(row.id,value);if(!latest.has(row.task_id))latest.set(row.task_id,value);}}return{items:items.map((r)=>{const task=this.task(r);return{...task,latestAttempt:byId.get(task.activeAttemptId)||latest.get(r.id)||null};}),nextCursor:more?encodeCursor(items.at(-1)):null}; }
+  getTask(id) { const task=this.task(this.database.prepare(`SELECT processing_tasks.*, ${FOLDER_MOVE_REVISION} AS folder_revision FROM processing_tasks WHERE id=?`).get(id));return task?.purgedAt?null:(task||null); }
+  listTasksPage({projectId=null,limit=50,cursor=null}={}) { const n=pageLimit(limit),c=decodeCursor(cursor),where=["status<>'archived'","purged_at IS NULL"],args=[];if(projectId){where.push('project_id=?');args.push(projectId);}if(c){where.push('(created_at<? OR (created_at=? AND id<?))');args.push(c.createdAt,c.createdAt,c.id);}const rows=this.database.prepare(`SELECT processing_tasks.*, ${FOLDER_MOVE_REVISION} AS folder_revision FROM processing_tasks WHERE ${where.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT ?`).all(...args,n+1),more=rows.length>n,items=rows.slice(0,n),latest=new Map(),byId=new Map();if(items.length){const attempts=this.database.prepare(`SELECT * FROM processing_attempts WHERE task_id IN (${items.map(()=>'?').join(',')}) ORDER BY task_id,attempt_number DESC`).all(...items.map((r)=>r.id));for(const row of attempts){const value=this.attempt(row);byId.set(row.id,value);if(!latest.has(row.task_id))latest.set(row.task_id,value);}}return{items:items.map((r)=>{const task=this.task(r);return{...task,latestAttempt:byId.get(task.activeAttemptId)||latest.get(r.id)||null};}),nextCursor:more?encodeCursor(items.at(-1)):null}; }
   listTasks(projectId) { return this.listTasksPage({projectId,limit:100}).items; }
   attempt(row) { return row && { id:row.id,taskId:row.task_id,datasetId:row.dataset_id,attemptNumber:row.attempt_number,providerId:row.provider_id,providerTaskId:row.provider_task_id,presetId:row.preset_id,options:json(row.options_json),capabilityFingerprint:row.capability_fingerprint,status:row.status,progress:row.progress,providerOutputCursor:row.provider_output_cursor,errorCode:row.error_code,errorMessage:row.error_message,resultModelId:row.result_model_id,resultModelVersionId:row.result_model_version_id,createdBy:row.created_by,createdAt:row.created_at,updatedAt:row.updated_at,startedAt:row.started_at,upstreamCompletedAt:row.upstream_completed_at,ingestedAt:row.ingested_at,completedAt:row.completed_at,submissionPhase:row.submission_phase||'new',uploadedFileCount:Number(row.uploaded_file_count)||0 }; }
   createAttempt(input) {
