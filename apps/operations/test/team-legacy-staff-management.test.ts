@@ -79,8 +79,15 @@ const setGate = (enabled: 0 | 1) => db.prepare("UPDATE native_staff_access_recon
 async function withoutTriggers(table: string, event: "INSERT" | "UPDATE", write: () => Promise<unknown>) {
   const triggers = (await db.prepare(`SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql LIKE ?`)
     .bind(table, `%${event} ON ${table}%`).all<{ name: string; sql: string }>()).results;
+  expect(triggers.length).toBeGreaterThan(0);
   await db.batch(triggers.map(trigger => db.prepare(`DROP TRIGGER ${trigger.name}`)));
-  try { await write(); } finally { await db.batch(triggers.map(trigger => db.prepare(trigger.sql))); }
+  try { await write(); } finally {
+    await db.batch(triggers.map(trigger => db.prepare(trigger.sql)));
+    const restored = (await db.prepare(`SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql LIKE ?`)
+      .bind(table, `%${event} ON ${table}%`).all<{ name: string; sql: string }>()).results;
+    const byName = (list: Array<{ name: string; sql: string }>) => [...list].sort((a, b) => a.name.localeCompare(b.name));
+    expect(byName(restored)).toEqual(byName(triggers));
+  }
 }
 // A pending native onboarding row (fixture only; the real create path needs a fenced command).
 async function pendingOnboarding(email: string, proposedStaffId = `native-proposed-${++sequence}`) {
@@ -384,8 +391,23 @@ describe("legacy Team staff management: mounted worker, real Access JWT, full lo
     await withoutTriggers("staff_users", "UPDATE", () =>
       db.prepare("UPDATE staff_users SET access_subject=? WHERE id=?").bind(aliasSubject, target.id).run());
     const before = await row(target.id);
-    expect((await edit(admin, target.id, { expectedUpdatedAt: before!.updated_at, displayName: "Collides" })).status).toBe(409);
+    const collided = await edit(admin, target.id, { expectedUpdatedAt: before!.updated_at, displayName: "Collides" });
+    expect(collided.status).toBe(409);
+    expect(await collided.json()).toMatchObject({ error: "This staff member's email or sign-in is also an active alternate sign-in" });
     expect(await row(target.id)).toEqual(before);
+  });
+
+  it("roster flags are false while the 0225 switch is on", async () => {
+    const nativeAdmin = await person({ role: "role-admin", native: true }), target = await person();
+    const before = await roster(nativeAdmin);
+    expect(before.can_manage_staff).toBe(true);
+    expect(before.staff.find(entry => entry.id === target.id)!.profile_editable).toBe(true);
+    await setGate(1);
+    try {
+      const during = await roster(nativeAdmin);
+      expect(during.can_manage_staff).toBe(false);
+      expect(during.staff.every(entry => entry.profile_editable === false)).toBe(true);
+    } finally { await setGate(0); }
   });
 
   it("roster hides updated_at from non-administrators", async () => {

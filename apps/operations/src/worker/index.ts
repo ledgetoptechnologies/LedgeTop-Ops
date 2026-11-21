@@ -3327,6 +3327,8 @@ app.get("/api/team/staff", async (c) => {
   // Same gate as PUT /api/admin/staff/:id/access-controls (administrator + global roles.manage).
   const rolesManageScope = administrator ? await sqlScope(c.env, principal, "roles.manage") : null;
   const canManageAccess = Boolean(rolesManageScope?.global && !rolesManageScope.deniedGlobal);
+  // Same gate as POST/PATCH /api/admin/staff: also false once the native cutover switch is on.
+  const canManageStaff = canManageAccess && await legacyStaffPreCutover(c.env.OPS_DB.withSession("first-primary"));
   const result = await c.env.OPS_DB.prepare(
     `SELECT s.id,s.email,s.display_name,s.status,s.last_seen_at,s.updated_at,s.provisioning_source,s.sync_protected,
       ${nativeLifecycleSql("s")} native_lifecycle,
@@ -3348,7 +3350,7 @@ app.get("/api/team/staff", async (c) => {
             owner_role: Boolean(owner_role),
             // Same decision as PATCH /api/admin/staff/:id (create uses can_manage_staff).
             profile_editable:
-              canManageAccess &&
+              canManageStaff &&
               legacyStaffProfileDecision(
                 { id: row.id, status: row.status, sync_protected: Number(row.sync_protected),
                   any_owner_role: Number(owner_role), native_lifecycle: Number(native_lifecycle) },
@@ -3369,7 +3371,7 @@ app.get("/api/team/staff", async (c) => {
           }
         : (({ updated_at: _updatedAt, ...visible }) => visible)(roster);
     }),
-    can_manage_staff: canManageAccess,
+    can_manage_staff: canManageStaff,
   });
 });
 
@@ -3525,6 +3527,10 @@ async function legacyStaffControlTable(db: D1DatabaseSession): Promise<boolean> 
   }
   if (enabled !== 0) throw new LegacyStaffCutoverActive();
   return true;
+}
+async function legacyStaffPreCutover(db: D1DatabaseSession): Promise<boolean> {
+  try { await legacyStaffControlTable(db); return true; }
+  catch (error) { if (error instanceof LegacyStaffCutoverActive) return false; throw error; }
 }
 const legacyStaffCutoverResponse = (c: any) => c.json({ error: "Staff are managed by employee management in this environment",
   code: "native_cutover_active" }, 409);
