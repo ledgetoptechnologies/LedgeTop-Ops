@@ -198,6 +198,7 @@ import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, re
 import { registerAdminFinanceSummaryRoutes } from './admin-finance-summary-routes';
 import { registerFlightLogsRoutes } from "./flight-logs-routes";
 import { registerLogsDeviceEligibilityRoutes } from "./logs-device-eligibility-http";
+import { registerStaffOperationsAccessRoutes } from "./staff-operations-access-http";
 import { readFinanceSummaryAuthority } from './admin-finance-summary-authority';
 import { registerNativeDirectorySharedProfileRoutes } from "./native-directory-shared-profile-routes";
 import { registerNativeDirectoryExistingImportRoutes } from "./native-directory-existing-import-routes";
@@ -682,6 +683,7 @@ app.use(`${OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE}/*`, dispatchOperationsNativeS
 registerStaffLoginClaimRoute(app);
 registerNativeStaffCohortReviewRoute(app);
 registerLogsDeviceEligibilityRoutes(app);
+registerStaffOperationsAccessRoutes(app);
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();
