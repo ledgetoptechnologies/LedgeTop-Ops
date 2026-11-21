@@ -1,3 +1,4 @@
+import {viewerFailureState, visibleViewerReturn, clearViewerTerminalState, renderViewerTerminalState} from './viewer-terminal-state.mjs';
 import * as THREE from 'three';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { load as loadersGlLoad } from '@loaders.gl/core';
@@ -150,7 +151,7 @@ const dom = {};
  'mode-status','cloud-status','tris-status','lod-status','measure-output','dem-legend',
  'dem-hover','legend-canvas','dem-legend-labels','photo-modal','photo-frame','photo-imgwrap','photo-img','photo-title',
  'photo-meta','photo-close','photo-download','photo-spinner','photo-empty','cam-tooltip','labels-container',
- 'error-actions','error-retry','error-lod','loading-cancel',
+ 'error-actions','error-retry','error-lod','loading-cancel','loading-actions',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
  'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float','lod-memory-mode',
  'staff-navigation','staff-dashboard','staff-models','staff-logo','brand-company','client-navigation','client-portal',
@@ -404,16 +405,18 @@ async function bootstrap() {
   let models = [];
   try {
     const res = await fetch('/api/models');
-    if (res.ok) models = await res.json();
-    else if (res.status === 401) { location.reload(); return; }   // session expired -> show login page
+    if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), {status: res.status});
+    models = await res.json();
   } catch (err) {
     console.error('Failed to reach the viewer API', err);
+    showFinalState(viewerFailureState(err, 'Could not load projects'));
+    return;
   }
 
   populateProjectSwitcher(models);
 
   if (!models.length) {
-    updateLoading('No projects available yet', 'Import or manage a model from the secure Viewer workspace.');
+    showFinalState({title: 'No projects available yet', detail: 'Import or manage a model from the secure Viewer workspace.', retry: false});
     return;
   }
 
@@ -422,11 +425,11 @@ async function bootstrap() {
 
   try {
     const res = await fetch(`/api/models/${encodeURIComponent(targetId)}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), {status: res.status});
     PROJECT = await res.json();
   } catch (err) {
     console.error('Failed to load project config', err);
-    updateLoading('Could not load this project', String(err.message || err));
+    showFinalState(viewerFailureState(err, 'Could not load this project'));
     return;
   }
 
@@ -465,7 +468,7 @@ async function applyProjectShareCatalog(catalog) {
   const options = catalog.tasks.map((task) => ({ id: task.id, title: task.displayName || task.modelTitle || 'Published task' }));
   populateProjectSwitcher(options, { queryKey: 'task' });
   if (!options.length) {
-    updateLoading('No published tasks', 'This project link is active, but no task currently has a published model.');
+    showFinalState({title: 'No published tasks', detail: 'This project link is active, but no task currently has a published model.', retry: false});
     return;
   }
   const requested = new URLSearchParams(location.search).get('task');
@@ -476,19 +479,20 @@ async function applyProjectShareCatalog(catalog) {
   history.replaceState(null, '', url.toString());
   const response = await fetch(`/api/project-share/${encodeURIComponent(SHARE_TOKEN)}/tasks/${encodeURIComponent(taskId)}`);
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401 && body.requiresPassword) { showSharePasswordPrompt(); return; }
   if (!response.ok) throw Object.assign(new Error(body.error || `HTTP ${response.status}`), { status: response.status });
   applyShareResult(body);
 }
 
 async function bootstrapProjectShare() {
-  if (!SHARE_TOKEN) { updateLoading('Invalid link', 'No project share token was found in this URL.'); return; }
+  if (!SHARE_TOKEN) { showFinalState(viewerFailureState({status: 404})); return; }
   updateLoading('Loading shared project...', '');
   try {
     const catalog = await fetchProjectShareCatalog();
     if (catalog.requiresPassword) { showSharePasswordPrompt(); return; }
     await applyProjectShareCatalog(catalog);
   } catch (error) {
-    updateLoading(error.status === 410 ? 'Link expired' : 'Could not load this project link', String(error.message || error));
+    showFinalState(viewerFailureState(error, 'Could not load this project link'), {retry: () => bootstrapProjectShare()});
   }
 }
 
@@ -497,7 +501,7 @@ async function bootstrapProjectShare() {
 // the backend instead of browsing the internal catalog.
 // ───────────────────────────────────────────────────────────────
 async function bootstrapShare() {
-  if (!SHARE_TOKEN) { updateLoading('Invalid link', 'No share token was found in this URL.'); return; }
+  if (!SHARE_TOKEN) { showFinalState(viewerFailureState({status: 404})); return; }
   updateLoading('Loading shared model...', '');
   try {
     const res = await fetch(`/api/share/${encodeURIComponent(SHARE_TOKEN)}`);
@@ -506,17 +510,13 @@ async function bootstrapShare() {
       if (body.requiresPassword) { showSharePasswordPrompt(); return; }
     }
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      updateLoading(
-        res.status === 410 ? 'Link expired' : 'Link not found',
-        body.error || 'This share link is no longer valid.'
-      );
+      showFinalState(viewerFailureState({status: res.status}), {retry: () => bootstrapShare()});
       return;
     }
     applyShareResult(await res.json());
   } catch (err) {
     console.error('Failed to load shared model', err);
-    updateLoading('Could not load this link', String(err.message || err));
+    showFinalState(viewerFailureState(err), {retry: () => bootstrapShare()});
   }
 }
 
@@ -535,6 +535,7 @@ function bindSharePasswordForm() {
   const submit = async () => {
     dom.sharePasswordError.textContent = '';
     dom.sharePasswordSubmit.disabled = true;
+    let unlocked = false;
     try {
       const endpoint = VIEW_MODE === 'project'
         ? `/api/project-share/${encodeURIComponent(SHARE_TOKEN)}/unlock?limit=50`
@@ -546,18 +547,35 @@ function bindSharePasswordForm() {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
+        if ([403, 404, 410].includes(res.status)) {
+          hideSharePasswordPrompt();
+          dom.sharePasswordInput.value = '';
+          dom.sharePasswordSubmit.disabled = false;
+          showFinalState(viewerFailureState({status: res.status}));
+          return;
+        }
         dom.sharePasswordError.textContent = res.status === 429
           ? 'Too many attempts — please wait a few minutes.'
           : (body.error || 'Incorrect password.');
         dom.sharePasswordSubmit.disabled = false;
         return;
       }
-      hideSharePasswordPrompt();
-      if (VIEW_MODE === 'project') await applyProjectShareCatalog(await fetchProjectShareCatalog(body));
-      else applyShareResult(body);
-    } catch (err) {
-      dom.sharePasswordError.textContent = 'Could not reach the server.';
+      unlocked = true;
       dom.sharePasswordSubmit.disabled = false;
+      hideSharePasswordPrompt();
+      if (VIEW_MODE === 'project') {
+        const catalog = await fetchProjectShareCatalog(body);
+        if (catalog.requiresPassword) { showSharePasswordPrompt(); return; }
+        await applyProjectShareCatalog(catalog);
+      } else applyShareResult(body);
+    } catch (err) {
+      dom.sharePasswordSubmit.disabled = false;
+      if (unlocked) {
+        // The password POST succeeded. Restart only the public share's GET
+        // bootstrap to revalidate current access; never replay the unlock body.
+        showFinalState(viewerFailureState(err, 'Could not load this link'),
+          {retry: () => VIEW_MODE === 'project' ? bootstrapProjectShare() : bootstrapShare()});
+      } else dom.sharePasswordError.textContent = 'Could not reach the server.';
     }
   };
   dom.sharePasswordSubmit.addEventListener('click', submit);
@@ -770,7 +788,7 @@ function init() {
     hideLoading();
     updateStatus('Streaming LOD unavailable or processing');
   } else {
-    updateLoading('No published views available', 'Original source files remain available for authenticated download in Operations.');
+    showFinalState({title: 'No published views available', detail: 'Original source files remain available for authenticated download in Operations.', retry: false});
   }
   loadCameras();         // prepare camera positions (hidden until toggled); no-op if unavailable
   startLoop();
@@ -1665,17 +1683,27 @@ async function bootstrapSession() {
     applyViewerSession(session, { initialize: true });
   } catch (error) {
     window.__ltdsViewerStartupDiagnostics?.mark('bootstrap-failed');
-    if (sessionStorageKey) sessionCapabilities.clear(sessionStorageKey);
+    // Preserve only an existing capability on a transient read failure; the
+    // server must authorize it again. Authoritative denial always disarms it.
+    if (sessionStorageKey && (SESSION_GRANT || !viewerFailureState(error).retry)) sessionCapabilities.clear(sessionStorageKey);
     updateLoading('Viewer session unavailable', String(error.message || error));
-    showSessionRecovery();
+    showSessionRecovery(error);
   }
 }
 
-function showSessionRecovery() {
+function showSessionRecovery(error) {
   const recovery = document.getElementById('session-recovery');
   if (!recovery) return;
   document.body.classList.add('session-bootstrap-failed');
   recovery.hidden = false;
+  const failure = viewerFailureState(error, 'Viewer session unavailable');
+  // A grant POST can have succeeded before its response was lost. Never reload
+  // that one-time URL; reopen through the existing authorized application instead.
+  if (SESSION_GRANT && failure.retry) failure.detail = 'Reopen this model from the application that shared it to start a new Viewer session.';
+  renderViewerTerminalState({surface: document.getElementById('recovery-message'),
+    title: document.getElementById('recovery-title'), detail: document.getElementById('recovery-detail'),
+    actions: document.getElementById('recovery-retry-actions')}, failure,
+    {documentRef: document, retry: !SESSION_GRANT && failure.retry ? () => location.reload() : null});
   if (window.parent !== window) {
     const workspace = document.getElementById('recovery-workspace');
     const topLevelGuidance = document.getElementById('recovery-top-level-guidance');
@@ -4576,11 +4604,21 @@ function applyPcPanelState() {
 function updateStatus(t) { dom.modeStatus.textContent = t; }
 function updateLoading(t, p, cancellable = false) {
   dom.loadingOverlay.classList.remove('hidden');
+  clearViewerTerminalState({surface: dom.loadingOverlay, actions: dom.loadingActions});
   dom.loadingText.textContent = t;
   dom.loadingProgress.textContent = p || '';
   dom.loadingCancel.style.display = cancellable ? '' : 'none';
 }
-function hideLoading() { dom.loadingOverlay.classList.add('hidden'); dom.loadingCancel.style.display = 'none'; }
+function hideLoading() {
+  dom.loadingOverlay.classList.add('hidden'); dom.loadingCancel.style.display = 'none';
+  clearViewerTerminalState({surface: dom.loadingOverlay, actions: dom.loadingActions});
+}
+function showFinalState(failure, {retry = () => location.reload()} = {}) {
+  dom.loadingOverlay.classList.remove('hidden'); dom.loadingCancel.style.display = 'none';
+  renderViewerTerminalState({surface: dom.loadingOverlay, title: dom.loadingText, detail: dom.loadingProgress, actions: dom.loadingActions},
+    failure, {documentRef: document, retry: failure.retry ? retry : null,
+      back: visibleViewerReturn(dom, activeViewerSession, {viewMode: VIEW_MODE, topLevel: window.parent === window})});
+}
 let errorHideTimer = null;
 function hideError() {
   if (errorHideTimer) clearTimeout(errorHideTimer);
