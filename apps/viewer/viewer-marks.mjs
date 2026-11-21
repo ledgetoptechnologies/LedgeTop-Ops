@@ -128,7 +128,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const canWrite = () => store.canWrite() && Boolean(view.map);
   const categoryById = id => store.state.categories.find(category => category.id === id) || null;
   const visibleMarks = () => store.state.marks.filter(mark => !filter || (filter === 'none' ? !mark.categoryId : mark.categoryId === filter));
-  const defaultVisibility = () => (store.state.capabilities.staff ? 'internal' : 'staff');
+  const defaultVisibility = () => (store.state.capabilities.staff ? 'internal' : 'private');
   const message = text => { store.state.message = text; render(); };
 
   function setMode(next) {
@@ -196,7 +196,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     colorInput.value = safeColor(draft.color);
     noteInput.value = draft.note || '';
     elevationInput.value = elevationForDisplay(draft.elevationNavd88M, units());
-    const options = store.state.capabilities.staff ? ['internal', 'client', 'private'] : ['staff', 'private'];
+    const options = store.state.capabilities.staff ? ['internal', 'client', 'private'] : ['private', 'staff'];
     visibilitySelect.replaceChildren(...options.map(value => h(document, 'option', { value, text: VISIBILITY_LABEL[value] })));
     visibilitySelect.value = options.includes(draft.visibility) ? draft.visibility : options[0];
     const accounts = store.state.audiences.map(row => row.account);

@@ -52,12 +52,14 @@ test('a client shares with staff, staff share back to the client account, and ea
   assert.equal(client.canWrite(), true);
   assert.equal(staff.state.capabilities.staff, true);
 
-  const created = await client.create(pin('Shared stand'));
+  const privateByDefault = await client.create(pin('Mine only'));
+  assert.equal(privateByDefault.visibility, 'private', 'client marks default to Only me');
+  const created = await client.create(pin('Shared stand', { visibility: 'staff' }));
   assert.equal(created.mine, true);
   assert.equal(created.visibility, 'staff');
   const moved = await client.update(created, { geometry: { type: 'Point', coordinates: [-87.0001, 43.0001] } });
   assert.equal(moved.revision, 2);
-  assert.deepEqual(client.state.undo.map(entry => entry.type), ['create', 'update']);
+  assert.deepEqual(client.state.undo.map(entry => entry.type), ['create', 'create', 'update']);
   assert.equal(await client.undo(), true);
   assert.deepEqual(client.find(created.id).geometry.coordinates, [-87, 43], 'undo restores the old position');
 
@@ -105,7 +107,7 @@ test('categories and GeoJSON import go through the API; company logins only read
   assert.equal(await client.undo(), true, 'undo removes the whole import');
   assert.equal(client.state.marks.length, 0);
 
-  await client.create(pin('Only for staff'));
+  await client.create(pin('Only for staff', { visibility: 'staff' }));
   const staff = createMarksStore({ request });
   await staff.setScope(scope('ops', 'staff-person'));
   await staff.create(pin('Visible', { visibility: 'client', shareAccount: 'direct_client_grant:grant-a' }));

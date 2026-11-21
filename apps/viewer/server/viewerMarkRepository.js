@@ -9,7 +9,9 @@ const ACCOUNT = /^direct_client_grant:[A-Za-z0-9._:-]{1,200}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const NOTE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const LIMITS = Object.freeze({ perOwner: 1000, perModel: 5000, categories: 100, vertices: 500, batch: 500, accounts: 200 });
-const VISIBILITY = Object.freeze({ client: ['staff', 'private'], ops: ['internal', 'client', 'private'] });
+// The first entry is the default when a request omits visibility: a client mark
+// stays with its owner until the client explicitly shares it with staff.
+const VISIBILITY = Object.freeze({ client: ['private', 'staff'], ops: ['internal', 'client', 'private'] });
 const ACCOUNT_TOUCH_MS = 60 * 60 * 1000;
 
 function markError(code, status = 400) {

@@ -84,14 +84,17 @@ test('client privacy: two clients on one model never read each other\'s marks', 
   assert.equal(created.headers.get('cache-control'), 'no-store');
   assert.equal(created.body.mark.color, '#88aa22');
   assert.equal((await request(clientA, 'POST', '', mine)).status, 200, 'same create replays');
-  const withStaff = (await request(clientA, 'POST', '', point({ name: 'A with staff' }))).body.mark;
-  assert.equal(withStaff.visibility, 'staff', 'a client mark defaults to shared with project staff');
+  const omitted = (await request(clientA, 'POST', '', point({ name: 'A default' }))).body.mark;
+  assert.equal(omitted.visibility, 'private', 'a client mark defaults to Only me');
+  assert.equal((await request(staff, 'GET', omitted.id)).status, 404, 'staff do not see it until the client shares it');
+  const withStaff = (await request(clientA, 'POST', '', point({ name: 'A with staff', visibility: 'staff' }))).body.mark;
+  assert.equal(withStaff.visibility, 'staff');
   const fromB = (await request(clientB, 'POST', '', point({ name: 'B with staff', visibility: 'staff' }))).body.mark;
   for (const visibility of ['internal', 'client', 'shared', 'everyone']) {
     assert.ok([400, 403].includes((await request(clientA, 'POST', '', point({ visibility }))).status), visibility);
   }
 
-  assert.deepEqual(await list(clientA), ['A private', 'A with staff']);
+  assert.deepEqual(await list(clientA), ['A default', 'A private', 'A with staff']);
   assert.deepEqual(await list(clientB), ['B with staff']);
   assert.deepEqual(await list(colleagueA), [], 'not even a colleague on the same account');
   assert.deepEqual(await list(staff), ['A with staff', 'B with staff']);
@@ -159,7 +162,7 @@ test('two accounts on one model under the SAME association id never see each oth
   const companyOne = session('client', 'client:company-one', { ...SHARED_ASSOCIATION, permissions: { view: true, measure: true } });
 
   const own = (await request(accountOne, 'POST', '', point({ name: 'One only me', visibility: 'private' }))).body.mark;
-  const toStaff = (await request(accountOne, 'POST', '', point({ name: 'One with staff' }))).body.mark;
+  const toStaff = (await request(accountOne, 'POST', '', point({ name: 'One with staff', visibility: 'staff' }))).body.mark;
   const categoryOne = { id: randomUUID(), name: 'One category', color: '#3366ff', icon: 'flag' };
   assert.equal((await request(accountOne, 'POST', 'categories', categoryOne)).status, 201);
   await request(accountTwo);
