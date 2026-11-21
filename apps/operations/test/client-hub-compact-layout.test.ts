@@ -69,6 +69,19 @@ describe("Client Hub compact directory toolbar", () => {
     expect(directorySource).not.toContain("Open each source workspace for its contacts");
   });
 
+  it("keeps 44px toolbar targets at every width and pointer type", () => {
+    const css = source("../src/client/styles.css");
+    // Same rule the multi-width Playwright specs check (375 to 3440px, desktop and touch projects).
+    for (const selector of [".client-directory-toolbar :is(input, select) {",
+      ".client-directory-toolbar :is(.client-directory-search, .client-directory-filters) > button {",
+      ".client-directory-toolbar > .client-directory-create .client-directory-create-bar > button {"]) {
+      const rule = css.slice(css.indexOf(selector), css.indexOf("}", css.indexOf(selector)));
+      expect(rule, selector).toContain("min-height: 44px;");
+    }
+    // Nothing (base or media query) shrinks a toolbar control below 44px.
+    expect(css).not.toMatch(/\.client-directory-(toolbar|filters|search|source|sort)[^{}]*\{[^}]*min-height:\s*(2\.25rem|2\.5rem|3[0-9]px|[0-3]?[0-9]px)/);
+  });
+
   it("drops descriptive sentences and the repeated eyebrow from the Client Hub header", () => {
     expect(appSource).toContain('clients: ["Client Hub", ""]');
     expect(appSource).toContain('const compact = page === "clients";');
