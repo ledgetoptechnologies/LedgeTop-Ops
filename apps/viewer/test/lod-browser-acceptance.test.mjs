@@ -1656,10 +1656,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
         : event.method === 'Runtime.exceptionThrown'
           ? event.params.exceptionDetails.url
           : null;
-      return typeof url === 'string' && (
-        url.includes('/@vite/client')
-        || url === 'https://ledgetopdroneservices.com/images/DroneLogo01.webp'
-      );
+      return typeof url === 'string' && url.includes('/@vite/client');
     };
     const errors = client.events.filter((event) => (
       event.method === 'Runtime.exceptionThrown' || (event.method === 'Log.entryAdded' && event.params.entry.level === 'error')

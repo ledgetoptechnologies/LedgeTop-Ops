@@ -2,7 +2,7 @@
 .measurement-report .measurement-report-toolbar { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 14px 24px; background: #edf2f6; border-bottom: 1px solid #d3dde5; }
 .measurement-report-toolbar label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
 .measurement-report .measurement-report-document { padding: 28px 36px; font: 13px/1.45 Arial, sans-serif; }
-.measurement-report-header { border-top: 5px solid #ee5007; padding-top: 12px; margin-bottom: 20px; }
+.measurement-report-header { border-top: 5px solid var(--brand-orange, #ee5007); padding-top: 12px; margin-bottom: 20px; }
 .measurement-report-brand { color: #a93606; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .measurement-report-brand span { margin-left: 12px; color: #546576; font-weight: 400; }
 .measurement-report h1 { margin: 15px 0 4px; font-size: 28px; line-height: 1.15; color: #172334; }
