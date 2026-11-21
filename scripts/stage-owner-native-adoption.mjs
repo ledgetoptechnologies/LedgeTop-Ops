@@ -54,10 +54,10 @@ const MAX_APPROVAL_LIFETIME_MS = 60 * 60 * 1000;
 // Current main migration chain (not the stale 225-migration bootstrap pin).
 // Any migration added, removed, renamed or edited changes these and refuses.
 export const STAGE_OWNER_ADOPTION_MIGRATIONS = Object.freeze({
-  count: 235,
-  last: '0243_staff_logs_device_eligibility.sql',
-  namesSha256: 'a34d43d7a2f94d4022a933c1fa427ce522f118dc79a39ee35b5a3e5c23e89937',
-  contentsSha256: 'a7c4e5ae9d8f3f8e75659eff62a3e2c2f8a915dea3a08a799695cb690d476ae3',
+  count: 236,
+  last: '0244_staff_operations_access_writer.sql',
+  namesSha256: 'f06a64313acf8c1efc046133e59d9dde5a15a7c5a40bd0eba80fb73c679db422',
+  contentsSha256: 'c67d4ac2cf54b7dae7e816cf0e2223adc167244b900506c47dc516df2d8379ab',
 });
 
 // Stage-only target pins from Merger's independent, non-secret readback
@@ -161,11 +161,16 @@ export function readStageOwnerAdoptionSourceMigrations(directory = migrationDire
   return { names, namesSha256: sha(names.join('\n')), contentsSha256 };
 }
 
+/** Fail-closed comparison of a source chain with the exact pin: count, last
+ * name, names digest and contents digest must all match. */
+export function assertStageOwnerAdoptionSourceMigrations(source, pin = STAGE_OWNER_ADOPTION_MIGRATIONS) {
+  if (!source || !Array.isArray(source.names) || source.names.length !== pin.count || source.names.at(-1) !== pin.last
+    || source.namesSha256 !== pin.namesSha256 || source.contentsSha256 !== pin.contentsSha256) fail('source_migration_chain_changed');
+  return source;
+}
+
 function verifySourceMigrations(ledger) {
-  const source = readStageOwnerAdoptionSourceMigrations();
-  const pin = STAGE_OWNER_ADOPTION_MIGRATIONS;
-  if (source.names.length !== pin.count || source.names.at(-1) !== pin.last || source.namesSha256 !== pin.namesSha256
-    || source.contentsSha256 !== pin.contentsSha256) fail('source_migration_chain_changed');
+  const source = assertStageOwnerAdoptionSourceMigrations(readStageOwnerAdoptionSourceMigrations());
   if (!Array.isArray(ledger) || canonical(ledger) !== canonical(source.names)) fail('database_migration_ledger_mismatch');
   return source;
 }

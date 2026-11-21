@@ -115,9 +115,10 @@ async function readRepository(repo, fetchImpl, extra = {}) {
 
 test('reads both actual source inventories against fixed ordered D1 ledgers', async () => {
   const operationsNames = names('apps/operations/migrations');
-  assert.equal(operationsNames.length, 235);
-  assert.deepEqual(operationsNames.slice(-4), ['0240_flight_logs_permissions.sql', '0241_staff_usernames.sql',
-    '0242_native_staff_onboarding_approval_actor_authority.sql', '0243_staff_logs_device_eligibility.sql']);
+  assert.equal(operationsNames.length, 236);
+  assert.deepEqual(operationsNames.slice(-5), ['0240_flight_logs_permissions.sql', '0241_staff_usernames.sql',
+    '0242_native_staff_onboarding_approval_actor_authority.sql', '0243_staff_logs_device_eligibility.sql',
+    '0244_staff_operations_access_writer.sql']);
   assert.equal(names('apps/client/migrations').length, 161);
   assert.equal(names('apps/client/migrations').at(-1), '0242_client_ops_triage_inquiries.sql');
   const fixture = makeFetch();
@@ -129,7 +130,7 @@ test('reads both actual source inventories against fixed ordered D1 ledgers', as
   assert.equal(result.schemaVersion, 1);
   assert.equal(result.accountId, ACCOUNT);
   assert.equal(result.databases[0].databaseId, DB_OPS);
-  assert.equal(result.databases[0].migrationCount, 235);
+  assert.equal(result.databases[0].migrationCount, 236);
   assert.equal(result.databases[1].databaseId, DB_CLIENT);
   assert.equal(result.databases[1].migrationCount, 161);
   assert.ok(result.databases.every((row) => /^[a-f0-9]{64}$/.test(row.sourceInventorySha256)
