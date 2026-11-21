@@ -61,7 +61,8 @@ test("recent links follow folders, Back and refresh; Trash has breathing room", 
   const trash = page.locator(".delivery-support-panels > section").filter({ has: page.getByRole("heading", { name: "Trash", exact: true }) });
   const a = await recent.boundingBox(), b = await trash.boundingBox();
   expect(a).not.toBeNull(); expect(b).not.toBeNull();
-  expect(b!.y - (a!.y + a!.height)).toBeGreaterThanOrEqual(16);
+  // Compact density: one --ops-section-gap (.9rem, about 14px) between panels.
+  expect(b!.y - (a!.y + a!.height)).toBeGreaterThanOrEqual(14);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
   await page.evaluate(() => window.scrollTo(0, 0));
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
