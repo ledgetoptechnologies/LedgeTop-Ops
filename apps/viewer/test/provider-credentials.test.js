@@ -409,6 +409,12 @@ test('delete requires write access, blocks queued and running work, and preserve
   assert.equal(record.attempt.providerId, provider.id);
   assert.equal(record.attempt.status, 'ready_for_review');
   assert.equal(record.logs[0].message, 'Preserved log');
+  const diagnostics = await request(c, `/api/v1/attempts/${attempt.id}/diagnostics`);
+  assert.equal(diagnostics.status, 200);
+  assert.deepEqual((await diagnostics.json()).diagnostics.provider, {
+    id: provider.id, displayName: 'Cluster', type: 'clusterodm',
+    deletedAt: c.database.prepare('SELECT deleted_at FROM processing_providers WHERE id=?').get(provider.id).deleted_at,
+  });
   assert.equal(c.processing.getAttemptProvenance(attempt.id).submission.providerId, provider.id);
   assert.equal(c.database.prepare('SELECT status FROM viewer_acceptance_ack_outbox WHERE event_id=?').get('receipt').status, 'delivered');
   assert.equal(c.database.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='provider.deleted' AND entity_id=?").get(provider.id).n, 1);
@@ -441,12 +447,14 @@ test('node deletion rolls back its receipt, audit, and provider together when re
 
 test('node deletion waits for durable remote cancellation evidence, including legacy cancellations', async t => {
   let cancelCalled, releaseCancel, remoteStatus = 20;
+  const remoteCalls = [];
   const cancelStarted = new Promise(resolve => { cancelCalled = resolve; });
   const cancelReleased = new Promise(resolve => { releaseCancel = resolve; });
   t.after(releaseCancel);
   const c = await fixture(t, {
     permissions: ['viewer.providers.write', 'viewer.processing.write'],
     providerFetch: async url => {
+      remoteCalls.push(new URL(url).origin);
       const pathname = new URL(url).pathname;
       if (pathname === '/task/cancel') {
         cancelCalled();
@@ -513,6 +521,28 @@ test('node deletion waits for durable remote cancellation evidence, including le
   const unknownDelete = await request(c, `/api/v1/processing/providers/${unknownOriginProvider.id}`, { method: 'DELETE', key: 'unknown-delete-0001', body: {} });
   assert.equal((await unknownDelete.json()).code, 'provider_cancellation_unconfirmed');
   assert.ok(c.processing.getProviderCredential(unknownOriginProvider.id));
+  assert.ok(remoteCalls.length > 0);
+  assert.ok(remoteCalls.every(origin => origin === provider.endpoint));
+  for (const mismatch of ['origin', 'task', 'missing-provenance']) {
+    const node = c.processing.upsertProvider({ type: 'nodeodm', displayName: mismatch, endpoint: `https://${mismatch}.example`, enabled: true });
+    c.processing.setProviderCredential(node.id, c.credentials.seal(node.id, TOKEN));
+    c.database.prepare('UPDATE processing_providers SET enabled=1 WHERE id=?').run(node.id);
+    const attempt = run(mismatch, node);
+    c.processing.transitionAttempt(attempt.id, 'running');
+    if (mismatch === 'origin') c.database.prepare('UPDATE processing_providers SET endpoint=? WHERE id=?').run('https://replacement.example', node.id);
+    if (mismatch === 'task') c.database.prepare('UPDATE processing_attempts SET provider_task_id=? WHERE id=?').run(crypto.randomUUID(), attempt.id);
+    if (mismatch === 'missing-provenance') c.database.prepare('DELETE FROM processing_attempt_provenance WHERE attempt_id=?').run(attempt.id);
+
+    const before = remoteCalls.length;
+    assert.equal((await cancel(attempt, `${mismatch}-cancel-0001`)).status, 200);
+    assert.equal((await cancel(attempt, `${mismatch}-check-0001`)).status, 200);
+    assert.equal(remoteCalls.length, before, `${mismatch} must issue zero remote requests`);
+    assert.equal(c.processing.providerCancellationUnsettled(node.id, attempt.id), true);
+    c.database.prepare('UPDATE processing_providers SET enabled=0 WHERE id=?').run(node.id);
+    const deleteResult = await request(c, `/api/v1/processing/providers/${node.id}`, { method: 'DELETE', key: `${mismatch}-delete-0001`, body: {} });
+    assert.equal(deleteResult.status, 409);
+    assert.equal((await deleteResult.json()).code, 'provider_cancellation_unconfirmed');
+  }
   assert.equal(c.database.prepare("SELECT COUNT(*) n FROM processing_events WHERE event_type='provider.cancellation_settled'").get().n, 2);
 });
 

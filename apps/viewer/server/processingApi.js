@@ -525,18 +525,19 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     if(!attempt)return error(res,404,'attempt_not_found');
     const cancelled=processing.cancelAttempt(attempt.id,req.actorId);
     const upstream=['queued_upstream','running'].includes(attempt.status);
-    const verify=attempt.providerTaskId&&cancelled&&processing.providerCancellationUnsettled(attempt.providerId,attempt.id);
-    if(upstream||verify){
+    const verify=cancelled?.providerTaskId&&processing.providerCancellationUnsettled(cancelled.providerId,cancelled.id);
+    if(verify){
       try{
-        const provider=processing.getProvider(attempt.providerId);
+        const provider=processing.getProvider(cancelled.providerId);
         if(!provider)throw new Error('Processing node is unavailable');
+        if(!processing.providerCancellationTargetMatches(cancelled,provider))throw new Error('Original processing node could not be verified');
         const adapter=new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,...(providerFetch?{fetchImpl:providerFetch}:{})});
-        if(upstream)await adapter.cancel(attempt.providerTaskId);
-        if(verify){
-          if(!processing.providerCancellationTargetMatches(attempt,provider))throw new Error('Original processing node could not be verified');
-          const observed=await adapter.status(attempt.providerTaskId);
-          if(!processing.recordProviderCancellationSettled(attempt.id,provider,observed))throw new Error('Upstream task is not confirmed terminal');
-        }
+        if(upstream)await adapter.cancel(cancelled.providerTaskId);
+        const current=processing.getAttempt(cancelled.id),currentProvider=processing.getProvider(provider.id);
+        if(current?.providerTaskId!==cancelled.providerTaskId||currentProvider?.endpoint!==provider.endpoint||
+          !processing.providerCancellationTargetMatches(current,currentProvider))throw new Error('Original processing node could not be verified');
+        const observed=await adapter.status(cancelled.providerTaskId);
+        if(!processing.recordProviderCancellationSettled(cancelled.id,provider,observed))throw new Error('Upstream task is not confirmed terminal');
       }catch(e){
         processing.appendLog(attempt.id,'warning',`Upstream cancellation could not be confirmed: ${sanitizeLogMessage(e.message)}`);
       }

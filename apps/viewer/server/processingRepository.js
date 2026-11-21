@@ -464,11 +464,14 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   }
 
   providerCancellationTargetMatches(attempt,provider) {
+    if(!attempt?.providerTaskId||!provider)return false;
     const original=this.getAttemptProvenance(attempt.id)?.submission;
-    if(original?.providerId!==provider.id||original.providerTaskId!==attempt.providerTaskId)return false;
-    if(original.providerEndpoint)return original.providerEndpoint===provider.endpoint;
+    if(!original||attempt.providerId!==provider.id||original.attemptId!==attempt.id||
+      original.providerId!==provider.id||original.providerTaskId!==attempt.providerTaskId||original.providerType!==provider.type)return false;
     const originSha256=providerOriginSha256(provider.endpoint);
-    return Boolean(originSha256&&original.providerOriginSha256===originSha256);
+    return Boolean(originSha256&&(original.providerEndpoint||original.providerOriginSha256)&&
+      (!original.providerEndpoint||original.providerEndpoint===provider.endpoint)&&
+      (!original.providerOriginSha256||original.providerOriginSha256===originSha256));
   }
 
   recordProviderCancellationSettled(attemptId,observedProvider,observedTask) {
@@ -1387,6 +1390,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   attemptDiagnostics(id,{eventLimit=100,logLimit=200,logRetentionDays=30}={}){
     const attempt=this.getAttempt(id);if(!attempt)return null;
     const task=this.getTask(attempt.taskId),project=task?this.getProject(task.projectId):null,provider=attempt.providerId?this.getProvider(attempt.providerId):null,worker=this.workerStatus(),nowMs=Date.now();
+    const providerHistory=attempt.providerId?this.database.prepare(`SELECT id,display_name AS displayName,provider_type AS type,deleted_at AS deletedAt
+      FROM processing_providers WHERE id=?`).get(attempt.providerId):null;
     const operationRow=this.database.prepare("SELECT * FROM dataset_operations WHERE processing_attempt_id=? OR json_extract(payload_json,'$.ids.attemptId')=? ORDER BY created_at DESC LIMIT 1").get(id,id);
     const processingJobs=this.database.prepare('SELECT * FROM processing_jobs WHERE attempt_id=? ORDER BY created_at,id').all(id).map(row=>{
       let queueReason=null;
@@ -1407,7 +1412,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const eventCount=Math.max(1,Math.min(Number(eventLimit)||100,500)),events=this.database.prepare('SELECT * FROM processing_events WHERE attempt_id=? OR operation_id=? ORDER BY created_at,id LIMIT ?').all(id,operationRow?.id||'',eventCount).map(row=>this.processingEvent(row));
     const logCount=Math.max(1,Math.min(Number(logLimit)||200,2000)),logTotal=Number(this.database.prepare('SELECT COUNT(*) n FROM processing_logs WHERE attempt_id=?').get(id).n)||0,logs=this.listLogs(id,logCount).map(row=>({level:bounded(row.level,20)||'info',message:diagnosticMessage(row.message),createdAt:row.created_at}));
     const retryKind=['failed','cancelled'].includes(attempt.status)?provider?.enabled?'provider':operationRow?.status==='failed'?'operation':'none':'none';
-    return{attempt:{...attempt,errorMessage:attempt.errorMessage?diagnosticMessage(attempt.errorMessage):null},task:task?{id:task.id,displayName:task.displayName,projectId:task.projectId,status:task.status,activeAttemptId:task.activeAttemptId}:null,currentAttemptId:task?.activeAttemptId||null,project:project?{id:project.id,displayName:project.displayName}:null,operation:operationRow?this.datasetOperation(operationRow):null,retryKind,retryEndpoint:retryKind==='provider'?`/api/v1/attempts/${encodeURIComponent(id)}/retry`:retryKind==='operation'?`/api/v1/operations/${encodeURIComponent(operationRow.id)}/retry`:null,processingJobs,derivatives,events,logs,logsTruncated:logTotal>logs.length,logRetentionDays:Math.max(1,Math.min(Number(logRetentionDays)||30,365))};
+    return{attempt:{...attempt,errorMessage:attempt.errorMessage?diagnosticMessage(attempt.errorMessage):null},provider:providerHistory??null,task:task?{id:task.id,displayName:task.displayName,projectId:task.projectId,status:task.status,activeAttemptId:task.activeAttemptId}:null,currentAttemptId:task?.activeAttemptId||null,project:project?{id:project.id,displayName:project.displayName}:null,operation:operationRow?this.datasetOperation(operationRow):null,retryKind,retryEndpoint:retryKind==='provider'?`/api/v1/attempts/${encodeURIComponent(id)}/retry`:retryKind==='operation'?`/api/v1/operations/${encodeURIComponent(operationRow.id)}/retry`:null,processingJobs,derivatives,events,logs,logsTruncated:logTotal>logs.length,logRetentionDays:Math.max(1,Math.min(Number(logRetentionDays)||30,365))};
   }
   enqueueEvent(type,payload) { const id=payload.eventId||crypto.randomUUID(),t=now();const clean={...payload,eventId:id,error:payload.error?{code:bounded(payload.error.code,80),message:sanitizeLogMessage(payload.error.message).slice(0,1000)}:undefined};const serialized=JSON.stringify(clean);if(Buffer.byteLength(serialized)>64*1024)throw new Error('event payload exceeds 64 KiB');const existing=this.database.prepare('SELECT payload_json,event_type FROM event_outbox WHERE id=?').get(id);if(existing){if(existing.payload_json!==serialized||existing.event_type!==type)throw new Error('eventId already has a different payload');return id;}this.database.prepare("INSERT INTO event_outbox(id,event_type,payload_json,status,available_at,created_at,updated_at) VALUES (?,?,?,'pending',?,?,?)").run(id,type,serialized,t,t,t);return id; }
   enqueueViewerAcceptanceAck(candidate){
