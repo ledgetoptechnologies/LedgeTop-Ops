@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Brand, Card, Loading, Skeleton } from "@ltds/ui";
+import { Card, Loading, Skeleton } from "@ltds/ui";
 import { ClientOnboardingInbox } from "./ClientOnboardingReview";
 import { authorityLost, endpoint, json, post, record, refusalStatus, uncertainFailure, uuid, validSession, type RequestFailure, type StaffSession } from "./onboarding-staff-api";
 import "./ClientOnboardingStaff.css";
@@ -10,7 +10,7 @@ type ScopeRow = { businessAreaId: string; divisionId: string | null | "" };
 type Created = { invitationId: string; expiresAt: string; requestSha256: string; state: string };
 /** The recipient link carries the one-time secret in its #fragment: it lives only in
  * memory, is never rendered as text, and is never rebuilt from the secret. */
-type Revealed = { invitationId: string; expiresAt: string; link: string | null; secret: string };
+type Revealed = { invitationId: string; link: string | null; secret: string };
 
 const MAX_UI_SCOPES = 16;
 const SESSION_REFRESH_MS = 8 * 60 * 1000;
@@ -26,7 +26,7 @@ const defaultExpiry = () => {
   return localDateTime(date);
 };
 function validCreated(value: Record<string, unknown>): value is Created & Record<string, unknown> {
-  return typeof value.invitationId === "string" && typeof value.expiresAt === "string"
+  return typeof value.invitationId === "string" && typeof value.expiresAt === "string" && Number.isFinite(Date.parse(value.expiresAt))
     && typeof value.requestSha256 === "string" && /^[0-9a-f]{64}$/.test(value.requestSha256) && typeof value.state === "string";
 }
 const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
@@ -48,16 +48,16 @@ export function validScopeChoices(value: Record<string, unknown>): ScopeChoice[]
   }
   return value.scopes as ScopeChoice[];
 }
-/** Accepts only an https onboarding link for exactly this invitation. */
-export function safeRecipientLink(value: unknown, invitationId: string): string | null {
+/** Accepts only an HTTPS onboarding link for the revealed invitation and secret. */
+export function safeRecipientLink(value: unknown, invitationId: string, invitationSecret: string): string | null {
   if (typeof value !== "string" || value.length > 512) return null;
   try {
     const url = new URL(value);
     return url.protocol === "https:" && !url.username && !url.password && !url.search
-      && url.pathname === `/onboarding/${invitationId}` && /^#[0-9a-f]{64}$/.test(url.hash) ? url.href : null;
+      && url.pathname === `/onboarding/${invitationId}` && url.hash === `#${invitationSecret}` ? url.href : null;
   } catch { return null; }
 }
-export function ClientOnboardingStaff() {
+export function ClientOnboardingStaff({ embedded = false, onBusyChange }: { embedded?: boolean; onBusyChange?: (busy: boolean) => void } = {}) {
   // One stable session object: a refresh rotates the token in place, so open reviews,
   // inbox pages and in-flight retries are not reloaded or remounted.
   const sessionRef = useRef<StaffSession | null>(null);
@@ -117,23 +117,24 @@ export function ClientOnboardingStaff() {
   const lost = useCallback(() => close("Your onboarding access changed. Reload the page to continue."), [close]);
 
   const session = sessionRef.current;
-  if (accessError) return <main className="onboarding-staff-gate"><Card><h1>Client onboarding unavailable</h1><p role="alert">{accessError}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
-  if (!session || !verifiedUntil) return <main className="onboarding-staff-gate"><Loading /></main>;
-  return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" /><a href="/">Exit onboarding</a></header><main>
-    <div className="onboarding-staff-heading"><p className="eyebrow">Client onboarding</p><h1>Client onboarding</h1>
-      <p>Invite a client to fill in their profile, then review what they submit and choose which Ledge Top businesses they belong to.</p></div>
+  if (accessError) return <Card><h2>Client onboarding unavailable</h2><p role="alert">{accessError}</p></Card>;
+  if (!session || !verifiedUntil) return <Loading />;
+  if (embedded) return <ClientOnboardingIssuer session={session} onRefused={refused} onBusyChange={onBusyChange} />;
+  return <div className="onboarding-review-surface">
     <ClientOnboardingInbox session={session} onRefused={refused} onAuthorityLost={lost} />
     <ClientOnboardingIssuer session={session} onRefused={refused} />
-  </main></div>;
+  </div>;
 }
 
-export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffSession; onRefused: (caught: unknown) => void }) {
+export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { session: StaffSession; onRefused: (caught: unknown) => void; onBusyChange?: (busy: boolean) => void }) {
   const [commandId] = useState(uuid);
   const [expiresAt, setExpiresAt] = useState(defaultExpiry);
   const [choices, setChoices] = useState<ScopeChoice[] | null | "unavailable">(null);
   const [rows, setRows] = useState<ScopeRow[]>([{ businessAreaId: "", divisionId: "" }]);
   const [created, setCreated] = useState<Created | null>(null);
   const [revealed, setRevealed] = useState<Revealed | null>(null);
+  const [expired, setExpired] = useState(false);
+  const expiryLatched = useRef(false);
   const [busy, setBusy] = useState<"create" | "reveal" | null>(null);
   const [error, setError] = useState("");
   const [uncertain, setUncertain] = useState<"create" | "reveal" | null>(null);
@@ -152,6 +153,28 @@ export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffS
     // Business areas are read once per staff session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  const expireInvitation = useCallback(() => {
+    expiryLatched.current = true;
+    setExpired(true);
+    setRevealed(null);
+  }, []);
+  const invitationExpired = expired || (created !== null && Date.parse(created.expiresAt) <= Date.now());
+  useEffect(() => {
+    if (!created || expired) return;
+    let timer: number | undefined;
+    const check = () => {
+      const remaining = Date.parse(created.expiresAt) - Date.now();
+      if (remaining <= 0) expireInvitation();
+      else timer = window.setTimeout(check, Math.min(remaining, MAX_TIMER_MS));
+    };
+    check();
+    return () => window.clearTimeout(timer);
+  }, [created, expired, expireInvitation]);
+  const stopIfExpired = () => {
+    if (!expiryLatched.current && (!created || Date.parse(created.expiresAt) > Date.now())) return false;
+    expireInvitation();
+    return true;
+  };
   const available = Array.isArray(choices) ? choices : [];
   const area = (id: string) => available.find(choice => choice.businessAreaId === id);
   const rowKey = (row: ScopeRow) => `${row.businessAreaId}\u0000${row.divisionId ?? AREA_WIDE}`;
@@ -166,40 +189,45 @@ export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffS
       : !complete ? "Choose a business area and division for every row, without repeating one." : "";
     setError(invalid);
     if (invalid) return;
-    setBusy("create");
+    onBusyChange?.(true); setBusy("create");
     try {
       const value = await post(session, "create", { commandId, expiresAt: parsedExpiry.toISOString(), targetClientRecordId: null,
         scopes: rows.map(row => ({ businessAreaId: row.businessAreaId, divisionId: row.divisionId === "" ? null : row.divisionId })) });
       if (!validCreated(value)) throw new Error("invalid_response");
       setCreated(value);
     } catch (caught) {
-      if (uncertainFailure(caught)) setUncertain("create");
+      // A generic denial can also follow an issuance whose receipt could not be verified.
+      if (refusalStatus(caught) === 403) {
+        setUncertain("create");
+        onRefused(caught);
+      } else if (uncertainFailure(caught)) setUncertain("create");
       else { setError("The invitation was refused. Check your permissions and the details, then try again."); onRefused(caught); }
-    } finally { setBusy(null); }
+    } finally { setBusy(null); onBusyChange?.(false); }
   };
   const reveal = async () => {
-    if (!created || busy || revealed || uncertain || revealAttempted.current) return;
-    revealAttempted.current = true; setBusy("reveal"); setError("");
+    if (!created || busy || revealed || uncertain || revealAttempted.current || stopIfExpired()) return;
+    revealAttempted.current = true; onBusyChange?.(true); setBusy("reveal"); setError("");
     try {
       const value = await post(session, "reveal", { commandId });
       if (!record(value) || value.commandId !== commandId || value.invitationId !== created.invitationId
-        || typeof value.invitationSecret !== "string" || !/^[0-9a-f]{64}$/.test(value.invitationSecret) || typeof value.expiresAt !== "string")
+        || typeof value.invitationSecret !== "string" || !/^[0-9a-f]{64}$/.test(value.invitationSecret) || value.expiresAt !== created.expiresAt)
         throw new Error("invalid_response");
-      setRevealed({ invitationId: created.invitationId, expiresAt: value.expiresAt,
-        link: safeRecipientLink(value.recipientUrl, created.invitationId), secret: value.invitationSecret });
+      if (stopIfExpired()) return;
+      setRevealed({ invitationId: created.invitationId,
+        link: safeRecipientLink(value.recipientUrl, created.invitationId, value.invitationSecret), secret: value.invitationSecret });
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("reveal");
       else { setError("The link couldn't be created. It won't be attempted again from this page."); onRefused(caught); }
-    } finally { setBusy(null); }
+    } finally { setBusy(null); onBusyChange?.(false); }
   };
   const copyLink = async () => {
-    if (!revealed) return;
+    if (!revealed || stopIfExpired()) return;
     const value = revealed.link ?? revealed.secret;
     try { await navigator.clipboard.writeText(value); setNotice(revealed.link ? "Link copied. Send it to the client through a secure channel." : "Invitation code copied."); }
     catch { setNotice(""); setError("Copying was blocked by the browser. Use “Open form” instead."); }
   };
   const openForm = (currentTab: boolean) => {
-    if (!revealed?.link) return;
+    if (!revealed?.link || stopIfExpired()) return;
     if (currentTab) { window.location.assign(revealed.link); return; }
     const opened = window.open(revealed.link, "_blank", "noopener,noreferrer");
     // With noopener the handle is usually null even on success; a blocked popup is
@@ -210,7 +238,6 @@ export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffS
 
   return <Card><section className="onboarding-created" aria-labelledby="onboarding-invite-title">
     <h2 id="onboarding-invite-title">Invite a new client</h2>
-    <p>Creates a one-time link where the client fills in their profile. It doesn't give the client any access until you review and approve their submission.</p>
     <form className="onboarding-staff-form" onSubmit={submit}>
       <label>Link expires<input type="datetime-local" value={expiresAt} min={localDateTime(new Date(Date.now() + 60_000))} disabled={frozen} onChange={event => setExpiresAt(event.target.value)} required /></label>
       <fieldset className="wide onboarding-scopes"><legend>Business areas</legend>
@@ -242,11 +269,12 @@ export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffS
       {!created && !uncertain && <button className="button-orange wide" disabled={Boolean(busy) || !Array.isArray(choices) || choices.length === 0 || !complete}>{busy === "create" ? "Creating…" : "Create invitation"}</button>}
     </form>
     {created && <div className="onboarding-invite-ready">
-      <p>Invitation created. It expires {new Date(created.expiresAt).toLocaleString()}.</p>
-      {!revealed && !uncertain && <><p>The link can be created only once. Be ready to send it to the client.</p>
+      {invitationExpired ? <p role="status">This invitation has expired. Reference <code>{commandId}</code>.</p>
+        : <p>Invitation created. It expires {new Date(created.expiresAt).toLocaleString()}.</p>}
+      {!invitationExpired && !revealed && !uncertain && <><p>The link can be created only once. Be ready to send it to the client.</p>
         <button className="button-orange" type="button" disabled={Boolean(busy)} onClick={() => void reveal()}>{busy === "reveal" ? "Creating link…" : "Create one-time link"}</button></>}
-      {uncertain === "reveal" && <p className="onboarding-staff-error" role="alert"><strong>The link result isn't confirmed.</strong> It may already have been used up; have an administrator check before issuing another invitation.</p>}
-      {revealed && <div className="onboarding-secret">
+      {!invitationExpired && uncertain === "reveal" && <p className="onboarding-staff-error" role="alert"><strong>The link result isn't confirmed.</strong> It may already have been used up; have an administrator check before issuing another invitation.</p>}
+      {!invitationExpired && revealed && <div className="onboarding-secret">
         <h3>{revealed.link ? "One-time link ready" : "Invitation code ready"}</h3>
         <p>{revealed.link ? "Copy it to send to the client, or open the form yourself to fill it in with them. This page won't show it again."
           : "The client link isn't configured for this environment. Copy the invitation code for the approved channel; this page won't show it again."}</p>
