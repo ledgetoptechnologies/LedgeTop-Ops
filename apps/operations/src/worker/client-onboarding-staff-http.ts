@@ -9,16 +9,22 @@ import { authenticateNativeStaffWithAdmissionVersion,
   type AuthenticatedNativeStaff,
   type AuthenticatedNativeStaffWithAdmissionVersion,
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
-import { issueClientOnboardingWithHandoff, revealClientOnboardingSecret,
+import { assertInviteMailKeyringsDisjoint, issueClientOnboardingWithHandoff, issueClientOnboardingMailWithHandoff, revealClientOnboardingSecret,
   snapshotClientOnboardingKeyring, type ClientOnboardingKeyring } from "./client-onboarding-handoff";
+import { normalizeInviteDeliveryAddress, snapshotInviteMailKeyring } from "./client-onboarding-invite-mail-crypto";
+import { destinationIssuanceSchemaFence, mailIssuanceSchemaFence, targetIssuanceSchemaFence } from "./client-onboarding-target-schema";
 import { readClientOnboardingSubmissionForReview, listClientOnboardingSubmissionsForReview } from "./client-onboarding-review";
 import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approval";
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
 import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
 import { readClientOnboardingScopeChoices } from "./client-onboarding-scope-choices";
+import { allowedInviteDestinationBindings, resolveInviteDestinations } from "./client-onboarding-invite-destinations";
 import { admittedOperationsRequestOrigin } from "./host-admission";
+import { currentInviteTargetChoice, searchInviteTargets, verifyInviteTargetChoice, type VerifiedInviteTarget } from "./client-onboarding-target-choices";
+import { listEnabledProjectAlphaApiV2SourceIds, resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
+import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 
-export type ClientOnboardingStaffRoute = "session" | "scope-choices" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status" | "existing-companies" | "shared-company-plan" | "shared-company-choices" | "approve-shared-company";
+export type ClientOnboardingStaffRoute = "session" | "scope-choices" | "target-choices" | "target-search" | "create" | "create-email" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status" | "existing-companies" | "shared-company-plan" | "shared-company-choices" | "approve-shared-company";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   environment: string;
   expectedHost: string;
@@ -27,6 +33,12 @@ export type ClientOnboardingStaffHttpDependencies = Readonly<{
   /** Configured Ops aliases remain constrained by the shared finite host policy. */
   operationsOrigins?: string;
   handoffKeyringJson?: string;
+  inviteDestinationBindingsJson?: string;
+  inviteTargetChoicesEnabled?: string;
+  inviteTargetIssuanceEnabled?: string;
+  /** Test/review only: the deployed dispatcher does not supply these values. */
+  inviteMailIssuanceEnabled?: string;
+  inviteMailKeysJson?: string;
   /** Canonical portal origin, supplied by deployment configuration, never browser input. */
   recipientOrigin?: string;
   /** Deployment-owned secret passed only to the credential-free list helper. */
@@ -48,6 +60,8 @@ class HttpFailure extends Error {
 export function clientOnboardingStaffHttpRequest(method: string, path: string): ClientOnboardingStaffRoute | null {
   if (method === "GET" && path === "/api/client-onboarding/staff/session") return "session";
   if (method === "POST" && path === "/api/client-onboarding/staff/scope-choices") return "scope-choices";
+  if (method === "POST" && path === "/api/client-onboarding/staff/target-choices") return "target-choices";
+  if (method === "POST" && path === "/api/client-onboarding/staff/target-search") return "target-search";
   if(method==="POST"&&path==="/api/client-onboarding/staff/shared-company-plan")return "shared-company-plan";
   if(method==="POST"&&path==="/api/client-onboarding/staff/approve-shared-company")return "approve-shared-company";
   if(method==="POST"&&path==="/api/client-onboarding/staff/shared-company-choices")return "shared-company-choices";
@@ -55,6 +69,7 @@ export function clientOnboardingStaffHttpRequest(method: string, path: string): 
   if (method === "POST" && path === "/api/client-onboarding/staff/activation-status") return "activation-status";
   if (method === "POST" && path === "/api/client-onboarding/staff/inbox") return "inbox";
   if (method === "POST" && path === "/api/client-onboarding/staff/create") return "create";
+  if (method === "POST" && path === "/api/client-onboarding/staff/create-email") return "create-email";
   if (method === "POST" && path === "/api/client-onboarding/staff/reveal") return "reveal";
   if (method === "POST" && path === "/api/client-onboarding/staff/review") return "review";
   if (method === "POST" && path === "/api/client-onboarding/staff/approve") return "approve";
@@ -119,6 +134,13 @@ function keyring(value: unknown): ClientOnboardingKeyring {
     return snapshotClientOnboardingKeyring(JSON.parse(value) as unknown);
   } catch { throw new HttpFailure(503, "client_onboarding_unavailable"); }
 }
+function mailKeyring(value: unknown) {
+  try {
+    if (typeof value !== "string" || value.length > 4_096 || encoder.encode(value).byteLength > 4_096) throw Error();
+    return snapshotInviteMailKeyring(JSON.parse(value) as unknown);
+  } catch { throw new HttpFailure(503, "client_onboarding_unavailable"); }
+}
+
 async function hmac(secret: string, message: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret),
     { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -169,6 +191,21 @@ async function body(request: Request, route: Exclude<ClientOnboardingStaffRoute,
     if (!exact(value, [])) throw new HttpFailure(400, "invalid_request");
     return value;
   }
+  if (route === "target-choices") {
+    if (!exact(value, ["sourceId", "kind", "publicId"]) || typeof value.sourceId !== "string"
+      || (value.kind !== "client" && value.kind !== "organization") || typeof value.publicId !== "string"
+      || !/^[a-f0-9]{32}$/.test(value.publicId)) throw new HttpFailure(400, "invalid_request");
+    return value;
+  }
+  if (route === "target-search") {
+    if (!exact(value, ["sourceId", "kind", "query", "cursor"])
+      || (value.sourceId !== "project-alpha:primary" && value.sourceId !== "project-alpha:secondary")
+      || (value.kind !== "client" && value.kind !== "organization") || typeof value.query !== "string"
+      || value.query.length > 100 || value.query.trim().length < 3 || /[\x00-\x1f\x7f]/.test(value.query)
+      || (value.cursor !== null && (typeof value.cursor !== "string" || !/^[a-f0-9]{32}\.[a-f0-9]{64}$/.test(value.cursor))))
+      throw new HttpFailure(400, "invalid_request");
+    return { ...value, query: value.query.trim() };
+  }
   if (route === "inbox") {
     if (!exact(value, ["cursor"])) throw new HttpFailure(400, "invalid_request");
     return value;
@@ -216,6 +253,18 @@ async function body(request: Request, route: Exclude<ClientOnboardingStaffRoute,
       throw new HttpFailure(400, "invalid_request");
     return value;
   }
+  if (route === "create-email") {
+    if (!exact(value, ["commandId", "expiresAt", "destinationSourceIds", "recipient", "recipientConfirmed"])
+      || typeof value.commandId !== "string" || typeof value.expiresAt !== "string"
+      || !Array.isArray(value.destinationSourceIds) || !normalizeInviteDeliveryAddress(value.recipient)
+      || value.recipientConfirmed !== true) throw new HttpFailure(400, "invalid_request");
+    return value;
+  }
+  if (exact(value, ["commandId", "expiresAt", "destinationSourceIds"]) && typeof value.commandId === "string"
+    && typeof value.expiresAt === "string" && Array.isArray(value.destinationSourceIds)) return value;
+  if (exact(value, ["commandId", "expiresAt", "destinationSourceIds", "targetChoices"]) && typeof value.commandId === "string"
+    && typeof value.expiresAt === "string" && Array.isArray(value.destinationSourceIds)
+    && Array.isArray(value.targetChoices) && value.targetChoices.length >= 1 && value.targetChoices.length <= 2) return value;
   if (!exact(value, ["commandId", "expiresAt", "targetClientRecordId", "scopes"])
     || typeof value.commandId !== "string" || typeof value.expiresAt !== "string"
     || (value.targetClientRecordId !== null && typeof value.targetClientRecordId !== "string")
@@ -231,12 +280,21 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     const url = new URL(request.url);
     const route = clientOnboardingStaffHttpRequest(request.method, url.pathname);
     if (!route) throw new HttpFailure(404, "not_found");
+    const inviteMailEnabled = dependencies.inviteMailIssuanceEnabled === "true";
+    if (route === "create-email" && !inviteMailEnabled) throw new HttpFailure(404, "not_found");
+    if (route === "target-choices" && dependencies.inviteTargetChoicesEnabled !== "true") throw new HttpFailure(404, "not_found");
+    if (route === "target-search" && (dependencies.inviteTargetChoicesEnabled !== "true"
+      || dependencies.inviteTargetIssuanceEnabled !== "true")) throw new HttpFailure(404, "not_found");
     const authority = snapshot(dependencies);
     // Capture deployment configuration before authentication/CSRF awaits so a
     // mutable test or host object cannot change the selected destinations.
     const projectAlphaApiV2Connections = dependencies.projectAlphaApiV2Connections;
+    const inviteDestinationBindingsJson = dependencies.inviteDestinationBindingsJson;
     const recipientOrigin = dependencies.recipientOrigin;
-    const handoff = route === "create" || route === "reveal" ? keyring(dependencies.handoffKeyringJson) : undefined;
+    const handoffConfig = dependencies.handoffKeyringJson;
+    const mailConfig = dependencies.inviteMailKeysJson;
+    const handoff = route === "create" || route === "create-email" || route === "reveal" ? keyring(handoffConfig) : undefined;
+    const mailKeys = route === "create-email" ? mailKeyring(mailConfig) : undefined;
     const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: dependencies.environment,
       EXPECTED_HOST: dependencies.expectedHost, OPERATIONS_ORIGINS: dependencies.operationsOrigins }, authority.origin);
     if (!requestOrigin || url.origin !== requestOrigin || url.search || url.hash)
@@ -263,12 +321,87 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     unexpired(auth);
     const input = await body(request, route);
     unexpired(auth);
+    if (route === "create-email") {
+      const digest = await hmac(authority.csrfSecret, JSON.stringify(["client-onboarding-invite-issuance-quota-v1", auth.identity.staffId]));
+      const key = `subject:${Buffer.from(digest, "hex").toString("base64url")}`;
+      if (!await consumeNativeStaffOnboardingRateLimit(authority.database, key, 20, 60))
+        throw new HttpFailure(429, "client_onboarding_rate_limited");
+      unexpired(auth);
+    }
+    if (route === "target-choices" || route === "target-search") {
+      const digest = await hmac(authority.csrfSecret, JSON.stringify(["client-onboarding-target-choice-quota-v1", auth.identity.staffId]));
+      const key = `subject:${Buffer.from(digest, "hex").toString("base64url")}`;
+      if (!await consumeNativeStaffOnboardingRateLimit(authority.database, key, 20, 60))
+        throw new HttpFailure(429, "client_onboarding_rate_limited");
+      try {
+        const authorized = await readClientOnboardingScopeChoices(authority.database, auth);
+        const binding = resolveInviteDestinations(inviteDestinationBindingsJson, authorized, [input.sourceId])?.[0];
+        if (!binding) throw Error();
+        const source = resolveProjectAlphaApiV2Connection({ PROJECT_ALPHA_API_V2_CONNECTIONS: projectAlphaApiV2Connections }, binding.sourceId);
+        const { expectedSourceInstanceId: instance, expectedApplicationId: application, expectedHistoryEpoch: epoch } = source.connection;
+        if (!source.enabled || !epoch) throw Error();
+        const context = { origin: requestOrigin, auth, binding, source: { instance, application, epoch } };
+        const sign = (message: string) => hmac(authority.csrfSecret, message);
+        const kind = input.kind as "client" | "organization";
+        if (route === "target-search") {
+          const page = await searchInviteTargets(authority.database, { ...context, kind,
+            query: input.query as string, cursor: input.cursor as string | null }, sign);
+          if (!page) throw Error();
+          unexpired(auth);
+          return response(200, page);
+        }
+        const choice = await currentInviteTargetChoice(authority.database, { ...context,
+          lookup: { kind, publicId: input.publicId as string } }, sign);
+        if (!choice) throw Error();
+        unexpired(auth);
+        return response(200, { choice: choice.reference });
+      } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
+    }
     if (route === "scope-choices") {
       try {
         const choices = await readClientOnboardingScopeChoices(authority.database, auth);
         unexpired(auth);
-        return response(200, choices);
+        if (inviteDestinationBindingsJson === undefined) return response(200, choices);
+        const eligibleDestinations = allowedInviteDestinationBindings(inviteDestinationBindingsJson, choices).map(binding => binding.sourceId);
+        let destinationSourceIds: typeof eligibleDestinations = [];
+        if (eligibleDestinations.length > 0) {
+          try {
+            await destinationIssuanceSchemaFence(authority.database.withSession("first-primary"));
+            destinationSourceIds = eligibleDestinations;
+          } catch {
+            // An explicit destination configuration must not fall back to legacy issuance.
+          }
+        }
+        let targetDestinationSourceIds: typeof destinationSourceIds = [];
+        if (destinationSourceIds.length > 0 && dependencies.inviteTargetChoicesEnabled === "true"
+          && dependencies.inviteTargetIssuanceEnabled === "true") {
+          try {
+            const configured = listEnabledProjectAlphaApiV2SourceIds({ PROJECT_ALPHA_API_V2_CONNECTIONS: projectAlphaApiV2Connections });
+            const eligibleTargets = destinationSourceIds.filter(sourceId => configured.includes(sourceId));
+            if (eligibleTargets.length > 0) {
+              await targetIssuanceSchemaFence(authority.database.withSession("first-primary"));
+              targetDestinationSourceIds = eligibleTargets;
+            }
+          } catch {
+            // Targeting needs a complete connection identity and the reviewed issuance schema.
+          }
+        }
+        let mailAvailable = false;
+        if (inviteMailEnabled && destinationSourceIds.length > 0) {
+          try {
+            assertInviteMailKeyringsDisjoint(keyring(handoffConfig), mailKeyring(mailConfig));
+            await mailIssuanceSchemaFence(authority.database.withSession("first-primary"));
+            mailAvailable = true;
+          } catch {
+            // Mail prerequisites are independent of ordinary invitation scopes.
+          }
+        }
+        unexpired(auth);
+        return response(200, { ...choices, destinationSourceIds,
+          ...(targetDestinationSourceIds.length > 0 ? { targetDestinationSourceIds } : {}),
+          ...(mailAvailable ? { inviteMailIssuanceAvailable: true } : {}) });
       } catch (error) {
+        if (error instanceof HttpFailure) throw error;
         if (error instanceof Error && error.message === "client_onboarding_scope_choices_denied")
           throw new HttpFailure(403, "client_onboarding_denied");
         throw new HttpFailure(503, "client_onboarding_unavailable");
@@ -277,9 +410,9 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     if(route==="shared-company-plan"||route==="shared-company-choices"||route==="approve-shared-company") {
       try {
         const result=route==="approve-shared-company"
-          ? await approveClientOnboardingSharedCompany(authority.database,auth,input,projectAlphaApiV2Connections)
+          ? await approveClientOnboardingSharedCompany(authority.database,auth,input,projectAlphaApiV2Connections,inviteDestinationBindingsJson)
           : route==="shared-company-plan"
-          ? await prepareClientOnboardingSharedCompanyPlan(authority.database,auth,input,projectAlphaApiV2Connections)
+          ? await prepareClientOnboardingSharedCompanyPlan(authority.database,auth,input,projectAlphaApiV2Connections,inviteDestinationBindingsJson)
           : await readClientOnboardingSharedCompanyChoices(authority.database,auth,input);
         unexpired(auth);return response(200,result);
       } catch {throw new HttpFailure(403,"client_onboarding_denied");}
@@ -319,13 +452,14 @@ export async function handleClientOnboardingStaffHttp(request: Request,
       try {
         const review = await readClientOnboardingSubmissionForReview(authority.database, auth, input.submissionId);
         unexpired(auth);
-        return response(200, review);
+        const { destinationIntent, ...submission } = review;
+        return response(200, destinationIntent ? { ...submission, destinationSourceIds: destinationIntent.bindings.map(binding => binding.sourceId) } : submission);
       } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
     }
     if (route === "approve") {
       try {
         const approved = await approveNewNativeOnlyClientOnboarding(authority.database, auth,
-          input.submissionId, input.fieldsSha256, input.sourceIds ?? [], projectAlphaApiV2Connections,input.organizationSelection);
+          input.submissionId, input.fieldsSha256, input.sourceIds ?? [], projectAlphaApiV2Connections,input.organizationSelection,inviteDestinationBindingsJson);
         return response(200, { decisionId: approved.decisionId, submissionId: approved.submissionId,
           clientRecordId: approved.clientRecordId, clientRecordVersion: approved.clientRecordVersion,
           ...(approved.organizationRecordId === null ? {} : {
@@ -335,13 +469,53 @@ export async function handleClientOnboardingStaffHttp(request: Request,
           relationshipVersion: approved.relationshipVersion, replayed: approved.replayed });
       } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
     }
-    if (route === "create") {
+    if (route === "create" || route === "create-email") {
+      if (Object.hasOwn(input, "targetChoices") && (dependencies.inviteTargetChoicesEnabled !== "true"
+        || dependencies.inviteTargetIssuanceEnabled !== "true")) throw new HttpFailure(404, "not_found");
       try {
+        let issuanceRequest = input;
+        let verifiedTargets: VerifiedInviteTarget[] | undefined;
+        if (Object.hasOwn(input, "destinationSourceIds")) {
+          if (!inviteDestinationBindingsJson) throw Error();
+          const authorized = await readClientOnboardingScopeChoices(authority.database, auth);
+          const intent = resolveInviteDestinations(inviteDestinationBindingsJson, authorized, input.destinationSourceIds);
+          if (!intent) throw Error();
+          unexpired(auth);
+          issuanceRequest = { commandId: input.commandId, expiresAt: input.expiresAt, targetClientRecordId: null,
+            scopes: intent.map(({ businessAreaId, divisionId }) => ({ businessAreaId, divisionId })), destinationIntent: intent };
+          if (Array.isArray(input.targetChoices)) {
+            const digest = await hmac(authority.csrfSecret, JSON.stringify(["client-onboarding-target-choice-quota-v1", auth.identity.staffId]));
+            if (!await consumeNativeStaffOnboardingRateLimit(authority.database, `subject:${Buffer.from(digest, "hex").toString("base64url")}`, 20, 60))
+              throw new HttpFailure(429, "client_onboarding_rate_limited");
+            verifiedTargets = [];
+            for (const choice of input.targetChoices) {
+              if (!plain(choice) || !exact(choice, ["sourceId", "kind", "publicId", "choice"])
+                || (choice.kind !== "client" && choice.kind !== "organization") || typeof choice.publicId !== "string"
+                || !/^[a-f0-9]{32}$/.test(choice.publicId)) throw Error();
+              const binding = intent.find(destination => destination.sourceId === choice.sourceId);
+              if (!binding || verifiedTargets.some(target => target.context.binding.sourceId === binding.sourceId)) throw Error();
+              const source = resolveProjectAlphaApiV2Connection({ PROJECT_ALPHA_API_V2_CONNECTIONS: projectAlphaApiV2Connections }, binding.sourceId);
+              const { expectedSourceInstanceId: instance, expectedApplicationId: application, expectedHistoryEpoch: epoch } = source.connection;
+              if (!source.enabled || !epoch) throw Error();
+              const context = { origin: requestOrigin, auth, binding, source: { instance, application, epoch },
+                lookup: { kind: choice.kind as "client" | "organization", publicId: choice.publicId } };
+              const pin = await verifyInviteTargetChoice(authority.database, context, choice.choice, message => hmac(authority.csrfSecret, message));
+              if (!pin) throw Error();
+              verifiedTargets.push({ context, pin });
+            }
+          }
+        }
+        if (route === "create-email") {
+          const receipt = await issueClientOnboardingMailWithHandoff(authority.database,
+            { authenticatedNativeStaff: handoffAuthentication(auth), request: issuanceRequest }, handoff!, input.recipient, mailKeys!);
+          return response(200, { invitationId: receipt.invitationId, expiresAt: receipt.expiresAt,
+            requestSha256: receipt.requestSha256, state: receipt.state, mailStatus: receipt.mailStatus });
+        }
         const receipt = await issueClientOnboardingWithHandoff(authority.database,
-          { authenticatedNativeStaff: handoffAuthentication(auth), request: input }, handoff!);
+          { authenticatedNativeStaff: handoffAuthentication(auth), request: issuanceRequest }, handoff!, ...(verifiedTargets ? [verifiedTargets] : []));
         return response(200, { invitationId: receipt.invitationId, expiresAt: receipt.expiresAt,
           requestSha256: receipt.requestSha256, state: receipt.state });
-      } catch { throw new HttpFailure(403, "client_onboarding_denied"); }
+      } catch (error) { if (error instanceof HttpFailure) throw error; throw new HttpFailure(403, "client_onboarding_denied"); }
     }
     try {
       const revealed = await revealClientOnboardingSecret(authority.database,

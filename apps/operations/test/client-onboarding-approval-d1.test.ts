@@ -14,7 +14,9 @@ import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { approveNewNativeOnlyClientOnboarding as approveRaw } from "../src/worker/client-onboarding-approval";
 import { readClientOnboardingExistingCompanies } from "../src/worker/client-onboarding-existing-company";
-import { listClientOnboardingSubmissionsForReview } from "../src/worker/client-onboarding-review";
+import { listClientOnboardingSubmissionsForReview, readClientOnboardingSubmissionForReview } from "../src/worker/client-onboarding-review";
+import { issueClientOnboardingWithHandoff, revealClientOnboardingSecret } from "../src/worker/client-onboarding-handoff";
+import { readInviteTargetChoice, type TargetChoiceContext } from "../src/worker/client-onboarding-target-choices";
 
 const inventoryRead = vi.hoisted(() => vi.fn());
 const bindingRead=vi.hoisted(()=>vi.fn());
@@ -71,18 +73,23 @@ async function sha256(value: string): Promise<string> {
 
 async function submission(fields: typeof consumer | Record<string, string> = consumer,
   targetClientRecordId: string | null = null,
-  scopes = [{ businessAreaId: "area:drone", divisionId: "division:north" }]) {
+  scopes = [{ businessAreaId: "area:drone", divisionId: "division:north" }],
+  destinationIntent?: unknown) {
   const invitationId = uuid(), commandId = uuid(), submissionId = uuid(), fieldsSha256 = sequence.toString(16).padStart(64, "0");
   await db.batch([
     db.prepare(`INSERT INTO client_onboarding_invitations
       (invitation_id,secret_sha256,issued_by,bound_access_subject,expires_at,target_client_record_id,state,version)
       VALUES(?,?,?,?,?,?, 'pending',1)`).bind(invitationId, "a".repeat(64), staffId,
       actor.identity.verifiedAccessSubject, actor.verifiedUntil, targetClientRecordId),
-    db.prepare(`INSERT INTO client_onboarding_issuance_commands
+    destinationIntent === undefined ? db.prepare(`INSERT INTO client_onboarding_issuance_commands
       (invitation_id,command_id,request_sha256,scopes_json,issuer_admission_version,
        issuer_profile_version,issuer_email,verified_until) VALUES(?,?,?,?,1,1,?,?)`)
       .bind(invitationId, commandId, "b".repeat(64), targetClientRecordId === null ? JSON.stringify(scopes) : null,
-        actor.identity.email, actor.verifiedUntil),
+        actor.identity.email, actor.verifiedUntil) : db.prepare(`INSERT INTO client_onboarding_issuance_commands
+      (invitation_id,command_id,request_sha256,scopes_json,issuer_admission_version,
+       issuer_profile_version,issuer_email,verified_until,destination_intent_json) VALUES(?,?,?,?,1,1,?,?,?)`)
+      .bind(invitationId, commandId, "b".repeat(64), JSON.stringify(scopes), actor.identity.email,
+        actor.verifiedUntil, JSON.stringify(destinationIntent)),
     db.prepare(`INSERT INTO client_onboarding_submissions
       (invitation_id,submission_id,fields_json,fields_sha256) VALUES(?,?,?,?)`)
       .bind(invitationId, submissionId, JSON.stringify(fields), fieldsSha256),
@@ -105,6 +112,10 @@ describe("native-only client onboarding approval against migrated D1", () => {
       && item.slice(0, 4) <= "0218").sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"))
         .map(statement => db.prepare(statement)));
+    const fixture = new URL("./fixtures/client-onboarding-destination-intent.provisional.sql", import.meta.url);
+    await db.batch(splitD1MigrationStatements(readFileSync(fixture, "utf8")).map(statement => db.prepare(statement)));
+    const targetsFixture = new URL("./fixtures/client-onboarding-target-proofs.provisional.sql", import.meta.url);
+    await db.batch(splitD1MigrationStatements(readFileSync(targetsFixture, "utf8")).map(statement => db.prepare(statement)));
     await db.batch([
       db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status)
         VALUES(?,?,?,?,'active')`).bind(staffId, actor.identity.email, actor.identity.displayName,
@@ -130,6 +141,190 @@ describe("native-only client onboarding approval against migrated D1", () => {
     ]);
   }, 240_000);
   afterAll(async () => runtime?.dispose());
+
+  it("rehearses the provisional destination fence and rolls back older approval writes in D1", async () => {
+    const scopes = [{ businessAreaId: "area:drone", divisionId: "division:north" }];
+    const intent = [{ sourceId: selectedSourceId, ...scopes[0] }];
+    const beforeInvitations = await count("client_onboarding_invitations");
+    await expect(submission(consumer, null, scopes, [{ ...intent[0], divisionId: "division:south" }]))
+      .rejects.toThrow("onboarding destination scope mismatch");
+    expect(await count("client_onboarding_invitations")).toBe(beforeInvitations);
+
+    const held = await submission(consumer, null, scopes, intent);
+    const beforeRecords = await count("operations_directory_records");
+    const beforeDecisions = await count("client_onboarding_decisions");
+    await expect(approveRaw(db, actor, held.submissionId, held.fieldsSha256)).rejects.toThrow("client_onboarding_approval_denied");
+    expect(await count("operations_directory_records")).toBe(beforeRecords);
+    expect(await count("client_onboarding_decisions")).toBe(beforeDecisions);
+
+    const keyring = { activeKeyId: "synthetic", keys: { synthetic: "ab".repeat(32) } };
+    const authenticatedNativeStaff = { identity: actor.identity, verifiedUntil: actor.verifiedUntil };
+    const commandId = uuid();
+    const request = { commandId, expiresAt: actor.verifiedUntil, targetClientRecordId: null, scopes, destinationIntent: intent };
+    const issue = (value: typeof request) => issueClientOnboardingWithHandoff(db, { authenticatedNativeStaff, request: value }, keyring);
+    const created = await issue(request);
+    expect(await issue(request)).toEqual(created);
+    await expect(issue({ ...request, destinationIntent: [{ ...intent[0], sourceId: secondSourceId }] })).rejects.toThrow();
+    const revealed = await revealClientOnboardingSecret(db, { authenticatedNativeStaff, commandId }, keyring);
+    expect(revealed).toMatchObject({ invitationId: created.invitationId, invitationSecret: expect.stringMatching(/^[0-9a-f]{64}$/) });
+
+    const submissionId = uuid(), fieldsSha256 = await sha256(JSON.stringify(consumer));
+    await db.prepare(`INSERT INTO client_onboarding_submissions(invitation_id,submission_id,fields_json,fields_sha256) VALUES(?,?,?,?)`)
+      .bind(created.invitationId, submissionId, JSON.stringify(consumer), fieldsSha256).run();
+    expect((await readClientOnboardingSubmissionForReview(db, actor, submissionId)).destinationIntent)
+      .toEqual({ bindings: intent, issuanceSha256: created.requestSha256 });
+    inventoryRead.mockClear().mockResolvedValue({ status: "observed", inventory: { authorizationGeneration: "7" } });
+    const decide = (ids: string[], bindings: unknown) => approveRaw(db, actor, submissionId, fieldsSha256, ids,
+      selectedConnection, undefined, JSON.stringify(bindings));
+    await expect(decide([], intent)).rejects.toThrow("client_onboarding_approval_denied");
+    await expect(decide([selectedSourceId], [{ ...intent[0], divisionId: "division:south" }])).rejects.toThrow("client_onboarding_approval_denied");
+    expect(inventoryRead).not.toHaveBeenCalled();
+    expect(await count("client_onboarding_decisions")).toBe(beforeDecisions);
+    expect(await decide([selectedSourceId], intent)).toMatchObject({ status: "written", replayed: false });
+    expect(await decide([selectedSourceId], intent)).toMatchObject({ status: "written", replayed: true });
+  });
+
+  it("binds both ordinary onboarding destinations through issue and decision", async () => {
+    const intent = [
+      {sourceId:secondSourceId,businessAreaId:"area:drone",divisionId:"division:south"},
+      {sourceId:selectedSourceId,businessAreaId:"area:drone",divisionId:"division:north"},
+    ];
+    const scopes=intent.map(({businessAreaId,divisionId})=>({businessAreaId,divisionId}));
+    const request={commandId:uuid(),expiresAt:actor.verifiedUntil,targetClientRecordId:null,scopes,destinationIntent:intent};
+    const authenticatedNativeStaff={identity:actor.identity,verifiedUntil:actor.verifiedUntil};
+    const keyring={activeKeyId:"synthetic",keys:{synthetic:"ab".repeat(32)}};
+    const queued=await issueClientOnboardingWithHandoff(db,{authenticatedNativeStaff,request},keyring);
+    expect(await issueClientOnboardingWithHandoff(db,{authenticatedNativeStaff,request},keyring)).toEqual(queued);
+    const submissionId=uuid(), fieldsSha256=await sha256(JSON.stringify(consumer));
+    await db.prepare("INSERT INTO client_onboarding_submissions(invitation_id,submission_id,fields_json,fields_sha256) VALUES(?,?,?,?)")
+      .bind(queued.invitationId,submissionId,JSON.stringify(consumer),fieldsSha256).run();
+    const review=await readClientOnboardingSubmissionForReview(db,actor,submissionId);
+    expect(review.destinationIntent).toEqual({bindings:intent,issuanceSha256:queued.requestSha256});
+    expect(review.targetApprovalPending).toBeUndefined();
+    inventoryRead.mockClear().mockResolvedValue({status:"observed",inventory:{authorizationGeneration:"7"}});
+    const tables=["client_onboarding_decisions","operations_directory_records"], before=await Promise.all(tables.map(count));
+    const decide=(ids:string[],bindings:unknown)=>approveRaw(db,actor,submissionId,fieldsSha256,ids,dualConnection,undefined,JSON.stringify(bindings));
+    await expect(decide([selectedSourceId],intent)).rejects.toThrow("client_onboarding_approval_denied");
+    await expect(decide([selectedSourceId,secondSourceId], [
+      {...intent[0],divisionId:intent[1].divisionId},{...intent[1],divisionId:intent[0].divisionId},
+    ])).rejects.toThrow("client_onboarding_approval_denied");
+    expect(await Promise.all(tables.map(count))).toEqual(before);
+    expect(inventoryRead).not.toHaveBeenCalled();
+    const decision=await decide([selectedSourceId,secondSourceId],intent);
+    expect(decision).toMatchObject({status:"written",replayed:false});
+    if(decision.status!=="written") throw Error("Fixture decision failed");
+    const enrollment=await db.prepare("SELECT destinations_json FROM effective_native_directory_enrollments WHERE record_id=?")
+      .bind(decision.clientRecordId).first<string>("destinations_json");
+    expect(JSON.parse(enrollment ?? "null")).toEqual([selectedSourceId,secondSourceId].sort().map(sourceId=>{
+      const source=JSON.parse(dualConnection).instances[sourceId];
+      return expect.objectContaining({sourceId,sourceInstanceUUID:source.sourceInstanceId,applicationUUID:source.applicationId,historyEpoch:source.historyEpoch});
+    }));
+    expect(await decide([secondSourceId,selectedSourceId],intent)).toMatchObject({
+      status:"written",replayed:true,decisionId:decision.decisionId,clientRecordId:decision.clientRecordId,
+    });
+    expect(await Promise.all(tables.map(count))).toEqual(before.map(value=>value+1));
+  });
+
+  it("issues and replays a mixed existing-target invitation in the real D1 handoff and rolls back stale pins", async () => {
+    await db.prepare(`INSERT OR IGNORE INTO native_directory_grants(id,staff_id,permission,effect,scope_kind,active,granted_by)
+      VALUES('approve-view',?,'directory.profile.view','allow','global',1,?)`).bind(staffId,staffId).run();
+    const item = await submission();
+    inventoryRead.mockResolvedValue({ status: "observed", inventory: { authorizationGeneration: "7" } });
+    const existing = await approveRaw(db, actor, item.submissionId, item.fieldsSha256, [selectedSourceId], selectedConnection);
+    await materializeResolvedProjectAlphaDirectoryClientIntents(db, [selectedSourceId], 12, Date.now());
+    const source = JSON.parse(selectedConnection).instances[selectedSourceId];
+    const commandId = await db.prepare(`SELECT materialization.command_id FROM operations_directory_materializations materialization
+      JOIN operations_directory_intents intent ON intent.intent_id=materialization.intent_id WHERE intent.record_id=?`)
+      .bind(existing.clientRecordId).first<string>("command_id");
+    expect(commandId).not.toBeNull();
+    const publicId = "a".repeat(32);
+    await db.prepare("UPDATE project_alpha_directory_outbox SET state='leased',attempts=1,lease_token='synthetic',lease_expires_at=9999999999999 WHERE command_id=? AND state='pending'").bind(commandId).run();
+    await db.prepare(`INSERT INTO project_alpha_directory_mappings(source_id,resource_type,external_id,project_alpha_public_id,
+      source_instance_id,application_id,history_epoch_id,command_id) VALUES(?,'client',?,?,?,?,?,?)`)
+      .bind(selectedSourceId,existing.clientRecordId,publicId,source.sourceInstanceId,source.applicationId,source.historyEpoch,commandId).run();
+    const context: TargetChoiceContext = { origin:"https://ops.example.test", auth:actor,
+      binding:{sourceId:selectedSourceId,businessAreaId:"area:drone",divisionId:"division:north"},
+      source:{instance:source.sourceInstanceId,application:source.applicationId,epoch:source.historyEpoch},
+      lookup:{kind:"client",publicId} };
+    const pin = await readInviteTargetChoice(db,actor,context.binding,context.source,context.lookup);
+    if (!pin) throw Error("synthetic mapped target not available");
+    const destinationIntent=[{sourceId:secondSourceId,businessAreaId:"area:drone",divisionId:"division:south"},context.binding];
+    const request = { commandId:uuid(),expiresAt:actor.verifiedUntil,targetClientRecordId:null,
+      scopes:destinationIntent.map(({businessAreaId,divisionId})=>({businessAreaId,divisionId})), destinationIntent };
+    const authenticatedNativeStaff = { identity: actor.identity, verifiedUntil: actor.verifiedUntil };
+    const keyring={activeKeyId:"synthetic",keys:{synthetic:"ab".repeat(32)}};
+    const issueTarget = (input = request, target = {context,pin}, database = db) => issueClientOnboardingWithHandoff(database,
+      {authenticatedNativeStaff,request:input}, keyring,[target]);
+    const created = await issueTarget();
+    expect(await issueTarget()).toEqual(created);
+    expect(await db.prepare("SELECT count(*) total FROM client_onboarding_target_proofs WHERE invitation_id=? AND source_id=?")
+      .bind(created.invitationId,selectedSourceId).first("total")).toBe(1);
+    await expect(issueClientOnboardingWithHandoff(db,{authenticatedNativeStaff,request},keyring)).rejects.toThrow();
+    await expect(issueTarget(request,{context:{...context,lookup:{...context.lookup,publicId:"b".repeat(32)}},pin})).rejects.toThrow();
+    const tables = ["client_onboarding_invitations","client_onboarding_issuance_commands","client_onboarding_handoffs","client_onboarding_target_proofs"];
+    const counts = await Promise.all(tables.map(count));
+    await expect(issueTarget({...request,commandId:uuid()},{context,pin:[{...pin[0],recordVersion:99},pin[1]]})).rejects.toThrow();
+    expect(await Promise.all(tables.map(count))).toEqual(counts);
+
+    const hold = "client_onboarding_target_approval_held";
+    const fixture = new URL("./fixtures/client-onboarding-target-proofs.provisional.sql", import.meta.url);
+    const originalHold = splitD1MigrationStatements(readFileSync(fixture,"utf8"))
+      .find(sql => sql.includes(`CREATE TRIGGER ${hold} `))!;
+    async function replaceHold() {
+      await db.batch([db.prepare(`DROP TRIGGER ${hold}`),db.prepare(`CREATE TRIGGER ${hold}
+        BEFORE INSERT ON client_onboarding_decisions BEGIN SELECT 1; END`)]);
+    }
+    async function restoreHold() {
+      await db.batch([db.prepare(`DROP TRIGGER ${hold}`),db.prepare(originalHold)]);
+    }
+    await replaceHold();
+    await expect(issueTarget({...request,commandId:uuid()})).rejects.toThrow();
+    expect(await Promise.all(tables.map(count))).toEqual(counts);
+    await restoreHold();
+
+    // Break the schema only after the standalone inventory hash passed and the
+    // production issuer is about to execute the real D1 write batch.
+    let raced = false;
+    const changedDuringIssue = new Proxy(db,{ get(target,property) {
+      if(property==="withSession")return (mode: Parameters<D1Database["withSession"]>[0]) => {
+        const session = target.withSession(mode);
+        return new Proxy(session,{ get(connection,key) {
+          if(key==="batch")return async (statements:D1PreparedStatement[]) => {
+            await replaceHold(); raced=true;
+            return connection.batch(statements);
+          };
+          const value = Reflect.get(connection,key);
+          return typeof value === "function" ? value.bind(connection) : value;
+        } });
+      };
+      const value=Reflect.get(target,property);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    await expect(issueTarget({...request,commandId:uuid()},{context,pin},changedDuringIssue)).rejects.toThrow();
+    expect(raced).toBe(true);
+    expect(await Promise.all(tables.map(count))).toEqual(counts);
+    await restoreHold();
+
+    const targetedSubmissionId = uuid(), targetedFieldsHash = await sha256(JSON.stringify(consumer));
+    await db.prepare(`INSERT INTO client_onboarding_submissions
+      (invitation_id,submission_id,fields_json,fields_sha256) VALUES(?,?,?,?)`)
+      .bind(created.invitationId, targetedSubmissionId, JSON.stringify(consumer), targetedFieldsHash).run();
+    expect(await readClientOnboardingSubmissionForReview(db, actor, targetedSubmissionId))
+      .toMatchObject({ targetClientRecordId: null, targetApprovalPending: true });
+    const beforeApproval = await Promise.all(["client_onboarding_decisions", "operations_directory_records"].map(count));
+    const inventoryCalls = inventoryRead.mock.calls.length;
+    await expect(approveRaw(db, actor, targetedSubmissionId, targetedFieldsHash,
+      [selectedSourceId, secondSourceId], dualConnection, undefined, JSON.stringify(destinationIntent)))
+      .rejects.toThrow("client_onboarding_approval_denied");
+    expect(inventoryRead.mock.calls).toHaveLength(inventoryCalls);
+    expect(await Promise.all(["client_onboarding_decisions", "operations_directory_records"].map(count))).toEqual(beforeApproval);
+
+    await db.prepare("ALTER TABLE client_onboarding_issuance_commands RENAME COLUMN target_intent_json TO unavailable_target_intent").run();
+    await expect(issueTarget({...request,commandId:uuid()})).rejects.toThrow();
+    expect(await Promise.all(tables.map(count))).toEqual(counts);
+    expect(await issueClientOnboardingWithHandoff(db,{authenticatedNativeStaff,request:{...request,commandId:uuid()}},keyring))
+      .toMatchObject({state:"pending"});
+  });
 
   it("creates exactly one unlinked native client, replays deterministically, and reserves no PA work", async () => {
     const item = await submission(), beforeOutbox = await count("project_alpha_directory_outbox");
@@ -675,11 +870,29 @@ describe("native-only client onboarding approval against migrated D1", () => {
     expect(await approveClientOnboardingSharedCompany(db,actor,approvalInput,dualConnection)).toEqual({...approved,replayed:true});
     const unrelated=await submission({...business,name:"No decision fence"}),unfencedId=uuid();
     await expect(db.prepare(`INSERT INTO client_onboarding_decisions
+      (decision_id,invitation_id,submission_id,fields_sha256,request_sha256,outcome,reviewer_staff_id,reviewer_subject,
+       reviewer_email,original_admission_version,original_profile_version,reason,reviewed_fields_json,client_record_id,
+       client_record_version,organization_record_id,organization_record_version,relationship_version,receipt_json,decided_at)
       SELECT ?,?, ?,?,request_sha256,outcome,reviewer_staff_id,reviewer_subject,reviewer_email,original_admission_version,
        original_profile_version,reason,reviewed_fields_json,client_record_id,client_record_version,organization_record_id,
        organization_record_version,relationship_version,json_set(receipt_json,'$.decisionId',?,'$.invitationId',?,'$.submissionId',?),decided_at
       FROM client_onboarding_decisions WHERE decision_id=?`).bind(unfencedId,unrelated.invitationId,unrelated.submissionId,unrelated.fieldsSha256,
        unfencedId,unrelated.invitationId,unrelated.submissionId,plan.planId).run()).rejects.toThrow("artifacts are incomplete");
+
+    const scopes=[{businessAreaId:"area:drone",divisionId:"division:north"},{businessAreaId:"area:drone",divisionId:"division:south"}];
+    const intent=[{sourceId:selectedSourceId,...scopes[0]},{sourceId:secondSourceId,...scopes[1]}];
+    const bound=await submission({...business,name:"Bound group contact"},null,scopes,intent);
+    const boundInput={...input,commandId:uuid(),submissionId:bound.submissionId,fieldsSha256:bound.fieldsSha256};
+    const config=JSON.stringify(intent), swapped=JSON.stringify(intent.map((value,index)=>({...value,...scopes[1-index]})));
+    await expect(prepareClientOnboardingSharedCompanyPlan(db,actor,{...boundInput,sourceIds:[selectedSourceId]},dualConnection,config)).rejects.toThrow();
+    const boundPlan=await prepareClientOnboardingSharedCompanyPlan(db,actor,boundInput,dualConnection,config);
+    const boundApproval={planId:boundPlan.planId,submissionId:bound.submissionId,fieldsSha256:bound.fieldsSha256};
+    const beforeBound=await count("operations_directory_records");
+    await expect(approveClientOnboardingSharedCompany(db,actor,boundApproval,dualConnection,swapped)).rejects.toThrow();
+    expect(await count("operations_directory_records")).toBe(beforeBound);
+    const boundResult=await approveClientOnboardingSharedCompany(db,actor,boundApproval,dualConnection,config);
+    expect(boundResult).toMatchObject({decisionId:boundPlan.planId,replayed:false});
+    expect(await count("operations_directory_records")).toBe(beforeBound+2);
   },120_000);
 
   it("uses a genuinely acquired foreign company binding without rewriting either identity, and denies stale or unsettled parent evidence",async()=>{

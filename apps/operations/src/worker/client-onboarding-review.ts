@@ -1,5 +1,7 @@
 import { parseClientOnboardingFields, type ClientOnboardingFields } from "@ltds/shared";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import { inviteDestinationsStillBound, parseInviteDestinationIntent, type InviteDestinationBinding } from "./client-onboarding-invite-destinations";
+import { readClientOnboardingScopeChoices } from "./client-onboarding-scope-choices";
 
 export type ClientOnboardingSubmissionReview = Readonly<{
   invitationId: string;
@@ -9,6 +11,8 @@ export type ClientOnboardingSubmissionReview = Readonly<{
   targetClientRecordId: string | null;
   scopes: readonly Readonly<{ businessAreaId: string; divisionId: string | null }>[];
   fields: ClientOnboardingFields;
+  destinationIntent?: Readonly<{ bindings: readonly InviteDestinationBinding[]; issuanceSha256: string }>;
+  targetApprovalPending?: true;
 }>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -136,8 +140,30 @@ export async function readClientOnboardingSubmissionForReview(database: D1Databa
       || Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
     const row = await authorizedReviews(database, authenticated, submissionId, null, 1).first<ReviewRow>();
     if (!row || row.submission_id !== submissionId) return denied();
-    return parseReview(row);
+    const parsed = parseReview(row);
+    // A legacy schema returns no destination column, and legacy rows return NULL.
+    const issuance = await database.withSession("first-primary").prepare(
+      "SELECT * FROM client_onboarding_issuance_commands WHERE invitation_id=?")
+      .bind(parsed.invitationId).first<{ destination_intent_json?: string | null; target_intent_json?: unknown; request_sha256: string }>();
+    if (!issuance || Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
+    // Any recorded target intent requires dedicated review, even if its JSON is malformed.
+    const review: ClientOnboardingSubmissionReview = issuance.target_intent_json == null
+      ? parsed : Object.freeze({ ...parsed, targetApprovalPending: true });
+    if (issuance.destination_intent_json == null) return review;
+    const bindings = parseInviteDestinationIntent(JSON.parse(issuance.destination_intent_json), review.scopes);
+    if (!bindings || !HEX.test(issuance.request_sha256) || review.targetClientRecordId !== null) return denied();
+    return Object.freeze({ ...review, destinationIntent: { bindings, issuanceSha256: issuance.request_sha256 } });
   } catch { return denied(); }
+}
+
+export async function verifyReviewDestinationIntent(database: D1Database, auth: AuthenticatedNativeStaffWithAdmissionVersion,
+  review: ClientOnboardingSubmissionReview, sourceIds: readonly string[], config: string | undefined): Promise<string | undefined> {
+  if (review.targetApprovalPending) return denied();
+  const intent = review.destinationIntent;
+  if (!intent) return undefined;
+  if (sourceIds.length !== intent.bindings.length || !intent.bindings.every(binding => sourceIds.includes(binding.sourceId))
+    || !inviteDestinationsStillBound(config, await readClientOnboardingScopeChoices(database, auth), intent.bindings)) return denied();
+  return intent.issuanceSha256;
 }
 
 export type ClientOnboardingInbox = Readonly<{
