@@ -437,7 +437,7 @@
     @media (prefers-reduced-motion: reduce) {
       #sidebar, #loading-overlay, #loading-overlay.hidden, #loading-bar > span, #photo-img, .tab-btn, .tool-btn, .layer-btn, .icon-btn, .text-btn { transition: none; }
       .brand-loader { animation: none; }
-      .spinner, #photo-spinner { animation-duration: 2.4s; }
+      .spinner, #photo-spinner { animation: none; }
     }
   </style>
 </head>
@@ -707,7 +707,7 @@
           <div class="spinner"></div>
           <div id="loading-text">Loading viewer...</div>
           <div id="loading-progress"></div>
-          <div id="loading-bar" hidden><span></span></div>
+          <div id="loading-bar" hidden aria-hidden="true"><span></span></div>
           <button id="loading-cancel" type="button">Cancel full mesh</button>
         </div>
       </div>

@@ -4581,10 +4581,11 @@ function updateLoading(t, p, cancellable = false) {
   dom.loadingCancel.style.display = cancellable ? '' : 'none';
   // A plain percentage also drives a slim bar that eases to the new value.
   const bar = document.getElementById('loading-bar');
-  const percent = /^(d+(?:.d+)?)%$/.exec(String(p || '').trim());
+  const percent = /^(\d+(?:\.\d+)?)%$/.exec(String(p || '').trim());
   if (bar) {
     bar.hidden = !percent;
     if (percent) bar.style.setProperty('--loading-fraction', String(Math.min(100, Number(percent[1])) / 100));
+    else bar.style.removeProperty('--loading-fraction');
   }
 }
 function hideLoading() {
