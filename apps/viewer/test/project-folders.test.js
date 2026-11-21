@@ -53,6 +53,33 @@ test('folder migration preserves an existing project, dataset and task',t=>{
   assert.equal(processing.getProject(project.id).displayName,'Existing');assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
 });
 
+test('guarded moves reject ABA and Undo is actor-scoped, single-use and expires',t=>{
+  const db=openDatabase(':memory:');t.after(()=>db.close());
+  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Existing'});
+  const dataset=p.createDataset({projectId:project.id,displayName:'Source',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic'});
+  p.finalizeDataset(dataset.id,[],'a'.repeat(64));
+  const task=p.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Already created'});
+  const folder=p.createProjectFolder(project.id,{displayName:'New folder'},'a');
+  const guard=(expectedFolderId,expectedFolderRevision,undo=false)=>({expectedFolderId,expectedFolderRevision,undo});
+  assert.equal(task.folderRevision,0);
+  const moved=p.moveTaskToFolder(task.id,folder.id,'a',guard(null,0));
+  assert.equal(moved.folderRevision,1);
+  const audit=db.prepare("SELECT created_at FROM audit_events WHERE action='processing_task.folder_changed' AND entity_id=?").get(task.id);
+  assert.equal(Date.parse(moved.undoExpiresAt)-Date.parse(audit.created_at),10_000);
+  assert.equal(p.getTask(task.id).undoExpiresAt,undefined);
+  assert.throws(()=>p.moveTaskToFolder(task.id,null,'b',guard(folder.id,1,true)),{code:'folder_undo_conflict'});
+  const restored=p.moveTaskToFolder(task.id,null,'a',guard(folder.id,1,true));
+  assert.equal(restored.folderRevision,2);assert.equal(restored.folderId,null);
+  assert.throws(()=>p.moveTaskToFolder(task.id,folder.id,'a',guard(null,0)),{code:'folder_conflict'});
+  assert.throws(()=>p.moveTaskToFolder(task.id,folder.id,'a',guard(null,2,true)),{code:'folder_undo_conflict'});
+  // Direct fixture setup advances the same revision, preventing replay of an older guarded move.
+  assert.equal(p.moveTaskToFolder(task.id,folder.id,'a').folderRevision,3);
+  assert.throws(()=>p.moveTaskToFolder(task.id,null,'a',guard(folder.id,1,true)),{code:'folder_conflict'});
+  db.prepare("UPDATE audit_events SET created_at='2000-01-01T00:00:00.000Z' WHERE rowid=(SELECT MAX(rowid) FROM audit_events)").run();
+  assert.throws(()=>p.moveTaskToFolder(task.id,null,'a',guard(folder.id,3,true)),{code:'folder_undo_conflict'});
+  assert.equal(p.getTask(task.id).folderId,folder.id);
+});
+
 test('folder deletion waits for another connection moving a task into it', {timeout:5000}, async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-folders-race-')),dbPath=path.join(root,'db.sqlite'),db=openDatabase(dbPath);
   const processing=new ProcessingRepository(db),project=processing.createProject({displayName:'Synthetic'}),source=processing.createDataset({projectId:project.id,displayName:'Source',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()});
@@ -86,14 +113,37 @@ test('folder API requires permissions and moves only within the original project
   const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));
   const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(root,{recursive:true,force:true});});
-  const call=(route,method='GET',body,credential=token)=>fetch(`http://127.0.0.1:${server.address().port}${route}`,{method,headers:{authorization:`Bearer ${credential}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},...(body===undefined?{}:{body:JSON.stringify(body)})});
+  const call=(route,method='GET',body,credential=token,key=crypto.randomUUID())=>fetch(`http://127.0.0.1:${server.address().port}${route}`,{method,headers:{authorization:`Bearer ${credential}`,'content-type':'application/json','idempotency-key':key},...(body===undefined?{}:{body:JSON.stringify(body)})});
   const endpoint=`/api/v1/projects/${project.id}/folders`;
   assert.equal((await call(endpoint,'POST',{displayName:'Client'},readOnly)).status,403);
   const created=await call(endpoint,'POST',{displayName:'Client',parentId:null});assert.equal(created.status,201);const folder=(await created.json()).folder;
   const list=await call(endpoint,'GET',undefined,readOnly);assert.deepEqual((await list.json()).folders,[folder]);
-  assert.equal((await call(`/api/v1/tasks/${task.id}/folder`,'PATCH',{folderId:outside.id})).status,400);
-  assert.equal((await call(`/api/v1/tasks/${task.id}/folder`,'PATCH',{folderId:folder.id},readOnly)).status,403);
-  const moved=await call(`/api/v1/tasks/${task.id}/folder`,'PATCH',{folderId:folder.id});assert.equal(moved.status,200);assert.equal((await moved.json()).task.folderId,folder.id);
+  const moveUrl=`/api/v1/tasks/${task.id}/folder`;
+  const initialGuard={expectedFolderId:null,expectedFolderRevision:0};
+  assert.equal((await call(moveUrl,'PATCH',{folderId:outside.id,...initialGuard})).status,400);
+  assert.equal((await call(moveUrl,'PATCH',{folderId:folder.id,...initialGuard},readOnly)).status,403);
+  const moveBody={folderId:folder.id,...initialGuard},moveKey=crypto.randomUUID();
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const moved=await call(moveUrl,'PATCH',moveBody,token,moveKey);assert.equal(moved.status,200);
+  const {serverTime,...moveResult}=await moved.json();
+  assert.equal(moveResult.task.folderId,folder.id);
+  assert.equal(Date.parse(moveResult.undoExpiresAt)-Date.parse(serverTime),10_000);
+  t.mock.timers.tick(10_001);
+  const replay=await call(moveUrl,'PATCH',moveBody,token,moveKey);
+  assert.equal(replay.status,200);assert.equal(replay.headers.get('idempotency-replayed'),'true');
+  const {serverTime:replayTime,...replayedResult}=await replay.json();
+  assert.deepEqual(replayedResult,moveResult);
+  assert.equal(Date.parse(replayTime)-Date.parse(moveResult.undoExpiresAt),1);
+  const expiredUndo=await call(moveUrl,'PATCH',{folderId:null,expectedFolderId:folder.id,expectedFolderRevision:1,undo:true});
+  assert.equal(expiredUndo.status,409);assert.equal((await expiredUndo.json()).code,'folder_undo_conflict');
+  t.mock.timers.reset();
+  assert.equal((await call(moveUrl,'PATCH',{folderId:null})).status,400,'unguarded legacy request must not overwrite the guarded move');
+  assert.equal(processing.getTask(task.id).folderId,folder.id);
+  assert.equal(processing.getTask(task.id).folderRevision,1);
+  assert.equal((await call(moveUrl,'PATCH',{folderId:null,expectedFolderRevision:1})).status,400);
+  assert.equal((await call(moveUrl,'PATCH',{folderId:null,expectedFolderId:folder.id,expectedFolderRevision:1},readOnly)).status,403);
+  const stale=await call(moveUrl,'PATCH',{folderId:null,expectedFolderId:folder.id,expectedFolderRevision:0});
+  assert.equal(stale.status,409);assert.equal((await stale.json()).code,'folder_conflict');
   assert.equal(processing.getTask(task.id).projectId,project.id);
   const folderUrl=`${endpoint}/${folder.id}`;
   const wrongProjectUrl=`/api/v1/projects/${other.id}/folders/${folder.id}`;
@@ -102,7 +152,8 @@ test('folder API requires permissions and moves only within the original project
   assert.equal((await call(folderUrl,'DELETE',undefined,readOnly)).status,403);
   assert.equal((await call(folderUrl,'DELETE')).status,409);
   const renamed=await call(folderUrl,'PATCH',{displayName:'Renamed'});assert.equal(renamed.status,200);assert.equal((await renamed.json()).folder.displayName,'Renamed');
-  assert.equal((await call(`/api/v1/tasks/${task.id}/folder`,'PATCH',{folderId:null})).status,200);
+  const undone=await call(moveUrl,'PATCH',{folderId:null,expectedFolderId:folder.id,expectedFolderRevision:1,undo:true});
+  assert.equal(undone.status,200);assert.equal((await undone.json()).undoExpiresAt,undefined);
   assert.equal((await call(folderUrl,'DELETE')).status,200);
   assert.equal(processing.getTask(task.id).datasetId,source.id);
 });
