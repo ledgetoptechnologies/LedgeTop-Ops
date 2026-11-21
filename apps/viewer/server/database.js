@@ -125,6 +125,91 @@ function migrateProjectFoldersV48(database) {
   database.exec(PROJECT_FOLDERS_V48_SQL);
 }
 
+// Restricted (exclusion-scoped) client credentials are fenced by a per-task
+// generation that only ever increases. Triggers bump it in the same statement
+// transaction as every write that can change whether a published task is
+// eligible: its project, folder, archive/purge state, published model, the
+// model's ready state or active version, that version's state, the published
+// output row, and folder re-parenting. Rows are never deleted or reset, so a
+// generation is never reused (a task that moves A->B->A gets a new value and
+// every credential minted before the first move stays dead). A missing row
+// means "deny" to every restricted check.
+const TASK_GENERATION_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
+const bumpTaskGenerations = where => `UPDATE task_authorization_generations
+      SET generation=generation+1,updated_at=${TASK_GENERATION_NOW} WHERE task_id IN (${where});`;
+const TASK_AUTHORIZATION_GENERATIONS_V52_SQL = `
+    CREATE TABLE task_authorization_generations (
+      task_id TEXT PRIMARY KEY NOT NULL,
+      generation INTEGER NOT NULL CHECK(generation>=1),
+      updated_at TEXT NOT NULL
+    ) WITHOUT ROWID;
+    INSERT INTO task_authorization_generations(task_id,generation,updated_at)
+      SELECT id,1,${TASK_GENERATION_NOW} FROM processing_tasks;
+    CREATE TRIGGER task_authorization_generation_monotonic BEFORE UPDATE ON task_authorization_generations
+      WHEN NEW.task_id IS NOT OLD.task_id OR NEW.generation<=OLD.generation
+      BEGIN SELECT RAISE(ABORT,'task authorization generation only increases'); END;
+    CREATE TRIGGER task_authorization_generation_permanent BEFORE DELETE ON task_authorization_generations
+      BEGIN SELECT RAISE(ABORT,'task authorization generation is permanent'); END;
+    CREATE TRIGGER task_authorization_generation_task_insert AFTER INSERT ON processing_tasks BEGIN
+      INSERT INTO task_authorization_generations(task_id,generation,updated_at) VALUES (NEW.id,1,${TASK_GENERATION_NOW})
+        ON CONFLICT(task_id) DO UPDATE SET generation=generation+1,updated_at=excluded.updated_at;
+    END;
+    CREATE TRIGGER task_authorization_generation_task_update AFTER UPDATE ON processing_tasks
+      WHEN NEW.id IS NOT OLD.id OR NEW.project_id IS NOT OLD.project_id OR NEW.folder_id IS NOT OLD.folder_id
+        OR NEW.published_model_id IS NOT OLD.published_model_id OR NEW.purged_at IS NOT OLD.purged_at
+        OR (NEW.status='archived') IS NOT (OLD.status='archived')
+      BEGIN ${bumpTaskGenerations('OLD.id,NEW.id')} END;
+    CREATE TRIGGER task_authorization_generation_task_delete AFTER DELETE ON processing_tasks
+      BEGIN ${bumpTaskGenerations('OLD.id')} END;
+    CREATE TRIGGER task_authorization_generation_project_update AFTER UPDATE ON projects
+      WHEN NEW.id IS NOT OLD.id OR NEW.status IS NOT OLD.status
+      BEGIN ${bumpTaskGenerations('SELECT id FROM processing_tasks WHERE project_id IN (OLD.id,NEW.id)')} END;
+    CREATE TRIGGER task_authorization_generation_model_update AFTER UPDATE ON models
+      WHEN NEW.id IS NOT OLD.id OR NEW.status IS NOT OLD.status OR NEW.active_version_id IS NOT OLD.active_version_id
+      BEGIN ${bumpTaskGenerations('SELECT id FROM processing_tasks WHERE published_model_id IN (OLD.id,NEW.id)')} END;
+    CREATE TRIGGER task_authorization_generation_model_delete AFTER DELETE ON models
+      BEGIN ${bumpTaskGenerations('SELECT id FROM processing_tasks WHERE published_model_id=OLD.id')} END;
+    CREATE TRIGGER task_authorization_generation_version_update AFTER UPDATE ON model_versions
+      WHEN NEW.id IS NOT OLD.id OR NEW.model_id IS NOT OLD.model_id OR NEW.status IS NOT OLD.status
+      BEGIN ${bumpTaskGenerations('SELECT id FROM processing_tasks WHERE published_model_id IN (OLD.model_id,NEW.model_id)')} END;
+    CREATE TRIGGER task_authorization_generation_version_delete AFTER DELETE ON model_versions
+      BEGIN ${bumpTaskGenerations('SELECT id FROM processing_tasks WHERE published_model_id=OLD.model_id')} END;
+    CREATE TRIGGER task_authorization_generation_output_insert AFTER INSERT ON model_outputs
+      BEGIN ${bumpTaskGenerations('NEW.task_id')} END;
+    CREATE TRIGGER task_authorization_generation_output_update AFTER UPDATE ON model_outputs
+      WHEN NEW.id IS NOT OLD.id OR NEW.model_id IS NOT OLD.model_id OR NEW.task_id IS NOT OLD.task_id
+        OR NEW.project_id IS NOT OLD.project_id OR NEW.status IS NOT OLD.status
+      BEGIN ${bumpTaskGenerations('OLD.task_id,NEW.task_id')} END;
+    CREATE TRIGGER task_authorization_generation_output_delete AFTER DELETE ON model_outputs
+      BEGIN ${bumpTaskGenerations('OLD.task_id')} END;
+    CREATE TRIGGER task_authorization_generation_folder_update AFTER UPDATE ON project_folders
+      WHEN NEW.id IS NOT OLD.id OR NEW.project_id IS NOT OLD.project_id OR NEW.parent_id IS NOT OLD.parent_id
+      BEGIN ${bumpTaskGenerations('SELECT id FROM processing_tasks WHERE project_id IN (OLD.project_id,NEW.project_id)')} END;
+    CREATE TRIGGER task_authorization_generation_folder_delete AFTER DELETE ON project_folders
+      BEGIN ${bumpTaskGenerations('SELECT id FROM processing_tasks WHERE project_id=OLD.project_id')} END;
+`;
+const TASK_AUTHORIZATION_GENERATIONS_V52_OBJECTS = ['task_authorization_generations',
+  'task_authorization_generation_monotonic', 'task_authorization_generation_permanent',
+  'task_authorization_generation_task_insert', 'task_authorization_generation_task_update',
+  'task_authorization_generation_task_delete', 'task_authorization_generation_project_update',
+  'task_authorization_generation_model_update', 'task_authorization_generation_model_delete',
+  'task_authorization_generation_version_update', 'task_authorization_generation_version_delete',
+  'task_authorization_generation_output_insert', 'task_authorization_generation_output_update',
+  'task_authorization_generation_output_delete', 'task_authorization_generation_folder_update',
+  'task_authorization_generation_folder_delete'];
+function taskAuthorizationGenerationsV52Present(database) {
+  const names = new Set(database.prepare('SELECT name FROM sqlite_master').all().map(row => row.name));
+  return TASK_AUTHORIZATION_GENERATIONS_V52_OBJECTS.every(name => names.has(name));
+}
+function migrateTaskAuthorizationGenerationsV52(database) {
+  if (database.prepare("SELECT 1 FROM sqlite_master WHERE name LIKE 'task_authorization_generation%'").get())
+    throw Object.assign(new Error('Unstamped task authorization generation schema requires explicit compatibility review.'), { code: 'viewer_migration_history_conflict' });
+  // Folder triggers and the folder column come from 48; refuse an order without it.
+  if (!projectFoldersV48Present(database))
+    throw Object.assign(new Error('Task authorization generations require the version 48 folder schema.'), { code: 'viewer_migration_order_conflict' });
+  database.exec(TASK_AUTHORIZATION_GENERATIONS_V52_SQL);
+}
+
 const MIGRATIONS = [
   {
     version: 1,
@@ -2195,6 +2280,9 @@ const MIGRATIONS = [
   {version:48,name:'project_organizational_folders',sql:'SELECT 1;',
     after(database){migrateProjectFoldersV48(database);},
     verify(database){return projectFoldersV48Present(database);}},
+  {version:52,name:'task_authorization_generations',sql:'SELECT 1;',
+    after(database){migrateTaskAuthorizationGenerationsV52(database);},
+    verify(database){return taskAuthorizationGenerationsV52Present(database);}},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;
@@ -2271,4 +2359,4 @@ function openDatabase(databasePath) {
   return database;
 }
 
-module.exports = { MIGRATIONS, applyMigrations, openDatabase };
+module.exports = { MIGRATIONS, applyMigrations, openDatabase, TASK_AUTHORIZATION_GENERATIONS_V52_SQL };

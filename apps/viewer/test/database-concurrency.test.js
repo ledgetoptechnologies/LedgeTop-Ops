@@ -58,6 +58,7 @@ test('two processes serialize the same pending upgrade migration', async (t) => 
   for (const migration of MIGRATIONS.slice(0, -1)) {
     database.exec('BEGIN IMMEDIATE');
     database.exec(migration.sql);
+    migration.after?.(database); // hook-built versions (42, 48) must be complete before the pending one
     database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
       .run(migration.version, migration.name, new Date().toISOString());
     database.exec('COMMIT');

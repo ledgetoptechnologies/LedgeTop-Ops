@@ -1,6 +1,6 @@
 import {Miniflare} from "miniflare";
 import {afterEach,describe,expect,it} from "vitest";
-import {createNativeViewerClientGrant,revokeNativeViewerClientGrant} from "../src/worker/viewer-integration";
+import {createNativeViewerClientGrant,createViewerClientGrant,revokeNativeViewerClientGrant} from "../src/worker/viewer-integration";
 import type {Env,StaffPrincipal} from "../src/worker/types";
 
 const active:Miniflare[]=[];
@@ -56,6 +56,17 @@ async function fixture(){
 afterEach(async()=>{await Promise.all(active.splice(0).map(value=>value.dispose()));});
 
 describe("native Viewer grant mutations",()=>{
+  it("refuses new legacy whole-project grants (they cannot carry exclusions) and writes nothing",async()=>{
+    const {database,env}=await fixture();
+    const project={...grant,scopeType:"project" as const,associationId:null,includeFuturePublished:true};
+    await expect(createNativeViewerClientGrant({env,principal,grant:project as never,idempotencyKey:"native-create-project-0001",request}))
+      .rejects.toMatchObject({status:410});
+    expect(await database.prepare("SELECT COUNT(*) count FROM viewer_native_client_grants").first<number>('count')).toBe(0);
+    expect(await database.prepare("SELECT COUNT(*) count FROM viewer_native_client_grant_mutation_receipts").first<number>('count')).toBe(0);
+    // Exact task grants are unchanged.
+    expect((await createNativeViewerClientGrant({env,principal,grant,idempotencyKey:"native-create-task-0001",request})).replayed).toBe(false);
+  });
+
   it("replays the stored create response before mutable target revalidation",async()=>{
     const {database,env}=await fixture();
     const first=await createNativeViewerClientGrant({env,principal,grant,idempotencyKey:"native-create-replay-0001",request});
@@ -89,5 +100,15 @@ describe("native Viewer grant mutations",()=>{
     expect(await revokeNativeViewerClientGrant({env,principal,grantId:created.grant.id,reason:"Security response",idempotencyKey:winningKey,request}))
       .toEqual({success:true,replayed:true,existingSessionsExpireWithinSeconds:1800});
     expect(await database.prepare("SELECT COUNT(*) count FROM viewer_native_client_grant_audit WHERE action='grant.revoked'").first<number>('count')).toBe(1);
+  });
+  it("refuses new legacy Operations-account whole-project grants before any write",async()=>{
+    const {database,env}=await fixture();
+    await database.prepare(`CREATE TABLE viewer_client_grant_mutation_receipts(actor_staff_id TEXT,idempotency_key TEXT,
+      request_fingerprint TEXT,grant_id TEXT,PRIMARY KEY(actor_staff_id,idempotency_key))`).run();
+    await database.prepare(`CREATE TABLE viewer_client_grants(id TEXT PRIMARY KEY)`).run();
+    await expect(createViewerClientGrant({env,principal,idempotencyKey:"legacy-create-project-0001",request,
+      grant:{accountId:"account-one",projectId:"project-one",scopeType:"project",associationId:null,includeFuturePublished:true,
+        expiresAt:null,permissions:{measure:true,cameras:true,download:false}} as never})).rejects.toMatchObject({status:410});
+    expect(await database.prepare("SELECT COUNT(*) count FROM viewer_client_grants").first<number>('count')).toBe(0);
   });
 });
