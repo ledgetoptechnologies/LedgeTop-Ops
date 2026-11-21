@@ -25,6 +25,21 @@ test('main-only push trigger: no manual, pull-request, tag, schedule or other-br
   assert.equal((workflow.match(/if: \$\{\{ github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' \}\}/g) ?? []).length, 3, 'every job is guarded');
 });
 
+test('both runtime image targets include the shared battery reference import and republish when it changes', () => {
+  const dockerfile = fs.readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const keyless = dockerfile.slice(dockerfile.indexOf('FROM ${NODE_IMAGE} AS keyless'), dockerfile.indexOf('FROM keyless AS full'));
+  const helper = 'apps/logs/src/battery-reference.mjs';
+  // Both service imports resolve to this exact file; source-checkout tests alone do not exercise COPY.
+  for (const file of ['analytics.mjs', 'battery-references.mjs']) {
+    const service = new URL(`../../logs/src/worker/${file}`, import.meta.url);
+    assert.match(fs.readFileSync(service, 'utf8'), /from ['"]\.\.\/battery-reference\.mjs['"]/);
+    assert.ok(fs.existsSync(new URL('../battery-reference.mjs', service)));
+  }
+  assert.ok(keyless.split('\n').includes(`COPY ${helper} ${helper}`), 'keyless packages the imported helper at its resolved path');
+  assert.match(dockerfile, /^FROM keyless AS full$/m, 'full inherits the same runtime helper');
+  assert.ok(onBlock.split('\n').includes(`      - ${helper}`), 'helper-only changes trigger the existing main-only publisher');
+});
+
 test('least privilege: read-only by default, packages: write only for the two publishing jobs, one non-secret build arg', () => {
   assert.match(workflow, /\npermissions:\n  contents: read\n\njobs:/);
   assert.equal((workflow.match(/packages: write/g) ?? []).length, 2);

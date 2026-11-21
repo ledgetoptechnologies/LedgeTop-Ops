@@ -41,6 +41,8 @@ const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b78
 
 /** Staff RPC methods: how each is called, and which need a key and a fresh authority check. */
 const RPC = Object.freeze({
+  setBatteryReference: { fn: (env, a, [input]) => service.setBatteryReference(env, a, input ?? {}), authority: 'import', keyed: true,
+    scope: ([input]) => `battery-reference:${input?.aircraftId}:${input?.batteryId}` },
   inventory: { fn: (env, a) => service.inventory(env, a) },
   listFlights: { fn: (env, a, [query]) => service.listFlights(env, a, query ?? {}) },
   getFlight: { fn: (env, a, [flightId]) => service.getFlight(env, a, flightId) },

@@ -19,7 +19,7 @@ export type RemoteLogsEnv = {
 };
 
 export const REMOTE_LIMITS = Object.freeze({ timeoutMs: 20_000, jsonBytes: 8 * 1024 * 1024, telemetryBytes: 32 * 1024 * 1024 + 1024 });
-const KEYED = new Set(["startImport", "decideSignIn", "revokeDevice", "assignDecodedLog", "reassignFlight", "resolveConflict"]);
+const KEYED = new Set(["startImport", "decideSignIn", "revokeDevice", "assignDecodedLog", "reassignFlight", "resolveConflict", "setBatteryReference"]);
 const UNAVAILABLE = { ok: false as const, error: { code: "logs_unavailable", status: 503, message: "Flight logs are unavailable right now. Try again in a few minutes." } };
 
 export function remoteLogsEnabled(env: RemoteLogsEnv): boolean { return env.LOGS_BACKEND_MODE === "local"; }
@@ -111,6 +111,7 @@ export function createRemoteFlightLogs(env: RemoteLogsEnv, fetchImpl: typeof fet
 
   const segment = (value: string) => encodeURIComponent(value);
   return {
+    setBatteryReference: (actor, input, options) => rpc("setBatteryReference", actor, [input], options),
     inventory: actor => rpc("inventory", actor, []),
     startImport: (actor, input, options) => rpc("startImport", actor, [input], options),
     importFlights: (actor, importId, batch) => rpc("importFlights", actor, [importId, batch]),

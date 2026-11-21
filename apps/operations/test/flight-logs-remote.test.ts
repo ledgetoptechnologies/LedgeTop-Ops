@@ -171,3 +171,17 @@ describe("attribution review through the local Logs host", () => {
     }
   });
 });
+
+
+it('requires and preserves the battery naming key and aircraft-scoped payload', async () => {
+  const { calls, fetchImpl } = recorder();
+  const logs = createRemoteFlightLogs(env, fetchImpl);
+  const input = { aircraftId: 'a1', batteryId: 'b1', referenceName: null };
+  expect((await logs.setBatteryReference!(actor, input)).ok).toBe(false);
+  expect(calls).toHaveLength(0);
+  await logs.setBatteryReference!(actor, input, { idempotencyKey: 'battery-reference-key-0001' });
+  const call = callAt(calls, 0);
+  expect(call.url.pathname).toBe('/internal/v1/logs/rpc/setBatteryReference');
+  expect(call.headers['Idempotency-Key']).toBe('battery-reference-key-0001');
+  expect(JSON.parse(call.init.body as string)).toEqual({ args: [input] });
+});
