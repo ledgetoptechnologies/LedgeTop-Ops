@@ -19,6 +19,14 @@ const ledgerRows = db => db.prepare(
 const viewer = { staffId: 'synthetic-preview-pilot', permissions: ['flight_logs.view'] };
 const migrate = db => migratePreviewDatabase(db, splitFixtureSql);
 
+async function provisionLegacyPreview(db) {
+  for (const sql of splitFixtureSql(readFileSync(baseline, 'utf8')).map(sql => sql.trim()).filter(Boolean)) {
+    await db.prepare(sql).run();
+  }
+  await db.prepare('CREATE TABLE _cf_METADATA (key INTEGER PRIMARY KEY, value BLOB)').run();
+  await db.prepare('INSERT INTO _cf_METADATA (key, value) VALUES (2, 1)').run();
+}
+
 async function assertAppliedOnce(db) {
   const before = await ledgerRows(db);
   assert.deepEqual(before.map(({ name, sha256 }) => ({ name, sha256 })),
@@ -36,12 +44,10 @@ test('fresh preview applies the complete Logs chain before the battery-aware rea
   await overview({ LOGS_DB: db }, viewer);
 });
 
-test('legacy 0001-only preview adopts its schema and preserves completed imports and flights', async t => {
+test('legacy 0001 preview with Workerd metadata preserves completed imports and flights', async t => {
   const db = new SqliteD1(':memory:');
   t.after(() => db.close());
-  for (const sql of splitFixtureSql(readFileSync(baseline, 'utf8')).map(sql => sql.trim()).filter(Boolean)) {
-    await db.prepare(sql).run();
-  }
+  await provisionLegacyPreview(db);
   await db.prepare(`INSERT INTO imports (id, source_system, pilot_id, actor_id, status, expected_flights, started_at)
     VALUES ('synthetic-import', 'opendronelog', ?, ?, 'completed', 1, '2026-01-01')`).bind(viewer.staffId, viewer.staffId).run();
   await db.prepare("INSERT INTO aircraft (id, serial, created_at, updated_at) VALUES ('air', 'synthetic-air', '2026-01-01', '2026-01-01')").run();
@@ -56,6 +62,7 @@ test('legacy 0001-only preview adopts its schema and preserves completed imports
   await migrate(db);
   await assertAppliedOnce(db);
   assert.deepEqual([(await readImport()).results, (await readFlights()).results], before);
+  assert.equal(await db.prepare('SELECT value FROM _cf_METADATA WHERE key = 2').first('value'), 1);
   assert.equal((await listFlights({ LOGS_DB: db }, viewer)).items[0].id, 'synthetic-flight');
   const detail = await getFlight({ LOGS_DB: db }, viewer, 'synthetic-flight');
   assert.equal(detail.battery.serial, 'synthetic-battery');
@@ -71,3 +78,15 @@ test('a partial untracked preview is refused without creating a ledger or later 
   await assert.rejects(migrate(db), /does not match the complete 0001 migration/);
   assert.deepEqual(await schemaObjects(db), before);
 });
+
+for (const name of ['unexpected_app_table', '_cf_unrecognized']) {
+  test(`legacy preview still refuses unknown table ${name}`, async t => {
+    const db = new SqliteD1(':memory:');
+    t.after(() => db.close());
+    await provisionLegacyPreview(db);
+    await db.prepare(`CREATE TABLE ${name} (id TEXT PRIMARY KEY)`).run();
+    const before = await schemaObjects(db);
+    await assert.rejects(migrate(db), /does not match the complete 0001 migration/);
+    assert.deepEqual(await schemaObjects(db), before);
+  });
+}

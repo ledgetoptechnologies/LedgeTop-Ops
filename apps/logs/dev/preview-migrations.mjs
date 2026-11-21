@@ -29,9 +29,10 @@ export async function migratePreviewDatabase(db, splitSqlQuery) {
   const baseline = files[0];
   if (baseline?.name !== baselineName) throw new Error('Unexpected first Logs preview migration');
 
-  const { results: schema } = await db.prepare(
-    "SELECT name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'",
-  ).all();
+  // Workerd persists local D1 bookmarks in this exact vendor table.
+  const { results: schema } = await db.prepare(`SELECT name, sql FROM sqlite_schema
+    WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'
+      AND NOT (type = 'table' AND name = '_cf_METADATA')`).all();
   const hasLedger = schema.some(row => row.name === ledger);
   const applied = hasLedger
     ? (await db.prepare(`SELECT name, sha256 FROM ${ledger} ORDER BY name`).all()).results
