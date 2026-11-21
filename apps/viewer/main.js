@@ -4,7 +4,6 @@ import { load as loadersGlLoad } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
 import L from 'leaflet';
 import { mountViewerMarks } from './viewer-marks.mjs';
-import { projectViewerMark } from './viewer-mark-position.mjs';
 import { createMapCameraOverlay } from './map-camera-overlay.mjs';
 import { createMeasurementWorkspace } from './measurement-workspace.mjs';
 import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs';
@@ -2534,54 +2533,42 @@ async function resolveMeasurementDisplayVertices(record,{signal}={}){
 
 function installViewerMarks() {
   if (!viewerMarks) {
-    let layer = null;
     viewerMarks = mountViewerMarks({
       panel: document.getElementById('panel-marks'),
-      onMapPick: () => setTool('none'),
-      mapLayer: { draw(marks, move) {
-        layer?.clearLayers();
-        if (!map || !marks.length) return;
-        layer ||= L.layerGroup().addTo(map);
-        for (const mark of marks) {
-          const dot = document.createElement('span');
-          dot.style.backgroundColor = mark.color;
-          const icon = L.divIcon({ className: 'viewer-map-mark', html: dot, iconSize: [16, 16], iconAnchor: [8, 8] });
-          const pin = L.marker([mark.latitude, mark.longitude], { icon, title: mark.name, draggable: Boolean(move) }).addTo(layer);
-          if (move) pin.on('dragend', () => {
-            const { lat, lng } = pin.getLatLng();
-            move(mark, { latitude: lat, longitude: lng });
-          });
-        }
-      } },
+      L, getMap: () => map,
+      // Placing or drawing a mark ends any measuring tool first.
+      onActivate: () => { if (state.activeTool && state.activeTool !== 'none') setTool('none'); },
+      georef: () => PROJECT?.georef || null,
+      units: () => DISPLAY_UNITS,
+      fileName: () => PROJECT?.title || PROJECT?.id || 'project',
     });
   }
   syncViewerMarks();
   syncViewerMarksView();
 }
 
+// Marks need the measure permission, like measurements. Session viewers (staff
+// and clients) use the saved, shared Marks API; the server decides whether
+// this login may write. Public links keep marks in this tab only.
 function syncViewerMarks() {
   if (!viewerMarks) return;
   const model = PROJECT;
-  const version = model?.activeVersion?.id;
   let context = null;
-  if (model?.id && version && SHARE_PERMISSIONS.measure !== false) {
+  if (model?.id && model?.activeVersion?.id && SHARE_PERMISSIONS.measure !== false) {
     const session = activeViewerSession;
     if (VIEW_MODE === 'session' && sessionAccessState !== 'unavailable'
-      && Date.parse(session?.expiresAt) > Date.now() && session?.subject
-      && (session.audience === 'ops' || (session.audience === 'client' && session.permissions?.personalMeasurements === true))) {
-      context = { mode: 'private', key: JSON.stringify([session.audience, session.subject, model.id, version]),
+      && Date.parse(session?.expiresAt) > Date.now() && session?.subject && ['ops', 'client'].includes(session.audience)) {
+      context = { mode: 'session', key: JSON.stringify([session.audience, session.subject, model.id]),
         token: () => sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null };
     } else if (['view', 'embed', 'project'].includes(VIEW_MODE)) {
-      context = { mode: 'temporary', key: JSON.stringify(['public', model.id, version]) };
+      context = { mode: 'temporary', key: JSON.stringify(['public', model.id]) };
     }
   }
   void viewerMarks.setScope(context);
 }
 
 function syncViewerMarksView() {
-  const georef = PROJECT?.georef;
-  const probe = { latitude: georef?.hemisphere === 'S' ? -1 : 1, longitude: georef?.utmZoneLon0Deg };
-  viewerMarks?.setView({ map: isMapMode(), mapFrame: Boolean(projectViewerMark(probe, georef)?.utm), georef });
+  viewerMarks?.setView({ map: Boolean(map) && isMapMode() });
 }
 
 function installMeasurementWorkspace() {
@@ -2595,7 +2582,7 @@ function installMeasurementWorkspace() {
     onBeforeAccessLost:()=>{if(VIEW_MODE==='session'&&activeViewerSession&&Date.parse(activeViewerSession.expiresAt)<=Date.now())measurementDraftRecovery.capture('session-expired',activeViewerSession,measurementWorkspace);},
     permitted:()=>SHARE_PERMISSIONS.measure!==false&&sessionAccessState!=='unavailable'&&(VIEW_MODE!=='session'||!activeViewerSession||Date.parse(activeViewerSession.expiresAt)>Date.now()),coordinateReference:measurementCoordinateReference,
     toLonLat:p=>{if(!measurementCoordinateReference().crs.startsWith('EPSG:'))throw new Error('GeoJSON needs verified geographic alignment. Use JSON or DXF with the local coordinate warning.');const [lat,lon]=utmToLatLon(p[0],p[1]);return [lon,lat];},
-    toolChanged:tool=>{state.activeTool=tool;document.querySelectorAll('#panel-measure .tool-btn[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===tool));},
+    toolChanged:tool=>{state.activeTool=tool;if(tool!=='none')viewerMarks?.cancelPlacement();document.querySelectorAll('#panel-measure .tool-btn[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===tool));},
     calculateSurface:calculateSavedMeasurementSurface,
     resolveDisplayVertices:resolveMeasurementDisplayVertices,
     adminRequest:reviewSessionChannel ? measurementAdminClient.request : undefined,
@@ -3236,6 +3223,7 @@ function ensureMap() {
   map.on('click', (e) => { if (!viewerMarks?.mapClick(e.latlng) && mapMeasure) addMapMeasurePoint(e.latlng); });
   syncViewerMarksView();
   map.on('dblclick', (e) => {
+    if (viewerMarks?.mapDoubleClick()) { L.DomEvent.stop(e); return; }
     if (mapMeasure?.points.length >= 3) { L.DomEvent.stop(e); finishMapMeasure(); }
   });
   map.on('contextmenu', (e) => {

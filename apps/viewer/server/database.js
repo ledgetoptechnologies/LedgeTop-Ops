@@ -2166,6 +2166,14 @@ const MIGRATIONS = [
     ]) && database.prepare('PRAGMA foreign_key_list(processing_attempt_engine_timing)').all()
       .some(row=>row.table==='processing_attempts'&&row.from==='attempt_id'&&row.to==='id'&&row.on_delete==='CASCADE');
   }},
+  // Shared ledger ordinal 84 (next free after main 83 and open PRs 46-52): Viewer Marks
+  // (pins, lines, areas and user categories).
+  {version:84,name:'viewer_coordinate_marks',sql:require('./viewerMarkSchema').VIEWER_MARKS_SQL,
+    verify(database){return require('./viewerMarkSchema').verifyViewerMarksSchema(database);},
+    after(database){
+      if(!this.verify(database))
+        throw Object.assign(new Error('Viewer schema version 84 did not create the Marks tables.'),{code:'viewer_migration_history_conflict'});
+    }},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;

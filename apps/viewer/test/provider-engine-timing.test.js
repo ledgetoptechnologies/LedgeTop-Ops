@@ -128,11 +128,13 @@ test('migration 83 preserves populated schema 42 and refuses incompatible ledger
   let db=new DatabaseSync(databasePath);
   t.after(()=>{db?.close();rmSync(root,{recursive:true,force:true});});
   db.exec('PRAGMA foreign_keys=ON');
-  const migration=MIGRATIONS.pop();
+  const index=MIGRATIONS.findIndex(item=>item.version===83);
+  const [migration]=MIGRATIONS.splice(index,1);
   assert.equal(migration.version,83);
   try{applyMigrations(db);}
-  finally{MIGRATIONS.push(migration);}
-  assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,42);
+  finally{MIGRATIONS.splice(index,0,migration);}
+  // Schema 42 plus later ledger ordinals (84: Viewer Marks).
+  assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,Math.max(...MIGRATIONS.filter(item=>item!==migration).map(item=>item.version)));
   const c={db,processing:new ProcessingRepository(db)};
   const project=c.processing.createProject({displayName:'Upgrade fixture'}),data=dataset(c,project);
   const task=c.processing.createTask({projectId:project.id,datasetId:data.id,displayName:'Existing task'});
@@ -161,9 +163,10 @@ test('a historical reference-protocol 51 stamp cannot satisfy the timer migratio
   const db=new DatabaseSync(':memory:');
   t.after(()=>db.close());
   db.exec('PRAGMA foreign_keys=ON');
-  const migration=MIGRATIONS.pop();
+  const index=MIGRATIONS.findIndex(item=>item.version===83);
+  const [migration]=MIGRATIONS.splice(index,1);
   try{applyMigrations(db);}
-  finally{MIGRATIONS.push(migration);}
+  finally{MIGRATIONS.splice(index,0,migration);}
   const oldIdentity='viewer_reference_protocol_identity';
   db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (51,?,?)')
     .run(oldIdentity,'2026-11-02T00:00:00Z');

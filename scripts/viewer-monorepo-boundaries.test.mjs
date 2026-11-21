@@ -29,7 +29,9 @@ const reviewedAckMigrations = [
 ];
 const reviewedTimerMigration = { version: 83, name: 'provider_engine_processing_elapsed' };
 const reviewedTimerSqlSha256 = 'c8b8205fbcf5b066030223c1176527f347ffc1bf4861b6ccf32e5845000f3214';
-const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "83"';
+// Schema 84 (Viewer Marks) is the next shared-ledger ordinal after 83.
+const reviewedMarksMigration = { version: 84, name: 'viewer_coordinate_marks' };
+const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "84"';
 const reviewedConverter = {
   patchSha256: 'fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c',
   lockSetSha256: 'b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98',
@@ -41,8 +43,8 @@ const reviewedConverter = {
 // identity; schema 42 validates and preserves legacy rows, maps accepted to
 // delivered, and prevents ACK deletion. Unknown or mismatched rows abort the
 // migration. Schema 83 adds an attempt- and provider-task-bound engine elapsed
-// record. The candidate image verification and attestation pins advance from
-// the upstream 38 to 83; the other runtime, numerical, promotion and digest
+// record; schema 84 adds Viewer Marks and mark categories. The candidate image
+// verification and attestation pins advance from the upstream 38 to 84; the other runtime, numerical, promotion and digest
 // guards remain fully compared.
 // The reviewed Obj2Tiles build updates its bounded-concurrency patch and adds
 // the ImageSharp 3.2.0 locked dependency/license notices. The image verifier pins
@@ -314,8 +316,8 @@ test('No script writes the Viewer image to a registry', () => {
 test('Viewer publication preserves the ACK migrations and pins the exact timer schema', () => {
   const migrations = MIGRATIONS.filter(({ version }) => version >= reviewedAckMigrations[0].version);
   assert.deepEqual(migrations.map(({ version, name }) => ({ version, name })),
-    [...reviewedAckMigrations, reviewedTimerMigration], 'another schema advance requires a new explicit gate review');
-  const timer = migrations.at(-1);
+    [...reviewedAckMigrations, reviewedTimerMigration, reviewedMarksMigration], 'another schema advance requires a new explicit gate review');
+  const timer = migrations.find(({ version }) => version === reviewedTimerMigration.version);
   const sqlSha256 = createHash('sha256').update(timer.sql.replace(/\r\n/g, '\n')).digest('hex');
   assert.equal(sqlSha256, reviewedTimerSqlSha256, 'migration 83 SQL must match the reviewed timer schema');
 });
