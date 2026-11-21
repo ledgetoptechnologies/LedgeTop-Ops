@@ -6,7 +6,7 @@ import java.util.Locale;
 
 /** Build-time constants. The production server is the default and, in a production build, the only one. */
 final class BuildInfo {
-    static final String VERSION = "0.3.4";
+    static final String VERSION = "0.3.5";
     static final String PRODUCTION_HOST = "logs.ledgetop.app";
     static final String DEFAULT_SERVER = "https://" + PRODUCTION_HOST;
 

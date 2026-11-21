@@ -31,6 +31,8 @@ export class FlightLogsService extends WorkerEntrypoint {
   pendingSignIns(actor) { return call(() => device.pendingSignIns(this.env, actor)); }
   decideSignIn(actor, input) { return call(() => device.decideSignIn(this.env, actor, input ?? {})); }
   clearPendingSignIns(actor) { return call(() => device.clearPendingSignIns(this.env, actor)); }
+  createPairing(actor) { return call(() => device.createPairing(this.env, actor)); }
+  cancelPairing(actor, pairingId) { return call(() => device.cancelPairing(this.env, actor, pairingId)); }
   listDevices(actor, input) { return call(() => device.listDevices(this.env, actor, input ?? {})); }
   revokeDevice(actor, deviceId) { return call(() => device.revokeDevice(this.env, actor, deviceId)); }
 }

@@ -7,7 +7,7 @@
 // uploads them write-once. Uploads are attributed to the pilot and device at that moment, for good.
 import { LogsError } from './errors.mjs';
 
-export const DEVICE_LIMITS = { codeTtlSeconds: 600, rawLogBytes: 100 * 1024 * 1024, haveBatch: 2000, pendingPerUsername: 5, signInsPerHour: 30,
+export const DEVICE_LIMITS = { codeTtlSeconds: 600, pairingTtlSeconds: 600, openPairingsPerPilot: 3, pairingFailuresPerHour: 100, rawLogBytes: 100 * 1024 * 1024, haveBatch: 2000, pendingPerUsername: 5, signInsPerHour: 30,
   // A controller whose pilot loses device eligibility in Ops stops working within this window (cached per
   // Worker isolate, per staff id). Approval and token collection never use the cache.
   activeCacheMs: 60_000 };
@@ -74,7 +74,9 @@ export const normalizeUsername = value => String(value ?? '').trim().toLowerCase
 // ---- Controller side (public device API, no Ops session) -------------------------------------------
 
 /** The controller asks to sign in as `username`, which must resolve to exactly one active staff member. */
-export async function startSignIn(env, { username, model, name, hardwareId }) {
+export async function startSignIn(env, body) {
+  if (body && body.pairingCode !== undefined) return startPairedSignIn(env, body);
+  const { username, model, name, hardwareId } = body ?? {};
   const user = normalizeUsername(username);
   if (!USERNAME.test(user)) throw new LogsError('invalid_username', 400, 'Type your Ledge Top username.');
   const db = env.LOGS_DB;
@@ -91,18 +93,107 @@ export async function startSignIn(env, { username, model, name, hardwareId }) {
   const since = new Date(Date.now() - 3600_000).toISOString();
   const inserted = await db.prepare(`INSERT INTO device_sign_ins (id, code, username, pilot_id, poll_token_hash, model, name, hardware_id, created_at, expires_at, eligibility_revision)
     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
-    WHERE (SELECT COUNT(*) FROM device_sign_ins WHERE username = ?3 AND status = 'pending' AND expires_at > ?9) < ?12
-      AND (SELECT COUNT(*) FROM device_sign_ins WHERE username = ?3 AND created_at > ?13) < ?14`)
+    WHERE (SELECT COUNT(*) FROM device_sign_ins WHERE username = ?3 AND pairing_id IS NULL AND status = 'pending' AND expires_at > ?9) < ?12
+      AND (SELECT COUNT(*) FROM device_sign_ins WHERE username = ?3 AND pairing_id IS NULL AND created_at > ?13) < ?14`)
     .bind(id, code, user, resolved.staffId, await sha256Hex(pollToken), text(model, 80), text(name, 80), text(hardwareId, 80),
       created, new Date(Date.now() + DEVICE_LIMITS.codeTtlSeconds * 1000).toISOString(), resolved.eligibilityRevision,
       DEVICE_LIMITS.pendingPerUsername, since, DEVICE_LIMITS.signInsPerHour).run();
   if (!inserted.meta?.changes) {
-    const pending = await db.prepare("SELECT COUNT(*) AS n FROM device_sign_ins WHERE username = ? AND status = 'pending' AND expires_at > ?").bind(user, created).first();
+    const pending = await db.prepare("SELECT COUNT(*) AS n FROM device_sign_ins WHERE username = ? AND pairing_id IS NULL AND status = 'pending' AND expires_at > ?").bind(user, created).first();
     if ((pending?.n ?? 0) >= DEVICE_LIMITS.pendingPerUsername)
       throw new LogsError('too_many_pending', 429, 'There are already several sign-in codes waiting for this username. Approve or clear them in Ledge Top, or wait 10 minutes.');
     throw new LogsError('too_many_sign_ins', 429, 'Too many sign-in attempts for this username. Try again later.');
   }
   return { signInId: id, code, pollToken, username: user, expiresInSeconds: DEVICE_LIMITS.codeTtlSeconds };
+}
+
+// ---- Pairing codes ------------------------------------------------------------------------------------
+// A pilot signed in to Ops makes a short-lived, single-use code (createPairing) and types it on the controller
+// with their username. The code is the proof: only its SHA-256 is stored, and it was only ever shown to the
+// authenticated pilot. A paired request has its own slot, outside the anonymous per-username limits, so
+// someone flooding a username can't stop that pilot signing in. It still needs approval in Ops.
+const PAIRING_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';   // Crockford base32: 10 characters = 50 bits
+const PAIRING = /^[0-9A-HJKMNP-TV-Z]{10}$/;
+function newPairingCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(10));
+  return [...bytes].map(b => PAIRING_ALPHABET[b & 31]).join('');
+}
+/** Accepts what people type: case, spaces and dashes don't matter; I/L read as 1 and O as 0. */
+export function normalizePairingCode(value) {
+  const code = String(value ?? '').toUpperCase().replace(/[\s-]/g, '').replace(/[IL]/g, '1').replace(/O/g, '0');
+  return PAIRING.test(code) ? code : null;
+}
+const pairingHash = code => sha256Hex(`ltds-logs-pairing:v1:${code}`);
+
+/** Ops side: a pairing code for the signed-in pilot, who must be explicitly eligible right now. */
+export async function createPairing(env, actor) {
+  requireStaff(actor);
+  const authority = await deviceAuthority(env, actor.staffId);
+  if (!authority.eligible) throw new LogsError('not_eligible', 403, 'You aren’t set up to use controllers. Ask an admin.');
+  const db = env.LOGS_DB, at = now(), id = crypto.randomUUID(), code = newPairingCode();
+  const expiresAt = new Date(Date.now() + DEVICE_LIMITS.pairingTtlSeconds * 1000).toISOString();
+  // At most a few open codes per pilot: making another closes this pilot's oldest, never anyone else's.
+  await db.batch([
+    db.prepare(`UPDATE device_pairings SET status = 'closed' WHERE pilot_id = ?1 AND status = 'open' AND id NOT IN
+      (SELECT id FROM device_pairings WHERE pilot_id = ?1 AND status = 'open' AND expires_at > ?2 ORDER BY created_at DESC LIMIT ?3)`)
+      .bind(actor.staffId, at, DEVICE_LIMITS.openPairingsPerPilot - 1),
+    db.prepare(`INSERT INTO device_pairings (id, pilot_id, secret_hash, eligibility_revision, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .bind(id, actor.staffId, await pairingHash(code), authority.revision, at, expiresAt),
+  ]);
+  return { pairingId: id, code: `${code.slice(0, 5)}-${code.slice(5)}`, expiresAt };
+}
+
+/** Ops side: closes one of the signed-in pilot's own open codes. */
+export async function cancelPairing(env, actor, pairingId) {
+  requireStaff(actor);
+  const result = await env.LOGS_DB.prepare("UPDATE device_pairings SET status = 'closed' WHERE id = ? AND pilot_id = ? AND status = 'open'")
+    .bind(String(pairingId), actor.staffId).run();
+  return { closed: Boolean(result.meta?.changes) };
+}
+
+async function pairingFailure(db) {
+  await db.prepare('INSERT INTO device_pairing_failures (at) VALUES (?)').bind(now()).run();
+}
+const badPairing = () => new LogsError('pairing_invalid', 404, 'That pairing code isn’t valid or has expired. Make a new one in Ledge Top.');
+
+/** Controller side: username plus a pairing code made in that pilot's own Ops session. */
+async function startPairedSignIn(env, { username, pairingCode, model, name, hardwareId }) {
+  const db = env.LOGS_DB, at = now();
+  const user = normalizeUsername(username);
+  if (!USERNAME.test(user)) throw new LogsError('invalid_username', 400, 'Type your Ledge Top username.');
+  // Global guess limit, before looking anything up: with 50-bit codes that live 10 minutes, this keeps
+  // guessing hopeless no matter how many callers try.
+  const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+  const failures = await db.prepare('SELECT COUNT(*) AS n FROM device_pairing_failures WHERE at > ?').bind(hourAgo).first();
+  if ((failures?.n ?? 0) >= DEVICE_LIMITS.pairingFailuresPerHour)
+    throw new LogsError('pairing_unavailable', 429, 'Pairing codes are paused for a while. Sign in with your username, or try again later.');
+  const code = normalizePairingCode(pairingCode);
+  if (!code) { await pairingFailure(db); throw badPairing(); }
+  const pairing = await db.prepare("SELECT * FROM device_pairings WHERE secret_hash = ? AND status = 'open' AND expires_at > ?").bind(await pairingHash(code), at).first();
+  if (!pairing) { await pairingFailure(db); throw badPairing(); }
+  // The username has to be the same pilot the code was made for, at the same eligibility revision.
+  let resolved;
+  try { resolved = await directory(env).resolvePilotUsername(user); }
+  catch (error) { if (error instanceof LogsError) throw error; throw new LogsError('directory_unavailable', 503, 'Sign-in is not available right now. Try again in a minute.'); }
+  if (!resolved || resolved.staffId !== pairing.pilot_id || resolved.eligibilityRevision !== pairing.eligibility_revision) {
+    await pairingFailure(db); throw badPairing();
+  }
+  if (!covers(await deviceAuthority(env, pairing.pilot_id), pairing.eligibility_revision)) {
+    await db.prepare("UPDATE device_pairings SET status = 'closed' WHERE id = ? AND status = 'open'").bind(pairing.id).run();
+    throw new LogsError('not_eligible', 403, 'Your controller access changed in Ledge Top. Make a new pairing code.');
+  }
+  // Use the code and create the request together: only the request that wins the code gets a sign-in.
+  const id = crypto.randomUUID(), pollToken = randomToken(), signInCodeText = signInCode();
+  const results = await db.batch([
+    db.prepare("UPDATE device_pairings SET status = 'used', used_at = ?1, sign_in_id = ?2 WHERE id = ?3 AND status = 'open' AND expires_at > ?1")
+      .bind(at, id, pairing.id),
+    db.prepare(`INSERT INTO device_sign_ins (id, code, username, pilot_id, poll_token_hash, model, name, hardware_id, created_at, expires_at, eligibility_revision, pairing_id)
+      SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 WHERE changes() = 1`)
+      .bind(id, signInCodeText, user, pairing.pilot_id, await sha256Hex(pollToken), text(model, 80), text(name, 80), text(hardwareId, 80),
+        at, new Date(Date.now() + DEVICE_LIMITS.codeTtlSeconds * 1000).toISOString(), pairing.eligibility_revision, pairing.id),
+  ]);
+  if (!results[0].meta?.changes || !results[1].meta?.changes) throw badPairing();
+  return { signInId: id, code: signInCodeText, pollToken, username: user, expiresInSeconds: DEVICE_LIMITS.codeTtlSeconds, paired: true };
 }
 
 /** The controller polls; after approval it collects its device token exactly once. */
