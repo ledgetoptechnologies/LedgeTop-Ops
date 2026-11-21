@@ -1,7 +1,7 @@
 export const PHOTO_HEADER_BYTES=256*1024;
 const HEADER_BYTES=PHOTO_HEADER_BYTES;
-// Read only GPS IFD values within a bounded JPEG APP1 segment. Missing or
-// malformed metadata is not a position; horizontal flight direction is never
+// Read only GPS IFD values (plus capture time) within a bounded JPEG APP1
+// segment. Missing or malformed metadata is not a position; heading is never
 // inferred from filenames or the order in which photos were selected.
 export function parsePhotoExif(input){
   const bytes=input instanceof Uint8Array?input:new Uint8Array(input);
@@ -37,7 +37,16 @@ export function parsePhotoExif(input){
       const latitude=(lat[0]+lat[1]/60+lat[2]/3600)*(latRef==='S'?-1:1),longitude=(lon[0]+lon[1]/60+lon[2]/3600)*(lonRef==='W'?-1:1);
       if(Math.abs(latitude)>90||Math.abs(longitude)>180)return null;
       const direction=rationals(0x11,1),trueHeading=text(0x10)==='T'&&direction&&direction[0]>=0&&direction[0]<360?direction[0]:null;
-      return {latitude,longitude,trueHeading};
+      // Capture time orders the preview path only; a malformed time never
+      // invalidates the GPS position read above.
+      let capturedAt=null;
+      try{
+        const ascii=(ifd,tag,max)=>{const at=ifd.find(entry=>u16(entry)===tag);if(at===undefined||u16(at+2)!==2)return null;const count=u32(at+4);if(!count||count>max)return null;const data=count<=4?at+8:base+u32(at+8);bounds(data,count);let out='';for(let i=0;i<count&&bytes[data+i];i++)out+=String.fromCharCode(bytes[data+i]);return out.trim();};
+        const exifPointer=root.find(at=>u16(at)===0x8769),exif=exifPointer!==undefined&&u16(exifPointer+2)===4&&u32(exifPointer+4)===1?entries(u32(exifPointer+8)):[];
+        const stamp=/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(ascii(exif,0x9003,32)||ascii(root,0x0132,32)||'');
+        if(stamp&&stamp[1]!=='0000'){const sub=ascii(exif,0x9291,16)||'';capturedAt=`${stamp[1]}-${stamp[2]}-${stamp[3]}T${stamp[4]}:${stamp[5]}:${stamp[6]}${/^\d{1,9}$/.test(sub)?`.${sub}`:''}`;}
+      }catch{capturedAt=null;}
+      return capturedAt?{latitude,longitude,trueHeading,capturedAt}:{latitude,longitude,trueHeading};
     }catch{return null;}
   }
   return null;

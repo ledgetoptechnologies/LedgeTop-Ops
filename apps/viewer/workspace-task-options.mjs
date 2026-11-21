@@ -22,14 +22,31 @@ export function taskOptionDomain(spec) {
 }
 export function taskOptionRestriction(spec) {
   if (REQUIRED.has(spec.name)) return 'Required for Viewer outputs; enabled automatically.';
-  if (FILE_OPTIONS.has(spec.name) || (['string', 'enum'].includes(spec.type) && /\b(?:file|directory|folder|path)\b/i.test(`${spec.domain || ''} ${spec.help || ''}`))) return 'This input needs a registered file or boundary workflow; arbitrary paths are not supported here.';
+  // JSON options carry their content inline (for example a GeoJSON boundary),
+  // never a server path, so they are editable as validated JSON text.
+  if (spec.type !== 'json' && (FILE_OPTIONS.has(spec.name) || (['string', 'enum'].includes(spec.type) && /\b(?:file|directory|folder|path)\b/i.test(`${spec.domain || ''} ${spec.help || ''}`)))) return 'This input needs a registered file or boundary workflow; arbitrary paths are not supported here.';
   // ODM exposes supported-choice settings as enum, not string. Only accept
   // its bounded string choice list; an unknown/malformed enum is not free text.
   if (spec.type === 'enum') {
     const choices = taskOptionDomain(spec)?.values;
     if (!choices?.length || !choices.every(value => typeof value === 'string' && value.length <= 4000)) return 'This node option type is not supported by this editor.';
-  } else if (!['bool', 'int', 'float', 'string'].includes(spec.type)) return 'This node option type is not supported by this editor.';
+  } else if (!['bool', 'int', 'float', 'string', 'json'].includes(spec.type)) return 'This node option type is not supported by this editor.';
   return null;
+}
+// Short type hint shown after an option name, e.g. "(positive float)".
+export function taskOptionTypeHint(spec) {
+  const base = { int: 'integer', float: 'float', string: 'string', json: 'json' }[spec?.type];
+  if (!base) return '';
+  const domain = spec.type === 'json' ? null : taskOptionDomain(spec);
+  if (domain?.values) return '';
+  if (domain?.min === 0 && domain.max === undefined) return `${domain.minExclusive ? 'positive' : 'non-negative'} ${base}`;
+  if (domain && (domain.min !== undefined || domain.max !== undefined)) return `${base} ${domain.min ?? ''}–${domain.max ?? ''}`;
+  return base;
+}
+// Node help text with ODM's argparse placeholders filled in.
+export function taskOptionDescription(spec) {
+  const choices = taskOptionDomain(spec)?.values;
+  return String(spec?.help || '').replace(/%\(choices\)s/g, choices ? choices.join(', ') : '').replace(/%\(default\)s/g, spec?.value === undefined || spec?.value === null ? '' : String(spec.value)).replace(/%%/g, '%').trim();
 }
 export function parseTaskOption(spec, raw) {
   if (taskOptionRestriction(spec)) throw new Error(taskOptionRestriction(spec));
@@ -43,6 +60,7 @@ export function parseTaskOption(spec, raw) {
     value = Number(raw);
     if (!Number.isFinite(value) || (spec.type === 'int' && !Number.isSafeInteger(value))) throw new Error(spec.type === 'int' ? 'Enter a whole number.' : 'Enter a finite number.');
   } else if (typeof raw !== 'string' || raw.length > 4000) throw new Error('Enter text of at most 4,000 characters.');
+  else if (spec.type === 'json') { try { JSON.parse(raw); } catch { throw new Error('Enter valid JSON.'); } }
   const domain = taskOptionDomain(spec);
   if (domain?.values && !domain.values.includes(value)) throw new Error('Choose one of the node’s supported values.');
   if (typeof value === 'number' && ((domain?.min !== undefined && value < domain.min) || (domain?.max !== undefined && value > domain.max))) throw new Error('Value is outside the node’s supported range.');
@@ -90,48 +108,91 @@ export function createTaskOptionsModel({ provider = null, presetOptions = {} } =
   ] };
 }
 
-export function mountTaskOptions({ container, provider = null, presetOptions = {}, title = 'Advanced processing options', helpText = 'Edit settings directly for this task. Reset restores the preset or node default. Changes do not modify your saved preset.', modifiedLabel = 'Modified for this task' }) {
-  const model = createTaskOptionsModel({ provider, presetOptions }), document = container.ownerDocument;
-  const root = document.createElement('details'); root.className = 'task-options-editor';
-  const summary = document.createElement('summary'); summary.textContent = title; root.append(summary);
-  const search = document.createElement('input'); search.type = 'search'; search.placeholder = 'Search options'; search.setAttribute('aria-label', 'Search processing options'); root.append(search);
-  const help = document.createElement('p'); help.className = 'form-note'; help.textContent = helpText; root.append(help);
-  const list = document.createElement('div'); list.className = 'task-options-list'; root.append(list);
-  const status = document.createElement('p'); status.setAttribute('role', 'status'); root.append(status); container.append(root);
+let editorSequence = 0;
+// Compact WebODM-style list: name, type hint and an (i) button whose
+// description is exposed on hover/focus and to screen readers via
+// aria-describedby. No inline descriptions.
+export function mountTaskOptions({ container, provider = null, presetOptions = {}, title = 'Task options' }) {
+  const model = createTaskOptionsModel({ provider, presetOptions }), document = container.ownerDocument, prefix = `task-option-${++editorSequence}`;
+  const make = (tag, className, text) => { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; };
+  const root = make('details', 'task-options-editor');
+  const summary = make('summary', '', title); root.append(summary);
+  const toolbar = make('div', 'task-options-toolbar'); root.append(toolbar);
+  const search = make('input'); search.type = 'search'; search.placeholder = 'Filter options'; search.setAttribute('aria-label', 'Filter processing options'); search.setAttribute('data-option-search', ''); toolbar.append(search);
+  const changedLabel = make('label', 'task-options-changed'), changedOnly = make('input'); changedOnly.type = 'checkbox'; changedOnly.setAttribute('data-show-changed', ''); changedLabel.append(changedOnly, make('span', '', 'Show only changed')); toolbar.append(changedLabel);
+  const list = make('div', 'task-options-list'); root.append(list);
+  const status = make('p', 'task-options-status'); status.setAttribute('role', 'status'); root.append(status); container.append(root);
   let rows = [], disposed = false, disabled = false;
-  function filter() { const query = search.value.toLowerCase().trim(); for (const row of rows) row.element.hidden = !row.search.includes(query); }
+  function filter() { const query = search.value.toLowerCase().trim(); for (const row of rows) row.element.hidden = !row.search.includes(query) || Boolean(changedOnly.checked && !row.changed()); }
+  function showErrors(errors) {
+    const byName = new Map(errors.map(error => [error.name, error.message]));
+    for (const row of rows) { const message = byName.get(row.name) || ''; row.error.textContent = message; row.error.hidden = !message; row.control.setAttribute('aria-invalid', String(Boolean(message))); }
+    const general = errors.filter(error => !rows.some(row => row.name === error.name));
+    status.textContent = general.map(error => error.message).join(' ');
+  }
   function render() {
     list.replaceChildren(); rows = []; status.textContent = '';
-    for (const entry of model.entries()) {
-      const { spec } = entry, row = document.createElement('fieldset'), legend = document.createElement('legend'); legend.textContent = spec.name; row.append(legend);
-      const info = document.createElement('p'); info.className = 'form-note'; info.textContent = `${entry.inheritedFrom}: ${entry.inherited === undefined || entry.inherited === null ? 'not specified' : String(entry.inherited)}. ${spec.help || ''}`; row.append(info);
-      const reset = document.createElement('button'); reset.type = 'button'; reset.textContent = entry.missing?'Remove retained change':'Reset'; reset.setAttribute('aria-label', entry.missing?`Remove retained change ${spec.name}`:`Reset ${spec.name} to ${entry.inheritedFrom.toLowerCase()}`); row.append(reset);
-      const domain = taskOptionDomain(spec), choices = spec.type === 'bool' ? null : domain?.values;
-      const control = document.createElement(choices ? 'select' : 'input'); control.setAttribute('aria-label', `${spec.name} override`);
-      if (choices) {const current=entry.overridden?entry.value:entry.inherited;if(current!==undefined&&!choices.some(choice=>String(choice)===String(current))){const retained=document.createElement('option');retained.value=String(current);retained.textContent=`${String(current)} (no longer supported)`;control.append(retained)}for (const choice of choices) { const option = document.createElement('option'); option.value = String(choice); option.textContent = spec.type === 'bool' ? choice ? 'Enabled' : 'Disabled' : String(choice); control.append(option); }}
-      else { control.type = spec.type === 'bool' ? 'checkbox' : ['int','float'].includes(spec.type) ? 'number' : 'text'; if (control.type === 'number') { control.step = spec.type === 'int' ? '1' : 'any'; if (domain?.min !== undefined) control.min = String(domain.min); if (domain?.max !== undefined) control.max = String(domain.max); } else control.maxLength = 4000; }
-      control.setAttribute('aria-label', spec.name);
+    const entries = model.entries();
+    entries.forEach((entry, index) => {
+      const { spec } = entry, id = `${prefix}-${index}`, row = make('div', 'task-option'); row.setAttribute('data-option', spec.name); row.setAttribute('role', 'group'); row.setAttribute('aria-labelledby', `${id}-name`);
+      const head = make('div', 'task-option-head'), name = make('label', 'task-option-name'); name.id = `${id}-name`; name.htmlFor = `${id}-control`;
+      const hint = taskOptionTypeHint(spec); name.append(make('strong', '', spec.name)); if (hint) name.append(make('span', 'task-option-type', ` (${hint})`));
+      const inherited = entry.inherited === undefined || entry.inherited === null || entry.inherited === '' ? 'not set' : String(entry.inherited);
+      const description = [taskOptionDescription(spec), entry.missing ? '' : `${entry.inheritedFrom}: ${inherited}.`, entry.restriction || ''].filter(Boolean).join(' ');
+      const info = make('button', 'task-option-info', 'i'); info.type = 'button'; info.setAttribute('aria-label', `About ${spec.name}`); info.setAttribute('aria-describedby', `${id}-tip`); info.setAttribute('data-option-info', '');
+      const tip = make('span', 'task-option-tip', description); tip.id = `${id}-tip`; tip.setAttribute('role', 'tooltip');
+      const reset = make('button', 'task-option-reset', entry.missing ? 'Remove' : '↺'); reset.type = 'button'; reset.setAttribute('data-option-reset', '');
+      const resetLabel = entry.missing ? `Remove retained change ${spec.name}` : `Reset ${spec.name} to ${entry.inheritedFrom.toLowerCase()}`; reset.setAttribute('aria-label', resetLabel); reset.title = resetLabel;
+      head.append(name, info, tip, reset); row.append(head);
+      const domain = spec.type === 'json' ? null : taskOptionDomain(spec), choices = spec.type === 'bool' ? null : domain?.values;
+      const control = make(choices ? 'select' : 'input'); control.id = `${id}-control`; control.setAttribute('aria-describedby', `${id}-tip ${id}-error`); control.setAttribute('data-option-control', spec.type); control.setAttribute('aria-label', spec.name);
+      let field = control, loadButton = null, fileInput = null;
+      if (choices) { const current = entry.overridden ? entry.value : entry.inherited; if (current !== undefined && !choices.some(choice => String(choice) === String(current))) { const retained = make('option', '', `${String(current)} (no longer supported)`); retained.value = String(current); control.append(retained); } for (const choice of choices) { const option = make('option', '', String(choice)); option.value = String(choice); control.append(option); } }
+      else if (spec.type === 'bool') { control.type = 'checkbox'; field = make('label', 'task-option-check'); field.append(control, make('span', '', 'Enable')); }
+      else { control.type = ['int', 'float'].includes(spec.type) ? 'number' : 'text'; if (control.type === 'number') { control.step = spec.type === 'int' ? '1' : 'any'; if (domain?.min !== undefined) control.min = String(domain.min); if (domain?.max !== undefined) control.max = String(domain.max); } else control.maxLength = 4000; }
+      if (spec.type === 'json') {
+        field = make('div', 'task-option-json'); fileInput = make('input'); fileInput.type = 'file'; fileInput.accept = '.json,.geojson,application/json,application/geo+json'; fileInput.hidden = true; fileInput.tabIndex = -1;
+        loadButton = make('button', 'task-option-load', 'Load file'); loadButton.type = 'button'; loadButton.setAttribute('aria-label', `Load ${spec.name} from a JSON file`); loadButton.setAttribute('data-option-load', '');
+        field.append(control, loadButton, fileInput);
+      }
+      const error = make('p', 'task-option-error'); error.id = `${id}-error`; error.hidden = true; error.setAttribute('data-option-error', '');
+      row.append(field, error);
       function showValue(value) { control.value = String(value ?? ''); if (spec.type === 'bool') control.checked = value === true || value === 'true'; }
-      showValue(entry.overridden ? entry.value : entry.inherited); control.disabled = disabled || Boolean(entry.restriction); row.append(control);
-      const modified = document.createElement('span'); modified.className = 'form-note'; row.append(modified);
-      function showModified(value) { modified.textContent = value ? modifiedLabel : ''; reset.disabled = disabled || !value; }
+      showValue(entry.overridden ? entry.value : entry.inherited); control.disabled = disabled || Boolean(entry.restriction); if (loadButton) loadButton.disabled = control.disabled;
+      let changed = entry.overridden;
+      function showModified(value) { changed = value; reset.hidden = !value; reset.disabled = disabled || !value; row.classList?.toggle?.('is-changed', Boolean(value)); }
       showModified(entry.overridden);
-      if (entry.restriction) { const note = document.createElement('p'); note.className = 'form-note'; note.textContent = entry.restriction; row.append(note); }
       function save() {
         if (disabled || entry.restriction) return;
         const raw = spec.type === 'bool' ? control.checked : control.value;
-        let changed = true;
-        try { changed = parseTaskOption(spec, raw) !== entry.inherited; } catch { /* Keep invalid drafts visible for validation. */ }
-        model.setOverride(spec.name, changed ? raw : undefined); showModified(changed); status.textContent = '';
+        let isChanged = true;
+        if (spec.type === 'json' && !String(raw).trim()) isChanged = false;
+        else { try { isChanged = parseTaskOption(spec, raw) !== entry.inherited; } catch { /* Keep invalid drafts visible for validation. */ } }
+        model.setOverride(spec.name, isChanged ? raw : undefined); showModified(isChanged); showErrors(model.validate().errors); filter();
       }
-      reset.addEventListener('click', () => { if (disabled || !entry.overridden&&!model.entries().find(item=>item.spec.name===spec.name)?.overridden) return; model.setOverride(spec.name, undefined);if(entry.missing){render();return}showValue(entry.inherited); showModified(false); status.textContent = ''; });
+      reset.addEventListener('click', () => { if (disabled || !model.entries().find(item => item.spec.name === spec.name)?.overridden) return; model.setOverride(spec.name, undefined); if (entry.missing) { render(); return; } showValue(entry.inherited); showModified(false); showErrors(model.validate().errors); filter(); });
       control.addEventListener('input', save); control.addEventListener('change', save);
-      rows.push({ element: row, search: `${spec.name} ${spec.help || ''}`.toLowerCase() }); list.append(row);
-    }
-    if (!rows.length) status.textContent = 'Select a node with available processing capabilities.';
-    else status.textContent=model.validate().errors.map(error=>`${error.name}: ${error.message}`).join(' ');
+      loadButton?.addEventListener('click', () => { if (!disabled && !control.disabled) { fileInput.value = ''; fileInput.click(); } });
+      fileInput?.addEventListener('change', async () => {
+        const file = fileInput.files?.[0]; if (!file || disabled) return;
+        if (file.size > 4000) { error.textContent = 'Choose a JSON file of at most 4,000 characters.'; error.hidden = false; return; }
+        control.value = await file.text(); if (!disposed) save();
+      });
+      rows.push({ name: spec.name, element: row, control, error, changed: () => changed, search: spec.name.toLowerCase() }); list.append(row);
+    });
+    if (!rows.length) status.textContent = 'No processing node selected';
+    else showErrors(model.validate().errors);
     filter();
   }
-  search.addEventListener('input', filter); render();
-  return { getOptions: model.getOptions, validate() { const result = model.validate(); status.textContent = result.errors.map(error => `${error.name}: ${error.message}`).join(' '); return result; }, update(next) { if (!disposed && model.update(next)) render(); }, setDisabled(value) { if (!disposed) { disabled = Boolean(value); search.disabled = disabled; render(); } }, dispose() { disposed = true; root.remove(); } };
+  search.addEventListener('input', filter); changedOnly.addEventListener('change', filter); render();
+  return {
+    getOptions: model.getOptions,
+    validate() { const result = model.validate(); showErrors(result.errors); return result; },
+    update(next) { if (!disposed && model.update(next)) render(); },
+    // Programmatic value (e.g. a boundary drawn on the photo map); null clears it.
+    setValue(name, value) { if (disposed) return; model.setOverride(name, value === null ? undefined : value); render(); },
+    supports(name, type) { return model.entries().some(entry => entry.spec.name === name && !entry.missing && !entry.restriction && (!type || entry.spec.type === type)); },
+    setDisabled(value) { if (!disposed) { disabled = Boolean(value); search.disabled = disabled; render(); } },
+    dispose() { disposed = true; root.remove(); },
+  };
 }

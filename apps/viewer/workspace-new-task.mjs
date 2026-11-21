@@ -1,5 +1,6 @@
 import {TASK_PHOTO_ACCEPT,inspectTaskPhotos,prepareTaskPhotos,uploadTaskPhotos} from './workspace-task-upload.mjs';
-import {providerSubmissionState,selectSubmissionProvider} from './server/providerSelection.mjs';
+import {providerSubmissionState} from './server/providerSelection.mjs';
+import {orchestratorPicker} from './workspace-processing-node.mjs';
 import {mountPhotoMap} from './workspace-task-photo-map.mjs';
 import {mountTaskOptions} from './workspace-task-options.mjs';
 import {presetSaveRequest} from './workspace-preset-request.mjs';
@@ -19,33 +20,32 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
   let source='pc',files=[],selectedPaths=new Set(),busy=false,datasetId='',currentProviders=providers,submissionId=crypto.randomUUID(),copyKey=crypto.randomUUID();
   let prepared=null,browseGeneration=0,sourceOperation=null,datasetKey=crypto.randomUUID(),submissionFingerprint='',pendingPhotoResume=null,datasetRequestName='';
   const ready=datasets.filter(item=>item.projectId===project.id&&item.status==='finalized');
+  const uid=`new-task-${crypto.randomUUID().slice(0,8)}`;
   container.insertAdjacentHTML('beforeend',`<form class="manage-form new-task-form">
-    <label>Task name<input name="taskDisplayName" required maxlength="240" value="${escape(defaultTaskName(project))}"></label>
-    <fieldset><legend>Photos</legend><div class="row-actions task-source-actions">
-      ${canUpload?'<button type="button" data-source="pc">Choose files</button><button type="button" data-choose-folder>Choose folder</button>':''}
-      ${canImport?'<button type="button" data-source="server">Select from server storage</button>':''}
-      ${ready.length?'<button type="button" data-source="existing">Use saved source</button>':''}
+    <div class="task-source-bar"><p data-selection role="status">No photos selected</p><div class="row-actions task-source-actions" role="group" aria-label="Photo source">
+      ${ready.length?'<button type="button" data-source="existing">Saved source</button>':''}
+      ${canImport?'<button type="button" data-source="server">Server storage</button>':''}
+      ${canUpload?'<button type="button" data-choose-folder>Choose folder</button><button type="button" data-source="pc">Choose files</button>':''}
+    </div></div>
+    <section data-source-panel="pc" hidden><input data-files type="file" multiple accept="${escape(TASK_PHOTO_ACCEPT)}" hidden><input data-folder type="file" multiple webkitdirectory hidden></section>
+    <section data-source-panel="server" hidden><div data-server-browser aria-live="polite"></div></section>
+    <section data-source-panel="existing" hidden><select name="existingDataset" aria-label="Saved source"><option value="">Choose saved source</option>${ready.map(item=>`<option value="${escape(item.id)}">${escape(item.displayName)}</option>`).join('')}</select></section>
+    <div data-photo-map hidden></div>
+    <div class="task-form-grid">
+      <label for="${uid}-name">Name</label><input id="${uid}-name" name="taskDisplayName" required maxlength="240" value="${escape(defaultTaskName(project))}">
+      <label for="${uid}-node">Processing node</label><div class="task-form-field"><select id="${uid}-node" name="providerId" required aria-describedby="${uid}-node-note"></select><p id="${uid}-node-note" data-provider-note class="task-field-note" role="status"></p></div>
+      <label for="${uid}-preset">Options</label><div class="task-form-field task-form-inline"><select id="${uid}-preset" name="presetId"><option value="">Default</option></select><button type="button" data-edit-options aria-expanded="false">Edit</button>${canManagePresets?'<button type="button" data-preset-open>Save as preset…</button>':''}</div>
     </div>
-    <section data-source-panel="pc"><input data-files type="file" multiple accept="${escape(TASK_PHOTO_ACCEPT)}" hidden><input data-folder type="file" multiple webkitdirectory hidden><p class="form-note">Choose individual photos or a folder including its subfolders. Originals stay unchanged.</p></section>
-    <section data-source-panel="server" hidden><div data-server-browser aria-live="polite"></div><p class="form-note">Select photos or folders from the import mount, including raw/. Selected folders include all nested photos. Originals remain in place.</p></section>
-    <section data-source-panel="existing" hidden><label>Saved source<select name="existingDataset"><option value="">Choose saved source</option>${ready.map(item=>`<option value="${escape(item.id)}">${escape(item.displayName)}</option>`).join('')}</select></label></section>
-    <p data-selection role="status">No photos selected.</p><div data-photo-map hidden></div></fieldset>
-    <label>Processing node<select name="providerId" required></select></label><p data-provider-note class="form-note"></p>
-    <label>Processing preset (optional)<select name="presetId"><option value="">Node defaults</option></select></label>
-    <div class="row-actions"><button type="button" data-edit-options>Edit task options</button>${canManagePresets?'<button type="button" data-preset-open>Save as preset…</button>':''}</div>
-    ${canManagePresets?'<fieldset data-preset-save hidden><legend>Save these settings as a preset</legend><label>Preset name<input name="newPresetName" maxlength="240"></label><p class="form-note">Saves the selected preset plus your changes. Your existing preset stays unchanged unless you explicitly choose Update selected preset. Updates apply to future tasks, not running jobs.</p><div class="row-actions"><button type="button" data-preset-save-button>Save new preset</button><button type="button" data-preset-update-button>Update selected preset</button><button type="button" data-preset-cancel>Cancel</button></div><p data-preset-status role="status"></p></fieldset>':''}
-    <label>Alignment<select name="alignment"><option value="automatic">Automatic · use photo coordinates</option></select></label><p class="form-note">Alignment to an earlier survey requires a registered reference file and is not available in this workflow yet.</p>
-    <div data-task-options></div>
-    <p class="form-note">Photos keep their original size. Changes apply only to this task unless you save a new preset.</p>
+    ${canManagePresets?'<fieldset data-preset-save hidden><legend>Save as preset</legend><label>Preset name<input name="newPresetName" maxlength="240"></label><div class="row-actions"><button type="button" data-preset-save-button>Save new preset</button><button type="button" data-preset-update-button>Update selected preset</button><button type="button" data-preset-cancel>Cancel</button></div><p data-preset-status role="status"></p></fieldset>':''}
+    <div data-task-options hidden></div>
     <progress data-progress aria-label="Photo preparation and upload progress" max="100" value="0" hidden></progress><p data-status role="status" aria-live="polite"></p>
-    ${allowBackground?'<button type="button" data-background hidden>Continue in background</button>':''}
-    <button class="primary-button" type="submit">Start processing</button>
+    <div class="task-form-actions">${allowBackground?'<button type="button" data-background hidden>Continue in background</button>':''}<button type="button" class="secondary-button" data-cancel>Cancel</button><button class="primary-button" type="submit">Start processing</button></div>
   </form>`);
   const form=container.querySelector('.new-task-form'),status=form.querySelector('[data-status]'),selection=form.querySelector('[data-selection]'),node=form.elements.providerId,progress=form.querySelector('progress');
-  const taskOptions=mountTaskOptions({container:form.querySelector('[data-task-options]')});
+  const optionsHost=form.querySelector('[data-task-options]'),taskOptions=mountTaskOptions({container:optionsHost});
   function syncTaskOptions({preserveOverrides=false}={}){taskOptions.update({provider:currentProviders.find(item=>item.id===node.value),presetOptions:presets.find(item=>item.id===form.elements.presetId.value)?.options||{},preserveOverrides});}
-  const photoMapHost=form.querySelector('[data-photo-map]');let photoMap=null,previewAbort=null,previewTimer=null,previewGeneration=0;
-  function clearPhotoPreview(){previewGeneration++;clearTimeout(previewTimer);previewTimer=null;previewAbort?.abort();previewAbort=null;photoMap?.dispose();photoMap=null;photoMapHost.replaceChildren();photoMapHost.hidden=true;}
+  const photoMapHost=form.querySelector('[data-photo-map]');let photoMap=null,boundaryApplied=false,previewAbort=null,previewTimer=null,previewGeneration=0;
+  function clearPhotoPreview(){if(boundaryApplied){boundaryApplied=false;taskOptions.setValue('boundary',null);}previewGeneration++;clearTimeout(previewTimer);previewTimer=null;previewAbort?.abort();previewAbort=null;photoMap?.dispose();photoMap=null;photoMapHost.replaceChildren();photoMapHost.hidden=true;}
   function schedulePhotoPreview(){
     clearPhotoPreview();
     if(signal.aborted||source==='existing'||(source==='pc'?!files.length:!selectedPaths.size))return;
@@ -56,7 +56,7 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
     if(signal.aborted||generation!==previewGeneration)return;
     const local=new AbortController();previewAbort=local;const abort=()=>local.abort();signal.addEventListener('abort',abort,{once:true});
     const current=()=>!local.signal.aborted&&!signal.aborted&&generation===previewGeneration;
-    try{photoMapHost.hidden=false;photoMap=mountPhotoMap(photoMapHost);const map=photoMap;
+    try{photoMapHost.hidden=false;photoMap=mountPhotoMap(photoMapHost,{onBoundary:applyBoundary});const map=photoMap;
       if(source==='pc')await map.setFiles(inspectTaskPhotos(files).items.map(item=>item.file),{signal:local.signal});
       else{const result=await api('/api/v1/dataset-imports/photo-preview',{method:'POST',body:{paths:[...selectedPaths]},signal:local.signal});if(current())await map.setLocations(result,{signal:local.signal});}
     }catch(error){if(current()){photoMap?.dispose();photoMap=null;photoMapHost.textContent='Photo locations could not be previewed. Your selection is unchanged.';}}
@@ -67,12 +67,14 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
   function reopen(){if(!signal.aborted&&!dialog.open)dialog.showModal();}
   function updateTransfer(){if(!allowBackground||presetSaving)return;if(!transferPanel&&busy){transferPanel=doc.createElement('aside');transferPanel.className='task-transfer-tray';transferPanel.setAttribute('aria-label','Active photo upload');transferPanel.innerHTML='<strong></strong><p role="status"></p><progress max="100" value="0" aria-label="Photo transfer progress"></progress><div class="row-actions"><button type="button" data-show-upload>View upload</button><button type="button" data-discard-upload title="Stops this browser upload and task submission. Accepted server preparation may continue; original photos and retained source data are not deleted.">Stop / discard</button></div>';transferPanel.querySelector('[data-show-upload]').onclick=reopen;transferPanel.querySelector('[data-discard-upload]').onclick=()=>{dispose();dialog.close();};doc.body.append(transferPanel);}if(transferPanel){transferPanel.querySelector('strong').textContent=form.elements.taskDisplayName.value;transferPanel.querySelector('p').textContent=status.textContent;transferPanel.querySelector('progress').value=progress.value;transferPanel.querySelector('progress').hidden=!busy;}}
   const say=message=>{if(!signal.aborted){status.textContent=message;updateTransfer();}};
+  // A boundary drawn on the photo map becomes this task's boundary option.
+  function applyBoundary(geojson){if(busy)return;if(!taskOptions.supports('boundary','json')){photoMap?.clearBoundary();say('The processing node does not accept a boundary');return;}boundaryApplied=Boolean(geojson);taskOptions.setValue('boundary',geojson?JSON.stringify(geojson):null);say(geojson?'Boundary set for this task':'');}
   function showProgress(item){const total=item.total||files.length,done=item.completed||0;let message;if(item.phase==='preparing'){progress.value=100*done/Math.max(1,total);message=`Preparing upload locally: ${done.toLocaleString()} / ${total.toLocaleString()} photos checked. Creating integrity checksums; no photos are being transferred yet.`;}else if(item.phase==='uploading'){progress.value=100*item.completedBytes/Math.max(1,item.totalBytes);const speed=item.bytesPerSecond>0?`${(item.bytesPerSecond/1024**2).toFixed(1)} MB/s`:'Estimating speed…';message=`Uploading to Viewer: ${done.toLocaleString()} / ${total.toLocaleString()} photos · ${(item.completedBytes/1024**2).toFixed(1)} / ${(item.totalBytes/1024**2).toFixed(1)} MB · ${speed}`;}else{progress.value=100;message='Upload received. Assembling and verifying your source photos on the server…';}say(message);}
-  function providerOptions(){const selected=node.value||selectSubmissionProvider(currentProviders,node.value);node.innerHTML='<option value="">Choose available node</option>'+currentProviders.map(item=>{const availability=providerSubmissionState(item);return `<option value="${escape(item.id)}" ${availability.eligible?'':'disabled'}>${escape(item.displayName)} — ${escape(availability.label)}</option>`;}).join('')+(selected&&!currentProviders.some(item=>item.id===selected)?`<option value="${escape(selected)}" disabled>Previously selected node — unavailable</option>`:'');node.value=selected;providerNote();}
+  function providerOptions(){const picker=orchestratorPicker(currentProviders);node.innerHTML=picker.options.map(item=>`<option value="${escape(item.id)}" ${item.disabled?'disabled':''}>${escape(item.label)}</option>`).join('');node.value=picker.selectedId;node.disabled=busy||!picker.usable;providerNote();}
   const compatiblePreset=(preset,provider)=>Boolean(provider&&preset.enabled&&(!preset.providerType||preset.providerType===provider.type)&&(!preset.capabilityFingerprint||preset.capabilityFingerprint===provider.capabilityFingerprint));
   function providerNote(preserveOverrides=true){const item=currentProviders.find(item=>item.id===node.value),preset=form.elements.presetId,previous=preset.value,selected=presets.find(p=>p.id===previous),eligible=presets.filter(p=>compatiblePreset(p,item));
-    form.querySelector('[data-provider-note]').textContent=(item?providerSubmissionState(item).label:'No available node selected. Configure or refresh nodes under Providers & nodes.')+(previous&&!eligible.some(p=>p.id===previous)?' Selected preset is incompatible with current capabilities. Your selection and edits are retained; review or choose another preset.':'');
-    preset.innerHTML='<option value="">Node defaults</option>'+eligible.map(p=>`<option value="${escape(p.id)}">${escape(p.displayName)}</option>`).join('')+(previous&&!eligible.some(p=>p.id===previous)?`<option value="${escape(previous)}" disabled>${escape(selected?.displayName||'Previous preset')} — incompatible, review required</option>`:'');
+    form.querySelector('[data-provider-note]').textContent=[orchestratorPicker(currentProviders).message,previous&&!eligible.some(p=>p.id===previous)?'Selected preset is incompatible with this node':''].filter(Boolean).join(' · ');
+    preset.innerHTML='<option value="">Default</option>'+eligible.map(p=>`<option value="${escape(p.id)}">${escape(p.displayName)}</option>`).join('')+(previous&&!eligible.some(p=>p.id===previous)?`<option value="${escape(previous)}" disabled>${escape(selected?.displayName||'Previous preset')} (incompatible)</option>`:'');
     preset.value=previous||'';syncTaskOptions({preserveOverrides});
   }
   const capabilityRefreshes=new Map();
@@ -86,24 +88,25 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
       if(signal.aborted)return;
       currentProviders=nodes.providers||[];const selectedPreset=presets.find(item=>item.id===form.elements.presetId.value);presets=result.presets||presets;
       if(selectedPreset&&!presets.some(item=>item.id===selectedPreset.id))presets=[...presets,{...selectedPreset,enabled:false}];
-      if(node.value===providerId){providerOptions();form.querySelector('[data-provider-note]').textContent+=' Capabilities refreshed from the node.';}
+      if(node.value===providerId)providerOptions();
     }finally{capabilityRefreshes.delete(providerId)}})();
     capabilityRefreshes.set(providerId,pending);return pending;
   }
   function refreshOptionsOnOpen(){if(!busy)void refreshTaskCapabilities().catch(error=>{if(!signal.aborted)say(`Node capability refresh failed; cached settings and your draft are retained: ${error.message}`);});}
   function setBusy(value){busy=value;for(const element of form.querySelectorAll('input,select,button'))if(!element.closest('[data-task-options]'))element.disabled=value;taskOptions.setDisabled(value);progress.hidden=!value||presetSaving;const background=form.querySelector('[data-background]');if(background){background.disabled=false;background.hidden=!value||presetSaving;}if(value&&!presetSaving)view.addEventListener('beforeunload',leaveWarning);else view.removeEventListener('beforeunload',leaveWarning);updateTransfer();if(!value)providerOptions();}
   function resetSource(){clearPhotoPreview();pendingPhotoResume=null;datasetRequestName='';datasetId='';prepared=null;sourceOperation=null;submissionFingerprint='';datasetKey=crypto.randomUUID();submissionId=crypto.randomUUID();copyKey=crypto.randomUUID();}
-  function selectFiles(list){if(busy||!list?.length)return;const resumable=datasetId&&prepared&&!sourceOperation?{datasetId,datasetKey,manifest:JSON.stringify(prepared.manifest)}:pendingPhotoResume;resetSource();pendingPhotoResume=resumable;files=[...list];try{const info=inspectTaskPhotos(files);selection.textContent=`${info.items.length.toLocaleString()} ${info.items.length===1?'photo':'photos'} selected${info.ignored.length?`; ${info.ignored.length} unsupported files skipped`:''}${info.renamed.length?`; ${info.renamed.length} duplicate filenames will be renamed in the processing copy`:''}.`;say('');schedulePhotoPreview();}catch(error){files=[];selection.textContent='No valid selection.';say(error.message);}}
+  function selectFiles(list){if(busy||!list?.length)return;const resumable=datasetId&&prepared&&!sourceOperation?{datasetId,datasetKey,manifest:JSON.stringify(prepared.manifest)}:pendingPhotoResume;resetSource();pendingPhotoResume=resumable;files=[...list];try{const info=inspectTaskPhotos(files);selection.textContent=`${info.items.length.toLocaleString()} ${info.items.length===1?'photo':'photos'} selected${info.ignored.length?` · ${info.ignored.length} unsupported skipped`:''}${info.renamed.length?` · ${info.renamed.length} duplicate names renamed`:''}`;say('');schedulePhotoPreview();}catch(error){files=[];selection.textContent='No valid photos selected';say(error.message);}}
   async function browse(path='',offset=0){if(busy||signal.aborted||source!=='server')return;const generation=++browseGeneration,host=form.querySelector('[data-server-browser]'),usable=()=>!busy&&!signal.aborted&&source==='server'&&generation===browseGeneration;host.textContent='Loading folders…';try{const page=await api(`/api/v1/dataset-imports/browse?path=${encodeURIComponent(path)}&offset=${offset}&limit=100`,{signal});if(signal.aborted||source!=='server'||generation!==browseGeneration)return;host.innerHTML=`<div class="row-actions">${path?'<button type="button" data-parent>Up one folder</button><button type="button" data-select-folder>Select this folder</button>':''}</div><p>${escape(page.path||'Import folder')}</p><div class="task-source-browser">${page.entries.map((item,index)=>`<div><label><input type="checkbox" data-pick="${index}" ${selectedPaths.has(item.relativePath)?'checked':''}>${escape(item.name)}</label>${item.kind==='folder'?`<button type="button" data-open="${index}">Open folder</button>`:''}</div>`).join('')||'<p>No photos or folders here.</p>'}</div>${page.nextOffset!=null?'<button type="button" data-next>Next page</button>':''}`;
       for(const control of host.querySelectorAll('button,input'))control.disabled=busy;
-      const update=()=>{resetSource();selection.textContent=`${selectedPaths.size} server selections. Folders will be scanned recursively.`;schedulePhotoPreview();};
+      const update=()=>{resetSource();selection.textContent=`${selectedPaths.size.toLocaleString()} server ${selectedPaths.size===1?'item':'items'} selected`;schedulePhotoPreview();};
       host.querySelector('[data-parent]')?.addEventListener('click',()=>{if(usable())void browse(page.parentPath||'');});host.querySelector('[data-select-folder]')?.addEventListener('click',()=>{if(!usable())return;selectedPaths.add(page.path);update();void browse(page.path,offset);});host.querySelector('[data-next]')?.addEventListener('click',()=>{if(usable())void browse(page.path,page.nextOffset);});
       host.querySelectorAll('[data-open]').forEach(button=>button.onclick=()=>{if(usable())void browse(page.entries[Number(button.dataset.open)].relativePath);});host.querySelectorAll('[data-pick]').forEach(input=>input.onchange=()=>{const path=page.entries[Number(input.dataset.pick)].relativePath;if(!usable()){input.checked=selectedPaths.has(path);return;}if(input.checked)selectedPaths.add(path);else selectedPaths.delete(path);update();});
     }catch(error){if(!signal.aborted&&source==='server'&&generation===browseGeneration)host.textContent=error.message;}}
   async function waitOperation(operation){let item=operation;if(!item?.id)throw new Error('Source preparation did not return a background operation.');while(!['succeeded','complete','completed','failed','cancelled'].includes(item.status)){if(signal.aborted)throw new DOMException('Cancelled','AbortError');say(allowBackground?'Preparing source photos on the server. You can browse this workspace; keep this browser tab open until the task is submitted.':'Preparing your source photos. Closing stops task submission; accepted preparation remains in Background work.');await new Promise((resolve,reject)=>{const done=()=>{signal.removeEventListener('abort',abort);resolve();},timer=setTimeout(done,1500),abort=()=>{clearTimeout(timer);reject(new DOMException('Cancelled','AbortError'));};signal.addEventListener('abort',abort,{once:true});});item=(await api(`/api/v1/operations/${encodeURIComponent(item.id)}`,{signal})).operation;if(!item?.id)throw new Error('Source preparation status is unavailable.');sourceOperation=item;}if(!['succeeded','complete','completed'].includes(item.status))throw new Error(item.errorMessage||item.error?.message||'Source preparation failed. Check Background work before retrying.');}
   form.querySelector('[data-files]').onchange=event=>selectFiles(event.target.files);form.querySelector('[data-folder]').onchange=event=>selectFiles(event.target.files);node.onchange=()=>{providerNote();refreshOptionsOnOpen();};
-  form.elements.presetId.onchange=()=>{syncTaskOptions();refreshOptionsOnOpen();};
-  form.querySelector('[data-edit-options]').onclick=()=>{const editor=form.querySelector('.task-options-editor');editor.open=!editor.open;if(editor.open){editor.scrollIntoView({block:'nearest'});refreshOptionsOnOpen();}};
+  form.elements.presetId.onchange=()=>{photoMap?.clearBoundary();syncTaskOptions();refreshOptionsOnOpen();};
+  form.querySelector('[data-edit-options]').onclick=event=>{const editor=form.querySelector('.task-options-editor'),open=optionsHost.hidden;optionsHost.hidden=!open;editor.open=open;event.currentTarget.setAttribute('aria-expanded',String(open));if(open){editor.scrollIntoView({block:'nearest'});refreshOptionsOnOpen();}};
+  form.querySelector('[data-cancel]').addEventListener('click',()=>dialog.close());
   form.querySelector('[data-background]')?.addEventListener('click',()=>dialog.close());
   form.querySelector('[data-preset-open]')?.addEventListener('click',()=>{form.querySelector('[data-preset-save]').hidden=false;form.elements.newPresetName.focus();refreshOptionsOnOpen();});
   form.querySelector('[data-preset-cancel]')?.addEventListener('click',()=>{form.querySelector('[data-preset-save]').hidden=true;});
@@ -128,9 +131,9 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
   }
   form.querySelector('[data-preset-save-button]')?.addEventListener('click',()=>saveTaskPreset(false));
   form.querySelector('[data-preset-update-button]')?.addEventListener('click',()=>saveTaskPreset(true));
-  form.elements.existingDataset.onchange=()=>{resetSource();selection.textContent='Saved source selected.';};
+  form.elements.existingDataset.onchange=()=>{resetSource();selection.textContent='Saved source selected';};
   function openPicker(selector){if(busy)return;const input=form.querySelector(selector);input.value='';input.click();}
-  function chooseSource(next){const changed=source!==next;source=next;if(changed){resetSource();files=[];selectedPaths.clear();selection.textContent='Select photos or a source folder.';}form.querySelectorAll('[data-source-panel]').forEach(panel=>panel.hidden=panel.dataset.sourcePanel!==source);form.querySelectorAll('[data-source]').forEach(item=>item.setAttribute('aria-pressed',String(item.dataset.source===source)));}
+  function chooseSource(next){const changed=source!==next;source=next;if(changed){resetSource();files=[];selectedPaths.clear();selection.textContent='No photos selected';}form.querySelectorAll('[data-source-panel]').forEach(panel=>panel.hidden=panel.dataset.sourcePanel!==source);form.querySelectorAll('[data-source]').forEach(item=>item.setAttribute('aria-pressed',String(item.dataset.source===source)));}
   form.querySelector('[data-choose-folder]')?.addEventListener('click',()=>{if(busy)return;chooseSource('pc');openPicker('[data-folder]');});
   form.querySelectorAll('[data-source]').forEach(button=>button.onclick=()=>{if(busy)return;chooseSource(button.dataset.source);if(source==='server')void browse();else if(source==='pc')openPicker('[data-files]');});
   form.onsubmit=async event=>{event.preventDefault();if(busy)return;const name=form.elements.taskDisplayName.value.trim(),providerId=node.value;if(!name||!providerId)return say('Enter a task name and choose an available processing node.');

@@ -40,9 +40,19 @@ test('file/path inputs and required outputs cannot be edited as arbitrary string
   assert.equal(model.entries()[0].inherited,true);assert.throws(()=>model.setOverride('gltf',false));assert.throws(()=>model.setOverride('align','/etc/source'));
 });
 class Element {
-  constructor(tag,ownerDocument){this.tag=tag;this.ownerDocument=ownerDocument;this.children=[];this.listeners={};this.value='';}
-  append(child){this.children.push(child);}setAttribute(name,value){this[name]=value;}addEventListener(name,fn){this.listeners[name]=fn;}replaceChildren(){this.children=[];}remove(){this.removed=true;}
+  constructor(tag,ownerDocument){this.tag=tag;this.ownerDocument=ownerDocument;this.children=[];this.listeners={};this.value='';this.attrs={};this.classes=new Set();}
+  append(...children){this.children.push(...children);}setAttribute(name,value){this.attrs[name]=String(value);}getAttribute(name){return this.attrs[name]??null;}
+  addEventListener(name,fn){this.listeners[name]=fn;}replaceChildren(){this.children=[];}remove(){this.removed=true;}
+  get classList(){const self=this;return{toggle(name,on){if(on)self.classes.add(name);else self.classes.delete(name);}};}
+  all(){return this.children.flatMap(child=>[child,...(child.all?child.all():[])]);}
+  find(attr,value){return this.all().find(element=>element.attrs&&attr in element.attrs&&(value===undefined||element.attrs[attr]===value));}
 }
+function mount(options){const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);const editor=mountTaskOptions({container,...options});return{container,editor,root:container.children[0]};}
+const row=(container,name)=>container.find('data-option',name);
+const control=(container,name)=>row(container,name).find('data-option-control');
+const reset=(container,name)=>row(container,name).find('data-option-reset');
+const search=container=>container.find('data-option-search');
+const changedOnly=container=>container.find('data-show-changed');
 test('real ODM enum schema remains editable through the adapter in task and preset contexts',async()=>{
   const info={version:'1.5.3',engine:'odm',engineVersion:'3.5.6',taskQueueCount:0,maxImages:null,totalMemory:99999999999,availableMemory:99999999999,cpuCores:99999999999};
   const adapter=new NodeOdmProvider({endpoint:'http://cluster.example.test',fetchImpl:async url=>new Response(JSON.stringify(String(url).includes('/info')?info:odmChoiceSpecs),{headers:{'content-type':'application/json'}})});
@@ -51,15 +61,14 @@ test('real ODM enum schema remains editable through the adapter in task and pres
   assert.equal(capabilities.options[0].type,'enum');
   assert.equal(capabilities.options[1].value,10000);
   for(const preset of [false,true]){
-    const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
-    const editor=mountTaskOptions({container,provider:{id:'cluster',capabilityFingerprint:fingerprint,capabilities},presetOptions:preset?{'feature-quality':'ultra'}:{},...(preset?{title:'Preset options',modifiedLabel:'Modified preset value'}:{})});
-    const list=container.children[0].children[3],stage=list.children[0].children[3],quality=list.children[2].children[3],lens=list.children[3].children[3];
-    for(const control of [stage,quality,lens]){assert.equal(control.tag,'select');assert.equal(control.disabled,false);}
+    const {container,editor}=mount({provider:{id:'cluster',capabilityFingerprint:fingerprint,capabilities},presetOptions:preset?{'feature-quality':'ultra'}:{},...(preset?{title:'Preset options'}:{})});
+    const stage=control(container,'end-with'),quality=control(container,'feature-quality'),lens=control(container,'camera-lens');
+    for(const item of [stage,quality,lens]){assert.equal(item.tag,'select');assert.equal(item.disabled,false);}
     assert.equal(stage.value,'odm_postprocess');assert.equal(stage.children.length,13);
     assert.equal(quality.value,preset?'ultra':'high');assert.equal(lens.value,'auto');
     stage.value='odm_orthophoto';stage.listeners.change();quality.value='medium';quality.listeners.input();lens.value='brown';lens.listeners.change();
     assert.deepEqual(editor.getOptions(),{'end-with':'odm_orthophoto','feature-quality':'medium','camera-lens':'brown'});
-    list.children[2].children[2].listeners.click();assert.equal(quality.value,preset?'ultra':'high');
+    reset(container,'feature-quality').listeners.click();assert.equal(quality.value,preset?'ultra':'high');
     quality.value='not-a-node-choice';quality.listeners.change();assert.equal(editor.validate().valid,false);assert.throws(()=>editor.getOptions(),/supported values/);
     editor.dispose();
   }
@@ -76,28 +85,26 @@ test('enum support requires bounded string choices and does not open file inputs
 });
 
 test('ODM enum capability refresh retains incompatible draft until reset to the new node default',()=>{
-  const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
   const original={id:'cluster',capabilityFingerprint:'original',capabilities:{options:[odmChoiceSpecs[2]]}};
-  const editor=mountTaskOptions({container,provider:original}),list=container.children[0].children[3];
-  let control=list.children[0].children[3];control.value='ultra';control.listeners.change();
+  const {container,editor}=mount({provider:original});
+  let item=control(container,'feature-quality');item.value='ultra';item.listeners.change();
   editor.update({provider:{...original,capabilityFingerprint:'refreshed',capabilities:{options:[{...odmChoiceSpecs[2],value:'medium',domain:['medium','low']}]}},preserveOverrides:true});
-  control=list.children[0].children[3];assert.equal(control.disabled,false);assert.equal(control.value,'ultra');assert.match(control.children[0].textContent,/no longer supported/);
+  item=control(container,'feature-quality');assert.equal(item.disabled,false);assert.equal(item.value,'ultra');assert.match(item.children[0].textContent,/no longer supported/);
   assert.equal(editor.validate().valid,false);assert.throws(()=>editor.getOptions(),/supported values/);
-  list.children[0].children[2].listeners.click();assert.equal(control.value,'medium');assert.deepEqual(editor.getOptions(),{});
-  control.value='low';control.listeners.change();assert.deepEqual(editor.getOptions(),{'feature-quality':'low'});
+  reset(container,'feature-quality').listeners.click();assert.equal(item.value,'medium');assert.deepEqual(editor.getOptions(),{});
+  item.value='low';item.listeners.change();assert.deepEqual(editor.getOptions(),{'feature-quality':'low'});
 });
 test('mounted editor directly edits effective values, resets, searches and preserves drafts when disabled',()=>{
-  const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
-  const editor=mountTaskOptions({container,provider,presetOptions:{count:7}}),root=container.children[0],search=root.children[1],list=root.children[3];
-  const row=list.children[0],reset=row.children[2],control=row.children[3];assert.equal(control.disabled,false);assert.equal(control.type,'checkbox');assert.equal(reset.disabled,true);
-  control.checked=true;control.listeners.change();assert.deepEqual(editor.getOptions(),{dtm:true});assert.equal(reset.disabled,false);
-  reset.listeners.click();assert.deepEqual(editor.getOptions(),{});assert.equal(control.checked,false);assert.equal(reset.disabled,true);
-  const count=list.children[1].children[3];assert.equal(count.value,'7');count.value='0';count.listeners.input();assert.deepEqual(editor.getOptions(),{count:0});
-  search.value='quality';search.listeners.input();assert.equal(row.hidden,true);assert.equal(list.children[3].hidden,false);
+  const {container,editor,root}=mount({provider,presetOptions:{count:7}});
+  const dtm=control(container,'dtm'),dtmReset=reset(container,'dtm');assert.equal(dtm.disabled,false);assert.equal(dtm.type,'checkbox');assert.equal(dtmReset.disabled,true);assert.equal(dtmReset.hidden,true);
+  dtm.checked=true;dtm.listeners.change();assert.deepEqual(editor.getOptions(),{dtm:true});assert.equal(dtmReset.disabled,false);assert.equal(dtmReset.hidden,false);
+  dtmReset.listeners.click();assert.deepEqual(editor.getOptions(),{});assert.equal(dtm.checked,false);assert.equal(dtmReset.hidden,true);
+  const count=control(container,'count');assert.equal(count.value,'7');count.value='0';count.listeners.input();assert.deepEqual(editor.getOptions(),{count:0});
+  search(container).value='quality';search(container).listeners.input();assert.equal(row(container,'dtm').hidden,true);assert.equal(row(container,'quality').hidden,false);
   editor.update({provider,presetOptions:{count:7}});assert.deepEqual(editor.getOptions(),{count:0});
-  editor.setDisabled(true);assert.equal(list.children[0].children[2].disabled,true);assert.equal(list.children[0].children[3].disabled,true);
-  editor.setDisabled(false);assert.equal(list.children[0].children[2].disabled,true);assert.equal(list.children[0].children[3].disabled,false);assert.equal(list.children[1].children[3].disabled,false);assert.equal(list.children[1].children[3].value,'0');
-  list.children[1].children[3].value='7';list.children[1].children[3].listeners.input();assert.deepEqual(editor.getOptions(),{});
+  editor.setDisabled(true);assert.equal(reset(container,'dtm').disabled,true);assert.equal(control(container,'dtm').disabled,true);
+  editor.setDisabled(false);assert.equal(reset(container,'dtm').disabled,true);assert.equal(control(container,'dtm').disabled,false);assert.equal(control(container,'count').disabled,false);assert.equal(control(container,'count').value,'0');
+  control(container,'count').value='7';control(container,'count').listeners.input();assert.deepEqual(editor.getOptions(),{});
   editor.dispose();assert.equal(root.removed,true);
 });
 
@@ -118,21 +125,79 @@ test('explicit capability refresh preserves valid drafts and visibly retains rem
   model.setOverride('count',4);model.setOverride('quality',undefined);assert.deepEqual(model.getOptions(),{count:4});
 });
 test('refreshed select retains unsupported draft visibly and removed settings require explicit removal',()=>{
-  const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
-  const editor=mountTaskOptions({container,provider}),list=container.children[0].children[3];
-  const quality=list.children[3].children[3];quality.value='low';quality.listeners.input();
+  const {container,editor}=mount({provider});
+  const quality=control(container,'quality');quality.value='low';quality.listeners.input();
   editor.update({provider:{...provider,capabilityFingerprint:'enum-change',capabilities:{options:[{name:'quality',type:'string',value:'high',domain:['high']}]}},preserveOverrides:true});
-  assert.equal(list.children[0].children[3].value,'low');assert.match(list.children[0].children[3].children[0].textContent,/no longer supported/);
+  assert.equal(control(container,'quality').value,'low');assert.match(control(container,'quality').children[0].textContent,/no longer supported/);
   editor.update({provider:{...provider,capabilityFingerprint:'removed',capabilities:{options:[]}},preserveOverrides:true});
-  assert.equal(list.children[0].children[3].value,'low');assert.equal(list.children[0].children[3].disabled,true);assert.equal(list.children[0].children[2].disabled,false);
-  assert.equal(editor.validate().valid,false);list.children[0].children[2].listeners.click();assert.deepEqual(editor.getOptions(),{});
+  assert.equal(control(container,'quality').value,'low');assert.equal(control(container,'quality').disabled,true);assert.equal(reset(container,'quality').disabled,false);assert.equal(reset(container,'quality').hidden,false);
+  assert.equal(editor.validate().valid,false);reset(container,'quality').listeners.click();assert.deepEqual(editor.getOptions(),{});
 });
 
-test('preset context labels are configurable and restricted settings cannot be changed by events',()=>{
-  const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
-  const editor=mountTaskOptions({container,provider:{capabilities:{options:[specs[1],{name:'gltf',type:'bool',value:false}]}},title:'Preset options',helpText:'Save explicitly.',modifiedLabel:'Modified preset value'});
-  const root=container.children[0],list=root.children[3];assert.equal(root.children[0].textContent,'Preset options');assert.equal(root.children[2].textContent,'Save explicitly.');
-  const count=list.children[0].children[3];count.value='8';count.listeners.input();assert.equal(list.children[0].children[4].textContent,'Modified preset value');
-  const required=list.children[1].children[3];assert.equal(required.checked,true);assert.equal(required.disabled,true);required.checked=false;required.listeners.change();assert.deepEqual(editor.getOptions(),{count:8});
-  editor.setDisabled(true);const disabled=list.children[0].children[3];disabled.value='2';disabled.listeners.input();assert.deepEqual(editor.getOptions(),{count:8});
+test('preset context title is configurable and restricted settings cannot be changed by events',()=>{
+  const {container,editor,root}=mount({provider:{capabilities:{options:[specs[1],{name:'gltf',type:'bool',value:false}]}},title:'Preset options'});
+  assert.equal(root.children[0].textContent,'Preset options');
+  const count=control(container,'count');count.value='8';count.listeners.input();assert.equal(row(container,'count').classes.has('is-changed'),true);
+  const required=control(container,'gltf');assert.equal(required.checked,true);assert.equal(required.disabled,true);required.checked=false;required.listeners.change();assert.deepEqual(editor.getOptions(),{count:8});
+  editor.setDisabled(true);const disabled=control(container,'count');disabled.value='2';disabled.listeners.input();assert.deepEqual(editor.getOptions(),{count:8});
+});
+
+test('every option has a keyboard-focusable info button described by a tooltip, with no inline description',()=>{
+  const {container}=mount({provider:{capabilities:{options:[...specs,odmChoiceSpecs[0]]}}});
+  for(const name of ['dtm','count','end-with']){
+    const item=row(container,name),info=item.find('data-option-info'),tipId=info.attrs['aria-describedby'],tip=item.all().find(element=>element.id===tipId);
+    assert.equal(info.tag,'button');assert.equal(info.type,'button');assert.equal(info.attrs['aria-label'],`About ${name}`);assert.notEqual(info.tabIndex,-1);
+    assert.ok(tip,'tooltip element exists');assert.equal(tip.attrs.role,'tooltip');
+    assert.ok(control(container,name).attrs['aria-describedby'].split(' ').includes(tipId),'control is described by the tooltip too');
+    assert.equal(item.all().filter(element=>element.className==='form-note').length,0,'no inline description paragraphs');
+  }
+  const stageTip=row(container,'end-with').all().find(element=>element.attrs.role==='tooltip');
+  assert.match(stageTip.textContent,/Can be one of: dataset, split/);assert.doesNotMatch(stageTip.textContent,/%\(/);
+});
+
+test('booleans render as Enable checkboxes, numbers as number inputs, enums as selects, JSON as text plus file loader',async()=>{
+  const json={name:'boundary',type:'json',value:'',domain:'json',help:'GeoJSON polygon limiting the area of the reconstruction. Can be specified either as path to a GeoJSON file or as a JSON string.'};
+  const {container,editor}=mount({provider:{capabilities:{options:[specs[0],{name:'crop',type:'float',value:3,domain:'positive float'},odmChoiceSpecs[2],json]}}});
+  const dtm=control(container,'dtm');assert.equal(dtm.type,'checkbox');assert.ok(row(container,'dtm').all().some(element=>element.textContent==='Enable'));
+  const crop=control(container,'crop');assert.equal(crop.tag,'input');assert.equal(crop.type,'number');assert.equal(crop.step,'any');
+  assert.match(row(container,'crop').all().find(element=>element.className==='task-option-type').textContent,/\(positive float\)/);
+  assert.equal(control(container,'feature-quality').tag,'select');
+  const boundary=control(container,'boundary');assert.equal(boundary.type,'text');assert.equal(boundary.disabled,false);
+  assert.match(row(container,'boundary').all().find(element=>element.className==='task-option-type').textContent,/\(json\)/);
+  const load=row(container,'boundary').find('data-option-load'),file=row(container,'boundary').all().find(element=>element.type==='file');
+  assert.equal(load.tag,'button');assert.equal(file.hidden,true);let clicked=0;file.click=()=>{clicked++;};load.listeners.click();assert.equal(clicked,1);
+  const geojson='{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}';
+  file.files=[{size:geojson.length,text:async()=>geojson}];await file.listeners.change();assert.deepEqual(editor.getOptions(),{boundary:geojson});
+  boundary.value='{not json';boundary.listeners.input();assert.equal(editor.validate().valid,false);assert.match(row(container,'boundary').find('data-option-error').textContent,/valid JSON/);
+  boundary.value='';boundary.listeners.input();assert.deepEqual(editor.getOptions(),{});
+  file.files=[{size:5000,text:async()=>'x'}];await file.listeners.change();assert.match(row(container,'boundary').find('data-option-error').textContent,/4,000/);
+  assert.equal(taskOptionRestriction({name:'boundary',type:'string'})!==null,true,'path-style boundary strings stay restricted');
+});
+
+test('filter matches option names and show-only-changed hides untouched options',()=>{
+  const {container}=mount({provider});
+  search(container).value='RES';search(container).listeners.input();
+  assert.deepEqual(['dtm','count','resolution','quality','label'].filter(name=>!row(container,name).hidden),['resolution']);
+  search(container).value='';search(container).listeners.input();
+  const count=control(container,'count');count.value='3';count.listeners.input();
+  changedOnly(container).checked=true;changedOnly(container).listeners.change();
+  assert.deepEqual(['dtm','count','resolution','quality','label'].filter(name=>!row(container,name).hidden),['count']);
+  reset(container,'count').listeners.click();assert.equal(row(container,'count').hidden,true,'a reset option leaves the changed-only list');
+  changedOnly(container).checked=false;changedOnly(container).listeners.change();assert.equal(row(container,'dtm').hidden,false);
+});
+
+test('per-option reset appears only when changed and returns the default',()=>{
+  const {container,editor}=mount({provider,presetOptions:{resolution:2}});
+  const resolution=control(container,'resolution'),button=reset(container,'resolution');
+  assert.equal(button.hidden,true);assert.match(button.attrs['aria-label'],/Reset resolution to preset/);
+  resolution.value='5';resolution.listeners.input();assert.equal(button.hidden,false);assert.deepEqual(editor.getOptions(),{resolution:5});
+  button.listeners.click();assert.equal(resolution.value,'2');assert.equal(button.hidden,true);assert.deepEqual(editor.getOptions(),{});
+  resolution.value='2';resolution.listeners.input();assert.equal(button.hidden,true,'typing the default back is not a change');
+});
+
+test('programmatic boundary value is applied only for supported JSON options',()=>{
+  const {editor}=mount({provider:{capabilities:{options:[{name:'boundary',type:'json',value:''},specs[0]]}}});
+  assert.equal(editor.supports('boundary','json'),true);assert.equal(editor.supports('dtm','json'),false);
+  editor.setValue('boundary','{"type":"FeatureCollection","features":[]}');assert.deepEqual(editor.getOptions(),{boundary:'{"type":"FeatureCollection","features":[]}'});
+  editor.setValue('boundary',null);assert.deepEqual(editor.getOptions(),{});
 });
