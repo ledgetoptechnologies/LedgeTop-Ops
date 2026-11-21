@@ -81,6 +81,8 @@ class Config:
     audience: str
     client_id: str
     limits: Limits = field(default_factory=Limits)
+    # Set only from a positively verified root inventory (inventory.check_inventory); off by default.
+    writes_enabled: bool = False
 
 
 @dataclass
@@ -306,6 +308,8 @@ class StaffFiles:
 
     def execute(self, envelope: dict, body: bytes) -> Result:
         """Called after the body has been read: the authorization is checked again here (intake)."""
+        if self.config.writes_enabled is not True:
+            raise Denied("writes-disabled", 503)  # no verified root inventory (R3.3)
         body_sha = hashlib.sha256(body).hexdigest()
         self.validate(envelope, body_sha)
         self.fresh(envelope)

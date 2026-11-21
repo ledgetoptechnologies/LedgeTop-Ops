@@ -232,24 +232,31 @@ class Gateway:
         if self.directory_pages is not None and hasattr(self.directory_pages, "close"):
             self.directory_pages.close()
 
-    def authenticate(self, headers, body):
-        def header(name, pattern):
-            value = headers.get(name)
-            if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
-                raise Denied("unauthorized", 401)
-            return value
-        if len(body) > 16384 or headers.get("Content-Type") != "application/json":
-            raise Denied()
-        key_id = header("X-Ops-Read-Key-Id", r"[A-Za-z0-9_-]{1,64}")
-        timestamp = header("X-Ops-Read-Time", r"[1-9][0-9]{0,15}")
-        nonce = header("X-Ops-Read-Nonce", r"[a-f0-9]{32}")
-        signature = header("X-Ops-Read-Signature", r"[a-f0-9]{64}")
+    @staticmethod
+    def signed_header(headers, name, pattern):
+        value = headers.get(name)
+        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+            raise Denied("unauthorized", 401)
+        return value
+
+    def verify_signature(self, headers, body):
+        """v1 HMAC scheme (unchanged). Returns (key_id, timestamp, nonce) once the signature is valid."""
+        key_id = self.signed_header(headers, "X-Ops-Read-Key-Id", r"[A-Za-z0-9_-]{1,64}")
+        timestamp = self.signed_header(headers, "X-Ops-Read-Time", r"[1-9][0-9]{0,15}")
+        nonce = self.signed_header(headers, "X-Ops-Read-Nonce", r"[a-f0-9]{32}")
+        signature = self.signed_header(headers, "X-Ops-Read-Signature", r"[a-f0-9]{64}")
         key = self.keys.get(key_id)
         if key is None:
             raise Denied("unauthorized", 401)
         message = "\n".join(["ops-employee-read-v1", self.gateway_id, key_id, timestamp, nonce, "POST", "/v1/read", hashlib.sha256(body).hexdigest()])
         if not hmac.compare_digest(signature, hmac.digest(key, message.encode(), "sha256").hex()):
             raise Denied("unauthorized", 401)
+        return key_id, timestamp, nonce
+
+    def authenticate(self, headers, body):
+        if len(body) > 16384 or headers.get("Content-Type") != "application/json":
+            raise Denied()
+        key_id, timestamp, nonce = self.verify_signature(headers, body)
         now = self.clock()
         if int(timestamp) > SAFE or abs(now - int(timestamp)) > 30:
             raise Denied("expired-request", 401)

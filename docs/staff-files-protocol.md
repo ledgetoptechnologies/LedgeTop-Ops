@@ -83,6 +83,19 @@ Exact keys; unknown or missing keys are refused:
 - The upload lease is 15 minutes, renewed by each chunk, with a 24-hour maximum.
 - Purge is off: expired uploads and trash keep their bytes, and still count against quota.
 
+**Reads (`/v1/read`, slice 2c).**
+- The body, operations and responses are the same as the v1 read protocol.
+- Access needs the NAS link JWT and a `files-read` Ed25519 signature. HMAC is never accepted, and a `files-write` key never authorizes a read.
+- **Signed bytes:** `ltfiles-v1read`, gatewayId, keyId, timestamp, nonce, `POST`, `/v1/read` and sha256(body), joined by LF. This is the exact v1 field layout under its own domain string, and the body is bound by its hash.
+- **Headers:** `X-Ltfiles-Read-Key-Id`, `-Time`, `-Nonce` and `-Signature` (base64url).
+- **The scheme is chosen per gateway in Ops,** by `FILES_GATEWAY_TRANSPORTS`, with exactly one scheme each and no fallback. Rollback edits that gateway's entry back to `hmac-v1` at the same origin, and works only while the old HMAC gateway is retained.
+
+**Writes need a verified root inventory (R3.3).**
+- `FILES_ROOT_INVENTORY` is bound to `FILES_HOST`, `FILES_DATASET` (the host path mounted at `/data`), `FILES_GATEWAY_ID` and the root pin.
+- All lists must be present, with empty ones written as `[]`.
+- The container checks ancestor and descendant overlap with SMB shares, Cloud Sync sources, managed roots and other roots, and checks for same-root aliases.
+- Otherwise `/v2/op` returns 503 `writes-disabled`, and `/readyz` reports `writes:false`.
+
 **Layout.**
 - `/data/root` is served.
 - `/data/.ltfiles` sits beside it on the same filesystem, private (mode 0700) and owned by the container user. The container refuses to start otherwise.

@@ -34,6 +34,13 @@ function key(value: unknown): Uint8Array {
 function sameKey(a: Uint8Array, b: Uint8Array) {
   return a.length === b.length && a.every((byte, index) => byte === b[index]);
 }
+/** The read cutover's Ed25519 gateway shape (slice 2c): the four HMAC fields plus the scheme and the NAS link client. */
+function ed25519Gateway(value: unknown): boolean {
+  const g = value as Record<string, unknown>;
+  return exact(value, ["origin", "gatewayId", "keyId", "key", "scheme", "accessClientId", "accessClientSecret"])
+    && g.scheme === "ed25519-nas-link" && typeof g.accessClientId === "string" && /^[A-Za-z0-9._-]{1,256}$/u.test(g.accessClientId)
+    && typeof g.accessClientSecret === "string" && g.accessClientSecret.length >= 16 && g.accessClientSecret.length <= 512;
+}
 function snapshot(input: WindowsEmployeeFilesStagingConfiguration, dependencies: Dependencies) {
   if (!exact(input, ["environment", "enabled", "opsOrigin", "access", "gateway", "handleKey", "queueKey", "adminCsrfSecret", "filesWrite"])
     || input.environment !== "staging" || input.enabled !== true || input.opsOrigin !== OPS_ORIGIN
@@ -41,7 +48,7 @@ function snapshot(input: WindowsEmployeeFilesStagingConfiguration, dependencies:
     || input.access.enabled !== true || input.access.issuer !== ACCESS_ISSUER
     || typeof input.access.staffAudience !== "string" || !/^[A-Za-z0-9_-]{16,128}$/u.test(input.access.staffAudience)
     || input.access.staffAudience === PRODUCTION_STAFF_AUDIENCE
-    || !exact(input.gateway, ["origin", "gatewayId", "keyId", "key"])
+    || !(exact(input.gateway, ["origin", "gatewayId", "keyId", "key"]) || ed25519Gateway(input.gateway))
     || typeof input.gateway.origin !== "string" || typeof input.gateway.gatewayId !== "string" || !UUID.test(input.gateway.gatewayId)
     || typeof input.gateway.keyId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/u.test(input.gateway.keyId)
     || typeof input.adminCsrfSecret !== "string" || new TextEncoder().encode(input.adminCsrfSecret).byteLength < 32
@@ -58,7 +65,9 @@ function snapshot(input: WindowsEmployeeFilesStagingConfiguration, dependencies:
   if (sameKey(gatewayKey, handleKey) || sameKey(gatewayKey, queueKey) || sameKey(handleKey, queueKey)) throw Error();
   return Object.freeze({ enabled: true, opsOrigin: OPS_ORIGIN,
     access: Object.freeze({ enabled: true, issuer: ACCESS_ISSUER, staffAudience: input.access.staffAudience }),
-    gateway: Object.freeze({ origin: origin.origin, gatewayId: input.gateway.gatewayId, keyId: input.gateway.keyId, key: gatewayKey }),
+    gateway: Object.freeze({ origin: origin.origin, gatewayId: input.gateway.gatewayId, keyId: input.gateway.keyId, key: gatewayKey,
+      ...(input.gateway.scheme === "ed25519-nas-link" ? { scheme: "ed25519-nas-link" as const, accessClientId: input.gateway.accessClientId,
+        accessClientSecret: input.gateway.accessClientSecret } : {}) }),
     handleKey, queueKey, adminCsrfSecret: input.adminCsrfSecret, filesWrite: input.filesWrite });
 }
 

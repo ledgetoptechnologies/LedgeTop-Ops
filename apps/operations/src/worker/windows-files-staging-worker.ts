@@ -5,7 +5,8 @@ import type standardWorker from "./staging-native-authority-entrypoint";
 export type WindowsEmployeeStagingProfile = Readonly<{ enabled: boolean; gateway: Readonly<{ origin: string; gatewayId: string; keyId: string }> }>;
 type PrivateBindings = Readonly<{ WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY?: string; WINDOWS_EMPLOYEE_HANDLE_KEY?: string; WINDOWS_EMPLOYEE_QUEUE_KEY?: string;
   FILES_WRITE_SIGNING_KEY?: string; FILES_WRITE_KEY_ID?: string; FILES_GATEWAY_TRANSPORTS?: string;
-  FILES_BACKEND_ACCESS_CLIENT_ID?: string; FILES_BACKEND_ACCESS_CLIENT_SECRET?: string }>;
+  FILES_BACKEND_ACCESS_CLIENT_ID?: string; FILES_BACKEND_ACCESS_CLIENT_SECRET?: string;
+  FILES_READ_SIGNING_KEY?: string; FILES_READ_KEY_ID?: string }>;
 type StagingEnv = Parameters<typeof standardWorker.fetch>[1] & PrivateBindings;
 type Fallback = Pick<typeof standardWorker, "fetch" | "queue" | "scheduled">;
 const ORIGIN = "https://ops-staging.ledgetopdroneservices.com";
@@ -32,6 +33,18 @@ function filesWrite(env: PrivateBindings): FilesWriteConfiguration | null {
       keyId: String(env.FILES_WRITE_KEY_ID), signingSeed: key(env.FILES_WRITE_SIGNING_KEY) };
   } catch { return null; }
 }
+/** Read cutover (slice 2c, R3.7): without FILES_GATEWAY_TRANSPORTS the reviewed HMAC gateway is used unchanged (the mapping is
+ * enabled only after seeding is verified). With it, the profile gateway must have exactly one entry at the same origin: hmac-v1
+ * keeps the HMAC key; ed25519-nas-link uses the separate files-read key over the NAS link. No fallback either way. */
+export function readGateway(profile: WindowsEmployeeStagingProfile["gateway"], env: PrivateBindings) {
+  const hmac = () => ({ ...profile, key: key(env.WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY) });
+  if (env.FILES_GATEWAY_TRANSPORTS === undefined) return hmac();
+  const entry = parseFilesGatewayTransports(env.FILES_GATEWAY_TRANSPORTS)[profile.gatewayId];
+  if (!entry || entry.origin !== profile.origin) throw Error("unmapped gateway");
+  if (entry.scheme === "hmac-v1") return hmac();
+  return { ...profile, keyId: String(env.FILES_READ_KEY_ID), key: key(env.FILES_READ_SIGNING_KEY), scheme: "ed25519-nas-link" as const,
+    accessClientId: String(env.FILES_BACKEND_ACCESS_CLIENT_ID), accessClientSecret: String(env.FILES_BACKEND_ACCESS_CLIENT_SECRET) };
+}
 /** The generated staging main supplies build-time public metadata. Only fixed
  * secret slots are read here; origins/IDs never come from env or a request. */
 export function createWindowsEmployeeStagingWorker(profile: WindowsEmployeeStagingProfile, fallback: Fallback) {
@@ -43,8 +56,7 @@ export function createWindowsEmployeeStagingWorker(profile: WindowsEmployeeStagi
         || env.EXPECTED_HOST !== new URL(ORIGIN).host || env.TEAM_DOMAIN !== ISSUER || env.OPERATIONS_AUD !== AUDIENCE) return unavailable();
       try {
         const router = createWindowsEmployeeFilesStagingRouter({ environment: "staging", enabled: true,
-          opsOrigin: ORIGIN, access: { enabled: true, issuer: ISSUER, staffAudience: AUDIENCE }, gateway: { ...captured.gateway,
-            key: key(env.WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY) }, handleKey: key(env.WINDOWS_EMPLOYEE_HANDLE_KEY), queueKey: key(env.WINDOWS_EMPLOYEE_QUEUE_KEY),
+          opsOrigin: ORIGIN, access: { enabled: true, issuer: ISSUER, staffAudience: AUDIENCE }, gateway: readGateway(captured.gateway, env), handleKey: key(env.WINDOWS_EMPLOYEE_HANDLE_KEY), queueKey: key(env.WINDOWS_EMPLOYEE_QUEUE_KEY),
           adminCsrfSecret: env.OPERATIONS_SESSION_SECRET, filesWrite: filesWrite(env) }, { database: env.OPS_DB });
         return await router.fetch(request);
       } catch { return unavailable(); }
