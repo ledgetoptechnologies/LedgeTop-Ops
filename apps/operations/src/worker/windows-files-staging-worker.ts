@@ -31,7 +31,8 @@ export function createWindowsEmployeeStagingWorker(profile: WindowsEmployeeStagi
       try {
         const router = createWindowsEmployeeFilesStagingRouter({ environment: "staging", enabled: true,
           opsOrigin: ORIGIN, access: { enabled: true, issuer: ISSUER, staffAudience: AUDIENCE }, gateway: { ...captured.gateway,
-            key: key(env.WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY) }, handleKey: key(env.WINDOWS_EMPLOYEE_HANDLE_KEY), queueKey: key(env.WINDOWS_EMPLOYEE_QUEUE_KEY) }, { database: env.OPS_DB });
+            key: key(env.WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY) }, handleKey: key(env.WINDOWS_EMPLOYEE_HANDLE_KEY), queueKey: key(env.WINDOWS_EMPLOYEE_QUEUE_KEY),
+          adminCsrfSecret: env.OPERATIONS_SESSION_SECRET }, { database: env.OPS_DB });
         return await router.fetch(request);
       } catch { return unavailable(); }
     },

@@ -3,11 +3,11 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createWindowsEmployeeFilesStagingRouter, type WindowsEmployeeFilesStagingConfiguration } from "../src/worker/windows-files-staging";
 
-const mocks = vi.hoisted(() => ({ keys: vi.fn(), identity: vi.fn(), roots: vi.fn(), resolve: vi.fn(), recheck: vi.fn(), provision: vi.fn(), audit: vi.fn() }));
+const mocks = vi.hoisted(() => ({ keys: vi.fn(), identity: vi.fn(), roots: vi.fn(), resolve: vi.fn(), recheck: vi.fn(), provision: vi.fn(), audit: vi.fn(), listing: vi.fn() }));
 vi.mock("jose", async () => ({ ...await vi.importActual<typeof import("jose")>("jose"), createRemoteJWKSet: mocks.keys }));
 vi.mock("../src/worker/native-staff-identity", () => ({ resolveNativeStaffIdentityWithAdmissionVersion: mocks.identity }));
 vi.mock("../src/worker/employee-read-authority", () => ({ listEmployeeReadRoots: mocks.roots, resolveEmployeeReadAuthority: mocks.resolve, recheckEmployeeReadAuthority: mocks.recheck }));
-vi.mock("../src/worker/employee-read-provisioning", async () => ({ ...await vi.importActual<typeof import("../src/worker/employee-read-provisioning")>("../src/worker/employee-read-provisioning"), provisionEmployeeRead: mocks.provision, recordEmployeeContentStart: mocks.audit }));
+vi.mock("../src/worker/employee-read-provisioning", async () => ({ ...await vi.importActual<typeof import("../src/worker/employee-read-provisioning")>("../src/worker/employee-read-provisioning"), listEmployeeFilesAccess: mocks.listing, provisionEmployeeRead: mocks.provision, recordEmployeeContentStart: mocks.audit }));
 const origin = "https://ops-staging.ledgetopdroneservices.com", issuer = "https://ledgetoptechnologies.cloudflareaccess.com", audience = "synthetic-staging-staff-audience";
 // Illustrative admissible name only: no DNS lookup or network request is made.
 const gatewayOrigin = "https://employee-files-staging.ledgetopdroneservices.com";
@@ -15,7 +15,7 @@ const gatewayId = "11111111-1111-4111-8111-111111111111", rootId = "22222222-222
 const config = (): WindowsEmployeeFilesStagingConfiguration => ({ environment: "staging", enabled: true, opsOrigin: origin,
   access: { enabled: true, issuer, staffAudience: audience },
   gateway: { origin: gatewayOrigin, gatewayId, keyId: "synthetic-staging", key: new Uint8Array(32).fill(1) },
-  handleKey: new Uint8Array(32).fill(2), queueKey: new Uint8Array(32).fill(3) });
+  handleKey: new Uint8Array(32).fill(2), queueKey: new Uint8Array(32).fill(3), adminCsrfSecret: 'synthetic-session-secret-'.padEnd(40, 'x') });
 let pair: Awaited<ReturnType<typeof generateKeyPair>>, localKeys: ReturnType<typeof createLocalJWKSet>, token: string;
 async function signed(claims: Record<string, unknown> = {}, aud: string | string[] = audience) {
   return new SignJWT({ type: "app", email: "synthetic@example.invalid", ...claims }).setProtectedHeader({ alg: "RS256", kid: "staging-test" })
@@ -60,7 +60,11 @@ describe("unmounted Windows employee staging composition", () => {
     expect(await reference.json()).toMatchObject({ principalId: body.principalId, resourceRef: expect.stringMatching(/^odqr1_/u) });
     expect(mocks.provision).not.toHaveBeenCalled(); expect(h.fetcher).not.toHaveBeenCalled();
     const command = { commandId: "55555555-5555-4555-8555-555555555555", kind: "register-root", rootId, gatewayId, rootFingerprint: "b".repeat(64), displayName: "Synthetic only" };
-    const admin = await h.call("/api/admin/employee-files/commands", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify(command) });
+    mocks.listing.mockResolvedValue({ schemaVersion: 1, canManage: true, target: null, roots: [], grants: [] });
+    const listed = await h.call("/api/admin/employee-files/staff/synthetic-staff/grants", { headers: { Origin: origin } });
+    expect(listed.status).toBe(200);
+    const { csrfToken } = await listed.json() as { csrfToken: string };
+    const admin = await h.call("/api/admin/employee-files/commands", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify(command) });
     expect(admin.status).toBe(200); expect(mocks.provision).toHaveBeenCalledWith(h.database, expect.objectContaining({ admissionVersion: 1 }), command, { gatewayIds: [gatewayId] });
     expect((await h.call("/unrelated")).status).toBe(404);
   });

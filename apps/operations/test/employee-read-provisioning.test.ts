@@ -16,7 +16,7 @@ describe('native employee read provisioning and audit against full source223 D1'
     mf = new Miniflare({ modules: true, compatibilityDate: '2026-08-06', script: 'export default {fetch(){return new Response("ok")}}', d1Databases: ['DB'] });
     db = await mf.getD1Database('DB') as D1Database;
     const directory = new URL('../migrations/', import.meta.url);
-    for (const name of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/u.test(name) && name.slice(0, 4) <= '0223').sort())
+    for (const name of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/u.test(name) && (name.slice(0, 4) <= '0223' || name.slice(0, 4) === '0245')).sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), 'utf8')).map(sql => db.prepare(sql)));
   }, 90_000);
   afterAll(async () => { await mf?.dispose(); });
@@ -37,6 +37,10 @@ describe('native employee read provisioning and audit against full source223 D1'
     targetStaffId: employee.identity.staffId, targetAccessSubject: employee.identity.verifiedAccessSubject, targetAdmissionVersion: employee.admissionVersion,
     expiresAt: Math.floor(Date.now() / 1000) + 3600 });
   const run = (command: unknown, actor = owner, database = db) => provision(database, actor, command, { gatewayIds: [gatewayId] });
+  async function csrfFor(app: { request: (url: string, init?: RequestInit) => Response | Promise<Response> }): Promise<string> {
+    const listed = await app.request(origin + '/api/admin/employee-files/staff/' + owner.identity.staffId + '/grants', { headers: { Origin: origin } });
+    return ((await listed.json()) as { csrfToken: string }).csrfToken;
+  }
   async function count(table: string, commandId: string): Promise<number> {
     return (await db.prepare(`SELECT COUNT(*) count FROM ${table} WHERE command_id=?`).bind(commandId).first<{ count: number }>())!.count;
   }
@@ -187,9 +191,10 @@ describe('native employee read provisioning and audit against full source223 D1'
     expect(() => parseEmployeeReadCommand(value)).toThrow(); expect(called).toBe(false);
   });
   it('unmounted admin factory defaults off and enforces exact Origin, human auth and bounded duplicate-free JSON', async () => {
-    const config = { enabled: true, opsOrigin: origin, access: { enabled: true, issuer: 'https://synthetic.cloudflareaccess.com', staffAudience: 'synthetic-audience-123456' }, gatewayIds: [gatewayId] };
+    const config = { enabled: true, opsOrigin: origin, access: { enabled: true, issuer: 'https://synthetic.cloudflareaccess.com', staffAudience: 'synthetic-audience-123456' }, gatewayIds: [gatewayId], csrfSecret: 'synthetic-csrf-secret-'.padEnd(40, 'x') };
     const app = createEmployeeReadAdminRouter(config, { database: db, authenticate: async () => owner });
-    const send = (body: string, headers: Record<string, string> = {}) => app.request(origin + '/api/admin/employee-files/commands', { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', ...headers }, body });
+    const csrf = await csrfFor(app);
+    const send = (body: string, headers: Record<string, string> = {}) => app.request(origin + '/api/admin/employee-files/commands', { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf, ...headers }, body });
     expect((await send(JSON.stringify(register()), { Origin: 'https://other.example.invalid' })).status).toBe(403);
     expect((await send('{"kind":"register-root","kind":"grant-read"}')).status).toBe(400);
     expect((await send('x'.repeat(8193))).status).toBe(400);
@@ -200,7 +205,7 @@ describe('native employee read provisioning and audit against full source223 D1'
     expect((await unauthenticated.request(origin + '/api/admin/employee-files/commands', { method: 'POST', headers: { Origin: origin } })).status).toBe(401);
   });
   it('captures enrollment and authentication configuration before asynchronous request work', async () => {
-    const config = { enabled: true, opsOrigin: origin, access: { enabled: true, issuer: 'https://synthetic.cloudflareaccess.com', staffAudience: 'synthetic-audience-123456' }, gatewayIds: [gatewayId] };
+    const config = { enabled: true, opsOrigin: origin, access: { enabled: true, issuer: 'https://synthetic.cloudflareaccess.com', staffAudience: 'synthetic-audience-123456' }, gatewayIds: [gatewayId], csrfSecret: 'synthetic-csrf-secret-'.padEnd(40, 'x') };
     const dependencies = { database: db, authenticate: async (_request: Request, _database: D1Database, access: typeof config.access) => {
       expect(access.enabled).toBe(true); expect(Object.isFrozen(access)).toBe(true);
       config.enabled = false; config.opsOrigin = 'https://other.example.invalid'; config.access.enabled = false; config.gatewayIds[0] = uuid();
@@ -210,9 +215,9 @@ describe('native employee read provisioning and audit against full source223 D1'
       return owner;
     } };
     const app = createEmployeeReadAdminRouter(config, dependencies);
-    const command = register();
+    const command = register(), csrf = await csrfFor(app);
     const response = await app.request(origin + '/api/admin/employee-files/commands', { method: 'POST',
-      headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify(command) });
+      headers: { Origin: origin, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(command) });
     expect(response.status).toBe(200);
     expect(await db.prepare('SELECT gateway_id FROM ops_employee_read_roots WHERE root_id=?').bind(rootId).first()).toEqual({ gateway_id: gatewayId });
   });

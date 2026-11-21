@@ -19,7 +19,7 @@ function setup(enabled = true) {
   const query = vi.fn(async () => ({ success: true, results: [] }));
   const fetch = vi.fn(async () => new Response("legacy", { status: 418 })), scheduled = vi.fn(), queue = vi.fn();
   const env = { ENVIRONMENT: "staging", PUBLIC_BASE_URL: origin, EXPECTED_HOST: new URL(origin).host, TEAM_DOMAIN: issuer, OPERATIONS_AUD: audience,
-    WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY: Buffer.alloc(32, 1).toString("base64url"), WINDOWS_EMPLOYEE_HANDLE_KEY: Buffer.alloc(32, 2).toString("base64url"), WINDOWS_EMPLOYEE_QUEUE_KEY: Buffer.alloc(32, 3).toString("base64url"),
+    WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY: Buffer.alloc(32, 1).toString("base64url"), WINDOWS_EMPLOYEE_HANDLE_KEY: Buffer.alloc(32, 2).toString("base64url"), WINDOWS_EMPLOYEE_QUEUE_KEY: Buffer.alloc(32, 3).toString("base64url"), OPERATIONS_SESSION_SECRET: "synthetic-session-secret-".padEnd(40, "x"),
     OPS_DB: { withSession: () => ({ prepare: () => ({ bind: () => ({ all: query, first: async () => ({ id: "synthetic-staff" }) }) }) }) } };
   const profile = { enabled, gateway: { origin: "https://synthetic-files-staging.ledgetopdroneservices.com", gatewayId: "00000000-0000-4000-8000-000000000001", keyId: "synthetic" } };
   const worker = createWindowsEmployeeStagingWorker(profile, { fetch, scheduled, queue });

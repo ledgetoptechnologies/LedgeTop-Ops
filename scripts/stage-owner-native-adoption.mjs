@@ -54,10 +54,10 @@ const MAX_APPROVAL_LIFETIME_MS = 60 * 60 * 1000;
 // Current main migration chain (not the stale 225-migration bootstrap pin).
 // Any migration added, removed, renamed or edited changes these and refuses.
 export const STAGE_OWNER_ADOPTION_MIGRATIONS = Object.freeze({
-  count: 235,
-  last: '0243_staff_logs_device_eligibility.sql',
-  namesSha256: 'a34d43d7a2f94d4022a933c1fa427ce522f118dc79a39ee35b5a3e5c23e89937',
-  contentsSha256: 'a7c4e5ae9d8f3f8e75659eff62a3e2c2f8a915dea3a08a799695cb690d476ae3',
+  count: 236,
+  last: '0245_staff_files_write_access.sql',
+  namesSha256: 'aa41346da4783f1b405f3c721b9b25bbe7cabf7e15133febb87f19dc620bb573',
+  contentsSha256: 'cb0dbefb0e84a56e8678d3b2c95fd99a22d5b1483f1e202e60fc0855bf9ecdc6',
 });
 
 // Stage-only target pins from Merger's independent, non-secret readback

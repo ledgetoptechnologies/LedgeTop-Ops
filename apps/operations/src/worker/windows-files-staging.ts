@@ -16,6 +16,8 @@ export type WindowsEmployeeFilesStagingConfiguration = Readonly<{
   environment: "staging"; enabled: boolean; opsOrigin: string;
   access: NativeStaffAccessConfiguration; gateway: EmployeeGatewayConfiguration;
   handleKey: Uint8Array; queueKey: Uint8Array;
+  /** The existing Ops session secret, used only to derive the Files admin CSRF tokens. */
+  adminCsrfSecret: string;
 }>;
 type Dependencies = Readonly<{ database: D1Database; fetch?: typeof fetch }>;
 function exact(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
@@ -30,7 +32,7 @@ function sameKey(a: Uint8Array, b: Uint8Array) {
   return a.length === b.length && a.every((byte, index) => byte === b[index]);
 }
 function snapshot(input: WindowsEmployeeFilesStagingConfiguration, dependencies: Dependencies) {
-  if (!exact(input, ["environment", "enabled", "opsOrigin", "access", "gateway", "handleKey", "queueKey"])
+  if (!exact(input, ["environment", "enabled", "opsOrigin", "access", "gateway", "handleKey", "queueKey", "adminCsrfSecret"])
     || input.environment !== "staging" || input.enabled !== true || input.opsOrigin !== OPS_ORIGIN
     || !exact(input.access, ["enabled", "issuer", "staffAudience"])
     || input.access.enabled !== true || input.access.issuer !== ACCESS_ISSUER
@@ -39,6 +41,8 @@ function snapshot(input: WindowsEmployeeFilesStagingConfiguration, dependencies:
     || !exact(input.gateway, ["origin", "gatewayId", "keyId", "key"])
     || typeof input.gateway.origin !== "string" || typeof input.gateway.gatewayId !== "string" || !UUID.test(input.gateway.gatewayId)
     || typeof input.gateway.keyId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/u.test(input.gateway.keyId)
+    || typeof input.adminCsrfSecret !== "string" || new TextEncoder().encode(input.adminCsrfSecret).byteLength < 32
+    || new TextEncoder().encode(input.adminCsrfSecret).byteLength > 512
     || !dependencies?.database || typeof dependencies.database.withSession !== "function"
     || dependencies.fetch !== undefined && typeof dependencies.fetch !== "function") throw Error();
   const origin = new URL(input.gateway.origin);
@@ -52,7 +56,7 @@ function snapshot(input: WindowsEmployeeFilesStagingConfiguration, dependencies:
   return Object.freeze({ enabled: true, opsOrigin: OPS_ORIGIN,
     access: Object.freeze({ enabled: true, issuer: ACCESS_ISSUER, staffAudience: input.access.staffAudience }),
     gateway: Object.freeze({ origin: origin.origin, gatewayId: input.gateway.gatewayId, keyId: input.gateway.keyId, key: gatewayKey }),
-    handleKey, queueKey });
+    handleKey, queueKey, adminCsrfSecret: input.adminCsrfSecret });
 }
 
 /** Source-only composition. Neither entrypoint imports or mounts it. A caller
@@ -75,6 +79,6 @@ export function createWindowsEmployeeFilesStagingRouter(input: WindowsEmployeeFi
   router.route("/", createEmployeeQueueRouter(config, captured));
   router.route("/", createEmployeeReadRouter(config, captured));
   router.route("/", createEmployeeReadAdminRouter({ enabled: true, opsOrigin: config.opsOrigin,
-    access: config.access, gatewayIds: [config.gateway.gatewayId] }, captured));
+    access: config.access, gatewayIds: [config.gateway.gatewayId], csrfSecret: config.adminCsrfSecret }, captured));
   return router;
 }
