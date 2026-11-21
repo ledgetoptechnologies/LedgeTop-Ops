@@ -191,6 +191,9 @@ contains:
 - the target ids and the approval reference;
 - `resumeFrom`, if the run resumed;
 - the reconcile result;
+- `rowCounts.start` and `existingSchema`: the start counts, and the object count
+  and digest of every schema object that the ten files do not create. A resumed
+  run carries both forward from its baseline receipt;
 - each file's hash and statement counts;
 - each preflight check, with its expected and observed counts and timestamps;
 - the apply start and finish times and the apply outcome;
@@ -267,6 +270,15 @@ It proves the following:
   file that receipt stopped on. An older receipt is refused with
   `baseline_receipt_not_latest`. This stops an older receipt from bypassing a
   later `postcheck_failed` stop.
+- Every schema object that the ten files do not create (type, name, table and
+  SQL) still matches the digest recorded at the 226 start. A change is refused
+  with `existing_schema_changed`, and the receipt states the expected and
+  observed object counts and digests. This also covers one edge case: after an
+  ambiguous stop on file k that did not land, a resumed run applies file k and
+  then fails its post-check. The older receipt's ambiguity allowance accepts a
+  ledger ending at file k. Reconcile with that older receipt is still refused if
+  the state differs from the pin, because it re-verifies the objects, the seeds,
+  the counts and this digest.
 - Every recorded file's seeded rows are still exactly the pinned seed: one
   control row each for 0227, 0229, 0230 and 0231, and 15 catalog rows for 0244.
 

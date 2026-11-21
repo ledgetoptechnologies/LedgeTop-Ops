@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   LEDGER_INSERT_SQL, OPS_0227_0244_AUTHORITY_NOTE, OPS_0227_0244_FILES, OPS_0227_0244_FINAL_LEDGER,
   OPS_0227_0244_FIXTURE_SHA256, OPS_0227_0244_PRE_READ_QUERY, OPS_0227_0244_PRIOR_LEDGER, OPS_PRODUCTION_DATABASE,
-  OPS_0227_0244_SCHEMA_ROWS_SQL, isOps0227To0244ReadQuery, loadVerifiedOps0227To0244Plan, mainOps0227To0244, openOps0227To0244Receipt,
+  OPS_0227_0244_SCHEMA_ROWS_SQL, ops0227To0244ExistingSchema, isOps0227To0244ReadQuery, loadVerifiedOps0227To0244Plan, mainOps0227To0244, openOps0227To0244Receipt,
   parseOps0227To0244Args, parseOps0227To0244SnapshotResult, runOps0227To0244Ordered,
 } from './production-ops-0227-0244-ordered-once.mjs';
 import { createOps0227To0244CloudflareProvider } from './production-ops-0227-0244-cloudflare-provider.mjs';
@@ -49,7 +49,7 @@ const readReceipt = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 
 /** Synthetic D1: reads go through a separate read-only connection, writes are one transaction per migration. */
 function sqliteProvider(file, { failApplyAt = null, skipLedgerAt = null, tamper = null, ambiguousAt = null, landed = false,
-  refuseAt = null, partialAt = null } = {}) {
+  refuseAt = null, partialAt = null, sideEffectAt = null } = {}) {
   const writer = new DatabaseSync(file);
   writer.exec('PRAGMA foreign_keys=ON');
   const calls = { reads: 0, writes: 0, targets: 0, sent: [] };
@@ -81,6 +81,7 @@ function sqliteProvider(file, { failApplyAt = null, skipLedgerAt = null, tamper 
         if (partialAt?.name === name && index === partialAt.count) throw new Error('synthetic failure mid-batch');
         writer.exec(statement);
       }
+      if (sideEffectAt?.name === name) writer.exec(sideEffectAt.sql);
       if (name !== skipLedgerAt) writer.prepare(LEDGER_INSERT_SQL).run(name);
       // The batch landed but the response was lost.
       if (name === ambiguousAt) throw new Error('ops_0227_0244_provider:request_uncertain_no_retry');
@@ -494,8 +495,9 @@ const execArgs = receiptFile => ['--execute', '--rehearsal', '--receipt', receip
 /** A counts-only baseline receipt holding the 226-row start counts of the synthetic chain. */
 function baselineFor(recorded = 0) {
   const db = new DatabaseSync(chains[226], { readOnly: true });
-  let row;
+  let row, schema;
   try {
+    schema = db.prepare(OPS_0227_0244_SCHEMA_ROWS_SQL).all().map(item => ({ ...item }));
     row = { ...db.prepare(`SELECT (SELECT count(*) FROM roles) rolesRows, (SELECT count(*) FROM permissions) permissionsRows,
       (SELECT count(*) FROM role_permissions) rolePermissionsRows, (SELECT count(*) FROM staff_users) staffUsersRows,
       (SELECT count(*) FROM staff_permission_overrides) staffPermissionOverridesRows`).get() };
@@ -503,7 +505,7 @@ function baselineFor(recorded = 0) {
   const file = receiptPath();
   fs.writeFileSync(file, JSON.stringify({ contract: 'production-ops-0227-0244-ordered-once-v1',
     planSha256: loadVerifiedOps0227To0244Plan().planSha256, target: { environment: 'non-production', ...REHEARSAL },
-    rowCounts: { start: row }, stop: null,
+    rowCounts: { start: row }, stop: null, existingSchema: ops0227To0244ExistingSchema({ schema }, loadVerifiedOps0227To0244Plan()),
     finalLedger: { count: 226 + recorded, lastMigration: recorded === 0 ? '0226_staff_login_bindings.sql' : OPS_0227_0244_ORDERED_NAMES[recorded - 1] } }));
   return file;
 }
@@ -847,4 +849,52 @@ test('reconcile rechecks the seeded rows of recorded files (controls and the 024
     assert.equal(refused.result.status, 'reconciliation-required');
     assert.equal(refused.result.stop.code, `reconciliation_required:recorded_seed_rows:${table}`);
   }
+});
+
+// --- N7: objects outside the plan are pinned at the start -------------------
+
+test('ambiguous at file k (not landed), resumed post-check fails on file k, reconcile with the older receipt is refused', async () => {
+  const file = freshDb();
+  const name = '0229_owner_intel_source_feed.sql';
+  const firstReceipt = receiptPath();
+  const first = await cli(file, execArgs(firstReceipt), { providerOptions: { ambiguousAt: name, landed: false } });
+  assert.equal(first.result.stop.code, 'reconciliation_required:apply_ambiguous_no_retry');
+  assert.equal(ledgerOf(file).length, 228);
+  const firstExisting = readReceipt(firstReceipt).existingSchema;
+  assert.ok(firstExisting.objectCount > 2000 && /^[a-f0-9]{64}$/u.test(firstExisting.sha256));
+
+  // The resumed run applies file k, but the batch also changes an object outside the plan.
+  const secondReceipt = receiptPath();
+  const second = await cli(file, [...execArgs(secondReceipt), '--resume-from', name, '--baseline-receipt', firstReceipt],
+    { providerOptions: { sideEffectAt: { name, sql: 'CREATE INDEX synthetic_outside_plan ON roles(name)' } } });
+  assert.equal(second.result.stop.code, 'reconciliation_required:postcheck_failed');
+  assert.equal(second.result.stop.step, name);
+  assert.deepEqual(readReceipt(secondReceipt).existingSchema, firstExisting, 'start digest carried forward');
+  assert.equal(ledgerOf(file).length, 229);
+
+  // The older receipt's ambiguity allowance matches 229 ending at file k, but the outside-plan digest does not.
+  const receiptFile = receiptPath();
+  const stale = await cli(file, ['--reconcile', '--receipt', receiptFile, '--baseline-receipt', firstReceipt, ...rehearsalArgs]);
+  assert.equal(stale.result.status, 'reconciliation-required');
+  assert.equal(stale.result.stop.code, 'reconciliation_required:existing_schema_changed');
+  assert.match(readReceipt(receiptFile).stop.detail, /objects outside the plan changed: expected \d+ \([a-f0-9]{64}\), observed \d+/u);
+  const resumed = await cli(file, [...execArgs(receiptPath()), '--resume-from', '0230_app_release_pilot.sql', '--baseline-receipt', firstReceipt]);
+  assert.equal(resumed.result.status, 'reconciliation-required');
+  assert.equal(resumed.provider.calls.writes, 0);
+  const latest = await cli(file, ['--reconcile', '--baseline-receipt', secondReceipt, ...rehearsalArgs]);
+  assert.equal(latest.result.stop.code, 'reconciliation_required:baseline_receipt_postcheck_failed');
+});
+
+test('a change to an existing object between runs is refused as existing_schema_changed', async () => {
+  const file = freshDb();
+  applyPrefix(file, 4);
+  const baseline = baselineFor(4);
+  assert.equal((await cli(file, ['--reconcile', '--baseline-receipt', baseline, ...rehearsalArgs])).result.status, 'reconciled');
+  const db = new DatabaseSync(file);
+  db.exec('CREATE INDEX synthetic_outside_plan ON roles(name)');
+  db.close();
+  const refused = await cli(file, [...execArgs(receiptPath()), '--resume-from', '0231_owner_google_ads_summary.sql', '--baseline-receipt', baseline]);
+  assert.equal(refused.result.status, 'reconciliation-required');
+  assert.equal(refused.result.stop.code, 'reconciliation_required:existing_schema_changed');
+  assert.equal(refused.provider.calls.writes, 0);
 });

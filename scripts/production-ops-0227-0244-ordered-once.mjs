@@ -299,11 +299,21 @@ export function loadOps0227To0244BaselineReceipt(filename, { plan, target } = {}
   if (!isPlain(value) || value.contract !== OPS_0227_0244_CONTRACT || value.planSha256 !== plan.planSha256
     || value.target?.databaseId !== target.databaseId || value.target?.accountId !== target.accountId
     || !exactKeys(start, TRACKED_ROWS) || TRACKED_ROWS.some(key => !Number.isSafeInteger(start[key]) || start[key] < 0)
-    || !Number.isSafeInteger(value.finalLedger?.count) || typeof value.finalLedger?.lastMigration !== 'string')
+    || !Number.isSafeInteger(value.finalLedger?.count) || typeof value.finalLedger?.lastMigration !== 'string'
+    || !exactKeys(value.existingSchema, ['objectCount', 'sha256']) || !Number.isSafeInteger(value.existingSchema.objectCount)
+    || !SHA.test(value.existingSchema.sha256 ?? ''))
     fail('baseline_receipt_invalid');
   return Object.freeze({ startCounts: Object.freeze({ ...start }), stopPhase: value.stop?.phase ?? null,
     stopCode: value.stop?.code ?? null, stopStep: value.stop?.step ?? null,
+    existingSchema: Object.freeze({ ...value.existingSchema }),
     finalLedger: Object.freeze({ count: value.finalLedger.count, lastMigration: value.finalLedger.lastMigration }) });
+}
+
+/** Digest (type, name, tbl_name, sql) of every schema object that none of the ten files creates. */
+export function ops0227To0244ExistingSchema(snapshot, plan) {
+  const planNames = new Set(plan.files.flatMap(file => file.expectedAddedObjects.map(object => object.name)));
+  const rows = snapshot.schema.filter(row => !planNames.has(row.name));
+  return { objectCount: rows.length, sha256: schemaRowsSha256(rows) };
 }
 
 export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null) {
@@ -356,6 +366,13 @@ export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null) 
     if (!latest.ok) return { ok: false, code: 'reconciliation_required:baseline_receipt_not_latest', appliedCount: applied, nextStep: null,
       ...position, message: `${position.message}; the baseline receipt recorded ${baseline.finalLedger.count} rows ending `
         + `${baseline.finalLedger.lastMigration}. Use the latest receipt`, checks };
+    // Every schema object outside the plan must be exactly as it was at the 226 start (N7).
+    const existing = ops0227To0244ExistingSchema(snapshot, plan);
+    const existingCheck = check('existing_schema_unchanged_since_start', baseline.existingSchema, existing);
+    checks.push(existingCheck);
+    if (!existingCheck.ok) return { ok: false, code: 'reconciliation_required:existing_schema_changed', appliedCount: applied, nextStep: null,
+      ...position, message: `${position.message}; objects outside the plan changed: expected ${baseline.existingSchema.objectCount} `
+        + `(${baseline.existingSchema.sha256}), observed ${existing.objectCount} (${existing.sha256})`, checks };
     const has0240 = plan.files.slice(0, applied).some(file => file.name.startsWith('0240'));
     const expected = { ...baseline.startCounts,
       permissionsRows: baseline.startCounts.permissionsRows + (has0240 ? 2 : 0),
@@ -486,7 +503,7 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
     startedAt: stamp(), finishedAt: null, status: 'running', stop: null,
     files: plan.files.map(({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount }) =>
       ({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount })),
-    initial: null, reconcile: null, steps: [], notes: [], rowCounts: null, finalLedger: null, writesPerformed: 0,
+    initial: null, reconcile: null, steps: [], notes: [], rowCounts: null, existingSchema: null, finalLedger: null, writesPerformed: 0,
   };
   const noteSize = (where, snapshot) => {
     if (snapshot.snapshotBytes > OPS_0227_0244_SNAPSHOT_WARN_BYTES)
@@ -523,6 +540,8 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
     // `start` is the count set at the 226 start of the whole apply; a resumed run carries it forward.
     state.rowCounts = { start: rec.appliedCount > 0 && baseline ? { ...baseline.startCounts } : trackedCounts(current),
       thisRunInitial: trackedCounts(current), final: null };
+    // The digest of objects outside the plan at the 226 start; a resumed run carries it forward.
+    state.existingSchema = rec.appliedCount > 0 && baseline ? { ...baseline.existingSchema } : ops0227To0244ExistingSchema(current, plan);
     noteSize('start', current);
     if (mode === 'reconcile') {
       if (!rec.ok) stop(null, 'reconcile', rec.code, rec.message);
