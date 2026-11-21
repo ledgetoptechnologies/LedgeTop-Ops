@@ -145,7 +145,9 @@ async function openShare(page, outputId = null) {
   const form = page.locator('#direct-client-grant-form'); await form.waitFor({ state: 'visible' });
   assert.equal(await form.getByRole('checkbox', { name: /^Camera positions/ }).isChecked(), false,
     'New direct shares must keep photo locations off until explicitly selected');
-  await form.locator('select[name="client"]').selectOption(JSON.stringify([CLIENT.sourceId, CLIENT.workspaceId]));
+  // Type-to-filter combobox: focus shows the first clients; choosing one only fills the form.
+  await form.getByRole('combobox', { name: 'Client' }).click();
+  await form.getByRole('option', { name: new RegExp(CLIENT.displayName) }).click();
   return form;
 }
 function assertNoUnrelatedWrites(state, pageErrors) {
@@ -179,17 +181,17 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     await legacy.getByText('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
     assert.equal(await original.evaluate(element => element.isConnected), true, 'Late legacy completion must preserve the current direct form');
     assert.equal(await form.locator('[name="confirmedScope"]').isChecked(), true);
-    assert.equal(await form.locator('select[name="client"]').inputValue(), JSON.stringify([CLIENT.sourceId, CLIENT.workspaceId]));
+    assert.equal(await form.locator('input[name="client"]').inputValue(), JSON.stringify([CLIENT.sourceId, CLIENT.workspaceId]));
     await form.getByRole('button', { name: 'Share with client', exact: true }).click();
     await page.locator('[data-action="revoke-direct-client-grant"]').waitFor();
     assert.equal(state.grants.length, 1, 'Independent direct authority still creates the explicitly selected grant');
     const refreshed = page.locator('#direct-client-grant-form');
     const beforeSearch = await refreshed.elementHandle();
-    await refreshed.locator('[name="clientQuery"]').fill('Synthetic');
-    await refreshed.locator('[data-action="search-direct-clients"]').click();
-    await page.waitForFunction(element => !element.isConnected, beforeSearch);
-    assert.equal(await page.locator('#direct-client-grant-form [name="clientQuery"]').inputValue(), 'Synthetic');
-    assert.ok(state.requests.some(request => request.path === DIRECT && request.query.q === 'Synthetic'), 'Search must reach the independent direct catalog');
+    await refreshed.getByRole('combobox', { name: 'Client' }).fill('Synthetic');
+    await refreshed.getByRole('option', { name: new RegExp(CLIENT.displayName) }).waitFor();
+    assert.equal(await beforeSearch.evaluate(element => element.isConnected), true, 'Filtering updates the list in place, without re-rendering the form');
+    assert.equal(await refreshed.locator('input[name="client"]').inputValue(), '', 'Typing clears the earlier choice');
+    assert.ok(state.requests.some(request => request.path === DIRECT && request.query.q === 'Synthetic' && request.query.include === 'clients'), 'Search must reach the independent direct catalog');
     assert.equal(await page.locator('#direct-client-grant-form').isVisible(), true, 'Search and post-share refresh must retain direct sharing despite legacy failure');
     assertNoUnrelatedWrites(state, pageErrors);
   });

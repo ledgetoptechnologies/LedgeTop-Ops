@@ -15,7 +15,8 @@ export type DirectShareGrant = {
   permissions: { measure: boolean; cameras: boolean; download: boolean };
   expiresAt: string | null; revokedAt: string | null; createdAt: string; clientDisplayName: string | null;
 };
-type GrantWorkspace = { clients: DirectShareClient[]; clientsNextCursor: string | null; grants: DirectShareGrant[] };
+type GrantWorkspace = { clients: DirectShareClient[]; clientsNextCursor: string | null; grants: DirectShareGrant[];
+  grantsNextCursor?: string | null; grantsIncomplete?: boolean };
 /** What is being shared: a whole Viewer project (and its future published models) or one published task. */
 export type ViewerShareTarget = { project: { viewerProjectId: string; name: string }; task: ViewerCatalogTask | null };
 
@@ -46,6 +47,25 @@ function validGrantWorkspace(value: unknown): value is GrantWorkspace {
       && typeof client.displayName === "string" && typeof client.businessName === "string")
     && value.grants.every(grant => isRecord(grant) && typeof grant.grantId === "string" && typeof grant.workspaceId === "string"
       && isRecord(grant.permissions));
+}
+
+export const DIRECT_SHARE_GRANT_PAGE_LIMIT = 50;
+/** Loads clients and every page of this project's grants (the server pages grants 100 at a time).
+ * If the page limit is reached the result says so, so the list is never silently short. */
+export async function loadDirectShareWorkspace(fetchJson: (path: string) => Promise<unknown>, viewerProjectId: string, q: string)
+  : Promise<GrantWorkspace> {
+  const params = new URLSearchParams({ viewerProjectId, limit: "25", include: "all" });
+  if (q.trim()) params.set("q", q.trim());
+  const first = await fetchJson(`/api/viewer/direct-client-grants?${params}`);
+  if (!validGrantWorkspace(first)) throw new Error("invalid_response");
+  const grants = [...first.grants];
+  let cursor = typeof first.grantsNextCursor === "string" ? first.grantsNextCursor : null, pages = 1;
+  while (cursor && pages < DIRECT_SHARE_GRANT_PAGE_LIMIT) {
+    const page = await fetchJson(`/api/viewer/direct-client-grants?${new URLSearchParams({ viewerProjectId, include: "grants", grantsCursor: cursor })}`);
+    if (!validGrantWorkspace(page)) throw new Error("invalid_response");
+    grants.push(...page.grants); cursor = typeof page.grantsNextCursor === "string" ? page.grantsNextCursor : null; pages++;
+  }
+  return { ...first, grants, grantsNextCursor: cursor, grantsIncomplete: !!cursor };
 }
 
 /** Grants that already cover this exact target: the project grant, or a grant for the same task. */
@@ -330,12 +350,11 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
     const current = ++run.current;
     setLoadError("");
     try {
-      const params = new URLSearchParams({ viewerProjectId: target.project.viewerProjectId, limit: "25" });
-      if (q.trim()) params.set("q", q.trim());
-      const value = await api<unknown>(`/api/viewer/direct-client-grants?${params}`);
+      const value = await loadDirectShareWorkspace(path => api<unknown>(path), target.project.viewerProjectId, q);
       if (current !== run.current) return;
-      if (!validGrantWorkspace(value)) throw new Error("invalid_response");
       setWorkspace(value);
+      // Existing-access checks need every share; say so plainly if some could not be listed.
+      if (value.grantsIncomplete) setLoadError("Some existing shares for this project could not be listed.");
     } catch (caught) {
       if (current !== run.current) return;
       setWorkspace(null);

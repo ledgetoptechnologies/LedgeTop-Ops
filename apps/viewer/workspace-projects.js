@@ -18,7 +18,7 @@ import { resumeCurrentTabWorkspaceRecovery } from './workspace-current-tab-recov
 import { createWorkspaceNavigationWork, workspaceNavigationState } from './workspace-navigation-state.mjs';
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, loadDirectClientAccess, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -110,7 +110,7 @@ async function openShareModal(projectId,onlyOutputId=null){
   // Direct sharing has its own authority and must not wait for project lookups.
   if(context.clientLoading)void(async()=>{
     let access=null;
-    try{access=directClientAccess(await api(directClientsPath(projectId)));}catch{}
+    try{access=await loadDirectClientAccess(api,projectId);}catch{}
     if(!current()||!can('viewer.client_grants.manage'))return;
     state.clientDirectAccess=access;context.directQuery='';
     if(context.loading)return;
@@ -683,32 +683,31 @@ function directShareContext(onlyOutputId){
 }
 function directClientShareCard(onlyOutputId){
   const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
-  return card('Share with a client',`<p class="form-note">Choose a client and what they can see. No business project or model setup is needed.</p>${directShareForm({...context,access,query:state.shareContext.directQuery||''})}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,{...context,dateTime})}`);
+  return card('Share with a client',`<p class="form-note">Choose a client and what they can see. No business project or model setup is needed.</p>${directShareForm(context)}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,{...context,dateTime})}`);
 }
 function rerenderClientSharePanel(projectId,onlyOutputId){
   const panel=modalContent.querySelector('[data-client-share-panel]');
-  if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
+  if(panel){panel.querySelector?.('#direct-client-grant-form')?.clientPicker?.dispose();panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
 }
 function bindDirectShare(form,projectId,onlyOutputId){
-  const context=directShareContext(onlyOutputId),read=()=>readDirectShareForm(form,{...context,clients:state.clientDirectAccess?.clients||[]});
+  const context=directShareContext(onlyOutputId),shareContext=state.shareContext,live=()=>state.shareContext===shareContext&&form.isConnected&&modal.open;
+  let picked=null;const read=()=>readDirectShareForm(form,{...context,clients:picked?[picked]:[]});
   const summary=form.querySelector('[data-direct-summary]'),taskInputs=[...form.querySelectorAll('input[name="taskId"]')];
   const sync=()=>{const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';summary.textContent=current.summary};
-  form.onchange=sync;sync();
-  const shareContext=state.shareContext,live=()=>state.shareContext===shareContext&&form.isConnected&&modal.open;
-  const search=async more=>{
-    if(form.shareBusy)return;
-    const query=more?shareContext.directQuery||'':form.elements.clientQuery.value;
-    try{
-      const result=directClientAccess(await api(directClientsPath(projectId,{query,cursor:more?state.clientDirectAccess.clientsNextCursor:null})));
-      if(!result||!live()||form.shareBusy)return;
-      shareContext.directQuery=query;
-      state.clientDirectAccess={...result,clients:more?[...state.clientDirectAccess.clients,...result.clients]:result.clients};
-      rerenderClientSharePanel(projectId,onlyOutputId);
-    }catch(error){toast(directShareErrorText(error),true)}
-  };
-  form.querySelector('[data-action="search-direct-clients"]').onclick=()=>search(false);
-  form.elements.clientQuery.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();search(false)}};
-  const more=form.querySelector('[data-action="more-direct-clients"]');if(more)more.onclick=()=>search(true);
+  form.onchange=sync;
+  // Type-to-filter picker: each keystroke (debounced) asks the server, and an older answer never replaces a newer one.
+  // Choosing a client only fills the form; the confirmation checkbox and Share button are still required.
+  const pickerRoot=form.querySelector('[data-client-picker]');
+  if(pickerRoot)form.clientPicker=bindClientPicker(pickerRoot,{initial:state.clientDirectAccess,
+    fetchPage:async({query,cursor,signal})=>{
+      const result=directClientAccess(await api(directClientsPath(projectId,{query,cursor,include:'clients'}),{signal}));
+      if(!result)throw new Error('Clients could not be loaded.');if(!live())throw new Error('Share dialog closed');return result;
+    },
+    onSelect:client=>{
+      // Any change of client, including clearing it, needs a fresh confirmation for the new recipient.
+      const changed=(picked?JSON.stringify([picked.sourceId,picked.workspaceId]):'')!==(client?JSON.stringify([client.sourceId,client.workspaceId]):'');
+      picked=client;if(changed&&form.elements.confirmedScope)form.elements.confirmedScope.checked=false;if(form.isConnected)sync()}});
+  sync();
   // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
   form.onsubmit=async event=>{
     event.preventDefault();if(form.shareBusy)return;
@@ -729,7 +728,7 @@ function bindDirectShare(form,projectId,onlyOutputId){
     }finally{form.shareBusy=false;if(form.isConnected)for(const [element,disabled] of controls)element.disabled=disabled}
     // A partial share keeps the form and its retry keys exactly as they were.
     if(shared!==bodies.length||!live())return;
-    try{const result=directClientAccess(await api(directClientsPath(projectId,{query:shareContext.directQuery||''})));if(result&&live())state.clientDirectAccess=result}catch{}
+    try{const result=await loadDirectClientAccess(api,projectId);if(result&&live())state.clientDirectAccess=result}catch{}
     if(live())rerenderClientSharePanel(projectId,onlyOutputId);
   };
 }
