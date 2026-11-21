@@ -127,6 +127,7 @@
   <script src="/pointcloud-elevation.js"></script>
   <script src="/pointcloud-display.js"></script>
   <script src="/pointcloud-cameras.js"></script>
+  <script src="/pointcloud-parcels.js"></script>
   <script src="/pointcloud-measurements.js"></script>
   <script src="/pointcloud-performance.js"></script>
   <script>
@@ -264,6 +265,14 @@
         viewer.renderer.render(cameraOverlayScene, viewer.scene.getActiveCamera());
       }
     });
+    // Property lines use the same overlay pass, in their own scene.
+    const parcelOverlayScene = new THREE.Scene();
+    const pointCloudParcelLayer = window.LtdsPointCloudParcels.createPointCloudParcelLayer({ THREE, scene: parcelOverlayScene });
+    viewer.addEventListener('render.pass.perspective_overlay', () => {
+      if (pointCloudParcelLayer.group.visible && pointCloudParcelLayer.vertexCount > 0) {
+        viewer.renderer.render(parcelOverlayScene, viewer.scene.getActiveCamera());
+      }
+    });
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
     // Start at a useful high-detail desktop baseline. Auto-LOD can still lower
@@ -382,6 +391,15 @@
       setCameras(markers) { return pointCloudCameraLayer.setMarkers(markers); },
       setCameraVisibility(visible) { pointCloudCameraLayer.setVisible(visible); },
       setCameraScale(value) { pointCloudCameraLayer.setScale(value); },
+      setParcelLines(lines) { return pointCloudParcelLayer.setLines(lines); },
+      setParcelVisibility(visible) { pointCloudParcelLayer.setVisible(visible); },
+      // UTM bounds [minE, minN, minZ, maxE, maxN, maxZ] of the loaded cloud.
+      getSceneBounds() {
+        if (!viewer.scene.pointclouds.length) return null;
+        const box = viewer.scene.getBoundingBox(viewer.scene.pointclouds);
+        const values = [box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z];
+        return values.every(Number.isFinite) && box.max.x > box.min.x && box.max.y > box.min.y ? values : null;
+      },
       fit() {
         classificationHover?.clear();
         if (viewer.scene.pointclouds.length) viewer.fitToScreen(0.7);

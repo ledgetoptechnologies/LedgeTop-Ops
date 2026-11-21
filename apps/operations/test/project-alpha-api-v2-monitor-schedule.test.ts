@@ -9,7 +9,8 @@ vi.mock("../src/worker/project-alpha-api-v2-monitor-cycle", () => ({ runProjectA
 vi.mock("../src/worker/project-alpha-api-v2-monitor-scheduler-selection", () => ({
   selectProjectAlphaApiV2MonitorSchedulerRevision: selectRevision }));
 
-import worker, { PROJECT_ALPHA_API_V2_MONITOR_CRON } from "../src/worker/index";
+import worker from "../src/worker/index";
+import { PROJECT_ALPHA_API_V2_MONITOR_CRON } from "../src/worker/scheduled-crons";
 
 const event = { cron: PROJECT_ALPHA_API_V2_MONITOR_CRON, scheduledTime: 1787751840000, noRetry() {} };
 const waitUntil = vi.fn(() => { throw Error("unexpected detached work"); });
