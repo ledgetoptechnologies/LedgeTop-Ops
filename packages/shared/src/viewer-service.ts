@@ -43,7 +43,9 @@ export interface ViewerClientDeliveryCatalog {
   tasks: Array<{ id: string; displayName: string; modelId: string; modelVersionId: string;
     modelTitle: string; publishedAt: string;
     /** Root-first folders holding the task; [] at the project root; absent from older Viewer images. */
-    folderPath?: ViewerClientFolderPathEntry[] }>;
+    folderPath?: ViewerClientFolderPathEntry[];
+    /** Viewer-owned task authorization generation; required by restricted (exclusion) grants, absent from older images. */
+    authorizationGeneration?: number }>;
   nextCursor: string | null;
 }
 
@@ -910,6 +912,7 @@ export class ViewerServiceClient {
       if (!task || !id(task.id) || seen.has(task.id) || !title(task.displayName) || !id(task.modelId) || !id(task.modelVersionId) ||
         !title(task.modelTitle) || typeof task.publishedAt !== "string" || !Number.isFinite(Date.parse(task.publishedAt)) ||
         (task.folderPath !== undefined && parseViewerClientFolderPath(task.folderPath) === null) ||
+        (task.authorizationGeneration !== undefined && (!Number.isSafeInteger(task.authorizationGeneration) || (task.authorizationGeneration as number) < 1)) ||
         (input.taskId !== undefined && task.id !== input.taskId))
         throw new ViewerServiceError("Viewer returned an invalid delivery task", "invalid_response");
       seen.add(task.id);
@@ -922,6 +925,7 @@ export class ViewerServiceClient {
         id: task.id as string, displayName: task.displayName as string, modelId: task.modelId as string,
         modelVersionId: task.modelVersionId as string, modelTitle: task.modelTitle as string, publishedAt: task.publishedAt as string,
         ...(task.folderPath !== undefined ? { folderPath: parseViewerClientFolderPath(task.folderPath)! } : {}),
+        ...(task.authorizationGeneration !== undefined ? { authorizationGeneration: task.authorizationGeneration as number } : {}),
       }; }), nextCursor: payload.nextCursor as string | null };
   }
 
@@ -1000,7 +1004,7 @@ export class ViewerServiceClient {
     };
     sourceAuthorization?: ViewerPublishedSessionSourceAuthorization;
     restrictedScope?: {
-      version: 1; projectId: string; taskId: string;
+      version: 1; projectId: string; taskId: string; generation: number;
       exclusions: { version: 1; folderIds: string[]; taskIds: string[] };
     };
   }): Promise<ViewerSessionGrant> {

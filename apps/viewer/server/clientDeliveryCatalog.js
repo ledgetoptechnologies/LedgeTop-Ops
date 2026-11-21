@@ -2,6 +2,7 @@
 
 const express = require('express');
 const { canonicalProjectExclusions } = require('./projectExclusions');
+const { currentTaskAuthorizationGeneration } = require('./restrictedSessionScope');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const { requireService } = require('./serviceAuth');
 const { ProcessingRepository } = require('./processingRepository');
@@ -36,6 +37,12 @@ function createClientDeliveryCatalog(repository) {
         || typeof decoded.createdAt !== 'string' || decoded.createdAt.length > 40 || !Number.isFinite(Date.parse(decoded.createdAt)))
         return res.status(400).json({ error: 'Invalid catalog cursor', code: 'invalid_catalog_query' });
     }
+    // Read in the same snapshot as eligibility; a task without a generation row is
+    // returned without one, and a restricted issuer then refuses to mint for it.
+    const generationField = taskId => {
+      const generation = currentTaskAuthorizationGeneration(repository.database, taskId);
+      return generation === null ? {} : { authorizationGeneration: generation };
+    };
     try {
       // Synchronous reads share one SQLite snapshot with no intervening await.
       // Exact-task queries never invoke the project catalog or expose siblings.
@@ -53,7 +60,8 @@ function createClientDeliveryCatalog(repository) {
           tasks: page.items.map(task => ({ id: task.taskId, displayName: task.taskDisplayName,
             modelId: task.modelId, modelVersionId: task.modelVersionId,
             modelTitle: task.modelDisplayName, publishedAt: task.publishedAt,
-            folderPath: folderPaths.get(task.taskId) || [] })), nextCursor: page.nextCursor };
+            folderPath: folderPaths.get(task.taskId) || [],
+            ...generationField(task.taskId) })), nextCursor: page.nextCursor };
       });
       return result ? res.json(result) : res.status(404).json({ error: 'Published delivery unavailable', code: 'delivery_unavailable' });
     } catch (error) {

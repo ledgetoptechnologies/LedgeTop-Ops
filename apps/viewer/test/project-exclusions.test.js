@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { canonicalProjectExclusions } = require('../server/projectExclusions');
+const { TASK_AUTHORIZATION_GENERATIONS_V51_SQL } = require('../server/database');
 
 const id = sequence => `00000000-0000-4000-8000-${String(sequence).padStart(12, '0')}`;
 const mask = { version: 1, folderIds: [id(1)], taskIds: [id(15)] };
@@ -44,6 +45,7 @@ function fixture(t) {
     db.prepare("INSERT INTO model_outputs VALUES (?, ?, ?, 'project', 'attempt', ?, 'published')")
       .run(version, model, task, date);
   }
+  db.exec(TASK_AUTHORIZATION_GENERATIONS_V51_SQL);
   return { db, repo: new ProcessingRepository(db) };
 }
 
@@ -123,7 +125,9 @@ test('restricted grant expiry, redemption and active sessions recheck current ex
     sourceAuthorization: { type: 'direct_client_grant', id: id(600), version: 1 },
     permissions: { view: true }, expiresAt: new Date(Date.now() + 60000).toISOString(),
   };
-  const restrictedScope = { version: 1, projectId: project, taskId: id(12), exclusions: mask };
+  const generation = () => db.prepare('SELECT generation FROM task_authorization_generations WHERE task_id=?').get(id(12)).generation;
+  const scopeNow = () => ({ version: 1, projectId: project, taskId: id(12), generation: generation(), exclusions: mask });
+  const restrictedScope = scopeNow();
   const restricted = { ...grant, restrictedScope };
   const move = db.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?');
   const first = repo.createSessionGrant(restricted);
@@ -133,10 +137,13 @@ test('restricted grant expiry, redemption and active sessions recheck current ex
   assert.equal(repo.redeemSessionGrant(first.id), null);
   assert.throws(() => repo.createSessionGrant(restricted), /restricted session scope/);
 
+  // Back to an eligible folder: the old capture stays dead, a fresh capture mints.
   move.run(id(3), id(12));
-  const issued = repo.createSessionGrant(restricted);
+  assert.throws(() => repo.createSessionGrant(restricted), /restricted session scope/);
+  const freshScope = scopeNow();
+  const issued = repo.createSessionGrant({ ...grant, restrictedScope: freshScope });
   const redeemed = repo.redeemSessionGrant(issued.id);
-  assert.deepEqual(redeemed.restrictedScope, restrictedScope);
+  assert.deepEqual(redeemed.restrictedScope, freshScope);
   const live = repo.createViewerSession({ ...redeemed, tokenHash: 'restricted' });
   const ordinary = repo.createViewerSession({
     ...grant, tokenHash: 'ordinary', sourceAuthorization: { ...grant.sourceAuthorization, id: id(601) },
@@ -147,10 +154,15 @@ test('restricted grant expiry, redemption and active sessions recheck current ex
   assert.equal(repo.viewerSessionLive(repo.getViewerSessionByHash('restricted')), false);
   assert.equal(repo.viewerSessionLive(ordinary), true);
   move.run(id(3), id(12));
+  // A->B->A: the session minted before the moves never revives.
+  assert.equal(repo.viewerSessionLive(repo.getViewerSessionByHash('restricted')), false);
+  const again = repo.createViewerSession({ ...grant, restrictedScope: scopeNow(), tokenHash: 'restricted-again' });
+  assert.equal(repo.viewerSessionLive(again), true);
   db.prepare('INSERT INTO revoked_published_session_authorizations VALUES (?, ?, ?)').run(
     grant.sourceAuthorization.type, grant.sourceAuthorization.id, grant.sourceAuthorization.version,
   );
   assert.equal(repo.viewerSessionLive(live), false);
+  assert.equal(repo.viewerSessionLive(again), false);
   assert.equal(repo.viewerSessionLive(ordinary), true);
 
   db.prepare('UPDATE viewer_sessions SET permissions_json=? WHERE token_hash=?').run(
@@ -191,4 +203,60 @@ test('Client D1 receipt strategy denies restricted rows to the exact old reader'
     /direct-viewer-grant-receipt-immutable/);
   db.exec("UPDATE viewer_direct_client_grants SET status='revoked',revoked_at='now' WHERE id='restricted'");
   assert.equal(db.prepare("SELECT status FROM viewer_direct_client_grants WHERE id='restricted'").get().status, 'revoked');
+});
+
+function sessionTables(db) {
+  db.exec(`
+    CREATE TABLE session_grants(id TEXT PRIMARY KEY, model_id TEXT, model_version_id TEXT, review_attempt_id TEXT,
+      session_mode TEXT, source_authorization_type TEXT, source_authorization_id TEXT, source_authorization_version INTEGER,
+      subject TEXT, audience TEXT, permissions_json TEXT, display_units TEXT, expires_at TEXT, created_at TEXT, redeemed_at TEXT);
+    CREATE TABLE viewer_sessions(id TEXT PRIMARY KEY, token_hash TEXT, model_id TEXT, model_version_id TEXT,
+      review_attempt_id TEXT, session_mode TEXT, source_authorization_type TEXT, source_authorization_id TEXT,
+      source_authorization_version INTEGER, subject TEXT, audience TEXT, permissions_json TEXT, display_units TEXT,
+      expires_at TEXT, created_at TEXT, updated_at TEXT, revoked_at TEXT);
+    CREATE TABLE revoked_published_session_authorizations(source_authorization_type TEXT,
+      source_authorization_id TEXT, source_authorization_version INTEGER);
+    CREATE TABLE service_nonces(created_at TEXT);
+    CREATE TABLE service_idempotency(expires_at TEXT);
+  `);
+}
+
+test('mint compares the captured generation, eligibility and tombstone inside one write transaction', t => {
+  const { ViewerRepository } = require('../server/repository');
+  const { db } = fixture(t);
+  sessionTables(db);
+  const project = id(500);
+  for (const table of ['project_folders', 'processing_tasks', 'model_outputs'])
+    db.prepare(`UPDATE ${table} SET project_id=? WHERE project_id='project'`).run(project);
+  db.prepare('UPDATE projects SET id=?').run(project);
+  const repo = new ViewerRepository(db);
+  const generation = () => db.prepare('SELECT generation FROM task_authorization_generations WHERE task_id=?').get(id(12)).generation;
+  const grant = (version = 1, captured = generation()) => ({
+    modelId: id(112), modelVersionId: id(212), subject: 'client:synthetic', audience: 'client',
+    sourceAuthorization: { type: 'direct_client_grant', id: id(700), version },
+    permissions: { view: true }, expiresAt: new Date(Date.now() + 60000).toISOString(),
+    restrictedScope: { version: 1, projectId: project, taskId: id(12), generation: captured, exclusions: mask },
+  });
+
+  // The eligibility read and the INSERT run while SQLite holds the write transaction.
+  const firstGrant = grant();
+  const prepare = db.prepare.bind(db);
+  const seen = [];
+  db.prepare = sql => { if (/task_authorization_generations|INSERT INTO session_grants/.test(sql)) seen.push(db.isTransaction ? true : sql.slice(0, 60)); return prepare(sql); };
+  repo.createSessionGrant(firstGrant);
+  db.prepare = prepare;
+  assert.ok(seen.length >= 2 && seen.every(item => item === true), `restricted mint runs inside BEGIN IMMEDIATE ${JSON.stringify(seen)}`);
+
+  // Move during mint: the issuer captured the generation before the move landed.
+  const captured = generation();
+  db.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?').run(id(2), id(12));
+  db.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?').run(id(3), id(12));
+  assert.throws(() => repo.createSessionGrant(grant(1, captured)), /restricted session scope/);
+  assert.throws(() => repo.createViewerSession({ ...grant(1, captured), tokenHash: 'stale' }), /restricted session scope/);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM session_grants').get().count, 1);
+
+  // A delayed issuer cannot mint under an acknowledged old grant version, even at the current generation.
+  db.prepare('INSERT INTO revoked_published_session_authorizations VALUES (?, ?, ?)').run('direct_client_grant', id(700), 1);
+  assert.throws(() => repo.createSessionGrant(grant(1)), /source authorization is revoked/);
+  assert.ok(repo.createSessionGrant(grant(2)).id);
 });

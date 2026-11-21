@@ -800,6 +800,9 @@ class ViewerRepository {
     const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
     if (sessionMode !== 'published' && sourceId !== null)
       throw new TypeError('source authorization is only valid for published sessions');
+    // Restricted mints check eligibility and the exact captured task generation,
+    // the source-version tombstone and the insert inside one write transaction.
+    return this.restrictedAtomically(restrictedScope, () => {
     const inserted = this.database.prepare(`INSERT INTO session_grants(
       id,model_id,model_version_id,review_attempt_id,session_mode,
       source_authorization_type,source_authorization_id,source_authorization_version,
@@ -816,6 +819,12 @@ class ViewerRepository {
     if (inserted.changes !== 1)
       throw Object.assign(new Error('source authorization is revoked'), { code: 'source_authorization_revoked' });
     return { id, modelId, modelVersionId, reviewAttemptId, sessionMode, sourceAuthorization: authorization, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
+    });
+  }
+
+  restrictedAtomically(restrictedScope, callback) {
+    if (restrictedScope === undefined || this.database.isTransaction) return callback();
+    return this.transaction(callback);
   }
 
   createSessionGrantAudited(input, audit) {
@@ -887,6 +896,7 @@ class ViewerRepository {
     const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
     if (sessionMode !== 'published' && sourceId !== null)
       throw new TypeError('source authorization is only valid for published sessions');
+    return this.restrictedAtomically(restrictedScope, () => {
     const inserted = this.database.prepare(`INSERT INTO viewer_sessions(
       id,token_hash,model_id,model_version_id,review_attempt_id,session_mode,
       source_authorization_type,source_authorization_id,source_authorization_version,
@@ -902,6 +912,7 @@ class ViewerRepository {
     );
     if (inserted.changes !== 1) return null;
     return this.getViewerSessionByHash(tokenHash);
+    });
   }
 
   getViewerSessionByHash(tokenHash) {

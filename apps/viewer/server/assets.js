@@ -216,6 +216,22 @@ async function pathTokenAuthorization(req, projectId) {
   return false;
 }
 
+// Direct-client sessions are rechecked from the database immediately before
+// protected bytes leave: a task move, publication change, generation bump or
+// source tombstone that lands during an awaited integrity check denies here.
+// A response that passes this check is then handed to nginx or sendFile and is
+// not interrupted mid-stream; the next request (or next Range) is refused.
+function presentedDirectSessionsStillLive(req) {
+  if (!canonicalRepository) return true;
+  const tokens = [req.params?.token, req.cookies?.[VIEWER_COOKIE]].filter(value => typeof value === 'string' && value);
+  for (const token of tokens) {
+    const session = canonicalRepository.getViewerSessionByHash(auth.hashToken(token));
+    if (session && (session.restrictedScope !== undefined || session.sourceAuthorization?.type === 'direct_client_grant')
+      && !canonicalRepository.viewerSessionLive(session)) return false;
+  }
+  return true;
+}
+
 function xAccelLocation(abs) {
   if (!config.xAccelRedirectPrefix) return null;
   const roots = [
@@ -262,6 +278,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   // intermediary or browser cache from serving a previously authorized URL
   // after its session/share has expired or been revoked.
   if(share){const current=canonicalRepository.getPublicShare(share.id);if(!canonicalRepository.publicShareLive(current)||!revisionMatches(current,{shareRevision:share.authorizationRevision})||!assetAllowed(current,publishedAsset?.kind))return res.status(403).json({error:'not authorized'});}
+  if (!presentedDirectSessionsStillLive(req)) return res.status(403).json({ error: 'not authorized' });
   res.setHeader('Cache-Control', 'private, no-store');
 
   const accelerated = xAccelLocation(abs);
@@ -311,6 +328,7 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     const stat = fs.statSync(absolute);
     if (stat.size !== photo.byteSize || await sha256File(absolute) !== photo.sha256) return res.status(404).json({ error: 'photo not found' });
     if(authorization.share){const current=await pathTokenAuthorization(req,req.params.id);if(!current?.cameras)return res.status(403).json({error:'not authorized'});}
+    if (!presentedDirectSessionsStillLive(req)) return res.status(403).json({ error: 'not authorized' });
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Content-Type', photo.contentType);
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -373,6 +391,7 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
 });
 
 module.exports = router;
+module.exports.presentedDirectSessionsStillLive = presentedDirectSessionsStillLive;
 module.exports.setRepository = setRepository;
 module.exports.setProcessingRepository = setProcessingRepository;
 module.exports.setSourceAuthorizationValidator = setSourceAuthorizationValidator;

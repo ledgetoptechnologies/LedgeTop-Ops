@@ -301,8 +301,10 @@ test('whole-project client scope requires current and future publications',()=>{
   f.form.elements.wholeProject.checked=true;f.form.elements.includeFuturePublished.checked=false;
   assert.throws(()=>f.context.clientGrantBody(f.form,null),/must include/);
   f.form.elements.includeFuturePublished.checked=true;assert.equal(f.context.clientGrantBody(f.form,null).grant.includeFuturePublished,true);
-  f.context.shareModal('project');assert.match(f.html(),/name="wholeProject" required/);
-  assert.doesNotMatch(f.html(),/name="(?:includeFuturePublished|wholeProject)" checked/);
+  // New legacy project grants are refused by the server; the legacy panel no longer offers the form.
+  f.context.shareModal('project');assert.doesNotMatch(f.html(),/name="wholeProject"|name="includeFuturePublished"/);
+  assert.match(f.context.clientShareCard(f.output,null),/New whole-project shares are direct client shares\./);
+  assert.doesNotMatch(f.context.clientShareCard(f.output,null),/id="client-grant-form"/);
 });
 
 test('project sharing has no public creation form or public task forms',async()=>{
