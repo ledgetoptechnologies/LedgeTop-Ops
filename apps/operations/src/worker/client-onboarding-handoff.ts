@@ -192,6 +192,11 @@ export async function issueClientOnboardingWithHandoff(database: D1Database, raw
   } catch { return issueDenied(); }
 }
 
+export function assertInviteMailKeyringsDisjoint(handoff: ClientOnboardingKeyring, mail: InviteMailKeyring): void {
+  const encryption = Object.values(mail.encryptionKeys), fingerprint = Object.values(mail.fingerprintKeys);
+  if (Object.values(handoff.keys).some(value => encryption.includes(value) || fingerprint.includes(value))) throw Error();
+}
+
 /** Unmounted email issuance. The caller must enforce its default-off feature gate and current scope authority. */
 export async function issueClientOnboardingMailWithHandoff(database: D1Database, raw: unknown,
   keyring: ClientOnboardingKeyring, recipient: unknown, mailKeys: InviteMailKeyring): Promise<Readonly<{
@@ -202,9 +207,8 @@ export async function issueClientOnboardingMailWithHandoff(database: D1Database,
     const ring = snapshotClientOnboardingKeyring(keyring), mailRing = snapshotInviteMailKeyring(mailKeys), address = normalizeInviteDeliveryAddress(recipient);
     const envelope = record(raw, ["authenticatedNativeStaff", "request"]);
     const authenticated = envelope && actor(envelope.authenticatedNativeStaff), base = envelope && baseRequest(envelope.request);
-    if (!authenticated || !base || !address || base.targetClientRecordId !== null
-      || Object.values(ring.keys).some(value => Object.values(mailRing.encryptionKeys).includes(value)
-        || Object.values(mailRing.fingerprintKeys).includes(value))) throw Error();
+    if (!authenticated || !base || !address || base.targetClientRecordId !== null) throw Error();
+    assertInviteMailKeyringsDisjoint(ring, mailRing);
     if (authenticated.verifiedLogin && !await assertCurrentStaffLogin(database, authenticated.verifiedLogin)) throw Error();
     const db = database.withSession("first-primary");
     const find = async () => parseRow(await db.prepare(`SELECT handoff.command_id,handoff.invitation_id,

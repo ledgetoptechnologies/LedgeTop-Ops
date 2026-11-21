@@ -9,9 +9,10 @@ import { authenticateNativeStaffWithAdmissionVersion,
   type AuthenticatedNativeStaff,
   type AuthenticatedNativeStaffWithAdmissionVersion,
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
-import { issueClientOnboardingWithHandoff, issueClientOnboardingMailWithHandoff, revealClientOnboardingSecret,
+import { assertInviteMailKeyringsDisjoint, issueClientOnboardingWithHandoff, issueClientOnboardingMailWithHandoff, revealClientOnboardingSecret,
   snapshotClientOnboardingKeyring, type ClientOnboardingKeyring } from "./client-onboarding-handoff";
 import { normalizeInviteDeliveryAddress, snapshotInviteMailKeyring } from "./client-onboarding-invite-mail-crypto";
+import { mailIssuanceSchemaFence } from "./client-onboarding-target-schema";
 import { readClientOnboardingSubmissionForReview, listClientOnboardingSubmissionsForReview } from "./client-onboarding-review";
 import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approval";
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
@@ -133,6 +134,13 @@ function keyring(value: unknown): ClientOnboardingKeyring {
     return snapshotClientOnboardingKeyring(JSON.parse(value) as unknown);
   } catch { throw new HttpFailure(503, "client_onboarding_unavailable"); }
 }
+function mailKeyring(value: unknown) {
+  try {
+    if (typeof value !== "string" || value.length > 4_096 || encoder.encode(value).byteLength > 4_096) throw Error();
+    return snapshotInviteMailKeyring(JSON.parse(value) as unknown);
+  } catch { throw new HttpFailure(503, "client_onboarding_unavailable"); }
+}
+
 async function hmac(secret: string, message: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret),
     { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -272,7 +280,8 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     const url = new URL(request.url);
     const route = clientOnboardingStaffHttpRequest(request.method, url.pathname);
     if (!route) throw new HttpFailure(404, "not_found");
-    if (route === "create-email" && dependencies.inviteMailIssuanceEnabled !== "true") throw new HttpFailure(404, "not_found");
+    const inviteMailEnabled = dependencies.inviteMailIssuanceEnabled === "true";
+    if (route === "create-email" && !inviteMailEnabled) throw new HttpFailure(404, "not_found");
     if (route === "target-choices" && dependencies.inviteTargetChoicesEnabled !== "true") throw new HttpFailure(404, "not_found");
     if (route === "target-search" && (dependencies.inviteTargetChoicesEnabled !== "true"
       || dependencies.inviteTargetIssuanceEnabled !== "true")) throw new HttpFailure(404, "not_found");
@@ -282,8 +291,10 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     const projectAlphaApiV2Connections = dependencies.projectAlphaApiV2Connections;
     const inviteDestinationBindingsJson = dependencies.inviteDestinationBindingsJson;
     const recipientOrigin = dependencies.recipientOrigin;
-    const handoff = route === "create" || route === "create-email" || route === "reveal" ? keyring(dependencies.handoffKeyringJson) : undefined;
-    const mailKeys = route === "create-email" ? snapshotInviteMailKeyring(JSON.parse(dependencies.inviteMailKeysJson ?? "null")) : undefined;
+    const handoffConfig = dependencies.handoffKeyringJson;
+    const mailConfig = dependencies.inviteMailKeysJson;
+    const handoff = route === "create" || route === "create-email" || route === "reveal" ? keyring(handoffConfig) : undefined;
+    const mailKeys = route === "create-email" ? mailKeyring(mailConfig) : undefined;
     const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: dependencies.environment,
       EXPECTED_HOST: dependencies.expectedHost, OPERATIONS_ORIGINS: dependencies.operationsOrigins }, authority.origin);
     if (!requestOrigin || url.origin !== requestOrigin || url.search || url.hash)
@@ -362,11 +373,22 @@ export async function handleClientOnboardingStaffHttp(request: Request,
             // Targeting needs a complete connection identity. Ordinary invitations still use their existing scope checks.
           }
         }
+        let mailAvailable = false;
+        if (inviteMailEnabled && destinationSourceIds.length > 0) {
+          try {
+            assertInviteMailKeyringsDisjoint(keyring(handoffConfig), mailKeyring(mailConfig));
+            await mailIssuanceSchemaFence(authority.database.withSession("first-primary"));
+            mailAvailable = true;
+          } catch {
+            // Mail prerequisites are independent of ordinary invitation scopes.
+          }
+        }
+        unexpired(auth);
         return response(200, { ...choices, destinationSourceIds,
           ...(targetDestinationSourceIds.length > 0 ? { targetDestinationSourceIds } : {}),
-          ...(destinationSourceIds.length > 0 && dependencies.inviteMailIssuanceEnabled === "true"
-            ? { inviteMailIssuanceAvailable: true } : {}) });
+          ...(mailAvailable ? { inviteMailIssuanceAvailable: true } : {}) });
       } catch (error) {
+        if (error instanceof HttpFailure) throw error;
         if (error instanceof Error && error.message === "client_onboarding_scope_choices_denied")
           throw new HttpFailure(403, "client_onboarding_denied");
         throw new HttpFailure(503, "client_onboarding_unavailable");

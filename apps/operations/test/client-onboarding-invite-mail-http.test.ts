@@ -1,19 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const calls=vi.hoisted(()=>({auth:vi.fn(),scope:vi.fn(),issue:vi.fn(),rate:vi.fn()}));
+const calls=vi.hoisted(()=>({auth:vi.fn(),scope:vi.fn(),issue:vi.fn(),rate:vi.fn(),schema:vi.fn()}));
 vi.mock("../src/worker/native-staff-auth",()=>({authenticateNativeStaffWithAdmissionVersion:calls.auth}));
 vi.mock("../src/worker/client-onboarding-scope-choices",()=>({readClientOnboardingScopeChoices:calls.scope}));
 vi.mock("../src/worker/native-staff-onboarding-rate-limit",()=>({consumeNativeStaffOnboardingRateLimit:calls.rate}));
-vi.mock("../src/worker/client-onboarding-handoff",()=>({
- snapshotClientOnboardingKeyring:(value:unknown)=>value,issueClientOnboardingWithHandoff:vi.fn(),
- issueClientOnboardingMailWithHandoff:calls.issue,revealClientOnboardingSecret:vi.fn(),
+vi.mock("../src/worker/client-onboarding-handoff",async original=>({
+ ...await original<typeof import("../src/worker/client-onboarding-handoff")>(),
+ issueClientOnboardingWithHandoff:vi.fn(),issueClientOnboardingMailWithHandoff:calls.issue,
+ revealClientOnboardingSecret:vi.fn(),
 }));
+vi.mock("../src/worker/client-onboarding-target-schema",()=>({mailIssuanceSchemaFence:calls.schema}));
 import {handleClientOnboardingStaffHttp,type ClientOnboardingStaffHttpDependencies} from "../src/worker/client-onboarding-staff-http";
 const origin="https://ops.ledgetopdroneservices.com";
 const actor={identity:{kind:"native" as const,staffId:"staff:test",verifiedAccessSubject:"access|staff:test",
  email:"staff@example.test",displayName:"Staff",profileVersion:1},admissionVersion:1,verifiedUntil:"2099-01-01T00:00:00.000Z"};
 const binding={sourceId:"project-alpha:secondary",businessAreaId:"area:tech",divisionId:"division:tech"};
 const keys={activeEncryptionKeyId:"enc",activeFingerprintKeyId:"mac",encryptionKeys:{enc:"b".repeat(64)},fingerprintKeys:{mac:"c".repeat(64)}};
-const dependencies={environment:"production",expectedHost:"ops.ledgetopdroneservices.com",database:{} as D1Database,
+const dependencies={environment:"production",expectedHost:"ops.ledgetopdroneservices.com",database:{withSession:(mode:string)=>{expect(mode).toBe("first-primary");return {};}} as D1Database,
  configuration:{enabled:true,issuer:"https://synthetic-team.cloudflareaccess.com",staffAudience:"synthetic-staff-audience",
   origin,csrfSecret:"synthetic-client-onboarding-secret-at-least-32-bytes"},
  handoffKeyringJson:JSON.stringify({activeKeyId:"handoff",keys:{handoff:"a".repeat(64)}}),
@@ -27,13 +29,13 @@ const request=(path:string,method:string,csrf?:string,input?:unknown)=>new Reque
 async function csrf(){const reply=await handleClientOnboardingStaffHttp(request("/api/client-onboarding/staff/session","GET"),dependencies);
  expect(reply.status).toBe(200);return (await reply.json() as {csrfToken:string}).csrfToken;}
 const path="/api/client-onboarding/staff/create-email";
-beforeEach(()=>{vi.clearAllMocks();calls.auth.mockResolvedValue(actor);calls.rate.mockResolvedValue(true);
+beforeEach(()=>{vi.clearAllMocks();calls.auth.mockResolvedValue(actor);calls.rate.mockResolvedValue(true);calls.schema.mockResolvedValue({});
  calls.scope.mockResolvedValue({scopes:[{businessAreaId:binding.businessAreaId,name:"Tech",allowAreaWide:false,
   divisions:[{divisionId:binding.divisionId,name:"Tech"}]}]});
  calls.issue.mockResolvedValue({invitationId:"22222222-2222-4222-8222-222222222222",expiresAt:body.expiresAt,
   requestSha256:"a".repeat(64),state:"pending",mailStatus:"queued"});});
 describe("default-off onboarding mail issuance HTTP",()=>{
- it("offers email only with the explicit flag and an authorized destination",async()=>{
+ it("offers email only with the explicit flag, authorized destination, keys and reviewed schema",async()=>{
   const token=await csrf();
   const scopePath="/api/client-onboarding/staff/scope-choices";
   const read=async (deps:ClientOnboardingStaffHttpDependencies)=>{
@@ -45,6 +47,19 @@ describe("default-off onboarding mail issuance HTTP",()=>{
   expect(await read({...dependencies,inviteMailIssuanceEnabled:undefined})).not.toHaveProperty("inviteMailIssuanceAvailable");
   expect(await read({...dependencies,inviteMailIssuanceEnabled:"TRUE"})).not.toHaveProperty("inviteMailIssuanceAvailable");
   expect(await read({...dependencies,inviteDestinationBindingsJson:undefined})).not.toHaveProperty("inviteMailIssuanceAvailable");
+  expect(calls.schema).toHaveBeenCalledOnce();
+  for (const overrides of [{inviteMailKeysJson:undefined}, {inviteMailKeysJson:"{}"},
+    {inviteMailKeysJson:" ".repeat(4097)}, {handoffKeyringJson:undefined},
+    {inviteMailKeysJson:JSON.stringify({...keys,encryptionKeys:{...keys.encryptionKeys,retired:"a".repeat(64)}})}]) {
+   const offer=await read({...dependencies,...overrides});
+   expect(offer).toMatchObject({destinationSourceIds:[binding.sourceId]});
+   expect(offer).not.toHaveProperty("inviteMailIssuanceAvailable");
+  }
+  expect(calls.schema).toHaveBeenCalledOnce();
+  calls.schema.mockRejectedValueOnce(Error("fixture_missing_or_changed_schema"));
+  const unavailable=await read(dependencies);
+  expect(unavailable).toMatchObject({destinationSourceIds:[binding.sourceId]});
+  expect(unavailable).not.toHaveProperty("inviteMailIssuanceAvailable");
   calls.scope.mockResolvedValueOnce({scopes:[]});
   expect(await read(dependencies)).not.toHaveProperty("inviteMailIssuanceAvailable");
   expect(calls.issue).not.toHaveBeenCalled();
