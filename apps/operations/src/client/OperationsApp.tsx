@@ -552,10 +552,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Operations",
       "Detailed operational schedules, projects, and task queues managed in Project Alpha.",
     ],
-    clients: [
-      "Client Hub",
-      "Review requests and open each client workspace for contacts, access, projects, and shared work.",
-    ],
+    clients: ["Client Hub", ""],
     notifications: [
       "Notifications",
       "Review delivery notices and notification history without mixing them into operational work.",
@@ -590,11 +587,13 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Competitors, website visits and Google search results for each Ledge Top business.",
     ],
   };
+  // Client Hub is a dense working list: a compact title, no eyebrow that only repeats it.
+  const compact = page === "clients";
   return (
-    <div className="page-heading">
-      <span className="eyebrow">{page === "dashboard"
+    <div className={compact ? "page-heading page-heading-compact" : "page-heading"}>
+      {!compact && <span className="eyebrow">{page === "dashboard"
         ? new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })
-        : SECTION_GROUP[page]}</span>
+        : SECTION_GROUP[page]}</span>}
       <h1>{copy[page][0]}</h1>
       {(page === "dashboard" || copy[page][1]) && <p>{page === "dashboard" ? `${greeting(displayName)}. Here's what needs attention today.` : copy[page][1]}</p>}
     </div>

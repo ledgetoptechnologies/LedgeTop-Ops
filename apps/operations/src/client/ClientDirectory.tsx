@@ -287,26 +287,24 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
   };
 
   return <section className="client-directory-workspace" aria-label="Client directory">
+    {/* One compact row: search (Enter or a pause searches), source, sort, type tabs, then Add client profile. */}
     <div className="client-directory-toolbar">
       <form className="client-directory-search" role="search" onSubmit={search}>
-        <label htmlFor="client-directory-query">Search clients</label>
-        <div>
-          <input id="client-directory-query" type="search" value={draft} maxLength={200}
-            placeholder={searchCapabilities.businessContacts ? "Client name, business contact, or project" : "Client or project name"}
-            aria-describedby="client-directory-search-help" autoComplete="off"
-            onChange={event => setDraft(event.target.value)} />
-          <button type="submit" className="button-orange">Search</button>
-          {(draft || query.q) && <button type="button" className="button-ghost"
-            onClick={() => changeQuery({ ...query, q: "" })}>Clear search</button>}
-        </div>
-        <small id="client-directory-search-help">
+        <label className="visually-hidden" htmlFor="client-directory-query">Search clients</label>
+        <input id="client-directory-query" type="search" value={draft} maxLength={200} enterKeyHint="search"
+          placeholder={searchCapabilities.businessContacts ? "Search client, contact or project" : "Search client or project"}
+          aria-describedby="client-directory-search-help" autoComplete="off"
+          onChange={event => setDraft(event.target.value)} />
+        {(draft || query.q) && <button type="button" className="button-ghost"
+          onClick={() => changeQuery({ ...query, q: "" })}>Clear search</button>}
+        <small id="client-directory-search-help" className="visually-hidden">
           Search by client name{searchCapabilities.businessContacts ? ", business contact name, email or phone" : ""} or project.
           {searchCapabilities.portalContacts
             && ` Portal contacts are included after ${searchCapabilities.portalContactMinimumQueryLength} characters.`}
         </small>
       </form>
-      <div className="client-directory-selectors">{(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
-        Client source
+      {(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
+        <span className="visually-hidden">Client source</span>
         <select id="client-directory-source" value={query.source}
           onChange={event => changeQuery({ ...query, source: event.target.value })}>
           <option value="">All available sources</option>
@@ -314,29 +312,29 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
           {sources.map(source => <option key={source.source_id} value={source.source_id}>{sourceDisplayName(source.display_name, source.source_id)}</option>)}
         </select>
       </label>}
-        <label className="client-directory-sort" htmlFor="client-directory-sort">Sort clients
-          <select id="client-directory-sort" value={query.sort} onChange={event => changeQuery({ ...query, sort: event.target.value === "name" ? "name" : "recent" })}>
-            <option value="recent">Recent business updates</option><option value="name">Name (A–Z)</option>
-          </select>
-        </label>
+      <label className="client-directory-sort" htmlFor="client-directory-sort"><span className="visually-hidden">Sort clients</span>
+        <select id="client-directory-sort" value={query.sort} onChange={event => changeQuery({ ...query, sort: event.target.value === "name" ? "name" : "recent" })}>
+          <option value="recent">Recent business updates</option><option value="name">Name (A–Z)</option>
+        </select>
+      </label>
+      <div className="client-directory-filters ltds-segmented" role="group" aria-label="Client type">
+        {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"
+          aria-pressed={query.kind === filter.kind}
+          onClick={() => changeQuery({ ...query, kind: filter.kind })}>{filter.label}</button>)}
       </div>
+      {nativeDirectoryProfileWrites && <NativeDirectoryProfileCreate />}
     </div>
-    {query.sort === "recent" && <p className="client-directory-status">Sorted by the latest business record change you can see.</p>}
-    {nativeDirectoryProfileWrites && <NativeDirectoryProfileCreate />}
-    <div className="client-directory-filters ltds-segmented" role="group" aria-label="Client type">
-      {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"
-        aria-pressed={query.kind === filter.kind}
-        onClick={() => changeQuery({ ...query, kind: filter.kind })}>{filter.label}</button>)}
+    <div className="client-directory-meta">
+      <p className="client-directory-status" role="status" aria-live="polite">
+        {loading === "initial" ? "Loading clients…" : loaded
+          ? `${number(clients.length)} client${clients.length === 1 ? "" : "s"} shown${query.q ? ` matching “${query.q}”` : ""}${loading === "more" ? " · Loading more…" : ""}`
+          : "Client directory could not be loaded."}
+      </p>
+      {loaded && <p className="client-directory-status client-directory-freshness">
+        {indexUpdatedAt ? <>Directory refreshed <time dateTime={indexUpdatedAt}>{new Date(indexUpdatedAt).toLocaleString()}</time></>
+          : "Directory refreshed periodically."}
+      </p>}
     </div>
-    <p className="client-directory-status" role="status" aria-live="polite">
-      {loading === "initial" ? "Loading clients…" : loaded
-        ? `${number(clients.length)} client${clients.length === 1 ? "" : "s"} shown${query.q ? ` matching “${query.q}”` : ""}${loading === "more" ? " · Loading more…" : ""}`
-        : "Client directory could not be loaded."}
-    </p>
-    {loaded && <p className="client-directory-status client-directory-freshness">
-      {indexUpdatedAt ? <>Directory refreshed <time dateTime={indexUpdatedAt}>{new Date(indexUpdatedAt).toLocaleString()}</time>.</>
-        : "Directory refreshed periodically."} This reflects directory synchronization, not client activity.
-    </p>}
     {error && <Card><div role="alert"><strong>{clients.length ? "More clients could not be loaded" : "Client directory unavailable"}</strong><p>{error}</p></div>
       <button type="button" className="button-orange" disabled={Boolean(loading)}
         onClick={() => void load(query, failedCursor.current)}>{staleCursor ? "Refresh clients" : "Retry clients"}</button>
@@ -355,8 +353,7 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
         <div className="client-directory-card-header"><small>{client.kind === "organization" ? "Organization" : "Individual client"}</small>
           {!client.business_party_id && <ClientPortalStatusPill client={client} />}</div>
         <h3>{client.business_party_name || client.display_name}</h3>
-        {client.business_party_id ? <><small>Linked customer · {number(client.business_party_member_count || 0)} business records</small>
-          <p className="client-directory-status">Open each source workspace for its contacts, history and access.</p></>
+        {client.business_party_id ? <small>Linked customer · {number(client.business_party_member_count || 0)} business records</small>
           : client.source_name && <small>{sourceDisplayName(client.source_name, client.source_id)}</small>}
         {!client.business_party_id && client.root_namespace === "portal" && <small>Portal workspace · business link pending</small>}
         <ClientBusinessUpdate value={client.meaningful_activity_at} asOf={activityAsOf} />
@@ -365,7 +362,6 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
           <div><dt>Contact records</dt><dd>{number(client.contact_count ?? client.contacts?.length ?? 0)}</dd></div>
           <div><dt>Requests</dt><dd>{number(client.request_count)}</dd></div>
         </dl>}
-        <span className="client-directory-open">Open client workspace <span aria-hidden="true">→</span></span>
       </a>)}
     </div>
     {loaded && !loading && !error && !clients.length && <Card>

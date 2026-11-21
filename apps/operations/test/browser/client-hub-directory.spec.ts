@@ -245,7 +245,7 @@ test("directory loads bounded direct-link cards and appends pages without losing
   await expect(page.getByRole("button", { name: "All", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".client-directory-card")).toHaveCount(4);
   await expect(page.locator(".client-directory-freshness time")).toHaveAttribute("datetime", "2026-08-25T12:00:00.000Z");
-  await expect(page.getByText("This reflects directory synchronization, not client activity.", { exact: false })).toBeVisible();
+  await expect(page.locator(".client-directory-freshness")).toContainText("Directory refreshed");
   await expect(page.locator(".client-directory-workspace details")).toHaveCount(0);
   await expect(page.getByText("Shared projects", { exact: true })).toHaveCount(4);
   await expect(page.getByText("Contact records", { exact: true })).toHaveCount(4);
@@ -280,7 +280,7 @@ test("server search finds unloaded clients and preserves query and kind through 
   await page.clock.install({ time: new Date("2034-01-01T00:00:00Z") });
   await page.clock.pauseAt(new Date("2034-01-01T00:00:01Z"));
   await page.getByRole("searchbox", { name: "Search clients" }).fill("unloaded@example.test");
-  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Search clients" }).press("Enter");
   await expect(page.getByRole("link", { name: "Open Hidden customer client workspace" })).toBeVisible();
   await page.clock.resume();
   await expect(page.getByRole("link", { name: "Open Initial customer client workspace" })).toHaveCount(0);
@@ -413,10 +413,10 @@ test("a superseded server search cannot replace newer results", async ({ page })
   });
   await page.goto("/clients");
   await page.getByRole("searchbox", { name: "Search clients" }).fill("Slow");
-  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Search clients" }).press("Enter");
   await expect.poll(() => slowStarted).toBe(true);
   await page.getByRole("searchbox", { name: "Search clients" }).fill("Fast");
-  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Search clients" }).press("Enter");
   await expect(page.getByRole("link", { name: "Open Fast customer client workspace" })).toBeVisible();
   release();
   await expect(page.getByRole("link", { name: "Open Slow customer client workspace" })).toHaveCount(0);
@@ -445,7 +445,7 @@ test("initial failures, stale continuations, and empty searches have recoverable
   await expect(page.getByRole("alert")).toHaveCount(0);
   expect(requested.filter(url => url.searchParams.get("cursor") === "old-cursor")).toHaveLength(1);
   await page.getByRole("searchbox", { name: "Search clients" }).fill("No match");
-  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Search clients" }).press("Enter");
   await expect(page.getByText("No matching clients", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Reset filters" }).click();
   await expect(page).toHaveURL(/\/clients$/);
