@@ -14,6 +14,7 @@ import database from '../server/database.js';
 import { projectViewerMark } from '../viewer-mark-position.mjs';
 
 const modelId = 'synthetic-model';
+const ACCOUNT_B = { sourceAuthorization: { type: 'model_association', id: 'account-b', version: 3 } };
 const point = (changes = {}) => ({
   id: randomUUID(), geometry: { type: 'Point', coordinates: [-87, 43.05] }, name: 'Synthetic pin',
   color: '#88AA22', icon: 'pin', note: 'Test only', ...changes,
@@ -27,11 +28,14 @@ async function openApi(t) {
   db.exec(schema.VIEWER_MARKS_SQL);
   assert.equal(schema.verifyViewerMarksSchema(db), true);
   const sessions = new Map();
+  // Client sessions carry the portal account they were issued under.
   const session = (audience, subject, changes = {}) => {
     const token = randomUUID().replaceAll('-', '');
     sessions.set(auth.hashToken(token), {
       audience, subject, modelId, modelVersionId: 'synthetic-v1',
-      permissions: { view: true, measure: true, personalMeasurements: true }, ...changes,
+      permissions: { view: true, measure: true, personalMeasurements: true },
+      sourceAuthorization: audience === 'client' ? { type: 'model_association', id: 'account-a', version: 1 } : null,
+      ...changes,
     });
     return token;
   };
@@ -61,76 +65,117 @@ async function openApi(t) {
   return { session, request, sessions };
 }
 
-test('visibility: private stays with its owner, shared reaches the model, internal stays with staff', async t => {
+const names = request => async token => (await request(token)).body.marks.map(mark => mark.name).sort();
+
+test('client privacy: two clients on one model never read each other\'s marks', async t => {
   const { session, request } = await openApi(t);
+  const list = names(request);
   const staff = session('ops', 'staff-person');
-  const client = session('client', 'client-a');
-  const otherClient = session('client', 'client-b');
-  const companyLogin = session('client', 'shared-company', { permissions: { view: true, measure: true } });
+  const clientA = session('client', 'client-a');
+  const colleagueA = session('client', 'client-a2');
+  const clientB = session('client', 'client-b', ACCOUNT_B);
   const otherModel = session('client', 'client-a', { modelId: 'other-model', modelVersionId: 'other-v1' });
 
-  const mine = point({ name: 'Private pin' });
-  const created = await request(client, 'POST', '', mine);
+  const mine = point({ name: 'A private', visibility: 'private' });
+  const created = await request(clientA, 'POST', '', mine);
   assert.equal(created.status, 201);
   assert.equal(created.headers.get('cache-control'), 'no-store');
-  assert.equal(created.body.mark.visibility, 'private');
   assert.equal(created.body.mark.color, '#88aa22');
-  assert.equal((await request(client, 'POST', '', mine)).status, 200, 'same create replays');
-  const shared = (await request(client, 'POST', '', point({ name: 'Shared pin', visibility: 'shared' }))).body.mark;
-  const internal = (await request(staff, 'POST', '', point({ name: 'Internal pin', visibility: 'internal' }))).body.mark;
-  assert.equal((await request(client, 'POST', '', point({ visibility: 'internal' }))).status, 403);
+  assert.equal((await request(clientA, 'POST', '', mine)).status, 200, 'same create replays');
+  const withStaff = (await request(clientA, 'POST', '', point({ name: 'A with staff' }))).body.mark;
+  assert.equal(withStaff.visibility, 'staff', 'a client mark defaults to shared with project staff');
+  const fromB = (await request(clientB, 'POST', '', point({ name: 'B with staff', visibility: 'staff' }))).body.mark;
+  for (const visibility of ['internal', 'client', 'shared', 'everyone']) {
+    assert.ok([400, 403].includes((await request(clientA, 'POST', '', point({ visibility }))).status), visibility);
+  }
 
-  const names = async token => (await request(token)).body.marks.map(mark => mark.name).sort();
-  assert.deepEqual(await names(client), ['Private pin', 'Shared pin']);
-  assert.deepEqual(await names(otherClient), ['Shared pin']);
-  assert.deepEqual(await names(companyLogin), ['Shared pin']);
-  assert.deepEqual(await names(staff), ['Internal pin', 'Shared pin']);
-  assert.deepEqual(await names(otherModel), []);
-  assert.equal((await request(otherClient, 'GET', internal.id)).status, 404);
-  assert.equal((await request(staff, 'GET', mine.id)).status, 404);
-
-  const seenByOther = (await request(otherClient, 'GET', shared.id)).body.mark;
-  assert.equal(seenByOther.mine, false);
-  assert.equal(seenByOther.editable, false);
-  assert.equal(seenByOther.author, 'client');
-  assert.equal(seenByOther.owner, undefined, 'clients never see who else made a mark');
-  assert.equal((await request(staff, 'GET', shared.id)).body.mark.owner, 'client-a');
-
-  const read = await request(companyLogin);
-  assert.deepEqual(read.body.capabilities, { write: false, staff: false });
-  assert.equal((await request(companyLogin, 'POST', '', point())).status, 403);
+  assert.deepEqual(await list(clientA), ['A private', 'A with staff']);
+  assert.deepEqual(await list(clientB), ['B with staff']);
+  assert.deepEqual(await list(colleagueA), [], 'not even a colleague on the same account');
+  assert.deepEqual(await list(staff), ['A with staff', 'B with staff']);
+  assert.deepEqual(await list(otherModel), []);
+  for (const [token, id] of [[clientB, withStaff.id], [clientB, mine.id], [clientA, fromB.id], [colleagueA, withStaff.id], [staff, mine.id]]) {
+    assert.equal((await request(token, 'GET', id)).status, 404);
+    assert.equal((await request(token, 'DELETE', id, { revision: 1 })).status, 404);
+  }
+  const seenByStaff = (await request(staff, 'GET', withStaff.id)).body.mark;
+  assert.equal(seenByStaff.owner, 'client-a');
+  assert.equal(seenByStaff.ownerAccount, 'model_association:account-a');
+  assert.equal((await request(clientA, 'GET', withStaff.id)).body.mark.ownerAccount, undefined);
 });
 
-test('clients edit their own marks; staff edit every mark they can read; only owners change visibility', async t => {
+test('staff share a mark with one named client account only', async t => {
+  const { session, request } = await openApi(t);
+  const list = names(request);
+  const staff = session('ops', 'staff-person');
+  const clientA = session('client', 'client-a');
+  const companyA = session('client', 'company-login-a', { permissions: { view: true, measure: true } });
+  const clientB = session('client', 'client-b', ACCOUNT_B);
+  const unaccounted = session('client', 'legacy-client', { sourceAuthorization: null });
+  await request(clientA);
+  await request(clientB);
+
+  assert.equal((await request(clientA, 'GET', 'audiences')).status, 403);
+  const audiences = (await request(staff, 'GET', 'audiences')).body.audiences.map(row => row.account).sort();
+  assert.deepEqual(audiences, ['model_association:account-a', 'model_association:account-b']);
+
+  const internal = (await request(staff, 'POST', '', point({ name: 'Staff only' }))).body.mark;
+  assert.equal(internal.visibility, 'internal', 'staff marks default to staff only');
+  assert.equal((await request(staff, 'POST', '', point({ visibility: 'client' }))).status, 400, 'a share needs a named account');
+  assert.equal((await request(staff, 'POST', '', point({ visibility: 'client', shareAccount: 'model_association:never-seen' }))).status, 400);
+  assert.equal((await request(staff, 'POST', '', point({ visibility: 'staff' }))).status, 403);
+  const toA = (await request(staff, 'POST', '', point({ name: 'For A', visibility: 'client', shareAccount: 'model_association:account-a' }))).body.mark;
+  assert.equal(toA.shareAccount, 'model_association:account-a');
+
+  assert.deepEqual(await list(clientA), ['For A']);
+  assert.deepEqual(await list(companyA), ['For A'], 'a company login reads within its account');
+  assert.deepEqual(await list(clientB), []);
+  assert.deepEqual(await list(unaccounted), []);
+  assert.equal((await request(clientB, 'GET', toA.id)).status, 404);
+  assert.equal((await request(clientB, 'GET', internal.id)).status, 404);
+  const seenByA = (await request(clientA, 'GET', toA.id)).body.mark;
+  assert.equal(seenByA.editable, false);
+  assert.equal(seenByA.shareAccount, undefined, 'clients do not see share targets');
+  assert.equal((await request(clientA, 'PUT', toA.id, { ...point(), id: toA.id, revision: 1 })).status, 403);
+  assert.equal((await request(companyA, 'POST', '', point())).status, 403, 'company logins stay read-only');
+  assert.deepEqual((await request(companyA)).body.capabilities, { write: false, staff: false });
+
+  // Moving the share to B takes it away from A.
+  const moved = await request(staff, 'PUT', toA.id, { ...point({ name: 'For B' }), id: toA.id, revision: 1, visibility: 'client',
+    shareAccount: 'model_association:account-b' });
+  assert.equal(moved.status, 200);
+  assert.deepEqual(await list(clientA), []);
+  assert.deepEqual(await list(clientB), ['For B']);
+});
+
+test('clients edit their own marks; staff edit marks they can read; only owners change visibility', async t => {
   const { session, request } = await openApi(t);
   const staff = session('ops', 'staff-person');
+  const otherStaff = session('ops', 'staff-two');
   const client = session('client', 'client-a');
-  const otherClient = session('client', 'client-b');
-  const shared = (await request(client, 'POST', '', point({ visibility: 'shared' }))).body.mark;
+  const shared = (await request(client, 'POST', '', point({ visibility: 'staff' }))).body.mark;
   const body = (mark, changes) => ({ id: mark.id, geometry: mark.geometry, name: mark.name, color: mark.color, icon: mark.icon,
     note: mark.note, categoryId: mark.categoryId, elevationNavd88M: mark.elevationNavd88M, revision: mark.revision, ...changes });
 
-  assert.equal((await request(otherClient, 'PUT', shared.id, body(shared, { name: 'Hijack' }))).status, 403);
-  assert.equal((await request(otherClient, 'DELETE', shared.id, { revision: 1 })).status, 403);
   const moved = await request(staff, 'PUT', shared.id, body(shared, { geometry: { type: 'Point', coordinates: [-87.001, 43.051] } }));
   assert.equal(moved.status, 200);
   assert.equal(moved.body.mark.revision, 2);
   assert.equal((await request(staff, 'PUT', shared.id, body(moved.body.mark, { visibility: 'private' }))).status, 403);
-  assert.equal((await request(staff, 'PUT', shared.id, body(moved.body.mark, { visibility: 'internal' }))).status, 403);
   assert.equal((await request(client, 'PUT', shared.id, body(shared, { name: 'Stale' }))).status, 409);
   const renamed = await request(client, 'PUT', shared.id, body(moved.body.mark, { name: 'Renamed', elevationNavd88M: 251.25 }));
   assert.equal(renamed.status, 200);
   assert.equal(renamed.body.mark.elevationNavd88M, 251.25);
-  assert.equal(renamed.body.mark.visibility, 'shared');
+  assert.equal(renamed.body.mark.visibility, 'staff');
+  const hidden = await request(client, 'PUT', shared.id, body(renamed.body.mark, { visibility: 'private' }));
+  assert.equal(hidden.body.mark.visibility, 'private');
+  assert.equal((await request(staff, 'GET', shared.id)).status, 404, 'a client can take a mark back');
 
-  const staffMark = (await request(staff, 'POST', '', point({ visibility: 'internal' }))).body.mark;
-  const shared2 = await request(staff, 'PUT', staffMark.id, body(staffMark, { visibility: 'shared' }));
-  assert.equal(shared2.body.mark.visibility, 'shared');
-  assert.equal((await request(client, 'PUT', staffMark.id, body(shared2.body.mark, { name: 'No' }))).status, 403);
-
-  assert.equal((await request(staff, 'DELETE', shared.id, { revision: 3 })).status, 204);
-  assert.equal((await request(client, 'GET', shared.id)).status, 404);
-  assert.equal((await request(client, 'POST', '', { ...point(), id: shared.id })).status, 409, 'deleted ids stay used');
+  const staffMark = (await request(staff, 'POST', '', point())).body.mark;
+  assert.equal((await request(otherStaff, 'PUT', staffMark.id, body(staffMark, { name: 'Team edit' }))).status, 200);
+  assert.equal((await request(client, 'GET', staffMark.id)).status, 404);
+  assert.equal((await request(otherStaff, 'DELETE', staffMark.id, { revision: 2 })).status, 204);
+  assert.equal((await request(staff, 'GET', staffMark.id)).status, 404);
+  assert.equal((await request(staff, 'POST', '', { ...point(), id: staffMark.id })).status, 409, 'deleted ids stay used');
 });
 
 test('lines, areas and typed values are validated', async t => {
@@ -147,44 +192,59 @@ test('lines, areas and typed values are validated', async t => {
     { geometry: { type: 'Point', coordinates: ['-87', 43] } }, { geometry: { type: 'LineString', coordinates: [[-87, 43]] } },
     { geometry: { type: 'Polygon', coordinates: [[[-87, 43], [-87.1, 43]]] } }, { geometry: { type: 'Circle', coordinates: [0, 0] } },
     { name: ' ' }, { name: 'a\u0007b' }, { color: 'orange' }, { note: 'a'.repeat(2001) }, { icon: '../x' },
-    { elevationNavd88M: 'high' }, { elevationNavd88M: 99999 }, { visibility: 'everyone' }, { ownerSubject: 'spoofed' },
-    { categoryId: randomUUID() },
+    { elevationNavd88M: 'high' }, { elevationNavd88M: 99999 }, { visibility: 'everyone' }, { shareAccount: 'not an account' },
+    { ownerSubject: 'spoofed' }, { categoryId: randomUUID() },
   ]) {
     assert.equal((await request(client, 'POST', '', point(change))).status, 400, JSON.stringify(change));
   }
 });
 
-test('categories are per model, user-defined, and deleting one leaves marks intact', async t => {
+test('categories stay with their owner; clients see staff categories only on marks shared with them', async t => {
   const { session, request } = await openApi(t);
   const staff = session('ops', 'staff-person');
-  const client = session('client', 'client-a');
-  const otherClient = session('client', 'client-b');
+  const clientA = session('client', 'client-a');
+  const clientB = session('client', 'client-b', ACCOUNT_B);
+  await request(clientA);
   const category = { id: randomUUID(), name: 'Survey point', color: '#3366ff', icon: 'flag' };
-  assert.equal((await request(client, 'POST', 'categories', category)).status, 201);
-  assert.equal((await request(otherClient, 'POST', 'categories', { ...category, id: randomUUID(), name: 'survey POINT' })).status, 409);
-  const mark = (await request(client, 'POST', '', point({ categoryId: category.id, visibility: 'shared' }))).body.mark;
+  assert.equal((await request(clientA, 'POST', 'categories', category)).status, 201);
+  assert.equal((await request(clientA, 'POST', 'categories', { ...category, id: randomUUID(), name: 'survey POINT' })).status, 409);
+  const categoryB = { ...category, id: randomUUID() };
+  assert.equal((await request(clientB, 'POST', 'categories', categoryB)).status, 201, 'names are per owner, so nothing leaks');
+  const mark = (await request(clientA, 'POST', '', point({ categoryId: category.id }))).body.mark;
   assert.equal(mark.categoryId, category.id);
+  assert.equal((await request(clientB, 'POST', '', point({ categoryId: category.id }))).status, 400, 'no using another client\'s category');
 
-  const listed = (await request(otherClient)).body;
-  assert.equal(listed.categories[0].name, 'Survey point');
-  assert.equal(listed.categories[0].editable, false);
-  assert.equal((await request(otherClient, 'PUT', 'categories/' + category.id, { ...category, name: 'Mine', revision: 1 })).status, 403);
-  const renamed = await request(staff, 'PUT', 'categories/' + category.id, { ...category, name: 'Gate', revision: 1 });
+  const categoryIds = async token => (await request(token)).body.categories.map(row => row.id).sort();
+  assert.deepEqual(await categoryIds(clientB), [categoryB.id], 'only B\'s own category');
+  assert.equal((await request(clientB, 'PUT', 'categories/' + category.id, { ...category, name: 'Mine', revision: 1 })).status, 404);
+  assert.equal((await request(clientB, 'DELETE', 'categories/' + category.id, { revision: 1 })).status, 404);
+
+  const staffCategory = { id: randomUUID(), name: 'Gate', color: '#43a047', icon: 'gate' };
+  const unusedStaff = { id: randomUUID(), name: 'Internal review', color: '#e53935', icon: 'warning' };
+  await request(staff, 'POST', 'categories', staffCategory);
+  await request(staff, 'POST', 'categories', unusedStaff);
+  assert.equal((await request(staff, 'POST', '', point({ categoryId: category.id }))).status, 400, 'staff use staff categories');
+  assert.deepEqual(await categoryIds(clientA), [category.id]);
+  await request(staff, 'POST', '', point({ categoryId: staffCategory.id, visibility: 'client', shareAccount: 'model_association:account-a' }));
+  assert.deepEqual(await categoryIds(clientA), [category.id, staffCategory.id].sort(), 'a shared mark brings its category name');
+  assert.deepEqual(await categoryIds(clientB), [categoryB.id]);
+  assert.equal((await request(clientA)).body.categories.find(row => row.id === staffCategory.id).editable, false);
+  assert.equal((await request(staff)).body.categories.length, 4);
+
+  const renamed = await request(staff, 'PUT', 'categories/' + category.id, { ...category, name: 'Gate post', revision: 1 });
   assert.equal(renamed.status, 200);
-  assert.equal(renamed.body.category.name, 'Gate');
-  assert.equal((await request(client, 'DELETE', 'categories/' + category.id, { revision: 1 })).status, 409);
-  assert.equal((await request(client, 'DELETE', 'categories/' + category.id, { revision: 2 })).status, 204);
-  const after = (await request(client)).body;
-  assert.deepEqual(after.categories, []);
-  assert.equal(after.marks[0].categoryId, null);
-  assert.equal(after.marks[0].color, '#88aa22');
-  assert.equal((await request(client, 'POST', 'categories', { ...category, id: randomUUID() })).status, 201, 'a deleted name can be reused');
+  assert.equal((await request(clientA, 'DELETE', 'categories/' + category.id, { revision: 1 })).status, 409);
+  assert.equal((await request(clientA, 'DELETE', 'categories/' + category.id, { revision: 2 })).status, 204);
+  const after = (await request(clientA)).body;
+  assert.equal(after.marks.find(row => row.id === mark.id).categoryId, null);
+  assert.equal(after.marks.find(row => row.id === mark.id).color, '#88aa22');
+  assert.equal((await request(clientA, 'POST', 'categories', { ...category, id: randomUUID() })).status, 201, 'a deleted name can be reused');
 });
 
 test('GeoJSON import lands as one batch or not at all', async t => {
   const { session, request } = await openApi(t);
   const client = session('client', 'client-a');
-  const good = [point({ name: 'One' }), point({ name: 'Two', visibility: 'shared' })];
+  const good = [point({ name: 'One' }), point({ name: 'Two', visibility: 'private' })];
   const saved = await request(client, 'POST', 'batch', { marks: good });
   assert.equal(saved.status, 201);
   assert.equal(saved.body.marks.length, 2);
@@ -199,9 +259,10 @@ test('revoked, public and unverifiable sessions cannot read or write Marks', asy
   const revoked = session('client', 'client-a');
   sessions.get(auth.hashToken(revoked)).revoked = true;
   for (const token of [revoked, session('public', 'recipient'), session('client', 'no-measure', { permissions: { view: true } }),
-    session('client', 'stale', { modelVersionId: 'synthetic-v2' })]) {
+    session('client', 'stale', { modelVersionId: 'synthetic-v2' }), 'not-a-real-token-value']) {
     assert.equal((await request(token)).status, 403);
     assert.equal((await request(token, 'POST', '', point())).status, 403);
+    assert.equal((await request(token, 'GET', 'audiences')).status, 403);
   }
 });
 
@@ -213,7 +274,7 @@ test('schema 84 migrates in the ledger and a stamped database without the tables
   try {
     assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=84').get().name, 'viewer_coordinate_marks');
     assert.equal(schema.verifyViewerMarksSchema(db), true);
-    db.exec('DROP TABLE viewer_mark_categories');
+    db.exec('DROP TABLE viewer_mark_accounts');
   } finally { db.close(); }
   assert.throws(() => database.openDatabase(filename), { code: 'viewer_migration_history_conflict' });
 });

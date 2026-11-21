@@ -4,7 +4,7 @@
 // Scopes:
 //   session   - a live Viewer session bearer; the server decides who may write
 //   temporary - public links: marks live in this tab only and are never sent
-const MARK_FIELDS = ['id', 'geometry', 'name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility'];
+const MARK_FIELDS = ['id', 'geometry', 'name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility', 'shareAccount'];
 const UNDO_LIMIT = 20;
 const MESSAGES = {
   mark_revision_conflict: 'Someone else changed this mark. The list was reloaded.',
@@ -16,6 +16,8 @@ const MESSAGES = {
   mark_edit_forbidden: 'You can only change your own marks.',
   mark_category_edit_forbidden: 'You can only change categories you made.',
   mark_identity_required: 'This login can view marks but not add them.',
+  mark_share_account_unknown: 'Choose a client account to share with.',
+  mark_visibility_forbidden: 'That sharing choice is not available for this mark.',
   invalid_mark: 'Check the label, colour and coordinates.',
   invalid_mark_batch: 'That file has marks the project cannot hold.',
 };
@@ -28,7 +30,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   let context = null, controller = null;
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
-    marks: [], categories: [], capabilities: { write: false, staff: false }, undo: [],
+    marks: [], categories: [], audiences: [], capabilities: { write: false, staff: false }, undo: [],
   };
   const emit = () => onChange(state);
   const temporary = () => context?.mode === 'temporary';
@@ -52,7 +54,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     const result = {};
     for (const field of MARK_FIELDS) if (mark[field] !== undefined) result[field] = mark[field];
     if (result.categoryId && !state.categories.some(category => category.id === result.categoryId)) result.categoryId = null;
-    if (temporary()) delete result.visibility;
+    if (result.visibility !== 'client') delete result.shareAccount;
+    if (temporary()) { delete result.visibility; delete result.shareAccount; }
     return { ...result, ...extra };
   }
 
@@ -68,6 +71,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     state.marks = data.marks;
     state.categories = data.categories;
     state.capabilities = data.capabilities;
+    // Staff pick a named client account when sharing a mark.
+    state.audiences = data.capabilities.staff ? (await api('/audiences', 'GET', undefined, signal)).audiences : [];
+    if (signal.aborted) return;
     state.ready = true;
   }
 
@@ -146,7 +152,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       controller = new AbortController();
       const signal = controller.signal;
       context = next;
-      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], undo: [],
+      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], undo: [],
         ready: next?.mode === 'temporary', loading: next?.mode === 'session',
         capabilities: { write: next?.mode === 'temporary', staff: false } });
       emit();

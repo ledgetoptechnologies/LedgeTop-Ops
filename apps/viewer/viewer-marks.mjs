@@ -5,7 +5,10 @@ import { elevationForDisplay, elevationToMetres, elevationUnit, formatDecimal, f
 import { geoJsonToMarks, marksToGeoJson } from './viewer-mark-geojson.mjs';
 
 const TYPE_LABEL = { Point: 'Pin', LineString: 'Line', Polygon: 'Area' };
-const VISIBILITY_LABEL = { shared: 'Everyone on this project', private: 'Only me', internal: 'Staff only' };
+// Clients share with project staff, never with other clients. Staff share with one named client account.
+const VISIBILITY_LABEL = { staff: 'Me and project staff', private: 'Only me', internal: 'Staff only', client: 'A client account' };
+const ACCOUNT_TYPE = { model_association: 'Client association', direct_client_grant: 'Client grant' };
+const accountLabel = key => { const [type, id = ''] = String(key).split(/:(.*)/s); return `${ACCOUNT_TYPE[type] || 'Client'} …${id.slice(-6)}`; };
 const LABELS_KEY = 'ltds.viewer.marks.labels';
 
 function h(document, tag, attributes = {}, ...children) {
@@ -81,6 +84,8 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const elevationField = h(document, 'label', {}, elevationLabel, elevationInput);
   const visibilitySelect = h(document, 'select', { name: 'visibility' });
   const visibilityField = field('Visible to', visibilitySelect);
+  const accountSelect = h(document, 'select', { name: 'shareAccount' });
+  const accountField = field('Client account', accountSelect);
   const noteInput = h(document, 'textarea', { name: 'note', maxlength: '2000', rows: '3' });
   const saveButton = h(document, 'button', { type: 'submit', class: 'viewer-mark-primary', text: 'Save' });
   const deleteButton = h(document, 'button', { type: 'button', text: 'Delete' });
@@ -88,7 +93,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const editor = h(document, 'form', { class: 'viewer-mark-form', hidden: true }, editorTitle,
     field('Label', nameInput), field('Category', categorySelect),
     h(document, 'fieldset', { class: 'viewer-mark-colors' }, h(document, 'legend', { text: 'Colour' }), ...swatches, colorInput),
-    iconField, pointCoordsField, coordReadout, elevationField, visibilityField, field('Notes', noteInput),
+    iconField, pointCoordsField, coordReadout, elevationField, visibilityField, accountField, field('Notes', noteInput),
     h(document, 'div', { class: 'viewer-mark-row' }, saveButton, deleteButton, closeButton));
 
   // List
@@ -123,7 +128,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const canWrite = () => store.canWrite() && Boolean(view.map);
   const categoryById = id => store.state.categories.find(category => category.id === id) || null;
   const visibleMarks = () => store.state.marks.filter(mark => !filter || (filter === 'none' ? !mark.categoryId : mark.categoryId === filter));
-  const defaultVisibility = () => (store.state.capabilities.staff || store.state.capabilities.write ? 'shared' : 'private');
+  const defaultVisibility = () => (store.state.capabilities.staff ? 'internal' : 'staff');
   const message = text => { store.state.message = text; render(); };
 
   function setMode(next) {
@@ -172,10 +177,14 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     render();
   }
 
-  function fillCategoryOptions(select, value, emptyLabel) {
+  // A mark can use your own categories (staff: any staff category), or keep the one it has.
+  const usableCategory = (category, keep) => category.id === keep || category.mine
+    || (store.state.capabilities.staff && category.author === 'staff');
+
+  function fillCategoryOptions(select, value, emptyLabel, usable = () => true) {
     const options = [h(document, 'option', { value: '', text: emptyLabel })];
     if (select === filterSelect) options.push(h(document, 'option', { value: 'none', text: 'No category' }));
-    for (const category of store.state.categories) options.push(h(document, 'option', { value: category.id, text: category.name }));
+    for (const category of store.state.categories.filter(usable)) options.push(h(document, 'option', { value: category.id, text: category.name }));
     select.replaceChildren(...options);
     select.value = value || '';
   }
@@ -183,14 +192,18 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   function writeEditor() {
     if (!draft) return;
     nameInput.value = draft.name;
-    fillCategoryOptions(categorySelect, draft.categoryId, 'None');
+    fillCategoryOptions(categorySelect, draft.categoryId, 'None', category => usableCategory(category, draft.categoryId));
     colorInput.value = safeColor(draft.color);
     noteInput.value = draft.note || '';
     elevationInput.value = elevationForDisplay(draft.elevationNavd88M, units());
-    const staff = store.state.capabilities.staff;
-    const options = ['shared', 'private', ...(staff && (draft.id ? draft.mine && draft.author === 'staff' : true) ? ['internal'] : [])];
+    const options = store.state.capabilities.staff ? ['internal', 'client', 'private'] : ['staff', 'private'];
     visibilitySelect.replaceChildren(...options.map(value => h(document, 'option', { value, text: VISIBILITY_LABEL[value] })));
-    visibilitySelect.value = draft.visibility || 'shared';
+    visibilitySelect.value = options.includes(draft.visibility) ? draft.visibility : options[0];
+    const accounts = store.state.audiences.map(row => row.account);
+    if (draft.shareAccount && !accounts.includes(draft.shareAccount)) accounts.unshift(draft.shareAccount);
+    accountSelect.replaceChildren(h(document, 'option', { value: '', text: accounts.length ? 'Choose…' : 'No client has opened Marks here yet' }),
+      ...accounts.map(account => h(document, 'option', { value: account, text: accountLabel(account) })));
+    accountSelect.value = draft.shareAccount || '';
     writeCoords();
   }
 
@@ -203,7 +216,8 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   function readEditor() {
     const elevation = elevationToMetres(elevationInput.value, units());
     return { name: nameInput.value.trim(), categoryId: categorySelect.value || null, color: safeColor(colorInput.value),
-      note: noteInput.value.trim(), elevationNavd88M: elevation, visibility: visibilitySelect.value };
+      note: noteInput.value.trim(), elevationNavd88M: elevation, visibility: visibilitySelect.value,
+      ...(visibilitySelect.value === 'client' ? { shareAccount: accountSelect.value || null } : {}) };
   }
 
   function readout(geometry) {
@@ -245,7 +259,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     editor.hidden = !draft;
     if (draft) {
       editorTitle.textContent = draft.id ? (editable ? 'Edit ' : '') + TYPE_LABEL[draft.geometry.type].toLowerCase() : 'New ' + TYPE_LABEL[draft.geometry.type].toLowerCase();
-      for (const control of [nameInput, categorySelect, colorInput, noteInput, elevationInput, visibilitySelect, pointCoords, saveButton, ...swatches, ...iconButtons])
+      for (const control of [nameInput, categorySelect, colorInput, noteInput, elevationInput, visibilitySelect, accountSelect, pointCoords, saveButton, ...swatches, ...iconButtons])
         control.disabled = !editable || state.busy;
       for (const swatch of swatches) swatch.setAttribute('aria-pressed', String(swatch.dataset.color === safeColor(colorInput.value)));
       for (const button of iconButtons) {
@@ -257,6 +271,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       coordReadout.textContent = readout(draft.geometry);
       elevationLabel.textContent = `NAVD88 Elevation (${elevationUnit(units())})`;
       visibilityField.hidden = !sessionScope || !state.capabilities.write || Boolean(draft.id && !draft.mine);
+      accountField.hidden = visibilityField.hidden || visibilitySelect.value !== 'client';
       deleteButton.hidden = !draft.id || !editable;
       deleteButton.textContent = armedDelete === draft.id ? 'Tap again to delete' : 'Delete';
       deleteButton.disabled = state.busy;
@@ -277,7 +292,9 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
         : `<svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true"><path d="${mark.geometry.type === 'Polygon' ? 'M3 14L5 4l9 2 1 8z' : 'M2 14l5-8 4 5 5-8'}" fill="${mark.geometry.type === 'Polygon' ? safeColor(mark.color) + '55' : 'none'}" stroke="${safeColor(mark.color)}" stroke-width="2"/></svg>`;
       const category = categoryById(mark.categoryId);
       const text = h(document, 'span', { class: 'viewer-mark-list-name' }, h(document, 'span', { text: mark.name }),
-        h(document, 'small', { text: [category?.name, mark.visibility !== 'shared' && VISIBILITY_LABEL[mark.visibility]].filter(Boolean).join(' · ') }));
+        h(document, 'small', { text: [category?.name, !mark.mine && mark.author === 'staff' && !state.capabilities.staff ? 'From project staff'
+          : mark.visibility === 'client' && mark.shareAccount ? accountLabel(mark.shareAccount)
+            : mark.visibility !== defaultVisibility() && VISIBILITY_LABEL[mark.visibility]].filter(Boolean).join(' · ') }));
       const button = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'aria-current': mark.id === selectedId ? 'true' : false }, icon, text);
       on(button, 'click', () => select(mark.id));
       return h(document, 'li', {}, button);
@@ -392,6 +409,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   for (const button of iconButtons) on(button, 'click', () => { if (draft) { draft.icon = button.dataset.icon; render(); } });
   on(nameInput, 'input', () => { if (draft) draft.name = nameInput.value; });
   on(closeButton, 'click', closeEditor);
+  on(visibilitySelect, 'change', () => render());
   on(deleteButton, 'click', async () => {
     const current = draft?.id ? store.find(draft.id) : null;
     if (!current) return;
@@ -405,11 +423,12 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     const values = readEditor();
     if (!values.name) { message('Give the mark a label.'); return; }
     if (Number.isNaN(values.elevationNavd88M)) { message('NAVD88 Elevation must be a number.'); return; }
+    if (values.visibility === 'client' && !values.shareAccount) { message('Choose a client account to share with.'); return; }
     const changes = { ...values, icon: markIconName(draft.icon), geometry: draft.geometry };
     if (draft.id) {
       const current = store.find(draft.id);
       if (!current) { closeEditor(); return; }
-      if (!current.mine) delete changes.visibility;
+      if (!current.mine) { delete changes.visibility; delete changes.shareAccount; }
       if (await store.update(current, changes)) closeEditor();
     } else if (await store.create(changes)) closeEditor();
   });

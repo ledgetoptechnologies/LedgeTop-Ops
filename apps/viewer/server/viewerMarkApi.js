@@ -4,9 +4,11 @@ const { trackedRouter } = require('./httpRequestLifecycle');
 const { getMeasurementPrincipal } = require('./measurementApi');
 const { ViewerMarkRepository, markError } = require('./viewerMarkRepository');
 
-// Same explicit bearer and live model access as personal measurements. A
-// client session without a verified individual identity (a shared company
-// login) may read shared marks but cannot write: writes need a person to own them.
+// Same explicit bearer and live model access as personal measurements.
+// Clients read their own marks and staff marks shared with their portal
+// account, never another client's. A client session without a verified
+// individual identity (a shared company login) reads within its account but
+// cannot write: writes need a person to own them.
 function createViewerMarkApi(repository) {
   const router = trackedRouter();
   const marks = new ViewerMarkRepository(repository.database);
@@ -20,6 +22,7 @@ function createViewerMarkApi(repository) {
       return res.status(429).json({ code: 'mark_rate_limited' });
     }
     req.markPrincipal = principal;
+    marks.touchAccount(principal);
     next();
   });
   const revisionOnly = body => {
@@ -34,6 +37,7 @@ function createViewerMarkApi(repository) {
       capabilities: { write: principal.personalPersistence, staff: principal.audience === 'ops' },
     });
   });
+  router.get('/audiences', (req, res) => res.json({ audiences: marks.audiences(req.markPrincipal) }));
   router.post('/batch', (req, res) => {
     if (!req.body || typeof req.body !== 'object' || Object.keys(req.body).some(key => key !== 'marks')) throw markError('invalid_mark_batch');
     res.status(201).json({ marks: marks.createMany(req.markPrincipal, req.body.marks) });

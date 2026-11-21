@@ -33,16 +33,17 @@ async function openServer(t) {
   const request = (path, init) => fetch(base + path, { ...init, redirect: 'follow' });
   const scope = (audience, subject, permissions = { view: true, measure: true, personalMeasurements: true }) => {
     const token = randomUUID().replaceAll('-', '');
-    const record = { audience, subject, modelId: 'synthetic-model', modelVersionId: 'synthetic-v1', permissions };
+    const record = { audience, subject, modelId: 'synthetic-model', modelVersionId: 'synthetic-v1', permissions,
+      sourceAuthorization: audience === 'client' ? { type: 'model_association', id: 'account-a', version: 1 } : null };
     sessions.set(auth.hashToken(token), record);
     return { mode: 'session', key: audience + subject, token: () => token, record };
   };
   return { request, scope };
 }
 
-const pin = (name, changes = {}) => ({ geometry: { type: 'Point', coordinates: [-87, 43] }, name, color: '#ee5007', icon: 'pin', note: '', visibility: 'shared', ...changes });
+const pin = (name, changes = {}) => ({ geometry: { type: 'Point', coordinates: [-87, 43] }, name, color: '#ee5007', icon: 'pin', note: '', ...changes });
 
-test('client and staff stores share marks, respect ownership and undo their own last change', async t => {
+test('a client shares with staff, staff share back to the client account, and each undoes their own change', async t => {
   const { request, scope } = await openServer(t);
   const client = createMarksStore({ request });
   const staff = createMarksStore({ request });
@@ -53,6 +54,7 @@ test('client and staff stores share marks, respect ownership and undo their own 
 
   const created = await client.create(pin('Shared stand'));
   assert.equal(created.mine, true);
+  assert.equal(created.visibility, 'staff');
   const moved = await client.update(created, { geometry: { type: 'Point', coordinates: [-87.0001, 43.0001] } });
   assert.equal(moved.revision, 2);
   assert.deepEqual(client.state.undo.map(entry => entry.type), ['create', 'update']);
@@ -68,9 +70,16 @@ test('client and staff stores share marks, respect ownership and undo their own 
   assert.match(client.state.message, /Someone else changed/);
   assert.equal(client.find(created.id).name, 'Checked by staff');
 
-  const internal = await staff.create(pin('Staff note', { visibility: 'internal' }));
+  const internal = await staff.create(pin('Staff note'));
+  assert.equal(internal.visibility, 'internal');
   await client.refresh();
   assert.equal(client.find(internal.id), null);
+  await staff.refresh();
+  assert.deepEqual(staff.state.audiences.map(row => row.account), ['model_association:account-a']);
+  const forClient = await staff.create(pin('For the client', { visibility: 'client', shareAccount: staff.state.audiences[0].account }));
+  await client.refresh();
+  assert.equal(client.find(forClient.id).editable, false);
+  assert.equal(client.find(forClient.id).shareAccount, undefined);
   assert.equal(await staff.remove(staff.find(internal.id)), true);
   assert.equal(await staff.undo(), true, 'undo delete brings back a copy');
   assert.equal(staff.state.marks.filter(mark => mark.name === 'Staff note').length, 1);
@@ -96,7 +105,10 @@ test('categories and GeoJSON import go through the API; company logins only read
   assert.equal(await client.undo(), true, 'undo removes the whole import');
   assert.equal(client.state.marks.length, 0);
 
-  await client.create(pin('Visible'));
+  await client.create(pin('Only for staff'));
+  const staff = createMarksStore({ request });
+  await staff.setScope(scope('ops', 'staff-person'));
+  await staff.create(pin('Visible', { visibility: 'client', shareAccount: 'model_association:account-a' }));
   const company = createMarksStore({ request });
   await company.setScope(scope('client', 'company-login', { view: true, measure: true }));
   assert.equal(company.canWrite(), false);
