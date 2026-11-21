@@ -1,0 +1,67 @@
+name: Windows signing smoke test
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  harmless-signing-check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    environment: windows-release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Build a harmless test library
+        id: fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $folder = Join-Path $env:RUNNER_TEMP ('LedgeTopSigningSmoke-' + [guid]::NewGuid().ToString('N'))
+          [IO.Directory]::CreateDirectory($folder) | Out-Null
+          $file = Join-Path $folder 'HarmlessSigningSmoke.dll'
+          Add-Type -TypeDefinition 'public static class HarmlessSigningSmoke { public static int Value => 42; }' -OutputAssembly $file
+          if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'NotSigned') { throw 'Fixture must start unsigned.' }
+          "path=$file" >> $env:GITHUB_OUTPUT
+      - name: Authenticate with the dedicated signing identity
+        uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign only the generated test library
+        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: ltt-signing
+          certificate-profile-name: LedgeTopFiles
+          files: ${{ steps.fixture.outputs.path }}
+          cache-dependencies: 'false'
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Verify the signature and profile
+        shell: pwsh
+        env:
+          TEST_FILE: ${{ steps.fixture.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signature = Get-AuthenticodeSignature -LiteralPath $env:TEST_FILE
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $null -eq $signature.TimeStamperCertificate) {
+            throw 'The generated fixture did not have a trusted, timestamped signature.'
+          }
+          if ($signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -cne 'Ledge Top Technologies LLC') {
+            throw 'The test signature reported an unexpected publisher.'
+          }
+          $extensions = @($signature.SignerCertificate.Extensions | Where-Object { $_.Oid.Value -ceq '2.5.29.37' })
+          if ($extensions.Count -ne 1) { throw 'The signing certificate has an unexpected EKU extension.' }
+          $eku = [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($extensions[0], $extensions[0].Critical)
+          $oids = @($eku.EnhancedKeyUsages | ForEach-Object { $_.Value })
+          if ($oids -cnotcontains '1.3.6.1.5.5.7.3.3' -or $oids -cnotcontains '1.3.6.1.4.1.311.97.1.0' -or
+              $oids -cnotcontains '1.3.6.1.4.1.311.97.909635111.695630699.711358597.268815956') {
+            throw 'The test signature does not identify the expected signing profile.'
+          }
+          Write-Output 'Harmless fixture signed and verified; no release or installer was published.'
