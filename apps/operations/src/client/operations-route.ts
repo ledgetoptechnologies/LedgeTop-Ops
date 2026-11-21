@@ -2,6 +2,8 @@ export type OperationsPage="dashboard"|"operations"|"clients"|"notifications"|"a
 export type OperationsSection="operations"|"projects"|"tasks"|"sops";
 export type DeliverySection="delivery"|"incoming"|"links";
 
+export const CLIENT_ONBOARDING_PATH = "/administration/client-onboarding";
+
 export const DATA_PAGE_PERMISSIONS = ["delivery.browse", "delivery.share.audit"] as const;
 
 export function canAccessDataPage(permissions:readonly string[]):boolean{

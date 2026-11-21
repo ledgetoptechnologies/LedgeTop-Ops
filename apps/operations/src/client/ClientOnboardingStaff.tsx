@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Brand, Card, Loading, Skeleton } from "@ltds/ui";
+import { Card, Loading, Skeleton } from "@ltds/ui";
 import { ClientOnboardingInbox } from "./ClientOnboardingReview";
 import { authorityLost, endpoint, json, post, record, refusalStatus, uncertainFailure, uuid, validSession, type RequestFailure, type StaffSession } from "./onboarding-staff-api";
 import "./ClientOnboardingStaff.css";
@@ -117,16 +117,13 @@ export function ClientOnboardingStaff({ embedded = false, onBusyChange }: { embe
   const lost = useCallback(() => close("Your onboarding access changed. Reload the page to continue."), [close]);
 
   const session = sessionRef.current;
-  if (accessError) return embedded ? <Card><h2>Client onboarding unavailable</h2><p role="alert">{accessError}</p></Card>
-    : <main className="onboarding-staff-gate"><Card><h1>Client onboarding unavailable</h1><p role="alert">{accessError}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
-  if (!session || !verifiedUntil) return embedded ? <Loading /> : <main className="onboarding-staff-gate"><Loading /></main>;
-  if (embedded) return <><p role="status">Existing-client selection and email delivery are not available here yet. Copy a generated link to send it securely.</p><ClientOnboardingIssuer session={session} onRefused={refused} onBusyChange={onBusyChange} /></>;
-  return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" /><a href="/">Exit onboarding</a></header><main>
-    <div className="onboarding-staff-heading"><p className="eyebrow">Client onboarding</p><h1>Client onboarding</h1>
-      <p>Invite a client to fill in their profile, then review what they submit and choose which Ledge Top businesses they belong to.</p></div>
+  if (accessError) return <Card><h2>Client onboarding unavailable</h2><p role="alert">{accessError}</p></Card>;
+  if (!session || !verifiedUntil) return <Loading />;
+  if (embedded) return <ClientOnboardingIssuer session={session} onRefused={refused} onBusyChange={onBusyChange} />;
+  return <div className="onboarding-review-surface">
     <ClientOnboardingInbox session={session} onRefused={refused} onAuthorityLost={lost} />
     <ClientOnboardingIssuer session={session} onRefused={refused} />
-  </main></div>;
+  </div>;
 }
 
 export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { session: StaffSession; onRefused: (caught: unknown) => void; onBusyChange?: (busy: boolean) => void }) {
@@ -241,7 +238,6 @@ export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { s
 
   return <Card><section className="onboarding-created" aria-labelledby="onboarding-invite-title">
     <h2 id="onboarding-invite-title">Invite a new client</h2>
-    <p>Creates a one-time link where the client fills in their profile. It doesn't give the client any access until you review and approve their submission.</p>
     <form className="onboarding-staff-form" onSubmit={submit}>
       <label>Link expires<input type="datetime-local" value={expiresAt} min={localDateTime(new Date(Date.now() + 60_000))} disabled={frozen} onChange={event => setExpiresAt(event.target.value)} required /></label>
       <fieldset className="wide onboarding-scopes"><legend>Business areas</legend>

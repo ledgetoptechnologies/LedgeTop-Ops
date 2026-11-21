@@ -75,3 +75,7 @@
   .onboarding-company-search button { width: 100%; }
   .onboarding-secret-actions > button { flex: 1 1 100%; }
 }
+.onboarding-staff-action,
+.onboarding-dialog :is(button, input:not([type="checkbox"], [type="radio"]), select, .button),
+.onboarding-review-surface :is(button, input:not([type="checkbox"], [type="radio"]), select, .button) { min-height: 44px; }
+.onboarding-review-surface { display: grid; gap: 1rem; }
