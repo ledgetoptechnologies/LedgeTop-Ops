@@ -22,8 +22,12 @@ export const directViewerClientGrantListQuerySchema=z.object({q:z.string().trim(
  .refine(query=>query.cursor===undefined||(query.include===undefined)===!query.cursor.startsWith('v1.'));
 /** Grants returned per listing page. Listing pages instead of failing at any count. */
 export const DIRECT_VIEWER_GRANT_PAGE_SIZE=100;
-/** Active shares per client; see readDirectViewerClientGrants for why this is a real limit. */
+/** Effective shares per client; see readDirectViewerClientGrants for why this is a real limit. */
 export const DIRECT_VIEWER_GRANTS_PER_CLIENT=100;
+/** An effective grant: active, unrevoked and unexpired. The client-portal read and every per-client
+ * cap check use this one boundary, so expired rows (which never change status) neither show nor count. */
+function effectiveGrantSql(alias?:string){const c=alias?`${alias}.`:'';
+ return `${c}status='active' AND ${c}revoked_at IS NULL AND (${c}authorization_expires_at IS NULL OR datetime(${c}authorization_expires_at)>datetime('now'))`;}
 const inputSchema=z.object({sourceId:source,workspaceId:opaque,viewerProjectId:opaque,taskId:opaque.nullable(),
  scopeType:z.enum(['project','task']),includeFuturePublished:z.boolean(),confirmedScope:z.literal(true),
  expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict()}).strict()
@@ -151,7 +155,7 @@ export async function readDirectViewerClientGrants(env:Env,input:{sourceId:strin
  const parsed=z.object({sourceId:source,workspaceId:opaque,grantId:opaque.optional()}).strict().safeParse(input);
  if(!parsed.success)fail(400,'invalid_request','Invalid client grant selector');
  const rows=await db(env).prepare(`SELECT * FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=?
- AND status='active' AND revoked_at IS NULL AND (authorization_expires_at IS NULL OR datetime(authorization_expires_at)>datetime('now'))
+ AND ${effectiveGrantSql()}
  ${input.grantId?'AND id=?':''} ORDER BY id LIMIT 101`).bind(input.sourceId,input.workspaceId,...(input.grantId?[input.grantId]:[])).all<DirectViewerClientGrantRow>();
  if(rows.results.length>100)fail(503,'grant_limit','Client Viewer grant limit exceeded');return rows.results;
 }
@@ -385,7 +389,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
  AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
  if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);
- const count=await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND status='active'`)
+ const count=await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND ${effectiveGrantSql()}`)
  .bind(g.sourceId,g.workspaceId).first<number>('n');
  // Real limit, not a listing artefact: the client portal reads all of one client's grants per request.
  // Checked here for a clear early answer and again inside the INSERT so concurrent creates cannot pass it.
@@ -396,7 +400,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
  can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
  SELECT ?,?,?,?,?,?,?,?,?,?,?,1,'active',?,?,? WHERE (${guard.sql})
- AND (SELECT count(*) FROM viewer_direct_client_grants cap WHERE cap.source_id=? AND cap.workspace_id=? AND cap.status='active')<?
+ AND (SELECT count(*) FROM viewer_direct_client_grants cap WHERE cap.source_id=? AND cap.workspace_id=? AND ${effectiveGrantSql('cap')})<?
  AND EXISTS(${recipientSql(env)} AND w.id=? AND w.project_alpha_source_id=?
  AND checkpoint.active_generation_id=? AND checkpoint.source_sequence=? AND root.source_version=?
  AND claim.client_authority_id IS ? AND claim.projection_source_id IS ? AND claim.source_workspace_id IS ? AND claim.ownership_epoch IS ?
@@ -435,7 +439,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
   const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
    AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
   if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);
-  const active=await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND status='active'`)
+  const active=await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND ${effectiveGrantSql()}`)
    .bind(g.sourceId,g.workspaceId).first<number>('n');
   if((active??0)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
   if(error instanceof Error&&/FOREIGN KEY|direct-viewer-recipient-invalid/.test(error.message))fail(409,'relationship_missing','Client connection changed; refresh before sharing');

@@ -214,6 +214,65 @@ describe('direct Viewer grant listing',()=>{
     includeFuturePublished:true,confirmedScope:true,expiresAt:null,permissions:{measure:true,cameras:false,download:false}}}))
    .rejects.toMatchObject({status:409,code:'grant_limit'});
  });
+
+ // The cap counts effective grants: the same active, unrevoked, unexpired rows the client portal reads.
+ const PAST='2020-01-01T00:00:00.000Z',FUTURE='2099-01-01T00:00:00.000Z';
+ async function seedClientGrants(database:D1Database,workspaceId:string,prefix:string,count:number,expiresAt:string|null){
+  const now=new Date().toISOString();
+  for(let start=0;start<count;start+=50)await database.batch(Array.from({length:Math.min(50,count-start)},(_,offset)=>
+   database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+    can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+    VALUES(?,'project-alpha:primary',?,?,NULL,'project',1,1,0,0,?,1,'active','staff-one',?,?)`)
+    .bind(`${prefix}-${String(start+offset).padStart(4,'0')}`,workspaceId,`${prefix}-project-${start+offset}`,expiresAt,now,now)));
+ }
+ const createFor=(env:Env,idempotencyKey:string,viewerProjectId='viewer-project')=>createDirectViewerClientGrant({env,principal,idempotencyKey,
+  request:new Request('https://ops.example.test/'),grant:{sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId,taskId:null,scopeType:'project',
+   includeFuturePublished:true,confirmedScope:true,expiresAt:null,permissions:{measure:true,cameras:false,download:false}}});
+ const effective=(database:D1Database)=>database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE workspace_id='ws-one'
+  AND status='active' AND revoked_at IS NULL AND (authorization_expires_at IS NULL OR datetime(authorization_expires_at)>datetime('now'))`).first<number>('n');
+ it('does not count expired grants toward the per-client limit',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedClientGrants(database,'ws-one','expired',100,PAST);
+  expect(await effective(database)).toBe(0);
+  const created=await createFor(env,'picker-expired-cap-00001');
+  expect(created.replayed).toBe(false);expect(await effective(database)).toBe(1);
+ });
+ it('still blocks at exactly 100 effective grants, whether or not expired grants are present',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  await seedClientGrants(database,'ws-one','live',99,FUTURE);await seedClientGrants(database,'ws-one','open',1,null);
+  await seedClientGrants(database,'ws-one','expired',20,PAST);expect(await effective(database)).toBe(100);
+  await expect(createFor(env,'picker-effective-cap-0001')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(await effective(database)).toBe(100);
+  for(const table of ['viewer_direct_client_grant_mutation_receipts','viewer_direct_client_grant_audit'])
+   expect(await database.prepare(`SELECT count(*) n FROM ${table}`).first<number>('n')).toBe(0);
+ });
+ it('lets the insert guard and the post-write diagnosis ignore an expired grant that lands after the count',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedClientGrants(database,'ws-one','live',99,FUTURE);
+  const now=new Date().toISOString();let raced=false;
+  const countSql=/SELECT count\(\*\) n FROM viewer_direct_client_grants WHERE source_id=\? AND workspace_id=\? AND status='active'/;
+  const racing={prepare(sql:string){const statement=database.prepare(sql);
+   if(!countSql.test(sql)||raced)return statement;
+   return {bind:(...values:unknown[])=>{const bound=statement.bind(...values);return {first:async(column:string)=>{const value=await bound.first(column);raced=true;
+    // An already-expired row commits after this request counted 99 effective grants.
+    await database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+     can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+     VALUES('grant-expired-race','project-alpha:primary','ws-one','expired-race-project',NULL,'project',1,1,0,0,?,1,'active','staff-two',?,?)`).bind(PAST,now,now).run();
+    return value;}};}};},
+   batch:(statements:D1PreparedStatement[])=>database.batch(statements)};
+  const raceEnv={...env,DELIVERY_DB:{withSession:()=>racing}} as unknown as Env;
+  const created=await createFor(raceEnv,'picker-expired-race-0001');
+  expect(raced).toBe(true);expect(created.replayed).toBe(false);expect(await effective(database)).toBe(100);
+ });
+ it('replays a create unchanged, even once the client is at the limit',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedClientGrants(database,'ws-one','expired',100,PAST);
+  const first=await createFor(env,'picker-replay-cap-000001');expect(first.replayed).toBe(false);
+  await seedClientGrants(database,'ws-one','live',99,FUTURE);expect(await effective(database)).toBe(100);
+  const again=await createFor(env,'picker-replay-cap-000001');
+  expect(again).toEqual({grant:first.grant,replayed:true});expect(await effective(database)).toBe(100);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'another-project'},tasks:[]});
+  await expect(createFor(env,'picker-replay-cap-000002','another-project')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  // Same-scope uniqueness is unchanged: an active row for the same scope still answers duplicate_active_grant.
+  await expect(createFor(env,'picker-replay-cap-000003')).rejects.toMatchObject({status:409,code:'duplicate_active_grant'});
+ });
 });
 
 describe('direct Viewer picker authorization is unchanged',()=>{
