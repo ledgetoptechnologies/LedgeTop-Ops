@@ -225,6 +225,8 @@ it("looks up an exact staff-authorized directory target without returning profil
       { ...environment, CLIENT_ONBOARDING_INVITE_TARGET_CHOICES_ENABLED: "true", ...patch });
     expect((await lookup({ CLIENT_ONBOARDING_INVITE_TARGET_CHOICES_ENABLED: undefined })).status).toBe(404);
     expect((await send(path, "POST", request, undefined, { ...environment, CLIENT_ONBOARDING_INVITE_TARGET_CHOICES_ENABLED: "true" })).status).toBe(403);
+    expect((await lookup()).status).toBe(403); // Directory viewing and editing do not grant identity linking.
+    sqlite.exec("INSERT INTO native_directory_grants VALUES ('staff:onboarding','directory.identity.link',1,'allow','global',NULL,NULL,NULL)");
     const success = await lookup();
     expect(success.status).toBe(200);
     const original = await success.json();
@@ -238,6 +240,9 @@ it("looks up an exact staff-authorized directory target without returning profil
     expect(await verify({ ...context, auth: { ...actor, admissionVersion: 1 } })).toBeNull();
     expect(await verify({ ...context, source: { ...context.source, instance: applicationId } })).toBeNull();
     expect(await verify({ ...context, lookup: { ...context.lookup, publicId: "3".repeat(32) } })).toBeNull();
+    sqlite.exec("DELETE FROM native_directory_grants WHERE permission='directory.identity.link'");
+    expect(await verify()).toBeNull();
+    sqlite.exec("INSERT INTO native_directory_grants VALUES ('staff:onboarding','directory.identity.link',1,'allow','global',NULL,NULL,NULL)");
     const pin = await verify();
     if (!pin) throw Error("synthetic target pin unavailable");
     const command = { commandId: "22222222-2222-4222-8222-222222222222", expiresAt: "2099-01-01T00:00:00.000Z",
@@ -268,6 +273,7 @@ it("looks up an exact staff-authorized directory target without returning profil
         sqlite.exec("COMMIT");
       } catch (error) { sqlite.exec("ROLLBACK"); throw error; }
     };
+    sqlite.exec("DELETE FROM native_directory_grants WHERE permission='directory.identity.link'");
     await expect(persist("no-identity-link")).rejects.toThrow();
     sqlite.exec("INSERT INTO native_directory_grants VALUES ('staff:onboarding','directory.identity.link',1,'allow','global',NULL,NULL,NULL)");
     await expect(persist("zero-intent", [])).rejects.toThrow("invalid target intent");
@@ -313,7 +319,7 @@ it("looks up an exact staff-authorized directory target without returning profil
     sqlite.exec("DELETE FROM native_directory_grants WHERE effect='deny'; INSERT INTO project_alpha_active_directory_mappings SELECT * FROM project_alpha_active_directory_mappings WHERE resource_type='client'");
     expect((await lookup()).status).toBe(403);
     const quota = sqlite.prepare("SELECT rate_key,request_count,request_limit FROM native_staff_onboarding_rate_limits").all();
-    expect(quota).toEqual([{ rate_key: expect.stringMatching(/^subject:[A-Za-z0-9_-]{43}$/), request_count: 9, request_limit: 20 }]);
+    expect(quota).toEqual([{ rate_key: expect.stringMatching(/^subject:[A-Za-z0-9_-]{43}$/), request_count: 10, request_limit: 20 }]);
     sqlite.exec("UPDATE native_staff_onboarding_rate_limits SET request_count=20,window_bucket=CAST(unixepoch('now') / 60 AS INTEGER)");
     expect((await lookup()).status).toBe(429);
     const searchPath = "/api/client-onboarding/staff/target-search";
@@ -344,6 +350,12 @@ it("looks up an exact staff-authorized directory target without returning profil
     addMapping.run(sourceId, sourceInstanceId, applicationId, historyEpoch, "local:other", "local:client", "organization", publicId);
     addMapping.run(sourceId, sourceInstanceId, applicationId, "d0000000-0000-4000-8000-000000000004", "local:client", "local:client", "client", publicId);
     sqlite.exec("INSERT INTO native_directory_grants VALUES ('staff:onboarding','directory.profile.view',1,'deny','resource','local:org',NULL,NULL)");
+    expect(await (await search()).json()).toEqual({ targets: [], nextCursor: null });
+    sqlite.exec("DELETE FROM native_directory_grants WHERE effect='deny'");
+    sqlite.exec("DELETE FROM native_directory_grants WHERE permission='directory.identity.link'");
+    expect(await (await search()).json()).toEqual({ targets: [], nextCursor: null });
+    sqlite.exec("INSERT INTO native_directory_grants VALUES ('staff:onboarding','directory.identity.link',1,'allow','global',NULL,NULL,NULL)");
+    sqlite.exec("INSERT INTO native_directory_grants VALUES ('staff:onboarding','directory.identity.link',1,'deny','resource','local:org',NULL,NULL)");
     expect(await (await search()).json()).toEqual({ targets: [], nextCursor: null });
     sqlite.exec("DELETE FROM native_directory_grants WHERE effect='deny'");
     const first = await search({ query: "  fixture  " });

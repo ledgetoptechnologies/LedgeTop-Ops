@@ -178,7 +178,7 @@ export async function searchInviteTargets(db: D1Database, context: TargetSearchC
     afterId = id;
   }
   const { results } = await db.withSession("first-primary").prepare(searchTargetSql)
-    .bind(...targetBindings({ auth, binding, source, lookup: { kind, publicId: "" } }, false), query, afterId)
+    .bind(...targetBindings({ auth, binding, source, lookup: { kind, publicId: "" } }, true), query, afterId)
     .all<{ publicId: string; displayName: string }>();
   const page = results.slice(0, TARGET_PAGE_SIZE);
   const last = page.at(-1)?.publicId;
@@ -191,7 +191,7 @@ export async function searchInviteTargets(db: D1Database, context: TargetSearchC
 export async function readInviteTargetChoice(db: D1Database, auth: AuthenticatedNativeStaffWithAdmissionVersion,
   binding: InviteDestinationBinding, source: SourceIdentity, lookup: InviteTargetLookup): Promise<readonly [Result, Pin | null] | null> {
   const { results } = await db.withSession("first-primary").prepare(currentTargetSql)
-    .bind(...targetBindings({ auth, binding, source, lookup }, false)).all<Result & { orgRecordId: string | null; orgRecordVersion: number | null;
+    .bind(...targetBindings({ auth, binding, source, lookup }, true)).all<Result & { orgRecordId: string | null; orgRecordVersion: number | null;
         orgMappingId: string | null; orgEnrollmentId: string | null }>();
   if (results.length !== 1 || !(Date.parse(auth.verifiedUntil) > Date.now())) return null;
   const { orgRecordId, orgRecordVersion, orgMappingId, orgEnrollmentId, ...target } = results[0];
