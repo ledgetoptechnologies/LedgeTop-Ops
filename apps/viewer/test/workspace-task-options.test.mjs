@@ -254,3 +254,12 @@ test('boundary option accepts only one small simple closed polygon',()=>{
   ])assert.throws(()=>parseTaskOption(spec,text),reason);
   assert.equal(parseTaskOption({name:'cameras',type:'json'},'{"any":1}'),'{"any":1}','other JSON options are not boundary-checked');
 });
+
+test('boundary rejects repeated corners, self-touching and folded-back edges but allows straight runs',()=>{
+  const spec={name:'boundary',type:'json'},polygon=ring=>JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:[ring]}}]});
+  assert.throws(()=>parseTaskOption(spec,polygon([[0,0],[0.1,0],[0.1,0.1],[0.1,0],[0,0.1],[0,0]])),/repeat/);
+  assert.throws(()=>parseTaskOption(spec,polygon([[0,0],[0.2,0],[0.1,0],[0.1,0.1],[0,0]])),/overlap/);
+  assert.throws(()=>parseTaskOption(spec,polygon([[0,0],[0.2,0],[0.2,0.2],[0.1,0],[0,0.2],[0,0]])),/cross or touch/);
+  assert.throws(()=>parseTaskOption(spec,polygon([[0,0],[0.2,0],[0.2,0.2],[0.1,0.2],[0.1,0.1],[0.15,0.2],[0,0.2],[0,0]])),/cross or touch|overlap/);
+  const straight=polygon([[0,0],[0.1,0],[0.2,0],[0.2,0.1],[0,0.1],[0,0]]);assert.equal(parseTaskOption(spec,straight),straight);
+});

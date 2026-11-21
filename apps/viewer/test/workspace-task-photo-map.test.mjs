@@ -30,11 +30,11 @@ test('cancellation after a delayed header read prevents stale metadata from bein
   await assert.rejects(scanPhotoLocations([file],{signal:controller.signal}),{name:'AbortError'});
 });
 function mapFixture(){
-  const node=()=>({children:[],listeners:{},style:{},textContent:'',setAttribute(){},addEventListener(name,fn){this.listeners[name]=fn;},removeEventListener(name){delete this.listeners[name];},append(...children){this.children.push(...children);},replaceChildren(){this.children=[];}}),doc={createElement:()=>node()},container={...node(),ownerDocument:doc};let removed=0;const markers=[],fits=[];
-  const layer={addTo(){return this;},clearLayers(){assert.equal(removed,0,'paths must detach before the map destroys its renderer');markers.length=0;},getBounds(){return markers.map(m=>m.position);}},map={zoom:10,zooms:[],setView(){return this;},getZoom(){return this.zoom;},setZoomAround(point,zoom){this.zooms.push({point,zoom});this.zoom=zoom;},mouseEventToContainerPoint(event){return{x:event.clientX,y:event.clientY};},fitBounds(bounds,options){fits.push({bounds,options});},invalidateSize(){},remove(){assert.equal(markers.length,0,'no paths may outlive renderer teardown');removed++;}};
-  const tiles=[],controls=[],paths=[];let mapOptions;
-  const L={map:(_host,options)=>{mapOptions=options;return map;},tileLayer:(url,options)=>{const item={url,options,addTo(){return this;}};tiles.push(item);return item;},layerGroup:()=>({}),control:{layers:(...args)=>{controls.push(args);return{addTo(){return this;}};}},featureGroup:()=>layer,polyline(latlngs,options){const path={latlngs,options,setLatLngs(next){this.latlngs=next;},addTo(){paths.push(this);return this;}};return path;},circleMarker(position){return{position,bindTooltip(label){this.label=label;return this;},addTo(){markers.push(this);return this;}};}};
-  return{container,map,paths,markers,fits,tiles,controls,mapOptions:()=>mapOptions,removed:()=>removed,preview:mountPhotoMap(container,{loadLeaflet:async()=>L})};
+  const node=()=>({children:[],listeners:{},style:{},dataset:{},attrs:{},textContent:'',setAttribute(name,value){this.attrs[name]=String(value);},focus(){this.focused=true;},addEventListener(name,fn){this.listeners[name]=fn;},removeEventListener(name){delete this.listeners[name];},append(...children){this.children.push(...children);},replaceChildren(){this.children=[];}}),doc={createElement:()=>node()},container={...node(),ownerDocument:doc};let removed=0;const markers=[],fits=[];
+  const layer={addTo(){return this;},clearLayers(){assert.equal(removed,0,'paths must detach before the map destroys its renderer');markers.length=0;},getBounds(){return markers.map(m=>m.position);}},map={zoom:10,zooms:[],center:{lat:45,lng:-90},handlers:{},doubleClickZoom:{enable(){},disable(){}},on(name,fn){this.handlers[name]=fn;},off(name){delete this.handlers[name];},getCenter(){return this.center;},setView(){return this;},getZoom(){return this.zoom;},setZoomAround(point,zoom){this.zooms.push({point,zoom});this.zoom=zoom;},mouseEventToContainerPoint(event){return{x:event.clientX,y:event.clientY};},fitBounds(bounds,options){fits.push({bounds,options});},invalidateSize(){},remove(){assert.equal(markers.length,0,'no paths may outlive renderer teardown');removed++;}};
+  const tiles=[],controls=[],paths=[],bars=[];let mapOptions;
+  const L={map:(_host,options)=>{mapOptions=options;return map;},tileLayer:(url,options)=>{const item={url,options,addTo(){return this;}};tiles.push(item);return item;},layerGroup:()=>({}),control:{layers:(...args)=>{controls.push(args);return{addTo(){return this;}};}},featureGroup:()=>layer,polyline(latlngs,options){const path={latlngs,options,setLatLngs(next){this.latlngs=[...next];},addTo(){paths.push(this);return this;},remove(){this.removed=true;}};return path;},polygon(latlngs){return{latlngs,addTo(){return this;},remove(){}};},Control:{extend(proto){return function(){return{addTo(target){bars.push(proto.onAdd.call(this,target));return this;}};};}},DomUtil:{create(tag,className,parent){const element=node();element.className=className;parent?.append(element);return element;}},DomEvent:{on(element,name,fn){element.addEventListener(name,fn);},disableClickPropagation(){},preventDefault(event){event.preventDefault?.();},stopPropagation(){}},circleMarker(position){return{position,bindTooltip(label){this.label=label;return this;},addTo(){markers.push(this);return this;}};}};
+  const boundaries=[];return{container,map,bars,paths,markers,fits,tiles,controls,boundaries,mapOptions:()=>mapOptions,removed:()=>removed,preview:mountPhotoMap(container,{loadLeaflet:async()=>L,onBoundary:value=>boundaries.push(value)})};
 }
 
 test('photo preview uses attributed anonymous satellite tiles with an optional blank basemap',async()=>{
@@ -130,4 +130,18 @@ test('server capture times with an unexpected format are dropped before ordering
   const f=mapFixture();
   await f.preview.setLocations({points:[{latitude:2,longitude:2,name:'b.jpg',capturedAt:'2026-05-01T10:00:01'},{latitude:1,longitude:1,name:'a.jpg',capturedAt:'not a time'}]});
   assert.deepEqual(f.paths[0].latlngs,[[1,1],[2,2]],'mixed validity falls back to file name order');f.preview.dispose();
+});
+test('boundary can be drawn from the keyboard: Space activates the tool and adds corners at the centre',async()=>{
+  const {boundaryProblem}=await import('../server/boundaryGeojson.mjs');
+  const f=mapFixture();await f.preview.setFiles([photo()]);
+  const surface=f.container.children[1],button=f.bars.flatMap(bar=>bar.children).find(element=>element.dataset.mapTool==='crop');assert.ok(button,'crop tool exists');
+  let prevented=0;const key=k=>({key:k,preventDefault(){prevented++;}});
+  button.listeners.keydown(key(' '));assert.equal(button.attrs['aria-pressed'],'true','Space activates the tool');assert.equal(surface.focused,true,'focus moves to the map');
+  assert.match(f.container.children[0].textContent,/Boundary: 0 corners/);
+  for(const [lat,lng] of [[45,-90],[45,-89.999],[45.001,-89.999]]){f.map.center={lat,lng};surface.listeners.keydown(key(' '));}
+  assert.match(f.container.children[0].textContent,/3 corners/);
+  surface.listeners.keydown(key('Enter'));assert.equal(f.boundaries.length,1);assert.equal(boundaryProblem(JSON.stringify(f.boundaries[0])),null,'keyboard polygon is a valid boundary');
+  assert.equal(f.container.children[0].textContent,'1 photo located','status line restored after drawing');
+  button.listeners.keydown(key('Enter'));assert.equal(f.boundaries.at(-1),null,'activating again clears the boundary');
+  f.preview.dispose();
 });

@@ -40,11 +40,12 @@ test('a changed orchestrator after refresh requires reselection; an unchanged on
 
 test('server binding: configured id, else the only ClusterODM provider, else a single-node deployment',()=>{
   const worker=node({id:'w'}),worker2=node({id:'w2'}),cluster=node({id:'c',type:'clusterodm'}),cluster2=node({id:'c2',type:'clusterodm'});
-  assert.equal(resolveOrchestrator([worker,cluster],'w')?.id,'w');
-  assert.equal(resolveOrchestrator([worker,cluster],'gone'),null);
-  assert.equal(resolveOrchestrator([worker,cluster,worker2],'')?.id,'c');
-  assert.equal(resolveOrchestrator([cluster,cluster2],''),null,'two ClusterODM providers are ambiguous');
-  assert.equal(resolveOrchestrator([worker],'')?.id,'w');
-  assert.equal(resolveOrchestrator([worker,worker2],''),null,'several plain nodes are ambiguous');
-  assert.equal(resolveOrchestrator(null,''),null);
+  const lookup=(list,configuredId='')=>{const limits=[];const result=resolveOrchestrator({configuredId,getProvider:id=>list.find(item=>item.id===id),listByType:(type,limit)=>{limits.push(limit);return list.filter(item=>item.type===type).slice(0,limit);},listAny:limit=>{limits.push(limit);return list.slice(0,limit);}});return{result,limits};};
+  assert.equal(lookup([worker,cluster],'w').result?.id,'w');
+  assert.equal(lookup([worker,cluster],'gone').result,null);
+  assert.equal(lookup([worker,cluster,worker2]).result?.id,'c');
+  assert.equal(lookup([cluster,cluster2]).result,null,'two ClusterODM providers are ambiguous');
+  assert.equal(lookup([worker]).result?.id,'w');
+  assert.equal(lookup([worker,worker2]).result,null,'several plain nodes are ambiguous');
+  assert.ok(lookup([worker,worker2]).limits.every(limit=>limit===2),'lookups are bounded');
 });

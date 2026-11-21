@@ -37,3 +37,15 @@ test('a single-node deployment keeps working and boundaries are validated at sub
   const crossing=await f.submit(only.id,{boundary:boundary([[0,0],[0.1,0.2],[0.1,0],[0,0.1],[0,0]])});assert.equal(crossing.status,400);
   const good=await f.submit(only.id,{boundary:boundary([[-90,45],[-89.999,45],[-89.999,45.001],[-90,45]])});assert.equal(good.status,201);
 });
+
+test('orchestrator lookup covers the whole inventory, not the first page of 100',async t=>{
+  const {config}=require('../server/config');const previous=config.processingOrchestratorProviderId;t.after(()=>{config.processingOrchestratorProviderId=previous;});
+  const f=await fixture(t,['clusterodm',...Array(101).fill('nodeodm'),'clusterodm']),first=f.providers[0],last=f.providers.at(-1);
+  config.processingOrchestratorProviderId='';
+  assert.equal((await f.list()).orchestratorProviderId,null,'a ClusterODM provider beyond the first page still makes the choice ambiguous');
+  assert.equal((await f.submit(last.id)).status,409);
+  config.processingOrchestratorProviderId=first.id;
+  const listed=await f.list();assert.equal(listed.providers.length,100);assert.equal(listed.orchestratorProviderId,first.id,'configured id found directly');
+  assert.equal((await f.submit(first.id)).status,201);
+  const other=await f.submit(last.id);assert.equal(other.status,409);assert.equal((await other.json()).code,'provider_not_orchestrator');
+});

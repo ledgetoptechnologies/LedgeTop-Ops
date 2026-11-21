@@ -71,16 +71,18 @@ export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet'),onBou
     boundaryLayer=Lref.polygon(vertices,{color:'#f8cb2e',weight:2,fillOpacity:.08,interactive:false}).addTo(map);
     onBoundary({type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:[ring]}}]});
   }
-  function stopDrawing(){if(!drawing)return;map.off('click',drawing.click);map.off('dblclick',drawing.finish);drawing.preview.remove();map.doubleClickZoom?.enable();surface.removeEventListener('keydown',drawing.key);drawing=null;cropButton?.setAttribute('aria-pressed','false');surface.classList?.remove('photo-map-drawing');}
+  function announce(){if(drawing)summary.textContent=`Boundary: ${drawing.vertices.length} ${drawing.vertices.length===1?'corner':'corners'} · Space adds at centre · Enter finishes · Esc cancels`;}
+  function stopDrawing(){if(!drawing)return;summary.textContent=drawing.summaryText;map.off('click',drawing.click);map.off('dblclick',drawing.finish);drawing.preview.remove();map.doubleClickZoom?.enable();surface.removeEventListener('keydown',drawing.key);drawing=null;cropButton?.setAttribute('aria-pressed','false');surface.classList?.remove('photo-map-drawing');}
   function toggleCrop(){
     if(drawing){stopDrawing();return;}
     if(boundaryLayer){boundaryLayer.remove();boundaryLayer=null;cropButton.setAttribute('aria-pressed','false');onBoundary(null);return;}
     const preview=Lref.polyline([],{color:'#f8cb2e',weight:2,dashArray:'4 4',interactive:false}).addTo(map);
-    drawing={vertices:[],preview,click:event=>{drawing.vertices.push([event.latlng.lat,event.latlng.lng]);preview.setLatLngs(drawing.vertices);},finish:()=>finishBoundary(),key:event=>{if(event.key==='Enter'){event.preventDefault();finishBoundary();}else if(event.key==='Escape'){event.preventDefault();stopDrawing();}}};
+    const addVertex=latlng=>{drawing.vertices.push(latlng);preview.setLatLngs(drawing.vertices);announce();};
+    drawing={vertices:[],preview,summaryText:summary.textContent,click:event=>addVertex([event.latlng.lat,event.latlng.lng]),finish:()=>finishBoundary(),key:event=>{if(event.key===' '||event.key==='Spacebar'){event.preventDefault();const center=map.getCenter();addVertex([center.lat,center.lng]);}else if(event.key==='Backspace'){event.preventDefault();drawing.vertices.pop();preview.setLatLngs(drawing.vertices);announce();}else if(event.key==='Enter'){event.preventDefault();finishBoundary();}else if(event.key==='Escape'){event.preventDefault();stopDrawing();}}};
     map.doubleClickZoom?.disable();map.on('click',drawing.click);map.on('dblclick',drawing.finish);surface.addEventListener('keydown',drawing.key);
-    cropButton.setAttribute('aria-pressed','true');surface.classList?.add('photo-map-drawing');
+    cropButton.setAttribute('aria-pressed','true');surface.classList?.add('photo-map-drawing');announce();
   }
-  function toolButton(L,bar,name,label,handler){const button=L.DomUtil.create('a','photo-map-tool',bar);button.href='#';button.setAttribute('role','button');button.title=label;button.setAttribute('aria-label',label);button.dataset.mapTool=name;button.innerHTML=ICONS[name];L.DomEvent.on(button,'click',event=>{L.DomEvent.preventDefault(event);L.DomEvent.stopPropagation(event);handler();});return button;}
+  function toolButton(L,bar,name,label,handler){const button=L.DomUtil.create('a','photo-map-tool',bar);button.href='#';button.setAttribute('role','button');button.title=label;button.setAttribute('aria-label',label);button.dataset.mapTool=name;button.innerHTML=ICONS[name];L.DomEvent.on(button,'click',event=>{L.DomEvent.preventDefault(event);L.DomEvent.stopPropagation(event);handler();});L.DomEvent.on(button,'keydown',event=>{if(event.key===' '||event.key==='Spacebar'||event.key==='Enter'){L.DomEvent.preventDefault(event);L.DomEvent.stopPropagation(event);handler();if(name==='crop'&&drawing)surface.focus?.();}});return button;}
   const ready=loadLeaflet().then(async module=>{
     if(disposed)return;const L=module.default||module;
     if(typeof window!=='undefined')await import('leaflet/dist/leaflet.css');
