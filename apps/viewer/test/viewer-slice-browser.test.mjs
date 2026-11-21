@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
-import {existsSync,mkdtempSync,readFileSync,writeFileSync} from 'node:fs';
+import {existsSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -31,11 +31,11 @@ window.fixture={pixels(){renderer.setRenderTarget(target);renderer.render(scene,
 
 test('real WebGL mesh and direct points follow slice controls, streamed arrivals, flip and reset',{timeout:45000},async t=>{
   const binary=executable();if(!binary){t.skip('Chromium is required for isolated WebGL slice test.');return;}
-  const unlock=await acquireBrowserHarnessLock({root});let browser,client,server;
+  const unlock=await acquireBrowserHarnessLock({root});let browser,client,server,profile;
   try{
     server=createServer((req,res)=>{const url=new URL(req.url,'http://fixture.invalid');if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(page());return;}const relative=url.pathname==='/viewer-slice.mjs'?'viewer-slice.mjs':url.pathname.startsWith('/three/')?'node_modules/three/'+url.pathname.slice(7):null;const file=relative&&path.resolve(root,relative);if(!file||!file.startsWith(root+path.sep)||!existsSync(file)){res.statusCode=404;res.end();return;}res.setHeader('Content-Type','application/javascript');res.end(readFileSync(file));});
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-    const profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-slice-browser-'));
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-slice-browser-'));
     browser=spawn(binary,['--headless=new','--enable-unsafe-swiftshader','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});
@@ -55,5 +55,13 @@ test('real WebGL mesh and direct points follow slice controls, streamed arrivals
       await click('reset');assert.deepEqual(await pixels(),[255,255],`${kind}: reset restores full geometry`);
     }
     await click('enabled');await client.evaluate('fixture.unsupported()');assert.deepEqual(await pixels(),[255,255]);assert.equal(await client.evaluate('fixture.active'),false);assert.equal(await client.evaluate("document.querySelector('[data-slice=enabled]').disabled"),true);
-  }finally{client?.close();browser?.kill();if(server)await new Promise(resolve=>server.close(resolve));await unlock();}
+  }finally{
+    client?.close();
+    // Wait for this test's own browser to exit (force it if needed) before releasing the lock.
+    if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();if(await Promise.race([exited.then(()=>true),delay(5000).then(()=>false)])===false){browser.kill('SIGKILL');await Promise.race([exited,delay(5000)]);}assert.ok(browser.exitCode!==null||browser.signalCode!==null,'isolated browser exited');}
+    if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}
+    await unlock();
+    // Remove only the profile this run created.
+    if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-viewer-slice-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Browser kept a lock on its temporary profile: ${absolute}`);}}
+  }
 });

@@ -9,6 +9,7 @@ import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
 import { renderStaffNavigation, installStaffNavigationGuard, hasUnfinishedMeasurements } from './viewer-staff-navigation.mjs';
+import { installViewerRail } from './viewer-rail.mjs';
 import { clientPortalTarget, renderClientNavigation } from './viewer-client-navigation.mjs';
 import { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX as SESSION_STORAGE_PREFIX } from './viewer-session-capability-store.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
@@ -1425,6 +1426,7 @@ function syncMeasurementActionVisibility() {
   const setHidden = (id, hidden) => { const element = document.getElementById(id); if (element) element.hidden = hidden; };
   setHidden('measurement-report-actions', !measure);
   setHidden('btn-capture-float', !measure);
+  setHidden('rail-measure', !measure);
   // The original processing report follows download permission independently.
   setHidden('panel-model-report', !measure && !download);
 }
@@ -4408,6 +4410,7 @@ function bindUI() {
     sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
     setTimeout(onResize, 300);
   });
+  installViewerRail();
 
   dom.photoClose.addEventListener('click', closePhoto);
   dom.photoModal.addEventListener('click', (e) => { if (e.target === dom.photoModal) closePhoto(); });
@@ -4484,6 +4487,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   state.activeMode = mode;
   document.querySelectorAll('.tab-btn').forEach((button) => {
     button.classList.toggle('active', button.dataset.mode === mode);
+    button.setAttribute?.('aria-pressed', String(button.dataset.mode === mode));
   });
   if (updateHistory) {
     const nextUrl = viewerModeUrl(location.href, mode);

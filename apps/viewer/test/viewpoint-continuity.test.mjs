@@ -75,17 +75,32 @@ test('mode transitions apply real report/capture permission visibility without h
     go(mode);
     assert.equal(ctx.dom['measurement-report-actions'].hidden, true);
     assert.equal(ctx.dom['btn-capture-float'].hidden, true);
+    assert.equal(ctx.dom['rail-measure'].hidden, true, 'no Measure shortcut without measure permission');
     assert.equal(ctx.dom['panel-model-report'].hidden, false, 'download-only original report remains available');
   }
   ctx.SHARE_PERMISSIONS = { measure: true, download: false };
   go('dsm');
   assert.equal(ctx.dom['measurement-report-actions'].hidden, false);
   assert.equal(ctx.dom['btn-capture-float'].hidden, false);
+  assert.equal(ctx.dom['rail-measure'].hidden, false, 'Measure shortcut returns with permission');
   ctx.sessionAccessState = 'unavailable';
   go('model');
   assert.equal(ctx.dom['panel-model-report'].hidden, true);
   assert.equal(ctx.dom['measurement-report-actions'].hidden, true);
   assert.equal(ctx.dom['btn-capture-float'].hidden, true);
+  assert.equal(ctx.dom['rail-measure'].hidden, true, 'Measure shortcut follows lost session access');
+});
+
+test('real switchMode marks exactly one rail view mode pressed', () => {
+  const { ctx, go } = harness();
+  const buttons = ['model', 'cloud', 'ortho', 'dsm', 'dtm'].map(mode => ({ dataset: { mode }, attributes: {},
+    classList: { toggle(name, on) { this[name] = on; } }, setAttribute(name, value) { this.attributes[name] = value; } }));
+  ctx.document.querySelectorAll = selector => selector === '.tab-btn' ? buttons : [];
+  for (const mode of ['ortho', 'cloud', 'model']) {
+    go(mode);
+    assert.deepEqual(buttons.map(button => button.attributes['aria-pressed']), buttons.map(button => String(button.dataset.mode === mode)));
+    assert.deepEqual(buttons.filter(button => button.classList.active).map(button => button.dataset.mode), [mode]);
+  }
 });
 
 for (const mapMode of ['ortho', 'dsm', 'dtm']) {
