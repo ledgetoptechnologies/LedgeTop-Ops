@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { NATIVE_DIRECTORY_RECONCILIATION_CRON } from "../src/worker/scheduled-crons";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import {
@@ -101,7 +102,8 @@ describe("default-off native Directory reconciliation scheduler", () => {
       expect(scheduledMinutes(cron)).not.toEqual(scheduledMinutes(reconciliationCron));
     }
     expect(config).not.toContain("0-55/5 * * * *");
-    expect(entrypoint).toContain(`NATIVE_DIRECTORY_RECONCILIATION_CRON = "${reconciliationCron}"`);
+    expect(NATIVE_DIRECTORY_RECONCILIATION_CRON).toBe(reconciliationCron);
+    expect(entrypoint).toContain("event.cron === NATIVE_DIRECTORY_RECONCILIATION_CRON");
     expect(entrypoint).toContain("runNativeDirectoryReconciliationScheduler(env)");
     const disabled = new Proxy({ PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED: "false" }, { get(target, key) {
       if (key === "PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED") return target.PROJECT_ALPHA_DIRECTORY_RECONCILIATION_ENABLED;

@@ -327,17 +327,21 @@ test('runner applies missing versions below a recorded higher ordinal and keeps 
   t.after(() => database.close());
   const recordedName = 'historical-legacy-42';
   database.prepare('UPDATE schema_migrations SET name=? WHERE version=42').run(recordedName);
+  const readLedger = () => database.prepare('SELECT version, name FROM schema_migrations ORDER BY version')
+    .all().map(row => [row.version, row.name]);
+  const originalLedger = readLedger();
+  const lowerVersion = originalLedger.at(-1)[0] + 1;
+  const higherVersion = lowerVersion + 1;
   database.exec("CREATE TABLE fixture_records (id TEXT PRIMARY KEY, retained TEXT); INSERT INTO fixture_records VALUES ('existing','preserved')");
-  database.prepare('INSERT INTO schema_migrations VALUES (50,?,?)').run('fixture_higher', '2026-11-20');
-  const lower = { version: 48, name: 'fixture_lower', sql: 'ALTER TABLE fixture_records ADD COLUMN detail TEXT' };
-  const higher = { version: 50, name: 'fixture_higher', sql: 'SELECT * FROM must_not_reapply_higher' };
+  const lower = { version: lowerVersion, name: 'fixture_lower', sql: 'ALTER TABLE fixture_records ADD COLUMN detail TEXT' };
+  const higher = { version: higherVersion, name: 'fixture_higher', sql: 'SELECT * FROM must_not_reapply_higher' };
+  database.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(higher.version, higher.name, '2026-11-20');
   MIGRATIONS.push(lower, higher);
   try {
     applyMigrations(database);
     applyMigrations(database);
     assert.equal(database.prepare('SELECT name FROM schema_migrations WHERE version=42').get().name, recordedName);
-    assert.deepEqual(database.prepare('SELECT version, name FROM schema_migrations WHERE version>42 ORDER BY version')
-      .all().map(row => [row.version, row.name]), [[48, lower.name], [50, higher.name]]);
+    assert.deepEqual(readLedger(), [...originalLedger, [lower.version, lower.name], [higher.version, higher.name]]);
     const row = database.prepare('SELECT * FROM fixture_records').get();
     assert.equal(row.retained, 'preserved');
     assert.equal(row.detail, null);

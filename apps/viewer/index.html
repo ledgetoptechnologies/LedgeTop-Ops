@@ -224,6 +224,18 @@
     #session-recovery a { color: #ff9a68; display: inline-block; padding: 12px; }
     #session-recovery a[hidden] { display: none; }
 
+    /* Top left of the view, clear of the map zoom buttons, the tools button,
+       the floating controls (top right) and the compass (bottom right). */
+    #property-lines-notice {
+      position: absolute; top: 14px; left: 56px; z-index: 110; pointer-events: none;
+      max-width: min(520px, calc(100% - 56px - 210px)); padding: 4px 9px; border-radius: 6px;
+      background: rgba(10,10,12,0.88); border: 1px solid rgba(255,214,10,0.55);
+      color: #f2f2f2; font-size: 11px; line-height: 1.35;
+    }
+    #property-lines-about p { margin-top: 6px; }
+    #property-lines-status:empty { display: none; }
+    #property-lines-status { margin-top: 8px; }
+    #layer-property-lines:disabled { cursor: not-allowed; opacity: 0.5; }
     #floating-controls { position: absolute; top: 14px; right: 14px; z-index: 120; display: flex; gap: 8px; }
     .icon-btn {
       width: 38px; height: 38px; border-radius: 50%;
@@ -438,6 +450,7 @@
       #status-left, #status-right { gap: 8px; }
       #photo-modal.docked #photo-frame { top: 112px; right: 8px; max-width: calc(100vw - 16px); max-height: calc(100vh - 154px); }
       #photo-actions .hint { display: none; }
+      #property-lines-notice { top: 60px; left: 56px; right: 112px; max-width: none; }
     }
   </style>
 </head>
@@ -559,6 +572,15 @@
             <label class="slider-row" id="map-volume-custom-row" style="display:none;"><span>Elevation</span><input id="map-volume-custom" type="number" step="0.1"><span class="val" id="map-volume-custom-unit">ft</span></label>
             <div class="hint">Volume integrates DSM/DTM cells inside the polygon against the selected horizontal reference plane.</div>
           </div>
+        </div>
+
+        <div class="panel" id="panel-property-lines" hidden>
+          <h3><svg viewBox="0 0 24 24"><path d="M3 4h8v7H3zM11 4h10v10H11zM3 11h8v9H3zM11 14h10v6H11z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Property lines</h3>
+          <div class="tool-grid">
+            <button class="layer-btn full" id="layer-property-lines" aria-pressed="false" aria-label="Show property lines" aria-describedby="property-lines-status">Show</button>
+          </div>
+          <p class="hint" id="property-lines-status" role="status" aria-live="polite"></p>
+          <div class="hint" id="property-lines-about" hidden><p data-pl="disclaimer"></p><p>Source: <span data-pl="source"></span></p></div>
         </div>
 
         <div class="panel" id="panel-slice" style="display:none;">
@@ -715,6 +737,7 @@
       <div id="leaflet-map"></div>
       <div id="cloud-container"></div>
 
+      <div id="property-lines-notice" role="note" hidden></div>
       <div id="floating-controls">
         <button class="icon-btn" id="btn-measure-float" title="Toggle distance measurement" style="display:none;"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
         <button class="icon-btn" id="btn-capture-float" title="Save view image" aria-label="Save view image" hidden><svg viewBox="0 0 24 24"><path d="M4 6h4l2-2h4l2 2h4v14H4z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>

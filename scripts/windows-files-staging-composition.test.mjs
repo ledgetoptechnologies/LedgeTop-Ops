@@ -119,6 +119,14 @@ test("reviewed StaffDirectory does not promote a library helper to a runtime cla
   assert.throws(() => assertWindowsStagingRuntimeExports("operations", baseline, [...candidate, WINDOWS_STAGING_EXPORT_POLICY.operations.helpers[0]]), /runtime_exports_changed/);
 });
 
+test("private cron constants cannot reappear in current Operations staging exports", () => {
+  const { baseline, candidate } = staffDirectoryExportFixture();
+  for (const name of ["NATIVE_DIRECTORY_OUTBOX_CRON", "NATIVE_DIRECTORY_RECONCILIATION_CRON", "PROJECT_ALPHA_API_V2_MONITOR_CRON"]) {
+    assert.throws(() => assertWindowsStagingRuntimeExports("operations", [...baseline, name], candidate), /source_exports_unreviewed/);
+    assert.throws(() => assertWindowsStagingRuntimeExports("operations", baseline, [...candidate, name]), /runtime_exports_changed/);
+  }
+});
+
 test("actual complete bundles preserve every reviewed runtime export and reject library export drift", async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const generated = buildWindowsStagingComposition(fixture());

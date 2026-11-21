@@ -82,6 +82,11 @@ import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
 import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUrl } from './view-mode.mjs';
 import { installLodResourceLifecycle } from './lod-resource-lifecycle.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { modelHorizontalDatum, verifiedUtmGeoref } from './property-lines.mjs';
+import { createPropertyLinesController } from './property-lines-layer.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
 import { bindProjectSwitcherNavigation, renderProjectSwitcherOptions } from './project-switcher.mjs';
@@ -186,6 +191,7 @@ let measurementWorkspace = null;
 let viewerMarks = null;
 let unbindProjectSwitcherNavigation = null;
 let viewerProductDownloads = null;
+let propertyLines = null;
 
 const state = {
   activeMode: null,
@@ -766,6 +772,7 @@ function init() {
   bindUI();
   installMeasurementWorkspace();
   installViewerMarks();
+  installPropertyLines();
   const available = applyAvailability();
   const requested = viewerModeFromUrl(location.href);
   const initialMode = chooseViewerMode(requested, available);
@@ -3238,6 +3245,7 @@ function ensureMap() {
     else { cancelMapMeasure(); setMapTool('none'); }
   });
   map.on('moveend zoomend resize', refreshMapCameraLayer);
+  map.on('moveend', () => propertyLines?.refresh());
 }
 
 function throwIfAborted(signal) {
@@ -4053,6 +4061,7 @@ window.addEventListener('message', (event) => {
     applyPcPanelState();
     if (pendingPointCloudView) pushViewToPointCloud(pendingPointCloudView);
     syncCameraLayer();
+    propertyLines?.refresh();
   } else if (message.type === 'camera-open') {
     if (!state.camerasVisible || !SHARE_PERMISSIONS.cameras
       || !Number.isSafeInteger(message.index) || message.index < 0 || message.index >= camFeatures.length) return;
@@ -4073,6 +4082,84 @@ window.addEventListener('message', (event) => {
 });
 
 // Bridge to the Potree iframe's control API (null until the iframe is ready)
+// ───────────────────────────────────────────────────────────────
+// Property lines (Wisconsin Statewide Parcel Map through this server)
+// ───────────────────────────────────────────────────────────────
+function propertyLinesSceneExtent() {
+  const mode = state.activeMode;
+  const fromBox = (box) => {
+    if (!box || box.isEmpty()) return null;
+    const a = worldToUtm(box.min), b = worldToUtm(box.max);
+    return { minE: Math.min(a.e, b.e), maxE: Math.max(a.e, b.e), minN: Math.min(a.n, b.n), maxN: Math.max(a.n, b.n), minAlt: Math.min(a.alt, b.alt), maxAlt: Math.max(a.alt, b.alt) };
+  };
+  if (mode === 'model') return tilesRenderer ? fromBox(tilesetWorldBounds(tilesRenderer)) : null;
+  if (mode === 'cloud' && state.cloudMode === 'direct') {
+    if (!pointCloudObject) return null;
+    pointCloudObject.updateWorldMatrix(true, false);
+    return fromBox(new THREE.Box3().setFromObject(pointCloudObject));
+  }
+  if (mode === 'cloud' && state.cloudMode === 'potree') {
+    const b = pcApi()?.getSceneBounds?.();
+    return Array.isArray(b) && b.length === 6 && b.every(Number.isFinite) ? { minE: b[0], minN: b[1], minAlt: b[2], maxE: b[3], maxN: b[4], maxAlt: b[5] } : null;
+  }
+  const url = mode === 'ortho' ? ORTHO_URL : mode === 'dsm' ? DSM_URL : mode === 'dtm' ? DTM_URL : null;
+  const ds = url && geoDatasets[url];
+  return ds ? { minE: ds.minE, minN: ds.minN, maxE: ds.maxE, maxN: ds.maxN } : null;
+}
+
+// One bounded window of the published DTM around the parcels, at the coarsest
+// overview that still gives about 1 m cells. Values are read as metres, as the
+// DEM views already do; the controller checks them against the scene.
+async function propertyLinesGroundGrid(ext, signal) {
+  if (!DTM_URL) return null;
+  const ds = await getDataset(DTM_URL, true, { signal });
+  const spanE = ds.maxE - ds.minE, spanN = ds.maxN - ds.minN;
+  const windowFor = (image) => {
+    const w = image.getWidth(), h = image.getHeight(), cellE = spanE / w, cellN = spanN / h;
+    const x0 = Math.max(0, Math.floor((ext.minE - ds.minE) / cellE) - 1), x1 = Math.min(w, Math.ceil((ext.maxE - ds.minE) / cellE) + 1);
+    const y0 = Math.max(0, Math.floor((ds.maxN - ext.maxN) / cellN) - 1), y1 = Math.min(h, Math.ceil((ds.maxN - ext.minN) / cellN) + 1);
+    return { image, cellE, cellN, x0, x1, y0, y1, pixels: Math.max(0, x1 - x0) * Math.max(0, y1 - y0) };
+  };
+  const fitting = ds.images.map(windowFor).filter((c) => c.pixels > 0 && c.pixels <= 4_000_000);
+  const pick = fitting.filter((c) => c.cellE <= 1.05).pop() || fitting[0];
+  if (!pick) return null;
+  const raster = await pick.image.readRasters({ window: [pick.x0, pick.y0, pick.x1, pick.y1], pool: ensureGeoTiffPool(), signal });
+  return { values: raster[0], width: pick.x1 - pick.x0, height: pick.y1 - pick.y0, minE: ds.minE + pick.x0 * pick.cellE, maxN: ds.maxN - pick.y0 * pick.cellN, cellE: pick.cellE, cellN: pick.cellN, nodata: ds.nodata };
+}
+
+function installPropertyLines() {
+  if (propertyLines) return;
+  propertyLines = createPropertyLinesController({
+    L, THREE, LineSegments2, LineSegmentsGeometry, LineMaterial,
+    fetchImpl: (...args) => fetch(...args),
+    headers: () => {
+      const token = VIEW_MODE === 'session' && sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null;
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    },
+    dom: {
+      panel: document.getElementById('panel-property-lines'),
+      button: document.getElementById('layer-property-lines'),
+      status: document.getElementById('property-lines-status'),
+      about: document.getElementById('property-lines-about'),
+      notice: document.getElementById('property-lines-notice'),
+    },
+    projectId: () => PROJECT?.id || null,
+    getMode: () => state.activeMode,
+    getCloudMode: () => state.cloudMode,
+    getMap: () => map || null,
+    getScene: () => scene || null,
+    getPotreeApi: () => pcApi(),
+    georefVerified: () => verifiedUtmGeoref(PROJECT?.georef, UTM_PROJECTION),
+    modelDatum: () => modelHorizontalDatum(PROJECT?.georef),
+    getSceneExtentUtm: propertyLinesSceneExtent,
+    getGroundGrid: propertyLinesGroundGrid,
+    utmToLatLon: (e, n) => utmToLatLon(e, n),
+    latLonToUtm: (lat, lon) => latLonToUtm(lat, lon),
+    utmToWorld: (e, n, alt) => utmToWorld(e, n, alt),
+  });
+  propertyLines.loadOffer();
+}
+
 function pcApi() {
   const f = document.getElementById('pc-iframe');
   const w = f && f.contentWindow;
@@ -4616,6 +4703,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
     else showDEM(mode, modeEpoch, modeSignal);
   }
   syncCameraLayer();
+  propertyLines?.refresh();
   return true;
 }
 

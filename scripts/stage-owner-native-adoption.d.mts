@@ -41,6 +41,8 @@ export const STAGE_PINS: Readonly<StageOwnerAdoptionPins>;
 
 export function assertStageOwnerAdoptionPinsProvisioned(pins?: unknown): StageOwnerAdoptionPins;
 export function readStageOwnerAdoptionSourceMigrations(directory?: string): { names: string[]; namesSha256: string; contentsSha256: string };
+export function assertStageOwnerAdoptionSourceMigrations<T extends { names: string[]; namesSha256: string; contentsSha256: string }>(
+  source: T, pin?: Readonly<{ count: number; last: string; namesSha256: string; contentsSha256: string }>): T;
 export function readStageOwnerAdoptionSnapshot(db: unknown, target: StageOwnerAdoptionTarget): Promise<StageOwnerAdoptionSnapshot>;
 export function buildStageOwnerAdoptionPlan(snapshot: StageOwnerAdoptionSnapshot, ids: { approvalId: string; commandId: string }): string;
 export function stageOwnerAdoptionConsentEnvelope(input: {
