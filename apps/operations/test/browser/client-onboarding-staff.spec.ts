@@ -555,3 +555,105 @@ for (const width of [320, 768, 1440]) test(`onboarding review fits ${width}px wi
   await expect(page.getByLabel(/^Example LLC/)).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
+
+async function prepareExpiringInvitation(page: Page, mode: string) {
+  await render(page, mode, "?dialog=1", true);
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  const dialog = page.getByRole("dialog", { name: "Onboard client" });
+  await chooseScope(page);
+  const localExpiry = await page.evaluate(() => {
+    const end = new Date(Date.now() + 3 * 60_000);
+    const local = new Date(end.getTime() - end.getTimezoneOffset() * 60_000);
+    return local.toISOString().slice(0, 16);
+  });
+  await dialog.getByLabel("Link expires").fill(localExpiry);
+  await dialog.getByRole("button", { name: "Create invitation" }).click();
+  const reveal = dialog.getByRole("button", { name: "Create one-time link" });
+  await expect(reveal).toBeEnabled();
+  const [create] = await bodies(page, "create");
+  return { dialog, reveal, create: create!, expiresAt: new Date(create!.expiresAt as string).getTime() };
+}
+
+const copiedAndOpened = (page: Page) => page.evaluate(() => {
+  const fixture = window as Window & { copied?: string[]; opened?: string[] };
+  return { copies: fixture.copied?.length ?? 0, opens: fixture.opened?.length ?? 0 };
+});
+
+for (const closed of [false, true]) {
+  test(`expired invitation loses copy and open actions while ${closed ? "closed" : "open"}`, async ({ page }) => {
+    const { dialog, reveal, create } = await prepareExpiringInvitation(page, "invitation-expiry");
+    await reveal.click();
+    await expect(dialog.getByRole("heading", { name: "One-time link ready" })).toBeVisible();
+    await expect.poll(() => copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+    if (closed) await dialog.getByRole("button", { name: "Close" }).click();
+    await page.clock.fastForward(4 * 60_000);
+    if (closed) await page.getByRole("button", { name: "Onboard client" }).click();
+    await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+    await expect(dialog.getByText(String(create.commandId), { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: /^(Copy link|Open form|Create one-time link|Generate and Copy|Create invitation)/ })).toHaveCount(0);
+    expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+    expect(await bodies(page, "create")).toEqual([create]);
+    expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+  });
+}
+
+for (const action of ["Copy link", "Open form in a new tab"]) {
+  test(`expired invitation blocks ${action} before its timer fires`, async ({ page }) => {
+    const { dialog, reveal, expiresAt } = await prepareExpiringInvitation(page, "invitation-expiry");
+    await reveal.click();
+    const button = dialog.getByRole("button", { name: action });
+    await expect(button).toBeVisible();
+    await expect.poll(() => copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+    const stale = await button.elementHandle();
+    await page.clock.setSystemTime(expiresAt + 1);
+    await stale!.evaluate(element => (element as HTMLButtonElement).click());
+    await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+    expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+    expect(await bodies(page, "create")).toHaveLength(1);
+    expect(await bodies(page, "reveal")).toHaveLength(1);
+  });
+}
+
+test("reveal arriving after expiry offers no link or clipboard write", async ({ page }) => {
+  const { dialog, reveal, create, expiresAt } = await prepareExpiringInvitation(page, "invitation-expiry-delayed");
+  await reveal.click();
+  await expect.poll(async () => await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+  await page.clock.setSystemTime(expiresAt + 1);
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeEnabled();
+  await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "One-time link ready" })).toHaveCount(0);
+  expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+  expect(await bodies(page, "create")).toEqual([create]);
+  expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+});
+
+test("reveal with mismatching expiry stays uncertain without another create or reveal", async ({ page }) => {
+  const { dialog, reveal, create } = await prepareExpiringInvitation(page, "invitation-expiry-mismatch");
+  await reveal.click();
+  await expect(dialog.getByText("The link result isn't confirmed.", { exact: false })).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  await expect(dialog.getByText("The link result isn't confirmed.", { exact: false })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /^(Copy link|Open form|Create one-time link|Generate and Copy|Create invitation)/ })).toHaveCount(0);
+  expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+  expect(await bodies(page, "create")).toEqual([create]);
+  expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+});
+
+test("latched expiry survives a backward clock step before the reveal reply", async ({ page }) => {
+  const { dialog, reveal, create, expiresAt } = await prepareExpiringInvitation(page, "invitation-expiry-delayed");
+  await reveal.click();
+  await expect.poll(async () => await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+  await page.clock.fastForward(4 * 60_000);
+  await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+  await page.clock.setSystemTime(expiresAt - 30_000);
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeEnabled();
+  await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+  await expect(dialog.getByText(String(create.commandId), { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "One-time link ready" })).toHaveCount(0);
+  expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+  expect(await bodies(page, "create")).toEqual([create]);
+  expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+});
