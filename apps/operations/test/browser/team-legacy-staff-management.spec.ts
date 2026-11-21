@@ -10,6 +10,9 @@ async function mockTeam(page: Page, canManage: boolean) {
       roles: "Owner", provisioning_source: "local", sync_protected: 0, owner_role: true, access_controls_editable: false, profile_editable: false },
     { id: "staff-plain", email: "plain@example.test", display_name: "Plain Person", status: "active", updated_at: "2026-01-01 00:00:00",
       roles: "", provisioning_source: "local", sync_protected: 0, owner_role: false, access_controls_editable: false, profile_editable: canManage },
+    { id: "staff-inactive-admin", email: "inactive-admin@example.test", display_name: "Inactive Admin", status: "inactive", updated_at: "2026-01-01 00:00:00",
+      roles: "Administrator", provisioning_source: "local", sync_protected: 0, owner_role: false, access_controls_editable: false,
+      profile_editable: canManage, reactivate_requires_owner: true },
   ];
   const writes: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
   await page.route("**/api/**", async route => {
@@ -53,6 +56,9 @@ test("Team add and edit controls follow the server flags and send versioned comm
   await expect(page.getByRole("heading", { name: "Plain Person" })).toBeVisible();
   await expect(card(page, "Role Owner").getByRole("button", { name: "Edit name" })).toHaveCount(0);
   await expect(card(page, "Admin").getByRole("button", { name: "Deactivate" })).toHaveCount(0);
+  // Reactivating an administrator is owner-only: a non-owner viewer gets no Reactivate control.
+  await expect(card(page, "Inactive Admin").getByRole("button", { name: "Edit name" })).toBeVisible();
+  await expect(card(page, "Inactive Admin").getByRole("button", { name: "Reactivate" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Add staff member" }).click();
   await page.getByLabel("Name", { exact: true }).fill("New Person");

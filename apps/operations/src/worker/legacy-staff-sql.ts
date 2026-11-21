@@ -34,3 +34,13 @@ export const legacyStaffPreCutoverSql = (controlTablePresent: boolean) => contro
 export const nativeReservedEmailSql = `(EXISTS(SELECT 1 FROM native_staff_pending_onboarding reserved_onboarding
     WHERE reserved_onboarding.login_email=? COLLATE NOCASE AND reserved_onboarding.state IN ('pending','claimed','approved'))
   OR EXISTS(SELECT 1 FROM native_staff_profiles reserved_profile WHERE reserved_profile.login_email=? COLLATE NOCASE))`;
+
+/** A global role-admin or role-owner in either role table (reactivating such a row needs an owner). */
+export const anyGlobalAdministratorRoleSql = (staff: string) => `(EXISTS(SELECT 1 FROM staff_role_assignments held_role
+    WHERE held_role.staff_id=${staff}.id AND held_role.role_id IN ('role-owner','role-admin') AND held_role.scope='global')
+  OR EXISTS(SELECT 1 FROM local_staff_role_assignments held_role
+    WHERE held_role.staff_id=${staff}.id AND held_role.role_id IN ('role-owner','role-admin') AND held_role.scope='global'))`;
+
+/** Binds: target id, actor id. True unless the target holds an administrator role and the actor is not a global owner. */
+export const legacyStaffReactivationAllowedSql = `(NOT EXISTS(SELECT 1 FROM staff_users reactivated WHERE reactivated.id=? AND ${anyGlobalAdministratorRoleSql("reactivated")})
+  OR EXISTS(SELECT 1 FROM staff_role_assignments owner_actor WHERE owner_actor.staff_id=? AND owner_actor.role_id='role-owner' AND owner_actor.scope='global'))`;

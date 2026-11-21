@@ -30,6 +30,7 @@ Operations app before cutover. The operator keeps it in step by hand.
 
 Reactivating brings back everything the person kept: roles, access settings
 and any other sign-in emails. Team asks for confirmation and then shows what
-came back. Remove anything they should no longer have before or right after
+came back. Only an owner can reactivate someone who holds an
+administrator or owner role. Remove anything they should no longer have before or right after
 reactivating. Sign-in works again once the email is back in the Access group
 or policy.

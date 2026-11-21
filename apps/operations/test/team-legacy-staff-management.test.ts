@@ -23,13 +23,15 @@ let beforeBatch: (() => Promise<void>) | null = null;
 type Person = { id: string; email: string; subject: string };
 const uuid = () => `90000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`;
 
-async function person(options: { role?: "role-admin" | "role-owner"; localOwner?: boolean; allow?: string[]; deny?: string[];
+async function person(options: { role?: "role-admin" | "role-owner"; localOwner?: boolean; localAdmin?: boolean; allow?: string[]; deny?: string[];
   native?: boolean; syncProtected?: boolean; id?: string } = {}): Promise<Person> {
   const id = options.id ?? `legacy-staff-${++sequence}`, email = `${id}@example.test`, subject = `access|${id}`;
   const statements = [db.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,sync_protected) VALUES(?,?,?,?,?)`)
     .bind(id, email, `Synthetic ${id}`, subject, options.syncProtected ? 1 : 0)];
   if (options.role) statements.push(db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES(?,?,?,'global','global')")
     .bind(uuid(), id, options.role));
+  if (options.localAdmin) statements.push(db.prepare("INSERT INTO local_staff_role_assignments(id,staff_id,role_id,scope,created_by) VALUES(?,?,'role-admin','global',?)")
+    .bind(uuid(), id, id));
   if (options.localOwner) statements.push(db.prepare("INSERT INTO local_staff_role_assignments(id,staff_id,role_id,scope,created_by) VALUES(?,?,'role-owner','global',?)")
     .bind(uuid(), id, id));
   for (const [effect, list] of [["allow", options.allow ?? []], ["deny", options.deny ?? []]] as const)
@@ -365,15 +367,63 @@ describe("legacy Team staff management: mounted worker, real Access JWT, full lo
     expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE email='late.actor@example.test'").first("n")).toBe(0);
   });
 
-  it("reactivation reports retained roles, access settings and alternate sign-ins", async () => {
+  it("an owner reactivates an administrator and gets the retained summary", async () => {
+    const owner = await person({ role: "role-owner" });
     const target = await person({ role: "role-admin", allow: ["delivery.browse"] });
     expect((await edit(admin, target.id, { expectedUpdatedAt: await version(target.id), status: "inactive" })).status).toBe(200);
-    const reactivated = await edit(admin, target.id, { expectedUpdatedAt: await version(target.id), status: "active" });
+    const reactivated = await edit(owner, target.id, { expectedUpdatedAt: await version(target.id), status: "active" });
     expect(reactivated.status).toBe(200);
     expect(await reactivated.json()).toMatchObject({ retained: { roles: 1, overrides: 1, alternateLogins: 0 } });
     expect(await db.prepare("SELECT count(*) n FROM staff_role_assignments WHERE staff_id=?").bind(target.id).first("n")).toBe(1);
     const renamed = await edit(admin, target.id, { expectedUpdatedAt: await version(target.id), displayName: "Just Renamed" });
     expect(await renamed.json()).not.toHaveProperty("retained");
+  });
+
+  it("owner only: a non-owner administrator cannot reactivate an administrator, in either role table", async () => {
+    for (const options of [{ role: "role-admin" as const }, { localAdmin: true }]) {
+      const target = await person(options);
+      expect((await edit(admin, target.id, { expectedUpdatedAt: await version(target.id), status: "inactive" })).status).toBe(200);
+      const before = await row(target.id);
+      const refused = await edit(admin, target.id, { expectedUpdatedAt: before!.updated_at, status: "active" });
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ code: "owner_required_to_reactivate_admin" });
+      expect(await row(target.id)).toEqual(before);
+      expect(await audits(target.id, "staff.status.changed")).toBe(1);
+    }
+    // Reactivating a row without an administrator role stays a roles.manage action.
+    const plain = await person();
+    expect((await edit(admin, plain.id, { expectedUpdatedAt: await version(plain.id), status: "inactive" })).status).toBe(200);
+    expect((await edit(admin, plain.id, { expectedUpdatedAt: await version(plain.id), status: "active" })).status).toBe(200);
+  });
+
+  it("owner only: a target that gains an administrator role between read and write is refused for a non-owner", async () => {
+    const target = await person();
+    expect((await edit(admin, target.id, { expectedUpdatedAt: await version(target.id), status: "inactive" })).status).toBe(200);
+    const before = await row(target.id);
+    beforeBatch = async () => { await db.prepare("INSERT INTO local_staff_role_assignments(id,staff_id,role_id,scope,created_by) VALUES(?,?,'role-admin','global',?)")
+      .bind(uuid(), target.id, target.id).run(); };
+    const raced = await edit(admin, target.id, { expectedUpdatedAt: before!.updated_at, status: "active" });
+    expect(raced.status).toBe(409);
+    expect(await raced.json()).toMatchObject({ code: "owner_required_to_reactivate_admin" });
+    expect(await row(target.id)).toEqual(before);
+    expect(await audits(target.id, "staff.status.changed")).toBe(1);
+  });
+
+  it("owner only: the roster flag matches the reactivation decision", async () => {
+    const owner = await person({ role: "role-owner" });
+    const inactiveAdmin = await person({ role: "role-admin" }), inactivePlain = await person(), activeAdmin = await person({ role: "role-admin" });
+    for (const target of [inactiveAdmin, inactivePlain])
+      expect((await edit(admin, target.id, { expectedUpdatedAt: await version(target.id), status: "inactive" })).status).toBe(200);
+    const flag = (list: { staff: Array<RosterRow & { reactivate_requires_owner?: boolean }> }, id: string) =>
+      list.staff.find(entry => entry.id === id)!.reactivate_requires_owner;
+    const asAdmin = await roster(admin), asOwner = await roster(owner);
+    expect(flag(asAdmin, inactiveAdmin.id)).toBe(true);
+    expect(flag(asAdmin, inactivePlain.id)).toBe(false);
+    expect(flag(asAdmin, activeAdmin.id)).toBe(false);
+    expect(flag(asOwner, inactiveAdmin.id)).toBe(false);
+    // Same decision as the route for both viewers.
+    expect((await edit(admin, inactiveAdmin.id, { expectedUpdatedAt: await version(inactiveAdmin.id), status: "active" })).status).toBe(409);
+    expect((await edit(owner, inactiveAdmin.id, { expectedUpdatedAt: await version(inactiveAdmin.id), status: "active" })).status).toBe(200);
   });
 
   it("maps an alternate sign-in collision on edit to 409", async () => {

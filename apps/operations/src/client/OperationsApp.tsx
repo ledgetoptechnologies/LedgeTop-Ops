@@ -6625,9 +6625,9 @@ function LegacyStaffProfileControls({ person, onChanged }: { person: any; onChan
       </div>
     </form> : <div className="actions">
       <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { setName(person.display_name); setEditing(true); }}>Edit name</button>
-      <button type="button" className="button-ghost button-small" disabled={busy}
+      {(active || person.reactivate_requires_owner !== true) && <button type="button" className="button-ghost button-small" disabled={busy}
         onClick={() => void changeStatus()}>
-        {active ? "Deactivate" : "Reactivate"}</button>
+        {active ? "Deactivate" : "Reactivate"}</button>}
     </div>}
     {message && <div className="notice" role="status">{message}</div>}
   </div>;

@@ -134,7 +134,7 @@ import {
   registerR2CrudRoutes,
 } from "./r2-crud";
 import { requiresAdministratorForMutation } from "./r2-crud-validation";
-import { legacyStaffActorSql, legacyStaffAnotherAdministratorSql, legacyStaffPreCutoverSql, nativeLifecycleSql, nativeReservedEmailSql } from "./legacy-staff-sql";
+import { anyGlobalAdministratorRoleSql, legacyStaffActorSql, legacyStaffAnotherAdministratorSql, legacyStaffPreCutoverSql, legacyStaffReactivationAllowedSql, nativeLifecycleSql, nativeReservedEmailSql } from "./legacy-staff-sql";
 import { cleanupProjectMemoryAttachmentUploads } from "./project-memory-attachments";
 import { listAdminAuditEvents } from "./admin-audit";
 import { registerClientFeedbackRoutes, staffFeedbackEntryEnabled } from "./client-feedback";
@@ -3329,9 +3329,10 @@ app.get("/api/team/staff", async (c) => {
   const canManageAccess = Boolean(rolesManageScope?.global && !rolesManageScope.deniedGlobal);
   // Same gate as POST/PATCH /api/admin/staff: also false once the native cutover switch is on.
   const canManageStaff = canManageAccess && await legacyStaffPreCutover(c.env.OPS_DB.withSession("first-primary"));
+  const viewerIsOwner = canManageStaff && await legacyStaffActorIsOwner(c.env.OPS_DB.withSession("first-primary"), principal.id);
   const result = await c.env.OPS_DB.prepare(
     `SELECT s.id,s.email,s.display_name,s.status,s.last_seen_at,s.updated_at,s.provisioning_source,s.sync_protected,
-      ${nativeLifecycleSql("s")} native_lifecycle,
+      ${nativeLifecycleSql("s")} native_lifecycle, ${anyGlobalAdministratorRoleSql("s")} administrator_role,
       (EXISTS(SELECT 1 FROM staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
         AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global')
        OR EXISTS(SELECT 1 FROM local_staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
@@ -3342,7 +3343,7 @@ app.get("/api/team/staff", async (c) => {
     .all<any>();
   return c.json({
     staff: result.results.map((row) => {
-      const { inherited_permissions, direct_allows, global_denies, owner_role, native_lifecycle, ...roster } =
+      const { inherited_permissions, direct_allows, global_denies, owner_role, native_lifecycle, administrator_role, ...roster } =
         row;
       return administrator
         ? {
@@ -3356,6 +3357,8 @@ app.get("/api/team/staff", async (c) => {
                   any_owner_role: Number(owner_role), native_lifecycle: Number(native_lifecycle) },
                 principal.id,
               ) === "ok",
+            // Same rule as the PATCH reactivation check: an inactive administrator needs an owner to reactivate.
+            reactivate_requires_owner: row.status === "inactive" && Boolean(administrator_role) && !viewerIsOwner,
             access_controls_editable:
               canManageAccess &&
               staffAccessControlsDecision(
@@ -3517,6 +3520,14 @@ type LegacyStaffRow = { id: string; email: string; display_name: string; status:
 const legacyStaffDto = (row: LegacyStaffRow) => ({ id: row.id, email: row.email, display_name: row.display_name,
   status: row.status, updated_at: row.updated_at });
 class LegacyStaffCutoverActive extends Error {}
+// Owner decision: reactivating a row that holds a global admin/owner role needs a global owner actor.
+class LegacyStaffOwnerRequired extends Error {}
+const legacyStaffOwnerRequiredResponse = (c: any) => c.json({ error: "Only an owner can reactivate an administrator",
+  code: "owner_required_to_reactivate_admin" }, 409);
+async function legacyStaffActorIsOwner(db: D1DatabaseSession, principalId: string): Promise<boolean> {
+  return (await db.prepare(`SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id='role-owner' AND scope='global' LIMIT 1`)
+    .bind(principalId).first("ok")) === 1;
+}
 // A pre-0225 schema (no control table) is pre-cutover, as in auth.ts; any value other than 0 is cutover.
 async function legacyStaffControlTable(db: D1DatabaseSession): Promise<boolean> {
   let enabled: unknown;
@@ -3617,6 +3628,7 @@ app.patch("/api/admin/staff/:id", async (c) => {
     return await legacyStaffEdit(c, c.env.OPS_DB.withSession("first-primary"), principal, value);
   } catch (error) {
     if (error instanceof LegacyStaffCutoverActive) return legacyStaffCutoverResponse(c);
+    if (error instanceof LegacyStaffOwnerRequired) return legacyStaffOwnerRequiredResponse(c);
     throw error;
   }
 });
@@ -3649,6 +3661,9 @@ async function legacyStaffEdit(c: any, db: D1DatabaseSession, principal: StaffPr
     .bind(target.id, target.id).first("ok")) !== 1;
   const lastAdministratorError = () => new HTTPException(409, { message: "The last active administrator cannot be deactivated" });
   if (await lastAdministrator()) throw lastAdministratorError();
+  const reactivationRefused = async () => reactivating && (await db.prepare(`SELECT ${legacyStaffReactivationAllowedSql} ok`)
+    .bind(target.id, principal.id).first("ok")) !== 1;
+  if (await reactivationRefused()) throw new LegacyStaffOwnerRequired();
   const statements = [
     // Atomic guard: json('') raises and rolls back the batch when the actor lost authority, the
     // cutover switch turned on, the row became protected/native, the version changed, or
@@ -3656,9 +3671,10 @@ async function legacyStaffEdit(c: any, db: D1DatabaseSession, principal: StaffPr
     c.env.OPS_DB.prepare(`SELECT CASE WHEN ${legacyStaffAuthoritySql(controlTable)} AND ${legacyStaffProfileEditableSql}
         AND EXISTS(SELECT 1 FROM staff_users versioned WHERE versioned.id=? AND versioned.updated_at=?)
         AND (? = 0 OR ${legacyStaffAnotherAdministratorSql})
+        AND (? = 0 OR ${legacyStaffReactivationAllowedSql})
       THEN 1 ELSE json('') END guard`)
       .bind(principal.id, target.id, principal.id, FIXED_PROTECTED_OWNER_ID, target.id, value.expectedUpdatedAt,
-        deactivating ? 1 : 0, target.id, target.id),
+        deactivating ? 1 : 0, target.id, target.id, reactivating ? 1 : 0, target.id, principal.id),
     c.env.OPS_DB.prepare(`UPDATE staff_users SET display_name=?,status=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
       WHERE id=? AND updated_at=?`).bind(displayName, status, target.id, value.expectedUpdatedAt),
   ] as ReturnType<Env["OPS_DB"]["prepare"]>[];
@@ -3677,6 +3693,7 @@ async function legacyStaffEdit(c: any, db: D1DatabaseSession, principal: StaffPr
     refuse(legacyStaffProfileDecision(current, principal.id));
     if (current.updated_at !== value.expectedUpdatedAt) throw stale();
     if (await lastAdministrator()) throw lastAdministratorError();
+    if (await reactivationRefused()) throw new LegacyStaffOwnerRequired();
     if (error instanceof Error && error.message.includes("staff_login_identity_collision"))
       throw new HTTPException(409, { message: "This staff member's email or sign-in is also an active alternate sign-in" });
     throw error;
