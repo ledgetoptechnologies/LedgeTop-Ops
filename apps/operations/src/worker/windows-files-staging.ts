@@ -4,6 +4,7 @@ import { createEmployeeQueueRouter } from "./employee-queue-routes";
 import { createEmployeeReadAdminRouter } from "./employee-read-admin-routes";
 import type { NativeStaffAccessConfiguration } from "./native-staff-auth";
 import type { EmployeeGatewayConfiguration } from "./employee-read-transport";
+import { createEmployeeFilesWriteRouter, type FilesWriteConfiguration } from "./employee-files-write";
 
 const OPS_ORIGIN = "https://ops-staging.ledgetopdroneservices.com";
 const ACCESS_ISSUER = "https://ledgetoptechnologies.cloudflareaccess.com";
@@ -18,6 +19,8 @@ export type WindowsEmployeeFilesStagingConfiguration = Readonly<{
   handleKey: Uint8Array; queueKey: Uint8Array;
   /** The existing Ops session secret, used only to derive the Files admin CSRF tokens. */
   adminCsrfSecret: string;
+  /** Staff Files writes (slice 2b); null keeps every write route unavailable (503). */
+  filesWrite: FilesWriteConfiguration | null;
 }>;
 type Dependencies = Readonly<{ database: D1Database; fetch?: typeof fetch }>;
 function exact(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
@@ -32,7 +35,7 @@ function sameKey(a: Uint8Array, b: Uint8Array) {
   return a.length === b.length && a.every((byte, index) => byte === b[index]);
 }
 function snapshot(input: WindowsEmployeeFilesStagingConfiguration, dependencies: Dependencies) {
-  if (!exact(input, ["environment", "enabled", "opsOrigin", "access", "gateway", "handleKey", "queueKey", "adminCsrfSecret"])
+  if (!exact(input, ["environment", "enabled", "opsOrigin", "access", "gateway", "handleKey", "queueKey", "adminCsrfSecret", "filesWrite"])
     || input.environment !== "staging" || input.enabled !== true || input.opsOrigin !== OPS_ORIGIN
     || !exact(input.access, ["enabled", "issuer", "staffAudience"])
     || input.access.enabled !== true || input.access.issuer !== ACCESS_ISSUER
@@ -56,7 +59,7 @@ function snapshot(input: WindowsEmployeeFilesStagingConfiguration, dependencies:
   return Object.freeze({ enabled: true, opsOrigin: OPS_ORIGIN,
     access: Object.freeze({ enabled: true, issuer: ACCESS_ISSUER, staffAudience: input.access.staffAudience }),
     gateway: Object.freeze({ origin: origin.origin, gatewayId: input.gateway.gatewayId, keyId: input.gateway.keyId, key: gatewayKey }),
-    handleKey, queueKey, adminCsrfSecret: input.adminCsrfSecret });
+    handleKey, queueKey, adminCsrfSecret: input.adminCsrfSecret, filesWrite: input.filesWrite });
 }
 
 /** Source-only composition. Neither entrypoint imports or mounts it. A caller
@@ -76,6 +79,13 @@ export function createWindowsEmployeeFilesStagingRouter(input: WindowsEmployeeFi
   const captured = Object.freeze({ database: dependencies.database, fetch: dependencies.fetch });
   // Register the narrower queue middleware first; the broader read router must
   // not consume queue requests before their own exact query/identity checks.
+  // Writes first: the read router answers every other method under /api/staff/files with 405.
+  if (config.filesWrite) router.route("/", createEmployeeFilesWriteRouter({ ...config.filesWrite, opsOrigin: config.opsOrigin, access: config.access },
+    { database: captured.database, fetch: captured.fetch }));
+  else {
+    router.post("/api/staff/files/roots/:rootId/operations", unavailable);
+    router.put("/api/staff/files/roots/:rootId/uploads/*", unavailable);
+  }
   router.route("/", createEmployeeQueueRouter(config, captured));
   router.route("/", createEmployeeReadRouter(config, captured));
   router.route("/", createEmployeeReadAdminRouter({ enabled: true, opsOrigin: config.opsOrigin,

@@ -5,10 +5,10 @@ import { createEmployeeReadRouter, employeeReadManifest, employeeWindowsFileName
 import { employeeHandleContext, encodeEmployeeFileHandle } from "../src/worker/employee-read-handles";
 import type { EmployeeReadProof } from "../src/worker/employee-read-transport";
 
-const mocks = vi.hoisted(() => ({ keys: vi.fn(), identity: vi.fn(), resolve: vi.fn(), recheck: vi.fn(), roots: vi.fn(), audit: vi.fn() }));
+const mocks = vi.hoisted(() => ({ keys: vi.fn(), identity: vi.fn(), resolve: vi.fn(), recheck: vi.fn(), roots: vi.fn(), audit: vi.fn(), write: vi.fn() }));
 vi.mock("jose", async () => ({ ...await vi.importActual<typeof import("jose")>("jose"), createRemoteJWKSet: mocks.keys }));
 vi.mock("../src/worker/native-staff-identity", () => ({ resolveNativeStaffIdentityWithAdmissionVersion: mocks.identity }));
-vi.mock("../src/worker/employee-read-authority", () => ({ resolveEmployeeReadAuthority: mocks.resolve, recheckEmployeeReadAuthority: mocks.recheck, listEmployeeReadRoots: mocks.roots }));
+vi.mock("../src/worker/employee-read-authority", () => ({ resolveEmployeeReadAuthority: mocks.resolve, recheckEmployeeReadAuthority: mocks.recheck, listEmployeeReadRoots: mocks.roots, resolveEmployeeWriteAuthority: mocks.write }));
 vi.mock("../src/worker/employee-read-provisioning", () => ({ recordEmployeeContentStart: mocks.audit }));
 const origin = "https://ops.example.test", issuer = "https://synthetic.cloudflareaccess.com", audience = "synthetic-staff-audience";
 const rootId = "22222222-2222-4222-8222-222222222222", gatewayId = "11111111-1111-4111-8111-111111111111", sha = "a".repeat(64);
@@ -134,7 +134,7 @@ describe("unmounted employee read HTTP factory with real RS256 verification", ()
     expect(response.status).toBe(200);
     const policy = await response.json() as Record<string, unknown>;
     expect(policy).toEqual({ schemaVersion: 1, role: "staff",
-      roots: [{ id: rootId, name: "Synthetic files", backend: "nas", rights: ["read"], listPath: `${base}/roots/${rootId}/entries` }],
+      roots: [{ id: rootId, name: "Synthetic files", backend: "nas", rights: ["read"], exclusive: false, listPath: `${base}/roots/${rootId}/entries` }],
       providerEnabled: false, hydrationEnabled: false, minimumAppVersion: "0.0.0", sessionExpiresAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u) });
     expect(response.headers.get("Cache-Control")).toContain("no-store"); expect(h.fetcher).not.toHaveBeenCalled();
     expect((await h.call(base + "/policy?x=1")).status).toBe(400);

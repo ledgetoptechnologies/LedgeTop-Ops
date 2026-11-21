@@ -70,10 +70,13 @@ const query = `SELECT root.gateway_id gatewayId,root.root_id rootId,root.root_ge
       AND denied.staff_id=profile.staff_id AND denied.access_subject=admission.bound_access_subject AND denied.admission_version=admission.version
       AND denied.active=1 AND denied.effect='deny' AND denied.expires_at>unixepoch())`;
 
+/** Write authority (0245): the same authority plus an explicit read-write allow grant on an exclusive root. */
+const WRITE = " AND allowed.rights='read-write' AND root.exclusive=1";
+
 /** A verified human identity is necessary but never grants a managed root.
  * No role, directory permission, legacy membership or email match grants bytes. */
 export async function resolveEmployeeReadAuthority(database: D1Database,
-  authenticated: AuthenticatedNativeStaffWithAdmissionVersion, rootId: string, exactGrantId?: string): Promise<EmployeeReadAuthority | null> {
+  authenticated: AuthenticatedNativeStaffWithAdmissionVersion, rootId: string, exactGrantId?: string, write = false): Promise<EmployeeReadAuthority | null> {
   try {
     if (typeof rootId !== 'string' || !UUID.test(rootId) || (exactGrantId !== undefined && (typeof exactGrantId !== 'string' || !UUID.test(exactGrantId)))
       || !exactAuthenticated(authenticated)) return null;
@@ -88,7 +91,7 @@ export async function resolveEmployeeReadAuthority(database: D1Database,
     const input = Object.freeze({ rootId, staffId: identity.staffId, accessSubject: identity.verifiedAccessSubject,
       admissionVersion: authenticated.admissionVersion, profileVersion: identity.profileVersion, email: identity.email, verifiedUntil: authenticated.verifiedUntil });
     if (login && !await assertCurrentStaffLogin(database, login)) return null;
-    const row = await database.withSession('first-primary').prepare(query + (exactGrantId === undefined ? '' : ' AND allowed.grant_id=?') + ' ORDER BY allowed.grant_id LIMIT 1')
+    const row = await database.withSession('first-primary').prepare(query + (write ? WRITE : '') + (exactGrantId === undefined ? '' : ' AND allowed.grant_id=?') + ' ORDER BY allowed.grant_id LIMIT 1')
       .bind(input.rootId, input.staffId, input.accessSubject, input.admissionVersion, input.profileVersion, ...(exactGrantId === undefined ? [] : [exactGrantId])).first<Row>();
     if (!row || row.email !== input.email || !positive(row.expiresAt) || row.expiresAt > 253402300799) return null;
     const proof = Object.freeze({ gatewayId: row.gatewayId, rootId: row.rootId, rootGeneration: row.rootGeneration, rootFingerprint: row.rootFingerprint,
@@ -103,13 +106,13 @@ export async function resolveEmployeeReadAuthority(database: D1Database,
 
 /** Fresh primary recheck after the backend await and immediately before handoff.
  * A replaced grant cannot rescue a proof issued under a revoked grant ID. */
-export async function recheckEmployeeReadAuthority(database: D1Database, proof: EmployeeReadAuthority): Promise<boolean> {
+export async function recheckEmployeeReadAuthority(database: D1Database, proof: EmployeeReadAuthority, write = false): Promise<boolean> {
   try {
     if (!validProof(proof)) return false;
     const login = proof.verifiedLogin ? snapshotStaffLoginProof(proof.verifiedLogin)! : undefined;
     const input = Object.freeze({ ...proof, ...(login ? { verifiedLogin: login } : {}) });
     if (login && !await assertCurrentStaffLogin(database, login)) return false;
-    const row = await database.withSession('first-primary').prepare(query + ' AND allowed.grant_id=? AND allowed.grant_generation=? LIMIT 1')
+    const row = await database.withSession('first-primary').prepare(query + (write ? WRITE : '') + ' AND allowed.grant_id=? AND allowed.grant_generation=? LIMIT 1')
       .bind(input.rootId, input.staffId, input.accessSubject, input.admissionVersion, input.profileVersion, input.grantId, input.grantGeneration).first<Row>();
     return !!row && row.gatewayId === input.gatewayId && row.rootGeneration === input.rootGeneration
       && row.rootFingerprint === input.rootFingerprint && positive(row.expiresAt) && row.expiresAt * 1000 > Date.now() && validUntil(input.verifiedUntil)
@@ -175,3 +178,8 @@ export async function listEmployeeReadRoots(database: D1Database,
     return Object.freeze(roots);
   } catch { return null; }
 }
+
+/** Staff Files writes: the read authority plus rights='read-write' on an exclusive root (deny still wins). */
+export const resolveEmployeeWriteAuthority = (database: D1Database, authenticated: AuthenticatedNativeStaffWithAdmissionVersion, rootId: string, exactGrantId?: string) =>
+  resolveEmployeeReadAuthority(database, authenticated, rootId, exactGrantId, true);
+export const recheckEmployeeWriteAuthority = (database: D1Database, proof: EmployeeReadAuthority) => recheckEmployeeReadAuthority(database, proof, true);

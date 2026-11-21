@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { authenticateNativeStaffWithAdmissionVersion, type AuthenticatedNativeStaffWithAdmissionVersion, type NativeStaffAccessConfiguration } from "./native-staff-auth";
-import { listEmployeeReadRoots, resolveEmployeeReadAuthority, recheckEmployeeReadAuthority } from "./employee-read-authority";
+import { listEmployeeReadRoots, resolveEmployeeReadAuthority, recheckEmployeeReadAuthority, resolveEmployeeWriteAuthority } from "./employee-read-authority";
 import { recordEmployeeContentStart } from "./employee-read-provisioning";
 import { readEmployeeGateway, canonicalEmployeeReadPath, type EmployeeGatewayConfiguration, type EmployeeReadProof, type EmployeeReadSelection } from "./employee-read-transport";
 import { employeeHandleContext, encodeEmployeeFileHandle, decodeEmployeeFileHandle, employeeFileProofMatches, employeeLogicalFileId } from "./employee-read-handles";
@@ -36,10 +36,11 @@ function selection(url: string, operation: "list" | "manifest"): EmployeeReadSel
   return { operation, path, cursor, snapshotId: null, expectedSha256: null, range: null };
 }
 /** Staff policy for the Windows Files app. Grants nothing itself: every listed root is re-authorized per request. */
-export function employeeFilesStaffPolicy(roots: readonly Readonly<{ rootId: string; displayName: string }>[], verifiedUntil: string) {
+export function employeeFilesStaffPolicy(roots: readonly Readonly<{ rootId: string; displayName: string; writable?: boolean; exclusive?: boolean }>[], verifiedUntil: string) {
   return {
     schemaVersion: 1 as const, role: "staff" as const,
-    roots: roots.map(root => ({ id: root.rootId, name: root.displayName, backend: "nas" as const, rights: ["read"] as const,
+    roots: roots.map(root => ({ id: root.rootId, name: root.displayName, backend: "nas" as const,
+      rights: root.writable === true ? ["read", "write"] : ["read"], exclusive: root.exclusive === true,
       listPath: `${BASE}/roots/${root.rootId}/entries` })),
     providerEnabled: false, hydrationEnabled: false, minimumAppVersion: "0.0.0",
     sessionExpiresAt: new Date(Date.parse(verifiedUntil)).toISOString(),
@@ -127,7 +128,16 @@ export function createEmployeeReadRouter(configuration: ReadConfiguration, depen
     query(c.req.url, []);
     const auth = c.get("employee"), roots = await listEmployeeReadRoots(database, auth);
     if (roots === null) return fail(403, "employee_read_denied");
-    return c.json(employeeFilesStaffPolicy(roots.filter(root => root.gatewayId === config!.gateway.gatewayId), auth.verifiedUntil));
+    const visible = roots.filter(root => root.gatewayId === config!.gateway.gatewayId);
+    // Write is reported only where the full write authority holds now (read-write grant, exclusive root, no deny).
+    const detailed = await Promise.all(visible.map(async root => {
+      try {
+        const row = await database.withSession("first-primary").prepare("SELECT exclusive FROM ops_employee_read_roots WHERE root_id=?").bind(root.rootId).first<{ exclusive: number }>();
+        const writable = !!await resolveEmployeeWriteAuthority(database, auth, root.rootId);
+        return { ...root, exclusive: row?.exclusive === 1, writable: writable && row?.exclusive === 1 };
+      } catch { return { ...root, exclusive: false, writable: false }; }  // unknown: reported read-only
+    }));
+    return c.json(employeeFilesStaffPolicy(detailed, auth.verifiedUntil));
   });
   router.get("/roots/:rootId/entries", async c => {
     const selected = selection(c.req.url, "list"), proof = await current(c.get("employee"), c.req.param("rootId"));

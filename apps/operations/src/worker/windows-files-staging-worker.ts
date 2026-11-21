@@ -1,8 +1,11 @@
 import { createWindowsEmployeeFilesStagingRouter } from "./windows-files-staging";
+import { parseFilesGatewayTransports, type FilesWriteConfiguration } from "./employee-files-write";
 import type standardWorker from "./staging-native-authority-entrypoint";
 
 export type WindowsEmployeeStagingProfile = Readonly<{ enabled: boolean; gateway: Readonly<{ origin: string; gatewayId: string; keyId: string }> }>;
-type PrivateBindings = Readonly<{ WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY?: string; WINDOWS_EMPLOYEE_HANDLE_KEY?: string; WINDOWS_EMPLOYEE_QUEUE_KEY?: string }>;
+type PrivateBindings = Readonly<{ WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY?: string; WINDOWS_EMPLOYEE_HANDLE_KEY?: string; WINDOWS_EMPLOYEE_QUEUE_KEY?: string;
+  FILES_WRITE_SIGNING_KEY?: string; FILES_WRITE_KEY_ID?: string; FILES_GATEWAY_TRANSPORTS?: string;
+  FILES_BACKEND_ACCESS_CLIENT_ID?: string; FILES_BACKEND_ACCESS_CLIENT_SECRET?: string }>;
 type StagingEnv = Parameters<typeof standardWorker.fetch>[1] & PrivateBindings;
 type Fallback = Pick<typeof standardWorker, "fetch" | "queue" | "scheduled">;
 const ORIGIN = "https://ops-staging.ledgetopdroneservices.com";
@@ -19,6 +22,16 @@ function key(text: string | undefined): Uint8Array {
   if (bytes.length !== 32 || btoa(decoded).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "") !== text) throw Error();
   return bytes;
 }
+/** Staff Files write settings from fixed slots only; anything missing or malformed keeps writes unavailable. */
+function filesWrite(env: PrivateBindings): FilesWriteConfiguration | null {
+  try {
+    if (env.FILES_WRITE_SIGNING_KEY === undefined) return null;
+    return { enabled: true, opsOrigin: ORIGIN, access: { enabled: true, issuer: ISSUER, staffAudience: AUDIENCE },
+      transports: parseFilesGatewayTransports(env.FILES_GATEWAY_TRANSPORTS), servicePrincipal: String(env.FILES_BACKEND_ACCESS_CLIENT_ID),
+      accessClientId: String(env.FILES_BACKEND_ACCESS_CLIENT_ID), accessClientSecret: String(env.FILES_BACKEND_ACCESS_CLIENT_SECRET),
+      keyId: String(env.FILES_WRITE_KEY_ID), signingSeed: key(env.FILES_WRITE_SIGNING_KEY) };
+  } catch { return null; }
+}
 /** The generated staging main supplies build-time public metadata. Only fixed
  * secret slots are read here; origins/IDs never come from env or a request. */
 export function createWindowsEmployeeStagingWorker(profile: WindowsEmployeeStagingProfile, fallback: Fallback) {
@@ -32,7 +45,7 @@ export function createWindowsEmployeeStagingWorker(profile: WindowsEmployeeStagi
         const router = createWindowsEmployeeFilesStagingRouter({ environment: "staging", enabled: true,
           opsOrigin: ORIGIN, access: { enabled: true, issuer: ISSUER, staffAudience: AUDIENCE }, gateway: { ...captured.gateway,
             key: key(env.WINDOWS_EMPLOYEE_GATEWAY_SIGNING_KEY) }, handleKey: key(env.WINDOWS_EMPLOYEE_HANDLE_KEY), queueKey: key(env.WINDOWS_EMPLOYEE_QUEUE_KEY),
-          adminCsrfSecret: env.OPERATIONS_SESSION_SECRET }, { database: env.OPS_DB });
+          adminCsrfSecret: env.OPERATIONS_SESSION_SECRET, filesWrite: filesWrite(env) }, { database: env.OPS_DB });
         return await router.fetch(request);
       } catch { return unavailable(); }
     },
