@@ -215,10 +215,10 @@ test('upstream slots are shared fairly between callers', async () => {
   assert.equal((await after).status, 'none');
 });
 
-async function withServer({ source, repository = fakeRepository(sessions, { shares: { 'share-1': liveShare, 'share-revoked': { ...liveShare, id: 'share-revoked', active: false } } }) }, run) {
+async function withServer({ source, boundaries = null, repository = fakeRepository(sessions, { shares: { 'share-1': liveShare, 'share-revoked': { ...liveShare, id: 'share-revoked', active: false } } }) }, run) {
   const app = express();
   app.use((req, _res, next) => { req.cookies = Object.fromEntries(String(req.headers.cookie || '').split(';').filter(Boolean).map(p => p.trim().split('='))); next(); });
-  app.use(createPropertyLinesApi({ repository, source, validator: allow }));
+  app.use(createPropertyLinesApi({ repository, source, validator: allow, boundaries }));
   const server = http.createServer(app);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try { await run(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise(resolve => server.close(resolve)); }
@@ -269,4 +269,49 @@ test('API: clients and live shares allowed, live share checks, model binding and
     assert.equal(failed.status, 502);
     assert.equal((await failed.json()).status, 'unavailable');
   });
+});
+
+test('API: an uploaded boundary replaces the state layer behind the same access checks', async () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const { createBoundaryStore, parseBoundaryFile } = require('../server/propertyLinesBoundary');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'parcel3-serve-'));
+  try {
+    const boundaries = createBoundaryStore({ baseDir: root, database: { prepare: () => ({ get: (modelId) => (modelId === 'model-a' ? { id: 'project-1' } : undefined) }) } });
+    const ring = [[-89.4012, 43.0748], [-89.4005, 43.0748], [-89.4005, 43.0752], [-89.4012, 43.0748]];
+    boundaries.save('project-1', parseBoundaryFile(Buffer.from(JSON.stringify({ type: 'Feature', properties: { name: 'Lot', owner: 'x' }, geometry: { type: 'Polygon', coordinates: [ring] } }))), { bytes: 1, sha256: 'e'.repeat(64) });
+    let upstream = 0;
+    const source = { parcels: async () => { upstream++; return { status: 'ok', parcels: [] }; } };
+    const staff = { Authorization: `Bearer ${staffToken}` }, client = { Authorization: `Bearer ${clientToken}` };
+    const box = 'bbox=-89.402,43.074,-89.4,43.0755';
+    await withServer({ source, boundaries }, async base => {
+      const parcels = (headers) => fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, headers ? { headers } : undefined);
+      const offer = await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: client })).json();
+      assert.equal(offer.source.kind, 'upload');
+      assert.equal(offer.source.region, null, 'not tied to Wisconsin coverage');
+      assert.match(offer.source.datumNote, /no datum shift/);
+      const publicLink = { Cookie: `ltds_share=${shareCookie()}` };
+      for (const headers of [staff, client]) {
+        assert.deepEqual(await (await parcels(headers)).json(), { status: 'ok', parcels: [{ id: 1, rings: [ring] }] }, 'geometry only, same numbers in and out');
+      }
+      // Anonymous public link: no layer at all (not the state parcels) until
+      // staff choose "Show on public links".
+      assert.deepEqual(await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: publicLink })).json(), { offered: false, source: null });
+      const hidden = await parcels(publicLink);
+      assert.equal(hidden.status, 403);
+      assert.equal((await hidden.json()).code, 'property_lines_not_offered');
+      boundaries.update('project-1', { publicVisible: true });
+      assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: publicLink })).json()).source.kind, 'upload');
+      assert.deepEqual(await (await parcels(publicLink)).json(), { status: 'ok', parcels: [{ id: 1, rings: [ring] }] });
+      assert.equal(offer.source.datum, 'WGS84');
+      assert.match(offer.source.datumNote, /WGS84.*NAD83-based model expect roughly 1 to 1\.5 m/);
+      assert.equal((await parcels()).status, 401);
+      assert.equal((await parcels({ Authorization: `Bearer ${expiredToken}` })).status, 403);
+      assert.equal((await parcels({ Cookie: `ltds_share=${shareCookie(1)}` })).status, 403, 'stale share revision');
+      assert.equal(upstream, 0, 'the state service is not asked');
+      boundaries.setSource('project-1', 'state');
+      assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: staff })).json()).source.id, 'wi-statewide-parcels');
+      await parcels(staff);
+      assert.equal(upstream, 1);
+    });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

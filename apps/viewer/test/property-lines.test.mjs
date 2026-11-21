@@ -272,6 +272,21 @@ test('map redraws reuse one canvas renderer and never pile up layers', async () 
   assert.equal(layers.size, 0);
 });
 
+test('an uploaded boundary is not limited to Wisconsin coverage', async () => {
+  const { propertyLinesAvailability } = await import('../property-lines.mjs');
+  const denver = { west: -104.992, south: 39.738, east: -104.989, north: 39.740 };
+  assert.deepEqual(propertyLinesAvailability({ offered: true, georefVerified: true, modelBounds: denver }), { available: false, reason: 'outside' });
+  assert.deepEqual(propertyLinesAvailability({ offered: true, georefVerified: true, modelBounds: denver, regionLimited: false }), { available: true, reason: null });
+  assert.deepEqual(propertyLinesAvailability({ offered: true, georefVerified: false, modelBounds: denver, regionLimited: false }), { available: false, reason: 'unverified' });
+});
+
+test('datum note covers uploaded WGS84 files against NAD83 models', async () => {
+  const { propertyLinesDatumNote } = await import('../property-lines.mjs');
+  assert.match(propertyLinesDatumNote('NAD83', 'WGS84'), /WGS84-based.*1 to 1\.5 m/);
+  assert.match(propertyLinesDatumNote('WGS84', 'WGS84'), /both WGS84-based; no datum shift/);
+  assert.equal(propertyLinesDatumNote('unknown', 'WGS84'), '');
+});
+
 test('no property-lines request is made for a model without a verified georeference', async () => {
   const { createPropertyLinesController } = await import('../property-lines-layer.mjs');
   const requests = [];

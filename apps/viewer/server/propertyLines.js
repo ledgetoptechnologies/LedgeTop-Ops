@@ -13,6 +13,7 @@ const { trackedRouter } = require('./httpRequestLifecycle');
 const { isAdminRequest } = require('./adminAuth');
 const { revisionMatches } = require('./publicSharePolicy');
 const { createUtmProjection } = require('../utm-conversion.mjs');
+const { parcelsInBounds, uploadSourceDescription } = require('./propertyLinesBoundary');
 
 // Datum convention, end to end (one rule, no exceptions):
 //   NAD83 geographic lon/lat, and NO datum transformation anywhere.
@@ -307,7 +308,21 @@ function sourceDescription() {
   return { id: 'wi-statewide-parcels', name, release, credit, disclaimer, datumNote, datum: DATUM, region: 'Wisconsin' };
 }
 
-function createPropertyLinesApi({ repository, source = createParcelSource(), validator } = {}) {
+// boundaries: optional uploaded-boundary store (propertyLinesBoundary.js).
+// When the model's project has chosen its uploaded file, that file replaces
+// the state layer for this model, behind exactly the same access checks.
+// An uploaded boundary is project-supplied data, not public-domain data: it
+// is shown to staff and to signed-in clients with live access to the model,
+// and to anonymous public links only when staff ticked "Show on public
+// links" (manifest publicVisible). A public link on a project whose source is
+// the upload otherwise gets no layer at all (not the state parcels, which may
+// be the wrong data for that site).
+function uploadVisible(upload, audience) {
+  if (!upload?.parcels) return false;
+  return audience === 'staff' || audience === 'client' || (audience === 'public' && upload.manifest.publicVisible === true);
+}
+
+function createPropertyLinesApi({ repository, source = createParcelSource(), validator, boundaries = null } = {}) {
   const router = trackedRouter();
   // 401 when nothing was presented; 403 when a session, admin login or share
   // was presented but is revoked, stale, expired or for another model.
@@ -324,7 +339,9 @@ function createPropertyLinesApi({ repository, source = createParcelSource(), val
     const caller = await resolve(req, req.query.model);
     if (!caller) return denied(req, res);
     const offered = propertyLinesOffered(caller.audience) && Boolean(modelSiteWindow(caller.version));
-    return res.json({ offered, source: sourceDescription() });
+    const upload = boundaries?.activeForModel(caller.model?.id);
+    if (upload && !uploadVisible(upload, caller.audience)) return res.json({ offered: false, source: null });
+    return res.json({ offered, source: upload ? uploadSourceDescription(upload.manifest, WISCONSIN_PARCELS.disclaimer) : sourceDescription() });
   });
 
   router.get('/api/v1/property-lines/parcels', async (req, res) => {
@@ -343,6 +360,10 @@ function createPropertyLinesApi({ repository, source = createParcelSource(), val
     if (repository?.rateLimited?.(`property-lines:${req.ip}`, LIMITS.ratePerMinute, 60_000)
       || repository?.rateLimited?.(`property-lines:${caller.caller}`, LIMITS.callerRatePerMinute, 60_000))
       return res.status(429).json({ error: 'too many requests', code: 'rate_limited' });
+    const upload = boundaries?.activeForModel(caller.model?.id);
+    if (upload && !uploadVisible(upload, caller.audience))
+      return res.status(403).json({ error: 'property lines are not offered for this viewer', code: 'property_lines_not_offered' });
+    if (upload) return res.json(parcelsInBounds(upload.parcels, parsed.bounds));
     if (parsed.outside) return res.json({ status: 'outside', parcels: [] });
     const result = await source.parcels(parsed.bounds, { caller: caller.caller });
     if (result.status === 'busy') return res.status(429).json({ status: 'unavailable', parcels: [], code: 'busy' });

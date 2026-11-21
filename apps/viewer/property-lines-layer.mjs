@@ -85,7 +85,7 @@ export function createPropertyLinesController(deps) {
   }
 
   function availability() {
-    return propertyLinesAvailability({ offered, georefVerified: deps.georefVerified(), modelBounds: siteBounds });
+    return propertyLinesAvailability({ offered, georefVerified: deps.georefVerified(), modelBounds: siteBounds, regionLimited: source?.kind !== 'upload' });
   }
 
   function render() {
@@ -106,7 +106,7 @@ export function createPropertyLinesController(deps) {
     dom.status.dataset.state = disabled ? av.reason : (on ? status : 'off');
     if (dom.about) dom.about.hidden = !shown;
     if (shown && source && dom.about) {
-      dom.about.querySelector('[data-pl="source"]').textContent = `${source.name}, release ${source.release}. ${source.credit}`;
+      dom.about.querySelector('[data-pl="source"]').textContent = source.kind === 'upload' ? `${source.name}, ${source.release}. ${source.credit}` : `${source.name}, release ${source.release}. ${source.credit}`;
       dom.about.querySelector('[data-pl="disclaimer"]').textContent = [source.disclaimer, propertyLinesDatumNote(deps.modelDatum?.(), source.datum) || source.datumNote].filter(Boolean).join(' ');
     }
     if (dom.notice) {
@@ -303,7 +303,9 @@ export function createPropertyLinesController(deps) {
       const response = await deps.fetchImpl(`/api/v1/property-lines?model=${encodeURIComponent(deps.projectId() || '')}`, { headers: deps.headers(), credentials: 'same-origin', cache: 'no-store' });
       const body = response.ok ? await response.json() : null;
       offered = body?.offered === true && Boolean(body.source);
-      source = offered ? body.source : null;
+      // Plain strings only; they are shown with textContent, never as HTML.
+      source = offered ? Object.fromEntries(['kind', 'name', 'release', 'credit', 'disclaimer', 'datumNote', 'datum', 'region']
+        .filter(key => typeof body.source[key] === 'string').map(key => [key, body.source[key].slice(0, 600)])) : null;
     } catch { offered = false; source = null; }
     refresh();
   }

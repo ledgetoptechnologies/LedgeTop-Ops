@@ -650,6 +650,24 @@ WGS84 UTM 16N
   the surveyed area, default 1.5 km, plus margin). The service URL changes with each yearly
   release: update `WISCONSIN_PARCELS` in `server/propertyLines.js` (URL,
   release and credit together).
+- **Uploaded boundary file** (fallback property-lines source): staff with
+  `viewer.projects.write` open a project's "Property lines source" in the
+  workspace, upload one GeoJSON or KML file (20 MB, 5,000 features, 200,000
+  vertices; content-sniffed; KML without DTD or entities; only Polygon,
+  MultiPolygon and LineString and an optional plain-text name are kept;
+  lon/lat range-checked and kept exactly as supplied, no datum shift), choose
+  state parcels or the upload, or remove it. The file is stored as one
+  normalized GeoJSON plus a manifest under
+  `<models root>/property-lines/<project id>/`, replaced atomically, and served
+  through the same property-lines endpoints and live access checks, for every
+  model of that project, anywhere (not only Wisconsin). Staff and signed-in
+  clients see it; anonymous public links see no property-lines layer for that
+  project unless staff tick "Show on public links" (off for every new upload).
+  KML and GeoJSON without a CRS are WGS84; the panel notes the 1 to 1.5 m offset
+  against a NAD83 model. Each response is box-filtered per ring and thinned to
+  20,000 vertices (flagged simplified). Purging the project
+  removes the folder; trash keeps it for restore. Shapefile (zip) and DXF are
+  not supported yet.
 - **LOD mesh** (when verified tile derivatives exist): hierarchical B3DM tiles,
   REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom).
   Detail `2..24` maps exponentially to the raw camera screen-space-error target
