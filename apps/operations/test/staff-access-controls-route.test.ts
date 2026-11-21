@@ -34,7 +34,35 @@ function environment(
 ) {
   const prepared: Array<{ sql: string; values: unknown[] }> = [];
   let batches = 0;
+  const withSession = vi.fn((constraint: string) => {
+    expect(constraint).toBe("first-primary");
+    return {
+      prepare(sql: string) {
+        if (sql.includes("FROM native_staff_access_reconciliation")) {
+          return {
+            async first(column: string) {
+              expect(column).toBe("enabled");
+              return 0;
+            },
+          };
+        }
+        expect(sql).toContain("role_id='role-owner' AND scope='global'");
+        return {
+          bind(staffId: string) {
+            expect(staffId).toBe(principal.id);
+            return {
+              async first(column: string) {
+                expect(column).toBe("ok");
+                return null;
+              },
+            };
+          },
+        };
+      },
+    };
+  });
   const database = {
+    withSession,
     prepare(sql: string) {
       const statement = {
         sql,
@@ -64,6 +92,7 @@ function environment(
   return {
     env: { ENVIRONMENT: "development", EXPECTED_HOST: "ops.example", INCOMING_EXPECTED_HOST: "incoming.example", OPS_DB: database },
     prepared,
+    withSession,
     batchCount: () => batches,
   };
 }
@@ -206,6 +235,8 @@ describe("staff access-control route", () => {
       nonAdmin.env as any,
       executionCtx,
     );
+    expect(nonAdminResponse.status).toBe(200);
+    expect(nonAdmin.withSession).not.toHaveBeenCalled();
     const nonAdminPerson = ((await nonAdminResponse.json()) as { staff: Record<string, unknown>[] }).staff[0]!;
     expect(nonAdminPerson).toMatchObject({ id: "staff-target", email: "target@example.com", roles: "Operator" });
     expect(nonAdminPerson).not.toHaveProperty("inherited_permissions");
@@ -220,7 +251,11 @@ describe("staff access-control route", () => {
       admin.env as any,
       executionCtx,
     );
-    const adminPerson = ((await adminResponse.json()) as { staff: Array<Record<string, any>> }).staff[0]!;
+    expect(adminResponse.status).toBe(200);
+    expect(admin.withSession).toHaveBeenCalledWith("first-primary");
+    const adminPayload = await adminResponse.json() as { staff: Record<string, unknown>[]; can_manage_staff: boolean };
+    expect(adminPayload.can_manage_staff).toBe(true);
+    const adminPerson = adminPayload.staff[0]!;
     expect(adminPerson.localControls).toMatchObject({
       teamRoster: true, deliveryBrowse: true, deliveryLinkCreate: false,
       viewerAccess: false, viewerDatasets: false, viewerStoragePurge: false,
