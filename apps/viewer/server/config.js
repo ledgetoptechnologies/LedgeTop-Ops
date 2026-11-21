@@ -174,6 +174,7 @@ const config = {
   processingLogRetentionDays: Math.min(positiveInteger(process.env.PROCESSING_LOG_RETENTION_DAYS, 30), 365),
   processingProviderTransferTimeoutMs: Math.min(positiveInteger(process.env.PROCESSING_PROVIDER_TRANSFER_TIMEOUT_MS, 6*3600_000), 24*3600_000),
   processingProviderOrigins: csv(process.env.PROCESSING_PROVIDER_ORIGINS),
+  processingOrchestratorProviderId: String(process.env.PROCESSING_ORCHESTRATOR_PROVIDER_ID || '').trim(),
   processingProviderAllowedCidrs,
   processingProviderAllowedCidrsError,
   processingProviderTokens,
