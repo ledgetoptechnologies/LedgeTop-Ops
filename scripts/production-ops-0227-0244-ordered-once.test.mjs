@@ -293,8 +293,12 @@ test('a transport error mid-way is ambiguous: stop without retry, partial receip
 test('a post-check mismatch (missing ledger row) stops at that file', async () => {
   const file = freshDb();
   const run = await execute(file, { skipLedgerAt: '0230_app_release_pilot.sql' });
-  assert.equal(run.result.status, 'stopped');
-  assert.deepEqual(run.receipt.stop, { step: '0230_app_release_pilot.sql', phase: 'post-check', code: 'post_check_failed:readback_ledger_tail' });
+  assert.equal(run.result.status, 'reconciliation-required');
+  assert.equal(run.receipt.stop.step, '0230_app_release_pilot.sql');
+  assert.equal(run.receipt.stop.phase, 'post-check');
+  assert.equal(run.receipt.stop.code, 'reconciliation_required:postcheck_failed');
+  assert.match(run.receipt.stop.detail, /^readback_ledger_tail,/u);
+  assert.equal(run.receipt.status, 'reconciliation-required');
   assert.equal(run.provider.calls.writes, 4);
 });
 
@@ -487,6 +491,22 @@ async function cli(file, args, { providerOptions = {}, confirm = async () => tru
 }
 const execArgs = receiptFile => ['--execute', '--rehearsal', '--receipt', receiptFile, ...rehearsalArgs];
 
+/** A counts-only baseline receipt holding the 226-row start counts of the synthetic chain. */
+function baselineFor() {
+  const db = new DatabaseSync(chains[226], { readOnly: true });
+  let row;
+  try {
+    row = { ...db.prepare(`SELECT (SELECT count(*) FROM roles) rolesRows, (SELECT count(*) FROM permissions) permissionsRows,
+      (SELECT count(*) FROM role_permissions) rolePermissionsRows, (SELECT count(*) FROM staff_users) staffUsersRows,
+      (SELECT count(*) FROM staff_permission_overrides) staffPermissionOverridesRows`).get() };
+  } finally { db.close(); }
+  const file = receiptPath();
+  fs.writeFileSync(file, JSON.stringify({ contract: 'production-ops-0227-0244-ordered-once-v1',
+    planSha256: loadVerifiedOps0227To0244Plan().planSha256, target: { environment: 'non-production', ...REHEARSAL },
+    rowCounts: { start: row }, stop: null }));
+  return file;
+}
+
 /** Applies the first `count` planned files directly, exactly as the operator would. */
 function applyPrefix(file, count) {
   const plan = loadVerifiedOps0227To0244Plan();
@@ -506,7 +526,7 @@ test('reconcile is read-only and reports the exact next step at 226, mid-chain a
     applyPrefix(file, count);
     const before = fs.readFileSync(file);
     const receiptFile = receiptPath();
-    const { result, provider } = await cli(file, ['--reconcile', '--receipt', receiptFile, ...rehearsalArgs]);
+    const { result, provider } = await cli(file, ['--reconcile', '--receipt', receiptFile, '--baseline-receipt', baselineFor(), ...rehearsalArgs]);
     assert.equal(result.status, 'reconciled', `count ${count}`);
     assert.equal(result.reconcile.appliedCount, count);
     assert.equal(result.reconcile.nextStep, next);
@@ -530,7 +550,8 @@ for (const landed of [true, false]) {
   test(`ambiguous response mid-chain (batch ${landed ? 'landed' : 'lost'}) -> reconcile -> resume -> 236`, async () => {
     const file = freshDb();
     const ambiguousAt = '0229_owner_intel_source_feed.sql';
-    const first = await cli(file, execArgs(receiptPath()), { providerOptions: { ambiguousAt, landed } });
+    const firstReceipt = receiptPath();
+    const first = await cli(file, execArgs(firstReceipt), { providerOptions: { ambiguousAt, landed } });
     assert.equal(first.result.status, 'reconciliation-required');
     assert.equal(first.result.steps.at(-1).apply.outcome, 'ambiguous');
     assert.deepEqual(first.provider.calls.sent, OPS_0227_0244_ORDERED_NAMES.slice(0, 3), 'sent once, never retried');
@@ -542,20 +563,26 @@ for (const landed of [true, false]) {
     assert.equal(retry.provider.calls.writes, 0);
 
     const next = landed ? '0230_app_release_pilot.sql' : ambiguousAt;
-    const reconciled = await cli(file, ['--reconcile', ...rehearsalArgs]);
+    const withoutBaseline = await cli(file, ['--reconcile', ...rehearsalArgs]);
+    assert.equal(withoutBaseline.result.stop.code, 'reconciliation_required:baseline_receipt_required');
+    // Reconcile twice; both runs must agree before resuming.
+    const reconciled = await cli(file, ['--reconcile', '--baseline-receipt', firstReceipt, ...rehearsalArgs]);
+    const again = await cli(file, ['--reconcile', '--baseline-receipt', firstReceipt, ...rehearsalArgs]);
     assert.equal(reconciled.result.status, 'reconciled');
     assert.equal(reconciled.result.reconcile.nextStep, next);
+    assert.deepEqual(again.result.reconcile, reconciled.result.reconcile);
+    assert.ok(reconciled.result.reconcile.checks.some(item => item.name === 'row_count:staffUsersRows' && item.ok));
 
     // Resuming from anything but the reconciled next step is refused, including re-sending a recorded file.
     const wrong = landed ? ambiguousAt : '0230_app_release_pilot.sql';
     const wrongReceipt = receiptPath();
-    const refused = await cli(file, [...execArgs(wrongReceipt), '--resume-from', wrong]);
+    const refused = await cli(file, [...execArgs(wrongReceipt), '--resume-from', wrong, '--baseline-receipt', firstReceipt]);
     assert.equal(refused.result.status, 'reconciliation-required');
     assert.equal(refused.provider.calls.writes, 0);
     assert.equal(readReceipt(wrongReceipt).stop.code, 'reconciliation_required:resume_from_is_not_next_step');
 
     const resumeReceipt = receiptPath();
-    const resumed = await cli(file, [...execArgs(resumeReceipt), '--resume-from', next]);
+    const resumed = await cli(file, [...execArgs(resumeReceipt), '--resume-from', next, '--baseline-receipt', firstReceipt]);
     assert.equal(resumed.result.status, 'complete');
     const start = OPS_0227_0244_ORDERED_NAMES.indexOf(next);
     assert.deepEqual(resumed.provider.calls.sent, OPS_0227_0244_ORDERED_NAMES.slice(start));
@@ -564,6 +591,7 @@ for (const landed of [true, false]) {
     assert.deepEqual(receipt.finalLedger, { ...OPS_0227_0244_FINAL_LEDGER });
     assert.deepEqual(ledgerOf(file).map(row => row.id), Array.from({ length: 236 }, (_, i) => i + 1));
     assert.ok(receipt.steps.every(step => step.readback.ledgerTail.name === step.name));
+    assert.deepEqual(receipt.rowCounts.start, readReceipt(firstReceipt).rowCounts.start, 'start counts carried forward');
   });
 }
 
@@ -662,12 +690,13 @@ test('the resume mismatch message states the ledger count and the expected next 
   const file = freshDb();
   applyPrefix(file, 3);
   const receiptFile = receiptPath();
-  const refused = await cli(file, [...execArgs(receiptFile), '--resume-from', '0228_competitor_intel_ingest.sql']);
+  const refused = await cli(file, [...execArgs(receiptFile), '--resume-from', '0228_competitor_intel_ingest.sql',
+    '--baseline-receipt', baselineFor()]);
   assert.equal(refused.result.status, 'reconciliation-required');
   assert.equal(readReceipt(receiptFile).stop.detail, 'ledger has 229 rows ending 0229_owner_intel_source_feed.sql; '
     + 'expected next file 0230_app_release_pilot.sql; --resume-from was 0228_competitor_intel_ingest.sql');
   const plain = await cli(file, execArgs(receiptPath()));
-  assert.match(plain.result.stop.detail, /^ledger has 229 rows .*expected next file 0230_app_release_pilot\.sql$/u);
+  assert.match(plain.result.stop.detail, /^ledger has 229 rows .*expected next file 0230_app_release_pilot\.sql/u);
 });
 
 test('row counts: 0240 adds exactly 2 permissions and 4 role grants; staff and override counts never change', async () => {
@@ -679,7 +708,7 @@ test('row counts: 0240 adds exactly 2 permissions and 4 role grants; staff and o
     if (prefix !== '0240') assert.deepEqual(delta, { rolesRows: 0, permissionsRows: 0, rolePermissionsRows: 0, staffUsersRows: 0,
       staffPermissionOverridesRows: 0 }, prefix);
   }
-  const { initial, final } = run.receipt.rowCounts;
+  const { start: initial, final } = run.receipt.rowCounts;
   assert.equal(final.permissionsRows - initial.permissionsRows, 2);
   assert.equal(final.rolePermissionsRows - initial.rolePermissionsRows, 4);
   assert.equal(final.staffUsersRows, initial.staffUsersRows);
@@ -692,9 +721,9 @@ test('row counts: 0240 adds exactly 2 permissions and 4 role grants; staff and o
 
   const changed = await execute(freshDb(), { tamper: (snapshot, calls) => calls.writes >= 3
     ? { ...snapshot, probes: { ...snapshot.probes, staffUsersRows: snapshot.probes.staffUsersRows + 1 } } : snapshot });
-  assert.equal(changed.result.status, 'stopped');
+  assert.equal(changed.result.status, 'reconciliation-required');
   assert.deepEqual(changed.result.stop, { step: '0229_owner_intel_source_feed.sql', phase: 'post-check',
-    code: 'post_check_failed:staff_users_rows_unchanged_since_start' });
+    code: 'reconciliation_required:postcheck_failed', detail: 'staff_users_rows_unchanged_since_start' });
 });
 
 test('an AUTOINCREMENT sequence ahead of the ledger stops before the first write', async () => {
@@ -713,4 +742,64 @@ test('the Client production database is refused in every mode', () => {
   for (const extra of [[], ['--reconcile'], ['--execute', '--rehearsal', '--receipt', path.join(tmp, 'c.json')]]) {
     assert.throws(() => parseOps0227To0244Args([...extra, ...client]), /client_production_database_refused/u);
   }
+});
+
+// --- N1: post-check failures and row-count invariants block reconcile -------
+
+test('after a post-check failure, reconcile refuses and resume is impossible', async () => {
+  const file = freshDb();
+  const firstReceipt = receiptPath();
+  const first = await cli(file, execArgs(firstReceipt), { providerOptions: { tamper: (snapshot, calls) => calls.writes >= 3
+    ? { ...snapshot, probes: { ...snapshot.probes, staffUsersRows: snapshot.probes.staffUsersRows + 1 } } : snapshot } });
+  assert.equal(first.result.status, 'reconciliation-required');
+  assert.deepEqual(first.result.stop, { step: '0229_owner_intel_source_feed.sql', phase: 'post-check',
+    code: 'reconciliation_required:postcheck_failed', detail: 'staff_users_rows_unchanged_since_start' });
+  assert.equal(ledgerOf(file).length, 229);
+  // The database itself is consistent, but the earlier run's post-check failed: never reconciled automatically.
+  const reconcileReceipt = receiptPath();
+  const reconciled = await cli(file, ['--reconcile', '--receipt', reconcileReceipt, '--baseline-receipt', firstReceipt, ...rehearsalArgs]);
+  assert.equal(reconciled.result.status, 'reconciliation-required');
+  assert.equal(reconciled.result.stop.code, 'reconciliation_required:baseline_receipt_postcheck_failed');
+  assert.equal(readReceipt(reconcileReceipt).status, 'reconciliation-required');
+  const resumed = await cli(file, [...execArgs(receiptPath()), '--resume-from', '0230_app_release_pilot.sql', '--baseline-receipt', firstReceipt]);
+  assert.equal(resumed.result.status, 'reconciliation-required');
+  assert.equal(resumed.provider.calls.writes, 0);
+});
+
+test('reconcile rechecks the row-count invariants against the start counts and names the differing counts', async () => {
+  const file = freshDb();
+  applyPrefix(file, 6);
+  const baseline = baselineFor();
+  const ok = await cli(file, ['--reconcile', '--baseline-receipt', baseline, ...rehearsalArgs]);
+  assert.equal(ok.result.status, 'reconciled');
+  assert.equal(ok.result.reconcile.nextStep, '0241_staff_usernames.sql');
+  const counts = Object.fromEntries(ok.result.reconcile.checks.filter(item => item.name.startsWith('row_count:'))
+    .map(item => [item.name.slice(10), item.observed - JSON.parse(fs.readFileSync(baseline, 'utf8')).rowCounts.start[item.name.slice(10)]]));
+  assert.deepEqual(counts, { rolesRows: 0, permissionsRows: 2, rolePermissionsRows: 4, staffUsersRows: 0, staffPermissionOverridesRows: 0 });
+
+  const db = new DatabaseSync(file);
+  db.exec("INSERT INTO permissions(key,description) VALUES('synthetic.extra','synthetic')");
+  db.close();
+  const receiptFile = receiptPath();
+  const refused = await cli(file, ['--reconcile', '--receipt', receiptFile, '--baseline-receipt', baseline, ...rehearsalArgs]);
+  assert.equal(refused.result.status, 'reconciliation-required');
+  assert.equal(refused.result.stop.code, 'reconciliation_required:row_counts_differ');
+  const receipt = readReceipt(receiptFile);
+  assert.match(receipt.stop.detail, /counts differ: permissionsRows \(expected \d+, observed \d+\)$/u);
+  assert.deepEqual(receipt.reconcile.checks.filter(item => item.name.startsWith('row_count:') && !item.ok).map(item => item.name),
+    ['row_count:permissionsRows']);
+  const resumed = await cli(file, [...execArgs(receiptPath()), '--resume-from', '0241_staff_usernames.sql', '--baseline-receipt', baseline]);
+  assert.equal(resumed.result.status, 'reconciliation-required');
+  assert.equal(resumed.provider.calls.writes, 0);
+});
+
+test('a baseline receipt for another plan or target is refused', async () => {
+  const file = freshDb();
+  applyPrefix(file, 2);
+  const other = receiptPath();
+  fs.writeFileSync(other, JSON.stringify({ ...JSON.parse(fs.readFileSync(baselineFor(), 'utf8')), planSha256: 'f'.repeat(64) }));
+  const { result } = await cli(file, ['--reconcile', '--baseline-receipt', other, ...rehearsalArgs]);
+  assert.equal(result.status, 'reconciliation-required');
+  assert.deepEqual(result.stop, { step: null, phase: 'baseline-receipt', code: 'ops_0227_0244:baseline_receipt_invalid' });
+  assert.throws(() => parseOps0227To0244Args(['--dry-run', '--baseline-receipt', other, ...rehearsalArgs]), /baseline_receipt_invalid/u);
 });

@@ -219,11 +219,18 @@ tool never retries a batch, and it never sends a file twice in one process.
 ## Reconcile and resume
 
 After any stop past the first write, do **not** re-run plain `--execute`. It
-refuses any ledger beyond 226. Reconcile first instead:
+refuses any ledger beyond 226. Reconcile first instead, passing the receipt of
+the run that stopped as the baseline:
 
 ```powershell
-node scripts/production-ops-0227-0244-ordered-once.mjs --reconcile --account-id <account> --database-id <uuid> --database-name <name> [--receipt <absolute path>]
+node scripts/production-ops-0227-0244-ordered-once.mjs --reconcile --baseline-receipt <stopped run's receipt> --account-id <account> --database-id <uuid> --database-name <name> [--receipt <new absolute path>]
 ```
+
+After an **ambiguous** stop, do not reconcile at once. A request whose response
+was lost may still be finishing on the D1 side. Wait several minutes, then run
+reconcile **twice**, a few minutes apart, and continue only if both runs report
+the same ledger count, the same next step and the same checks. If they differ,
+something is still changing: stop and investigate.
 
 Reconcile is read-only: it takes one snapshot and writes nothing. Every
 reconcile result and every refusal states the ledger count and the expected
@@ -238,6 +245,22 @@ It proves the following:
   digest). For a recorded 0240, the 2 permissions and 4 role grants exist.
 - No object of any unrecorded file exists. For an unrecorded 0240, there are no
   `flight_logs.*` permissions.
+- When at least one file is recorded, the row counts still hold against the start
+  counts in the baseline receipt:
+  - `roles`, `staff_users` and `staff_permission_overrides` are unchanged;
+  - `permissions` is the start count plus 2 if 0240 is recorded;
+  - `role_permissions` is the start count plus the 0240 grants (4) if 0240 is
+    recorded.
+
+  The receipt lists every differing count with its expected and observed values.
+  Without a baseline receipt, reconcile refuses with
+  `baseline_receipt_required`. A baseline receipt for another plan or database
+  is refused.
+- The baseline receipt did not stop on a failed post-check. A post-check failure
+  (`reconciliation_required:postcheck_failed`, including a row-count delta
+  mismatch) means a write was acknowledged but the state is not as pinned. Such
+  a stop always needs a reviewed manual reconciliation, and reconcile refuses it
+  with `baseline_receipt_postcheck_failed`.
 
 If all of this holds, the status is `reconciled` and the receipt names the exact
 next step. Any other state is refused with status `reconciliation-required` and
@@ -245,7 +268,9 @@ the first failing check, for example:
 
 - a gap, a reordered row or an extra row;
 - a recorded file whose objects are missing;
-- a partial object set for an unrecorded file.
+- a partial object set for an unrecorded file;
+- a row count that differs from the start counts plus the expected deltas;
+- an earlier post-check failure.
 
 That state needs a reviewed manual reconciliation; the tool cannot continue it.
 For a partial file, list its objects read-only before deciding, for example for
@@ -253,8 +278,13 @@ For a partial file, list its objects read-only before deciding, for example for
 
 ```sql
 SELECT type, name, tbl_name FROM sqlite_master
-WHERE name GLOB 'owner_intel_google_ads_*' ORDER BY type, name;
+WHERE name GLOB 'owner_intel_google_ads_*'
+   OR name IN ('owner_intel_source_no_google_ads_operation', 'owner_intel_v1_no_google_ads_operation')
+ORDER BY type, name;
 ```
+
+The two named triggers belong to 0231 but sit on the earlier
+`owner_intel_source_inbox` and `ci_ingest_inbox` tables.
 
 The exact names of each file's objects are in the fixture's
 `expectedAddedObjects`.
@@ -262,7 +292,7 @@ The exact names of each file's objects are in the fixture's
 To continue, pass exactly the reported next step:
 
 ```powershell
-node scripts/production-ops-0227-0244-ordered-once.mjs --execute --resume-from <next file> --receipt <new absolute path> [--approval-ref <id> | --rehearsal] --account-id <account> --database-id <uuid> --database-name <name>
+node scripts/production-ops-0227-0244-ordered-once.mjs --execute --resume-from <next file> --baseline-receipt <stopped run's receipt> --receipt <new absolute path> [--approval-ref <id> | --rehearsal] --account-id <account> --database-id <uuid> --database-name <name>
 ```
 
 The resumed run re-proves everything before it asks for confirmation:
@@ -273,7 +303,9 @@ The resumed run re-proves everything before it asks for confirmation:
 3. The execute pass itself re-reads and re-proves the prefix before its first
    write.
 
-Use a new receipt path for every run.
+Use a new receipt path for every run. A resumed run's receipt carries the
+original start counts forward, so it can serve as the baseline for a later
+resume.
 
 ## Rollback notes
 
@@ -282,6 +314,12 @@ research. A manual reverse migration must also delete that file's
 `d1_migrations` row (`DELETE FROM d1_migrations WHERE name='<file>'`), or the
 ledger gates and this tool's reconcile will refuse the state. Delete the rows
 from the latest file backwards.
+
+Deleting a ledger row does not lower the `d1_migrations` AUTOINCREMENT sequence.
+After a rollback, the `sqlite_sequence` preflight therefore refuses to re-apply
+the file, because the next id would skip a number. This is by design. Re-applying
+after a rollback is a separate, reviewed decision, and it needs a new reviewed
+tool or plan.
 
 - **0227, 0228, 0229, 0231:** Code rollback leaves inert, empty tables, apart
   from controls seeded with `enabled=0`. A reverse migration drops the triggers

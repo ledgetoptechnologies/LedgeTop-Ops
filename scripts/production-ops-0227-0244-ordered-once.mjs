@@ -287,7 +287,24 @@ export function ops0227To0244LedgerPosition(snapshot, plan) {
     message: `ledger has ${ledger.length} rows ending ${ledger.at(-1)?.name ?? 'nothing'}; expected next file ${expectedNextFile ?? 'none (all ten recorded)'}` };
 }
 
-export function reconcileOps0227To0244Snapshot(snapshot, plan) {
+/**
+ * Loads the start row counts from an earlier receipt of this tool (the first run's receipt, or a resumed
+ * run's receipt, which carries the same start counts forward). Counts only; no identities.
+ */
+export function loadOps0227To0244BaselineReceipt(filename, { plan, target } = {}) {
+  if (typeof filename !== 'string' || !path.isAbsolute(filename)) fail('baseline_receipt_path_invalid');
+  let value;
+  try { value = JSON.parse(fs.readFileSync(filename, 'utf8')); } catch { fail('baseline_receipt_unreadable'); }
+  const start = value?.rowCounts?.start;
+  if (!isPlain(value) || value.contract !== OPS_0227_0244_CONTRACT || value.planSha256 !== plan.planSha256
+    || value.target?.databaseId !== target.databaseId || value.target?.accountId !== target.accountId
+    || !exactKeys(start, TRACKED_ROWS) || TRACKED_ROWS.some(key => !Number.isSafeInteger(start[key]) || start[key] < 0))
+    fail('baseline_receipt_invalid');
+  return Object.freeze({ startCounts: Object.freeze({ ...start }), stopPhase: value.stop?.phase ?? null,
+    stopCode: value.stop?.code ?? null });
+}
+
+export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null) {
   const prior = OPS_0227_0244_PRIOR_LEDGER.count, ledger = snapshot.ledger;
   const position = ops0227To0244LedgerPosition(snapshot, plan);
   const base = ledger.slice(0, prior), suffix = ledger.slice(prior);
@@ -315,6 +332,24 @@ export function reconcileOps0227To0244Snapshot(snapshot, plan) {
   });
   const badObject = failed(checks);
   if (badObject) return { ok: false, code: `reconciliation_required:${badObject.name}`, appliedCount: applied, nextStep: null, ...position, checks };
+  if (applied > 0) {
+    // Row-count invariants (M3) need the start counts of the run that wrote the recorded prefix.
+    if (!baseline) return { ok: false, code: 'reconciliation_required:baseline_receipt_required', appliedCount: applied, nextStep: null,
+      ...position, message: `${position.message}; pass --baseline-receipt with the earlier receipt`, checks };
+    if (baseline.stopPhase === 'post-check' || /postcheck_failed|post_check_failed/u.test(baseline.stopCode ?? ''))
+      return { ok: false, code: 'reconciliation_required:baseline_receipt_postcheck_failed', appliedCount: applied, nextStep: null,
+        ...position, message: `${position.message}; the earlier run stopped on a failed post-check (${baseline.stopCode})`, checks };
+    const has0240 = plan.files.slice(0, applied).some(file => file.name.startsWith('0240'));
+    const expected = { ...baseline.startCounts,
+      permissionsRows: baseline.startCounts.permissionsRows + (has0240 ? 2 : 0),
+      rolePermissionsRows: baseline.startCounts.rolePermissionsRows + (has0240 ? 2 * p.ownerAdminRoles : 0) };
+    const countChecks = TRACKED_ROWS.map(key => check(`row_count:${key}`, expected[key], p[key]));
+    checks.push(...countChecks);
+    const differ = countChecks.filter(item => !item.ok);
+    if (differ.length > 0) return { ok: false, code: 'reconciliation_required:row_counts_differ', appliedCount: applied, nextStep: null,
+      ...position, message: `${position.message}; counts differ: ${differ.map(item => `${item.name.slice(10)} (expected ${item.expected}, observed ${item.observed})`).join(', ')}`,
+      checks };
+  }
   return { ok: true, code: null, appliedCount: applied, ...position,
     nextStep: applied < plan.files.length ? plan.files[applied].name : null, checks };
 }
@@ -420,7 +455,7 @@ const RECONCILE_NOTE = 'Do not retry. Run --reconcile (read-only); continue only
  * only classifies the state. `startIndex` > 0 resumes after a reconciled prefix; the run re-proves it first.
  */
 export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run', target, receipt = null, startIndex = 0,
-  approvalRef = null, now = () => new Date(), log = () => {} } = {}) {
+  approvalRef = null, baseline = null, now = () => new Date(), log = () => {} } = {}) {
   if (!['dry-run', 'execute', 'reconcile'].includes(mode)) fail('mode_invalid');
   if (!plan || plan.contract !== OPS_0227_0244_CONTRACT || !Array.isArray(plan.files) || plan.files.length !== 10) fail('plan_invalid');
   if (!Number.isSafeInteger(startIndex) || startIndex < 0 || startIndex >= plan.files.length) fail('start_index_invalid');
@@ -453,12 +488,14 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
   try { current = await read(OPS_0227_0244_PRE_READ_QUERY); }
   catch (error) { stop(null, 'initial-read', errorCode(error)); }
   if (current) {
-    const rec = reconcileOps0227To0244Snapshot(current, plan);
+    const rec = reconcileOps0227To0244Snapshot(current, plan, baseline);
     state.reconcile = { ok: rec.ok, code: rec.code, appliedCount: rec.appliedCount, nextStep: rec.nextStep, ledgerCount: rec.ledgerCount,
       expectedNextFile: rec.expectedNextFile, message: rec.message, checks: rec.checks };
     state.initial = { observedAt: current.observedAt, snapshotBytes: current.snapshotBytes, ledger: ledgerSummary(current.ledger),
       schemaObjectCount: current.schema.length, checks: startIndex === 0 && mode !== 'reconcile' ? initialLedgerChecks(current, plan) : [] };
-    state.rowCounts = { initial: trackedCounts(current), final: null };
+    // `start` is the count set at the 226 start of the whole apply; a resumed run carries it forward.
+    state.rowCounts = { start: rec.appliedCount > 0 && baseline ? { ...baseline.startCounts } : trackedCounts(current),
+      thisRunInitial: trackedCounts(current), final: null };
     noteSize('start', current);
     if (mode === 'reconcile') {
       if (!rec.ok) stop(null, 'reconcile', rec.code, rec.message);
@@ -475,7 +512,7 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
   }
   persist();
   const baseLedger = current?.ledger.slice(0, OPS_0227_0244_PRIOR_LEDGER.count) ?? [];
-  const runInitial = current ? trackedCounts(current) : null;
+  const runInitial = state.rowCounts?.start ?? null;
   for (let index = startIndex; mode !== 'reconcile' && state.status === 'running' && index < plan.files.length; index++) {
     const file = plan.files[index];
     const step = { order: file.order, name: file.name, preflight: null, apply: null, post: null, readback: null };
@@ -524,7 +561,12 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
       ledgerTail: after.ledger.at(-1)?.name ?? null, addedObjectCount: post.addedObjectCount, tableRows: after.tableRows,
       rowDeltas: post.rowDeltas, checks: post.checks };
     const badPost = failed(post.checks);
-    if (badPost) { stop(file.name, 'post-check', `post_check_failed:${badPost.name}`); persist(); break; }
+    if (badPost) {
+      // The write was acknowledged but the state is not as pinned: never reconciled or resumed automatically.
+      stop(file.name, 'post-check', 'reconciliation_required:postcheck_failed',
+        post.checks.filter(item => !item.ok).map(item => item.name).join(','));
+      persist(); break;
+    }
     log(`applied and verified: ${file.name} (ledger ${after.ledger.length}, tail ${after.ledger.at(-1).name})`);
     if (file.name.startsWith('0240')) { state.notes.push(`After 0240: ${OPS_0227_0244_AUTHORITY_NOTE}`); log(`NOTE: ${OPS_0227_0244_AUTHORITY_NOTE}`); }
     if (file.name.startsWith('0244')) { state.notes.push(`After 0244: ${OPS_0244_AUTHORITY_NOTE}`); log(`NOTE: ${OPS_0244_AUTHORITY_NOTE}`); }
@@ -554,16 +596,17 @@ export function describeOps0227To0244Plan(plan) {
 // CLI
 
 const USAGE = 'usage: node scripts/production-ops-0227-0244-ordered-once.mjs '
-  + '[--dry-run | --reconcile | --execute --receipt <absolute path> [--resume-from <file>] [--approval-ref <id>] [--rehearsal]] '
+  + '[--dry-run | --reconcile [--baseline-receipt <earlier receipt>] | --execute --receipt <absolute path> '
+  + '[--resume-from <file> --baseline-receipt <earlier receipt>] [--approval-ref <id>] [--rehearsal]] '
   + '--account-id <id> --database-id <uuid> --database-name <name> [--receipt <absolute path>]';
 const APPROVAL_REF = /^[A-Za-z0-9][A-Za-z0-9._:#/-]{2,127}$/u;
 
 export function parseOps0227To0244Args(args, env = {}) {
   const options = { mode: 'dry-run', accountId: env.CLOUDFLARE_ACCOUNT_ID ?? null, databaseId: null, databaseName: null,
-    receiptPath: null, rehearsal: false, resumeFrom: null, approvalRef: null };
+    receiptPath: null, rehearsal: false, resumeFrom: null, approvalRef: null, baselineReceipt: null };
   const seen = new Set();
   const valueFlags = { '--account-id': 'accountId', '--database-id': 'databaseId', '--database-name': 'databaseName',
-    '--receipt': 'receiptPath', '--resume-from': 'resumeFrom', '--approval-ref': 'approvalRef' };
+    '--receipt': 'receiptPath', '--resume-from': 'resumeFrom', '--approval-ref': 'approvalRef', '--baseline-receipt': 'baselineReceipt' };
   let modes = 0;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -585,6 +628,9 @@ export function parseOps0227To0244Args(args, env = {}) {
   if (options.resumeFrom !== null && (options.mode !== 'execute' || !OPS_0227_0244_FILES.some(file => file.name === options.resumeFrom)))
     fail('resume_from_invalid');
   if (options.approvalRef !== null && (options.mode !== 'execute' || !APPROVAL_REF.test(options.approvalRef))) fail('approval_ref_invalid');
+  if (options.baselineReceipt !== null && (!path.isAbsolute(options.baselineReceipt)
+    || !(options.mode === 'reconcile' || (options.mode === 'execute' && options.resumeFrom !== null))
+    || path.resolve(options.baselineReceipt) === path.resolve(options.receiptPath ?? ''))) fail('baseline_receipt_invalid');
   if (OPS_0227_0244_REFUSED_DATABASE_IDS.includes(options.databaseId)) fail('client_production_database_refused');
   const isProduction = options.databaseId === OPS_PRODUCTION_DATABASE.databaseId;
   if (isProduction && (options.accountId !== OPS_PRODUCTION_DATABASE.accountId || options.databaseName !== OPS_PRODUCTION_DATABASE.databaseName))
@@ -642,7 +688,18 @@ export async function mainOps0227To0244(args, dependencies = {}) {
       databaseName: options.databaseName, allowWrites: options.mode === 'execute' });
     await provider.assertTarget();
     const readOnly = { readSnapshot: query => provider.readSnapshot(query) };
-    const common = { plan, target, log: out, approvalRef: options.approvalRef };
+    let baseline = null;
+    if (options.baselineReceipt) {
+      try { baseline = loadOps0227To0244BaselineReceipt(options.baselineReceipt, { plan, target }); }
+      catch (error) {
+        const refusal = { schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
+          status: 'reconciliation-required', stop: { step: null, phase: 'baseline-receipt', code: errorCode(error) },
+          writesPerformed: 0, at: new Date().toISOString() };
+        receipt?.write(refusal);
+        return refusal;
+      }
+    }
+    const common = { plan, target, log: out, approvalRef: options.approvalRef, baseline };
     if (options.mode === 'reconcile') return await runOps0227To0244Ordered({ ...common, provider: readOnly, mode: 'reconcile', receipt });
     let startIndex = 0;
     if (options.mode === 'execute' && options.resumeFrom !== null) {
