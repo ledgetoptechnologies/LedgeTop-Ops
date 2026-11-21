@@ -106,6 +106,111 @@ function ownerGoogleAdsDto(source:NonNullable<Awaited<ReturnType<typeof readOwne
   receipt:{operationId:source.operationId,payloadSha256:source.payloadSha256,completedAt:source.completedAt,acceptedAt:source.acceptedAt}};
 }
 
+export type OwnerIntelSummaryRange='7d'|'28d'|'90d';
+export type OwnerIntelSummaryState='unavailable'|'unconfigured'|'stale'|'partial'|'available';
+export type OwnerIntelSummarySourceId='google_ads'|'search_console'|'own_site'|'ga4';
+export type OwnerIntelSummaryMetrics=
+ |{currencyCode:string|null;costMicros:string|null;impressions:string|null;clicks:string|null;conversions:string|null}
+ |{clicks:number|null;impressions:number|null;ctr:number|null;position:number|null}
+ |{monitoredPages:number;changesSincePrevious:number};
+export type OwnerIntelSummarySource={id:OwnerIntelSummarySourceId;businessId:string;range:OwnerIntelSummaryRange} & (
+ |{state:'available'|'partial';reason:string|null;metrics:OwnerIntelSummaryMetrics|null}
+ |{state:'unavailable'|'unconfigured'|'stale';reason:string;metrics:null});
+export type OwnerIntelSummary={schema:'ops.intel.owner-summary.v1';business:{id:string;key:string;name:string};range:OwnerIntelSummaryRange;sources:OwnerIntelSummarySource[]};
+type OwnerIntelSummaryEvidence={kind:'google_ads';source:NonNullable<Awaited<ReturnType<typeof readOwnerGoogleAdsProjection>>>}|{kind:'owner_source';source:NonNullable<Awaited<ReturnType<typeof readOwnerIntelSourceProjection>>>};
+const ownerSourceTables=['owner_intel_source_control','owner_intel_source_bindings','owner_intel_source_inbox','owner_intel_source_epochs','owner_intel_source_subject_heads','owner_intel_source_kind_heads','owner_intel_source_range_heads','owner_intel_source_epoch_audit','owner_intel_source_projections','owner_intel_source_batch_guards'] as const;
+function summarySource(id:OwnerIntelSummarySourceId,businessId:string,range:OwnerIntelSummaryRange,state:'available'|'partial',reason:string|null,metrics:OwnerIntelSummaryMetrics|null):OwnerIntelSummarySource;
+function summarySource(id:OwnerIntelSummarySourceId,businessId:string,range:OwnerIntelSummaryRange,state:'unavailable'|'unconfigured'|'stale',reason:string,metrics:null):OwnerIntelSummarySource;
+function summarySource(id:OwnerIntelSummarySourceId,businessId:string,range:OwnerIntelSummaryRange,state:OwnerIntelSummaryState,reason:string|null,metrics:OwnerIntelSummaryMetrics|null):OwnerIntelSummarySource{
+ if(state==='unavailable'||state==='unconfigured'||state==='stale'){
+  if(reason===null||metrics!==null)throw unavailable('intel_projection_unavailable',503);
+  return {id,businessId,range,state,reason,metrics:null};
+ }
+ return {id,businessId,range,state,reason,metrics};
+}
+async function ownerIntelSummary(db:D1Database,selected:Business,range:OwnerIntelSummaryRange):Promise<{view:OwnerIntelSummary;evidence:OwnerIntelSummaryEvidence[]}>{
+ const businessId=selected.businessId,evidence:OwnerIntelSummaryEvidence[]=[],sources:OwnerIntelSummarySource[]=[];
+ const lttNoDedicatedAdvertiser=selected.name==='Ledge Top Technologies';
+ if(!selected.bindingId||selected.configurationRevision===null){
+  sources.push(summarySource('google_ads',businessId,range,'unconfigured',lttNoDedicatedAdvertiser?'owner_advertiser_not_confirmed':'source_binding_not_configured',null));
+  sources.push(summarySource('search_console',businessId,range,'unconfigured','source_binding_not_configured',null));
+  sources.push(summarySource('own_site',businessId,range,'unconfigured','source_binding_not_configured',null));
+ }else{
+  if(lttNoDedicatedAdvertiser){
+   // Beau confirmed LTT has no dedicated Ads advertiser. A manager/MCC
+   // projection must never be presented as the company's own campaign totals.
+   sources.push(summarySource('google_ads',businessId,range,'unconfigured','owner_advertiser_not_confirmed',null));
+  }else{
+   const adsState=await ownerGoogleAdsReadState(db,selected.bindingId,selected.configurationRevision);
+  if(adsState==='schema_missing')sources.push(summarySource('google_ads',businessId,range,'unavailable','source_schema_unavailable',null));
+  else if(adsState==='disabled')sources.push(summarySource('google_ads',businessId,range,'unconfigured','source_disabled',null));
+  else if(adsState==='binding_missing')sources.push(summarySource('google_ads',businessId,range,'unconfigured','source_binding_not_configured',null));
+  else{
+   const ads=await readOwnerGoogleAdsProjection(db,selected.bindingId,selected.configurationRevision,range);
+   if(!ads){
+    const count=await db.withSession('first-primary').prepare("SELECT COUNT(*) count FROM owner_intel_google_ads_projections WHERE binding_id=? AND configuration_revision=? AND subject_key='own:google-ads'")
+     .bind(selected.bindingId,selected.configurationRevision).first<number>('count');
+    sources.push(summarySource('google_ads',businessId,range,'unavailable',count&&count>0?'range_unavailable':'awaiting_first_data',null));
+   }else{
+    evidence.push({kind:'google_ads',source:ads});
+    const totals=ads.observation.payload.totals;
+    if(totals.state==='source_stale')sources.push(summarySource('google_ads',businessId,range,'stale','source_stale',null));
+    else if(totals.state==='observed')sources.push(summarySource('google_ads',businessId,range,'available',null,{currencyCode:ads.observation.payload.currencyCode,costMicros:totals.costMicros,impressions:totals.impressions,clicks:totals.clicks,conversions:totals.conversions}));
+    else if(totals.state==='no_account')sources.push(summarySource('google_ads',businessId,range,'unconfigured','no_account',null));
+    else sources.push(summarySource('google_ads',businessId,range,'partial',totals.reason??totals.state,null));
+   }
+  }
+  }
+  const tableCount=await db.withSession('first-primary').prepare(`SELECT COUNT(*) count FROM sqlite_schema WHERE type='table' AND name IN(${ownerSourceTables.map(()=>'?').join(',')})`).bind(...ownerSourceTables).first<number>('count');
+  if(tableCount!==ownerSourceTables.length){
+   sources.push(summarySource('search_console',businessId,range,'unavailable','source_schema_unavailable',null));
+   sources.push(summarySource('own_site',businessId,range,'unavailable','source_schema_unavailable',null));
+  }else{
+   const control=await db.withSession('first-primary').prepare('SELECT enabled,storage_accepted FROM owner_intel_source_control WHERE singleton=1').first<{enabled:number;storage_accepted:number}>();
+   if(!control||control.enabled!==1||control.storage_accepted!==1){
+    sources.push(summarySource('search_console',businessId,range,'unconfigured','source_disabled',null));
+    sources.push(summarySource('own_site',businessId,range,'unconfigured','source_disabled',null));
+   }else{
+    for(const [id,kind,days] of [['search_console','search_console_summary',Number(range.slice(0,-1))] as const,['own_site','own_site',null] as const]){
+     const bindingRows=await db.withSession('first-primary').prepare('SELECT subject_key FROM owner_intel_source_bindings WHERE binding_id=? AND configuration_revision=? AND observation_kind=? AND active=1 LIMIT 2')
+      .bind(selected.bindingId,selected.configurationRevision,kind).all<{subject_key:string}>();
+     if(bindingRows.results.length>1)throw unavailable('intel_storage_unavailable',503);
+     if(bindingRows.results.length===0){sources.push(summarySource(id,businessId,range,'unconfigured','source_binding_not_configured',null));continue;}
+     const source=await readOwnerIntelSourceProjection(db,selected.bindingId,selected.configurationRevision,kind,days as 7|28|90|undefined);
+     if(!source){
+      const count=await db.withSession('first-primary').prepare('SELECT COUNT(*) count FROM owner_intel_source_projections WHERE binding_id=? AND configuration_revision=? AND observation_kind=?')
+       .bind(selected.bindingId,selected.configurationRevision,kind).first<number>('count');
+      sources.push(summarySource(id,businessId,range,'unavailable',count&&count>0?'range_unavailable':'awaiting_first_data',null));continue;
+     }
+     evidence.push({kind:'owner_source',source});
+     const provenance=source.observation.payload.provenance;
+     if(provenance.partialReason==='source_stale'){
+      sources.push(summarySource(id,businessId,range,'stale','source_stale',null));continue;
+     }
+     if(source.observation.observationKind==='search_console_summary'){
+      const payload=source.observation.payload;
+      if(payload.totals.reason==='source_stale')sources.push(summarySource(id,businessId,range,'stale','source_stale',null));
+      else if(payload.totals.state==='not_connected')sources.push(summarySource(id,businessId,range,'unconfigured',payload.totals.reason??'not_connected',null));
+      else{
+       const partial=provenance.partial||payload.totals.state!=='observed';
+       sources.push(summarySource(id,businessId,range,partial?'partial':'available',partial?(provenance.partialReason??payload.totals.reason??'incomplete_source_data'):null,
+        {clicks:payload.totals.clicks,impressions:payload.totals.impressions,ctr:asFraction(payload.totals.ctrPercent),position:asNumber(payload.totals.avgPosition)}));
+      }
+     }else{
+      const view=ownerWebsiteDto(source,range);
+      sources.push(summarySource(id,businessId,range,provenance.partial?'partial':'available',provenance.partial?(provenance.partialReason??'incomplete_source_data'):null,
+       {monitoredPages:view.monitoredPages.length,changesSincePrevious:view.changesSincePrevious.length}));
+     }
+    }
+   }
+  }
+ }
+ // This lane has no accepted owner binding/read model. Never substitute a
+ // managed-client account or an MCA total for the internal owner business.
+ sources.push(summarySource('ga4',businessId,range,'unconfigured','ga4_not_connected',null));
+ return {view:{schema:'ops.intel.owner-summary.v1',business:{id:businessId,key:selected.key,name:selected.name},range,sources},evidence};
+}
+
 /** Registered only after ordinary human Access authentication. No producer,
  * portal, PA, public-link or service credential is accepted here. */
 export function registerOwnerIntelRoutes(app:Hono<Bindings>){
@@ -143,12 +248,26 @@ export function registerOwnerIntelRoutes(app:Hono<Bindings>){
   const principal=c.get('principal'),authority=await ownerIntelAuthority(c.env.OPS_DB,principal);
   if(!authority)throw new HTTPException(403,{message:'intel_owner_required'});
   const key=c.req.param('key'),section=c.req.param('section');
-  if(!['competitors','website','search-console','google-ads'].includes(section))throw unavailable('intel_section_not_found');
+  if(!['competitors','website','search-console','google-ads','summary'].includes(section))throw unavailable('intel_section_not_found');
   const query=new URL(c.req.url).searchParams;
   if(section==='competitors'?query.size!==0:[...query.keys()].some(k=>k!=='range')||query.getAll('range').length!==1||!['7d','28d','90d'].includes(query.get('range')??''))
    throw new HTTPException(400,{message:'intel_query_invalid'});
   const selected=await business(c.env.OPS_DB,key,principal.id);
   if(!selected)throw unavailable('intel_business_not_found');
+  if(section==='summary'){
+   const result=await ownerIntelSummary(c.env.OPS_DB,selected,query.get('range') as OwnerIntelSummaryRange);
+   await stillCurrent(c.env.OPS_DB,principal,authority,selected.businessId);
+   const current=await business(c.env.OPS_DB,key,principal.id);
+   if(!current||JSON.stringify(current)!==JSON.stringify(selected))throw unavailable('intel_binding_changed',503);
+   for(const item of result.evidence){
+    const currentEvidence=item.kind==='google_ads'
+     ?await ownerGoogleAdsProjectionStillCurrent(c.env.OPS_DB,item.source)
+     :await ownerIntelSourceProjectionStillCurrent(c.env.OPS_DB,item.source);
+    if(!currentEvidence)throw unavailable('intel_binding_changed',503);
+   }
+   await stillCurrent(c.env.OPS_DB,principal,authority,selected.businessId);
+   return c.json(result.view);
+  }
   if(section!=='competitors'){
    await stillCurrent(c.env.OPS_DB,principal,authority,selected.businessId);
    if(section==='google-ads'){
