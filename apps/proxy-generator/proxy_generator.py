@@ -23,6 +23,7 @@ SKIP = frozenset(("proxy", "avata raw", "avata_raw", "avataraw", ".previews", "_
     "tmp", "temp", "trash", "recycle", "snapshots", ".snapshot", "archive", "map", "model",
     "edited vs nonedited", "edited vs. nonedited", "deliverables", "deliverable", "exports",
     "export", "final", "finals", "output", "outputs", "rendered", "renders"))
+SKIPPED_REPORT = "skipped-files.json"
 STOP = threading.Event()
 
 
@@ -255,24 +256,42 @@ def encode_args(source, tmp, media, config):
 
 class Store:
     def __init__(self, state):
+        # Best effort: a shared mount's ACLs can refuse or ignore these modes.
+        with contextlib.suppress(OSError):
+            os.chmod(state, 0o700)
         self.db = sqlite3.connect(state / "jobs.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS jobs (key TEXT PRIMARY KEY, identity TEXT, observed REAL, version TEXT, output_identity TEXT, failures INTEGER DEFAULT 0, retry_at REAL DEFAULT 0, legacy_eligible INTEGER DEFAULT 1)")
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}
+        for column in ("path", "error"):
+            if column not in columns:
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+        self.db.commit()
+        with contextlib.suppress(OSError):
+            os.chmod(state / "jobs.sqlite", 0o600)
 
     def observe(self, key, source_id, now):
         row = self.db.execute("SELECT identity, observed, version, output_identity, failures, retry_at, legacy_eligible FROM jobs WHERE key=?", (key,)).fetchone()
         if not row or row[0] != source_id:
-            self.db.execute("INSERT INTO jobs(key,identity,observed) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET identity=excluded.identity,observed=excluded.observed,version=NULL,output_identity=NULL,failures=0,retry_at=0,legacy_eligible=0", (key, source_id, now))
+            self.db.execute("INSERT INTO jobs(key,identity,observed) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET identity=excluded.identity,observed=excluded.observed,version=NULL,output_identity=NULL,failures=0,retry_at=0,legacy_eligible=0,path=NULL,error=NULL", (key, source_id, now))
             self.db.commit()
             return None
         return row
 
     def success(self, key, version, output_id):
-        self.db.execute("UPDATE jobs SET version=?,output_identity=?,failures=0,retry_at=0,legacy_eligible=0 WHERE key=?", (version, output_id, key))
+        self.db.execute("UPDATE jobs SET version=?,output_identity=?,failures=0,retry_at=0,legacy_eligible=0,path=NULL,error=NULL WHERE key=?", (version, output_id, key))
         self.db.commit()
 
-    def failure(self, key, now, config):
-        self.db.execute("UPDATE jobs SET version=?,output_identity=NULL,failures=failures+1,retry_at=?+MIN(?,?*(1 << MIN(failures,16))),legacy_eligible=0 WHERE key=?", (config.render_version, now, config.retry_max, config.retry_base, key))
+    def failure(self, key, now, config, path=None, error=None):
+        self.db.execute("UPDATE jobs SET version=?,output_identity=NULL,failures=failures+1,retry_at=?+MIN(?,?*(1 << MIN(failures,16))),legacy_eligible=0,path=?,error=? WHERE key=?", (config.render_version, now, config.retry_max, config.retry_base, path, error, key))
         self.db.commit()
+
+    def remember_path(self, key, path):
+        # Failures from before the report kept no path; a scan fills it in without retrying them.
+        if self.db.execute("UPDATE jobs SET path=? WHERE key=? AND path IS NULL AND failures>0", (path, key)).rowcount:
+            self.db.commit()
+
+    def failed(self):
+        return self.db.execute("SELECT path, error, failures FROM jobs WHERE failures>0 AND path IS NOT NULL ORDER BY path").fetchall()
 
     def close(self):
         self.db.close()
@@ -283,6 +302,8 @@ class Generator:
         self.config = config
         self.store = Store(config.state)
         self.health = config.state / "health.json"
+        self.failure_codes = {}
+        self.scan_skips = {}
 
     def heartbeat(self):
         temp = self.config.state / "health.tmp"
@@ -317,6 +338,7 @@ class Generator:
                         yield path
                     else:
                         log("source_skipped_unsafe_or_collision")
+                        self.scan_skips[path.relative_to(root).as_posix()] = "same_name_collision" if counts[path.stem.casefold()] > 1 else "unsafe_path"
 
     def render(self, path, source_id):
         config = self.config
@@ -358,17 +380,49 @@ class Generator:
             os.replace(temp, output)
             return "generated", identity(output)
         except (JobError, OSError, ValueError, ArithmeticError, subprocess.SubprocessError) as error:
-            log("job_failed", code=str(error) if isinstance(error, JobError) else "io_or_media_failure")
+            code = str(error) if isinstance(error, JobError) else "io_or_media_failure"
+            log("job_failed", code=code)
+            self.failure_codes[key_for(config.root, path)] = code
             return "failed", None
         finally:
             if temp is not None and safe_path(config.root, temp):
                 with contextlib.suppress(FileNotFoundError):
                     temp.unlink()
 
+    def write_skipped(self, now):
+        """Private list of sources without a current proxy. Paths stay in the state folder, never in logs.
+
+        A failed write keeps the previous report: reporting must never stop a scan.
+        """
+        root, state = self.config.root, self.config.state
+        files = [{"path": path, "reason": error or "earlier_failure_reason_unknown", "attempts": failures, "gave_up": failures >= self.config.attempts}
+            for path, error, failures in self.store.failed() if (root / path).is_file()]
+        files += [{"path": path, "reason": reason, "attempts": 0, "gave_up": True} for path, reason in sorted(self.scan_skips.items())]
+        temp = None
+        try:
+            # The single-instance lock makes any existing temporary a leftover; unlink never follows a link.
+            for stale in state.glob(".skipped-files-*"):
+                stale.unlink(missing_ok=True)
+            # mkstemp is exclusive and owner-only; replacing the name never writes through a link.
+            descriptor, name = tempfile.mkstemp(prefix=".skipped-files-", suffix=".tmp", dir=state)
+            temp = pathlib.Path(name)
+            with os.fdopen(descriptor, "w") as file:
+                json.dump({"updated": now, "files": files}, file, indent=1)
+            os.replace(temp, state / SKIPPED_REPORT)
+            temp = None
+        except OSError:
+            log("skipped_report_failed")
+        finally:
+            if temp is not None:
+                with contextlib.suppress(OSError):
+                    temp.unlink()
+
     def scan(self, now=None):
         config = self.config
         now = time.time() if now is None else now
         self.store_snapshot = {}
+        self.scan_skips = {}
+        paths = {}
         counts = {"generated": 0, "adopted": 0, "failed": 0, "current": 0, "deferred": 0}
         pending = {}
         # Keep at most concurrency futures, rather than accumulating a whole Jobs tree in RAM.
@@ -385,7 +439,8 @@ class Generator:
                     if output_id:
                         self.store.success(key, config.render_version, output_id)
                     elif not STOP.is_set():
-                        self.store.failure(key, now, config)
+                        self.store.failure(key, now, config, paths.get(key), self.failure_codes.pop(key, None))
+                        self.write_skipped(now)
                     self.store_snapshot.pop(key, None)
             for path in self.candidates():
                 if STOP.is_set():
@@ -409,11 +464,13 @@ class Generator:
                         self.store.db.execute("UPDATE jobs SET failures=0,retry_at=0 WHERE key=?", (key,))
                         self.store.db.commit()
                     elif row[4] >= config.attempts or now < row[5]:
+                        self.store.remember_path(key, path.relative_to(config.root).as_posix())
                         counts["deferred"] += 1
                         continue
                     while len(pending) >= config.concurrency:
                         collect(True)
                     self.store_snapshot[key] = row
+                    paths[key] = path.relative_to(config.root).as_posix()
                     pending[pool.submit(self.render, path, source_id)] = key
                     collect(False)
                 except (OSError, JobError):
@@ -421,6 +478,7 @@ class Generator:
             while pending:
                 collect(True)
         self.heartbeat()
+        self.write_skipped(now)
         log("scan_complete", **counts)
         return counts
 

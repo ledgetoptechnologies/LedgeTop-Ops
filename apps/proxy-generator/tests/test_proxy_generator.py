@@ -99,6 +99,123 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("0:a?", args)
         self.assertEqual(args[args.index("-r") + 1], "30000/1001")
 
+    def skipped(self):
+        return json.loads((self.state / app.SKIPPED_REPORT).read_text())["files"]
+
+    def test_skipped_report_names_failed_files_and_clears_when_fixed(self):
+        self.generator.scan(now=2000)
+        self.assertEqual(self.skipped(), [])
+        with mock.patch.object(app, "probe", side_effect=app.JobError("process_failed")):
+            for now in (2002, 2005, 2008):
+                self.generator.scan(now=now)
+        self.assertEqual(self.skipped(), [{"path": "2026/Synthetic/Raw/clip.mp4", "reason": "process_failed", "attempts": 3, "gave_up": True}])
+        self.generator.store.success(app.key_for(self.root, self.path), self.config.render_version, "proxy")
+        self.generator.write_skipped(2011)
+        self.assertEqual(self.skipped(), [])
+
+    def test_skipped_report_keeps_paths_out_of_logs_and_drops_deleted_sources(self):
+        self.generator.scan(now=2000)
+        with mock.patch.object(app, "probe", side_effect=app.JobError("variable_frame_rate_unsupported")), mock.patch("builtins.print") as printed:
+            self.generator.scan(now=2002)
+        self.assertNotIn("clip.mp4", str(printed.call_args_list))
+        self.assertEqual(self.skipped()[0]["reason"], "variable_frame_rate_unsupported")
+        self.assertFalse(self.skipped()[0]["gave_up"])
+        self.path.unlink()
+        self.generator.scan(now=2005)
+        self.assertEqual(self.skipped(), [], "a deleted source is not reported")
+
+    def test_skipped_report_ignores_a_stopped_job(self):
+        self.generator.scan(now=2000)
+        def stop(*_):
+            app.STOP.set()
+            raise app.JobError("stopped")
+        with mock.patch.object(app, "probe", side_effect=stop):
+            self.generator.scan(now=2002)
+        app.STOP.clear()
+        self.assertEqual(self.skipped(), [])
+
+    def test_skipped_report_lists_same_name_collisions(self):
+        (self.folder / "CLIP.mov").write_bytes(b"other")
+        self.generator.scan(now=2000)
+        self.assertEqual({row["reason"] for row in self.skipped()}, {"same_name_collision"})
+        self.assertEqual(len(self.skipped()), 2)
+
+    def test_skipped_report_includes_failures_from_before_the_report_without_retrying(self):
+        self.generator.scan(now=2000)
+        key = app.key_for(self.root, self.path)
+        self.generator.store.db.execute("UPDATE jobs SET failures=3,version=?,retry_at=0 WHERE key=?", (self.config.render_version, key))
+        self.generator.store.db.commit()
+        with mock.patch.object(self.generator, "render") as render:
+            self.generator.scan(now=2002)
+            render.assert_not_called()
+        self.assertEqual(self.skipped(), [{"path": "2026/Synthetic/Raw/clip.mp4", "reason": "earlier_failure_reason_unknown", "attempts": 3, "gave_up": True}])
+
+    @unittest.skipIf(os.name == "nt", "POSIX modes require Linux")
+    def test_state_and_report_are_owner_only(self):
+        self.state.chmod(0o755)
+        (self.state / "jobs.sqlite").chmod(0o644)
+        store = app.Store(self.state)
+        self.addCleanup(store.close)
+        self.generator.scan(now=2000)
+        mode = lambda path: path.stat().st_mode & 0o777
+        self.assertEqual(mode(self.state), 0o700)
+        self.assertEqual(mode(self.state / "jobs.sqlite"), 0o600)
+        self.assertEqual(mode(self.state / app.SKIPPED_REPORT), 0o600)
+
+    def test_failed_report_write_keeps_the_previous_report_and_the_scan(self):
+        self.generator.scan(now=2000)
+        before = (self.state / app.SKIPPED_REPORT).read_text()
+        real_replace = os.replace
+        def replace(source, target):
+            if pathlib.Path(target).name == app.SKIPPED_REPORT:
+                raise OSError("disk full")
+            real_replace(source, target)
+        with mock.patch.object(app.os, "replace", side_effect=replace), mock.patch.object(self.generator, "render", return_value=("failed", None)):
+            self.assertEqual(self.generator.scan(now=2002)["failed"], 1, "the scan finishes despite the report failure")
+        self.assertEqual((self.state / app.SKIPPED_REPORT).read_text(), before)
+        self.assertEqual(list(self.state.glob(".skipped-files-*")), [])
+
+    @unittest.skipIf(os.name == "nt", "symlink privilege requires Linux")
+    def test_report_never_writes_through_links(self):
+        outside = pathlib.Path(self.tmp.name) / "outside"
+        outside.write_text("untouched")
+        stale = self.state / ".skipped-files-stale.tmp"
+        stale.symlink_to(outside)
+        (self.state / app.SKIPPED_REPORT).symlink_to(outside)
+        self.generator.write_skipped(2000)
+        self.assertEqual(outside.read_text(), "untouched")
+        self.assertFalse(stale.is_symlink())
+        self.assertFalse((self.state / app.SKIPPED_REPORT).is_symlink())
+        self.assertEqual(self.skipped(), [])
+
+    @unittest.skipIf(os.name == "nt", "symlink privilege requires Linux")
+    def test_unsafe_source_is_not_called_a_collision(self):
+        outside = pathlib.Path(self.tmp.name) / "outside.mp4"
+        outside.write_bytes(b"x")
+        (self.folder / "linked.mp4").symlink_to(outside)
+        self.generator.scan(now=2000)
+        self.assertEqual([(row["path"], row["reason"]) for row in self.skipped()], [("2026/Synthetic/Raw/linked.mp4", "unsafe_path")])
+
+    def test_stored_path_is_removed_after_success(self):
+        self.generator.scan(now=2000)
+        key = app.key_for(self.root, self.path)
+        self.generator.store.failure(key, 2001, self.config, "2026/Synthetic/Raw/clip.mp4", "process_failed")
+        self.generator.store.success(key, self.config.render_version, "proxy")
+        self.assertEqual(self.generator.store.db.execute("SELECT path, error FROM jobs WHERE key=?", (key,)).fetchone(), (None, None))
+
+    def test_existing_state_database_gains_report_columns(self):
+        state = pathlib.Path(self.tmp.name) / "old-state"
+        state.mkdir()
+        db = app.sqlite3.connect(state / "jobs.sqlite")
+        db.execute("CREATE TABLE jobs (key TEXT PRIMARY KEY, identity TEXT, observed REAL, version TEXT, output_identity TEXT, failures INTEGER DEFAULT 0, retry_at REAL DEFAULT 0, legacy_eligible INTEGER DEFAULT 1)")
+        db.execute("INSERT INTO jobs(key,identity,observed,failures) VALUES('k','i',1,3)")
+        db.commit()
+        db.close()
+        store = app.Store(state)
+        self.addCleanup(store.close)
+        self.assertEqual(store.failed(), [], "older failures have no path yet")
+        self.assertEqual(store.db.execute("SELECT failures FROM jobs WHERE key='k'").fetchone()[0], 3)
+
     def test_encode_is_all_intra_h264_420(self):
         args = app.encode_args(self.path, self.path.with_suffix(".tmp.mov"), media(), self.config)
         self.assertEqual(args[args.index("-c:v") + 1], "libx264")
