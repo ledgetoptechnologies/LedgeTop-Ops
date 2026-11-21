@@ -39,8 +39,11 @@ describe('exact aggregate boundary',()=>{
     expect(decodeCompanyFinanceSummary(encode({...payload(),coverage:{...payload().coverage,complete:true}}),expected)).toBeNull();
     expect(decodeCompanyFinanceSummary(encode(payload([bucket(),bucket()])),expected)).toBeNull();
   });
-  it('uses the configured business calendar across UTC month boundaries',()=>{
-    expect(currentFinancePeriod('America/Chicago',new Date('2026-11-01T03:00:00Z'))).toEqual({from:'2026-10-01',to:'2026-10-31',dateBasis:'stored-calendar-date'});
+  it('covers the last 30 days on the configured business calendar',()=>{
+    expect(currentFinancePeriod('America/Chicago',new Date('2026-11-01T03:00:00Z'))).toEqual({from:'2026-10-02',to:'2026-10-31',dateBasis:'stored-calendar-date'});
+    expect(currentFinancePeriod('America/Chicago',new Date('2026-11-05T15:00:00Z'))).toEqual({from:'2026-10-07',to:'2026-11-05',dateBasis:'stored-calendar-date'});
+    expect(currentFinancePeriod('America/Chicago',new Date('2027-01-10T15:00:00Z'))).toEqual({from:'2026-12-12',to:'2027-01-10',dateBasis:'stored-calendar-date'});
+    expect(currentFinancePeriod('America/Chicago',new Date('2028-03-05T15:00:00Z'))).toEqual({from:'2028-02-05',to:'2028-03-05',dateBasis:'stored-calendar-date'});
   });
   it('accepts explicit USD expense reporting without assigning those expenses to CAD',()=>{
     const usd:FinanceMoneyBucket={...bucket('USD','300.00'),expenses:{count:2,total:'100.00',pending:'25.00',confirmed:'75.00',reimbursed:'0.00'},recordedOperatingResult:'200.00'};
