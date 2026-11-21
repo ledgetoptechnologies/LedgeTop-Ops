@@ -30,7 +30,7 @@ test('submit uploads the immutable attempt GCP snapshot as a private auxiliary g
   const sha256=crypto.createHash('sha256').update(body).digest('hex');
   c.processing.finalizeDataset(draft.id,[{id:'photo',relativePath:'photo.jpg',byteSize:body.length,sha256,contentType:'image/jpeg',metadata:{width:100,height:100,gps:{latitude:44.5,longitude:-88.1}}}],sha256);
   const source='point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n';
-  const set=c.gcp.importSet({datasetId:draft.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceSha256:crypto.createHash('sha256').update(source).digest('hex'),sourceContent:source,
+  const set=c.gcp.importSet({datasetId:draft.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceSha256:crypto.createHash('sha256').update(source).digest('hex'),sourceContent:source,sourceBytes:Buffer.from(source),
     crs:'EPSG:4326',elevationUnits:'m',points:[{externalId:'A',label:'A',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
   const task=c.processing.createTask({projectId:project.id,datasetId:draft.id,displayName:'Model'});
   c.gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'photo',pixelX:25,pixelY:75,createdBy:'ops:1'});

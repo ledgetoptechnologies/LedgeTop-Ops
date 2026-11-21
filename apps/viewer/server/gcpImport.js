@@ -161,7 +161,8 @@ function parseCsv(source) {
 
 function parseGeoJson(source) {
   let value;
-  try { value = JSON.parse(source); }
+  // Interpret an optional UTF-8 BOM without changing the source bytes/hash.
+  try { value = JSON.parse(source.replace(/^\uFEFF/, '')); }
   catch { throw invalid('GeoJSON is not valid JSON'); }
   if (!value || value.type !== 'FeatureCollection' || !Array.isArray(value.features))
     throw invalid('GeoJSON must be a FeatureCollection');

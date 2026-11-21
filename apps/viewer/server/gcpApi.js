@@ -2,7 +2,10 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const express = require('express');
 const { GcpRepository } = require('./gcpRepository');
+const { MAX_GCP_SOURCE_BYTES, sourceText } = require('./gcpSourceOriginals');
+const { readIndexedOriginal } = require('./gcpDatasetRetention');
 const { parseGcpInterchange, confirmationToken } = require('./gcpImport');
 const { hashFile } = require('./storageManager');
 
@@ -13,9 +16,9 @@ function onlyKeys(value, allowed) {
 
 function fail(error, res, respond) {
   const code = error?.code || 'invalid_gcp_request';
-  const conflict = new Set(['dataset_not_available', 'correspondence_exists', 'gcp_dataset_mismatch']);
+  const conflict = new Set(['dataset_not_available', 'correspondence_exists', 'gcp_dataset_mismatch', 'gcp_original_upload_required']);
   const safeValidationCodes=new Set(['invalid_gcp_input','gcp_input_too_large','unsupported_gcp_format','invalid_source_file',
-    'invalid_gcp_point','invalid_pixel_coordinates','invalid_gcp_image','gcp_pixel_out_of_bounds','correspondence_exists','gcp_dataset_mismatch']);
+    'invalid_gcp_point','invalid_pixel_coordinates','invalid_gcp_image','gcp_pixel_out_of_bounds','correspondence_exists','gcp_dataset_mismatch','gcp_original_upload_required']);
   const message=safeValidationCodes.has(code)?String(error?.message||code).replace(/[\r\n\t]+/g,' ').slice(0,400):code;
   return respond(res, conflict.has(code) ? 409 : 400, code, message);
 }
@@ -23,13 +26,49 @@ function fail(error, res, respond) {
 function mountGcpRoutes(router, { repository, processing, storage, authorize, mutate, error }) {
   const gcp = new GcpRepository(processing.database);
 
+  function importContent(body, datasetId) {
+    if (body.sourceOriginalId === undefined) return { content: body.content, original: null };
+    if (body.content !== undefined || typeof body.sourceOriginalId !== 'string' || !body.sourceOriginalId || body.sourceOriginalId.length > 128)
+      throw Object.assign(new Error('invalid retained GCP source'), { code: 'invalid_source_file' });
+    const original = gcp.originals.get(body.sourceOriginalId, datasetId);
+    if (!original || (body.fileName != null && body.fileName !== original.fileName))
+      throw Object.assign(new Error('invalid retained GCP source'), { code: 'invalid_source_file' });
+    return { content: sourceText(original.bytes), original };
+  }
+
+  router.post('/api/v1/datasets/:datasetId/gcp-source-originals', authorize('viewer.gcp.write'),
+    express.raw({ type: 'application/octet-stream', limit: MAX_GCP_SOURCE_BYTES,
+      verify(req, _res, bytes) { req.rawBody = Buffer.from(bytes); } }), mutate, (req, res) => {
+      const dataset = gcp.dataset(req.params.datasetId);
+      if (!dataset || dataset.status !== 'finalized') return error(res, 409, 'dataset_not_available');
+      try {
+        if (!Buffer.isBuffer(req.body) || !req.body.length) return error(res, 400, 'invalid_gcp_original');
+        const original = gcp.originals.retain({ datasetId: dataset.id, projectId: dataset.project_id,
+          fileName: req.query.fileName, bytes: req.body, actorId: req.actorId });
+        return res.status(201).json({ original });
+      } catch (caught) { return fail(caught, res, error); }
+    });
+
+  router.get('/api/v1/datasets/:datasetId/gcp-source-originals', authorize('viewer.gcp.read'), (req, res) => {
+    if (!gcp.dataset(req.params.datasetId)) return error(res, 404, 'dataset_not_found');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ originals: gcp.originals.list(req.params.datasetId) });
+  });
+
+  router.get('/api/v1/gcp-source-originals/:id/content', authorize('viewer.gcp.read'), (req, res) => {
+    const original = gcp.originals.get(req.params.id);
+    if (!original) return error(res, 404, 'gcp_original_not_found');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.attachment(original.fileName).type('application/octet-stream').send(original.bytes);
+  });
+
   router.get('/api/v1/datasets/:datasetId/gcp-sets', authorize('viewer.gcp.read'), (req, res) => {
     if (!gcp.dataset(req.params.datasetId)) return error(res, 404, 'dataset_not_found');
     res.json({ sets: gcp.listSets(req.params.datasetId) });
   });
 
   router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, (req, res) => {
-    if (!onlyKeys(req.body, ['displayName', 'format', 'fileName', 'content', 'sourceFileId', 'declarations', 'confirmationToken']))
+    if (!onlyKeys(req.body, ['displayName', 'format', 'fileName', 'content', 'sourceOriginalId', 'sourceFileId', 'declarations', 'confirmationToken']))
       return error(res, 400, 'invalid_gcp_import');
     if (typeof req.body.displayName !== 'string' || !req.body.displayName.trim() || req.body.displayName.trim().length > 160)
       return error(res, 400, 'invalid_gcp_set_name');
@@ -38,11 +77,20 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     if (req.body.sourceFileId != null && (typeof req.body.sourceFileId !== 'string' || req.body.sourceFileId.length > 128))
       return error(res, 400, 'invalid_source_file');
     try {
-      const parsed = parseGcpInterchange({ format: req.body.format, content: req.body.content, declarations: req.body.declarations });
+      const supplied = importContent(req.body, req.params.datasetId);
+      const parsed = parseGcpInterchange({ format: req.body.format, content: supplied.content, declarations: req.body.declarations });
       if (req.body.format === 'emlid-all-columns-v1' && req.body.confirmationToken !== confirmationToken(parsed))
         return error(res, 409, 'gcp_preview_confirmation_required');
       const sourceFileId = req.body.sourceFileId ||
         gcp.findSourceFile(req.params.datasetId, req.body.fileName, parsed.sourceSha256);
+      let sourceBytes = null;
+      if (!supplied.original && sourceFileId) {
+        const dataset = gcp.dataset(req.params.datasetId);
+        const file = processing.database.prepare('SELECT * FROM dataset_files WHERE id=? AND dataset_id=?')
+          .get(sourceFileId, req.params.datasetId);
+        if (!dataset || !file) return error(res, 400, 'invalid_source_file');
+        sourceBytes = readIndexedOriginal(storage, dataset.root_key, dataset.relative_path, file);
+      }
       const set = gcp.importSet({
         datasetId: req.params.datasetId,
         displayName: req.body.displayName.trim(),
@@ -50,7 +98,9 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         sourceFileId,
         sourceFilename: req.body.fileName?.trim() || null,
         sourceSha256: parsed.sourceSha256,
-        sourceContent:req.body.content,
+        sourceContent:supplied.content,
+        sourceOriginalId:supplied.original?.id || null,
+        sourceBytes,
         crs: parsed.crs,
         elevationUnits: parsed.elevationUnits,
         provenance: parsed.provenance,
@@ -58,16 +108,17 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         createdBy: req.actorId,
       });
       repository.audit({ actorType: 'admin', actorId: req.actorId, action: 'gcp.set_imported', entityType: 'gcp_set', entityId: set.id,
-        details: { datasetId: set.datasetId, sourceFormat: set.sourceFormat, pointCount: set.pointCount } });
+        details: { datasetId: set.datasetId, sourceFormat: set.sourceFormat, pointCount: set.pointCount, sourceOriginalId: set.sourceOriginal?.id || null } });
       return res.status(201).json({ set, points: set.points });
     } catch (caught) { return fail(caught, res, error); }
   });
 
   router.post('/api/v1/datasets/:datasetId/gcp-sets/import-preview', authorize('viewer.gcp.write'), (req, res) => {
-    if (!onlyKeys(req.body, ['format', 'content', 'declarations']) || !gcp.dataset(req.params.datasetId))
+    if (!onlyKeys(req.body, ['format', 'content', 'sourceOriginalId', 'declarations']) || !gcp.dataset(req.params.datasetId))
       return error(res, 400, 'invalid_gcp_preview');
     try {
-      const parsed = parseGcpInterchange(req.body);
+      const supplied = importContent(req.body, req.params.datasetId);
+      const parsed = parseGcpInterchange({ format: req.body.format, content: supplied.content, declarations: req.body.declarations });
       return res.json({ sourceSha256: parsed.sourceSha256, pointCount: parsed.points.length,
         columns: { id: 'Name', authoritative: ['Easting', 'Northing', 'Elevation'], crossCheck: ['Latitude', 'Longitude', 'Ellipsoidal height'] },
         provenance: parsed.provenance, sample: parsed.points.slice(0, 5), warnings: parsed.points.length < 3 ? ['Fewer than 3 control points were supplied.'] : [],
@@ -83,9 +134,9 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   router.delete('/api/v1/gcp-sets/:id', authorize('viewer.gcp.write'), mutate, (req, res) => {
     const current = gcp.getSet(req.params.id);
     if (!current) return error(res, 404, 'gcp_set_not_found');
-    gcp.deleteSet(current.id);
+    try { gcp.deleteSet(current.id); } catch (caught) { return fail(caught, res, error); }
     repository.audit({ actorType: 'admin', actorId: req.actorId, action: 'gcp.set_deleted', entityType: 'gcp_set', entityId: current.id,
-      details: { datasetId: current.datasetId, pointCount: current.pointCount } });
+      details: { datasetId: current.datasetId, pointCount: current.pointCount, sourceOriginalId: current.sourceOriginal?.id || null } });
     return res.status(204).end();
   });
 
