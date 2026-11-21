@@ -48,6 +48,8 @@ export function NativeTeamOperationsAccess({ staffId, name }: { staffId: string;
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState<Pending | null>(null);
+  /** Nothing renders until the panel's own GET answers; 404 (0244 absent) or 403 (no authority) keeps it hidden. */
+  const [visible, setVisible] = useState(false);
   const mounted = useRef(true);
   const request = useRef(0);
   const inFlight = useRef(false);
@@ -55,8 +57,9 @@ export function NativeTeamOperationsAccess({ staffId, name }: { staffId: string;
 
   useEffect(() => {
     mounted.current = true;
-    setData(null); setReason(""); setStatus(""); setError(""); setBusy(false); setLoading(false); setPending(null);
+    setData(null); setReason(""); setStatus(""); setError(""); setBusy(false); setLoading(false); setPending(null); setVisible(false);
     uncertain.current = false;
+    void load();
     return () => { mounted.current = false; request.current++; inFlight.current = false; };
   }, [staffId]);
 
@@ -66,13 +69,14 @@ export function NativeTeamOperationsAccess({ staffId, name }: { staffId: string;
     try {
       const value = await api.read(staffId);
       if (!mounted.current || current !== request.current) return;
-      setData(value);
+      setData(value); setVisible(true);
     } catch (cause) {
       if (!mounted.current || current !== request.current) return;
       const e = cause instanceof OperationsAccessApiError ? cause : null;
       setData(null);
-      setError(e?.code === "not_found" ? "Operations access is not available here."
-        : e?.code === "denied" ? "You can't change Operations access." : "Operations access could not be loaded.");
+      if (e?.code === "not_found" || e?.code === "denied") { setVisible(false); return; }
+      setVisible(true);
+      setError("Operations access could not be loaded.");
     } finally { if (mounted.current && current === request.current) setLoading(false); }
   };
 
@@ -125,10 +129,11 @@ export function NativeTeamOperationsAccess({ staffId, name }: { staffId: string;
   };
 
   const locked = busy || pending !== null;
+  if (!visible) return null;
   return <section className="native-operations-access" aria-label={`${name} Operations access`} aria-busy={loading || busy}>
     <h4>Operations access</h4>
     {!data && <button type="button" className="button-ghost button-small" disabled={loading || busy} onClick={() => void load()}>
-      {loading ? "Loading…" : "Load Operations access"}
+      {loading ? "Loading…" : "Reload"}
     </button>}
     {error && <div className="notice error" role="alert">{error}</div>}
     {status && <div className="notice" role="status">{status}</div>}
