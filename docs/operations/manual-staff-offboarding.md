@@ -17,8 +17,10 @@ that cutover once happened.
 
 Before cutover, an administrator with global `roles.manage` can set the status
 to inactive from the Team page instead of a direct D1 edit; see
-[legacy-staff-team-management.md](legacy-staff-team-management.md). The change
-record and the manual Access removal below still apply.
+[legacy-staff-team-management.md](legacy-staff-team-management.md). The Team
+page refuses owners, sync-protected rows and rows with a native admission,
+profile or onboarding (Ops-onboarded hires), so those still follow this
+procedure. The change record and the manual Access removal below still apply.
 
 ## Prepare the exact change
 

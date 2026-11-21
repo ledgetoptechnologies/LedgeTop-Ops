@@ -1,7 +1,7 @@
 # Legacy staff management from the Team page
 
-Pre-cutover only (the native staff readiness control is absent or disabled).
-Administrators holding global `roles.manage` can add a staff member, change a
+Pre-cutover only (the native staff readiness control is absent or disabled);
+once it is enabled both actions are refused. Administrators holding global `roles.manage` can add a staff member, change a
 name, and deactivate or reactivate legacy staff on the Team page. Owners, the
 acting administrator, sync-protected rows and rows that belong to native
 employee management cannot be changed there. Email and role changes are not
@@ -28,5 +28,8 @@ Operations app before cutover. The operator keeps it in step by hand.
 3. For a departure, also complete the private change record described in
    [manual-staff-offboarding.md](manual-staff-offboarding.md).
 
-Reactivating restores Operations sign-in only after the email is back in the
-Access group or policy.
+Reactivating brings back everything the person kept: roles, access settings
+and any other sign-in emails. Team asks for confirmation and then shows what
+came back. Remove anything they should no longer have before or right after
+reactivating. Sign-in works again once the email is back in the Access group
+or policy.

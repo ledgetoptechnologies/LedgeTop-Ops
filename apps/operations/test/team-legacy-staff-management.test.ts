@@ -10,13 +10,14 @@ import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrati
 import { csrfToken } from "../src/worker/request-security";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 import worker from "../src/worker/index";
+import { legacyStaffAnotherAdministratorSql } from "../src/worker/legacy-staff-sql";
 
 const keys = vi.hoisted(() => ({ getKey: undefined as unknown }));
 vi.mock("jose", async importOriginal => ({ ...await importOriginal<typeof import("jose")>(), createRemoteJWKSet: () => keys.getKey }));
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 
 const issuer = "https://synthetic-legacy-staff.cloudflareaccess.com", audience = "synthetic-legacy-staff-aud";
-const origin = "https://ops.example.test", FIXED_OWNER = "staff-beau-koltz";
+const origin = "https://ops.example.test";
 let runtime: Miniflare, db: D1Database, signingKey: CryptoKey, sequence = 0;
 let beforeBatch: (() => Promise<void>) | null = null;
 type Person = { id: string; email: string; subject: string };
@@ -72,6 +73,23 @@ async function roster(actor: Person) {
   const response = await fetch(new Request(`${origin}/api/team/staff`, { headers: { "Cf-Access-Jwt-Assertion": await token(actor) } }));
   expect(response.status).toBe(200);
   return response.json() as Promise<{ staff: RosterRow[]; can_manage_staff: boolean }>;
+}
+const setGate = (enabled: 0 | 1) => db.prepare("UPDATE native_staff_access_reconciliation SET enabled=? WHERE singleton=1").bind(enabled).run();
+// Re-creates the named triggers after running a fixture write that the trigger would refuse.
+async function withoutTriggers(table: string, event: "INSERT" | "UPDATE", write: () => Promise<unknown>) {
+  const triggers = (await db.prepare(`SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql LIKE ?`)
+    .bind(table, `%${event} ON ${table}%`).all<{ name: string; sql: string }>()).results;
+  await db.batch(triggers.map(trigger => db.prepare(`DROP TRIGGER ${trigger.name}`)));
+  try { await write(); } finally { await db.batch(triggers.map(trigger => db.prepare(trigger.sql))); }
+}
+// A pending native onboarding row (fixture only; the real create path needs a fenced command).
+async function pendingOnboarding(email: string, proposedStaffId = `native-proposed-${++sequence}`) {
+  const creator = await person({ native: true });
+  await withoutTriggers("native_staff_pending_onboarding", "INSERT", () => db.prepare(`INSERT INTO native_staff_pending_onboarding
+    (onboarding_id,proposed_staff_id,login_email,display_name,invitation_secret_sha256,expires_at,state,version,proposal_json,
+     proposal_sha256,created_by_staff_id,created_by_subject,reason) VALUES(?,?,?,?,?,?,'pending',1,'{}',?,?,?,?)`)
+    .bind(uuid(), proposedStaffId, email, "Synthetic Pending", "a".repeat(64), new Date(Date.now() + 86_400_000).toISOString(),
+      "b".repeat(64), creator.id, creator.subject, "Synthetic onboarding fixture").run());
 }
 const session = async (who: { email: string; subject: string }) =>
   (await fetch(new Request(`${origin}/api/session/status`, { headers: { "Cf-Access-Jwt-Assertion": await token(who) } }))).status;
@@ -200,9 +218,10 @@ describe("legacy Team staff management: mounted worker, real Access JWT, full lo
   });
 
   it("refuses self, owners, native rows, sync-protected rows and email/role keys without writing", async () => {
-    await db.prepare("INSERT OR IGNORE INTO staff_users(id,email,display_name,sync_protected) VALUES(?,?,?,0)")
-      .bind(FIXED_OWNER, "fixed-owner@example.test", "Fixed Owner").run();
-    const fixed = { id: FIXED_OWNER, email: "", subject: "" };
+    // The migration-seeded protected owner (looked up, not named here).
+    const seededOwner = await db.prepare(`SELECT staff_id FROM staff_role_assignments WHERE role_id='role-owner' AND scope='global'
+      ORDER BY rowid LIMIT 1`).first<string>("staff_id");
+    const fixed = { id: seededOwner!, email: "", subject: "" };
     const cases: Array<[Person, number]> = [
       [admin, 409], [fixed as Person, 409], [await person({ role: "role-owner" }), 409], [await person({ localOwner: true }), 409],
       [await person({ native: true }), 409], [await person({ syncProtected: true }), 409],
@@ -262,5 +281,132 @@ describe("legacy Team staff management: mounted worker, real Access JWT, full lo
     const deniedList = await roster(deniedAdmin);
     expect(deniedList.can_manage_staff).toBe(false);
     expect(deniedList.staff.every(entry => entry.profile_editable === false)).toBe(true);
+  });
+  it("refuses unsafe names and malformed emails", async () => {
+    for (const displayName of ["Admin‮evil", "Zero​width", "Line break", "Tab\tname"])
+      expect((await create(admin, { commandId: uuid(), displayName, email: `unsafe-${++sequence}@example.test` })).status).toBe(400);
+    for (const email of ["two@at@example.test", "space d@example.test", "nodot@localhost", "üml@example.test", "a@b.c"])
+      expect((await create(admin, { commandId: uuid(), displayName: "Synthetic", email })).status).toBe(400);
+    const plain = await person();
+    expect((await edit(admin, plain.id, { expectedUpdatedAt: await version(plain.id), displayName: "Bidi‭name" })).status).toBe(400);
+  });
+
+  it("refuses an email reserved by a pending native onboarding, and edits of onboarding-provenance rows", async () => {
+    const reserved = "pending.hire@example.test";
+    await pendingOnboarding(reserved);
+    const response = await create(admin, { commandId: uuid(), displayName: "Pending", email: "Pending.Hire@example.test" });
+    expect(response.status).toBe(409);
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE email=?").bind(reserved).first("n")).toBe(0);
+    // Raced: the reservation lands between the pre-check and the write; the in-batch guard refuses.
+    const raced = "raced.hire@example.test";
+    beforeBatch = () => pendingOnboarding(raced);
+    expect((await create(admin, { commandId: uuid(), displayName: "Raced", email: raced })).status).toBe(409);
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE email=?").bind(raced).first("n")).toBe(0);
+    // A staff row that only has native onboarding provenance (no admission or profile) is not legacy-editable.
+    const provenance = await person();
+    await pendingOnboarding(`provenance-${provenance.id}@example.test`, provenance.id);
+    const before = await row(provenance.id);
+    expect((await edit(admin, provenance.id, { expectedUpdatedAt: before!.updated_at, status: "inactive" })).status).toBe(409);
+    expect(await row(provenance.id)).toEqual(before);
+    expect((await roster(admin)).staff.find(entry => entry.id === provenance.id)!.profile_editable).toBe(false);
+  });
+
+  it("refuses both routes with native_cutover_active once the 0225 switch is on, including inside the batch", async () => {
+    const nativeAdmin = await person({ role: "role-admin", native: true }), target = await person();
+    await setGate(1);
+    try {
+      const created = await create(nativeAdmin, { commandId: uuid(), displayName: "Cutover", email: "cutover.person@example.test" });
+      expect(created.status).toBe(409);
+      expect(await created.json()).toMatchObject({ code: "native_cutover_active" });
+      const edited = await edit(nativeAdmin, target.id, { expectedUpdatedAt: await version(target.id), displayName: "Cutover" });
+      expect(edited.status).toBe(409);
+      expect(await edited.json()).toMatchObject({ code: "native_cutover_active" });
+    } finally { await setGate(0); }
+    const before = await row(target.id);
+    beforeBatch = async () => { await setGate(1); };
+    try {
+      const raced = await edit(admin, target.id, { expectedUpdatedAt: before!.updated_at, status: "inactive" });
+      expect(raced.status).toBe(409);
+      expect(await raced.json()).toMatchObject({ code: "native_cutover_active" });
+    } finally { await setGate(0); }
+    expect(await row(target.id)).toEqual(before);
+    beforeBatch = async () => { await setGate(1); };
+    try {
+      expect((await create(admin, { commandId: uuid(), displayName: "Raced", email: "cutover.raced@example.test" })).status).toBe(409);
+    } finally { await setGate(0); }
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE email LIKE 'cutover.%'").first("n")).toBe(0);
+  });
+
+  it("a different administrator cannot replay another administrator's command", async () => {
+    const other = await person({ role: "role-admin" }), commandId = uuid();
+    const value = { commandId, displayName: "Replay Target", email: "replay.target@example.test" };
+    expect((await create(admin, value)).status).toBe(201);
+    expect((await create(other, value)).status).toBe(409);
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE email=?").bind(value.email).first("n")).toBe(1);
+    expect(await audits(`staff-local-${commandId}`, "staff.created")).toBe(1);
+  });
+
+  it("rechecks the acting administrator inside the batch", async () => {
+    const actor = await person({ role: "role-admin" }), target = await person(), before = await row(target.id);
+    beforeBatch = async () => { await db.prepare(`INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by)
+      VALUES(?,?,'roles.manage','deny','global',NULL,'global',?)`).bind(uuid(), actor.id, actor.id).run(); };
+    expect((await edit(actor, target.id, { expectedUpdatedAt: before!.updated_at, status: "inactive" })).status).toBe(403);
+    expect(await row(target.id)).toEqual(before);
+    const second = await person({ role: "role-admin" });
+    beforeBatch = async () => { await db.prepare("UPDATE staff_users SET status='inactive' WHERE id=?").bind(second.id).run(); };
+    expect((await create(second, { commandId: uuid(), displayName: "Late", email: "late.actor@example.test" })).status).toBe(403);
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE email='late.actor@example.test'").first("n")).toBe(0);
+  });
+
+  it("reactivation reports retained roles, access settings and alternate sign-ins", async () => {
+    const target = await person({ role: "role-admin", allow: ["delivery.browse"] });
+    expect((await edit(admin, target.id, { expectedUpdatedAt: await version(target.id), status: "inactive" })).status).toBe(200);
+    const reactivated = await edit(admin, target.id, { expectedUpdatedAt: await version(target.id), status: "active" });
+    expect(reactivated.status).toBe(200);
+    expect(await reactivated.json()).toMatchObject({ retained: { roles: 1, overrides: 1, alternateLogins: 0 } });
+    expect(await db.prepare("SELECT count(*) n FROM staff_role_assignments WHERE staff_id=?").bind(target.id).first("n")).toBe(1);
+    const renamed = await edit(admin, target.id, { expectedUpdatedAt: await version(target.id), displayName: "Just Renamed" });
+    expect(await renamed.json()).not.toHaveProperty("retained");
+  });
+
+  it("maps an alternate sign-in collision on edit to 409", async () => {
+    const owner = await person({ role: "role-owner" }), target = await person(), intentId = uuid(), created = Date.now() - 10_000;
+    const aliasSubject = `access|alias-${owner.id}`;
+    await db.batch([
+      db.prepare("INSERT INTO staff_login_generations VALUES(?,0)").bind(owner.id),
+      db.prepare(`INSERT INTO staff_login_binding_intents(id,staff_id,canonical_email,canonical_subject,issuer,alternate_email,token_sha256,generation,
+        created_at_ms,expires_at_ms) VALUES(?,?,?,?,?,?,?,0,?,?)`).bind(intentId, owner.id, owner.email, owner.subject, issuer,
+        `alias-${owner.id}@example.test`, intentId.replaceAll("-", "").padStart(64, "0"), created, created + 900_000),
+      db.prepare("INSERT INTO staff_login_bindings(id,staff_id,issuer,login_email,access_subject,intent_id,created_at_ms) VALUES(?,?,?,?,?,?,?)")
+        .bind(uuid(), owner.id, issuer, `alias-${owner.id}@example.test`, aliasSubject, intentId, created),
+    ]);
+    // Fixture only: a legacy row whose subject already equals an active alternate sign-in.
+    await withoutTriggers("staff_users", "UPDATE", () =>
+      db.prepare("UPDATE staff_users SET access_subject=? WHERE id=?").bind(aliasSubject, target.id).run());
+    const before = await row(target.id);
+    expect((await edit(admin, target.id, { expectedUpdatedAt: before!.updated_at, displayName: "Collides" })).status).toBe(409);
+    expect(await row(target.id)).toEqual(before);
+  });
+
+  it("roster hides updated_at from non-administrators", async () => {
+    const viewer = await person({ allow: ["team.view"] });
+    expect((await roster(viewer)).staff.every(entry => entry.updated_at === undefined)).toBe(true);
+    expect((await roster(admin)).staff.every(entry => typeof entry.updated_at === "string")).toBe(true);
+  });
+
+  // Last: it deactivates every other administrator. Through the route the actor always counts as
+  // another active administrator, so the guard SQL is checked directly. It uses exactly the
+  // isAdministrator predicate: a local-only role-admin does not count.
+  it("last-admin guard: refuses when no other active administrator (staff_role_assignments) remains", async () => {
+    const guard = (targetId: string) => db.prepare(`SELECT ${legacyStaffAnotherAdministratorSql} ok`).bind(targetId, targetId).first("ok");
+    const last = await person({ role: "role-admin" }), plain = await person();
+    const localOnly = await person();
+    await db.prepare("INSERT INTO local_staff_role_assignments(id,staff_id,role_id,scope,created_by) VALUES(?,?,'role-admin','global',?)")
+      .bind(uuid(), localOnly.id, localOnly.id).run();
+    expect(await guard(last.id)).toBe(1);
+    await db.prepare(`UPDATE staff_users SET status='inactive' WHERE id<>? AND id IN (SELECT staff_id FROM staff_role_assignments
+      WHERE role_id IN ('role-owner','role-admin') AND scope='global')`).bind(last.id).run();
+    expect(await guard(last.id)).toBe(0);
+    expect(await guard(plain.id)).toBe(1);
   });
 });
