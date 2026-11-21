@@ -6,7 +6,7 @@
 // against the D1 metadata endpoint before any read.
 import { createHash } from 'node:crypto';
 import {
-  LEDGER_INSERT_SQL, OPS_0227_0244_FILES, isOps0227To0244ReadQuery, loadVerifiedOps0227To0244Plan,
+  LEDGER_INSERT_SQL, OPS_0227_0244_FILES, OPS_0227_0244_SCHEMA_ROWS_SQL, isOps0227To0244ReadQuery, loadVerifiedOps0227To0244Plan,
   parseOps0227To0244SnapshotResult,
 } from './production-ops-0227-0244-ordered-once.mjs';
 
@@ -84,7 +84,8 @@ export function createOps0227To0244CloudflareProvider({ getBearerToken, accountI
   async function readSnapshot({ query } = {}) {
     if (!verifiedTarget) fail('target_not_verified');
     if (!isOps0227To0244ReadQuery(query)) fail('read_query_invalid');
-    const payload = await request('POST', `d1/database/${encodeURIComponent(databaseId)}/query`, { sql: query, params: [] }, 32 * 1024 * 1024);
+    const payload = await request('POST', `d1/database/${encodeURIComponent(databaseId)}/query`,
+      { batch: [{ sql: query, params: [] }, { sql: OPS_0227_0244_SCHEMA_ROWS_SQL, params: [] }] }, 32 * 1024 * 1024);
     return parseOps0227To0244SnapshotResult(payload.result, { observedAt: new Date(now()).toISOString() });
   }
 

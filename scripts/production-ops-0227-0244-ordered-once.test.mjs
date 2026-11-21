@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   LEDGER_INSERT_SQL, OPS_0227_0244_AUTHORITY_NOTE, OPS_0227_0244_FILES, OPS_0227_0244_FINAL_LEDGER,
   OPS_0227_0244_FIXTURE_SHA256, OPS_0227_0244_PRE_READ_QUERY, OPS_0227_0244_PRIOR_LEDGER, OPS_PRODUCTION_DATABASE,
-  isOps0227To0244ReadQuery, loadVerifiedOps0227To0244Plan, mainOps0227To0244, openOps0227To0244Receipt,
+  OPS_0227_0244_SCHEMA_ROWS_SQL, isOps0227To0244ReadQuery, loadVerifiedOps0227To0244Plan, mainOps0227To0244, openOps0227To0244Receipt,
   parseOps0227To0244Args, parseOps0227To0244SnapshotResult, runOps0227To0244Ordered,
 } from './production-ops-0227-0244-ordered-once.mjs';
 import { createOps0227To0244CloudflareProvider } from './production-ops-0227-0244-cloudflare-provider.mjs';
@@ -49,7 +49,7 @@ const readReceipt = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 
 /** Synthetic D1: reads go through a separate read-only connection, writes are one transaction per migration. */
 function sqliteProvider(file, { failApplyAt = null, skipLedgerAt = null, tamper = null, ambiguousAt = null, landed = false,
-  refuseAt = null } = {}) {
+  refuseAt = null, partialAt = null } = {}) {
   const writer = new DatabaseSync(file);
   writer.exec('PRAGMA foreign_keys=ON');
   const calls = { reads: 0, writes: 0, targets: 0, sent: [] };
@@ -61,10 +61,14 @@ function sqliteProvider(file, { failApplyAt = null, skipLedgerAt = null, tamper 
       calls.reads++;
       assert.ok(isOps0227To0244ReadQuery(query), 'read query must be the pinned read-only snapshot');
       const reader = new DatabaseSync(file, { readOnly: true });
-      let row;
-      try { row = { ...reader.prepare(query).get() }; } finally { reader.close(); }
-      const snapshot = parseOps0227To0244SnapshotResult([{ success: true, results: [row],
-        meta: { rows_written: 0, changed_db: false, served_by_primary: true } }], { observedAt: new Date().toISOString() });
+      let row, schemaRows;
+      try {
+        row = { ...reader.prepare(query).get() };
+        schemaRows = reader.prepare(OPS_0227_0244_SCHEMA_ROWS_SQL).all().map(item => ({ ...item }));
+      } finally { reader.close(); }
+      const meta = { rows_written: 0, changed_db: false, served_by_primary: true };
+      const snapshot = parseOps0227To0244SnapshotResult([{ success: true, results: [row], meta },
+        { success: true, results: schemaRows, meta }], { observedAt: new Date().toISOString() });
       return tamper ? tamper(snapshot, calls) : snapshot;
     },
     async applyMigration({ name, statements }) {
@@ -72,12 +76,12 @@ function sqliteProvider(file, { failApplyAt = null, skipLedgerAt = null, tamper 
       if (name === refuseAt) throw new Error('ops_0227_0244_provider:migration_pin_mismatch');
       calls.sent.push(name);
       if (name === failApplyAt || (name === ambiguousAt && !landed)) throw new Error('synthetic transport failure');
-      writer.exec('BEGIN');
-      try {
-        for (const statement of statements) writer.exec(statement);
-        if (name !== skipLedgerAt) writer.prepare(LEDGER_INSERT_SQL).run(name);
-        writer.exec('COMMIT');
-      } catch (error) { writer.exec('ROLLBACK'); throw error; }
+      // No BEGIN/COMMIT: a D1 batch is not assumed to be atomic. Statements land one by one.
+      for (const [index, statement] of statements.entries()) {
+        if (partialAt?.name === name && index === partialAt.count) throw new Error('synthetic failure mid-batch');
+        writer.exec(statement);
+      }
+      if (name !== skipLedgerAt) writer.prepare(LEDGER_INSERT_SQL).run(name);
       // The batch landed but the response was lost.
       if (name === ambiguousAt) throw new Error('ops_0227_0244_provider:request_uncertain_no_retry');
       return { applied: true };
@@ -187,7 +191,8 @@ test('a wrong local file hash refuses before any remote call', async () => {
 test('a ledger not at exactly 226 rows ending at 0226 refuses before any write', async () => {
   const short = await execute(freshDb(225));
   assert.equal(short.result.status, 'stopped');
-  assert.deepEqual(short.result.stop, { step: null, phase: 'initial-ledger', code: 'prior_ledger_mismatch:ledger_count' });
+  assert.deepEqual(short.result.stop, { step: null, phase: 'initial-ledger', code: 'prior_ledger_mismatch:ledger_count',
+    detail: 'ledger has 225 rows ending 0225_native_staff_lifecycle_bridge.sql; expected next file 0227_owner_intel_reads.sql' });
   assert.equal(short.provider.calls.writes, 0);
 
   const ahead = freshDb();
@@ -205,7 +210,8 @@ test('a ledger not at exactly 226 rows ending at 0226 refuses before any write',
   db2.exec("UPDATE d1_migrations SET name='0100_renamed.sql' WHERE id=100");
   db2.close();
   const drift = await execute(renamed);
-  assert.deepEqual(drift.result.stop, { step: null, phase: 'initial-ledger', code: 'prior_ledger_mismatch:ledger_names_sha256' });
+  assert.equal(drift.result.stop.code, 'prior_ledger_mismatch:ledger_names_sha256');
+  assert.equal(drift.result.stop.phase, 'initial-ledger');
   assert.equal(drift.provider.calls.writes, 0);
 });
 
@@ -383,11 +389,18 @@ test('production execute runs the main-branch source check before any provider i
   const production = ['--account-id', OPS_PRODUCTION_DATABASE.accountId, '--database-id', OPS_PRODUCTION_DATABASE.databaseId,
     '--database-name', OPS_PRODUCTION_DATABASE.databaseName];
   let factoryCalls = 0;
-  await assert.rejects(mainOps0227To0244(['--execute', '--receipt', receiptPath(), '--approval-ref', 'approval-synthetic', ...production], {
-    env: TOKEN_ENV, out: () => {}, sourceCheck: async () => { throw new Error('ops_0227_0244:main_branch_required'); },
+  const receiptFile = receiptPath();
+  // The real 0226 source check throws production_ops_0226_runner_* codes; they map to a refused receipt.
+  const result = await mainOps0227To0244(['--execute', '--receipt', receiptFile, '--approval-ref', 'approval-synthetic', ...production], {
+    env: TOKEN_ENV, out: () => {}, sourceCheck: async () => { throw new Error('production_ops_0226_runner_main_branch_required'); },
     providerFactory: () => { factoryCalls++; },
-  }), /main_branch_required/u);
+  });
   assert.equal(factoryCalls, 0);
+  assert.equal(result.status, 'refused');
+  const receipt = readReceipt(receiptFile);
+  assert.deepEqual(receipt.stop, { step: null, phase: 'source-check',
+    code: 'ops_0227_0244:source_check_failed:production_ops_0226_runner_main_branch_required' });
+  assert.equal(receipt.approvalRef, 'approval-synthetic');
 });
 
 // --- Cloudflare provider (fake fetch only) ---------------------------------
@@ -408,21 +421,27 @@ const targetPayload = { success: true, result: { uuid: REHEARSAL.databaseId, nam
 test('provider verifies the explicit target and refuses non-snapshot reads', async () => {
   const wrong = fakeFetch(() => ({ payload: { success: true, result: { uuid: REHEARSAL.databaseId, name: 'ltds-ops' } } }));
   await assert.rejects(provider(wrong.fetchImpl).assertTarget(), /target_mismatch/u);
+  const meta = { rows_written: 0, changed_db: false, served_by_primary: true };
+  const probes = Object.fromEntries(['ownerAdminRoles', 'flightLogsPermissions', 'flightLogsRolePermissions', 'claimedOnboarding',
+    'onboardingApprovers', 'staffLoginPrerequisiteTables', 'catalogPermissionKeys', 'nativeHireOverrides', 'nativeHires',
+    'nativeStaffReconciliationRows', 'nativeStaffReconciliationEnabled', 'staffUsersViewColumns', 'ledgerSequence', 'rolesRows',
+    'permissionsRows', 'rolePermissionsRows', 'staffUsersRows', 'staffPermissionOverridesRows'].map(key => [key, 0]));
   const fake = fakeFetch((url, init, n) => n === 1 ? { payload: targetPayload }
-    : { payload: { success: true, result: [{ success: true, results: [{ ops_0227_0244_snapshot: JSON.stringify({ ledger: [], schema: [],
-      probes: Object.fromEntries(['ownerAdminRoles', 'flightLogsPermissions', 'flightLogsRolePermissions', 'claimedOnboarding', 'onboardingApprovers',
-        'staffLoginPrerequisiteTables', 'catalogPermissionKeys', 'nativeHireOverrides', 'nativeHires', 'nativeStaffReconciliationRows',
-        'nativeStaffReconciliationEnabled', 'staffUsersViewColumns'].map(key => [key, 0])), tableRows: {} }) }],
-    meta: { rows_written: 0, changed_db: false, served_by_primary: true } }] } });
+    : { payload: { success: true, result: [
+      { success: true, results: [{ ops_0227_0244_snapshot: JSON.stringify({ ledger: [], probes, tableRows: {} }) }], meta },
+      { success: true, results: [{ type: 'table', name: 'roles', tbl_name: 'roles', sql: 'CREATE TABLE roles(id TEXT)' }], meta }] } });
   const p = provider(fake.fetchImpl);
   await assert.rejects(p.readSnapshot({ query: OPS_0227_0244_PRE_READ_QUERY }), /target_not_verified/u);
   await p.assertTarget();
   await assert.rejects(p.readSnapshot({ query: 'DELETE FROM d1_migrations' }), /read_query_invalid/u);
   const snapshot = await p.readSnapshot({ query: OPS_0227_0244_PRE_READ_QUERY });
   assert.deepEqual(snapshot.ledger, []);
+  assert.equal(snapshot.schema.length, 1);
+  assert.equal(snapshot.snapshotBytes, Buffer.byteLength(JSON.stringify({ ledger: [], probes, tableRows: {} })));
   assert.equal(fake.calls[0].url, `https://api.cloudflare.com/client/v4/accounts/${REHEARSAL.accountId}/d1/database/${REHEARSAL.databaseId}`);
   assert.equal(fake.calls[1].init.redirect, 'manual');
-  assert.deepEqual(fake.calls[1].body, { sql: OPS_0227_0244_PRE_READ_QUERY, params: [] });
+  assert.deepEqual(fake.calls[1].body, { batch: [{ sql: OPS_0227_0244_PRE_READ_QUERY, params: [] },
+    { sql: OPS_0227_0244_SCHEMA_ROWS_SQL, params: [] }] });
 });
 
 test('provider sends one pinned batch per migration, refuses writes in dry-run, tampering, and re-sends', async () => {
@@ -474,10 +493,8 @@ function applyPrefix(file, count) {
   const db = new DatabaseSync(file);
   try {
     for (const planned of plan.files.slice(0, count)) {
-      db.exec('BEGIN');
       for (const statement of planned.statements) db.exec(statement);
       db.prepare(LEDGER_INSERT_SQL).run(planned.name);
-      db.exec('COMMIT');
     }
   } finally { db.close(); }
 }
@@ -611,4 +628,89 @@ test('production execute requires an approval reference and records it; rehearsa
   assert.equal(receipt.approvalRef, 'approval-0227-0244-synthetic');
   assert.equal(receipt.target.environment, 'production');
   assert.equal(receipt.finalLedger.count, 236);
+});
+
+// --- Review follow-ups: non-atomic batches, row counts, sequence, targets ----
+
+test('a partially applied batch (some statements, no ledger row) is detected and refused by reconcile', async () => {
+  const file = freshDb();
+  const name = '0231_owner_google_ads_summary.sql';
+  const first = await cli(file, execArgs(receiptPath()), { providerOptions: { partialAt: { name, count: 6 } } });
+  assert.equal(first.result.status, 'reconciliation-required');
+  assert.equal(first.result.steps.at(-1).apply.outcome, 'ambiguous');
+  assert.equal(ledgerOf(file).length, 230, 'no ledger row for the partial file');
+  const db = new DatabaseSync(file, { readOnly: true });
+  const partialTables = db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name GLOB 'owner_intel_google_ads_*'").get().n;
+  db.close();
+  assert.ok(partialTables > 0, 'some objects of the unrecorded file exist');
+
+  const receiptFile = receiptPath();
+  const reconciled = await cli(file, ['--reconcile', '--receipt', receiptFile, ...rehearsalArgs]);
+  assert.equal(reconciled.result.status, 'reconciliation-required');
+  assert.equal(reconciled.result.stop.code, `reconciliation_required:unrecorded_objects_absent:${name}`);
+  assert.equal(reconciled.result.stop.detail,
+    `ledger has 230 rows ending 0230_app_release_pilot.sql; expected next file ${name}`);
+  assert.equal(readReceipt(receiptFile).reconcile.ledgerCount, 230);
+  for (const args of [[...execArgs(receiptPath()), '--resume-from', name], execArgs(receiptPath())]) {
+    const refused = await cli(file, args);
+    assert.equal(refused.result.status, 'reconciliation-required');
+    assert.equal(refused.provider.calls.writes, 0);
+  }
+});
+
+test('the resume mismatch message states the ledger count and the expected next file', async () => {
+  const file = freshDb();
+  applyPrefix(file, 3);
+  const receiptFile = receiptPath();
+  const refused = await cli(file, [...execArgs(receiptFile), '--resume-from', '0228_competitor_intel_ingest.sql']);
+  assert.equal(refused.result.status, 'reconciliation-required');
+  assert.equal(readReceipt(receiptFile).stop.detail, 'ledger has 229 rows ending 0229_owner_intel_source_feed.sql; '
+    + 'expected next file 0230_app_release_pilot.sql; --resume-from was 0228_competitor_intel_ingest.sql');
+  const plain = await cli(file, execArgs(receiptPath()));
+  assert.match(plain.result.stop.detail, /^ledger has 229 rows .*expected next file 0230_app_release_pilot\.sql$/u);
+});
+
+test('row counts: 0240 adds exactly 2 permissions and 4 role grants; staff and override counts never change', async () => {
+  const run = await execute(freshDb());
+  assert.equal(run.result.status, 'complete');
+  const deltas = Object.fromEntries(run.receipt.steps.map(step => [step.name.slice(0, 4), step.post.rowDeltas]));
+  assert.deepEqual(deltas['0240'], { rolesRows: 0, permissionsRows: 2, rolePermissionsRows: 4, staffUsersRows: 0, staffPermissionOverridesRows: 0 });
+  for (const [prefix, delta] of Object.entries(deltas)) {
+    if (prefix !== '0240') assert.deepEqual(delta, { rolesRows: 0, permissionsRows: 0, rolePermissionsRows: 0, staffUsersRows: 0,
+      staffPermissionOverridesRows: 0 }, prefix);
+  }
+  const { initial, final } = run.receipt.rowCounts;
+  assert.equal(final.permissionsRows - initial.permissionsRows, 2);
+  assert.equal(final.rolePermissionsRows - initial.rolePermissionsRows, 4);
+  assert.equal(final.staffUsersRows, initial.staffUsersRows);
+  assert.equal(final.staffPermissionOverridesRows, initial.staffPermissionOverridesRows);
+  assert.ok(run.receipt.steps[9].post.checks.some(item => item.name === 'catalog_rows' && item.ok && item.observed === 15));
+  assert.ok(run.receipt.notes.some(note => note.startsWith('After 0244:')));
+  assert.ok(run.receipt.initial.snapshotBytes > 0);
+  assert.ok(run.receipt.steps.every(step => step.preflight.snapshotBytes > 0 && step.post.snapshotBytes > 0));
+  console.log(`# largest single snapshot value (bytes): start ${run.receipt.initial.snapshotBytes}, after 0244 ${run.receipt.steps[9].post.snapshotBytes}`);
+
+  const changed = await execute(freshDb(), { tamper: (snapshot, calls) => calls.writes >= 3
+    ? { ...snapshot, probes: { ...snapshot.probes, staffUsersRows: snapshot.probes.staffUsersRows + 1 } } : snapshot });
+  assert.equal(changed.result.status, 'stopped');
+  assert.deepEqual(changed.result.stop, { step: '0229_owner_intel_source_feed.sql', phase: 'post-check',
+    code: 'post_check_failed:staff_users_rows_unchanged_since_start' });
+});
+
+test('an AUTOINCREMENT sequence ahead of the ledger stops before the first write', async () => {
+  const file = freshDb();
+  const db = new DatabaseSync(file);
+  db.exec("UPDATE sqlite_sequence SET seq=300 WHERE name='d1_migrations'");
+  db.close();
+  const run = await execute(file);
+  assert.equal(run.result.stop.code, 'preflight_failed:ledger_sequence');
+  assert.equal(run.provider.calls.writes, 0);
+});
+
+test('the Client production database is refused in every mode', () => {
+  const client = ['--account-id', OPS_PRODUCTION_DATABASE.accountId, '--database-id', '7f40a7b7-c3ec-470e-a626-e798867f71f8',
+    '--database-name', 'client-data'];
+  for (const extra of [[], ['--reconcile'], ['--execute', '--rehearsal', '--receipt', path.join(tmp, 'c.json')]]) {
+    assert.throws(() => parseOps0227To0244Args([...extra, ...client]), /client_production_database_refused/u);
+  }
 });

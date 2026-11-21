@@ -6,7 +6,11 @@
 // 0226 precedent: one D1 REST batch holding the pinned Wrangler wire statements
 // plus `INSERT INTO d1_migrations(name) VALUES (?)`. A read-only preflight runs
 // before each file and an exact post-check after it. The first mismatch or
-// failure stops the run; nothing is retried, replayed or resumed.
+// failure stops the run; nothing is retried or replayed. The batch is NOT
+// assumed to be atomic: an ambiguous or failed apply may leave some of a file's
+// objects without its ledger row, so a later run must pass the read-only
+// reconcile (which refuses partial objects) and may continue only with
+// --resume-from the reconciled next step.
 //
 // The default mode is a read-only dry run. Writes need `--execute`, an unused
 // receipt path and the typed confirmation. See
@@ -50,6 +54,11 @@ export const OPS_PRODUCTION_DATABASE = Object.freeze({
   accountId: '846c924bf17bf4f3dd15c97a4c5d1d51', databaseName: 'ltds-ops', databaseId: '6ebf7514-d306-4615-ae56-ad869c874dbd',
 });
 export const OPS_0227_0244_AUTHORITY_NOTE = 'recapture the post-0226 authority snapshot (role_permissions changed)';
+export const OPS_0244_AUTHORITY_NOTE = 'recapture the post-0226 authority snapshot (0244 added the staff_permission_overrides guards and the 15-row catalog seed)';
+/** Other production D1 ids already pinned in the repo; never a rehearsal target. */
+export const OPS_0227_0244_REFUSED_DATABASE_IDS = Object.freeze(['7f40a7b7-c3ec-470e-a626-e798867f71f8']);
+/** D1 caps a single string value near 2 MB; a larger snapshot is flagged in the receipt. */
+export const OPS_0227_0244_SNAPSHOT_WARN_BYTES = 1_500_000;
 export const OPS_0227_0244_CONFIRMATION = databaseName => `APPLY 0227-0244 TO ${databaseName}`;
 export const OPS_0244_CATALOG_PERMISSION_KEYS = Object.freeze(['operations.view_all', 'sops.assign', 'delivery.browse',
   'delivery.share.create', 'delivery.share.revoke', 'delivery.share.audit', 'team.view', 'administration.view',
@@ -153,10 +162,27 @@ const PROBES_SQL = `json_object(
     'nativeStaffReconciliationRows',(SELECT count(*) FROM native_staff_access_reconciliation),
     'nativeStaffReconciliationEnabled',(SELECT enabled FROM native_staff_access_reconciliation WHERE singleton=1),
     'staffUsersViewColumns',(SELECT count(*) FROM pragma_table_info('staff_users') WHERE name IN
-      ('provisioning_source','sync_protected','project_alpha_user_id','access_subject','status')))`;
+      ('provisioning_source','sync_protected','project_alpha_user_id','access_subject','status')),
+    'ledgerSequence',(SELECT seq FROM sqlite_sequence WHERE name='d1_migrations'),
+    'rolesRows',(SELECT count(*) FROM roles),
+    'permissionsRows',(SELECT count(*) FROM permissions),
+    'rolePermissionsRows',(SELECT count(*) FROM role_permissions),
+    'staffUsersRows',(SELECT count(*) FROM staff_users),
+    'staffPermissionOverridesRows',(SELECT count(*) FROM staff_permission_overrides))`;
 const PROBE_KEYS = Object.freeze(['ownerAdminRoles', 'flightLogsPermissions', 'flightLogsRolePermissions', 'claimedOnboarding',
   'onboardingApprovers', 'staffLoginPrerequisiteTables', 'catalogPermissionKeys', 'nativeHireOverrides', 'nativeHires',
-  'nativeStaffReconciliationRows', 'nativeStaffReconciliationEnabled', 'staffUsersViewColumns']);
+  'nativeStaffReconciliationRows', 'nativeStaffReconciliationEnabled', 'staffUsersViewColumns', 'ledgerSequence',
+  'rolesRows', 'permissionsRows', 'rolePermissionsRows', 'staffUsersRows', 'staffPermissionOverridesRows']);
+const NULLABLE_PROBES = new Set(['nativeStaffReconciliationEnabled', 'ledgerSequence']);
+/** Existing tables whose row counts are tracked across the run (counts only). */
+const TRACKED_ROWS = Object.freeze(['rolesRows', 'permissionsRows', 'rolePermissionsRows', 'staffUsersRows', 'staffPermissionOverridesRows']);
+
+/**
+ * Schema objects are read as ordinary rows, not folded into one JSON value: the full Ops schema SQL is
+ * about 2.7 MB, above D1's ~2 MB per-value limit. Each snapshot is one read-only batch of two SELECTs.
+ */
+export const OPS_0227_0244_SCHEMA_ROWS_SQL = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL "
+  + "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY type,name";
 
 /** One read-only SELECT. `tables` adds row counts for tables a step created (post-check only). */
 export function ops0227To0244SnapshotQuery(tables = []) {
@@ -165,9 +191,6 @@ export function ops0227To0244SnapshotQuery(tables = []) {
     : `json_object(${tables.map(table => `'${table}',(SELECT count(*) FROM "${table}")`).join(',')})`;
   return `SELECT json_object(
   'ledger',json((SELECT json_group_array(json_object('id',id,'name',name)) FROM (SELECT id,name FROM d1_migrations ORDER BY id))),
-  'schema',json((SELECT json_group_array(json_object('type',type,'name',name,'tbl_name',tbl_name,'sql',sql))
-    FROM (SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL
-      AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY type,name))),
   'probes',${PROBES_SQL},
   'tableRows',${tableRows}) AS ops_0227_0244_snapshot`;
 }
@@ -178,20 +201,29 @@ export function isOps0227To0244ReadQuery(query) {
     && query.endsWith(' AS ops_0227_0244_snapshot') && !WRITE_WORD.test(query.replace(/'[^']*'/gu, "''")) && !query.includes(';');
 }
 
-/** Parses a D1 `/query` result for the snapshot query; it must be a zero-write primary read. */
+/**
+ * Parses the D1 `/query` batch result [snapshot, schema rows]; both must be zero-write primary reads.
+ * `snapshotBytes` is the largest single value returned, the figure that D1's per-value limit applies to.
+ */
 export function parseOps0227To0244SnapshotResult(value, { observedAt } = {}) {
   let payload; try { payload = typeof value === 'string' ? JSON.parse(value) : value; } catch { fail('read_result_invalid'); }
-  if (!Array.isArray(payload) || payload.length !== 1 || payload[0]?.success !== true || !Array.isArray(payload[0].results)
-    || payload[0].meta?.rows_written !== 0 || payload[0].meta?.changed_db !== false || payload[0].meta?.served_by_primary !== true
+  if (!Array.isArray(payload) || payload.length !== 2 || payload.some(item => item?.success !== true || !Array.isArray(item.results)
+    || item.meta?.rows_written !== 0 || item.meta?.changed_db !== false || item.meta?.served_by_primary !== true)
     || payload[0].results.length !== 1 || typeof payload[0].results[0]?.ops_0227_0244_snapshot !== 'string'
-    || Buffer.byteLength(payload[0].results[0].ops_0227_0244_snapshot) > 24 * 1024 * 1024) fail('read_result_invalid');
+    || Buffer.byteLength(payload[0].results[0].ops_0227_0244_snapshot) > 24 * 1024 * 1024
+    || payload[1].results.length > MAX_ROWS) fail('read_result_invalid');
   let snapshot; try { snapshot = JSON.parse(payload[0].results[0].ops_0227_0244_snapshot); } catch { fail('read_result_invalid'); }
+  if (!isPlain(snapshot) || Object.hasOwn(snapshot, 'schema')) fail('read_result_invalid');
   if (typeof observedAt !== 'string' || !Number.isFinite(Date.parse(observedAt))) fail('read_result_invalid');
-  return validateSnapshot({ ...snapshot, observedAt });
+  const schema = payload[1].results.map(row => ({ type: row?.type, name: row?.name, tbl_name: row?.tbl_name, sql: row?.sql }));
+  const snapshotBytes = Math.max(Buffer.byteLength(payload[0].results[0].ops_0227_0244_snapshot),
+    ...schema.map(row => (typeof row.sql === 'string' ? Buffer.byteLength(row.sql) : 0)));
+  return validateSnapshot({ ...snapshot, schema, observedAt, snapshotBytes });
 }
 
 function validateSnapshot(snapshot) {
-  if (!exactKeys(snapshot, ['ledger', 'schema', 'probes', 'tableRows', 'observedAt'])) fail('snapshot_invalid');
+  if (!exactKeys(snapshot, ['ledger', 'schema', 'probes', 'tableRows', 'observedAt', 'snapshotBytes'])
+    || !Number.isSafeInteger(snapshot.snapshotBytes)) fail('snapshot_invalid');
   const { ledger, schema, probes, tableRows } = snapshot;
   if (!Array.isArray(ledger) || ledger.length > MAX_ROWS || ledger.some((row, index) => !exactKeys(row, ['id', 'name'])
     || !Number.isSafeInteger(row.id) || row.id < 1 || typeof row.name !== 'string' || row.name.length === 0
@@ -199,9 +231,8 @@ function validateSnapshot(snapshot) {
   if (!Array.isArray(schema) || schema.length > MAX_ROWS || schema.some(row => !exactKeys(row, ['type', 'name', 'tbl_name', 'sql'])
     || !['table', 'index', 'view', 'trigger'].includes(row.type) || typeof row.name !== 'string'
     || typeof row.tbl_name !== 'string' || typeof row.sql !== 'string')) fail('schema_invalid');
-  if (!exactKeys(probes, PROBE_KEYS) || PROBE_KEYS.some(key => key !== 'nativeStaffReconciliationEnabled'
-    && (!Number.isSafeInteger(probes[key]) || probes[key] < 0))
-    || (probes.nativeStaffReconciliationEnabled !== null && !Number.isSafeInteger(probes.nativeStaffReconciliationEnabled))) fail('probes_invalid');
+  if (!exactKeys(probes, PROBE_KEYS) || PROBE_KEYS.some(key => !(NULLABLE_PROBES.has(key) && probes[key] === null)
+    && (!Number.isSafeInteger(probes[key]) || probes[key] < 0))) fail('probes_invalid');
   if (!isPlain(tableRows) || Object.values(tableRows).some(count => !Number.isSafeInteger(count) || count < 0)) fail('table_rows_invalid');
   return snapshot;
 }
@@ -247,8 +278,18 @@ function fileObjectsRows(snapshot, file) {
  * prefix of the ten files (ids contiguous from 227), every recorded file's objects
  * exist exactly as pinned, and no object of any unrecorded file exists.
  */
+export function ops0227To0244LedgerPosition(snapshot, plan) {
+  const prior = OPS_0227_0244_PRIOR_LEDGER.count, ledger = snapshot.ledger;
+  let exact = 0;
+  while (exact < plan.files.length && ledger[prior + exact]?.name === plan.files[exact].name && ledger[prior + exact]?.id === prior + exact + 1) exact++;
+  const expectedNextFile = ledger.length < prior ? OPS_0227_0244_FILES[0].name : plan.files[exact]?.name ?? null;
+  return { ledgerCount: ledger.length, ledgerTail: ledger.at(-1)?.name ?? null, expectedNextFile,
+    message: `ledger has ${ledger.length} rows ending ${ledger.at(-1)?.name ?? 'nothing'}; expected next file ${expectedNextFile ?? 'none (all ten recorded)'}` };
+}
+
 export function reconcileOps0227To0244Snapshot(snapshot, plan) {
   const prior = OPS_0227_0244_PRIOR_LEDGER.count, ledger = snapshot.ledger;
+  const position = ops0227To0244LedgerPosition(snapshot, plan);
   const base = ledger.slice(0, prior), suffix = ledger.slice(prior);
   const checks = [
     check('prior_ledger_present', true, ledger.length >= prior && ledger.length <= prior + plan.files.length),
@@ -258,7 +299,7 @@ export function reconcileOps0227To0244Snapshot(snapshot, plan) {
       && row.name === plan.files[index].name && row.id === prior + index + 1)),
   ];
   const bad = failed(checks);
-  if (bad) return { ok: false, code: `reconciliation_required:${bad.name}`, appliedCount: null, nextStep: null, checks };
+  if (bad) return { ok: false, code: `reconciliation_required:${bad.name}`, appliedCount: null, nextStep: null, ...position, checks };
   const applied = suffix.length, p = snapshot.probes;
   plan.files.forEach((file, index) => {
     const rows = fileObjectsRows(snapshot, file);
@@ -273,13 +314,14 @@ export function reconcileOps0227To0244Snapshot(snapshot, plan) {
     }
   });
   const badObject = failed(checks);
-  if (badObject) return { ok: false, code: `reconciliation_required:${badObject.name}`, appliedCount: applied, nextStep: null, checks };
-  return { ok: true, code: null, appliedCount: applied, ledgerCount: ledger.length, ledgerTail: ledger.at(-1)?.name ?? null,
+  if (badObject) return { ok: false, code: `reconciliation_required:${badObject.name}`, appliedCount: applied, nextStep: null, ...position, checks };
+  return { ok: true, code: null, appliedCount: applied, ...position,
     nextStep: applied < plan.files.length ? plan.files[applied].name : null, checks };
 }
 
 function stepPreflightChecks(snapshot, file) {
   const p = snapshot.probes, checks = [
+    check('ledger_sequence', snapshot.ledger.at(-1)?.id ?? null, p.ledgerSequence),
     check('file_objects_absent', 0, fileObjectsRows(snapshot, file).length),
   ];
   const short = file.name.slice(0, 4);
@@ -301,7 +343,9 @@ function recordedCounts(snapshot, file) {
   return {};
 }
 
-function postChecks(before, after, file) {
+const trackedCounts = snapshot => Object.fromEntries(TRACKED_ROWS.map(key => [key, snapshot.probes[key]]));
+
+function postChecks(before, after, file, runInitial) {
   const expectedLedger = [...before.ledger, { id: before.ledger.at(-1).id + 1, name: file.name }];
   const beforeKeys = new Set(before.schema.map(objectKey));
   const kept = after.schema.filter(row => beforeKeys.has(objectKey(row)));
@@ -320,7 +364,19 @@ function postChecks(before, after, file) {
   ];
   if (file.name.startsWith('0240')) checks.push(check('flight_logs_permissions', 2, after.probes.flightLogsPermissions),
     check('flight_logs_role_permissions', 2 * before.probes.ownerAdminRoles, after.probes.flightLogsRolePermissions));
-  return { checks, addedObjectCount: added.length, readback };
+  const rowDeltas = Object.fromEntries(TRACKED_ROWS.map(key => [key, after.probes[key] - before.probes[key]]));
+  const is0240 = file.name.startsWith('0240');
+  const roleGrantDelta = after.probes.flightLogsRolePermissions - before.probes.flightLogsRolePermissions;
+  checks.push(
+    check('roles_rows_unchanged', 0, rowDeltas.rolesRows),
+    check('permissions_rows_delta', is0240 ? 2 : 0, rowDeltas.permissionsRows),
+    check('role_permissions_rows_delta', is0240 ? (roleGrantDelta > 0 && roleGrantDelta <= 4 ? roleGrantDelta : 'between 1 and 4') : 0,
+      rowDeltas.rolePermissionsRows),
+    check('staff_users_rows_unchanged_since_start', runInitial.staffUsersRows, after.probes.staffUsersRows),
+    check('staff_permission_overrides_rows_unchanged_since_start', runInitial.staffPermissionOverridesRows,
+      after.probes.staffPermissionOverridesRows));
+  if (file.name.startsWith('0244')) checks.push(check('catalog_rows', 15, after.tableRows.staff_operations_access_catalog ?? null));
+  return { checks, addedObjectCount: added.length, readback, rowDeltas };
 }
 
 const failed = checks => checks.find(item => !item.ok);
@@ -349,7 +405,9 @@ export function openOps0227To0244Receipt(filename) {
 // ---------------------------------------------------------------------------
 // Ordered run
 
-const errorCode = error => (error instanceof Error && /^ops_0227_0244[a-z_]*:/u.test(error.message)) ? error.message : 'unexpected_error';
+const errorCode = error => (error instanceof Error && /^ops_0227_0244[a-z_]*:/u.test(error.message)) ? error.message
+  : (error instanceof Error && /^production_ops_0226_runner_[a-z_]+$/u.test(error.message)) ? `ops_0227_0244:source_check_failed:${error.message}`
+    : 'unexpected_error';
 // Provider refusals raised before any request is sent. Every other apply error is ambiguous.
 const NOT_SENT = /^ops_0227_0244_provider:(?:writes_disabled|target_not_verified|migration_pin_mismatch|migration_already_sent_no_retry|auth_unavailable|configuration_invalid)$/u;
 const RECONCILE_NOTE = 'Do not retry. Run --reconcile (read-only); continue only with --execute --resume-from <reported next step>.';
@@ -376,7 +434,11 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
     startedAt: stamp(), finishedAt: null, status: 'running', stop: null,
     files: plan.files.map(({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount }) =>
       ({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount })),
-    initial: null, reconcile: null, steps: [], notes: [], finalLedger: null, writesPerformed: 0,
+    initial: null, reconcile: null, steps: [], notes: [], rowCounts: null, finalLedger: null, writesPerformed: 0,
+  };
+  const noteSize = (where, snapshot) => {
+    if (snapshot.snapshotBytes > OPS_0227_0244_SNAPSHOT_WARN_BYTES)
+      state.notes.push(`Snapshot at ${where} is ${snapshot.snapshotBytes} bytes, near the D1 per-value limit.`);
   };
   const persist = () => { if (receipt) receipt.write(state); };
   const stop = (step, phase, code, detail = null) => {
@@ -392,24 +454,28 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
   catch (error) { stop(null, 'initial-read', errorCode(error)); }
   if (current) {
     const rec = reconcileOps0227To0244Snapshot(current, plan);
-    state.reconcile = { ok: rec.ok, code: rec.code, appliedCount: rec.appliedCount, nextStep: rec.nextStep, checks: rec.checks };
-    state.initial = { observedAt: current.observedAt, ledger: ledgerSummary(current.ledger), schemaObjectCount: current.schema.length,
-      checks: startIndex === 0 && mode !== 'reconcile' ? initialLedgerChecks(current, plan) : [] };
+    state.reconcile = { ok: rec.ok, code: rec.code, appliedCount: rec.appliedCount, nextStep: rec.nextStep, ledgerCount: rec.ledgerCount,
+      expectedNextFile: rec.expectedNextFile, message: rec.message, checks: rec.checks };
+    state.initial = { observedAt: current.observedAt, snapshotBytes: current.snapshotBytes, ledger: ledgerSummary(current.ledger),
+      schemaObjectCount: current.schema.length, checks: startIndex === 0 && mode !== 'reconcile' ? initialLedgerChecks(current, plan) : [] };
+    state.rowCounts = { initial: trackedCounts(current), final: null };
+    noteSize('start', current);
     if (mode === 'reconcile') {
-      if (!rec.ok) stop(null, 'reconcile', rec.code);
+      if (!rec.ok) stop(null, 'reconcile', rec.code, rec.message);
       else {
         state.status = 'reconciled';
         log(rec.nextStep ? `reconciled: ${rec.appliedCount} of 10 recorded; next step ${rec.nextStep}` : 'reconciled: all ten recorded (236)');
       }
     } else if (startIndex === 0) {
       const bad = failed(state.initial.checks);
-      if (bad && current.ledger.length > OPS_0227_0244_PRIOR_LEDGER.count) stop(null, 'initial-ledger', `reconciliation_required:${rec.code ?? 'ledger_beyond_0226'}`);
-      else if (bad) stop(null, 'initial-ledger', `prior_ledger_mismatch:${bad.name}`);
-    } else if (!rec.ok) stop(null, 'reconcile', rec.code);
-    else if (rec.appliedCount !== startIndex) stop(null, 'reconcile', 'reconciliation_required:resume_from_is_not_next_step', rec.nextStep);
+      if (bad && current.ledger.length > OPS_0227_0244_PRIOR_LEDGER.count) stop(null, 'initial-ledger', `reconciliation_required:${rec.code ?? 'ledger_beyond_0226'}`, rec.message);
+      else if (bad) stop(null, 'initial-ledger', `prior_ledger_mismatch:${bad.name}`, rec.message);
+    } else if (!rec.ok) stop(null, 'reconcile', rec.code, rec.message);
+    else if (rec.appliedCount !== startIndex) stop(null, 'reconcile', 'reconciliation_required:resume_from_is_not_next_step', rec.message);
   }
   persist();
   const baseLedger = current?.ledger.slice(0, OPS_0227_0244_PRIOR_LEDGER.count) ?? [];
+  const runInitial = current ? trackedCounts(current) : null;
   for (let index = startIndex; mode !== 'reconcile' && state.status === 'running' && index < plan.files.length; index++) {
     const file = plan.files[index];
     const step = { order: file.order, name: file.name, preflight: null, apply: null, post: null, readback: null };
@@ -420,7 +486,7 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
     }
     const checks = [...(mode === 'execute' || index === startIndex ? ledgerChecks(current, baseLedger, plan, index) : []),
       ...stepPreflightChecks(current, file)];
-    step.preflight = { observedAt: current.observedAt, ledgerCount: current.ledger.length,
+    step.preflight = { observedAt: current.observedAt, snapshotBytes: current.snapshotBytes, ledgerCount: current.ledger.length,
       ledgerDeferred: mode === 'dry-run' && index > startIndex, checks, recorded: recordedCounts(current, file) };
     const bad = failed(checks);
     if (bad) { stop(file.name, 'preflight', `preflight_failed:${bad.name}`); persist(); break; }
@@ -451,21 +517,25 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
     let after;
     try { after = await read(ops0227To0244SnapshotQuery(Object.keys(file.expectedNewTableRows).sort())); }
     catch (error) { stop(file.name, 'post-read', `reconciliation_required:post_read_failed`, errorCode(error)); persist(); break; }
-    const post = postChecks(current, after, file);
+    const post = postChecks(current, after, file, runInitial);
+    noteSize(`after ${file.name}`, after);
     step.readback = post.readback;
-    step.post = { observedAt: after.observedAt, ledgerCount: after.ledger.length, ledgerTail: after.ledger.at(-1)?.name ?? null,
-      addedObjectCount: post.addedObjectCount, tableRows: after.tableRows, checks: post.checks };
+    step.post = { observedAt: after.observedAt, snapshotBytes: after.snapshotBytes, ledgerCount: after.ledger.length,
+      ledgerTail: after.ledger.at(-1)?.name ?? null, addedObjectCount: post.addedObjectCount, tableRows: after.tableRows,
+      rowDeltas: post.rowDeltas, checks: post.checks };
     const badPost = failed(post.checks);
     if (badPost) { stop(file.name, 'post-check', `post_check_failed:${badPost.name}`); persist(); break; }
     log(`applied and verified: ${file.name} (ledger ${after.ledger.length}, tail ${after.ledger.at(-1).name})`);
     if (file.name.startsWith('0240')) { state.notes.push(`After 0240: ${OPS_0227_0244_AUTHORITY_NOTE}`); log(`NOTE: ${OPS_0227_0244_AUTHORITY_NOTE}`); }
+    if (file.name.startsWith('0244')) { state.notes.push(`After 0244: ${OPS_0244_AUTHORITY_NOTE}`); log(`NOTE: ${OPS_0244_AUTHORITY_NOTE}`); }
     current = after;
   }
   if (state.status === 'running') {
     state.status = mode === 'execute' ? 'complete' : 'dry-run-passed';
-    if (mode === 'dry-run') state.notes.push(`0240 will change role_permissions: ${OPS_0227_0244_AUTHORITY_NOTE} after the apply.`);
+    if (mode === 'dry-run') state.notes.push(`0240 will change role_permissions: ${OPS_0227_0244_AUTHORITY_NOTE} after the apply.`,
+      `0244 will add override guards and the catalog seed: ${OPS_0244_AUTHORITY_NOTE} after the apply.`);
   }
-  if (current) state.finalLedger = ledgerSummary(current.ledger);
+  if (current) { state.finalLedger = ledgerSummary(current.ledger); if (state.rowCounts) state.rowCounts.final = trackedCounts(current); }
   if (state.status === 'complete' && canonical(state.finalLedger) !== canonical(OPS_0227_0244_FINAL_LEDGER)) {
     stop(null, 'final', 'final_ledger_mismatch');
   }
@@ -515,6 +585,7 @@ export function parseOps0227To0244Args(args, env = {}) {
   if (options.resumeFrom !== null && (options.mode !== 'execute' || !OPS_0227_0244_FILES.some(file => file.name === options.resumeFrom)))
     fail('resume_from_invalid');
   if (options.approvalRef !== null && (options.mode !== 'execute' || !APPROVAL_REF.test(options.approvalRef))) fail('approval_ref_invalid');
+  if (OPS_0227_0244_REFUSED_DATABASE_IDS.includes(options.databaseId)) fail('client_production_database_refused');
   const isProduction = options.databaseId === OPS_PRODUCTION_DATABASE.databaseId;
   if (isProduction && (options.accountId !== OPS_PRODUCTION_DATABASE.accountId || options.databaseName !== OPS_PRODUCTION_DATABASE.databaseName))
     fail('production_target_mismatch');
@@ -553,7 +624,17 @@ export async function mainOps0227To0244(args, dependencies = {}) {
       return refusal;
     }
     out(`Ordered plan ${plan.planSha256} (prior ledger ${plan.priorLedger.count} -> ${plan.finalLedger.count}):\n${describeOps0227To0244Plan(plan)}`);
-    if (options.mode === 'execute' && options.environment === 'production') await (dependencies.sourceCheck ?? defaultSourceCheck)();
+    if (options.mode === 'execute' && options.environment === 'production') {
+      try { await (dependencies.sourceCheck ?? defaultSourceCheck)(); }
+      catch (error) {
+        const code = errorCode(error);
+        const refusal = { schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
+          status: 'refused', stop: { step: null, phase: 'source-check', code: code === 'unexpected_error' ? 'ops_0227_0244:source_check_failed' : code },
+          writesPerformed: 0, at: new Date().toISOString() };
+        receipt?.write(refusal);
+        return refusal;
+      }
+    }
     const token = env.CLOUDFLARE_API_TOKEN;
     if (typeof token !== 'string' || token.length < 20 || token.length > 16_384) fail('cloudflare_token_missing');
     const providerFactory = dependencies.providerFactory ?? (await import('./production-ops-0227-0244-cloudflare-provider.mjs')).createOps0227To0244CloudflareProvider;
@@ -569,7 +650,8 @@ export async function mainOps0227To0244(args, dependencies = {}) {
       const rec = await runOps0227To0244Ordered({ ...common, provider: readOnly, mode: 'reconcile' });
       if (rec.status !== 'reconciled' || rec.reconcile.nextStep !== options.resumeFrom) {
         const refused = { ...rec, mode: 'execute', resumeFrom: options.resumeFrom, status: 'reconciliation-required',
-          stop: rec.stop ?? { step: null, phase: 'reconcile', code: 'reconciliation_required:resume_from_is_not_next_step', detail: rec.reconcile?.nextStep ?? null } };
+          stop: rec.stop ?? { step: null, phase: 'reconcile', code: 'reconciliation_required:resume_from_is_not_next_step',
+            detail: `${rec.reconcile.message}; --resume-from was ${options.resumeFrom}` } };
         receipt?.write(refused);
         return refused;
       }

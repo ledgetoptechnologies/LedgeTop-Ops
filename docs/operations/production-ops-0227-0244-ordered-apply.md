@@ -28,6 +28,30 @@ any remote call, the script checks the local bytes against both pins. To
 re-derive the fixture offline, run
 `node scripts/production-ops-0227-0244-wire-fixture.mjs`.
 
+**The batch is not assumed to be atomic.** The 0226 precedent does not assume
+it, and nothing in this repository proves that a D1 `/query` batch rolls back as
+a unit. A failed or ambiguous apply can therefore leave some of a file's tables,
+triggers or views in place with no ledger row. Reconcile detects that partial
+state and refuses to continue (see below), and the offline tests model it with a
+synthetic D1 that applies statements one by one.
+
+Each snapshot is one read-only `/query` batch of two SELECTs:
+
+1. One JSON value holding the ledger, the probe counts and the row counts.
+2. The schema objects (`type`, `name`, `tbl_name`, `sql`) as ordinary rows.
+
+The schema is not folded into one value, because the full Ops schema SQL is
+about 2.7 MB as a single value, above D1's roughly 2 MB per-value limit. Every
+receipt phase records `snapshotBytes`, which is the largest single returned
+value, about 20 KB on the synthetic chain. The receipt gets a note if this ever
+exceeds 1.5 MB.
+
+**Scope:** this tool and this change cover the Operations database only. The
+Client sections of the shared release profiles (`append-plan.json`,
+`reconciliation-manifest.json`) are unchanged from main. The Client append and
+its ordering have their own owner and are out of scope here. The tool refuses
+the Client production database id in every mode.
+
 ## What each run checks
 
 A fresh run starts only from the exact observed production ledger: 226 rows, ids
@@ -40,6 +64,9 @@ following:
 
 - The ledger count is right, the ledger tail is the previous file, and the
   earlier history is unchanged.
+- The `d1_migrations` AUTOINCREMENT sequence (`sqlite_sequence`) equals the
+  last ledger id. A sequence ahead of the ledger would give the new row a
+  skipped id.
 - None of the file's new objects exist yet (for 0240: no `flight_logs.*`
   permission).
 - 0240: `role-owner` and `role-admin` exist.
@@ -63,9 +90,30 @@ the following:
 - The added objects exactly match the pinned list and digest.
 - Each new table has exactly the pinned seed row count.
 - For 0240: 2 permissions and 4 `role_permissions` rows exist.
+- Row counts of the existing authority tables:
+  - `roles`: unchanged.
+  - `permissions`: unchanged, except exactly +2 for 0240.
+  - `role_permissions`: unchanged, except +1 to +4 for 0240 (+4 when both
+    roles exist).
+  - `staff_users` and `staff_permission_overrides`: unchanged since the start
+    of the run.
+  - For 0244: the catalog holds exactly 15 rows.
+
+  The tool records per-step deltas and the start and final counts. These are
+  counts only, never row contents. A live staff or override change during the
+  run therefore stops it after that file's write. Plan the run in a quiet window.
 
 After 0240, the tool prints and records this note: **recapture the post-0226
-authority snapshot (role_permissions changed)**.
+authority snapshot (role_permissions changed)**. After 0244 it records a matching
+note, because 0244 adds the override guards and the catalog seed.
+
+### After a complete apply
+
+- Recapture the post-0226 ordinary-frontend authority packet. Both 0240 and 0244
+  change its base.
+- Recapture the installed-schema-preservation profile. It describes ledger 226
+  with ten files pending, so it no longer matches.
+- Refresh the Ops section of the append plan for the 236-row base.
 
 ## Intentional authority changes
 
@@ -177,8 +225,11 @@ refuses any ledger beyond 226. Reconcile first instead:
 node scripts/production-ops-0227-0244-ordered-once.mjs --reconcile --account-id <account> --database-id <uuid> --database-name <name> [--receipt <absolute path>]
 ```
 
-Reconcile is read-only: it takes one snapshot and writes nothing. It proves the
-following:
+Reconcile is read-only: it takes one snapshot and writes nothing. Every
+reconcile result and every refusal states the ledger count and the expected
+next file, for example
+`ledger has 229 rows ending 0229_owner_intel_source_feed.sql; expected next file 0230_app_release_pilot.sql`.
+It proves the following:
 
 - The first 226 rows are the pinned prior ledger.
 - The rows after them are exactly an ordered prefix of the ten files, with ids
@@ -197,6 +248,16 @@ the first failing check, for example:
 - a partial object set for an unrecorded file.
 
 That state needs a reviewed manual reconciliation; the tool cannot continue it.
+For a partial file, list its objects read-only before deciding, for example for
+0231:
+
+```sql
+SELECT type, name, tbl_name FROM sqlite_master
+WHERE name GLOB 'owner_intel_google_ads_*' ORDER BY type, name;
+```
+
+The exact names of each file's objects are in the fixture's
+`expectedAddedObjects`.
 
 To continue, pass exactly the reported next step:
 
@@ -217,7 +278,10 @@ Use a new receipt path for every run.
 ## Rollback notes
 
 None of the files has a down migration. These notes come from the release
-research.
+research. A manual reverse migration must also delete that file's
+`d1_migrations` row (`DELETE FROM d1_migrations WHERE name='<file>'`), or the
+ledger gates and this tool's reconcile will refuse the state. Delete the rows
+from the latest file backwards.
 
 - **0227, 0228, 0229, 0231:** Code rollback leaves inert, empty tables, apart
   from controls seeded with `enabled=0`. A reverse migration drops the triggers
@@ -237,8 +301,10 @@ research.
 - **0244:** Applying the file activates the writer. A reverse migration drops the
   three `staff_permission_overrides` guards and the other triggers, then the two
   views, then the state, commands and catalog tables. Grants that the writer made
-  remain ordinary override rows. Command rows are the audit trail, so dropping
-  them loses provenance.
+  remain ordinary override rows. While the guards exist, a native hire's override
+  rows can be removed only by a revoke command. They can be removed directly only
+  after the three guards are dropped. Command rows are the audit trail, so
+  dropping them loses provenance.
 
 ## Tests
 
