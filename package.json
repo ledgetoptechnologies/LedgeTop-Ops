@@ -21,7 +21,7 @@
     "staging:check": "node scripts/staging-preflight.mjs",
     "staging:windows-files:preflight": "node scripts/windows-files-staging-preflight.mjs --read-only",
     "staging:windows-files:preflight:test": "node --test scripts/windows-files-staging-preflight.test.mjs",
-    "staging:check:test": "node --test scripts/staging-preflight.test.mjs",
+    "staging:check:test": "node --test scripts/staging-preflight.test.mjs scripts/staging-backend-release-plan.test.mjs",
     "staging:config:check": "node scripts/staging-config-scaffold.mjs",
     "staging:config:test": "node --test scripts/staging-config-scaffold.test.mjs",
     "staging:client:expand-0179:generate": "node scripts/staging-client-expand-0179-config.mjs --write",
