@@ -328,22 +328,45 @@ test('runner applies missing versions below a recorded higher ordinal and keeps 
   const recordedName = 'historical-legacy-42';
   database.prepare('UPDATE schema_migrations SET name=? WHERE version=42').run(recordedName);
   database.exec("CREATE TABLE fixture_records (id TEXT PRIMARY KEY, retained TEXT); INSERT INTO fixture_records VALUES ('existing','preserved')");
-  database.prepare('INSERT INTO schema_migrations VALUES (50,?,?)').run('fixture_higher', '2026-11-20');
   const lower = { version: 48, name: 'fixture_lower', sql: 'ALTER TABLE fixture_records ADD COLUMN detail TEXT' };
-  const higher = { version: 50, name: 'fixture_higher', sql: 'SELECT * FROM must_not_reapply_higher' };
-  MIGRATIONS.push(lower, higher);
+  MIGRATIONS.push(lower);
   try {
     applyMigrations(database);
     applyMigrations(database);
     assert.equal(database.prepare('SELECT name FROM schema_migrations WHERE version=42').get().name, recordedName);
     assert.deepEqual(database.prepare('SELECT version, name FROM schema_migrations WHERE version>42 ORDER BY version')
-      .all().map(row => [row.version, row.name]), [[48, lower.name], [50, higher.name]]);
+      .all().map(row => [row.version, row.name]), [[48, lower.name], [50, 'deleted_processing_nodes']]);
     const row = database.prepare('SELECT * FROM fixture_records').get();
     assert.equal(row.retained, 'preserved');
     assert.equal(row.detail, null);
   } finally {
-    MIGRATIONS.splice(-2);
+    MIGRATIONS.pop();
   }
+});
+
+test('v50 upgrades a populated v42 database without other feature migrations', t => {
+  const database = new DatabaseSync(':memory:');
+  t.after(() => database.close());
+  const nodeDeletion = MIGRATIONS.pop();
+  try {
+    assert.equal(nodeDeletion.version, 50);
+    applyMigrations(database);
+  } finally {
+    MIGRATIONS.push(nodeDeletion);
+  }
+  const created = '2026-11-20T00:00:00.000Z';
+  database.prepare(`INSERT INTO processing_providers(id,provider_type,display_name,endpoint,enabled,created_at,updated_at)
+    VALUES ('fixture-node','nodeodm','Existing node','https://node.invalid',1,?,?)`).run(created, created);
+  assert.equal(database.prepare('SELECT max(version) version FROM schema_migrations').get().version,42);
+  applyMigrations(database);
+  applyMigrations(database);
+  assert.deepEqual({...database.prepare('SELECT enabled,deleted_at FROM processing_providers WHERE id=?').get('fixture-node')},
+    { enabled:1, deleted_at:null });
+  assert.deepEqual(database.prepare('SELECT version FROM schema_migrations WHERE version>42').all().map(row=>row.version),[50]);
+  assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(),[]);
+  database.exec('ALTER TABLE processing_providers DROP COLUMN deleted_at; ALTER TABLE processing_providers ADD COLUMN deleted_at INTEGER');
+  assert.throws(()=>applyMigrations(database),{code:'viewer_migration_history_conflict'});
+  assert.equal(database.isTransaction,false);
 });
 
 test('runner refuses a conflicting recorded name or malformed verified schema starting at 43', t => {

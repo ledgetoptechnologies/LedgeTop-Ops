@@ -337,6 +337,9 @@ test('processing readiness decrypts enabled credentials with overlap and fails c
 
 test('delete requires write access, blocks queued and running work, and preserves run history', async t => {
   const c = await fixture(t, { permissions: ['viewer.providers.read', 'viewer.providers.write', 'viewer.processing.read'] });
+  const oldOrigins = [...config.processingProviderOrigins];
+  config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, 'https://cluster.example');
+  t.after(() => config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, ...oldOrigins));
   const readToken = crypto.randomBytes(32).toString('base64url');
   c.processing.createAdminSession({ tokenHash: auth.hashToken(readToken), subject: 'reader', permissions: ['viewer.providers.read'], expiresAt: new Date(Date.now() + 60_000).toISOString() });
 
