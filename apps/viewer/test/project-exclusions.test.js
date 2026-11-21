@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { canonicalProjectExclusions } = require('../server/projectExclusions');
-const { TASK_AUTHORIZATION_GENERATIONS_V51_SQL } = require('../server/database');
+const { TASK_AUTHORIZATION_GENERATIONS_V52_SQL } = require('../server/database');
 
 const id = sequence => `00000000-0000-4000-8000-${String(sequence).padStart(12, '0')}`;
 const mask = { version: 1, folderIds: [id(1)], taskIds: [id(15)] };
@@ -45,7 +45,7 @@ function fixture(t) {
     db.prepare("INSERT INTO model_outputs VALUES (?, ?, ?, 'project', 'attempt', ?, 'published')")
       .run(version, model, task, date);
   }
-  db.exec(TASK_AUTHORIZATION_GENERATIONS_V51_SQL);
+  db.exec(TASK_AUTHORIZATION_GENERATIONS_V52_SQL);
   return { db, repo: new ProcessingRepository(db) };
 }
 

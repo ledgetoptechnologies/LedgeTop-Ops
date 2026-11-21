@@ -1,5 +1,5 @@
 'use strict';
-// Viewer-owned task authorization generation (schema 51): persisted, backfilled,
+// Viewer-owned task authorization generation (schema 52, provisional number): persisted, backfilled,
 // only ever increasing, bumped by every scope-affecting write, and compared at
 // mint, redemption and every live restricted-session check.
 const test = require('node:test');
@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { MIGRATIONS, applyMigrations, TASK_AUTHORIZATION_GENERATIONS_V51_SQL } = require('../server/database');
+const { MIGRATIONS, applyMigrations, TASK_AUTHORIZATION_GENERATIONS_V52_SQL } = require('../server/database');
 const { restrictedSessionAllows, currentTaskAuthorizationGeneration } = require('../server/restrictedSessionScope');
 
 const id = sequence => `00000000-0000-4000-8000-${String(sequence).padStart(12, '0')}`;
@@ -35,7 +35,7 @@ function seedTasks(db, ids) {
 }
 const generationOf = (db, task) => db.prepare('SELECT generation FROM task_authorization_generations WHERE task_id=?').get(task)?.generation;
 
-test('upgrade from 48 backfills every existing task, stamps 51 and new tasks start at 1', t => {
+test('upgrade from 48 backfills every existing task, stamps 52 and new tasks start at 1', t => {
   const db = fileDb(t, 'upgrade');
   const all = [...MIGRATIONS];
   useMigrations(t, all.filter(item => item.version <= 48));
@@ -43,7 +43,7 @@ test('upgrade from 48 backfills every existing task, stamps 51 and new tasks sta
   seedTasks(db, ['task-1', 'task-2']);
   MIGRATIONS.splice(0, MIGRATIONS.length, ...all);
   applyMigrations(db);
-  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=51').get().name, 'task_authorization_generations');
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=52').get().name, 'task_authorization_generations');
   assert.equal(generationOf(db, 'task-1'), 1);
   assert.equal(generationOf(db, 'task-2'), 1);
   db.prepare(`INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,metadata_json,created_at,updated_at)
@@ -52,14 +52,14 @@ test('upgrade from 48 backfills every existing task, stamps 51 and new tasks sta
   applyMigrations(db); // idempotent re-run accepts the verified stamp
 });
 
-test('51 refuses an install order without the 48 folder schema, and unstamped objects', t => {
+test('52 refuses an install order without the 48 folder schema, and unstamped objects', t => {
   const without48 = fileDb(t, 'no48');
-  useMigrations(t, [...MIGRATIONS].filter(item => item.version <= 42 || item.version === 51));
+  useMigrations(t, [...MIGRATIONS].filter(item => item.version <= 42 || item.version === 52));
   assert.throws(() => applyMigrations(without48), /require the version 48 folder schema/);
   assert.equal(without48.prepare("SELECT 1 FROM sqlite_master WHERE name='task_authorization_generations'").get(), undefined);
 });
 
-test('a 51 stamp whose objects are missing is refused, never accepted', t => {
+test('a 52 stamp whose objects are missing is refused, never accepted', t => {
   const db = fileDb(t, 'stamp');
   applyMigrations(db);
   db.exec('DROP TRIGGER task_authorization_generation_task_update');
@@ -85,7 +85,7 @@ function lightFixture(t) {
     INSERT INTO processing_tasks VALUES ('t','p','Task','now','ready',NULL,'m','fa'), ('u','p','Other','now','ready',NULL,NULL,NULL);
     INSERT INTO model_outputs VALUES ('v','m','t','p','attempt','now','published');
   `);
-  db.exec(TASK_AUTHORIZATION_GENERATIONS_V51_SQL);
+  db.exec(TASK_AUTHORIZATION_GENERATIONS_V52_SQL);
   return db;
 }
 
@@ -149,4 +149,59 @@ test('a missing generation row denies every restricted check', t => {
   const noTable = new DatabaseSync(':memory:');
   t.after(() => noTable.close());
   assert.equal(currentTaskAuthorizationGeneration(noTable, 't'), null);
+});
+
+test('live restricted liveness reads tombstone, generation and eligibility in one snapshot (two connections)', t => {
+  const { ViewerRepository } = require('../server/repository');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-generation-snapshot-'));
+  const file = path.join(root, 'db.sqlite');
+  const reader = new DatabaseSync(file), writer = new DatabaseSync(file);
+  t.after(() => { reader.close(); writer.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  reader.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000');
+  writer.exec('PRAGMA busy_timeout=5000');
+  const P = id(1), T = id(2), M = id(3), V = id(4), FA = id(5), FB = id(6);
+  reader.exec(`
+    CREATE TABLE projects(id TEXT PRIMARY KEY, display_name TEXT, default_units TEXT, status TEXT);
+    CREATE TABLE project_folders(id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, display_name TEXT);
+    CREATE TABLE processing_tasks(id TEXT PRIMARY KEY, project_id TEXT, display_name TEXT, created_at TEXT,
+      status TEXT, purged_at TEXT, published_model_id TEXT, folder_id TEXT);
+    CREATE TABLE models(id TEXT PRIMARY KEY, display_name TEXT, active_version_id TEXT, status TEXT);
+    CREATE TABLE model_outputs(id TEXT PRIMARY KEY, model_id TEXT, task_id TEXT, project_id TEXT, attempt_id TEXT, updated_at TEXT, status TEXT);
+    CREATE TABLE model_versions(id TEXT PRIMARY KEY, model_id TEXT, status TEXT);
+    CREATE TABLE viewer_sessions(id TEXT PRIMARY KEY, token_hash TEXT, model_id TEXT, model_version_id TEXT,
+      review_attempt_id TEXT, session_mode TEXT, source_authorization_type TEXT, source_authorization_id TEXT,
+      source_authorization_version INTEGER, subject TEXT, audience TEXT, permissions_json TEXT, display_units TEXT,
+      expires_at TEXT, created_at TEXT, updated_at TEXT, revoked_at TEXT);
+    CREATE TABLE revoked_published_session_authorizations(source_authorization_type TEXT,
+      source_authorization_id TEXT, source_authorization_version INTEGER);
+  `);
+  reader.prepare("INSERT INTO projects VALUES (?,'Project','metric','active')").run(P);
+  reader.prepare("INSERT INTO project_folders VALUES (?,?,NULL,'Visible'),(?,?,NULL,'Hidden')").run(FA, P, FB, P);
+  reader.prepare("INSERT INTO models VALUES (?,'Model',?,'ready')").run(M, V);
+  reader.prepare("INSERT INTO model_versions VALUES (?,?,'ready')").run(V, M);
+  reader.prepare("INSERT INTO processing_tasks VALUES (?,?,'Task','now','ready',NULL,?,?)").run(T, P, M, FA);
+  reader.prepare("INSERT INTO model_outputs VALUES (?,?,?,?,'attempt','now','published')").run(V, M, T, P);
+  reader.exec(TASK_AUTHORIZATION_GENERATIONS_V52_SQL);
+  const repo = new ViewerRepository(reader);
+  const generation = reader.prepare('SELECT generation FROM task_authorization_generations WHERE task_id=?').get(T).generation;
+  const session = repo.createViewerSession({ tokenHash: 'restricted', modelId: M, modelVersionId: V, audience: 'client', subject: 'client:synthetic',
+    sourceAuthorization: { type: 'direct_client_grant', id: 'grant', version: 1 }, permissions: { view: true },
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    restrictedScope: { version: 1, projectId: P, taskId: T, generation, exclusions: { version: 1, folderIds: [FB], taskIds: [] } } });
+  assert.equal(repo.viewerSessionLive(session), true);
+
+  // Another connection commits a move into the excluded folder between the
+  // generation read and the eligibility read of the same liveness decision.
+  const prepare = reader.prepare.bind(reader);
+  let fired = false;
+  reader.prepare = sql => {
+    if (!fired && /FROM projects p/.test(sql)) { fired = true; writer.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?').run(FB, T); }
+    return prepare(sql);
+  };
+  t.after(() => { reader.prepare = prepare; });
+  assert.equal(repo.viewerSessionLive(session), true, 'all reads saw the pre-move snapshot (allowed at that instant)');
+  assert.equal(fired, true);
+  assert.equal(reader.isTransaction, false, 'the read snapshot is released');
+  assert.equal(repo.viewerSessionLive(session), false, 'the next decision sees the move');
+  assert.equal(repo.liveViewerSessionByHash('restricted'), null);
 });

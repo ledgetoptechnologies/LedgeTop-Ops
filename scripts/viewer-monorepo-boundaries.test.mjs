@@ -22,12 +22,12 @@ function steps(source) {
 const migratedSteps = steps(workflow);
 const originalSteps = steps(upstream);
 const { MIGRATIONS } = createRequire(import.meta.url)('../apps/viewer/server/database.js');
-const reviewedSchemaPin = 'EXPECTED_SCHEMA_VERSION: "51"';
+const reviewedSchemaPin = 'EXPECTED_SCHEMA_VERSION: "52"';
 const reviewedMigrations = [
   { version: 41, name: 'viewer_acceptance_ack_outbox' },
   { version: 42, name: 'viewer_acceptance_ack_outbox_schema_reconcile' },
   { version: 48, name: 'project_organizational_folders' },
-  { version: 51, name: 'task_authorization_generations' },
+  { version: 52, name: 'task_authorization_generations' },
 ];
 const reviewedConverter = {
   patchSha256: 'fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c',
@@ -40,10 +40,10 @@ const reviewedConverter = {
 // identity; schema 42 validates and preserves legacy rows, maps accepted to
 // delivered, and prevents ACK deletion. Unknown or mismatched rows abort the
 // migration. Schema 48 adds project folders and same-project task placement.
-// Schema 51 adds the monotonic per-task authorization generation that fences
+// Schema 52 (provisional number) adds the monotonic per-task authorization generation that fences
 // restricted (exclusion-scoped) client credentials; it requires 48.
 // The candidate image verification and attestation pins advance from the
-// imported 38 to 51. All other upstream runtime, numerical, promotion and
+// imported 38 to 52. All other upstream runtime, numerical, promotion and
 // digest guards remain fully compared.
 // The reviewed Obj2Tiles build updates its bounded-concurrency patch and adds
 // the ImageSharp 3.2.0 locked dependency/license notices. The image verifier pins

@@ -137,7 +137,7 @@ function migrateProjectFoldersV48(database) {
 const TASK_GENERATION_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const bumpTaskGenerations = where => `UPDATE task_authorization_generations
       SET generation=generation+1,updated_at=${TASK_GENERATION_NOW} WHERE task_id IN (${where});`;
-const TASK_AUTHORIZATION_GENERATIONS_V51_SQL = `
+const TASK_AUTHORIZATION_GENERATIONS_V52_SQL = `
     CREATE TABLE task_authorization_generations (
       task_id TEXT PRIMARY KEY NOT NULL,
       generation INTEGER NOT NULL CHECK(generation>=1),
@@ -188,7 +188,7 @@ const TASK_AUTHORIZATION_GENERATIONS_V51_SQL = `
     CREATE TRIGGER task_authorization_generation_folder_delete AFTER DELETE ON project_folders
       BEGIN ${bumpTaskGenerations('SELECT id FROM processing_tasks WHERE project_id=OLD.project_id')} END;
 `;
-const TASK_AUTHORIZATION_GENERATIONS_V51_OBJECTS = ['task_authorization_generations',
+const TASK_AUTHORIZATION_GENERATIONS_V52_OBJECTS = ['task_authorization_generations',
   'task_authorization_generation_monotonic', 'task_authorization_generation_permanent',
   'task_authorization_generation_task_insert', 'task_authorization_generation_task_update',
   'task_authorization_generation_task_delete', 'task_authorization_generation_project_update',
@@ -197,17 +197,17 @@ const TASK_AUTHORIZATION_GENERATIONS_V51_OBJECTS = ['task_authorization_generati
   'task_authorization_generation_output_insert', 'task_authorization_generation_output_update',
   'task_authorization_generation_output_delete', 'task_authorization_generation_folder_update',
   'task_authorization_generation_folder_delete'];
-function taskAuthorizationGenerationsV51Present(database) {
+function taskAuthorizationGenerationsV52Present(database) {
   const names = new Set(database.prepare('SELECT name FROM sqlite_master').all().map(row => row.name));
-  return TASK_AUTHORIZATION_GENERATIONS_V51_OBJECTS.every(name => names.has(name));
+  return TASK_AUTHORIZATION_GENERATIONS_V52_OBJECTS.every(name => names.has(name));
 }
-function migrateTaskAuthorizationGenerationsV51(database) {
+function migrateTaskAuthorizationGenerationsV52(database) {
   if (database.prepare("SELECT 1 FROM sqlite_master WHERE name LIKE 'task_authorization_generation%'").get())
     throw Object.assign(new Error('Unstamped task authorization generation schema requires explicit compatibility review.'), { code: 'viewer_migration_history_conflict' });
   // Folder triggers and the folder column come from 48; refuse an order without it.
   if (!projectFoldersV48Present(database))
     throw Object.assign(new Error('Task authorization generations require the version 48 folder schema.'), { code: 'viewer_migration_order_conflict' });
-  database.exec(TASK_AUTHORIZATION_GENERATIONS_V51_SQL);
+  database.exec(TASK_AUTHORIZATION_GENERATIONS_V52_SQL);
 }
 
 const MIGRATIONS = [
@@ -2280,9 +2280,9 @@ const MIGRATIONS = [
   {version:48,name:'project_organizational_folders',sql:'SELECT 1;',
     after(database){migrateProjectFoldersV48(database);},
     verify(database){return projectFoldersV48Present(database);}},
-  {version:51,name:'task_authorization_generations',sql:'SELECT 1;',
-    after(database){migrateTaskAuthorizationGenerationsV51(database);},
-    verify(database){return taskAuthorizationGenerationsV51Present(database);}},
+  {version:52,name:'task_authorization_generations',sql:'SELECT 1;',
+    after(database){migrateTaskAuthorizationGenerationsV52(database);},
+    verify(database){return taskAuthorizationGenerationsV52Present(database);}},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;
@@ -2359,4 +2359,4 @@ function openDatabase(databasePath) {
   return database;
 }
 
-module.exports = { MIGRATIONS, applyMigrations, openDatabase, TASK_AUTHORIZATION_GENERATIONS_V51_SQL };
+module.exports = { MIGRATIONS, applyMigrations, openDatabase, TASK_AUTHORIZATION_GENERATIONS_V52_SQL };

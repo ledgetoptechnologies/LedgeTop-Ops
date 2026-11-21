@@ -42,6 +42,17 @@ async function harness(t) {
   repository.createViewerSession({ tokenHash: auth.hashToken(token), modelId: model.id, modelVersionId: model.activeVersionId,
     sourceAuthorization, subject: 'client:synthetic', audience: 'client',
     permissions: { view: true, cameras: true, download: false }, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  // A second, independent direct session whose own grant is already revoked.
+  const staleToken = 'stale-direct-session-token-00000000000000';
+  repository.createViewerSession({ tokenHash: auth.hashToken(staleToken), modelId: model.id, modelVersionId: model.activeVersionId,
+    sourceAuthorization: { type: 'direct_client_grant', id: 'stale-grant', version: 1 }, subject: 'client:other', audience: 'client',
+    permissions: { view: true, cameras: true, download: false }, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  database.prepare(`INSERT INTO revoked_published_session_authorizations
+    (source_authorization_type,source_authorization_id,source_authorization_version,revoked_at) VALUES ('direct_client_grant','stale-grant',1,?)`)
+    .run(new Date().toISOString());
+  const share = repository.createPublicShare({ modelId: model.id, publicIdHash: crypto.randomBytes(32).toString('hex'),
+    permissions: { view: true, cameras: true } });
+  const shareToken = auth.sign({ kind: 'share-asset', shareId: share.id, modelId: model.id }, 3_600_000);
   const opsToken = 'ops-session-token-00000000000000000000000';
   repository.createViewerSession({ tokenHash: auth.hashToken(opsToken), modelId: model.id, modelVersionId: model.activeVersionId,
     subject: 'ops:synthetic', audience: 'ops', permissions: { view: true, cameras: true, download: false },
@@ -59,7 +70,7 @@ async function harness(t) {
   };
   assets.setRepository(repository);
   const app = express();
-  app.use((req, _res, next) => { req.cookies = {}; next(); });
+  app.use((req, _res, next) => { req.cookies = req.get('x-test-viewer-cookie') ? { ltds_viewer: req.get('x-test-viewer-cookie') } : {}; next(); });
   app.use(assets);
   const server = await new Promise(resolve => { const value = app.listen(0, '127.0.0.1', () => resolve(value)); });
   t.after(async () => {
@@ -69,7 +80,7 @@ async function harness(t) {
     fs.rmSync(root, { recursive: true, force: true });
   });
   return {
-    base: `http://127.0.0.1:${server.address().port}`, token, opsToken, model, photo, shots, datasetId, database,
+    base: `http://127.0.0.1:${server.address().port}`, token, opsToken, staleToken, shareToken, model, photo, shots, datasetId, database,
     revokeOnRead(n) { reads = 0; tombstoneAfterReads = n; },
   };
 }
@@ -95,35 +106,57 @@ test('asset and camera routes recheck a direct-client session immediately before
     ['asset Range', () => fetch(`${h.base}${assetPath(h.token)}`, { headers: { Range: 'bytes=0-3' } })],
     ['camera GET', () => fetch(`${h.base}${photoPath(h.token)}`)],
   ]) {
-    h.database.exec('DELETE FROM revoked_published_session_authorizations');
+    h.database.exec("DELETE FROM revoked_published_session_authorizations WHERE source_authorization_id='synthetic-grant'");
     h.revokeOnRead(2);
     const response = await request();
     assert.equal(response.status, 403, label);
     if (label !== 'asset HEAD') assert.doesNotMatch(await response.text(), /FeatureCollection|synthetic-direct-camera-photo/, label);
   }
 
-  // Staff/ops sessions keep their existing behaviour (no direct-grant recheck applies).
-  h.database.exec('DELETE FROM revoked_published_session_authorizations');
+  // Cookie admission (/assets) is rechecked the same way.
+  const cookieAsset = `/assets/${h.model.id}/datasets/${h.datasetId}/assets/odm_report/shots.geojson`;
+  h.database.exec("DELETE FROM revoked_published_session_authorizations WHERE source_authorization_id='synthetic-grant'");
+  h.revokeOnRead(Infinity);
+  assert.equal((await fetch(`${h.base}${cookieAsset}`, { headers: { 'x-test-viewer-cookie': h.token } })).status, 200);
+  h.revokeOnRead(2);
+  assert.equal((await fetch(`${h.base}${cookieAsset}`, { headers: { 'x-test-viewer-cookie': h.token } })).status, 403, 'cookie GET');
+});
+
+test('the final check revalidates only the authority that admitted the delivery (mixed authorities)', async t => {
+  const h = await harness(t);
+  const assetPath = token => `/session-assets/${encodeURIComponent(token)}/${h.model.id}/datasets/${h.datasetId}/assets/odm_report/shots.geojson`;
+  const photoPath = token => `/session-camera-photos/${encodeURIComponent(token)}/${h.model.id}/DJI_0001.JPG`;
+  const stale = { headers: { 'x-test-viewer-cookie': h.staleToken } };
+  // The stale direct cookie alone is refused.
+  assert.equal((await fetch(`${h.base}/assets/${h.model.id}/datasets/${h.datasetId}/assets/odm_report/shots.geojson`, stale)).status, 403);
+  // An unrelated stale direct cookie never blocks an independent valid authority.
+  for (const [label, path] of [
+    ['valid direct session path', assetPath(h.token)],
+    ['staff session path', assetPath(h.opsToken)],
+    ['public share path', assetPath(h.shareToken)],
+    ['valid direct camera path', photoPath(h.token)],
+    ['public share camera path', photoPath(h.shareToken)],
+  ]) {
+    for (const init of [stale, { ...stale, method: 'HEAD' }, { headers: { ...stale.headers, Range: 'bytes=0-3' } }]) {
+      if (label.includes('camera') && init.method === 'HEAD') continue;
+      const response = await fetch(`${h.base}${path}`, init);
+      assert.ok([200, 206].includes(response.status), `${label} ${init.method || 'GET'} ${init.headers.Range || ''}: ${response.status}`);
+    }
+  }
+  // A tombstone on the admitting session still denies, whatever else is presented.
+  h.revokeOnRead(2);
+  assert.equal((await fetch(`${h.base}${assetPath(h.token)}`, stale)).status, 403);
+  // Staff sessions keep their existing behaviour (no direct-grant recheck applies).
   h.revokeOnRead(2);
   assert.equal((await fetch(`${h.base}${assetPath(h.opsToken)}`)).status, 200);
 });
 
-test('the final check accepts only live direct sessions and ignores signed share tokens', () => {
-  const sessions = new Map([
-    ['live', { sourceAuthorization: { type: 'direct_client_grant' }, live: true }],
-    ['dead', { sourceAuthorization: { type: 'direct_client_grant' }, live: false }],
-    ['restricted-dead', { restrictedScope: {}, live: false }],
-    ['ops-dead', { sourceAuthorization: null, live: false }],
-  ]);
-  assets.setRepository({
-    getViewerSessionByHash: hash => [...sessions].find(([key]) => auth.hashToken(key) === hash)?.[1] || null,
-    viewerSessionLive: session => session.live,
-  });
-  const check = token => assets.presentedDirectSessionsStillLive({ params: { token }, cookies: {} });
-  assert.equal(check('live'), true);
-  assert.equal(check('dead'), false);
-  assert.equal(check('restricted-dead'), false);
-  assert.equal(check('ops-dead'), true);
-  assert.equal(check('not-a-session'), true);
-  assert.equal(assets.presentedDirectSessionsStillLive({ params: {}, cookies: { ltds_viewer: 'dead' } }), false);
+test('the final check re-reads only the recorded admitting session', () => {
+  const sessions = new Map([['live', true], ['dead', false]]);
+  assets.setRepository({ liveViewerSessionByHash: hash => ([...sessions].find(([key]) => auth.hashToken(key) === hash)?.[1] ? {} : null) });
+  assert.equal(assets.admittedDirectSessionStillLive({}), true, 'no direct session admitted this request');
+  assert.equal(assets.admittedDirectSessionStillLive({ admittedDirectSessionHash: auth.hashToken('live') }), true);
+  assert.equal(assets.admittedDirectSessionStillLive({ admittedDirectSessionHash: auth.hashToken('dead'), cookies: { ltds_viewer: 'live' } }), false);
+  assert.equal(assets.admittedDirectSessionStillLive({ params: { token: 'dead' }, cookies: { ltds_viewer: 'dead' } }), true,
+    'unrecorded presented credentials are never consulted');
 });

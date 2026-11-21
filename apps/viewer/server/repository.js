@@ -919,7 +919,35 @@ class ViewerRepository {
     return this.viewerSession(this.database.prepare('SELECT * FROM viewer_sessions WHERE token_hash=?').get(tokenHash));
   }
 
+  // One deferred read transaction gives every read below (tombstone, task
+  // generation, eligibility, review state) the same WAL snapshot, so a commit
+  // from another connection between them cannot combine old and new state.
+  readSnapshot(callback) {
+    if (this.database.isTransaction) return callback();
+    this.database.exec('BEGIN');
+    try {
+      const result = callback();
+      this.database.exec('COMMIT');
+      return result;
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   viewerSessionLive(session, at = Date.now()) {
+    return this.readSnapshot(() => this.viewerSessionLiveInSnapshot(session, at));
+  }
+
+  /** Re-read a session by token hash and decide liveness in one snapshot; null when not live. */
+  liveViewerSessionByHash(tokenHash, at = Date.now()) {
+    return this.readSnapshot(() => {
+      const session = this.getViewerSessionByHash(tokenHash);
+      return session && this.viewerSessionLiveInSnapshot(session, at) ? session : null;
+    });
+  }
+
+  viewerSessionLiveInSnapshot(session, at = Date.now()) {
     if (!session || session.revokedAt || Date.parse(session.expiresAt) <= at) return false;
     if (session.sourceAuthorization && this.database.prepare(`SELECT 1 FROM revoked_published_session_authorizations
       WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`)

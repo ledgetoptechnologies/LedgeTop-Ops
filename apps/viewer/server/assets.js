@@ -60,7 +60,10 @@ async function isAuthorizedForProject(req, projectId) {
     if (requestedModelId
       && requestedModelId === viewer.modelId
       && model?.status === 'ready'
-      && model.activeVersionId === viewer.modelVersionId) return true;
+      && model.activeVersionId === viewer.modelVersionId) {
+      recordAdmittingSession(req, auth.hashToken(viewerCookie), viewer);
+      return true;
+    }
   }
 
   const cookieVal = req.cookies && req.cookies[SHARE_COOKIE];
@@ -181,6 +184,7 @@ async function pathTokenAuthorization(req, projectId) {
       && (review
         ? model?.activeVersion?.id === viewer.modelVersionId && model.activeVersion.status === 'ready'
         : model?.status === 'ready' && model.activeVersionId === viewer.modelVersionId);
+    if (allowed) recordAdmittingSession(req, auth.hashToken(req.params.token), viewer);
     return allowed ? { model, review, cameras: viewer.permissions?.cameras !== false, download: viewer.permissions?.download === true } : false;
   }
   const payload = auth.verify(req.params.token);
@@ -216,20 +220,22 @@ async function pathTokenAuthorization(req, projectId) {
   return false;
 }
 
-// Direct-client sessions are rechecked from the database immediately before
-// protected bytes leave: a task move, publication change, generation bump or
+// The final check revalidates only the authority that admitted this delivery.
+// When a direct-client (or restricted) Viewer session admitted it, that exact
+// session is re-read and its liveness decided in one SQLite snapshot
+// immediately before protected bytes leave, so a task move, generation bump or
 // source tombstone that lands during an awaited integrity check denies here.
-// A response that passes this check is then handed to nginx or sendFile and is
-// not interrupted mid-stream; the next request (or next Range) is refused.
-function presentedDirectSessionsStillLive(req) {
-  if (!canonicalRepository) return true;
-  const tokens = [req.params?.token, req.cookies?.[VIEWER_COOKIE]].filter(value => typeof value === 'string' && value);
-  for (const token of tokens) {
-    const session = canonicalRepository.getViewerSessionByHash(auth.hashToken(token));
-    if (session && (session.restrictedScope !== undefined || session.sourceAuthorization?.type === 'direct_client_grant')
-      && !canonicalRepository.viewerSessionLive(session)) return false;
-  }
-  return true;
+// Unrelated cookies or tokens on the same request are never consulted, and
+// public-share/staff authorities keep their existing checks. A response that
+// passes is then handed to nginx or sendFile and is not interrupted mid-stream;
+// the next request (or next Range) is refused.
+function recordAdmittingSession(req, tokenHash, session) {
+  if (req && session && (session.restrictedScope !== undefined || session.sourceAuthorization?.type === 'direct_client_grant'))
+    req.admittedDirectSessionHash = tokenHash;
+}
+function admittedDirectSessionStillLive(req) {
+  if (!req?.admittedDirectSessionHash) return true;
+  return Boolean(canonicalRepository?.liveViewerSessionByHash(req.admittedDirectSessionHash));
 }
 
 function xAccelLocation(abs) {
@@ -278,7 +284,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   // intermediary or browser cache from serving a previously authorized URL
   // after its session/share has expired or been revoked.
   if(share){const current=canonicalRepository.getPublicShare(share.id);if(!canonicalRepository.publicShareLive(current)||!revisionMatches(current,{shareRevision:share.authorizationRevision})||!assetAllowed(current,publishedAsset?.kind))return res.status(403).json({error:'not authorized'});}
-  if (!presentedDirectSessionsStillLive(req)) return res.status(403).json({ error: 'not authorized' });
+  if (!admittedDirectSessionStillLive(req)) return res.status(403).json({ error: 'not authorized' });
   res.setHeader('Cache-Control', 'private, no-store');
 
   const accelerated = xAccelLocation(abs);
@@ -328,7 +334,7 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     const stat = fs.statSync(absolute);
     if (stat.size !== photo.byteSize || await sha256File(absolute) !== photo.sha256) return res.status(404).json({ error: 'photo not found' });
     if(authorization.share){const current=await pathTokenAuthorization(req,req.params.id);if(!current?.cameras)return res.status(403).json({error:'not authorized'});}
-    if (!presentedDirectSessionsStillLive(req)) return res.status(403).json({ error: 'not authorized' });
+    if (!admittedDirectSessionStillLive(req)) return res.status(403).json({ error: 'not authorized' });
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Content-Type', photo.contentType);
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -391,7 +397,7 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
 });
 
 module.exports = router;
-module.exports.presentedDirectSessionsStillLive = presentedDirectSessionsStillLive;
+module.exports.admittedDirectSessionStillLive = admittedDirectSessionStillLive;
 module.exports.setRepository = setRepository;
 module.exports.setProcessingRepository = setProcessingRepository;
 module.exports.setSourceAuthorizationValidator = setSourceAuthorizationValidator;
