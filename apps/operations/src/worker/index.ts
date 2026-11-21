@@ -72,6 +72,11 @@ import {
 } from "./delivery";
 import { searchShareRecipients, shareDirectoryRecipientsEnabled } from "./share-recipients";
 import { syncProjectAlpha } from "./project-alpha";
+import {
+  NATIVE_DIRECTORY_OUTBOX_CRON,
+  NATIVE_DIRECTORY_RECONCILIATION_CRON,
+  PROJECT_ALPHA_API_V2_MONITOR_CRON,
+} from "./scheduled-crons";
 import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
 import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
 import { registerPortalDirectoryCorrespondenceRoutes } from './portal-directory-correspondence-routes';
@@ -3874,9 +3879,6 @@ const CLIENT_REQUEST_NOTIFICATION_CRON = "*/5 * * * *";
 const CLIENT_HUB_INDEX_CRON = "2-57/5 * * * *";
 const PROJECT_ALPHA_RECOVERY_CRON = "17 * * * *";
 const NATIVE_DELIVERY_NOTIFICATION_CRON = "4-59/15 * * * *";
-export const PROJECT_ALPHA_API_V2_MONITOR_CRON = "3-58/5 * * * *";
-export const NATIVE_DIRECTORY_OUTBOX_CRON = "1-56/5 * * * *";
-export const NATIVE_DIRECTORY_RECONCILIATION_CRON = "6-51/15 * * * *";
 
 export async function runScheduledPrimaryProjectAlphaSync(env: Env) {
   const result = await syncProjectAlpha(env);
