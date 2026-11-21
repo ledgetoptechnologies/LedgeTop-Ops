@@ -48,10 +48,11 @@ const receiptPath = () => path.join(tmp, `receipt-${++counter}.json`);
 const readReceipt = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 
 /** Synthetic D1: reads go through a separate read-only connection, writes are one transaction per migration. */
-function sqliteProvider(file, { failApplyAt = null, skipLedgerAt = null, tamper = null } = {}) {
+function sqliteProvider(file, { failApplyAt = null, skipLedgerAt = null, tamper = null, ambiguousAt = null, landed = false,
+  refuseAt = null } = {}) {
   const writer = new DatabaseSync(file);
   writer.exec('PRAGMA foreign_keys=ON');
-  const calls = { reads: 0, writes: 0, targets: 0 };
+  const calls = { reads: 0, writes: 0, targets: 0, sent: [] };
   return {
     calls,
     close() { writer.close(); },
@@ -68,13 +69,17 @@ function sqliteProvider(file, { failApplyAt = null, skipLedgerAt = null, tamper 
     },
     async applyMigration({ name, statements }) {
       calls.writes++;
-      if (name === failApplyAt) throw new Error('synthetic transport failure');
+      if (name === refuseAt) throw new Error('ops_0227_0244_provider:migration_pin_mismatch');
+      calls.sent.push(name);
+      if (name === failApplyAt || (name === ambiguousAt && !landed)) throw new Error('synthetic transport failure');
       writer.exec('BEGIN');
       try {
         for (const statement of statements) writer.exec(statement);
         if (name !== skipLedgerAt) writer.prepare(LEDGER_INSERT_SQL).run(name);
         writer.exec('COMMIT');
       } catch (error) { writer.exec('ROLLBACK'); throw error; }
+      // The batch landed but the response was lost.
+      if (name === ambiguousAt) throw new Error('ops_0227_0244_provider:request_uncertain_no_retry');
       return { applied: true };
     },
   };
@@ -190,7 +195,7 @@ test('a ledger not at exactly 226 rows ending at 0226 refuses before any write',
   db.prepare(LEDGER_INSERT_SQL).run('0227_owner_intel_reads.sql');
   db.close();
   const partial = await execute(ahead);
-  assert.equal(partial.result.status, 'stopped');
+  assert.equal(partial.result.status, 'reconciliation-required');
   assert.equal(partial.result.stop.phase, 'initial-ledger');
   assert.equal(partial.provider.calls.writes, 0);
   assert.equal(partial.receipt.initial.checks.find(item => item.name === 'planned_files_already_in_ledger').observed, 1);
@@ -259,12 +264,16 @@ test('a pre-existing object of a later file stops at that file', async () => {
   assertStoppedAt(await execute(file), '0241_staff_usernames.sql', 'preflight_failed:file_objects_absent', 6);
 });
 
-test('an apply failure mid-way stops without retry and leaves a partial receipt', async () => {
+test('a transport error mid-way is ambiguous: stop without retry, partial receipt, reconciliation required', async () => {
   const file = freshDb();
   const run = await execute(file, { failApplyAt: '0229_owner_intel_source_feed.sql' });
-  assert.equal(run.result.status, 'stopped');
+  assert.equal(run.result.status, 'reconciliation-required');
   assert.deepEqual(run.receipt.stop, { step: '0229_owner_intel_source_feed.sql', phase: 'apply',
-    code: 'apply_failed_outcome_unknown_no_retry', detail: 'unexpected_error' });
+    code: 'reconciliation_required:apply_ambiguous_no_retry', detail: 'unexpected_error' });
+  assert.equal(run.receipt.steps[2].apply.outcome, 'ambiguous');
+  assert.equal(run.receipt.steps[1].apply.outcome, 'acknowledged');
+  assert.deepEqual(run.receipt.steps[1].readback, { ledgerCount: 228, ledgerTail: { id: 228, name: '0228_competitor_intel_ingest.sql' },
+    expectedObjects: 14, objectsPresent: 14 });
   assert.equal(run.provider.calls.writes, 3);
   assert.equal(run.receipt.writesPerformed, 2);
   assert.equal(run.receipt.steps.length, 3);
@@ -279,7 +288,7 @@ test('a post-check mismatch (missing ledger row) stops at that file', async () =
   const file = freshDb();
   const run = await execute(file, { skipLedgerAt: '0230_app_release_pilot.sql' });
   assert.equal(run.result.status, 'stopped');
-  assert.deepEqual(run.receipt.stop, { step: '0230_app_release_pilot.sql', phase: 'post-check', code: 'post_check_failed:ledger_row_appended' });
+  assert.deepEqual(run.receipt.stop, { step: '0230_app_release_pilot.sql', phase: 'post-check', code: 'post_check_failed:readback_ledger_tail' });
   assert.equal(run.provider.calls.writes, 4);
 });
 
@@ -374,7 +383,7 @@ test('production execute runs the main-branch source check before any provider i
   const production = ['--account-id', OPS_PRODUCTION_DATABASE.accountId, '--database-id', OPS_PRODUCTION_DATABASE.databaseId,
     '--database-name', OPS_PRODUCTION_DATABASE.databaseName];
   let factoryCalls = 0;
-  await assert.rejects(mainOps0227To0244(['--execute', '--receipt', receiptPath(), ...production], {
+  await assert.rejects(mainOps0227To0244(['--execute', '--receipt', receiptPath(), '--approval-ref', 'approval-synthetic', ...production], {
     env: TOKEN_ENV, out: () => {}, sourceCheck: async () => { throw new Error('ops_0227_0244:main_branch_required'); },
     providerFactory: () => { factoryCalls++; },
   }), /main_branch_required/u);
@@ -445,4 +454,161 @@ test('provider sends one pinned batch per migration, refuses writes in dry-run, 
   await assert.rejects(q.applyMigration({ name: file.name, sha256: file.sha256, statements: file.statements,
     statementsSha256: file.statementsSha256 }), /http_failure/u);
   assert.equal(failing.calls.length, 2, 'no retry after a failed mutation');
+});
+
+// --- Reconcile, ambiguous responses, resume, approval boundary -------------
+
+async function cli(file, args, { providerOptions = {}, confirm = async () => true, extra = {} } = {}) {
+  let provider;
+  try {
+    const result = await mainOps0227To0244(args, { env: TOKEN_ENV, out: () => {}, confirm,
+      providerFactory: () => (provider = sqliteProvider(file, providerOptions)), ...extra });
+    return { result, provider };
+  } finally { provider?.close(); }
+}
+const execArgs = receiptFile => ['--execute', '--rehearsal', '--receipt', receiptFile, ...rehearsalArgs];
+
+/** Applies the first `count` planned files directly, exactly as the operator would. */
+function applyPrefix(file, count) {
+  const plan = loadVerifiedOps0227To0244Plan();
+  const db = new DatabaseSync(file);
+  try {
+    for (const planned of plan.files.slice(0, count)) {
+      db.exec('BEGIN');
+      for (const statement of planned.statements) db.exec(statement);
+      db.prepare(LEDGER_INSERT_SQL).run(planned.name);
+      db.exec('COMMIT');
+    }
+  } finally { db.close(); }
+}
+
+test('reconcile is read-only and reports the exact next step at 226, mid-chain and 236', async () => {
+  for (const [count, next] of [[0, '0227_owner_intel_reads.sql'], [4, '0231_owner_google_ads_summary.sql'],
+    [6, '0241_staff_usernames.sql'], [10, null]]) {
+    const file = freshDb();
+    applyPrefix(file, count);
+    const before = fs.readFileSync(file);
+    const receiptFile = receiptPath();
+    const { result, provider } = await cli(file, ['--reconcile', '--receipt', receiptFile, ...rehearsalArgs]);
+    assert.equal(result.status, 'reconciled', `count ${count}`);
+    assert.equal(result.reconcile.appliedCount, count);
+    assert.equal(result.reconcile.nextStep, next);
+    assert.equal(provider.calls.writes, 0);
+    assert.equal(provider.calls.reads, 1);
+    assert.ok(fs.readFileSync(file).equals(before));
+    assert.equal(readReceipt(receiptFile).status, 'reconciled');
+  }
+});
+
+test('mid-chain refusal before send stops without an ambiguous mark', async () => {
+  const run = await execute(freshDb(), { refuseAt: '0242_native_staff_onboarding_approval_actor_authority.sql' });
+  assert.equal(run.result.status, 'stopped');
+  assert.deepEqual(run.receipt.stop, { step: '0242_native_staff_onboarding_approval_actor_authority.sql', phase: 'apply',
+    code: 'apply_refused_before_send', detail: 'ops_0227_0244_provider:migration_pin_mismatch' });
+  assert.equal(run.receipt.steps.at(-1).apply.outcome, 'not-sent');
+  assert.equal(run.receipt.finalLedger.count, 233);
+});
+
+for (const landed of [true, false]) {
+  test(`ambiguous response mid-chain (batch ${landed ? 'landed' : 'lost'}) -> reconcile -> resume -> 236`, async () => {
+    const file = freshDb();
+    const ambiguousAt = '0229_owner_intel_source_feed.sql';
+    const first = await cli(file, execArgs(receiptPath()), { providerOptions: { ambiguousAt, landed } });
+    assert.equal(first.result.status, 'reconciliation-required');
+    assert.equal(first.result.steps.at(-1).apply.outcome, 'ambiguous');
+    assert.deepEqual(first.provider.calls.sent, OPS_0227_0244_ORDERED_NAMES.slice(0, 3), 'sent once, never retried');
+    assert.equal(ledgerOf(file).length, landed ? 229 : 228);
+
+    // A plain retry is refused without any write: the ledger is past 226.
+    const retry = await cli(file, execArgs(receiptPath()));
+    assert.equal(retry.result.status, 'reconciliation-required');
+    assert.equal(retry.provider.calls.writes, 0);
+
+    const next = landed ? '0230_app_release_pilot.sql' : ambiguousAt;
+    const reconciled = await cli(file, ['--reconcile', ...rehearsalArgs]);
+    assert.equal(reconciled.result.status, 'reconciled');
+    assert.equal(reconciled.result.reconcile.nextStep, next);
+
+    // Resuming from anything but the reconciled next step is refused, including re-sending a recorded file.
+    const wrong = landed ? ambiguousAt : '0230_app_release_pilot.sql';
+    const wrongReceipt = receiptPath();
+    const refused = await cli(file, [...execArgs(wrongReceipt), '--resume-from', wrong]);
+    assert.equal(refused.result.status, 'reconciliation-required');
+    assert.equal(refused.provider.calls.writes, 0);
+    assert.equal(readReceipt(wrongReceipt).stop.code, 'reconciliation_required:resume_from_is_not_next_step');
+
+    const resumeReceipt = receiptPath();
+    const resumed = await cli(file, [...execArgs(resumeReceipt), '--resume-from', next]);
+    assert.equal(resumed.result.status, 'complete');
+    const start = OPS_0227_0244_ORDERED_NAMES.indexOf(next);
+    assert.deepEqual(resumed.provider.calls.sent, OPS_0227_0244_ORDERED_NAMES.slice(start));
+    const receipt = readReceipt(resumeReceipt);
+    assert.equal(receipt.resumeFrom, next);
+    assert.deepEqual(receipt.finalLedger, { ...OPS_0227_0244_FINAL_LEDGER });
+    assert.deepEqual(ledgerOf(file).map(row => row.id), Array.from({ length: 236 }, (_, i) => i + 1));
+    assert.ok(receipt.steps.every(step => step.readback.ledgerTail.name === step.name));
+  });
+}
+
+test('resume is refused for a non-prefix ledger, recorded files without objects, and partial objects of an unrecorded file', async () => {
+  const gap = freshDb();
+  applyPrefix(gap, 1);
+  let db = new DatabaseSync(gap);
+  db.prepare(LEDGER_INSERT_SQL).run('0229_owner_intel_source_feed.sql');
+  db.close();
+
+  const hollow = freshDb();
+  db = new DatabaseSync(hollow);
+  db.prepare(LEDGER_INSERT_SQL).run('0227_owner_intel_reads.sql');
+  db.close();
+
+  const partial = freshDb();
+  applyPrefix(partial, 2);
+  db = new DatabaseSync(partial);
+  db.exec('CREATE TABLE owner_intel_source_control(placeholder TEXT)');
+  db.close();
+
+  for (const [file, resumeFrom, code] of [
+    [gap, '0228_competitor_intel_ingest.sql', 'reconciliation_required:recorded_rows_exact_ordered_prefix'],
+    [hollow, '0228_competitor_intel_ingest.sql', 'reconciliation_required:recorded_objects_exact:0227_owner_intel_reads.sql'],
+    [partial, '0229_owner_intel_source_feed.sql', 'reconciliation_required:unrecorded_objects_absent:0229_owner_intel_source_feed.sql'],
+  ]) {
+    const reconcileReceipt = receiptPath();
+    const reconciled = await cli(file, ['--reconcile', '--receipt', reconcileReceipt, ...rehearsalArgs]);
+    assert.equal(reconciled.result.status, 'reconciliation-required');
+    assert.equal(reconciled.result.stop.code, code);
+    assert.equal(readReceipt(reconcileReceipt).status, 'reconciliation-required');
+    const receiptFile = receiptPath();
+    const refused = await cli(file, [...execArgs(receiptFile), '--resume-from', resumeFrom]);
+    assert.equal(refused.result.status, 'reconciliation-required');
+    assert.equal(refused.provider.calls.writes, 0);
+    assert.equal(readReceipt(receiptFile).stop.code, code);
+    const plain = await cli(file, execArgs(receiptPath()));
+    assert.equal(plain.result.status, 'reconciliation-required');
+    assert.equal(plain.provider.calls.writes, 0);
+  }
+});
+
+test('production execute requires an approval reference and records it; rehearsal does not', async () => {
+  const production = ['--account-id', OPS_PRODUCTION_DATABASE.accountId, '--database-id', OPS_PRODUCTION_DATABASE.databaseId,
+    '--database-name', OPS_PRODUCTION_DATABASE.databaseName];
+  assert.throws(() => parseOps0227To0244Args(['--execute', '--receipt', path.join(tmp, 'a.json'), ...production]),
+    /approval_ref_required_for_production/u);
+  assert.throws(() => parseOps0227To0244Args(['--execute', '--receipt', path.join(tmp, 'a.json'), '--approval-ref', 'x y', ...production]),
+    /approval_ref_invalid/u);
+  assert.throws(() => parseOps0227To0244Args(['--reconcile', '--resume-from', '0228_competitor_intel_ingest.sql', ...rehearsalArgs]),
+    /resume_from_invalid/u);
+  assert.throws(() => parseOps0227To0244Args(['--execute', '--receipt', path.join(tmp, 'a.json'), '--rehearsal',
+    '--resume-from', '0232_unknown.sql', ...rehearsalArgs]), /resume_from_invalid/u);
+  assert.equal(parseOps0227To0244Args(execArgs(path.join(tmp, 'r.json'))).approvalRef, null);
+  // Offline: an injected synthetic provider stands in for D1; the source check is stubbed.
+  const file = freshDb();
+  const receiptFile = receiptPath();
+  const { result } = await cli(file, ['--execute', '--receipt', receiptFile, '--approval-ref', 'approval-0227-0244-synthetic', ...production],
+    { extra: { sourceCheck: async () => 'f'.repeat(40) } });
+  assert.equal(result.status, 'complete');
+  const receipt = readReceipt(receiptFile);
+  assert.equal(receipt.approvalRef, 'approval-0227-0244-synthetic');
+  assert.equal(receipt.target.environment, 'production');
+  assert.equal(receipt.finalLedger.count, 236);
 });

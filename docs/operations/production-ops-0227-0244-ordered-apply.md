@@ -30,10 +30,10 @@ re-derive the fixture offline, run
 
 ## What each run checks
 
-Before any write, the ledger must be exactly the observed production ledger: 226
-rows, ids 1–226, a pinned names digest, and none of the ten files present. There
-is no partial resume. A ledger that already contains any of these files is
-refused.
+A fresh run starts only from the exact observed production ledger: 226 rows, ids
+1–226, a pinned names digest, and none of the ten files present. A ledger that
+already contains any of the files is refused as `reconciliation-required`. Such a
+ledger can only continue through reconcile and resume, described below.
 
 Before **each** file, the tool takes a fresh read-only snapshot and checks the
 following:
@@ -51,9 +51,14 @@ following:
   `native_staff_access_reconciliation.enabled` is 0. The five `staff_users`
   view columns exist. The native-hire count is recorded.
 
-After each file, the tool checks the following:
+After each file, the tool re-reads the database and records a **readback** in
+the receipt step. The readback holds the ledger count, the ledger tail (id and
+name), and how many of the file's expected objects are present. It then checks
+the following:
 
-- Exactly one ledger row was appended, with the next id and this file's name.
+- The ledger tail is this file at the next id, and every expected object is
+  present.
+- Exactly one ledger row was appended, and the earlier rows are unchanged.
 - Every earlier schema object is unchanged.
 - The added objects exactly match the pinned list and digest.
 - Each new table has exactly the pinned seed row count.
@@ -61,6 +66,29 @@ After each file, the tool checks the following:
 
 After 0240, the tool prints and records this note: **recapture the post-0226
 authority snapshot (role_permissions changed)**.
+
+## Intentional authority changes
+
+- **0240** grants `flight_logs.view` and `flight_logs.import` to `role-owner`
+  and `role-admin`. It inserts the two `permissions` rows and four
+  `role_permissions` rows, and the grants take effect immediately. This is the
+  only change these ten files make to existing authority data. It invalidates any
+  authority snapshot taken before 0240.
+- **0242** adds four `BEFORE INSERT` triggers:
+  - `native_staff_onboarding_approve_actor_allow` and
+    `native_staff_onboarding_approve_actor_deny` on
+    `native_staff_management_fences`;
+  - `native_staff_onboarding_approve_receipt_actor_allow` and
+    `native_staff_onboarding_approve_receipt_actor_deny` on
+    `native_staff_management_commands`.
+
+  From then on, an onboarding approval needs three things. The actor must hold
+  an active global `staff.onboarding.approve` allow delegation (contract version
+  1). The onboarding must be claimed (version 2) with an empty ACL proposal. The
+  approver's subject must differ from the claimant's. A matching deny delegation
+  blocks the approval. 0242 changes no rows.
+- **0244** adds three guards on the existing `staff_permission_overrides` table
+  for native hires. Applying it activates the Team Operations-access writer.
 
 ## Dry run (default)
 
@@ -79,24 +107,30 @@ the token on the command line or in a file.
 ## Execute
 
 ```powershell
-node scripts/production-ops-0227-0244-ordered-once.mjs --execute --receipt <absolute path> --account-id <account> --database-id <uuid> --database-name <name>
+# production (the database pinned by the 0226 precedent)
+node scripts/production-ops-0227-0244-ordered-once.mjs --execute --receipt <absolute path> --approval-ref <approval id> --account-id <account> --database-id <uuid> --database-name <name>
+# rehearsal on a disposable copy
+node scripts/production-ops-0227-0244-ordered-once.mjs --execute --rehearsal --receipt <absolute path> --account-id <account> --database-id <uuid> --database-name <name>
 ```
 
 Execute mode works as follows:
 
 1. It refuses an existing receipt path.
-2. For the production database that the 0226 precedent already pins, it requires
-   a clean `main` checkout that equals `origin/main`.
-3. For any other database, it requires `--rehearsal`. `--rehearsal` refuses the
-   production database.
+2. For the production database id, it requires two things:
+   - `--approval-ref <id>`, the reference of the owner's production approval. The
+     tool records it in the receipt and treats it only as a reference: it does
+     not check it.
+   - A clean `main` checkout that equals `origin/main`.
+3. For any other database, it requires `--rehearsal`, and the approval reference
+   is optional. `--rehearsal` refuses the production database.
 4. It runs the full dry run first.
 5. It waits for the typed confirmation `APPLY 0227-0244 TO <database-name>`.
 6. It runs the ordered loop.
 
 Exit codes:
 
-- 0: complete, or the dry run passed.
-- 1: stopped or refused.
+- 0: complete, dry run passed, or reconciled.
+- 1: stopped, refused, or reconciliation required.
 - 2: cancelled.
 
 ## Receipt and stop behaviour
@@ -106,11 +140,13 @@ full after every phase, so a stop always leaves a complete partial receipt. It
 contains:
 
 - the plan hash and the fixture hash;
-- the target ids;
+- the target ids and the approval reference;
+- `resumeFrom`, if the run resumed;
+- the reconcile result;
 - each file's hash and statement counts;
 - each preflight check, with its expected and observed counts and timestamps;
-- the apply start and finish times;
-- each post-check result;
+- the apply start and finish times and the apply outcome;
+- each readback and post-check result;
 - notes;
 - the final ledger: count, last name and names digest;
 - the stop record, if the run stopped: step, phase and code.
@@ -118,11 +154,65 @@ contains:
 It contains no token, no staff ids, emails or names, and no schema SQL. Only
 counts, names and digests are recorded.
 
-The tool stops at the first failed check or error and never continues. An apply
-error is recorded as `apply_failed_outcome_unknown_no_retry`. Do **not** re-run
-the tool to "finish" the plan. It refuses any ledger other than the exact 226-row
-start. Reconcile `d1_migrations` and `sqlite_master` with read-only queries, then
-decide on a reviewed follow-up.
+The tool stops at the first failed check or error and never continues. Each
+apply step records one of these outcomes:
+
+- `acknowledged`: D1 confirmed the batch, including the ledger row.
+- `not-sent`: the provider refused before sending, for example because of a pin
+  mismatch. The stop code is `apply_refused_before_send`.
+- `ambiguous`: the request errored, timed out or returned an unparseable or
+  unconfirmed response after it may have been sent. The run stops with status
+  `reconciliation-required` and code
+  `reconciliation_required:apply_ambiguous_no_retry`.
+
+A failed read after an apply is treated the same way as an ambiguous apply. The
+tool never retries a batch, and it never sends a file twice in one process.
+
+## Reconcile and resume
+
+After any stop past the first write, do **not** re-run plain `--execute`. It
+refuses any ledger beyond 226. Reconcile first instead:
+
+```powershell
+node scripts/production-ops-0227-0244-ordered-once.mjs --reconcile --account-id <account> --database-id <uuid> --database-name <name> [--receipt <absolute path>]
+```
+
+Reconcile is read-only: it takes one snapshot and writes nothing. It proves the
+following:
+
+- The first 226 rows are the pinned prior ledger.
+- The rows after them are exactly an ordered prefix of the ten files, with ids
+  contiguous from 227.
+- Every recorded file's objects exist exactly as pinned (names, types and SQL
+  digest). For a recorded 0240, the 2 permissions and 4 role grants exist.
+- No object of any unrecorded file exists. For an unrecorded 0240, there are no
+  `flight_logs.*` permissions.
+
+If all of this holds, the status is `reconciled` and the receipt names the exact
+next step. Any other state is refused with status `reconciliation-required` and
+the first failing check, for example:
+
+- a gap, a reordered row or an extra row;
+- a recorded file whose objects are missing;
+- a partial object set for an unrecorded file.
+
+That state needs a reviewed manual reconciliation; the tool cannot continue it.
+
+To continue, pass exactly the reported next step:
+
+```powershell
+node scripts/production-ops-0227-0244-ordered-once.mjs --execute --resume-from <next file> --receipt <new absolute path> [--approval-ref <id> | --rehearsal] --account-id <account> --database-id <uuid> --database-name <name>
+```
+
+The resumed run re-proves everything before it asks for confirmation:
+
+1. It reconciles again in the same run, and refuses unless the next step equals
+   `--resume-from`. Files that are already recorded are never sent again.
+2. It runs the dry-run preflight for the remaining files.
+3. The execute pass itself re-reads and re-proves the prefix before its first
+   write.
+
+Use a new receipt path for every run.
 
 ## Rollback notes
 

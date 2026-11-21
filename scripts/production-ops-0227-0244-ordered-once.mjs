@@ -236,10 +236,51 @@ function initialLedgerChecks(snapshot, plan) {
   ];
 }
 
-function stepPreflightChecks(snapshot, file) {
+function fileObjectsRows(snapshot, file) {
   const names = new Set(file.expectedAddedObjects.map(object => object.name));
+  return snapshot.schema.filter(row => names.has(row.name));
+}
+
+/**
+ * Read-only reconciliation of a snapshot against the ordered plan. It proves the
+ * ledger is the exact pinned 226-row prior ledger followed by an exact ordered
+ * prefix of the ten files (ids contiguous from 227), every recorded file's objects
+ * exist exactly as pinned, and no object of any unrecorded file exists.
+ */
+export function reconcileOps0227To0244Snapshot(snapshot, plan) {
+  const prior = OPS_0227_0244_PRIOR_LEDGER.count, ledger = snapshot.ledger;
+  const base = ledger.slice(0, prior), suffix = ledger.slice(prior);
+  const checks = [
+    check('prior_ledger_present', true, ledger.length >= prior && ledger.length <= prior + plan.files.length),
+    check('prior_ledger_names_sha256', OPS_0227_0244_PRIOR_LEDGER.namesSha256, namesSha256(base)),
+    check('prior_ledger_ids_contiguous', true, base.every((row, index) => row.id === index + 1)),
+    check('recorded_rows_exact_ordered_prefix', true, suffix.every((row, index) => plan.files[index] !== undefined
+      && row.name === plan.files[index].name && row.id === prior + index + 1)),
+  ];
+  const bad = failed(checks);
+  if (bad) return { ok: false, code: `reconciliation_required:${bad.name}`, appliedCount: null, nextStep: null, checks };
+  const applied = suffix.length, p = snapshot.probes;
+  plan.files.forEach((file, index) => {
+    const rows = fileObjectsRows(snapshot, file);
+    if (index < applied) {
+      checks.push(check(`recorded_objects_exact:${file.name}`, { objects: file.expectedAddedObjects, sha256: file.expectedAddedSchemaSha256 },
+        { objects: rows.map(({ type, name, tbl_name }) => ({ type, name, tbl_name })), sha256: schemaRowsSha256(rows) }));
+      if (file.name.startsWith('0240')) checks.push(check(`recorded_grants:${file.name}`, { permissions: 2, rolePermissions: 2 * p.ownerAdminRoles },
+        { permissions: p.flightLogsPermissions, rolePermissions: p.flightLogsRolePermissions }));
+    } else {
+      checks.push(check(`unrecorded_objects_absent:${file.name}`, 0, rows.length));
+      if (file.name.startsWith('0240')) checks.push(check(`unrecorded_grants_absent:${file.name}`, 0, p.flightLogsPermissions));
+    }
+  });
+  const badObject = failed(checks);
+  if (badObject) return { ok: false, code: `reconciliation_required:${badObject.name}`, appliedCount: applied, nextStep: null, checks };
+  return { ok: true, code: null, appliedCount: applied, ledgerCount: ledger.length, ledgerTail: ledger.at(-1)?.name ?? null,
+    nextStep: applied < plan.files.length ? plan.files[applied].name : null, checks };
+}
+
+function stepPreflightChecks(snapshot, file) {
   const p = snapshot.probes, checks = [
-    check('file_objects_absent', 0, snapshot.schema.filter(row => names.has(row.name)).length),
+    check('file_objects_absent', 0, fileObjectsRows(snapshot, file).length),
   ];
   const short = file.name.slice(0, 4);
   if (short === '0240') checks.push(check('owner_admin_roles', 2, p.ownerAdminRoles), check('flight_logs_permissions_absent', 0, p.flightLogsPermissions));
@@ -265,7 +306,12 @@ function postChecks(before, after, file) {
   const beforeKeys = new Set(before.schema.map(objectKey));
   const kept = after.schema.filter(row => beforeKeys.has(objectKey(row)));
   const added = after.schema.filter(row => !beforeKeys.has(objectKey(row)));
+  const present = fileObjectsRows(after, file);
+  const readback = { ledgerCount: after.ledger.length, ledgerTail: after.ledger.at(-1) ?? null,
+    expectedObjects: file.expectedAddedObjectCount, objectsPresent: present.length };
   const checks = [
+    check('readback_ledger_tail', { id: before.ledger.at(-1).id + 1, name: file.name }, readback.ledgerTail),
+    check('readback_objects_present', file.expectedAddedObjectCount, present.length),
     check('ledger_row_appended', true, canonical(after.ledger) === canonical(expectedLedger)),
     check('existing_schema_unchanged', true, canonical(kept) === canonical(before.schema)),
     check('added_objects', file.expectedAddedObjects, added.map(({ type, name, tbl_name }) => ({ type, name, tbl_name }))),
@@ -274,7 +320,7 @@ function postChecks(before, after, file) {
   ];
   if (file.name.startsWith('0240')) checks.push(check('flight_logs_permissions', 2, after.probes.flightLogsPermissions),
     check('flight_logs_role_permissions', 2 * before.probes.ownerAdminRoles, after.probes.flightLogsRolePermissions));
-  return { checks, addedObjectCount: added.length };
+  return { checks, addedObjectCount: added.length, readback };
 }
 
 const failed = checks => checks.find(item => !item.ok);
@@ -304,31 +350,39 @@ export function openOps0227To0244Receipt(filename) {
 // Ordered run
 
 const errorCode = error => (error instanceof Error && /^ops_0227_0244[a-z_]*:/u.test(error.message)) ? error.message : 'unexpected_error';
+// Provider refusals raised before any request is sent. Every other apply error is ambiguous.
+const NOT_SENT = /^ops_0227_0244_provider:(?:writes_disabled|target_not_verified|migration_pin_mismatch|migration_already_sent_no_retry|auth_unavailable|configuration_invalid)$/u;
+const RECONCILE_NOTE = 'Do not retry. Run --reconcile (read-only); continue only with --execute --resume-from <reported next step>.';
 
 /**
  * Runs the ordered plan against an injected provider:
  *   provider.readSnapshot({ query }) -> parsed snapshot (read-only)
  *   provider.applyMigration({ name, sha256, statements, statementsSha256 }) -> one batch, never retried
- * mode 'dry-run' performs one read and never calls applyMigration.
+ * mode 'dry-run' performs one read and never calls applyMigration; mode 'reconcile' performs one read and
+ * only classifies the state. `startIndex` > 0 resumes after a reconciled prefix; the run re-proves it first.
  */
-export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run', target, receipt = null,
-  now = () => new Date(), log = () => {} } = {}) {
-  if (!['dry-run', 'execute'].includes(mode)) fail('mode_invalid');
+export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run', target, receipt = null, startIndex = 0,
+  approvalRef = null, now = () => new Date(), log = () => {} } = {}) {
+  if (!['dry-run', 'execute', 'reconcile'].includes(mode)) fail('mode_invalid');
   if (!plan || plan.contract !== OPS_0227_0244_CONTRACT || !Array.isArray(plan.files) || plan.files.length !== 10) fail('plan_invalid');
+  if (!Number.isSafeInteger(startIndex) || startIndex < 0 || startIndex >= plan.files.length) fail('start_index_invalid');
   if (!provider || typeof provider.readSnapshot !== 'function' || (mode === 'execute' && typeof provider.applyMigration !== 'function'))
     fail('provider_contract_invalid');
   if (mode === 'execute' && !receipt) fail('receipt_required');
   const stamp = () => now().toISOString();
   const state = {
-    schemaVersion: 1, contract: OPS_0227_0244_CONTRACT, mode, planSha256: plan.planSha256, fixtureSha256: plan.fixtureSha256,
-    target: target ?? null, startedAt: stamp(), finishedAt: null, status: 'running', stop: null,
+    schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode, planSha256: plan.planSha256, fixtureSha256: plan.fixtureSha256,
+    target: target ?? null, approvalRef, resumeFrom: startIndex > 0 ? plan.files[startIndex].name : null,
+    startedAt: stamp(), finishedAt: null, status: 'running', stop: null,
     files: plan.files.map(({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount }) =>
       ({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount })),
-    initial: null, steps: [], notes: [], finalLedger: null, writesPerformed: 0,
+    initial: null, reconcile: null, steps: [], notes: [], finalLedger: null, writesPerformed: 0,
   };
   const persist = () => { if (receipt) receipt.write(state); };
   const stop = (step, phase, code, detail = null) => {
-    state.status = 'stopped'; state.stop = { step, phase, code, ...(detail ? { detail } : {}) };
+    state.status = code.startsWith('reconciliation_required') ? 'reconciliation-required' : 'stopped';
+    state.stop = { step, phase, code, ...(detail ? { detail } : {}) };
+    if (state.status === 'reconciliation-required' && !state.notes.includes(RECONCILE_NOTE)) state.notes.push(RECONCILE_NOTE);
     log(`STOP at ${step ?? 'start'} (${phase}): ${code}`);
   };
   const read = async query => provider.readSnapshot({ query });
@@ -337,52 +391,73 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
   try { current = await read(OPS_0227_0244_PRE_READ_QUERY); }
   catch (error) { stop(null, 'initial-read', errorCode(error)); }
   if (current) {
-    const checks = initialLedgerChecks(current, plan);
-    state.initial = { observedAt: current.observedAt, ledger: ledgerSummary(current.ledger), schemaObjectCount: current.schema.length, checks };
-    const bad = failed(checks);
-    if (bad) stop(null, 'initial-ledger', `prior_ledger_mismatch:${bad.name}`);
+    const rec = reconcileOps0227To0244Snapshot(current, plan);
+    state.reconcile = { ok: rec.ok, code: rec.code, appliedCount: rec.appliedCount, nextStep: rec.nextStep, checks: rec.checks };
+    state.initial = { observedAt: current.observedAt, ledger: ledgerSummary(current.ledger), schemaObjectCount: current.schema.length,
+      checks: startIndex === 0 && mode !== 'reconcile' ? initialLedgerChecks(current, plan) : [] };
+    if (mode === 'reconcile') {
+      if (!rec.ok) stop(null, 'reconcile', rec.code);
+      else {
+        state.status = 'reconciled';
+        log(rec.nextStep ? `reconciled: ${rec.appliedCount} of 10 recorded; next step ${rec.nextStep}` : 'reconciled: all ten recorded (236)');
+      }
+    } else if (startIndex === 0) {
+      const bad = failed(state.initial.checks);
+      if (bad && current.ledger.length > OPS_0227_0244_PRIOR_LEDGER.count) stop(null, 'initial-ledger', `reconciliation_required:${rec.code ?? 'ledger_beyond_0226'}`);
+      else if (bad) stop(null, 'initial-ledger', `prior_ledger_mismatch:${bad.name}`);
+    } else if (!rec.ok) stop(null, 'reconcile', rec.code);
+    else if (rec.appliedCount !== startIndex) stop(null, 'reconcile', 'reconciliation_required:resume_from_is_not_next_step', rec.nextStep);
   }
   persist();
-  const initialLedger = current?.ledger ?? [];
-  for (let index = 0; state.status === 'running' && index < plan.files.length; index++) {
+  const baseLedger = current?.ledger.slice(0, OPS_0227_0244_PRIOR_LEDGER.count) ?? [];
+  for (let index = startIndex; mode !== 'reconcile' && state.status === 'running' && index < plan.files.length; index++) {
     const file = plan.files[index];
-    const step = { order: file.order, name: file.name, preflight: null, apply: null, post: null };
+    const step = { order: file.order, name: file.name, preflight: null, apply: null, post: null, readback: null };
     state.steps.push(step);
-    if (mode === 'execute' && index > 0) {
+    if (mode === 'execute' && index > startIndex) {
       try { current = await read(OPS_0227_0244_PRE_READ_QUERY); }
       catch (error) { stop(file.name, 'preflight-read', errorCode(error)); persist(); break; }
     }
-    const checks = [...(mode === 'execute' || index === 0 ? ledgerChecks(current, initialLedger, plan, index) : []),
+    const checks = [...(mode === 'execute' || index === startIndex ? ledgerChecks(current, baseLedger, plan, index) : []),
       ...stepPreflightChecks(current, file)];
     step.preflight = { observedAt: current.observedAt, ledgerCount: current.ledger.length,
-      ledgerDeferred: mode === 'dry-run' && index > 0, checks, recorded: recordedCounts(current, file) };
+      ledgerDeferred: mode === 'dry-run' && index > startIndex, checks, recorded: recordedCounts(current, file) };
     const bad = failed(checks);
     if (bad) { stop(file.name, 'preflight', `preflight_failed:${bad.name}`); persist(); break; }
     log(`${mode === 'execute' ? 'preflight ok' : 'dry-run ok'}: ${file.name}`);
     if (mode === 'dry-run') { persist(); continue; }
-    step.apply = { startedAt: stamp(), finishedAt: null, statements: file.statementCount + 1 };
+    step.apply = { startedAt: stamp(), finishedAt: null, statements: file.statementCount + 1, outcome: 'sending' };
     persist();
     try {
       await provider.applyMigration({ name: file.name, sha256: file.sha256, statements: file.statements,
         statementsSha256: file.statementsSha256 });
     } catch (error) {
+      const code = errorCode(error);
       step.apply.finishedAt = stamp();
-      stop(file.name, 'apply', 'apply_failed_outcome_unknown_no_retry', errorCode(error));
-      state.notes.push('Do not retry or resume. Reconcile d1_migrations and sqlite_master read-only before any next step.');
+      if (NOT_SENT.test(code)) {
+        step.apply.outcome = 'not-sent';
+        stop(file.name, 'apply', 'apply_refused_before_send', code);
+      } else {
+        // The request may have reached D1: the outcome is unknown. Never retry; a later run must reconcile.
+        step.apply.outcome = 'ambiguous';
+        stop(file.name, 'apply', 'reconciliation_required:apply_ambiguous_no_retry', code);
+      }
       persist(); break;
     }
     state.writesPerformed++;
     step.apply.finishedAt = stamp();
+    step.apply.outcome = 'acknowledged';
     persist();
     let after;
     try { after = await read(ops0227To0244SnapshotQuery(Object.keys(file.expectedNewTableRows).sort())); }
-    catch (error) { stop(file.name, 'post-read', errorCode(error)); persist(); break; }
+    catch (error) { stop(file.name, 'post-read', `reconciliation_required:post_read_failed`, errorCode(error)); persist(); break; }
     const post = postChecks(current, after, file);
+    step.readback = post.readback;
     step.post = { observedAt: after.observedAt, ledgerCount: after.ledger.length, ledgerTail: after.ledger.at(-1)?.name ?? null,
       addedObjectCount: post.addedObjectCount, tableRows: after.tableRows, checks: post.checks };
     const badPost = failed(post.checks);
     if (badPost) { stop(file.name, 'post-check', `post_check_failed:${badPost.name}`); persist(); break; }
-    log(`applied and verified: ${file.name} (ledger ${after.ledger.length})`);
+    log(`applied and verified: ${file.name} (ledger ${after.ledger.length}, tail ${after.ledger.at(-1).name})`);
     if (file.name.startsWith('0240')) { state.notes.push(`After 0240: ${OPS_0227_0244_AUTHORITY_NOTE}`); log(`NOTE: ${OPS_0227_0244_AUTHORITY_NOTE}`); }
     current = after;
   }
@@ -408,31 +483,38 @@ export function describeOps0227To0244Plan(plan) {
 // ---------------------------------------------------------------------------
 // CLI
 
-const USAGE = 'usage: node scripts/production-ops-0227-0244-ordered-once.mjs [--dry-run | --execute --receipt <absolute path>] '
-  + '--account-id <id> --database-id <uuid> --database-name <name> [--rehearsal] [--receipt <absolute path>]';
+const USAGE = 'usage: node scripts/production-ops-0227-0244-ordered-once.mjs '
+  + '[--dry-run | --reconcile | --execute --receipt <absolute path> [--resume-from <file>] [--approval-ref <id>] [--rehearsal]] '
+  + '--account-id <id> --database-id <uuid> --database-name <name> [--receipt <absolute path>]';
+const APPROVAL_REF = /^[A-Za-z0-9][A-Za-z0-9._:#/-]{2,127}$/u;
 
 export function parseOps0227To0244Args(args, env = {}) {
   const options = { mode: 'dry-run', accountId: env.CLOUDFLARE_ACCOUNT_ID ?? null, databaseId: null, databaseName: null,
-    receiptPath: null, rehearsal: false };
+    receiptPath: null, rehearsal: false, resumeFrom: null, approvalRef: null };
   const seen = new Set();
+  const valueFlags = { '--account-id': 'accountId', '--database-id': 'databaseId', '--database-name': 'databaseName',
+    '--receipt': 'receiptPath', '--resume-from': 'resumeFrom', '--approval-ref': 'approvalRef' };
+  let modes = 0;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (seen.has(arg)) fail('usage');
     seen.add(arg);
-    if (arg === '--dry-run' || arg === '--execute') {
-      if (seen.has('--dry-run') && seen.has('--execute')) fail('usage');
-      options.mode = arg.slice(2);
-    } else if (arg === '--rehearsal') options.rehearsal = true;
-    else if (['--account-id', '--database-id', '--database-name', '--receipt'].includes(arg)) {
+    if (['--dry-run', '--execute', '--reconcile'].includes(arg)) { modes++; options.mode = arg.slice(2); }
+    else if (arg === '--rehearsal') options.rehearsal = true;
+    else if (Object.hasOwn(valueFlags, arg)) {
       const value = args[++i];
       if (typeof value !== 'string' || value.startsWith('--') || value.length === 0) fail('usage');
-      options[{ '--account-id': 'accountId', '--database-id': 'databaseId', '--database-name': 'databaseName', '--receipt': 'receiptPath' }[arg]] = value;
+      options[valueFlags[arg]] = value;
     } else fail('usage');
   }
+  if (modes > 1) fail('usage');
   if (!/^[a-f0-9]{32}$/u.test(options.accountId ?? '')) fail('account_id_required');
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u.test(options.databaseId ?? '')) fail('database_id_required');
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(options.databaseName ?? '')) fail('database_name_required');
   if (options.receiptPath !== null && !path.isAbsolute(options.receiptPath)) fail('receipt_path_invalid');
+  if (options.resumeFrom !== null && (options.mode !== 'execute' || !OPS_0227_0244_FILES.some(file => file.name === options.resumeFrom)))
+    fail('resume_from_invalid');
+  if (options.approvalRef !== null && (options.mode !== 'execute' || !APPROVAL_REF.test(options.approvalRef))) fail('approval_ref_invalid');
   const isProduction = options.databaseId === OPS_PRODUCTION_DATABASE.databaseId;
   if (isProduction && (options.accountId !== OPS_PRODUCTION_DATABASE.accountId || options.databaseName !== OPS_PRODUCTION_DATABASE.databaseName))
     fail('production_target_mismatch');
@@ -440,6 +522,7 @@ export function parseOps0227To0244Args(args, env = {}) {
     if (!options.receiptPath) fail('receipt_required');
     if (isProduction && options.rehearsal) fail('rehearsal_refuses_production_database');
     if (!isProduction && !options.rehearsal) fail('rehearsal_flag_required_for_non_production_database');
+    if (isProduction && options.approvalRef === null) fail('approval_ref_required_for_production');
   }
   return Object.freeze({ ...options, environment: isProduction ? 'production' : 'non-production' });
 }
@@ -447,7 +530,7 @@ export function parseOps0227To0244Args(args, env = {}) {
 async function promptConfirmation(phrase) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) fail('interactive_confirmation_required');
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
-  try { return (await terminal.question(`Type ${phrase} to apply ten migrations in order: `)) === phrase; }
+  try { return (await terminal.question(`Type ${phrase} to apply the remaining migrations in order: `)) === phrase; }
   finally { terminal.close(); }
 }
 
@@ -464,8 +547,8 @@ export async function mainOps0227To0244(args, dependencies = {}) {
     let plan;
     try { plan = loadVerifiedOps0227To0244Plan({ root: dependencies.root ?? ROOT }); }
     catch (error) {
-      const refusal = { schemaVersion: 1, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, status: 'refused',
-        stop: { step: null, phase: 'local-verification', code: errorCode(error) }, writesPerformed: 0, at: new Date().toISOString() };
+      const refusal = { schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
+        status: 'refused', stop: { step: null, phase: 'local-verification', code: errorCode(error) }, writesPerformed: 0, at: new Date().toISOString() };
       receipt?.write(refusal);
       return refusal;
     }
@@ -478,9 +561,29 @@ export async function mainOps0227To0244(args, dependencies = {}) {
       databaseName: options.databaseName, allowWrites: options.mode === 'execute' });
     await provider.assertTarget();
     const readOnly = { readSnapshot: query => provider.readSnapshot(query) };
-    const rehearsal = await runOps0227To0244Ordered({ plan, provider: readOnly, mode: 'dry-run', target, receipt: options.mode === 'dry-run' ? receipt : null, log: out });
+    const common = { plan, target, log: out, approvalRef: options.approvalRef };
+    if (options.mode === 'reconcile') return await runOps0227To0244Ordered({ ...common, provider: readOnly, mode: 'reconcile', receipt });
+    let startIndex = 0;
+    if (options.mode === 'execute' && options.resumeFrom !== null) {
+      // Same-run reconciliation must prove the recorded prefix and name the requested file as the next step.
+      const rec = await runOps0227To0244Ordered({ ...common, provider: readOnly, mode: 'reconcile' });
+      if (rec.status !== 'reconciled' || rec.reconcile.nextStep !== options.resumeFrom) {
+        const refused = { ...rec, mode: 'execute', resumeFrom: options.resumeFrom, status: 'reconciliation-required',
+          stop: rec.stop ?? { step: null, phase: 'reconcile', code: 'reconciliation_required:resume_from_is_not_next_step', detail: rec.reconcile?.nextStep ?? null } };
+        receipt?.write(refused);
+        return refused;
+      }
+      startIndex = rec.reconcile.appliedCount;
+    }
+    const rehearsal = await runOps0227To0244Ordered({ ...common, provider: readOnly, mode: 'dry-run', startIndex,
+      receipt: options.mode === 'dry-run' ? receipt : null });
     if (options.mode === 'dry-run' || rehearsal.status !== 'dry-run-passed') {
-      if (options.mode === 'execute') receipt?.write({ ...rehearsal, mode: 'execute', status: 'refused' });
+      if (options.mode === 'execute') {
+        const status = rehearsal.status === 'reconciliation-required' ? rehearsal.status : 'refused';
+        const refused = { ...rehearsal, mode: 'execute', status };
+        receipt?.write(refused);
+        return refused;
+      }
       return rehearsal;
     }
     const phrase = OPS_0227_0244_CONFIRMATION(options.databaseName);
@@ -489,7 +592,7 @@ export async function mainOps0227To0244(args, dependencies = {}) {
       receipt?.write(cancelled);
       return cancelled;
     }
-    return await runOps0227To0244Ordered({ plan, provider, mode: 'execute', target, receipt, log: out });
+    return await runOps0227To0244Ordered({ ...common, provider, mode: 'execute', receipt, startIndex });
   } finally { receipt?.close(); }
 }
 
@@ -502,10 +605,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   try {
     const result = await mainOps0227To0244(process.argv.slice(2));
     process.stdout.write(`${JSON.stringify({ status: result.status, mode: result.mode, stop: result.stop ?? null,
-      finalLedger: result.finalLedger ?? null, writesPerformed: result.writesPerformed ?? 0 })}\n`);
-    process.exitCode = ['complete', 'dry-run-passed'].includes(result.status) ? 0 : result.status === 'cancelled' ? 2 : 1;
+      nextStep: result.reconcile?.nextStep ?? null, finalLedger: result.finalLedger ?? null, writesPerformed: result.writesPerformed ?? 0 })}\n`);
+    process.exitCode = ['complete', 'dry-run-passed', 'reconciled'].includes(result.status) ? 0 : result.status === 'cancelled' ? 2 : 1;
   } catch (error) {
-    process.stderr.write(`${errorCode(error) === 'unexpected_error' ? 'ops_0227_0244:unexpected_error' : errorCode(error)}\n${errorCode(error) === 'ops_0227_0244:usage' ? `${USAGE}\n` : ''}`);
+    const code = errorCode(error);
+    process.stderr.write(`${code === 'unexpected_error' ? 'ops_0227_0244:unexpected_error' : code}\n${code === 'ops_0227_0244:usage' ? `${USAGE}\n` : ''}`);
     process.exitCode = 1;
   }
 }
