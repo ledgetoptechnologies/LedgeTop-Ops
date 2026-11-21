@@ -49,7 +49,7 @@ test('project overview shows folders and tasks at the selected level, and keeps 
 test('folder URLs round-trip and task history restores the task folder', () => {
   const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
   const take=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
-  const context={URL,URLSearchParams,location:{href:'https://viewer.example/workspace',origin:'https://viewer.example'},WORKSPACE_SECTIONS:new Set(['dashboard','providers']),selectedFolderId:null,
+  const context={URL,URLSearchParams,location:{href:'https://viewer.example/workspace',origin:'https://viewer.example'},WORKSPACE_SECTIONS:new Set(['dashboard','providers']),selectedFolderId:null,projectDataGeneration:0,
     state:{section:'dashboard',selectedProjectId:'p',expandedTaskId:null,taskPage:null,tasks:[{id:'task',projectId:'p',folderId:'f'}]},folderState:{projectId:'p',currentId:null,folders:[{id:'f',projectId:'p'}]}};
   vm.createContext(context);
   vm.runInContext(take('function readWorkspaceView(', '\nconst initialView')+take('function workspaceView()', '\nfunction syncWorkspaceView'),context);
@@ -80,4 +80,70 @@ test('refresh for an old project cannot interrupt the current project', async ()
   let calls=0;const context={api:()=>{calls++;throw new Error('must not call');},state:{section:'dashboard',selectedProjectId:'b'},folderState:{projectId:'b',currentId:'b-folder',folders:null,loading:true,epoch:7}};
   vm.createContext(context);vm.runInContext(source.slice(start,end),context);await context.loadProjectFolders('a');
   assert.equal(calls,0);assert.equal(context.folderState.projectId,'b');assert.equal(context.folderState.epoch,7);assert.equal(context.folderState.loading,true);
+});
+
+test('scoped refresh ignores a move-racing response and reconciles only its current project', async () => {
+  const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
+  const start=source.indexOf('async function refreshProjectWorkspace('),end=source.indexOf('\nfunction selectedProject(',start);
+  const first={id:'one',projectId:'p',folderId:null,folderRevision:0},other={id:'two',projectId:'q'};
+  let resolveTasks,resolveFolders,paintCount=0;
+  const context={
+    projectDataGeneration:0,projectArtifactsRefreshId:null,projectRefreshBusy:false,projectPaintPending:false,workspaceLoads:0,
+    can:()=>true,document:{hidden:false},folderAuthorizationGuard:()=>()=>true,
+    state:{section:'dashboard',selectedProjectId:'p',expandedTaskId:'one',projectQuery:'search',tasks:[first,other],busy:false},
+    folderState:{projectId:'p',folders:[],loading:false},
+    pagedApi:()=>new Promise(resolve=>{resolveTasks=resolve;}),
+    api:()=>new Promise(resolve=>{resolveFolders=resolve;}),
+    syncSelectedTaskFolder:()=>{},patchProjectFolderView:()=>{paintCount++;return false;},
+  };
+  vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+  let refresh=context.refreshProjectWorkspace();
+  const moved={...first,folderId:'folder',folderRevision:1};
+  context.projectDataGeneration++;
+  context.state.tasks=[moved,other];
+  resolveTasks({tasks:[first]});resolveFolders({folders:[]});await refresh;
+  assert.equal(context.state.tasks[0],moved);assert.equal(paintCount,0);
+  refresh=context.refreshProjectWorkspace();
+  const current={...moved,status:'processing'};
+  resolveTasks({tasks:[current,{id:'unexpected',projectId:'foreign'}]});
+  resolveFolders({folders:[{id:'folder',projectId:'p'},{id:'foreign',projectId:'q'}]});await refresh;
+  assert.deepEqual(Array.from(context.state.tasks),[other,current]);
+  assert.equal(context.state.expandedTaskId,'one');assert.equal(context.state.projectQuery,'search');
+  assert.equal(context.folderState.folders.length,1);assert.equal(paintCount,1);
+});
+
+test('a late guarded 401 cannot clear renewed workspace authorization', async () => {
+  const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
+  const start=source.indexOf('async function api('),end=source.indexOf('\nasync function authenticatedDownload',start);
+  let resolveBody,clearCount=0,captured;
+  const context={
+    state:{token:'old'},clearWorkspaceAuthorization:()=>{clearCount++;},
+    fetch:(_path,request)=>{captured=request.headers.Authorization;return {status:401,ok:false,json:()=>new Promise(resolve=>{resolveBody=resolve;})};}
+  };
+  vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+  const pending=context.api('/api/v1/tasks?projectId=p',{recoveryGuard:()=>context.state.token==='old'});
+  await Promise.resolve();
+  assert.equal(captured,'Bearer old');
+  context.state.token='new';
+  resolveBody({code:'unauthorized'});
+  await assert.rejects(pending,{code:'recovery_session_changed'});
+  assert.equal(clearCount,0);
+});
+
+test('an externally removed selected task waits for an active editor and then clears selection', () => {
+  const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
+  const start=source.indexOf('function syncSelectedTaskFolder('),end=source.indexOf('\nfunction taskEditActive(',start);
+  let activeEdit=true,rewrites=0,renders=0;
+  const context={
+    state:{tasks:[],expandedTaskId:'one',taskPage:'settings'},selectedFolderId:null,folderState:{folders:[]},
+    CSS:{escape:String},content:{querySelector:()=>({})},taskEditActive:()=>activeEdit,
+    syncWorkspaceView:()=>{rewrites++;},render:()=>{renders++;}
+  };
+  vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+  assert.equal(context.syncSelectedTaskFolder('p'),true);
+  assert.equal(context.state.expandedTaskId,'one');
+  activeEdit=false;
+  assert.equal(context.syncSelectedTaskFolder('p'),false);
+  assert.equal(context.state.expandedTaskId,null);assert.equal(context.state.taskPage,null);
+  assert.equal(rewrites,1);assert.equal(renders,1);
 });

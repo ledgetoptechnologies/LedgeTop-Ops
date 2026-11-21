@@ -52,9 +52,14 @@ const state={section:initialView.section,token:sessionStorage.getItem(TOKEN_KEY)
 // Folder navigation is per project and never changes project authorization.
 const folderState = { projectId: null, currentId: null, folders: null, error: null, loading: false, epoch: 0 };
 let folderAuthorizationGeneration=0,activeFolderMutation=null;
+let projectDataGeneration=0,projectRefreshTimer=null,projectRefreshBusy=false,projectPaintPending=false,workspaceLoads=0;
+let projectArtifactsRefreshId=null;
+let draggedFolderTask=null,folderUndo=null,folderUndoTimer=null;
 function invalidateFolderAuthorization(){
   folderAuthorizationGeneration++;folderState.epoch++;folderState.projectId=null;
   folderState.folders=null;folderState.error=null;folderState.loading=false;
+  projectDataGeneration++;
+  clearFolderUndo();
   // Keep selectedFolderId: expiry recovery restores navigation, not old data.
   if(activeFolderMutation){activeFolderMutation=null;state.busy=false;shell.removeAttribute('aria-busy');}
 }
@@ -74,12 +79,13 @@ function repaintFolderAuthorization(){
   queueMicrotask(()=>{if(token&&session&&state.token===token&&state.adminSession===session&&
     generation===folderAuthorizationGeneration&&!workspaceAuthorizationClearing&&state.section==='dashboard'&&state.selectedProjectId)render();});
 }
-async function mutateFolder(projectId,url,options,message,guard,onSuccess){
+async function mutateFolder(projectId,url,options,message,guard,onSuccess,reload=true){
   if(!guard()||state.busy)return;
+  projectDataGeneration++;
   const owned={};activeFolderMutation=owned;state.busy=true;shell.setAttribute('aria-busy','true');
   try{
     const result=await api(url,{...options,recoveryGuard:guard});if(!guard())return;
-    onSuccess?.(result);toast(message);await loadProjectFolders(projectId);return result;
+    onSuccess?.(result);if(message)toast(message);if(reload)await loadProjectFolders(projectId);return result;
   }catch(error){if(guard())toast(error.message,true);}
   finally{if(activeFolderMutation===owned){activeFolderMutation=null;state.busy=false;shell.removeAttribute('aria-busy');}}
 }
@@ -245,6 +251,7 @@ function workspaceView(){return{section:state.section,selectedProjectId:state.se
 function workspaceUrl(view=workspaceView()){const params=new URLSearchParams({section:WORKSPACE_SECTIONS.has(view.section)?view.section:'dashboard'});if(view.section==='dashboard'&&view.selectedProjectId)params.set('project',view.selectedProjectId);if(view.section==='dashboard'&&view.selectedProjectId&&view.selectedFolderId)params.set('folder',view.selectedFolderId);if(view.section==='dashboard'&&view.selectedProjectId&&view.expandedTaskId)params.set('task',view.expandedTaskId);if(view.section==='dashboard'&&view.selectedProjectId&&view.expandedTaskId&&['gcp','settings','files'].includes(view.taskPage))params.set('panel',view.taskPage);return`/workspace?${params}`}
 function applyWorkspaceView(view){
   const priorFolder=selectedFolderId,nextSection=WORKSPACE_SECTIONS.has(view?.section)?view.section:'dashboard',nextProject=nextSection==='dashboard'&&view?.selectedProjectId?view.selectedProjectId:null;
+  if(state.section!==nextSection||state.selectedProjectId!==nextProject||priorFolder!==(view?.selectedFolderId||null))projectDataGeneration++;
   if(folderState.projectId&&(nextSection!=='dashboard'||folderState.projectId!==nextProject)){folderState.epoch++;folderState.projectId=null;folderState.folders=null;folderState.loading=false;}
   state.section=nextSection;state.selectedProjectId=nextProject;selectedFolderId=state.selectedProjectId&&view?.selectedFolderId?view.selectedFolderId:null;
   state.expandedTaskId=state.selectedProjectId&&view?.expandedTaskId?view.expandedTaskId:null;
@@ -306,7 +313,7 @@ async function workspaceFetch(path,init={}){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal,recoveryGuard}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}let response;if(recoveryGuard){if(!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});response=await fetch(path,init)}else response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return payload}
+async function api(path,{method='GET',body,headers={},signal,recoveryGuard}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const assertRequestCurrent=()=>{if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});};let response;if(recoveryGuard){assertRequestCurrent();response=await fetch(path,init);assertRequestCurrent()}else response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}assertRequestCurrent();if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return payload}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message,onFailure){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');let submitted=false;try{const result=await api(path,options);submitted=true;toast(typeof message==='function'?message(result):message);await load();return result}catch(error){onFailure?.(error,{submitted});toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
@@ -378,7 +385,7 @@ function companionRepairAction(output) {
   return button('restore-products', output.id, 'Restore missing products', false,
     `data-endpoint="${esc(repair.endpoint)}" title="${esc('Restore ' + (repair.missingAssetKinds || []).join(', ') + ' in a new version; existing published versions remain unchanged.')}"`);
 }
-async function refreshOperations(){if(!state.token||state.operationRefreshBusy)return false;state.operationRefreshBusy=true;try{const previous=new Map(state.operations.map(operation=>[operation.id,operation.status])),previousDerivatives=new Map(state.derivativeJobs.map(job=>[job.id,job.status])),[result,derivatives]=await Promise.all([pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives')]);state.operations=result.operations;state.derivativeJobs=derivatives.derivatives||[];if(state.section==='background')render();else renderOperationActivity();const completed=state.operations.some(operation=>operation.status==='succeeded'&&previous.has(operation.id)&&previous.get(operation.id)!=='succeeded'),derivativeCompleted=state.derivativeJobs.some(job=>['complete','failed'].includes(job.status)&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)));if(completed||derivativeCompleted){toast(completed?'Background import completed':state.derivativeJobs.some(job=>job.status==='failed'&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)))?'Background derivative failed':'Background derivative completed');await load();return true}}catch(error){if(error.status!==401)console.warn('Background work refresh failed',error.message)}finally{state.operationRefreshBusy=false}return false}
+async function refreshOperations(){if(!state.token||state.operationRefreshBusy)return false;state.operationRefreshBusy=true;try{const previous=new Map(state.operations.map(operation=>[operation.id,operation.status])),previousDerivatives=new Map(state.derivativeJobs.map(job=>[job.id,job.status])),[result,derivatives]=await Promise.all([pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives')]);state.operations=result.operations;state.derivativeJobs=derivatives.derivatives||[];if(state.section==='background')render();else renderOperationActivity();const completed=state.operations.some(operation=>operation.status==='succeeded'&&previous.has(operation.id)&&previous.get(operation.id)!=='succeeded'),derivativeCompleted=state.derivativeJobs.some(job=>['complete','failed'].includes(job.status)&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)));if(completed||derivativeCompleted){toast(completed?'Background import completed':state.derivativeJobs.some(job=>job.status==='failed'&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)))?'Background derivative failed':'Background derivative completed');if(state.section==='dashboard'&&state.selectedProjectId){await refreshProjectWorkspace(true);scheduleOperationRefresh();}else await load();return true}}catch(error){if(error.status!==401)console.warn('Background work refresh failed',error.message)}finally{state.operationRefreshBusy=false}return false}
 function scheduleOperationRefresh(delay=null){clearTimeout(state.operationTimer);if(!state.token)return;const active=state.operations.some(operation=>OPERATION_ACTIVE.has(operation.status))||state.derivativeJobs.some(job=>job.status==='pending'||job.status==='leased'),wait=delay??(active?2000:15000);state.operationTimer=setTimeout(async()=>{const reloaded=await refreshOperations();if(!reloaded)scheduleOperationRefresh()},wait)}
 
 function dashboard(){const work=taskPhaseCounts(state.tasks),healthy=state.providers.filter(provider=>provider.enabled&&['healthy','ready'].includes(provider.runtimeHealth||provider.lastHealth)).length;return`<div class="metric-grid dashboard-metrics">${metric('Projects',state.projects.length,'Viewer projects')}${metric('Ready tasks',state.tasks.filter(task=>state.outputs.some(output=>output.taskId===task.id&&(output.status==='ready'||(output.status==='published'&&output.activePublished)))).length,'Available to view and share')}${metric('Submitting',work.submitting,'Viewer upload or node-admission work')}${metric('Processing now',work.processing,`${work.queued} queued · ${work.finalizing} finalizing in Viewer`)}${metric('Provider nodes',`${healthy}/${state.providers.length}`,'Enabled and healthy')}</div><section class="project-workspace top-gap"><div class="project-toolbar"><label class="project-search"><span class="sr-only">Filter projects by name</span><input id="project-filter" type="search" value="${esc(state.projectQuery)}" placeholder="Search projects…" autocomplete="off"></label></div><div id="project-list" class="project-list">${projectRows()}</div></section>`}
@@ -400,6 +407,167 @@ function taskLodNotice(task){
   else if(lod.canGenerate||lod.recoveryAction?.eligible)label='Streaming available to prepare';
   return label?`<small class="task-lod-notice" title="Open Task settings for streaming status and recovery actions.">${esc(label)}</small>`:'';
 }
+function syncSelectedTaskFolder(projectId){
+  const selected=state.tasks.find(task=>task.id===state.expandedTaskId&&task.projectId===projectId);
+  if(state.expandedTaskId&&!selected){
+    const oldRow=content.querySelector(`[data-project-task="${CSS.escape(state.expandedTaskId)}"]`);
+    if(taskEditActive(state.taskPage?content:oldRow))return true;
+    const wasTaskPage=state.taskPage;
+    state.expandedTaskId=null;state.taskPage=null;
+    syncWorkspaceView('replace');
+    if(wasTaskPage)render();
+  }
+  if(selected&&state.taskDetails[selected.id]?.task)state.taskDetails[selected.id].task={...state.taskDetails[selected.id].task,...selected};
+  const requested=selected?selected.folderId:selectedFolderId;
+  const next=requested&&folderState.folders?.some(folder=>folder.id===requested)?requested:null;
+  if(next!==selectedFolderId){
+    selectedFolderId=folderState.currentId=next;
+    syncWorkspaceView('replace');
+  }
+  return false;
+}
+
+function taskEditActive(region){
+  if(!region)return false;
+  const work=currentWorkspaceNavigationState();
+  return region.contains(document.activeElement)||work.unsavedGcpMark||work.pendingGcpSave;
+}
+
+function patchSelectedTaskDetail(){
+  const task=state.tasks.find(item=>item.id===state.expandedTaskId&&item.projectId===state.selectedProjectId);
+  if(!task||state.taskPage==='gcp')return false;
+  const row=content.querySelector(`[data-project-task="${CSS.escape(task.id)}"]`);
+  const region=state.taskPage?content.querySelector('.task-workspace-page'):row?.querySelector('.task-detail-motion');
+  if(!region)return false;
+  const dataset=state.datasets.find(item=>item.id===task.datasetId),template=document.createElement('template');
+  template.innerHTML=state.taskPage?taskWorkspaceBody(task,dataset):taskDetail(task,dataset);
+  if(region.innerHTML===template.innerHTML)return false;
+  if(taskEditActive(region))return true;
+  const previousTail=region.querySelector('.log-tail'),tailTop=previousTail?.scrollTop||0;
+  const atEnd=previousTail&&previousTail.scrollHeight-previousTail.clientHeight-tailTop<24;
+  const scrollTop=content.scrollTop,pageTop=window.scrollY;
+  region.replaceChildren(template.content);
+  bindProjectActions(region);
+  bindTaskDisclosures(region);
+  hydrateOrthophotoPreviews(region);
+  const tail=region.querySelector('.log-tail');
+  if(tail)tail.scrollTop=atEnd?tail.scrollHeight:tailTop;
+  if(content.scrollTop!==scrollTop)content.scrollTop=scrollTop;
+  if(window.scrollY!==pageTop)window.scrollTo(window.scrollX,pageTop);
+  return false;
+}
+
+function patchProjectFolderView(){
+  if(state.taskPage)return patchSelectedTaskDetail();
+  const section=content.querySelector('.project-detail');
+  const current=section?.querySelector('[data-project-folder-view]');
+  if(!current||section.id!==`project-detail-${state.selectedProjectId}`||draggedFolderTask)return Boolean(current);
+  const template=document.createElement('template');
+  template.innerHTML=selectedProject();
+  const next=template.content.querySelector('[data-project-folder-view]');
+  const list=current.querySelector(':scope > .task-list'),newList=next?.querySelector(':scope > .task-list');
+  if(!list||!newList)return false;
+  const focused=document.activeElement, scrollTop=content.scrollTop, pageTop=window.scrollY;
+  const controls=Array.from(current.children).filter(child=>child!==list);
+  const newControls=Array.from(next.children).filter(child=>child!==newList);
+  let pending=false;
+  if(controls.map(node=>node.outerHTML).join('')!==newControls.map(node=>node.outerHTML).join('')){
+    if(controls.some(node=>node.contains(focused)))pending=true;
+    else{
+      controls.forEach(node=>node.remove());
+      list.before(...newControls);
+    }
+  }
+  const oldRows=new Map(Array.from(list.querySelectorAll(':scope > [data-project-task]')).map(row=>[row.dataset.projectTask,row]));
+  const wanted=Array.from(newList.querySelectorAll(':scope > [data-project-task]'));
+  const wantedIds=new Set(wanted.map(row=>row.dataset.projectTask));
+  for(const [id,row] of oldRows){
+    if(wantedIds.has(id))continue;
+    if(row.contains(focused)||id===state.expandedTaskId)pending=true;
+    else row.remove();
+  }
+  for(const node of Array.from(list.children).filter(child=>!child.hasAttribute('data-project-task'))){
+    if(wanted.length||newList.firstElementChild?.outerHTML!==node.outerHTML)node.remove();
+  }
+  if(!wanted.length&&!list.childElementCount&&newList.firstElementChild)list.append(newList.firstElementChild.cloneNode(true));
+  let following=null;
+  for(const fresh of wanted.reverse()){
+    const row=oldRows.get(fresh.dataset.projectTask);
+    if(!row){list.insertBefore(fresh,following);following=fresh;continue;}
+    const summary=row.querySelector('.task-summary'),newSummary=fresh.querySelector('.task-summary');
+    if(summary&&newSummary&&summary.outerHTML!==newSummary.outerHTML){
+      if(summary.contains(focused)||summary.querySelector('details[open]'))pending=true;
+      else summary.replaceWith(newSummary);
+    }
+    if(row.nextElementSibling!==following&&!row.contains(focused)&&!row.classList.contains('expanded'))list.insertBefore(row,following);
+    following=row;
+  }
+  const count=section.querySelector('.project-tasks-title span'),freshCount=template.content.querySelector('.project-tasks-title span')?.textContent;
+  if(count&&freshCount!=null&&count.textContent!==freshCount)count.textContent=freshCount;
+  bindProjectActions(current);
+  if(content.scrollTop!==scrollTop)content.scrollTop=scrollTop;
+  if(window.scrollY!==pageTop)window.scrollTo(window.scrollX,pageTop);
+  return patchSelectedTaskDetail()||pending;
+}
+
+function scheduleProjectRefresh(delay){
+  if(delay===undefined&&projectRefreshTimer!==null)return;
+  clearTimeout(projectRefreshTimer);
+  projectRefreshTimer=null;
+  if(document.hidden||!state.selectedProjectId||state.section!=='dashboard'||!can('viewer.processing.read'))return;
+  projectRefreshTimer=setTimeout(()=>{
+    projectRefreshTimer=null;
+    void refreshProjectWorkspace().finally(()=>scheduleProjectRefresh());
+  },delay??8000);
+}
+
+async function refreshProjectWorkspace(includeArtifacts=false){
+  const projectId=state.selectedProjectId;
+  if(includeArtifacts)projectArtifactsRefreshId=projectId;
+  if(!projectId||projectRefreshBusy||workspaceLoads||state.busy||folderState.loading||
+      folderState.projectId!==projectId||document.hidden||!can('viewer.processing.read'))return;
+  const artifacts=projectArtifactsRefreshId===projectId;
+  const authorized=folderAuthorizationGuard(projectId);
+  const generation=projectDataGeneration;
+  const current=()=>authorized()&&generation===projectDataGeneration&&!state.busy&&!workspaceLoads&&!document.hidden;
+  if(!current())return;
+  projectRefreshBusy=true;
+  try{
+    const project=encodeURIComponent(projectId),options={recoveryGuard:current},readDatasets=artifacts&&can('viewer.datasets.read');
+    const [taskResult,folderResult,datasetResult,outputResult]=await Promise.all([
+      pagedApi(`/api/v1/tasks?projectId=${project}`,'tasks',options),
+      api(`/api/v1/projects/${project}/folders`,options),
+      readDatasets?pagedApi(`/api/v1/datasets?projectId=${project}`,'datasets',options):null,
+      artifacts?pagedApi(`/api/v1/processing/outputs?projectId=${project}`,'outputs',options):null
+    ]);
+    if(!current()||!Array.isArray(folderResult.folders))return;
+    const tasks=taskResult.tasks.filter(task=>task.projectId===projectId);
+    const folders=folderResult.folders.filter(folder=>folder.projectId===projectId);
+    const previousTasks=state.tasks.filter(task=>task.projectId===projectId);
+    const changed=JSON.stringify(previousTasks)!==JSON.stringify(tasks)||JSON.stringify(folderState.folders)!==JSON.stringify(folders)||artifacts;
+    if(changed){
+      projectDataGeneration++;
+      state.tasks=[...state.tasks.filter(task=>task.projectId!==projectId),...tasks];
+      if(datasetResult)state.datasets=[...state.datasets.filter(item=>item.projectId!==projectId),...datasetResult.datasets];
+      if(outputResult){
+        state.outputs=[...state.outputs.filter(item=>item.projectId!==projectId),...outputResult.outputs];
+        const detail=state.taskDetails[state.expandedTaskId]?.task;
+        if(detail)detail.outputs=outputResult.outputs.filter(item=>item.taskId===detail.id);
+      }
+      folderState.folders=folders;folderState.error=null;
+      if(artifacts)projectArtifactsRefreshId=null;
+    }
+    if(changed||projectPaintPending){
+      const selectionPending=syncSelectedTaskFolder(projectId);
+      projectPaintPending=patchProjectFolderView()||selectionPending;
+    }
+  }catch(error){
+    if(current()&&error.status!==401)console.warn('Project refresh failed',error.message);
+  }finally{
+    projectRefreshBusy=false;
+  }
+}
+
 function selectedProject(){
   const project=state.projects.find(item=>item.id===state.selectedProjectId);if(!project)return'';
   if(folderState.projectId!==project.id){folderState.projectId=project.id;folderState.currentId=selectedFolderId;folderState.folders=null;folderState.error=null;folderState.loading=true;queueMicrotask(()=>{if(state.selectedProjectId===project.id)loadProjectFolders(project.id)});}
@@ -407,24 +575,24 @@ function selectedProject(){
   const moreActions=`${can('viewer.projects.write')?button('edit-project',project.id,'Rename project'):''}${can('viewer.datasets.import')?button('project-import',project.id,'Import existing results'):''}${can('viewer.projects.read')?button('project-property-lines',project.id,'Property lines source'):''}${can('viewer.projects.write')&&!hasActiveTask?dangerButton('trash-project',project.id,'Delete project'):''}`;
   const actions=active?`${can('viewer.processing.write')?`<button class="primary-button" data-action="project-process" data-id="${esc(project.id)}">New task</button>`:''}${canShare?button('project-share',project.id,'Share'):''}${moreActions?`<details class="project-more-actions"><summary aria-label="More project actions" title="More project actions">⋯</summary><div class="project-more-menu">${moreActions}</div></details>`:''}`:'';
   const folders=folderState.folders||[],current=folderState.currentId,path=folderPath(folders,current),visibleFolders=folders.filter(folder=>(folder.parentId||null)===current),visibleTasks=tasks.filter(task=>(task.folderId||null)===current);
-  const crumbs=`<nav aria-label="Folder path" class="import-breadcrumb">${button('folder-root',project.id,project.displayName)}${path.map(folder=>`<span aria-hidden="true">/</span>${button('folder-open',folder.id,folder.displayName)}`).join('')}</nav>`;
-  const folderContent=folderState.loading?`<p role="status">Loading folders…</p><div class="task-list">${visibleTasks.map(taskPanel).join('')}</div>`:folderState.error?`<p role="alert">${esc(folderState.error)} Showing all project tasks.</p>${button('folder-retry',project.id,'Retry folders')}<div class="task-list">${tasks.map(taskPanel).join('')||empty('No tasks in this project yet.')}</div>`:`${crumbs}${active&&can('viewer.projects.write')?button('folder-create',project.id,'New folder'):''}<div class="data-list" aria-label="Folders">${visibleFolders.map(folder=>`<div class="manage-row"><span aria-hidden="true">📁</span>${button('folder-open',folder.id,folder.displayName)}${active&&can('viewer.projects.write')?`<div class="row-actions">${button('folder-rename',folder.id,'Rename',false,`aria-label="Rename ${esc(folder.displayName)}"`)}${button('folder-delete',folder.id,'Delete',false,`aria-label="Delete ${esc(folder.displayName)}"`)}</div>`:''}</div>`).join('')}</div><div class="task-list">${visibleTasks.map(taskPanel).join('')||(!visibleFolders.length?empty('No folders or tasks here yet.'):'')}</div>`;
-  return`<section class="project-detail" id="project-detail-${esc(project.id)}" aria-label="${esc(project.displayName)} tasks and actions"><div class="project-detail-heading"><h2 class="project-tasks-title">Tasks <span>${tasks.length}</span><small class="project-source-count" title="Active source collections, not model versions or storage copies. Includes unused drafts; excludes archived and recycled sources.">${countLabel(sourceSetCount,'source set')}</small></h2><div class="row-actions" aria-label="Project actions">${actions}</div></div>${active?'':'<p class="form-note">This project is archived and read-only.</p>'}${folderContent}</section>`;
+  const crumbs=`<nav aria-label="Folder path" class="import-breadcrumb">${button('folder-root',project.id,project.displayName,false,'data-task-drop-folder=""')}${path.map(folder=>`<span aria-hidden="true">/</span>${button('folder-open',folder.id,folder.displayName,false,`data-task-drop-folder="${esc(folder.id)}"`)}`).join('')}</nav>`;
+  const folderContent=folderState.loading?`<p role="status">Loading folders…</p><div class="task-list">${visibleTasks.map(taskPanel).join('')}</div>`:folderState.error?`<p role="alert">${esc(folderState.error)} Showing all project tasks.</p>${button('folder-retry',project.id,'Retry folders')}<div class="task-list">${tasks.map(taskPanel).join('')||empty('No tasks in this project yet.')}</div>`:`${crumbs}${active&&can('viewer.projects.write')?button('folder-create',project.id,'New folder'):''}<div class="data-list" aria-label="Folders">${visibleFolders.map(folder=>`<div class="manage-row" data-task-drop-folder="${esc(folder.id)}"><span aria-hidden="true">📁</span>${button('folder-open',folder.id,folder.displayName)}${active&&can('viewer.projects.write')?`<div class="row-actions">${button('folder-rename',folder.id,'Rename',false,`aria-label="Rename ${esc(folder.displayName)}"`)}${button('folder-delete',folder.id,'Delete',false,`aria-label="Delete ${esc(folder.displayName)}"`)}</div>`:''}</div>`).join('')}</div><div class="task-list">${visibleTasks.map(taskPanel).join('')||(!visibleFolders.length?empty('No folders or tasks here yet.'):'')}</div>`;
+  return`<section class="project-detail" id="project-detail-${esc(project.id)}" aria-label="${esc(project.displayName)} tasks and actions"><div class="project-detail-heading"><h2 class="project-tasks-title">Tasks <span>${tasks.length}</span><small class="project-source-count" title="Active source collections, not model versions or storage copies. Includes unused drafts; excludes archived and recycled sources.">${countLabel(sourceSetCount,'source set')}</small></h2><div class="row-actions" aria-label="Project actions">${actions}</div></div>${active?'':'<p class="form-note">This project is archived and read-only.</p>'}<div data-project-folder-view>${folderContent}</div></section>`;
 }
 function datasetActions(dataset,projectActive){if(!projectActive)return'';const items=[];if(dataset.status==='draft'&&can('viewer.datasets.write'))items.push(button('upload-dataset',dataset.id,'Upload'));if(['draft','finalized','archived'].includes(dataset.status)&&can('viewer.storage.purge'))items.push(dangerButton('trash-dataset',dataset.id,'Move source to Recycle Bin'));return items.join('')}
 function lodJobForOutput(output){return state.derivativeJobs.find(job=>job.attemptId===output.attemptId&&['mesh_tiles','lod_audit'].includes(job.type))||null}
 function recoveryOperationForOutput(outputId){return[...state.operations].filter(operation=>operation.type==='lod_recovery'&&operation.status!=='cancelled'&&(operation.sourceOutputId===outputId||operation.result?.recovery?.sourceOutputId===outputId)).sort((left,right)=>Date.parse(right.updatedAt||right.createdAt||0)-Date.parse(left.updatedAt||left.createdAt||0))[0]||null}
 function lodAction(output){if(!can('viewer.processing.write'))return'';const repair=companionRepairAction(output);if(repair)return repair;const job=lodJobForOutput(output),lod=output.lod||{},recovery=lod.recoveryAction,feedStatus=job?.status==='pending'?'queued':job?.status==='leased'?'running':job?.status,status=feedStatus||lod.status,id=job?.id||lod.jobId||output.id,retryable=Boolean(lod.canRetry||(status==='failed'&&job?.optional&&(Number(job.manualRetryCount)||0)<1));if(recovery?.kind==='new_version'&&recovery.eligible){const existing=recoveryOperationForOutput(output.id);if(existing?.status==='failed')return existing.retryable===false?button('derivative-status',existing.id,'Recovery retry exhausted',false,'disabled title="The one authorized manual recovery retry has already failed."'):button('retry-operation',existing.id,'Retry recovery',false,'title="Retry the existing recovery version without changing the current model."');if(existing){const label=existing.status==='queued'?'Recovery queued':existing.status==='leased'?'Creating recovery…':existing.status==='awaiting_derivatives'?'Generating 3D tiles…':'Recovery complete';return button('derivative-status',existing.id,label,false,'disabled')}return button('create-lod-recovery',output.id,'Create recovery version',false,`data-endpoint="${esc(recovery.endpoint)}" title="The current version remains safe while a new recovery version is built."`)}if(lod.disabledByPolicy)return button('derivative-status',id,'3D tiles disabled by server',false,`disabled title="${esc(lod.reason||'3D tile generation is disabled on this Viewer deployment.')}"`);if(['failed','fallback'].includes(status)&&retryable)return button('retry-derivative',id,'Retry 3D tiles');if(status==='queued')return button('derivative-status',id,'3D tiles queued',false,'disabled');if(status==='running')return button('derivative-status',id,'Generating 3D tiles…',false,'disabled');if(status==='available'||(status==='complete'&&job?.result?.verified))return button('derivative-status',id,'3D tiles ready',false,'disabled');if(status==='fallback')return button('derivative-status',id,'Using full mesh fallback',false,`disabled title="${esc(lod.reason||'Verified streaming tiles are unavailable.')}"`);if(lod.canGenerate)return button('generate-tiles',output.id,'Generate 3D tiles');return''}
 function taskQuickActions(task){const outputs=state.outputs.filter(item=>item.taskId===task.id),output=outputs.find(item=>item.activePublished&&item.status==='published')||outputs.find(item=>item.status==='ready'&&item.attemptId),readOnly=task.status==='archived'||state.projects.find(project=>project.id===task.projectId)?.status!=='active',items=[],more=[];if(output){const kinds=new Set(Array.isArray(output.assetKinds)?output.assetKinds:[]),published=output.activePublished&&output.status==='published';if(published&&output.viewSessionUrl)items.push(button('view-output',output.id,'View',true));else if(!readOnly&&output.status==='ready'&&output.attemptId&&can('viewer.processing.publish'))items.push(button('open-review',output.attemptId,'View',true));if(output.reportUrl&&kinds.has('report'))items.push(button('download-report',output.id,'Model report',false,`data-url="${esc(output.reportUrl)}"`));if(!readOnly&&canShareOutput(output))items.push(button('share-output',output.id,'Share'));if(output.downloadProducts?.length||output.downloadUrl&&kinds.size)more.push(button('download-output',output.id,'Download model files',false,`data-url="${esc(output.downloadUrl)}"`))}if(!readOnly&&can('viewer.processing.write')){more.unshift(button('edit-task',task.id,'Rename'));more.push(folderState.projectId===task.projectId&&Array.isArray(folderState.folders)?button('folder-move-task',task.id,'Move to folder'):button('folder-move-task',task.id,'Move to folder',false,'disabled title="Folders are still loading."'));}more.push(button('task-settings',task.id,'Details & processing'),button('task-files',task.id,'Files & versions'),button('task-history',task.id,'Processing history'));if(!readOnly&&can('viewer.gcp.read'))more.push(button('task-gcp',task.id,'Ground control points'));items.push(`<details class="project-more-actions task-more-actions"><summary aria-label="More task actions" title="More task actions">⋯</summary><div class="project-more-menu">${more.join('')}</div></details>`);return items.join('')}
-function taskPanel(task){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task);return`<article class="task-panel ${expanded?'expanded':''}"><div class="task-summary"><button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-chevron" aria-hidden="true">›</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="region" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
+function taskPanel(task){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task);return`<article class="task-panel ${expanded?'expanded':''}" data-project-task="${esc(task.id)}"><div class="task-summary"><button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-chevron" aria-hidden="true">›</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${canDragFolderTask(task)? button('folder-move-task',task.id,'Move',false,'draggable="true" data-folder-drag aria-label="Move task. Drag or choose a folder."'):''}${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="region" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
 function taskFact(label,value){const display=label==='Reconstructed points'&&value!==null&&value!==undefined?groupedNumber(value):value;return`<div><dt>${esc(label)}</dt><dd>${available(display)}</dd></div>`}
 function disclosureAttributes(taskId,name){return`data-task-id="${esc(taskId)}" data-task-disclosure="${esc(name)}" ${state.taskDisclosures[taskId]?.[name]?'open':''}`}
 function taskDisclosurePanel(taskId,name,label,body,meta=''){return`<details class="task-subsection task-disclosure" ${disclosureAttributes(taskId,name)}><summary><span>${esc(label)}</span>${meta?`<small>${esc(meta)}</small>`:''}</summary><div class="task-disclosure-body">${body}</div></details>`}
 function publishedOrthophoto(outputs){return outputs.find(output=>output.activePublished&&output.status==='published'&&Array.isArray(output.assetKinds)&&output.assetKinds.includes('ortho'))||null}
 function orthophotoPreview(task,outputs){const output=publishedOrthophoto(outputs);if(!output)return'';const cached=state.orthophotoPreviews[output.id];if(cached?.status==='ready')return`<figure class="task-ortho-preview"><img src="${esc(cached.dataUrl)}" alt="Orthophoto preview for ${esc(task.displayName)}"><figcaption>Published orthophoto</figcaption></figure>`;if(cached?.status==='failed')return`<figure class="task-ortho-preview unavailable"><div role="img" aria-label="Orthophoto preview unavailable">Preview unavailable</div><figcaption>Published orthophoto</figcaption></figure>`;return`<figure class="task-ortho-preview loading"><canvas width="420" height="236" data-ortho-output-id="${esc(output.id)}" role="img" aria-label="Loading the published orthophoto preview for ${esc(task.displayName)}"></canvas><figcaption>Published orthophoto</figcaption></figure>`}
 async function renderOrthophotoPreview(canvas,outputId){if(state.orthophotoPreviews[outputId]?.status==='loading')return;state.orthophotoPreviews[outputId]={status:'loading'};try{if(!orthophotoPool)orthophotoPool=new GeoTiffPool(Math.min(2,navigator.hardwareConcurrency||2));const tiff=await openGeoTiff(`/api/v1/processing/outputs/${encodeURIComponent(outputId)}/assets/ortho`,{headers:{Authorization:`Bearer ${state.token}`},allowFullFile:false,blockSize:262144,cacheSize:12}),count=await tiff.getImageCount();let image=await tiff.getImage(count-1);for(let index=0;index<count;index++){const candidate=await tiff.getImage(index);image=candidate;if(Math.max(candidate.getWidth(),candidate.getHeight())<=640)break}const sourceWidth=image.getWidth(),sourceHeight=image.getHeight(),scale=Math.min(1,480/Math.max(sourceWidth,sourceHeight)),width=Math.max(1,Math.round(sourceWidth*scale)),height=Math.max(1,Math.round(sourceHeight*scale)),rgb=await image.readRGB({width,height,interleave:true,enableAlpha:true,pool:orthophotoPool,resampleMethod:'bilinear'}),bits=Math.max(...Array.from(image.fileDirectory.getValue('BitsPerSample')||[8])),channelScale=bits>8?255/(2**bits-1):1,channels=rgb.length/(width*height),nodata=parseFiniteGdalNoData(image.getGDALNoData()),context=canvas.getContext('2d'),pixels=context.createImageData(width,height);canvas.width=width;canvas.height=height;for(let source=0,target=0;target<pixels.data.length;source+=channels,target+=4){pixels.data[target]=rgb[source]*channelScale;pixels.data[target+1]=rgb[source+1]*channelScale;pixels.data[target+2]=rgb[source+2]*channelScale;pixels.data[target+3]=isRgbNoData(rgb[source],rgb[source+1],rgb[source+2],nodata)?0:channels>=4?rgb[source+3]*channelScale:255}context.putImageData(pixels,0,0);state.orthophotoPreviews[outputId]={status:'ready',dataUrl:canvas.toDataURL('image/png')};canvas.setAttribute('aria-label','Published orthophoto preview')}catch(error){console.warn('orthophoto preview unavailable',{outputId,message:error instanceof Error?error.message:String(error)});state.orthophotoPreviews[outputId]={status:'failed'};const figure=canvas.closest('.task-ortho-preview');if(figure){figure.className='task-ortho-preview unavailable';figure.innerHTML='<div role="img" aria-label="Orthophoto preview unavailable">Preview unavailable</div><figcaption>Published orthophoto</figcaption>'}}}
-function hydrateOrthophotoPreviews(){content.querySelectorAll('[data-ortho-output-id]').forEach(canvas=>{const outputId=canvas.dataset.orthoOutputId;void renderOrthophotoPreview(canvas,outputId).then(()=>synchronizeOrthophotoPreviews(content,outputId,state.orthophotoPreviews[outputId]))})}
-function bindTaskDisclosures(){content.querySelectorAll('[data-task-disclosure]').forEach(disclosure=>disclosure.addEventListener('toggle',()=>{const taskId=disclosure.dataset.taskId,name=disclosure.dataset.taskDisclosure;state.taskDisclosures[taskId]={...(state.taskDisclosures[taskId]||{}),[name]:disclosure.open}}))}
+function hydrateOrthophotoPreviews(root=content){root.querySelectorAll('[data-ortho-output-id]').forEach(canvas=>{const outputId=canvas.dataset.orthoOutputId;void renderOrthophotoPreview(canvas,outputId).then(()=>synchronizeOrthophotoPreviews(content,outputId,state.orthophotoPreviews[outputId]))})}
+function bindTaskDisclosures(root=content){root.querySelectorAll('[data-task-disclosure]').forEach(disclosure=>disclosure.addEventListener('toggle',()=>{const taskId=disclosure.dataset.taskId,name=disclosure.dataset.taskDisclosure;state.taskDisclosures[taskId]={...(state.taskDisclosures[taskId]||{}),[name]:disclosure.open}}))}
 function reducedMotion(){return window.matchMedia('(prefers-reduced-motion: reduce)').matches}
 function animateOpenedTask(taskId){if(reducedMotion())return;queueMicrotask(()=>{const motion=content.querySelector(`[data-action="toggle-task"][data-id="${CSS.escape(taskId)}"]`)?.closest('.task-panel')?.querySelector('.task-detail-motion');if(!motion)return;const animation=motion.animate([{height:'0px',opacity:0,transform:'translateY(-6px)'},{height:`${motion.scrollHeight}px`,opacity:1,transform:'translateY(0)'}],{duration:220,easing:'cubic-bezier(.2,.8,.2,1)'});animation.onfinish=()=>{motion.style.height='';motion.style.opacity='';motion.style.transform=''}})}
 async function collapseTask(taskId){const motion=content.querySelector(`[data-action="toggle-task"][data-id="${CSS.escape(taskId)}"]`)?.closest('.task-panel')?.querySelector('.task-detail-motion');if(motion&&!reducedMotion())await motion.animate([{height:`${motion.scrollHeight}px`,opacity:1},{height:'0px',opacity:0}],{duration:160,easing:'ease-in'}).finished.catch(()=>undefined);releaseGcpImage(gcpWorkspace(taskId));if(state.expandedTaskId===taskId)state.expandedTaskId=null;syncWorkspaceView('push');render()}
@@ -556,15 +724,16 @@ function globalDiagnosticRun(item){const selected=state.selectedDiagnosticRunId=
 function globalDiagnosticHistory(){if(state.diagnosticRunsError&&!state.diagnosticRuns.length)return`<section class="content-card diagnostic-run-history load-error" role="alert"><p class="eyebrow">Processing run history unavailable</p><h2>Runs could not be loaded</h2><p>${esc(state.diagnosticRunsError)}</p>${button('retry-diagnostic-runs','diagnostics','Try again',true)}</section>`;const projects=new Map();for(const run of state.diagnosticRuns){const projectKey=run.projectId||'unassigned-project',taskKey=run.taskId||'unassigned-task';if(!projects.has(projectKey))projects.set(projectKey,{name:run.projectDisplayName||'Unassigned project',tasks:new Map()});const project=projects.get(projectKey);if(!project.tasks.has(taskKey))project.tasks.set(taskKey,{name:run.taskDisplayName||'Unassigned task',runs:[]});project.tasks.get(taskKey).runs.push(run)}const groups=[...projects.entries()].map(([projectId,project])=>`<section class="diagnostic-project-group" aria-labelledby="diagnostic-project-${esc(projectId)}"><h3 id="diagnostic-project-${esc(projectId)}">${esc(project.name)}</h3>${[...project.tasks.entries()].map(([taskId,task])=>`<section class="diagnostic-task-group" aria-labelledby="diagnostic-task-${esc(taskId)}"><div class="diagnostic-task-heading"><h4 id="diagnostic-task-${esc(taskId)}">${esc(task.name)}</h4><span>${task.runs.length} run${task.runs.length===1?'':'s'}</span></div><div class="data-list">${task.runs.map(globalDiagnosticRun).join('')}</div></section>`).join('')}</section>`).join('');return`<section class="content-card diagnostic-run-history"><div class="section-heading"><div><p class="eyebrow">All projects</p><h2>Processing run history</h2><p>Inspect every retained attempt, failure stage, derivative, and sanitized log without opening each task.</p></div>${button('retry-diagnostic-runs','diagnostics','Refresh')}</div>${state.diagnosticRunsError?`<p class="load-error" role="alert">Older runs could not be loaded: ${esc(state.diagnosticRunsError)}</p>`:''}<div class="diagnostic-run-groups">${groups||(state.diagnosticRunsLoading?empty('Loading processing runs…'):empty('No processing runs have been recorded.'))}</div>${state.diagnosticRunsCursor?`<div class="history-load-more">${button('load-more-diagnostic-runs','diagnostics',state.diagnosticRunsLoading?'Loading…':'Load older runs',false,state.diagnosticRunsLoading?'disabled':'')}</div>`:''}</section>`}
 function diagnostics(){const lifecycle=state.ready?.lifecycle||[],failed=state.failedMutations||[];const failedRows=failed.map(item=>`<div class="manage-row"><div><strong>${esc(item.type)} ${esc(item.entityType)}</strong><small>${esc(item.entityId)}</small><small>${esc(item.errorCode||'lifecycle_failed')}: ${esc(item.errorMessage||'The storage operation requires operator repair.')}</small></div>${badge(item.status)}<div class="row-actions">${can('viewer.storage.purge')?button('retry-storage-mutation',item.id,'Retry'):''}</div></div>`).join('')||empty('No failed storage mutations.');const trashCount=state.storage?.trash?.items?.length||0;return`<div class="metric-grid"><div id="storage-usage-cards" style="display:contents">${storageUsageCards(state.storage?.usage)}</div>${metric('Processing worker',state.ready?.worker?.live?'Live':'Unavailable','Queue and worker health')}${metric('Platform',state.ready?.ok?'Ready':'Attention needed','Aggregated readiness')}</div><div class="diagnostic-grid top-gap">${card('Queue & provider health',`<div class="data-list">${state.providers.map(provider=>`<div class="manage-row"><div><strong>${esc(provider.displayName)}</strong><small>${esc(provider.endpoint)}</small></div>${badge(provider.runtimeHealth||provider.lastHealth||'unknown')}<div></div></div>`).join('')||empty('No providers configured.')} ${lifecycle.map(item=>`<div class="manage-row"><div><strong>${esc(item.status)}</strong><small>Storage lifecycle operations</small></div><strong>${item.count}</strong><div></div></div>`).join('')}</div>`)}${card('Failed storage mutations',`<div class="data-list">${failedRows}</div><p class="form-note">Repair the reported storage conflict before retrying. A failed row keeps processing readiness blocked.</p>`)}${card('Storage trash & recovery',`${state.trashLoadError?`<p class="load-error" role="alert">Recycle Bin load failed: ${esc(state.trashLoadError)}</p>`:`<p class="card-copy">${trashCount} deleted item${trashCount===1?'':'s'} currently remain recoverable.</p>`}${button('open-trash','trash','Open Recycle Bin',true)}`)}</div><div class="top-gap">${globalDiagnosticHistory()}</div>`}
 
-function render(){clearInterval(state.logTimer);renderNav();updateActivityIndicator();document.querySelector('#page-title').textContent=NAV.find(item=>item[0]===state.section)?.[2]||'Dashboard';if(state.taskPage)document.querySelector('#page-title').textContent={gcp:'Ground control points',settings:'Task settings',files:'Task files'}[state.taskPage];content.innerHTML=`<div id="workspace-section">${(state.section==='dashboard'&&state.taskPage?taskWorkspacePage:({dashboard,background,providers,trash,diagnostics}[state.section]||dashboard))()}</div>`;bind();if(state.section==='providers')bindModalActions(content.querySelector('.provider-workspace'));refreshOpenedProvider();bindTaskDisclosures();hydrateOrthophotoPreviews();storageUsagePoll.sync();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000)}}
-function bind(){content.querySelectorAll('[data-section]').forEach(element=>element.onclick=()=>navigateWorkspace({section:element.dataset.section},'push'));content.querySelectorAll('[data-action]').forEach(element=>element.onclick=()=>action(element));const filter=content.querySelector('#project-filter');if(filter)filter.oninput=()=>{state.projectQuery=filter.value;const query=state.projectQuery.trim().toLocaleLowerCase('en-US');content.querySelectorAll('[data-project-name]').forEach(row=>row.hidden=Boolean(query&&!row.dataset.projectName.includes(query)))};const backgroundSearch=content.querySelector('#background-search-form');if(backgroundSearch)backgroundSearch.onsubmit=event=>{event.preventDefault();state.backgroundQuery=backgroundSearch.elements.query.value.trim();state.backgroundImportLimit=3;state.backgroundDerivativeLimit=3;render()};content.querySelectorAll('.gcp-import-form').forEach(form=>form.onsubmit=importGcp);content.querySelectorAll('.gcp-set-select').forEach(select=>select.onchange=()=>changeGcpSet(select.dataset.taskId,select.value));content.querySelectorAll('.gcp-point-select').forEach(select=>select.onchange=()=>changeGcpPoint(select.dataset.taskId,select.value));content.querySelectorAll('.gcp-candidate-form').forEach(form=>{form.elements.mode.onchange=()=>{gcpWorkspace(form.dataset.taskId).mode=form.elements.mode.value;render()};form.onsubmit=event=>refreshGcpCandidates(event)});content.querySelectorAll('.gcp-mark-form').forEach(form=>{form.onsubmit=saveGcpMark;form.oninput=()=>setGcpDraft(form.dataset.taskId,Number(form.elements.pixelX.value),Number(form.elements.pixelY.value))});content.querySelectorAll('.gcp-mark-image').forEach(image=>{image.onload=()=>configureGcpImage(image);image.onclick=event=>markGcpImage(event)})}
+function render(){if(draggedFolderTask)clearTaskDrag();clearInterval(state.logTimer);renderNav();updateActivityIndicator();document.querySelector('#page-title').textContent=NAV.find(item=>item[0]===state.section)?.[2]||'Dashboard';if(state.taskPage)document.querySelector('#page-title').textContent={gcp:'Ground control points',settings:'Task settings',files:'Task files'}[state.taskPage];content.innerHTML=`<div id="workspace-section">${(state.section==='dashboard'&&state.taskPage?taskWorkspacePage:({dashboard,background,providers,trash,diagnostics}[state.section]||dashboard))()}</div>`;bind();if(state.section==='providers')bindModalActions(content.querySelector('.provider-workspace'));refreshOpenedProvider();bindTaskDisclosures();hydrateOrthophotoPreviews();storageUsagePoll.sync();scheduleProjectRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000)}}
+function bindProjectActions(root){root.querySelectorAll('[data-action]').forEach(element=>element.onclick=()=>action(element));}
+function bind(){content.querySelectorAll('[data-section]').forEach(element=>element.onclick=()=>navigateWorkspace({section:element.dataset.section},'push'));bindProjectActions(content);const filter=content.querySelector('#project-filter');if(filter)filter.oninput=()=>{state.projectQuery=filter.value;const query=state.projectQuery.trim().toLocaleLowerCase('en-US');content.querySelectorAll('[data-project-name]').forEach(row=>row.hidden=Boolean(query&&!row.dataset.projectName.includes(query)))};const backgroundSearch=content.querySelector('#background-search-form');if(backgroundSearch)backgroundSearch.onsubmit=event=>{event.preventDefault();state.backgroundQuery=backgroundSearch.elements.query.value.trim();state.backgroundImportLimit=3;state.backgroundDerivativeLimit=3;render()};content.querySelectorAll('.gcp-import-form').forEach(form=>form.onsubmit=importGcp);content.querySelectorAll('.gcp-set-select').forEach(select=>select.onchange=()=>changeGcpSet(select.dataset.taskId,select.value));content.querySelectorAll('.gcp-point-select').forEach(select=>select.onchange=()=>changeGcpPoint(select.dataset.taskId,select.value));content.querySelectorAll('.gcp-candidate-form').forEach(form=>{form.elements.mode.onchange=()=>{gcpWorkspace(form.dataset.taskId).mode=form.elements.mode.value;render()};form.onsubmit=event=>refreshGcpCandidates(event)});content.querySelectorAll('.gcp-mark-form').forEach(form=>{form.onsubmit=saveGcpMark;form.oninput=()=>setGcpDraft(form.dataset.taskId,Number(form.elements.pixelX.value),Number(form.elements.pixelY.value))});content.querySelectorAll('.gcp-mark-image').forEach(image=>{image.onload=()=>configureGcpImage(image);image.onclick=event=>markGcpImage(event)})}
 async function action(element){
   const action=element.dataset.action,id=element.dataset.id,taskId=element.dataset.taskId;
   if(action==='new-project')return newProjectModal();
   if(['task-gcp','task-settings','task-files','task-return'].includes(action)){const task=state.tasks.find(item=>item.id===id);if(!task)return;return navigateWorkspace({section:'dashboard',selectedProjectId:task.projectId,expandedTaskId:task.id,taskPage:({'task-gcp':'gcp','task-settings':'settings','task-files':'files'})[action]||null},'push')}
   if(action==='task-history')return navigateWorkspace({section:'diagnostics'},'push');
-  if(action==='folder-open'){if(!folderState.folders?.some(folder=>folder.id===id))return;folderState.currentId=id;selectedFolderId=id;state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('push');render();return;}
-  if(action==='folder-root'){folderState.currentId=null;selectedFolderId=null;state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('push');render();return;}
+  if(action==='folder-open'){if(!folderState.folders?.some(folder=>folder.id===id))return;projectDataGeneration++;folderState.currentId=id;selectedFolderId=id;state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('push');render();return;}
+  if(action==='folder-root'){projectDataGeneration++;folderState.currentId=null;selectedFolderId=null;state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('push');render();return;}
   if(action==='folder-retry')return loadProjectFolders(id);
   if(action==='folder-create')return createFolderModal(id);
   if(action==='folder-rename')return renameFolderModal(id);
@@ -630,33 +799,42 @@ async function loadDiagnosticRuns(reset=false){if(state.diagnosticRunsLoading)re
 async function loadMoreAttempts(taskId){const detail=state.taskDetails[taskId],cursor=detail?.nextAttemptCursor;if(!cursor||detail.loadingMoreAttempts)return;detail.loadingMoreAttempts=true;render();try{const result=await api(`/api/v1/tasks/${encodeURIComponent(taskId)}/attempts?limit=20&timing=engine&cursor=${encodeURIComponent(cursor)}`),known=new Set(detail.attempts.map(item=>item.id));detail.attempts.push(...(result.attempts||[]).filter(item=>!known.has(item.id)));detail.nextAttemptCursor=result.nextCursor||null}catch(error){toast(`Older runs could not be loaded: ${error.message}`,true)}finally{detail.loadingMoreAttempts=false;if(state.expandedTaskId===taskId)render()}}
 const taskDetailRefreshes=new Set();
 async function refreshTaskDetails(taskId,quiet=false){
-  const task=state.tasks.find(item=>item.id===taskId),attemptId=task?.latestAttempt?.id,previous=state.taskDetails[taskId],authorization=state.token;
+  const task=state.tasks.find(item=>item.id===taskId),attemptId=task?.latestAttempt?.id,previous=state.taskDetails[taskId],authorization=state.token,session=state.adminSession;
+  let generation=projectDataGeneration;
+  const current=()=>state.token===authorization&&state.adminSession===session&&projectDataGeneration===generation&&state.tasks.some(item=>item.id===taskId);
+  const options=quiet?{recoveryGuard:current}:undefined;
   if(!task||taskDetailRefreshes.has(taskId))return;
   taskDetailRefreshes.add(taskId);
   try{
-    const requests=[api(`/api/v1/tasks/${encodeURIComponent(taskId)}`),api(`/api/v1/tasks/${encodeURIComponent(taskId)}/storage?limit=100`),api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-sets`),api(`/api/v1/tasks/${encodeURIComponent(taskId)}/attempts?limit=20&timing=engine`)];
-    if(attemptId)requests.push(api(`/api/v1/attempts/${encodeURIComponent(attemptId)}?logLimit=100`));
+    const requests=[api(`/api/v1/tasks/${encodeURIComponent(taskId)}`,options),api(`/api/v1/tasks/${encodeURIComponent(taskId)}/storage?limit=100`,options),api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-sets`,options),api(`/api/v1/tasks/${encodeURIComponent(taskId)}/attempts?limit=20&timing=engine`,options)];
+    if(attemptId)requests.push(api(`/api/v1/attempts/${encodeURIComponent(attemptId)}?logLimit=100`,options));
     const results=await Promise.allSettled(requests);
-    if(state.token!==authorization||!state.tasks.some(item=>item.id===taskId))return;
-    const refreshedTask=results[0].value?.task||task,freshAttemptId=refreshedTask.latestAttempt?.id;
+    if(!current())return;
+    const returnedTask=results[0].value?.task;
+    const refreshedTask=returnedTask&&((returnedTask.folderRevision??0)>=(task.folderRevision??0))?returnedTask:task,freshAttemptId=refreshedTask.latestAttempt?.id;
     let attemptResult=attemptId&&freshAttemptId===attemptId?results[4]?.value:null,logsError=Boolean(attemptId&&results[4]?.status==='rejected');
     if(freshAttemptId&&freshAttemptId!==attemptId){
-      try{attemptResult=await api(`/api/v1/attempts/${encodeURIComponent(freshAttemptId)}?logLimit=100`);logsError=false}catch{logsError=true}
-      if(state.token!==authorization||!state.tasks.some(item=>item.id===taskId))return;
+      try{attemptResult=await api(`/api/v1/attempts/${encodeURIComponent(freshAttemptId)}?logLimit=100`,options);logsError=false}catch{logsError=true}
+      if(!current())return;
     }
     const attemptPage=results[3].value||{},freshAttempts=attemptPage.attempts||previous?.attempts||[],attempts=quiet&&previous?.attempts?.length>freshAttempts.length?[...freshAttempts,...previous.attempts.filter(item=>!freshAttempts.some(fresh=>fresh.id===item.id))]:freshAttempts,sameAttempt=previous?.attempt?.id===freshAttemptId;
+    if(JSON.stringify(task)!==JSON.stringify(refreshedTask))generation=++projectDataGeneration;
     state.tasks=state.tasks.map(item=>item.id===taskId?refreshedTask:item);
     state.taskDetails[taskId]={task:refreshedTask,storage:results[1].value||previous?.storage||null,gcp:quiet&&previous?.gcp?previous.gcp:(results[2].value||{sets:[]}),attempts,nextAttemptCursor:quiet&&previous?.attempts?.length>freshAttempts.length?previous.nextAttemptCursor:(attemptPage.nextCursor||null),attemptDiagnostics:previous?.attemptDiagnostics||{},selectedAttemptId:previous?.selectedAttemptId||null,attempt:attemptResult?.attempt||refreshedTask.latestAttempt,logs:(attemptResult?.logs||(sameAttempt?previous?.logs:[])||[]).slice(-100),logsError};
+    if(refreshedTask.folderId!==task.folderId&&Array.isArray(folderState.folders)&&
+        folderState.projectId===task.projectId&&state.selectedProjectId===task.projectId)syncSelectedTaskFolder(task.projectId);
     if(!quiet){try{await refreshGcpWorkspace(taskId,false)}catch(error){state.taskDetails[taskId].gcp={...(state.taskDetails[taskId].gcp||{sets:[]}),error:error.message}}}
-    if(state.token!==authorization)return;
+    if(!current())return;
     if(state.expandedTaskId===taskId){
       const panel=quiet?content.querySelector(`[data-task-output="${CSS.escape(taskId)}"]`):null;
-      if(panel&&task.latestAttempt?.status===refreshedTask.latestAttempt?.status&&freshAttemptId===attemptId){
+      if(panel){
         const pre=panel.querySelector('.log-tail'),scrollTop=pre?.scrollTop||0,atEnd=pre?pre.scrollHeight-pre.clientHeight-scrollTop<24:true,focused=document.activeElement===pre,holder=document.createElement('div');
         holder.innerHTML=logPanel(refreshedTask,state.taskDetails[taskId].attempt,state.taskDetails[taskId].logs);
         const replacement=holder.firstElementChild;
         if(replacement){panel.replaceWith(replacement);replacement.querySelectorAll('[data-action]').forEach(element=>element.onclick=()=>action(element));const tail=replacement.querySelector('.log-tail');if(tail){tail.scrollTop=atEnd?tail.scrollHeight:scrollTop;if(focused)tail.focus({preventScroll:true})}}
-      }else if(!quiet||task.latestAttempt?.status!==refreshedTask.latestAttempt?.status||freshAttemptId!==attemptId){render();if(!quiet)document.querySelector(`[data-action="toggle-task"][data-id="${CSS.escape(taskId)}"]`)?.focus()}
+      }
+      if(quiet){projectPaintPending=patchProjectFolderView();}
+      else{render();document.querySelector(`[data-action="toggle-task"][data-id="${CSS.escape(taskId)}"]`)?.focus()}
     }
   }finally{taskDetailRefreshes.delete(taskId)}
 }
@@ -713,19 +891,108 @@ async function deleteFolder(folderId){
   if(state.busy||!current())return;
   await mutateFolder(target.project.id,`/api/v1/projects/${encodeURIComponent(target.project.id)}/folders/${encodeURIComponent(folderId)}`,folderRequestOptions('DELETE',undefined,{}),'Folder deleted',current);
 }
+function canDragFolderTask(task){
+  return task.status!=='archived'&&Array.isArray(folderState.folders)&&folderState.projectId===task.projectId&&
+    Number.isSafeInteger(task.folderRevision)&&state.projects.some(project=>project.id===task.projectId&&project.status==='active')&&
+    folderAuthorizationGuard(task.projectId,'viewer.processing.write')();
+}
+
+function clearFolderUndo(){
+  clearTimeout(folderUndoTimer);
+  folderUndo=null;
+  document.querySelector('#workspace-folder-undo')?.replaceChildren();
+}
+
+function offerFolderUndo(task,previousFolderId,deadline){
+  clearFolderUndo();
+  const target=document.querySelector('#workspace-folder-undo');
+  const remaining=deadline-performance.now();
+  if(!target||remaining<=0)return;
+  const undo={deadline};
+  const control=document.createElement('button');
+  control.type='button';control.className='toast-action';control.textContent='Undo';
+  control.onclick=()=>{
+    if(folderUndo!==undo||performance.now()>=undo.deadline||!canDragFolderTask(task)){clearFolderUndo();return;}
+    if(state.busy)return;
+    clearFolderUndo();
+    void moveFolderTask(task,previousFolderId,{}, {undo:true});
+  };
+  target.replaceChildren(document.createTextNode('Task moved'),control);
+  folderUndo=undo;
+  folderUndoTimer=setTimeout(clearFolderUndo,remaining);
+}
+
+async function moveFolderTask(task,folderId,receipt,{undo=false,originActive=()=>true,onSuccess}={}){
+  if(!canDragFolderTask(task)||folderId===task.folderId)return;
+  const undoDeadline=performance.now()+10_000;
+  const authorized=folderAuthorizationGuard(task.projectId,'viewer.processing.write');
+  const current=()=>authorized()&&originActive()&&state.tasks.some(value=>value.id===task.id&&value.projectId===task.projectId&&value.status!=='archived');
+  const body={folderId,expectedFolderId:task.folderId??null,expectedFolderRevision:task.folderRevision,...(undo?{undo:true}:{})};
+  const result=await mutateFolder(task.projectId,`/api/v1/tasks/${encodeURIComponent(task.id)}/folder`,folderRequestOptions('PATCH',body,receipt),
+    undo?'Task moved back':null,current,({task:updated}={})=>{
+      if(updated?.id!==task.id||updated.projectId!==task.projectId||updated.folderId!==folderId||updated.folderRevision!==task.folderRevision+1){
+        throw Error('Task move could not be confirmed. Check the current folder.');
+      }
+      projectDataGeneration++;
+      state.tasks=state.tasks.map(value=>value.id===updated.id?{...value,...updated}:value);
+      syncSelectedTaskFolder(task.projectId);
+      projectPaintPending=patchProjectFolderView();
+      onSuccess?.();
+      if(!undo)offerFolderUndo(updated,body.expectedFolderId,undoDeadline);
+    },false);
+  // Conflicts and lost responses also require a fresh server read.
+  scheduleProjectRefresh(0);
+  return result;
+}
+
+function clearTaskDrag(){
+  draggedFolderTask=null;
+  content.querySelector('[data-folder-drop-destinations]')?.remove();
+  content.querySelectorAll('.folder-drop-active').forEach(element=>element.classList.remove('folder-drop-active'));
+}
+
+function beginTaskDrag(event){
+  const handle=event.target.closest('[data-folder-drag]');
+  if(!handle)return;
+  const task=state.tasks.find(value=>value.id===handle.dataset.id);
+  const view=content.querySelector('[data-project-folder-view]');
+  if(!task||!view||!event.dataTransfer||!canDragFolderTask(task)){event.preventDefault();return;}
+  clearTaskDrag();
+  draggedFolderTask=task;
+  event.dataTransfer.effectAllowed='move';
+  event.dataTransfer.setData('text/plain','Viewer task');
+  const destinations=document.createElement('div');
+  destinations.dataset.folderDropDestinations='';
+  destinations.className='folder-drop-destinations';
+  const label=document.createElement('strong');label.textContent='Drop task into';destinations.append(label);
+  for(const folder of [{id:null,displayName:'Project root'},...folderState.folders]){
+    if(folder.id===task.folderId)continue;
+    const target=document.createElement('span');
+    target.dataset.taskDropFolder=folder.id||'';
+    target.textContent=folder.id?folderPath(folderState.folders,folder.id).map(item=>item.displayName).join(' / '):folder.displayName;
+    destinations.append(target);
+  }
+  view.append(destinations);
+}
+
+function taskDropTarget(event){
+  const dest=event.target.closest('[data-task-drop-folder]');
+  const task=draggedFolderTask,folderId=dest?.dataset.taskDropFolder||null;
+  return dest&&task&&canDragFolderTask(task)&&task.folderId!==folderId&&
+    (folderId===null||folderState.folders.some(folder=>folder.id===folderId))?dest:null;
+}
+
 function moveTaskFolderModal(taskId){
   const task=state.tasks.find(item=>item.id===taskId),folders=folderState.folders;
-  if(!task||!folders||folderState.projectId!==task.projectId)return;
+  if(!task||!folders||!canDragFolderTask(task))return;
   const authorized=folderAuthorizationGuard(task.projectId,'viewer.processing.write');if(!authorized())return;
   const options=folders.map(folder=>`<option value="${esc(folder.id)}" ${folder.id===task.folderId?'selected':''}>${esc(folderPath(folders,folder.id).map(item=>item.displayName).join(' / '))}</option>`).join('');
   openModal('Move task',`<form id="folder-move-form" class="manage-form"><p>Move ${esc(task.displayName)} within this project.</p><label><span>Destination</span><select name="folderId"><option value="">Project root</option>${options}</select></label><button class="primary-button">Move task</button></form>`);
   const form=modalContent.querySelector('#folder-move-form'),receipt={};
   const current=()=>authorized()&&form.isConnected&&state.tasks.some(value=>value.id===taskId&&value.projectId===task.projectId&&value.status!=='archived')&&state.projects.some(project=>project.id===task.projectId&&project.status==='active');
   form.onsubmit=async event=>{event.preventDefault();if(!current())return;const folderId=event.currentTarget.elements.folderId.value||null;
-    await mutateFolder(task.projectId,`/api/v1/tasks/${encodeURIComponent(taskId)}/folder`,folderRequestOptions('PATCH',{folderId},receipt),'Task moved',current,result=>{
-      if(result?.task?.id!==taskId||result.task.projectId!==task.projectId)throw Error('Task move could not be confirmed. Refresh the project.');
-      state.tasks=state.tasks.map(value=>value.id===taskId?{...value,...result.task}:value);
-      if(state.taskDetails[taskId]?.task)state.taskDetails[taskId].task={...state.taskDetails[taskId].task,...result.task};modal.close();});};
+    if(folderId===task.folderId){modal.close();return;}
+    await moveFolderTask(task,folderId,receipt,{originActive:current,onSuccess:()=>modal.close()});};
 }
 function legacyImportModal(projectId,datasetId){const project=state.projects.find(item=>item.id===(projectId||state.datasets.find(dataset=>dataset.id===datasetId)?.projectId)),drafts=state.datasets.filter(dataset=>dataset.projectId===project?.id&&dataset.status==='draft');openModal(`Import into ${project?.displayName||'project'}`,`<div class="import-choice" role="tablist" aria-label="Import source"><button class="import-tab active" data-import-tab="device">This device</button><button class="import-tab" data-import-tab="server">Server import folder</button></div><section data-import-panel="device"><form id="upload-form" class="manage-form">${select('Draft dataset','datasetId',opts(drafts,'Select a draft'))}<label><span>Artifact role</span><select name="processingRole"><option value="auto">Detect automatically</option><option value="image">Source imagery</option><option value="provider_input">Model / orthophoto / point cloud</option><option value="gcp_source">GCP source</option></select></label>${field('Files','files','required type="file" multiple')}<button class="primary-button">Upload or resume</button><progress id="upload-progress" value="0" max="100"></progress></form><p class="form-note">Browser uploads are limited to 128 files, 64 MB each, and 256 MB total.</p></section><section data-import-panel="server" hidden><form id="server-import-form" class="manage-form"><input type="hidden" name="projectId" value="${esc(project?.id||'')}">${field('Task name','taskDisplayName','required maxlength="240"')}${field('Folder or backup ZIP','sourceRelativePath','required placeholder="incoming/task-folder or task.zip"')}<button class="primary-button">Queue structured task import</button></form><p class="form-note">This immediately queues a durable import from the managed server folder. The worker validates the folder or ZIP, detects supported task artifacts, and creates the task only after validation; there is no preview step.</p></section>`);modalContent.querySelectorAll('[data-import-tab]').forEach(tab=>tab.onclick=()=>{modalContent.querySelectorAll('[data-import-tab]').forEach(item=>item.classList.toggle('active',item===tab));modalContent.querySelectorAll('[data-import-panel]').forEach(panel=>panel.hidden=panel.dataset.importPanel!==tab.dataset.importTab)});const upload=modalContent.querySelector('#upload-form');if(datasetId)upload.elements.datasetId.value=datasetId;upload.onsubmit=event=>{event.preventDefault();uploadFiles(upload)};modalContent.querySelector('#server-import-form').onsubmit=event=>{event.preventDefault();modal.close();mutate('/api/v1/processing/server-task-imports',{method:'POST',body:values(event.currentTarget),headers:{'Idempotency-Key':crypto.randomUUID()}},'Server-folder import queued')}}
 async function renderServerImportBrowser(path=''){
@@ -1138,14 +1405,42 @@ async function digest(buffer){return[...new Uint8Array(await crypto.subtle.diges
 function uploadFiles(form){return navigationWork.trackLegacyUpload(form.elements.files.files.length,()=>performLegacyUpload(form));}
 async function performLegacyUpload(form){const files=[...form.elements.files.files],datasetId=form.elements.datasetId.value,role=form.elements.processingRole.value,total=files.reduce((sum,file)=>sum+file.size,0),progress=form.querySelector('progress');if(!files.length||files.length>128||files.some(file=>file.size>64*1024**2)||total>256*1024**2)return toast('Browser upload limit exceeded (128 files, 64 MB each, 256 MB total); use the server import folder for larger artifacts',true);state.busy=true;try{let preparedCount=0;const prepared=[];for(let index=0;index<files.length;index++){const buffer=await files[index].arrayBuffer();prepared.push({file:files[index],spec:{id:`file-${index}`,relativePath:files[index].webkitRelativePath||files[index].name,byteSize:files[index].size,sha256:await digest(buffer),contentType:files[index].type||'application/octet-stream',processingRole:role}});progress.value=Math.round(++preparedCount/files.length*15)}const created=await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}/uploads`,{method:'POST',body:{files:prepared.map(item=>item.spec)}}),upload=created.upload,token=created.uploadToken;sessionStorage.setItem('ltds-viewer-upload',JSON.stringify({datasetId,uploadId:upload.id,manifest:prepared.map(item=>item.spec)}));let sent=0;for(const item of prepared){const remote=upload.files.find(file=>file.id===item.spec.id),missing=new Set(remote.missingChunks);for(let index=0;index<remote.chunkCount;index++){const start=index*upload.chunkSize,end=Math.min(start+upload.chunkSize,item.file.size);if(missing.has(index)){const chunk=await item.file.slice(start,end).arrayBuffer(),response=await workspaceFetch(`/api/v1/admin/uploads/${encodeURIComponent(upload.id)}/files/${encodeURIComponent(item.spec.id)}/chunks/${index}`,{method:'PUT',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/octet-stream','X-Upload-Token':token,'X-Chunk-SHA256':await digest(chunk)},body:chunk});if(!response.ok)throw Error(`Chunk upload failed (${response.status})`)}sent+=end-start;progress.value=15+Math.round(sent/Math.max(total,1)*80)}}await api(`/api/v1/admin/uploads/${encodeURIComponent(upload.id)}/finalize`,{method:'POST',body:{uploadToken:token}});sessionStorage.removeItem('ltds-viewer-upload');progress.value=100;modal.close();toast('Upload finalized; processing will index the dataset');await load()}catch(error){toast(`${error.message}. Reselect the same files to resume.`,true)}finally{state.busy=false}}
 
-async function pagedApi(path,key){const items=[],seen=new Set();let cursor=null;do{const separator=path.includes('?')?'&':'?',page=await api(`${path}${separator}limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);items.push(...(page[key]||[]));cursor=page.nextCursor||null;if(cursor&&seen.has(cursor))throw Error(`Pagination cursor repeated for ${key}`);if(cursor)seen.add(cursor)}while(cursor);return{[key]:items}}
+async function pagedApi(path,key,options){const items=[],seen=new Set();let cursor=null;do{const separator=path.includes('?')?'&':'?',page=await api(`${path}${separator}limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`,options);items.push(...(page[key]||[]));cursor=page.nextCursor||null;if(cursor&&seen.has(cursor))throw Error(`Pagination cursor repeated for ${key}`);if(cursor)seen.add(cursor)}while(cursor);return{[key]:items}}
 async function pagedStorage(){let first=null,cursor=null;const items=[],seen=new Set();do{const page=await api(`/api/v1/storage?limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);if(!first)first=page;items.push(...(page.trash?.items||[]));cursor=page.trash?.nextCursor||null;if(cursor&&seen.has(cursor))throw Error('Pagination cursor repeated for trash');if(cursor)seen.add(cursor)}while(cursor);return{...(first||{}),trash:{...(first?.trash||{}),items,nextCursor:null}}}
 async function refreshTrash(){state.trashLoadError=null;render();try{state.storage=await pagedStorage()}catch(error){state.trashLoadError=error.message}render()}
-async function load(){const previousStorage=state.storage,requests=[pagedApi('/api/v1/projects','projects'),pagedApi('/api/v1/datasets','datasets'),pagedApi('/api/v1/tasks','tasks'),api('/api/v1/processing/providers?limit=100'),api('/api/v1/processing/presets'),pagedApi('/api/v1/processing/outputs','outputs'),pagedStorage(),can('viewer.storage.purge')?pagedApi('/api/v1/storage/mutations?status=failed','mutations'):Promise.resolve({mutations:[]}),api('/api/v1/processing/ready'),api('/api/v1/workspace/client-grants'),pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives'),api('/api/v1/diagnostics/runs?limit=20')],results=await Promise.allSettled(requests);if(!state.token)return access();[state.projects,state.datasets,state.tasks,state.providers,state.presets,state.outputs,state.failedMutations,state.ready,state.clientAccess,state.operations,state.derivativeJobs]=[results[0].value?.projects||[],results[1].value?.datasets||[],results[2].value?.tasks||[],results[3].value?.providers||[],results[4].value?.presets||[],results[5].value?.outputs||[],results[7].value?.mutations||[],results[8].value||null,results[9].value||null,results[10].value?.operations||[],results[11].value?.derivatives||[]];if(results[6].status==='fulfilled'){state.storage=results[6].value;state.trashLoadError=null}else{state.storage=previousStorage;state.trashLoadError=results[6].reason?.message||'Storage service unavailable'}if(results[12].status==='fulfilled'){state.diagnosticRuns=results[12].value?.runs||[];state.diagnosticRunsCursor=results[12].value?.nextCursor||null;state.diagnosticRunsError=null}else{state.diagnosticRunsError=results[12].reason?.message||'Processing run history is unavailable'}validateWorkspaceView();syncWorkspaceView('replace');const published=state.outputs.filter(output=>output.activePublished),shareResults=await Promise.allSettled(published.map(output=>api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)));state.shares=Object.fromEntries(published.map((output,index)=>[output.id,shareResults[index].value?.shares||[]]));const okay=state.ready?.ok===true;setWorkspaceHealth({dot:document.querySelector('#nav-health-dot'),label:document.querySelector('#nav-health-label'),foot:document.querySelector('.workspace-nav-foot')},okay);render();hydrateExpandedTask();scheduleOperationRefresh()}
+async function load(){const generation=++projectDataGeneration, token=state.token, session=state.adminSession;
+  workspaceLoads++;
+  const current=()=>generation===projectDataGeneration&&token===state.token&&session===state.adminSession;
+  try{const previousStorage=state.storage,requests=[pagedApi('/api/v1/projects','projects'),pagedApi('/api/v1/datasets','datasets'),pagedApi('/api/v1/tasks','tasks'),api('/api/v1/processing/providers?limit=100'),api('/api/v1/processing/presets'),pagedApi('/api/v1/processing/outputs','outputs'),pagedStorage(),can('viewer.storage.purge')?pagedApi('/api/v1/storage/mutations?status=failed','mutations'):Promise.resolve({mutations:[]}),api('/api/v1/processing/ready'),api('/api/v1/workspace/client-grants'),pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives'),api('/api/v1/diagnostics/runs?limit=20')],results=await Promise.allSettled(requests);if(!current())return;if(!state.token)return access();[state.projects,state.datasets,state.tasks,state.providers,state.presets,state.outputs,state.failedMutations,state.ready,state.clientAccess,state.operations,state.derivativeJobs]=[results[0].value?.projects||[],results[1].value?.datasets||[],results[2].value?.tasks||[],results[3].value?.providers||[],results[4].value?.presets||[],results[5].value?.outputs||[],results[7].value?.mutations||[],results[8].value||null,results[9].value||null,results[10].value?.operations||[],results[11].value?.derivatives||[]];if(results[6].status==='fulfilled'){state.storage=results[6].value;state.trashLoadError=null}else{state.storage=previousStorage;state.trashLoadError=results[6].reason?.message||'Storage service unavailable'}if(results[12].status==='fulfilled'){state.diagnosticRuns=results[12].value?.runs||[];state.diagnosticRunsCursor=results[12].value?.nextCursor||null;state.diagnosticRunsError=null}else{state.diagnosticRunsError=results[12].reason?.message||'Processing run history is unavailable'}validateWorkspaceView();syncWorkspaceView('replace');const published=state.outputs.filter(output=>output.activePublished),shareResults=await Promise.allSettled(published.map(output=>api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)));if(!current())return;state.shares=Object.fromEntries(published.map((output,index)=>[output.id,shareResults[index].value?.shares||[]]));const okay=state.ready?.ok===true;setWorkspaceHealth({dot:document.querySelector('#nav-health-dot'),label:document.querySelector('#nav-health-label'),foot:document.querySelector('.workspace-nav-foot')},okay);render();hydrateExpandedTask();scheduleOperationRefresh()}finally{workspaceLoads--;scheduleProjectRefresh();}
+}
 function access(){content.innerHTML='<div class="auth-state"><div><p class="eyebrow">Secure workspace</p><h2>Open Viewer from LTDS Operations</h2><p>This workspace reuses your Operations identity and has no separate login.</p></div></div>'}
 
 async function submitServerImport(form){if(state.busy)return;const submit=form.querySelector('button[type="submit"]'),browser=modalContent.querySelector('#server-import-browser');const endpoint=form.elements.sourceRelativePath.dataset.sourceKind==='zip'?'/api/v1/processing/webodm-task-imports':'/api/v1/processing/server-task-imports';state.busy=true;submit.disabled=true;submit.textContent='Starting import…';try{const result=await api(endpoint,{method:'POST',body:values(form),headers:{'Idempotency-Key':crypto.randomUUID()}});rememberOperation(result.operation);modal.close();toast('Import queued; progress will continue in Background work');scheduleOperationRefresh(500)}catch(error){browser.innerHTML=`<div class="empty-state">${esc(error.message)}</div>`;submit.disabled=false;submit.textContent='Try again';toast(error.message,true)}finally{state.busy=false}}
 modalContent.addEventListener('submit',event=>{const form=event.target;if(form?.id!=='server-import-form')return;event.preventDefault();event.stopImmediatePropagation();submitServerImport(form)},true);
+
+document.addEventListener('visibilitychange',()=>scheduleProjectRefresh(0));
+content.addEventListener('dragstart',beginTaskDrag);
+content.addEventListener('dragover',event=>{
+  if(!draggedFolderTask)return;
+  const target=taskDropTarget(event);
+  content.querySelectorAll('.folder-drop-active').forEach(element=>{if(element!==target)element.classList.remove('folder-drop-active');});
+  if(!target)return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect='move';
+  target.classList.add('folder-drop-active');
+});
+content.addEventListener('drop',event=>{
+  const target=taskDropTarget(event),task=draggedFolderTask;
+  if(!target)return;
+  event.preventDefault();
+  clearTaskDrag();
+  void moveFolderTask(task,target.dataset.taskDropFolder||null,{});
+});
+content.addEventListener('dragend',()=>{
+  if(!draggedFolderTask)return;
+  clearTaskDrag();
+  if(projectPaintPending)projectPaintPending=patchProjectFolderView();
+});
 
 installWorkspaceSidebar({shell,toggle:document.querySelector('#nav-toggle'),collapseButton:document.querySelector('#nav-collapse'),container:document.querySelector('#workspace-navigation'),rerender:renderNav});
 document.querySelector('#background-work-button').onclick=()=>navigateWorkspace({section:'background'},'push');
