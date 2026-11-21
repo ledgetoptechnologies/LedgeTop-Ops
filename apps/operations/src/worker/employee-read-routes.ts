@@ -35,6 +35,16 @@ function selection(url: string, operation: "list" | "manifest"): EmployeeReadSel
   if (cursor !== null && !/^[A-Za-z0-9._-]{1,8192}$/u.test(cursor)) fail(400, "employee_read_cursor");
   return { operation, path, cursor, snapshotId: null, expectedSha256: null, range: null };
 }
+/** Staff policy for the Windows Files app. Grants nothing itself: every listed root is re-authorized per request. */
+export function employeeFilesStaffPolicy(roots: readonly Readonly<{ rootId: string; displayName: string }>[], verifiedUntil: string) {
+  return {
+    schemaVersion: 1 as const, role: "staff" as const,
+    roots: roots.map(root => ({ id: root.rootId, name: root.displayName, backend: "nas" as const, rights: ["read"] as const,
+      listPath: `${BASE}/roots/${root.rootId}/entries` })),
+    providerEnabled: false, hydrationEnabled: false, minimumAppVersion: "0.0.0",
+    sessionExpiresAt: new Date(Date.parse(verifiedUntil)).toISOString(),
+  };
+}
 export function employeeWindowsFileName(path: string): string {
   let name = (path.split("/").at(-1) ?? "").replace(/[\p{Cc}<>:"/\\|?*]/gu, "_").trim();
   const truncate = (value: string) => { let output = ""; for (const c of value) { if (output.length + c.length > 150) break; output += c; } return output; };
@@ -110,6 +120,14 @@ export function createEmployeeReadRouter(configuration: ReadConfiguration, depen
     const roots = await listEmployeeReadRoots(database, c.get("employee"));
     if (roots === null) return fail(403, "employee_read_denied");
     return c.json({ schemaVersion: 1, roots: roots.filter(root => root.gatewayId === config!.gateway.gatewayId) });
+  });
+  // The Windows Files staff policy: the same v1 shape as the client policy (PR 649), role "staff". Every existing
+  // grant is read-only; write rights arrive with the staff write slice and only for exclusive roots.
+  router.get("/policy", async c => {
+    query(c.req.url, []);
+    const auth = c.get("employee"), roots = await listEmployeeReadRoots(database, auth);
+    if (roots === null) return fail(403, "employee_read_denied");
+    return c.json(employeeFilesStaffPolicy(roots.filter(root => root.gatewayId === config!.gateway.gatewayId), auth.verifiedUntil));
   });
   router.get("/roots/:rootId/entries", async c => {
     const selected = selection(c.req.url, "list"), proof = await current(c.get("employee"), c.req.param("rootId"));

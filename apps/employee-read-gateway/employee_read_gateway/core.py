@@ -173,6 +173,8 @@ class ReplayStore:
             db.close()
 
     def claim(self, key_id, nonce, expiry, now):
+        if type(expiry) is not int or not isinstance(now, (int, float)) or expiry <= now:
+            raise Denied("expired", 401)  # an already-expired authorization is never admitted
         try:
             with self.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
