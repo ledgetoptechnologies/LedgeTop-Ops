@@ -33,6 +33,58 @@ async function openSubmission(page: Page, name: string) {
   await expect(page.getByRole("heading", { name: `Review ${name}` })).toBeVisible();
 }
 
+test("Client Hub keeps navigation behind the onboarding dialog and protects an in-flight create", async ({ page }) => {
+  await render(page, "delayed-create", "?dialog=1");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "Onboard client" });
+  await expect(dialog).toBeVisible();
+  await chooseScope(page);
+  await dialog.getByRole("button", { name: "Create invitation" }).click();
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  await expect(dialog.getByText(/Invitation created/)).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await expect(page.getByRole("heading", { name: "Client Hub" })).toBeVisible();
+});
+
+test("closing and reopening keeps an uncertain result instead of creating a second invitation", async ({ page }) => {
+  await render(page, "uncertain", "?dialog=1");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  await expect(page.getByRole("link", { name: "Review submissions" })).toHaveAttribute("href", "/administration/client-onboarding");
+  await trigger.click();
+  await chooseScope(page);
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await page.getByRole("button", { name: "Create one-time link" }).click();
+  await expect(page.getByText(/link result isn't confirmed/i)).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
+  await trigger.click();
+  await expect(page.getByText(/link result isn't confirmed/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
+  expect(await bodies(page, "create")).toHaveLength(1);
+  expect(await bodies(page, "reveal")).toHaveLength(1);
+});
+
+test("closing and reopening preserves an uncopied one-time link in memory", async ({ page }) => {
+  await render(page, "success", "?dialog=1");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  await trigger.click();
+  await chooseScope(page);
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await page.getByRole("button", { name: "Create one-time link" }).click();
+  await expect(page.getByRole("button", { name: "Copy link" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
+  await trigger.click();
+  await page.getByRole("button", { name: "Copy link" }).click();
+  expect(await page.evaluate(() => (window as Window & { copied?: string[] }).copied?.length)).toBe(1);
+  expect(await bodies(page, "create")).toHaveLength(1);
+  expect(await bodies(page, "reveal")).toHaveLength(1);
+});
+
 test("capability remains hidden when the dedicated administrator session is disabled", async ({ page }) => {
   await render(page, "disabled");
   await expect(page.getByRole("heading", { name: "Client onboarding unavailable" })).toBeVisible();

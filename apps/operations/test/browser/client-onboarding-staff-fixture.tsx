@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import "@ltds/ui/styles.css";
 import "../../src/client/styles.css";
 import { ClientOnboardingStaff } from "../../src/client/ClientOnboardingStaff";
+import { OnboardClientButton } from "../../src/client/OnboardClientButton";
 
 type Call = { path: string; body: unknown };
 const calls: Call[] = [];
@@ -109,7 +110,10 @@ window.fetch = async (input, init) => {
   if (route === "approve-shared-company") { approved = true; return Response.json({ decisionId: body.planId, planId: body.planId, outcome: "approved",
     invitationId, submissionId: body.submissionId, clientRecordId: "55555555-5555-4555-8555-555555555555", clientRecordVersion: 1,
     organizationRecordId: "org:ltds", organizationRecordVersion: 6, relationshipVersion: 1, replayed: false, members: [], portalActivation: "pending" }); }
-  if (route === "create") return Response.json({ invitationId, expiresAt: body.expiresAt, requestSha256: "c".repeat(64), state: "pending" });
+  if (route === "create") {
+    if (mode === "delayed-create") await held();
+    return Response.json({ invitationId, expiresAt: body.expiresAt, requestSha256: "c".repeat(64), state: "pending" });
+  }
   if (route === "reveal") {
     if (mode === "uncertain") return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     return Response.json({ commandId: body.commandId, invitationId, expiresAt: "2099-01-01T00:00:00.000Z", invitationSecret: "d".repeat(64),
@@ -118,4 +122,5 @@ window.fetch = async (input, init) => {
   return Response.json({ error: "not_found" }, { status: 404 });
 };
 
-createRoot(document.getElementById("root")!).render(<ClientOnboardingStaff />);
+createRoot(document.getElementById("root")!).render(location.search === "?dialog=1"
+  ? <main><h1>Client Hub</h1><OnboardClientButton /></main> : <ClientOnboardingStaff />);

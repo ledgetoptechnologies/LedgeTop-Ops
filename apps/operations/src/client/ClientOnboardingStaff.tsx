@@ -57,7 +57,7 @@ export function safeRecipientLink(value: unknown, invitationId: string): string 
       && url.pathname === `/onboarding/${invitationId}` && /^#[0-9a-f]{64}$/.test(url.hash) ? url.href : null;
   } catch { return null; }
 }
-export function ClientOnboardingStaff() {
+export function ClientOnboardingStaff({ embedded = false, onBusyChange }: { embedded?: boolean; onBusyChange?: (busy: boolean) => void } = {}) {
   // One stable session object: a refresh rotates the token in place, so open reviews,
   // inbox pages and in-flight retries are not reloaded or remounted.
   const sessionRef = useRef<StaffSession | null>(null);
@@ -117,8 +117,10 @@ export function ClientOnboardingStaff() {
   const lost = useCallback(() => close("Your onboarding access changed. Reload the page to continue."), [close]);
 
   const session = sessionRef.current;
-  if (accessError) return <main className="onboarding-staff-gate"><Card><h1>Client onboarding unavailable</h1><p role="alert">{accessError}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
-  if (!session || !verifiedUntil) return <main className="onboarding-staff-gate"><Loading /></main>;
+  if (accessError) return embedded ? <Card><h2>Client onboarding unavailable</h2><p role="alert">{accessError}</p></Card>
+    : <main className="onboarding-staff-gate"><Card><h1>Client onboarding unavailable</h1><p role="alert">{accessError}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
+  if (!session || !verifiedUntil) return embedded ? <Loading /> : <main className="onboarding-staff-gate"><Loading /></main>;
+  if (embedded) return <><p role="status">Existing-client selection and email delivery are not available here yet. Copy a generated link to send it securely.</p><ClientOnboardingIssuer session={session} onRefused={refused} onBusyChange={onBusyChange} /></>;
   return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" /><a href="/">Exit onboarding</a></header><main>
     <div className="onboarding-staff-heading"><p className="eyebrow">Client onboarding</p><h1>Client onboarding</h1>
       <p>Invite a client to fill in their profile, then review what they submit and choose which Ledge Top businesses they belong to.</p></div>
@@ -127,7 +129,7 @@ export function ClientOnboardingStaff() {
   </main></div>;
 }
 
-export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffSession; onRefused: (caught: unknown) => void }) {
+export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { session: StaffSession; onRefused: (caught: unknown) => void; onBusyChange?: (busy: boolean) => void }) {
   const [commandId] = useState(uuid);
   const [expiresAt, setExpiresAt] = useState(defaultExpiry);
   const [choices, setChoices] = useState<ScopeChoice[] | null | "unavailable">(null);
@@ -166,7 +168,7 @@ export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffS
       : !complete ? "Choose a business area and division for every row, without repeating one." : "";
     setError(invalid);
     if (invalid) return;
-    setBusy("create");
+    onBusyChange?.(true); setBusy("create");
     try {
       const value = await post(session, "create", { commandId, expiresAt: parsedExpiry.toISOString(), targetClientRecordId: null,
         scopes: rows.map(row => ({ businessAreaId: row.businessAreaId, divisionId: row.divisionId === "" ? null : row.divisionId })) });
@@ -175,11 +177,11 @@ export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffS
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("create");
       else { setError("The invitation was refused. Check your permissions and the details, then try again."); onRefused(caught); }
-    } finally { setBusy(null); }
+    } finally { setBusy(null); onBusyChange?.(false); }
   };
   const reveal = async () => {
     if (!created || busy || revealed || uncertain || revealAttempted.current) return;
-    revealAttempted.current = true; setBusy("reveal"); setError("");
+    revealAttempted.current = true; onBusyChange?.(true); setBusy("reveal"); setError("");
     try {
       const value = await post(session, "reveal", { commandId });
       if (!record(value) || value.commandId !== commandId || value.invitationId !== created.invitationId
@@ -190,7 +192,7 @@ export function ClientOnboardingIssuer({ session, onRefused }: { session: StaffS
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("reveal");
       else { setError("The link couldn't be created. It won't be attempted again from this page."); onRefused(caught); }
-    } finally { setBusy(null); }
+    } finally { setBusy(null); onBusyChange?.(false); }
   };
   const copyLink = async () => {
     if (!revealed) return;
