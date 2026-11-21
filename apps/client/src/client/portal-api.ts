@@ -687,12 +687,47 @@ export async function suspendPortalWorkspaceMember(workspaceId: string, identity
   await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(identityId)}`, { method: "DELETE", ...(signal ? {signal} : {}) });
 }
 
+/** Upper bound on pages one share or target load follows (100 rows each);
+ * matches the server's per-walk cursor bound. */
+export const DELEGATED_SHARE_LIST_PAGE_LIMIT = 50;
+
+async function loadAllDelegatedSharePages<K extends "targets" | "shares", T>(
+  path: string, key: K, request: PortalRequest,
+): Promise<T[]> {
+  // A walk expires 15 minutes after its first page (HTTP 410); restart it once from page one.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const items: T[] = [];
+    let cursor: string | null = null, expired = false;
+    for (let page = 0; page < DELEGATED_SHARE_LIST_PAGE_LIMIT; page++) {
+      const query: string = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+      let body: { nextCursor?: string | null } & Record<K, T[]>;
+      try {
+        body = await request<{ nextCursor?: string | null } & Record<K, T[]>>(`${path}${query}`);
+      } catch (error) {
+        if (cursor && attempt === 0 && (error as { status?: unknown })?.status === 410) { expired = true; break; }
+        throw error;
+      }
+      items.push(...body[key]);
+      cursor = typeof body.nextCursor === "string" && body.nextCursor ? body.nextCursor : null;
+      if (!cursor) return items;
+    }
+    if (!expired) throw new Error("This workspace has too many shares to list here. Contact support.");
+  }
+  throw new Error("The share list expired while loading. Try again.");
+}
+
 export async function loadPortalDelegatedShareTargets(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShareTarget[]> {
-  return (await request<{ targets: PortalDelegatedShareTarget[] }>(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-share-targets`)).targets;
+  // The server pages by immutable ids; display order (label, then ids) is applied after the full walk.
+  const targets = await loadAllDelegatedSharePages<"targets", PortalDelegatedShareTarget>(
+    `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-share-targets`, "targets", request);
+  const order = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return targets.sort((a, b) => order(a.displayName.toLowerCase(), b.displayName.toLowerCase())
+    || order(a.folderTargetId, b.folderTargetId) || order(a.delegationId, b.delegationId));
 }
 
 export async function loadPortalDelegatedShares(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShare[]> {
-  return (await request<{ shares: PortalDelegatedShare[] }>(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-shares`)).shares;
+  return loadAllDelegatedSharePages<"shares", PortalDelegatedShare>(
+    `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-shares`, "shares", request);
 }
 
 export async function createPortalDelegatedShare(
