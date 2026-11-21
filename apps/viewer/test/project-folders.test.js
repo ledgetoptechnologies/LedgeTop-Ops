@@ -64,12 +64,15 @@ test('guarded moves reject ABA and Undo is actor-scoped, single-use and expires'
   assert.equal(task.folderRevision,0);
   const moved=p.moveTaskToFolder(task.id,folder.id,'a',guard(null,0));
   assert.equal(moved.folderRevision,1);
+  const audit=db.prepare("SELECT created_at FROM audit_events WHERE action='processing_task.folder_changed' AND entity_id=?").get(task.id);
+  assert.equal(Date.parse(moved.undoExpiresAt)-Date.parse(audit.created_at),10_000);
+  assert.equal(p.getTask(task.id).undoExpiresAt,undefined);
   assert.throws(()=>p.moveTaskToFolder(task.id,null,'b',guard(folder.id,1,true)),{code:'folder_undo_conflict'});
   const restored=p.moveTaskToFolder(task.id,null,'a',guard(folder.id,1,true));
   assert.equal(restored.folderRevision,2);assert.equal(restored.folderId,null);
   assert.throws(()=>p.moveTaskToFolder(task.id,folder.id,'a',guard(null,0)),{code:'folder_conflict'});
   assert.throws(()=>p.moveTaskToFolder(task.id,folder.id,'a',guard(null,2,true)),{code:'folder_undo_conflict'});
-  // An older caller advances the same revision and cannot bypass the conflict fence.
+  // Direct fixture setup advances the same revision, preventing replay of an older guarded move.
   assert.equal(p.moveTaskToFolder(task.id,folder.id,'a').folderRevision,3);
   assert.throws(()=>p.moveTaskToFolder(task.id,null,'a',guard(folder.id,1,true)),{code:'folder_conflict'});
   db.prepare("UPDATE audit_events SET created_at='2000-01-01T00:00:00.000Z' WHERE rowid=(SELECT MAX(rowid) FROM audit_events)").run();
@@ -115,10 +118,15 @@ test('folder API requires permissions and moves only within the original project
   assert.equal((await call(endpoint,'POST',{displayName:'Client'},readOnly)).status,403);
   const created=await call(endpoint,'POST',{displayName:'Client',parentId:null});assert.equal(created.status,201);const folder=(await created.json()).folder;
   const list=await call(endpoint,'GET',undefined,readOnly);assert.deepEqual((await list.json()).folders,[folder]);
-  assert.equal((await call(`/api/v1/tasks/${task.id}/folder`,'PATCH',{folderId:outside.id})).status,400);
-  assert.equal((await call(`/api/v1/tasks/${task.id}/folder`,'PATCH',{folderId:folder.id},readOnly)).status,403);
-  const moved=await call(`/api/v1/tasks/${task.id}/folder`,'PATCH',{folderId:folder.id});assert.equal(moved.status,200);assert.equal((await moved.json()).task.folderId,folder.id);
   const moveUrl=`/api/v1/tasks/${task.id}/folder`;
+  const initialGuard={expectedFolderId:null,expectedFolderRevision:0};
+  assert.equal((await call(moveUrl,'PATCH',{folderId:outside.id,...initialGuard})).status,400);
+  assert.equal((await call(moveUrl,'PATCH',{folderId:folder.id,...initialGuard},readOnly)).status,403);
+  const moved=await call(moveUrl,'PATCH',{folderId:folder.id,...initialGuard});assert.equal(moved.status,200);
+  const moveResult=await moved.json();assert.equal(moveResult.task.folderId,folder.id);assert.ok(Date.parse(moveResult.undoExpiresAt)>Date.now());
+  assert.equal((await call(moveUrl,'PATCH',{folderId:null})).status,400,'unguarded legacy request must not overwrite the guarded move');
+  assert.equal(processing.getTask(task.id).folderId,folder.id);
+  assert.equal(processing.getTask(task.id).folderRevision,1);
   assert.equal((await call(moveUrl,'PATCH',{folderId:null,expectedFolderRevision:1})).status,400);
   assert.equal((await call(moveUrl,'PATCH',{folderId:null,expectedFolderId:folder.id,expectedFolderRevision:1},readOnly)).status,403);
   const stale=await call(moveUrl,'PATCH',{folderId:null,expectedFolderId:folder.id,expectedFolderRevision:0});
@@ -131,7 +139,8 @@ test('folder API requires permissions and moves only within the original project
   assert.equal((await call(folderUrl,'DELETE',undefined,readOnly)).status,403);
   assert.equal((await call(folderUrl,'DELETE')).status,409);
   const renamed=await call(folderUrl,'PATCH',{displayName:'Renamed'});assert.equal(renamed.status,200);assert.equal((await renamed.json()).folder.displayName,'Renamed');
-  assert.equal((await call(`/api/v1/tasks/${task.id}/folder`,'PATCH',{folderId:null})).status,200);
+  const undone=await call(moveUrl,'PATCH',{folderId:null,expectedFolderId:folder.id,expectedFolderRevision:1,undo:true});
+  assert.equal(undone.status,200);assert.equal((await undone.json()).undoExpiresAt,undefined);
   assert.equal((await call(folderUrl,'DELETE')).status,200);
   assert.equal(processing.getTask(task.id).datasetId,source.id);
 });

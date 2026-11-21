@@ -515,15 +515,17 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.post('/api/v1/task-submissions',authorize('viewer.processing.write'),mutate,(req,res)=>{const b=req.body||{};if(!onlyKeys(b,['submissionId','projectId','datasetId','taskDisplayName','providerId','presetId','options'])||typeof b.submissionId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(b.submissionId)||typeof b.taskDisplayName!=='string'||!b.taskDisplayName.trim()||b.taskDisplayName.length>240)return error(res,400,'invalid_submission');const project=processing.getProject(b.projectId),dataset=processing.getDataset(b.datasetId);if(!project||project.status!=='active'||!dataset||dataset.projectId!==project.id)return error(res,400,'invalid_project_or_dataset');const checked=validatedAttemptInput(null,b,b.datasetId);if(checked.error)return error(res,checked.status,checked.error,checked.message||checked.error);try{const result=processing.createTaskSubmission({subject:req.actorId,submissionId:b.submissionId,requestHash:sha256Hex(req.rawBody||Buffer.from(JSON.stringify(b))),projectId:b.projectId,datasetId:b.datasetId,taskDisplayName:b.taskDisplayName.trim(),providerId:checked.value.provider.id,presetId:checked.value.preset?.id,options:checked.value.options,capabilityFingerprint:checked.value.provider.capabilityFingerprint});if(result.conflict)return error(res,409,'submission_conflict');return res.status(result.replayed?200:201).json(result);}catch(e){return error(res,409,e.code||'submission_not_created');}});
   router.get('/api/v1/tasks/:id',authorize('viewer.processing.read'),(req,res)=>{const t=processing.getTask(req.params.id);return t?res.json({task:workspaceTask(t)}):error(res,404,'task_not_found');});
   router.patch('/api/v1/tasks/:id/folder',authorize('viewer.processing.write'),mutate,(req,res)=>{
-    const b=req.body||{},guarded=Object.hasOwn(b,'expectedFolderId')||Object.hasOwn(b,'expectedFolderRevision')||Object.hasOwn(b,'undo');
+    const b=req.body||{};
     if(!onlyKeys(b,['folderId','expectedFolderId','expectedFolderRevision','undo'])||!Object.hasOwn(b,'folderId')||
-      (guarded&&((b.expectedFolderId!==null&&typeof b.expectedFolderId!=='string')||
-        !Number.isSafeInteger(b.expectedFolderRevision)||b.expectedFolderRevision<0||(Object.hasOwn(b,'undo')&&b.undo!==true)))){
+       (b.expectedFolderId!==null&&typeof b.expectedFolderId!=='string')||!Number.isSafeInteger(b.expectedFolderRevision)||
+       b.expectedFolderRevision<0||(Object.hasOwn(b,'undo')&&b.undo!==true)){
       return error(res,400,'invalid_folder');
     }
     try{
-      const task=processing.moveTaskToFolder(req.params.id,b.folderId,req.actorId,guarded?b:null);
-      return task?res.json({task}):error(res,404,'task_not_found');
+      const result=processing.moveTaskToFolder(req.params.id,b.folderId,req.actorId,b);
+      if(!result)return error(res,404,'task_not_found');
+      const {undoExpiresAt,...task}=result;
+      return res.json({task,...(undoExpiresAt?{undoExpiresAt}:{})});
     }catch(e){
       const conflict=e.code==='folder_conflict'||e.code==='folder_undo_conflict';
       return error(res,conflict?409:400,e.code||'invalid_folder',conflict?e.message:undefined);
