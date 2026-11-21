@@ -17,7 +17,7 @@ const roster = [
 const csrf = "c".repeat(43);
 type Entry = { permission: string; state: string; operation: "grant" | "revoke" | null; editable: boolean; reason: string | null };
 
-async function mockTeam(page: Page, options: { postStatus?: number } = {}) {
+async function mockTeam(page: Page, options: { postStatus?: number; nativeReady?: boolean; accessStatus?: number } = {}) {
   let revision = 0;
   const entries: Entry[] = [
     { permission: "team.view", state: "none", operation: "grant", editable: true, reason: null },
@@ -33,11 +33,13 @@ async function mockTeam(page: Page, options: { postStatus?: number } = {}) {
         profileType: "Administrator", isAdministrator: true, permissions: ["team.view", "roles.manage"], divisions: [] },
       csrfToken: "csrf-team", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
     } });
+    if (path === "/api/native-staff/session" && options.nativeReady === false) return route.fulfill({ status: 404, json: { error: "not_found" } });
     if (path === "/api/native-staff/session") return route.fulfill({ json: {
       csrfToken: `1.${"a".repeat(64)}`, verifiedUntil: new Date(Date.now() + 3_600_000).toISOString() } });
     if (path === "/api/team/staff" && request.method() === "GET") return route.fulfill({ json: { staff: roster } });
     if (/^\/api\/team\/staff\/[^/]+\/assigned-work$/.test(path)) return route.fulfill({ json: { operations: [], truncated: false } });
     if (path === "/api/staff-operations-access/staff-native-hire") {
+      if (options.accessStatus) return route.fulfill({ status: options.accessStatus, json: { error: "Not found" } });
       if (request.method() === "GET") return route.fulfill({ json: { staffId: "staff-native-hire", targetAdmissionVersion: 1, revision,
         targetEditable: true, targetReason: null, permissions: entries, csrfToken: csrf,
         verifiedUntil: new Date(Date.now() + 600_000).toISOString() } });
@@ -63,7 +65,6 @@ test("the Operations access panel renders the server's per-permission decision a
   await expect(card(page, "Role Owner").getByRole("region", { name: /Operations access/ })).toHaveCount(0);
   await expect(card(page, "Imported Operator").getByRole("region", { name: /Operations access/ })).toHaveCount(0);
   const panel = card(page, "Native Hire").getByRole("region", { name: "Native Hire Operations access" });
-  await panel.getByRole("button", { name: "Load Operations access" }).click();
   await expect(panel.getByText("View the team roster")).toBeVisible();
   await expect(panel.getByText("From role", { exact: false })).toBeVisible();
   await expect(panel.getByText("Denied", { exact: false }).first()).toBeVisible();
@@ -85,7 +86,6 @@ test("an uncertain command keeps its commandId and is only retried by an explici
   const posts = await mockTeam(page, { postStatus: 503 });
   await page.goto("/team");
   const panel = card(page, "Native Hire").getByRole("region", { name: "Native Hire Operations access" });
-  await panel.getByRole("button", { name: "Load Operations access" }).click();
   await panel.getByLabel("Reason for change").fill("Synthetic uncertain change");
   await panel.getByRole("button", { name: "Grant View the team roster" }).click();
   await expect(panel.getByText("The result is unknown. Reload, then retry this same change.")).toBeVisible();
@@ -96,4 +96,26 @@ test("an uncertain command keeps its commandId and is only retried by an explici
   await expect(panel.getByRole("button", { name: "Revoke View the team roster" })).toBeVisible();
   expect(posts).toHaveLength(2);
   expect(posts[1]).toEqual(posts[0]);
+});
+
+test("the panel follows its own GET when native session readiness is false", async ({ page }) => {
+  const posts = await mockTeam(page, { nativeReady: false });
+  await page.goto("/team");
+  await expect(page.getByText("Employee management is not enabled in this environment.")).toBeVisible();
+  const panel = card(page, "Native Hire").getByRole("region", { name: "Native Hire Operations access" });
+  await expect(panel.getByText("View the team roster")).toBeVisible();
+  await panel.getByLabel("Reason for change").fill("Synthetic production access");
+  await panel.getByRole("button", { name: "Grant View the team roster" }).click();
+  await expect(panel.getByRole("button", { name: "Revoke View the team roster" })).toBeVisible();
+  expect(posts).toHaveLength(1);
+});
+
+test("the panel renders nothing when its GET answers 404", async ({ page }) => {
+  let reads = 0;
+  page.on("request", request => { if (request.url().includes("/api/staff-operations-access/")) reads++; });
+  await mockTeam(page, { nativeReady: false, accessStatus: 404 });
+  await page.goto("/team");
+  await expect(card(page, "Native Hire").getByRole("heading", { name: "Native Hire", exact: true })).toBeVisible();
+  await expect.poll(() => reads).toBeGreaterThan(0);
+  await expect(card(page, "Native Hire").getByRole("region", { name: /Operations access/ })).toHaveCount(0);
 });
