@@ -35,3 +35,13 @@
 .measurement-row.measurement-hidden{background:#24262b;border-color:#4c4f55;color:#a4a7ad}
 .measurement-row.measurement-hidden .measurement-row-heading,.measurement-row.measurement-hidden .measurement-row-summary,.measurement-row.measurement-hidden .measurement-row-result{opacity:.6}
 @media print{body>*:not(dialog.measurement-report){display:none!important}.measurement-report{position:static;display:block;max-height:none;width:100%;max-width:none;border:0;overflow:visible}.measurement-report .measurement-actions{display:none}}
+/* While drawing, Undo / Cancel / Finish float over the view so phones (no right-click or Enter) can finish a shape. */
+.measurement-draft-bar{position:absolute;left:50%;bottom:max(16px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:660;display:flex;gap:8px;padding:6px;border:1px solid #ffffff26;border-radius:12px;background:#0a0a0ce6;box-shadow:0 10px 30px #0008;pointer-events:auto}
+.measurement-draft-bar[hidden]{display:none}
+.measurement-draft-bar button{min-height:44px;min-width:44px;padding:0 14px;border:1px solid #ffffff2e;border-radius:9px;background:#1d1d21;color:#f5f5f5;font-family:inherit;font-weight:600;font-size:14px;cursor:pointer}
+.measurement-draft-bar button:hover{background:#2a2a2f}
+.measurement-draft-bar .measurement-draft-finish{border-color:#ee5007;background:#ee5007;color:#fff}
+.measurement-draft-bar .measurement-draft-finish:hover{background:#ff6a23}
+.measurement-workspace [data-m="delete"][data-confirming="true"]{border-color:#e5484d;color:#ff9b9e}
+/* Touch-sized controls on small screens. */
+@media(max-width:640px){.measurement-workspace button,.measurement-workspace select,.tool-btn{min-height:44px}.measurement-workspace .measurement-row button{min-height:40px;font-size:13px}}
