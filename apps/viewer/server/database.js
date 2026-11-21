@@ -2152,6 +2152,18 @@ const MIGRATIONS = [
   `},
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
+  {version:50,name:'deleted_processing_nodes',sql:`
+    ALTER TABLE processing_providers ADD COLUMN deleted_at TEXT;
+  `,
+    verify(database) {
+      return database.prepare('PRAGMA table_xinfo(processing_providers)').all().some(column =>
+        column.name==='deleted_at' && column.type==='TEXT' && column.notnull===0 &&
+        column.dflt_value===null && column.pk===0 && column.hidden===0);
+    },
+    after(database) {
+      if(!this.verify(database))
+        throw Object.assign(new Error('Viewer schema version 50 did not add a nullable processing_providers.deleted_at TEXT column.'), {code:'viewer_migration_history_conflict'});
+    }},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;
