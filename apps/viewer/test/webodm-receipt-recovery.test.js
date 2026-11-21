@@ -7,7 +7,7 @@ const test=require('node:test');
 const {openDatabase}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
 
-test('an abandoned WebODM receipt reservation becomes recoverable after its bounded lease',t=>{
+test('an unresolved WebODM receipt remains held after elapsed time',t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-webodm-receipt-'));
   const db=openDatabase(path.join(root,'viewer.sqlite'));
   const processing=new ProcessingRepository(db);
@@ -16,6 +16,6 @@ test('an abandoned WebODM receipt reservation becomes recoverable after its boun
   assert.equal(processing.reserveSubjectOperationReceipt(receipt).created,true);
   assert.equal(processing.reserveSubjectOperationReceipt(receipt).created,false);
   db.prepare('UPDATE subject_operation_receipts SET created_at=? WHERE subject=? AND client_key=?').run(new Date(Date.now()-121000).toISOString(),receipt.subject,receipt.key);
-  assert.equal(processing.reserveSubjectOperationReceipt(receipt).created,true);
+  assert.equal(processing.reserveSubjectOperationReceipt(receipt).created,false);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM subject_operation_receipts WHERE subject=? AND client_key=?').get(receipt.subject,receipt.key).n,1);
 });
