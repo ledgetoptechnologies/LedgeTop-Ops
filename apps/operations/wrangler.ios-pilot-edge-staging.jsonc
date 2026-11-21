@@ -1,31 +1,35 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "lt-ops-ios-oauth-probe-staging",
+  "name": "ledge-top-ios-edge-staging",
   "main": "src/worker/ios-pilot-edge-bridge.ts",
-  "account_id": "846c924bf17bf4f3dd15c97a4c5d1d51",
+  "account_id": "df3f376bae6ee621f50cf972ebcc9484",
   "compatibility_date": "2026-07-22",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
   "keep_vars": false,
-  "routes": [
-    { "pattern": "ios-pilot-staging.ledgetop.app", "custom_domain": true }
-  ],
+  "routes": [],
   "vars": {
     "ENVIRONMENT": "staging",
     "IOS_MANAGED_PILOT_ENABLED": "false",
-    "IOS_MANAGED_PILOT_ORIGIN": "https://ios-pilot-staging.ledgetop.app",
-    "IOS_MANAGED_PILOT_AUDIENCE": "e982d104616a480315256a577ef5ad5ce089f382c0b5453ce9db4cd9df7cf89d",
-    "IOS_OAUTH_PROBE_ENABLED": "true",
-    "IOS_OAUTH_PROBE_AUDIENCE": "e982d104616a480315256a577ef5ad5ce089f382c0b5453ce9db4cd9df7cf89d",
-    "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
-    "OPERATIONS_AUD": "559cd7c0d2cc47f271aac422412fce677a51443ec365d9f2c585d9c0e377cc0b"
+    "IOS_PILOT_BUSINESS_ENABLED": "false",
+    "IOS_MANAGED_PILOT_ORIGIN": "https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev",
+    "IOS_MANAGED_PILOT_AUDIENCE": "17f32ab9f964a3e4c64864e06d3d0e1b128604192b9a7e457db1f8f88b8f5707",
+    "IOS_OAUTH_PROBE_ENABLED": "false",
+    "IOS_OAUTH_PROBE_AUDIENCE": "17f32ab9f964a3e4c64864e06d3d0e1b128604192b9a7e457db1f8f88b8f5707",
+    "TEAM_DOMAIN": "https://ledge-top-staging.cloudflareaccess.com",
+    "OPERATIONS_AUD": "ffb0d85b1929560fbafd7476a987401e0e25dc5000a251fcdcf85bc2ae5d7f84"
   },
   "services": [
     {
       "binding": "IOS_PILOT_READ",
-      "service": "lt-ops-ios-pilot-read-staging",
+      "service": "ledge-top-ios-read-staging",
       "entrypoint": "IosPilotReadService"
+    },
+    {
+      "binding": "IOS_PILOT_BUSINESS_READ",
+      "service": "ledge-top-ios-read-staging",
+      "entrypoint": "IosPilotBusinessReadService"
     }
   ]
 }

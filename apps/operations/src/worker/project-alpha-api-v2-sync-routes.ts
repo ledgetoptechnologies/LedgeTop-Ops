@@ -25,10 +25,13 @@ const requestSchema = z.object({
   sourceId,
   directoryContinuationToken: z.string().min(1).max(2048).optional(),
   projectContinuationToken: z.string().min(1).max(2048).optional(),
+  directoryOnly: z.boolean().optional(),
   limit: z.number().int().min(1).max(200).optional(),
 }).strict().superRefine((value, context) => {
   if (value.directoryContinuationToken && value.projectContinuationToken)
     context.addIssue({ code: "custom", message: "Continue one inventory surface at a time" });
+  if (value.directoryOnly && value.projectContinuationToken)
+    context.addIssue({ code: "custom", message: "Directory-only sync cannot continue project inventory" });
   if ((value.directoryContinuationToken || value.projectContinuationToken) && value.limit === undefined)
     context.addIssue({ code: "custom", message: "Continuation limit is required" });
 });
@@ -147,7 +150,9 @@ export function registerProjectAlphaApiV2SyncRoutes(app: App): void {
         throw new HTTPException(409, { message: "Project Alpha inventory source changed; restart the bounded inventory" });
       continuation = decoded;
     }
-    const outcome = await runProjectAlphaApiV2SyncPage(c.env, { sourceId: parsed.data.sourceId, limit, ...(continuation ? { continuation } : {}) });
+    const outcome = await runProjectAlphaApiV2SyncPage(c.env, { sourceId: parsed.data.sourceId, limit,
+      ...(parsed.data.directoryOnly !== undefined ? { directoryOnly: parsed.data.directoryOnly } : {}),
+      ...(continuation ? { continuation } : {}) });
     const stale = outcome.status === "partial" && [outcome.directory, outcome.projects]
       .some(item => item.status === "blocked" && item.reason === "cursor_stale");
     const safeResult = await safeOutcome(c.env, c.get("principal").id, parsed.data.sourceId, limit, outcome);

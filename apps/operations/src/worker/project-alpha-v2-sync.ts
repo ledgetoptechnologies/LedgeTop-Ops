@@ -36,6 +36,8 @@ export type ProjectAlphaApiV2SyncPageInput = Readonly<{
   sourceId: string;
   continuation?: ProjectAlphaApiV2SyncCursorPayload;
   limit?: number;
+  /** Narrow to Directory capability/transport only; absent or false retains both surfaces. */
+  directoryOnly?: boolean;
 }>;
 
 export type ProjectAlphaApiV2PersistedPage = Readonly<{
@@ -102,11 +104,14 @@ function validContinuation(value: unknown, sourceId: string, limit: number): val
 function validInput(value: ProjectAlphaApiV2SyncPageInput): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const keys = ["sourceId", ...(Object.hasOwn(value, "continuation") ? ["continuation"] : []),
-    ...(Object.hasOwn(value, "limit") ? ["limit"] : [])];
+    ...(Object.hasOwn(value, "limit") ? ["limit"] : []),
+    ...(Object.hasOwn(value, "directoryOnly") ? ["directoryOnly"] : [])];
   return exactKeys(value, keys)
     && SOURCE_ID.test(value.sourceId)
     && (value.limit === undefined || Number.isInteger(value.limit) && value.limit >= 1 && value.limit <= 200)
-    && (value.continuation === undefined || validContinuation(value.continuation, value.sourceId, value.limit ?? value.continuation.limit));
+    && (value.directoryOnly === undefined || typeof value.directoryOnly === "boolean")
+    && (value.continuation === undefined || validContinuation(value.continuation, value.sourceId, value.limit ?? value.continuation.limit))
+    && !(value.directoryOnly && value.continuation?.surface === "projects");
 }
 
 function canonicalDirectoryPage(inventory: ProjectAlphaDirectoryInventorySuccess, requestedCursor: string | null): string {
@@ -300,15 +305,16 @@ export async function runProjectAlphaApiV2SyncPage(env: ProjectAlphaApiV2SyncEnv
   const limit = input.limit ?? continuation?.limit ?? 100;
   const selected = await withEnabledConfiguredProjectAlphaApiV2Connection(env, input.sourceId,
     async connection => {
-      const probe = await probeProjectAlphaApiV2(connection, [], send, [
-        PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT, PROJECT_ALPHA_PROJECT_INVENTORY_ENDPOINT]);
+      const probe = await probeProjectAlphaApiV2(connection, [], send, input.directoryOnly
+        ? [PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT]
+        : [PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT, PROJECT_ALPHA_PROJECT_INVENTORY_ENDPOINT]);
       if (probe.status !== "verified") return { status: "blocked", reason: "capabilities" } as const;
       if (continuation && (connection.expectedSourceInstanceId !== continuation.sourceInstanceId
         || connection.expectedApplicationId !== continuation.applicationId || connection.expectedHistoryEpoch !== continuation.historyEpoch))
         return { status: "partial", directory: { status: "blocked", reason: "cursor_stale" },
-          projects: { status: "blocked", reason: "cursor_stale" } } as const;
+          projects: input.directoryOnly ? { status: "not_requested" } as const : { status: "blocked", reason: "cursor_stale" } as const } as const;
       const readDirectory = !continuation || continuation.surface === "directory";
-      const readProjects = !continuation || continuation.surface === "projects";
+      const readProjects = !input.directoryOnly && (!continuation || continuation.surface === "projects");
       const directoryRead = readDirectory ? await readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities(connection, input.sourceId,
         { type: "all", cursor: continuation?.surface === "directory" ? continuation.cursor : null, limit }, send) : null;
       const projectRead = readProjects ? await readProjectAlphaProjectInventoryAfterVerifiedCapabilities(connection,

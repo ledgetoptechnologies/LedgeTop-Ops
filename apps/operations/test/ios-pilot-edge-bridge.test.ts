@@ -61,7 +61,7 @@ describe('isolated pilot edge bridge', () => {
     expect((await actualHandlePilotEdge(req('/mobile-pilot/v1/session'), liveDisabled, [origin], access)).status).toBe(404);
     const reviewedOrigin = 'https://ios-pilot-staging.ledgetop.app';
     const reviewedRequest = new Request(reviewedOrigin + '/oauth-probe/v1', { headers: auth });
-    expect((await edge.fetch(reviewedRequest, { ...e, IOS_MANAGED_PILOT_ORIGIN: reviewedOrigin }, { access })).status).toBe(200);
+    expect((await edge.fetch(reviewedRequest, { ...e, IOS_MANAGED_PILOT_ORIGIN: reviewedOrigin }, { access })).status).toBe(404);
   });
   it('rejects missing or mismatched runtime identity without consulting the private service', async () => {
     const e = env(), request = req('/mobile-pilot/v1/session');
