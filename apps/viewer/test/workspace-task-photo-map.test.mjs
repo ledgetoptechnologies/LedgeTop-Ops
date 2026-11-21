@@ -145,3 +145,23 @@ test('boundary can be drawn from the keyboard: Space activates the tool and adds
   button.listeners.keydown(key('Enter'));assert.equal(f.boundaries.at(-1),null,'activating again clears the boundary');
   f.preview.dispose();
 });
+
+test('a mouse double-click finishes the boundary without duplicating the last corner',async()=>{
+  const f=mapFixture();await f.preview.setFiles([photo()]);
+  const button=f.bars.flatMap(bar=>bar.children).find(element=>element.dataset.mapTool==='crop');button.listeners.click({});
+  const click=(lat,lng,detail=1)=>f.map.handlers.click({latlng:{lat,lng},originalEvent:{detail}});
+  click(45,-90);click(45,-89.999);click(45,-89.999);click(45.001,-89.999);click(45.001,-89.999,2);f.map.handlers.dblclick();
+  assert.equal(f.boundaries.length,1);const ring=f.boundaries[0].features[0].geometry.coordinates[0];
+  assert.deepEqual(ring,[[-90,45],[-89.999,45],[-89.999,45.001],[-90,45]],'repeated and double-click corners are dropped');
+  f.preview.dispose();
+});
+test('an invalid drawn boundary is reported and never handed on as set',async()=>{
+  const f=mapFixture();await f.preview.setFiles([photo()]);
+  const button=f.bars.flatMap(bar=>bar.children).find(element=>element.dataset.mapTool==='crop');button.listeners.click({});
+  for(const [lat,lng] of [[45,-90],[45.002,-89.998],[45,-89.998],[45.001,-90]])f.map.handlers.click({latlng:{lat,lng},originalEvent:{detail:1}});
+  f.map.handlers.dblclick();
+  assert.equal(f.boundaries.length,0,'crossing polygon not applied');assert.match(f.container.children[0].textContent,/must not cross/);
+  button.listeners.click({});f.map.handlers.click({latlng:{lat:45,lng:-90},originalEvent:{detail:1}});f.map.handlers.click({latlng:{lat:45,lng:-90},originalEvent:{detail:2}});f.map.handlers.dblclick();
+  assert.equal(f.boundaries.length,0);assert.match(f.container.children[0].textContent,/at least 3 corners/);
+  f.preview.dispose();
+});

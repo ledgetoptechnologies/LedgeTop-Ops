@@ -1,4 +1,5 @@
 import {parsePhotoExif,PHOTO_HEADER_BYTES as HEADER_BYTES} from './server/photoExif.mjs';
+import {boundaryProblem} from './server/boundaryGeojson.mjs';
 export {parsePhotoExif} from './server/photoExif.mjs';
 const MAX_FILES=20_000;
 const CAPTURED_AT=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?$/;
@@ -65,11 +66,16 @@ export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet'),onBou
     link.href=url;link.download='photo-positions.geojson';doc.body.append(link);link.click();link.remove();view.setTimeout(()=>view.URL.revokeObjectURL(url),1000);
   }
   function finishBoundary(){
-    if(!drawing)return;const vertices=drawing.vertices;stopDrawing();
-    if(vertices.length<3)return;
-    const ring=[...vertices,vertices[0]].map(([lat,lng])=>[Number(lng.toFixed(7)),Number(lat.toFixed(7))]);
-    boundaryLayer=Lref.polygon(vertices,{color:'#f8cb2e',weight:2,fillOpacity:.08,interactive:false}).addTo(map);
-    onBoundary({type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:[ring]}}]});
+    if(!drawing)return;const pending=drawing.vertices;stopDrawing();
+    // Rounded corners; a corner repeating the previous one (the extra clicks
+    // of a double-click) is dropped, as is a last corner equal to the first.
+    const corners=[];for(const [lat,lng] of pending){const corner=[Number(lng.toFixed(7)),Number(lat.toFixed(7))],previous=corners.at(-1);if(!previous||previous[0]!==corner[0]||previous[1]!==corner[1])corners.push(corner);}
+    if(corners.length>1&&corners[0][0]===corners.at(-1)[0]&&corners[0][1]===corners.at(-1)[1])corners.pop();
+    if(corners.length<3){summary.textContent='Boundary needs at least 3 corners';return;}
+    const geojson={type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:[[...corners,corners[0]]]}}]},problem=boundaryProblem(geojson);
+    if(problem){summary.textContent=problem;return;}
+    boundaryLayer=Lref.polygon(corners.map(([lng,lat])=>[lat,lng]),{color:'#f8cb2e',weight:2,fillOpacity:.08,interactive:false}).addTo(map);
+    onBoundary(geojson);
   }
   function announce(){if(drawing)summary.textContent=`Boundary: ${drawing.vertices.length} ${drawing.vertices.length===1?'corner':'corners'} · Space adds at centre · Enter finishes · Esc cancels`;}
   function stopDrawing(){if(!drawing)return;summary.textContent=drawing.summaryText;map.off('click',drawing.click);map.off('dblclick',drawing.finish);drawing.preview.remove();map.doubleClickZoom?.enable();surface.removeEventListener('keydown',drawing.key);drawing=null;cropButton?.setAttribute('aria-pressed','false');surface.classList?.remove('photo-map-drawing');}
@@ -78,7 +84,7 @@ export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet'),onBou
     if(boundaryLayer){boundaryLayer.remove();boundaryLayer=null;cropButton.setAttribute('aria-pressed','false');onBoundary(null);return;}
     const preview=Lref.polyline([],{color:'#f8cb2e',weight:2,dashArray:'4 4',interactive:false}).addTo(map);
     const addVertex=latlng=>{drawing.vertices.push(latlng);preview.setLatLngs(drawing.vertices);announce();};
-    drawing={vertices:[],preview,summaryText:summary.textContent,click:event=>addVertex([event.latlng.lat,event.latlng.lng]),finish:()=>finishBoundary(),key:event=>{if(event.key===' '||event.key==='Spacebar'){event.preventDefault();const center=map.getCenter();addVertex([center.lat,center.lng]);}else if(event.key==='Backspace'){event.preventDefault();drawing.vertices.pop();preview.setLatLngs(drawing.vertices);announce();}else if(event.key==='Enter'){event.preventDefault();finishBoundary();}else if(event.key==='Escape'){event.preventDefault();stopDrawing();}}};
+    drawing={vertices:[],preview,summaryText:summary.textContent,click:event=>{if((event.originalEvent?.detail||1)>1)return;addVertex([event.latlng.lat,event.latlng.lng]);},finish:()=>finishBoundary(),key:event=>{if(event.key===' '||event.key==='Spacebar'){event.preventDefault();const center=map.getCenter();addVertex([center.lat,center.lng]);}else if(event.key==='Backspace'){event.preventDefault();drawing.vertices.pop();preview.setLatLngs(drawing.vertices);announce();}else if(event.key==='Enter'){event.preventDefault();finishBoundary();}else if(event.key==='Escape'){event.preventDefault();stopDrawing();}}};
     map.doubleClickZoom?.disable();map.on('click',drawing.click);map.on('dblclick',drawing.finish);surface.addEventListener('keydown',drawing.key);
     cropButton.setAttribute('aria-pressed','true');surface.classList?.add('photo-map-drawing');announce();
   }

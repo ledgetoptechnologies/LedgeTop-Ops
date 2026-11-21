@@ -1,6 +1,6 @@
 import {TASK_PHOTO_ACCEPT,inspectTaskPhotos,prepareTaskPhotos,uploadTaskPhotos} from './workspace-task-upload.mjs';
 import {providerSubmissionState} from './server/providerSelection.mjs';
-import {orchestratorPicker} from './workspace-processing-node.mjs';
+import {orchestratorPicker,withOrchestrator} from './workspace-processing-node.mjs';
 import {mountPhotoMap} from './workspace-task-photo-map.mjs';
 import {mountTaskOptions} from './workspace-task-options.mjs';
 import {presetSaveRequest} from './workspace-preset-request.mjs';
@@ -14,10 +14,10 @@ export function defaultTaskName(project,date=new Date()){
 // A browser-owned controller. In background mode, closing hides the dialog
 // while submission continues; explicit disposal still aborts local work.
 // Accepted durable copy/finalization operations are never silently cancelled.
-export function mountNewTask({container,dialog,project,providers=[],orchestratorProviderId='',presets=[],datasets=[],api,token,fetcher=fetch,onComplete=()=>{},onDispose=()=>{},canUpload=true,canImport=true,canManagePresets=false,allowBackground=false}){
+export function mountNewTask({container,dialog,project,providers=[],orchestratorProviderId='',orchestrator=null,presets=[],datasets=[],api,token,fetcher=fetch,onComplete=()=>{},onDispose=()=>{},canUpload=true,canImport=true,canManagePresets=false,allowBackground=false}){
   const controller=new AbortController(),{signal}=controller;
   dialog.classList.add('new-task-modal');
-  let orchestratorId=orchestratorProviderId,confirmedNode='',pickerMessage='',source='pc',files=[],selectedPaths=new Set(),busy=false,datasetId='',currentProviders=providers,submissionId=crypto.randomUUID(),copyKey=crypto.randomUUID();
+  let orchestratorId=orchestratorProviderId,confirmedNode='',pickerMessage='',source='pc',files=[],selectedPaths=new Set(),busy=false,datasetId='',currentProviders=withOrchestrator(providers,orchestrator),submissionId=crypto.randomUUID(),copyKey=crypto.randomUUID();
   let prepared=null,browseGeneration=0,sourceOperation=null,datasetKey=crypto.randomUUID(),submissionFingerprint='',pendingPhotoResume=null,datasetRequestName='';
   const ready=datasets.filter(item=>item.projectId===project.id&&item.status==='finalized');
   const uid=`new-task-${crypto.randomUUID().slice(0,8)}`;
@@ -71,7 +71,7 @@ export function mountNewTask({container,dialog,project,providers=[],orchestrator
   // and the visible selection before any durable step.
   function assertOrchestrator(providerId){if(!providerId||providerId!==orchestratorId||node.value!==providerId)throw new Error('The orchestrator changed. Select it again before starting.');}
   // A boundary drawn on the photo map becomes this task's boundary option.
-  function applyBoundary(geojson){if(busy)return;if(!taskOptions.supports('boundary','json')){photoMap?.clearBoundary();say('The processing node does not accept a boundary');return;}boundaryApplied=Boolean(geojson);taskOptions.setValue('boundary',geojson?JSON.stringify(geojson):null);say(geojson?'Boundary set for this task':'');}
+  function applyBoundary(geojson){if(busy)return;if(!taskOptions.supports('boundary','json')){photoMap?.clearBoundary();say('The processing node does not accept a boundary');return;}boundaryApplied=Boolean(geojson);taskOptions.setValue('boundary',geojson?JSON.stringify(geojson):null);if(!geojson){say('');return;}const problem=taskOptions.validate().errors.find(item=>item.name==='boundary');say(problem?`Boundary not set: ${problem.message}`:'Boundary set for this task');}
   function showProgress(item){const total=item.total||files.length,done=item.completed||0;let message;if(item.phase==='preparing'){progress.value=100*done/Math.max(1,total);message=`Preparing upload locally: ${done.toLocaleString()} / ${total.toLocaleString()} photos checked. Creating integrity checksums; no photos are being transferred yet.`;}else if(item.phase==='uploading'){progress.value=100*item.completedBytes/Math.max(1,item.totalBytes);const speed=item.bytesPerSecond>0?`${(item.bytesPerSecond/1024**2).toFixed(1)} MB/s`:'Estimating speed…';message=`Uploading to Viewer: ${done.toLocaleString()} / ${total.toLocaleString()} photos · ${(item.completedBytes/1024**2).toFixed(1)} / ${(item.totalBytes/1024**2).toFixed(1)} MB · ${speed}`;}else{progress.value=100;message='Upload received. Assembling and verifying your source photos on the server…';}say(message);}
   function providerOptions(){const picker=orchestratorPicker(currentProviders,orchestratorId,{previousId:confirmedNode});node.innerHTML=picker.options.map(item=>`<option value="${escape(item.id)}" ${item.disabled?'disabled':''}>${escape(item.label)}</option>`).join('');node.value=picker.selectedId;node.disabled=busy||!picker.usable;if(!confirmedNode&&picker.usable&&picker.selectedId)confirmedNode=picker.selectedId;pickerMessage=picker.message;providerNote();}
   const compatiblePreset=(preset,provider)=>Boolean(provider&&preset.enabled&&(!preset.providerType||preset.providerType===provider.type)&&(!preset.capabilityFingerprint||preset.capabilityFingerprint===provider.capabilityFingerprint));
@@ -82,14 +82,14 @@ export function mountNewTask({container,dialog,project,providers=[],orchestrator
   }
   const capabilityRefreshes=new Map();
   async function refreshTaskCapabilities({requireFresh=false}={}){
-    if(!node.value&&!requireFresh){const nodes=await api('/api/v1/processing/providers?limit=100',{signal});if(signal.aborted)return;currentProviders=nodes.providers||[];orchestratorId=nodes.orchestratorProviderId||'';providerOptions();}
+    if(!node.value&&!requireFresh){const nodes=await api('/api/v1/processing/providers?limit=100',{signal});if(signal.aborted)return;currentProviders=withOrchestrator(nodes.providers||[],nodes.orchestrator);orchestratorId=nodes.orchestratorProviderId||'';providerOptions();}
     const providerId=node.value;if(!providerId){if(requireFresh)throw new Error('Choose a processing node first.');return;}
     if(capabilityRefreshes.has(providerId))return capabilityRefreshes.get(providerId);
     const pending=(async()=>{try{
       await api(`/api/v1/processing/providers/${encodeURIComponent(providerId)}/capabilities/refresh`,{method:'POST',body:{},signal});
       const [nodes,result]=await Promise.all([api('/api/v1/processing/providers?limit=100',{signal}),api('/api/v1/processing/presets',{signal})]);
       if(signal.aborted)return;
-      currentProviders=nodes.providers||[];orchestratorId=nodes.orchestratorProviderId||'';const selectedPreset=presets.find(item=>item.id===form.elements.presetId.value);presets=result.presets||presets;
+      currentProviders=withOrchestrator(nodes.providers||[],nodes.orchestrator);orchestratorId=nodes.orchestratorProviderId||'';const selectedPreset=presets.find(item=>item.id===form.elements.presetId.value);presets=result.presets||presets;
       if(selectedPreset&&!presets.some(item=>item.id===selectedPreset.id))presets=[...presets,{...selectedPreset,enabled:false}];
       if(node.value===providerId)providerOptions();
     }finally{capabilityRefreshes.delete(providerId)}})();

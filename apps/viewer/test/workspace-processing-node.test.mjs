@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {orchestratorPicker} from '../workspace-processing-node.mjs';
+import {orchestratorPicker,withOrchestrator} from '../workspace-processing-node.mjs';
 import {resolveOrchestrator} from '../server/providerSelection.mjs';
 
 const now=Date.now();
@@ -48,4 +48,13 @@ test('server binding: configured id, else the only ClusterODM provider, else a s
   assert.equal(lookup([worker]).result?.id,'w');
   assert.equal(lookup([worker,worker2]).result,null,'several plain nodes are ambiguous');
   assert.ok(lookup([worker,worker2]).limits.every(limit=>limit===2),'lookups are bounded');
+});
+
+test('an orchestrator outside the listed page is shown from the server summary',()=>{
+  const page=Array.from({length:100},(_,index)=>node({id:`w${index}`,displayName:`Worker ${index}`})),summary=node({id:'cluster-101',displayName:'Orchestrator',type:'clusterodm'});
+  assert.equal(orchestratorPicker(page,'cluster-101',{now}).usable,false,'the page alone does not contain it');
+  const merged=withOrchestrator(page,summary);assert.equal(merged.length,101);
+  const picker=orchestratorPicker(merged,'cluster-101',{now});assert.deepEqual(picker.options,[{id:'cluster-101',label:'Orchestrator',disabled:false}]);assert.equal(picker.selectedId,'cluster-101');
+  assert.equal(withOrchestrator(merged,summary).length,101,'not duplicated when already listed');
+  assert.equal(withOrchestrator(page,null),page);
 });

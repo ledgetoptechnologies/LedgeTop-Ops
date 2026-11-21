@@ -7,6 +7,13 @@ import {providerSubmissionState} from './server/providerSelection.mjs';
 // a problem it stays visible but cannot be chosen, and the message says why.
 // When the orchestrator changes after the user accepted one, the selection is
 // cleared so the user must choose it again.
+// The listing is paged; the server also returns the orchestrator's own summary
+// so it is available even when it is not on the returned page.
+export function withOrchestrator(providers,orchestrator){
+  const list=Array.isArray(providers)?providers:[];
+  return orchestrator?.id&&!list.some(item=>item?.id===orchestrator.id)?[...list,orchestrator]:list;
+}
+
 export function orchestratorPicker(providers,orchestratorId,{previousId='',...options}={}){
   const provider=orchestratorId?(Array.isArray(providers)?providers:[]).find(item=>item?.id===orchestratorId):null;
   if(!provider)return{options:[{id:'',label:'Orchestrator',disabled:true}],selectedId:'',usable:false,message:'No orchestrator is configured'};

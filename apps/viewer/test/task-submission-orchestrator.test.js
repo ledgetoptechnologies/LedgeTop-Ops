@@ -45,7 +45,7 @@ test('orchestrator lookup covers the whole inventory, not the first page of 100'
   assert.equal((await f.list()).orchestratorProviderId,null,'a ClusterODM provider beyond the first page still makes the choice ambiguous');
   assert.equal((await f.submit(last.id)).status,409);
   config.processingOrchestratorProviderId=first.id;
-  const listed=await f.list();assert.equal(listed.providers.length,100);assert.equal(listed.orchestratorProviderId,first.id,'configured id found directly');
+  const listed=await f.list();assert.equal(listed.providers.length,100);assert.equal(listed.orchestratorProviderId,first.id,'configured id found directly');assert.equal(listed.orchestrator.id,first.id,'its summary is returned even when off the page');assert.equal(listed.orchestrator.displayName,first.displayName);
   assert.equal((await f.submit(first.id)).status,201);
   const other=await f.submit(last.id);assert.equal(other.status,409);assert.equal((await other.json()).code,'provider_not_orchestrator');
 });
