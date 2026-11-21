@@ -75,6 +75,10 @@ services:
     image: ghcr.io/ledgetoptechnologies/thumbnail-queue-worker:latest
     pull_policy: always
     container_name: thumbnail-gen
+    # The same shared NAS link file as flight-logs (optional; the bearer below stays until it is retired).
+    env_file:
+      - path: ${NAS_LINK_ENV_FILE:-/mnt/Plugins/App_Data/LedgeTop-Ops-Workers/shared/nas-link.env}
+        required: false
     pids_limit: 256
     cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-8.0}"
     mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-10g}
@@ -178,10 +182,11 @@ services:
     cap_drop:
       - ALL
     cpus: '2.0'
-    # Optional until the shared NAS link file exists: without NAS_LINK_ENV_FILE / LOGS_INGRESS_HOST the stack starts
-    # exactly as before and Logs uses only its own logs.env (legacy path). Needs Docker Compose 2.24+ (required: false).
+    # The one shared NAS link file (default path below; override with NAS_LINK_ENV_FILE). Optional until it exists:
+    # without it the stack starts exactly as before and Logs uses only its own logs.env (legacy path).
+    # Needs Docker Compose 2.24+ (required: false).
     env_file:
-      - path: ${NAS_LINK_ENV_FILE:-/nonexistent/nas-link.env}
+      - path: ${NAS_LINK_ENV_FILE:-/mnt/Plugins/App_Data/LedgeTop-Ops-Workers/shared/nas-link.env}
         required: false
     environment:
       LOGS_INGRESS_HOST: ${LOGS_INGRESS_HOST:-}

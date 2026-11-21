@@ -63,7 +63,7 @@ class RendererNasLinkTests(unittest.TestCase):
         self.assertNotIn("LTDSTHUMB_API_TOKEN", queue)
         self.assertEqual({key: queue[key] for key in LINK}, LINK)
         self.assertEqual(queue["CF_ACCESS_CLIENT_ID"], "", "no older pair, so the worker resolves the link pair")
-        current = json.loads(render([ALL], VALUES).stdout)["services"]
+        current = json.loads(render([ALL], VALUES, link=True).stdout)["services"]
         for name in services:
             if name != "queue-renderer":
                 self.assertEqual(services[name], current[name], f"{name} unchanged by the successor")
