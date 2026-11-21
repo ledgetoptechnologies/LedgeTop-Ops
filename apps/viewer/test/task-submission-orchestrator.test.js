@@ -14,7 +14,7 @@ async function fixture(t,providerTypes){
   const base=`http://127.0.0.1:${server.address().port}`,headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
   const submit=(providerId,options={})=>{const submissionId=crypto.randomUUID();return fetch(`${base}/api/v1/task-submissions`,{method:'POST',headers:{...headers,'idempotency-key':`submit-${submissionId}`},body:JSON.stringify({submissionId,projectId:project.id,datasetId:dataset.id,taskDisplayName:'Flight',providerId,options})});};
   const list=async()=>(await fetch(`${base}/api/v1/processing/providers?limit=100`,{headers})).json();
-  return{providers,submit,list};
+  return{providers,submit,list,database};
 }
 const boundary=ring=>JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:[ring]}}]});
 
@@ -41,11 +41,14 @@ test('a single-node deployment keeps working and boundaries are validated at sub
 test('orchestrator lookup covers the whole inventory, not the first page of 100',async t=>{
   const {config}=require('../server/config');const previous=config.processingOrchestratorProviderId;t.after(()=>{config.processingOrchestratorProviderId=previous;});
   const f=await fixture(t,['clusterodm',...Array(101).fill('nodeodm'),'clusterodm']),first=f.providers[0],last=f.providers.at(-1);
+  // Fixed creation order: the listing pages newest first, so the oldest
+  // (first) provider is outside the first 100 rows.
+  const stamp=f.database.prepare('UPDATE processing_providers SET created_at=? WHERE id=?');f.providers.forEach((provider,index)=>stamp.run(new Date(Date.UTC(2000,0,1,0,0,index)).toISOString(),provider.id));
   config.processingOrchestratorProviderId='';
   assert.equal((await f.list()).orchestratorProviderId,null,'a ClusterODM provider beyond the first page still makes the choice ambiguous');
   assert.equal((await f.submit(last.id)).status,409);
   config.processingOrchestratorProviderId=first.id;
-  const listed=await f.list();assert.equal(listed.providers.length,100);assert.equal(listed.orchestratorProviderId,first.id,'configured id found directly');assert.equal(listed.orchestrator.id,first.id,'its summary is returned even when off the page');assert.equal(listed.orchestrator.displayName,first.displayName);
+  const listed=await f.list();assert.equal(listed.providers.length,100);assert.equal(listed.providers.some(provider=>provider.id===first.id),false,'configured provider is outside the first page');assert.equal(listed.providers.some(provider=>provider.id===last.id),true);assert.equal(listed.orchestratorProviderId,first.id,'configured id found directly');assert.equal(listed.orchestrator.id,first.id,'its summary is returned even when off the page');assert.equal(listed.orchestrator.displayName,first.displayName);
   assert.equal((await f.submit(first.id)).status,201);
   const other=await f.submit(last.id);assert.equal(other.status,409);assert.equal((await other.json()).code,'provider_not_orchestrator');
 });
