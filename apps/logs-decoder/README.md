@@ -106,8 +106,8 @@ controller ──upload──▶ Logs public host (device API + /health only; ev
 - **Build:** inside the upstream workspace at v0.5.7, commit `e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa`, against
   upstream's own `Cargo.lock`. The build fails if any existing lock entry changes; `libc` is already locked there at
   0.2.151.
-- **Output:** the same `{version, details, frames}` JSON as the upstream CLI. It prints nothing; the outcome is its
-  exit code:
+- **Output:** the upstream CLI's `{version, details, frames}` JSON plus `header` (`startTime`, the log header's UTC
+  start, and `productType`). It prints nothing; the outcome is its exit code:
 
 | Exit code | Meaning |
 |---|---|

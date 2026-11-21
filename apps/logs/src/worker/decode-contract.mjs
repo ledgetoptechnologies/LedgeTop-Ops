@@ -102,7 +102,7 @@ export async function heldRawLog(env, lease, { now = Date.now() } = {}) {
 }
 
 const SUMMARY_FIELDS = ['display_name', 'started_at', 'ended_at', 'duration_seconds', 'distance_m', 'max_altitude_m', 'max_speed_mps',
-  'home_lat', 'home_lon', 'photo_count', 'video_count', 'telemetry_points'];
+  'home_lat', 'home_lon', 'photo_count', 'video_count', 'telemetry_points', 'started_at_source', 'photo_count_source', 'aircraft_model', 'app'];
 const COUNT_FIELDS = new Set(['photo_count', 'video_count', 'telemetry_points']);
 
 async function receiptFor(db, sha256) {

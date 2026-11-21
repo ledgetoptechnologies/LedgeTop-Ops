@@ -138,7 +138,8 @@ export async function reviewQueue(env, actor, { queue = 'unassigned', limit = 50
       // No home position or track: what an administrator needs to recognise the flight.
       summary: summary && { displayName: summary.display_name, startedAt: summary.started_at, endedAt: summary.ended_at,
         durationSeconds: summary.duration_seconds, distanceM: summary.distance_m, maxAltitudeM: summary.max_altitude_m,
-        photoCount: summary.photo_count, videoCount: summary.video_count },
+        photoCount: summary.photo_count, videoCount: summary.video_count, photoCountSource: summary.photo_count_source ?? null,
+        startedAtSource: summary.started_at_source ?? null, aircraftModel: summary.aircraft_model ?? null, app: summary.app ?? null },
       conflict: row.conflict_flight_id ? { flightId: row.conflict_flight_id, pilotId: row.conflict_pilot_id ?? null } : null,
     };
   });
