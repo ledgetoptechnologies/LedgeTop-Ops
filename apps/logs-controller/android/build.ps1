@@ -3,6 +3,9 @@
 #   powershell -File apps/logs-controller/android/build.ps1 -Sdk <android-sdk> -Jdk <jdk17> [-Out <dir>]
 #     [-StagingHost <exact host>]  also allow this one HTTPS host, exactly (staging builds)
 #     [-TestBuild]  allow http://127.0.0.1:<port> (adb reverse) and make the APK debuggable. Never ship these.
+#     [-SyntheticOnlySha256 <hex>,...]  staging/test builds: read only the app's own synthetic-input folder and
+#                   upload only files with these exact SHA-256 values (never a pilot's real DJI logs).
+#     [-AllowRealLogs]  staging/test builds: read the DJI apps' real log folders. One of these two is required.
 # A production build talks to https://logs.ledgetop.app only.
 param(
   [Parameter(Mandatory = $true)][string]$Sdk,
@@ -13,7 +16,9 @@ param(
   [int]$VersionCode = 1,
   [string]$VersionName = "0.1.0",
   [string]$StagingHost = "",
-  [switch]$TestBuild
+  [switch]$TestBuild,
+  [string[]]$SyntheticOnlySha256 = @(),
+  [switch]$AllowRealLogs
 )
 $ErrorActionPreference = "Stop"
 $bt = Join-Path $Sdk "build-tools\$BuildTools"
@@ -26,8 +31,26 @@ function Run($exe) { & $exe @args; if ($LASTEXITCODE -ne 0) { throw "$exe failed
 # One exact host name (no wildcards, ports or paths), e.g. the confirmed staging Worker host.
 if ($StagingHost -and ($StagingHost -cnotmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$' -or $StagingHost -in @('workers.dev', 'ledgetop.app'))) { throw "StagingHost must be one exact lowercase host name" }
 
-if (Test-Path $Out) { Remove-Item -Recurse -Force $Out }
+# Input scope. A production build reads real logs and can't be limited to synthetic input. A staging or test build
+# must say which it is: synthetic-only with approved SHA-256 values, or explicitly allowed to read real logs.
+$approved = @($SyntheticOnlySha256 | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach ($h in $approved) { if ($h -cnotmatch '^[0-9a-f]{64}$') { throw "SyntheticOnlySha256 values must be lowercase 64-character SHA-256 hex" } }
+$nonProduction = [bool]$StagingHost -or $TestBuild
+if (-not $nonProduction -and ($approved.Count -gt 0 -or $AllowRealLogs)) { throw "Production builds read real logs; -SyntheticOnlySha256 and -AllowRealLogs are for staging or test builds only" }
+if ($nonProduction -and (($approved.Count -gt 0) -eq [bool]$AllowRealLogs)) { throw "Staging and test builds need exactly one of -SyntheticOnlySha256 <hash,...> or -AllowRealLogs" }
+$synthetic = $approved.Count -gt 0
+# A synthetic-input build talks only to one baked-in staging host, never production.
+if ($synthetic -and -not $StagingHost) { throw "-SyntheticOnlySha256 needs -StagingHost: a synthetic-input build talks only to that one staging host" }
+
+# Only ever delete an output folder an earlier run of this script created (it holds the marker file).
+$Out = [System.IO.Path]::GetFullPath($Out)
+$marker = Join-Path $Out ".ledgetop-logs-build"
+if (Test-Path $Out) {
+  if (-not (Test-Path $marker -PathType Leaf)) { throw "Output folder $Out exists and was not created by this build script; choose a new -Out path" }
+  Remove-Item -Recurse -Force $Out
+}
 New-Item -ItemType Directory -Force "$Out\gen\app\ledgetop\logs", "$Out\classes", "$Out\dex", "$Out\policy" | Out-Null
+Set-Content -Path $marker -Value "Ledge Top Logs controller build output" -Encoding ascii
 
 # Build flags: the only servers this APK may ever talk to.
 $hosts = if ($StagingHost) { '"' + $StagingHost.ToLowerInvariant() + '"' } else { "" }
@@ -38,6 +61,8 @@ $flags = @(
   "final class BuildFlags {",
   "    static final boolean ALLOW_LOOPBACK = $loop;",
   "    static final String[] EXTRA_HOSTS = { $hosts };",
+  "    static final boolean SYNTHETIC_INPUT_ONLY = $(if ($synthetic) { 'true' } else { 'false' });",
+  "    static final String[] APPROVED_SHA256 = { $(($approved | ForEach-Object { '"' + $_ + '"' }) -join ', ') };",
   "    private BuildFlags() {}",
   "}"
 )
@@ -45,8 +70,12 @@ $flags = @(
 
 # Server-policy checks run on the JDK before packaging; a failing rule fails the build.
 Run "$java\javac.exe" -source 11 -target 11 -encoding UTF-8 "-Xlint:-options" -d "$Out\policy" `
-  "$PSScriptRoot\src\app\ledgetop\logs\BuildInfo.java" "$Out\gen\app\ledgetop\logs\BuildFlags.java" "$PSScriptRoot\test\ServerPolicyTest.java"
+  "$PSScriptRoot\src\app\ledgetop\logs\BuildInfo.java" "$PSScriptRoot\src\app\ledgetop\logs\InputPolicy.java" "$Out\gen\app\ledgetop\logs\BuildFlags.java" `
+  "$PSScriptRoot\src\app\ledgetop\logs\HttpPolicy.java" "$PSScriptRoot\test\ServerPolicyTest.java" "$PSScriptRoot\test\InputPolicyTest.java" `
+  "$PSScriptRoot\test\RedirectPolicyTest.java"
 Run "$java\java.exe" -cp "$Out\policy" app.ledgetop.logs.ServerPolicyTest $loop "$StagingHost"
+Run "$java\java.exe" -cp "$Out\policy" app.ledgetop.logs.RedirectPolicyTest
+Run "$java\java.exe" -cp "$Out\policy" app.ledgetop.logs.InputPolicyTest $(if ($synthetic) { 'synthetic' } else { 'real' }) ($approved -join ',')
 
 Run "$bt\aapt2.exe" compile --dir "$PSScriptRoot\res" -o "$Out\res.zip"
 $linkArgs = @("link", "-I", $androidJar, "--manifest", "$PSScriptRoot\AndroidManifest.xml", "-o", "$Out\unsigned.apk", "$Out\res.zip",
@@ -63,7 +92,7 @@ Run "$bt\d8.bat" --release --min-api 26 --lib $androidJar --output "$Out\dex" @c
 Push-Location "$Out\dex"; Run "$java\jar.exe" -uf0M "$Out\unsigned.apk" classes.dex; Pop-Location
 Run "$bt\zipalign.exe" -f -p 4 "$Out\unsigned.apk" "$Out\aligned.apk"
 
-$apkName = "ledgetop-logs-$VersionName" + $(if ($TestBuild) { "-TEST-loopback" } elseif ($StagingHost) { "-staging" } else { "" }) + "-debugsigned.apk"
+$apkName = "ledgetop-logs-$VersionName" + $(if ($TestBuild) { "-TEST-loopback" } elseif ($StagingHost) { "-staging" } else { "" }) + $(if ($synthetic) { "-synthetic" } else { "" }) + "-debugsigned.apk"
 # A local debug key (not a release key), kept outside the repo so upgrades install over each other.
 $keyDir = Join-Path $env:LOCALAPPDATA "LedgeTop\android"
 $keystore = Join-Path $keyDir "ledgetop-logs-debug.keystore"

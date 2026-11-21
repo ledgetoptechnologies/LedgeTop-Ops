@@ -17,9 +17,15 @@ public final class ServerPolicyTest {
         String staging = args.length > 1 ? args[1] : "";
         if (loopback != BuildFlags.ALLOW_LOOPBACK) { System.err.println("FAIL flags mismatch"); System.exit(1); }
 
-        expect(true, "https://logs.ledgetop.app");
-        expect(true, "https://logs.ledgetop.app/");
-        expect(true, "https://LOGS.ledgetop.app");
+        // Production is allowed in every build except a synthetic-input staging build, which talks only to its staging host.
+        boolean production = !BuildFlags.SYNTHETIC_INPUT_ONLY;
+        expect(production, "https://logs.ledgetop.app");
+        expect(production, "https://logs.ledgetop.app/");
+        expect(production, "https://LOGS.ledgetop.app");
+        String expectedDefault = BuildFlags.SYNTHETIC_INPUT_ONLY ? "https://" + staging : "https://logs.ledgetop.app";
+        if (!BuildInfo.DEFAULT_SERVER.equals(expectedDefault)) { failures++; System.err.println("FAIL DEFAULT_SERVER = " + BuildInfo.DEFAULT_SERVER + ", expected " + expectedDefault); }
+        if (BuildFlags.SYNTHETIC_INPUT_ONLY && staging.isEmpty()) { failures++; System.err.println("FAIL a synthetic-input build has no staging host"); }
+        if (!BuildInfo.allowedServer(BuildInfo.DEFAULT_SERVER)) { failures++; System.err.println("FAIL DEFAULT_SERVER is not an allowed server"); }
         // Never: other hosts, look-alikes, other Ledge Top hosts not baked into this build.
         expect(false, "https://evil.example.com");
         expect(false, "https://logs.ledgetop.app.evil.com");
@@ -49,7 +55,8 @@ public final class ServerPolicyTest {
         expect(false, "https://logs-staging.ledgetop.app".equals("https://" + staging) ? "https://nope.ledgetop.app" : "https://logs-staging.ledgetop.app");
 
         if (failures > 0) { System.err.println(failures + " server-policy check(s) failed"); System.exit(1); }
-        System.out.println("server policy: all checks passed (loopback=" + loopback + ", staging=" + (staging.isEmpty() ? "none" : staging) + ")");
+        System.out.println("server policy: all checks passed (loopback=" + loopback + ", staging=" + (staging.isEmpty() ? "none" : staging)
+            + ", production " + (production ? "allowed" : "refused") + ", default " + BuildInfo.DEFAULT_SERVER + ")");
     }
 
     private ServerPolicyTest() {}
