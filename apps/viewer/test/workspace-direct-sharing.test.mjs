@@ -519,15 +519,15 @@ test('direct client sharing leads the Share dialog and keeps Operations project 
   await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
   const html=f.html()+f.clientPanel.innerHTML;
   assert.match(html,/Share with a client/);assert.match(html,/Share through an Operations project instead/);
-  assert.match(html,/The whole project, including tasks published later/);
+  assert.match(html,/The whole project<\/label>/);assert.match(html,/Also share models published later/);
   assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
 });
 test('changing or clearing the chosen client unticks the confirmation',()=>{
   const f=fixture();f.state.clientDirectAccess={clients:[],grants:[]};let bound;
   f.context.bindClientPicker=(_root,options)=>{bound=options;return {dispose(){}}};
   const confirmed={checked:false},summary={textContent:''};
-  const form={isConnected:true,elements:{client:{value:''},confirmedScope:confirmed,expiresAt:{value:''},measure:{checked:true},cameras:{checked:false},download:{checked:false}},
-    querySelector:selector=>selector==='[data-direct-summary]'?summary:selector==='[data-client-picker]'?{}:selector==='input[name="scope"]:checked'?{value:'project'}:null,
+  const form={isConnected:true,elements:{client:{value:''},confirmedScope:confirmed,includeLater:{checked:false},expiresAt:{value:''},measure:{checked:true},cameras:{checked:false},download:{checked:false}},
+    querySelector:selector=>selector==='[data-direct-summary]'?summary:selector==='[data-client-picker]'?{}:selector==='input[name="scope"]:checked'?{value:'project'}:selector==='[data-direct-review]'?{hidden:true}:selector==='[data-direct-review-button]'?{hidden:false}:selector==='[data-direct-back]'?{}:null,
     querySelectorAll:()=>[]};
   f.context.bindDirectShare(form,'project',null);
   const first={sourceId:'project-alpha:primary',workspaceId:'ws-1',displayName:'Pat Example',businessName:'Division A'};
