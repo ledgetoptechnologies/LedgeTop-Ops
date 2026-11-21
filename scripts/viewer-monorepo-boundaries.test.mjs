@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -26,6 +27,9 @@ const reviewedAckMigrations = [
   { version: 41, name: 'viewer_acceptance_ack_outbox' },
   { version: 42, name: 'viewer_acceptance_ack_outbox_schema_reconcile' },
 ];
+const reviewedTimerMigration = { version: 51, name: 'provider_engine_processing_elapsed' };
+const reviewedTimerSqlSha256 = 'c8b8205fbcf5b066030223c1176527f347ffc1bf4861b6ccf32e5845000f3214';
+const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "51"';
 const reviewedConverter = {
   patchSha256: 'fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c',
   lockSetSha256: 'b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98',
@@ -36,9 +40,10 @@ const reviewedConverter = {
 // Schema 41 adds a task/provider/attempt-bound durable ACK outbox with immutable
 // identity; schema 42 validates and preserves legacy rows, maps accepted to
 // delivered, and prevents ACK deletion. Unknown or mismatched rows abort the
-// migration. Only the candidate image verification and attestation schema gates
-// advance from 38 to 42; all other upstream runtime, numerical, promotion and
-// digest guards remain fully compared.
+// migration. Schema 51 adds an attempt- and provider-task-bound engine elapsed
+// record. The candidate image verification and attestation pins advance from
+// the upstream 38 to 51; the other runtime, numerical, promotion and digest
+// guards remain fully compared.
 // The reviewed Obj2Tiles build updates its bounded-concurrency patch and adds
 // the ImageSharp 3.2.0 locked dependency/license notices. The image verifier pins
 // the exact patch, lock-set and license-notice digests, checks the embedded
@@ -51,12 +56,10 @@ function replaceReviewedOnce(source, before, after, label) {
 function reviewedUpstreamStep(name) {
   const original = originalSteps.get(name);
   if (!['Verify exact candidate image', 'Write verified release attestation'].includes(name)) return original;
-  assert.deepEqual(MIGRATIONS.slice(-2).map(({ version, name }) => ({ version, name })), reviewedAckMigrations,
-    'another schema advance requires a new explicit gate review');
   assert.equal(original.split('EXPECTED_SCHEMA_VERSION: "38"').length - 1, 1,
     `${name}: expected historical schema pin must occur exactly once`);
   let reviewed = replaceReviewedOnce(original, 'EXPECTED_SCHEMA_VERSION: "38"',
-    'EXPECTED_SCHEMA_VERSION: "42"', `${name} schema pin`);
+    reviewedCandidateSchemaPin, `${name} schema pin`);
 
   if (name === 'Verify exact candidate image') {
     reviewed = replaceReviewedOnce(reviewed,
@@ -85,7 +88,7 @@ function reviewedUpstreamStep(name) {
       'attestation dependency and license pins');
   }
 
-  assert.equal(migratedSteps.get(name).split('EXPECTED_SCHEMA_VERSION: "42"').length - 1, 1,
+  assert.equal(migratedSteps.get(name).split(reviewedCandidateSchemaPin).length - 1, 1,
     `${name}: candidate schema pin must match the reviewed migration`);
   return reviewed;
 }
@@ -306,6 +309,15 @@ test('No script writes the Viewer image to a registry', () => {
     if (fs.existsSync(path.join(root, directory))) walk(directory);
   }
   assert.deepEqual(writers.filter(file => !file.endsWith('.test.mjs')), []);
+});
+
+test('Viewer publication preserves the ACK migrations and pins the exact timer schema', () => {
+  const migrations = MIGRATIONS.filter(({ version }) => version >= reviewedAckMigrations[0].version);
+  assert.deepEqual(migrations.map(({ version, name }) => ({ version, name })),
+    [...reviewedAckMigrations, reviewedTimerMigration], 'another schema advance requires a new explicit gate review');
+  const timer = migrations.at(-1);
+  const sqlSha256 = createHash('sha256').update(timer.sql.replace(/\r\n/g, '\n')).digest('hex');
+  assert.equal(sqlSha256, reviewedTimerSqlSha256, 'migration 51 SQL must match the reviewed timer schema');
 });
 
 test('All upstream runtime and numerical-engine verification remains intact', () => {
