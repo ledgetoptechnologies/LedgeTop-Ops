@@ -27,9 +27,10 @@ async function connected(t, api, config = {}) {
 test('real MCP handshake advertises read tools only by default, and rejects hidden writes', async t => {
   const client = await connected(t, { session: async () => ({ user: { id: 'owner' } }), request: () => assert.fail('no request') });
   const result = await client.listTools();
-  assert.equal(result.tools.length, 10);
+  assert.equal(result.tools.length, 11);
   assert.ok(result.tools.every(v => v.annotations.readOnlyHint));
   assert.ok(result.tools.find(v => v.name === 'preview_delivery_access'));
+  assert.ok(result.tools.find(v => v.name === 'list_viewer_client_grants'));
   const denied = await client.callTool({ name: 'create_client', arguments: {} });
   assert.equal(denied.isError, true);
   const session = await client.callTool({ name: 'get_connection', arguments: {} });
@@ -61,6 +62,67 @@ test('default human config routes get_connection to the canonical production ori
   assert.equal(calls[0].init.redirect, 'error');
   assert.equal(calls[0].init.headers['X-LTDS-Agent-Id'], 'local-agent');
   assert.equal(calls[0].init.headers['X-Requested-With'], 'XMLHttpRequest');
+});
+
+test('direct Viewer grants tool uses one canonical-origin GET and preserves the returned DTO', async t => {
+  const calls = [];
+  const config = loadConfig({});
+  const grant = { grantId: 'grant-1', sourceId: 'project-alpha:primary', workspaceId: 'workspace-1',
+    viewerProjectId: 'viewer-project-1', taskId: null, scopeType: 'project', includeFuturePublished: true,
+    permissions: { measure: true, cameras: false, download: false }, expiresAt: '2026-10-01T00:00:00Z',
+    grantVersion: 2, revokedAt: null, createdAt: '2026-09-01T00:00:00Z', clientDisplayName: 'Example Client' };
+  const access = new AccessClient(config, {
+    getToken: () => `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.c2ln`,
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ clients: [], clientsNextCursor: null, grants: [grant] }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+  const client = await connected(t, access, config);
+  const result = await client.callTool({ name: 'list_viewer_client_grants', arguments: {
+    viewerProjectId: 'viewer-project-1', q: 'A & B', cursor: 'cursor_1', limit: 2,
+  } });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(JSON.parse(result.content[0].text), { clients: [], clientsNextCursor: null, grants: [grant] });
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0].url);
+  assert.equal(url.origin, 'https://ops.ledgetop.app');
+  assert.equal(url.pathname, '/api/viewer/direct-client-grants');
+  assert.deepEqual([...url.searchParams], [['viewerProjectId', 'viewer-project-1'], ['q', 'A & B'], ['cursor', 'cursor_1'], ['limit', '2']]);
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.body, undefined);
+});
+
+test('direct Viewer grant selectors reject malformed values before any API request', async t => {
+  let calls = 0;
+  const client = await connected(t, { request: async () => { calls++; return { clients: [], grants: [] }; } });
+  for (const arguments_ of [
+    { viewerProjectId: '../other' }, { q: 'x\n' }, { q: 'x'.repeat(121) }, { cursor: '../next' },
+    { limit: 0 }, { limit: 51 }, { method: 'POST' }, { path: '/api/viewer/direct-client-grants' },
+  ]) {
+    const result = await client.callTool({ name: 'list_viewer_client_grants', arguments: arguments_ });
+    assert.equal(result.isError, true);
+  }
+  assert.equal(calls, 0);
+});
+
+test('direct Viewer grant tool preserves authenticated API status errors', async t => {
+  const config = loadConfig({});
+  for (const status of [403, 503]) {
+    const access = new AccessClient(config, {
+      getToken: () => `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.c2ln`,
+      fetch: async () => new Response(JSON.stringify({ error: 'sanitized' }), {
+        status, headers: { 'content-type': 'application/json' },
+      }),
+    });
+    const client = await connected(t, access, config);
+    const result = await client.callTool({ name: 'list_viewer_client_grants', arguments: { viewerProjectId: 'viewer-project-1' } });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, new RegExp(`HTTP ${status}`));
+    assert.doesNotMatch(result.content[0].text, /sanitized/);
+  }
 });
 
 test('client lookup preserves canonical namespace IDs and forces source-specific records', async t => {
@@ -140,7 +202,7 @@ test('actual child-process stdio discovers tools without an Access login or netw
   const client = new Client({ name: 'stdio-test', version: '1' });
   t.after(() => client.close());
   await client.connect(transport);
-  assert.equal((await client.listTools()).tools.length, 10);
+  assert.equal((await client.listTools()).tools.length, 11);
 });
 
 test('existing public link lookup uses one exact read route without creating or widening a share', async t => {
