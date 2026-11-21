@@ -9,25 +9,34 @@ export type EmployeeReadAdminConfiguration = Readonly<{
 }>;
 
 const encoder = new TextEncoder();
-const CSRF_BUCKET_SECONDS = 600;  // a token is valid for its bucket and the previous one (10 to 20 minutes)
-const HEX64 = /^[0-9a-f]{64}$/u;
+/** A CSRF token carries its own expiry and is valid for at most 15 minutes from issue. */
+export const CSRF_LIFETIME_SECONDS = 900;
+const TOKEN = /^([1-9][0-9]{0,15})\.([0-9a-f]{64})$/u;
 
 async function hmac(secret: string, message: string): Promise<string> {
   const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return Buffer.from(await crypto.subtle.sign('HMAC', key, encoder.encode(message))).toString('hex');
 }
-/** Same construction as the existing Ops staff CSRF (client-onboarding-staff-http.ts), with its own domain string. */
-function csrfToken(secret: string, origin: string, access: NativeStaffAccessConfiguration, auth: AuthenticatedNativeStaffWithAdmissionVersion, bucket: number) {
-  return hmac(secret, JSON.stringify(['employee-files-admin-csrf-v1', access.issuer, access.staffAudience, origin,
-    auth.identity.staffId, auth.identity.verifiedAccessSubject, auth.identity.email, auth.admissionVersion, bucket]));
+/** HMAC over the same identity fields as the existing Ops staff CSRF (client-onboarding-staff-http.ts), with its own
+ * domain string and an explicit expiry: "<expiresAt>.<hex>". */
+function csrfMac(secret: string, origin: string, access: NativeStaffAccessConfiguration, auth: AuthenticatedNativeStaffWithAdmissionVersion, expiresAt: number) {
+  return hmac(secret, JSON.stringify(['employee-files-admin-csrf-v2', access.issuer, access.staffAudience, origin,
+    auth.identity.staffId, auth.identity.verifiedAccessSubject, auth.identity.email, auth.admissionVersion, expiresAt]));
 }
-async function csrfValid(candidate: string, secret: string, origin: string, access: NativeStaffAccessConfiguration,
-  auth: AuthenticatedNativeStaffWithAdmissionVersion): Promise<boolean> {
-  if (!HEX64.test(candidate)) return false;
-  const bucket = Math.floor(Date.now() / 1000 / CSRF_BUCKET_SECONDS);
-  const [current, prior] = await Promise.all([csrfToken(secret, origin, access, auth, bucket), csrfToken(secret, origin, access, auth, bucket - 1)]);
-  const given = Buffer.from(candidate, 'hex');
-  return Number(timingSafeEqual(given, Buffer.from(current, 'hex'))) + Number(timingSafeEqual(given, Buffer.from(prior, 'hex'))) > 0;
+export async function issueEmployeeFilesCsrf(secret: string, origin: string, access: NativeStaffAccessConfiguration,
+  auth: AuthenticatedNativeStaffWithAdmissionVersion, nowSeconds = Math.floor(Date.now() / 1000)): Promise<string> {
+  const expiresAt = nowSeconds + CSRF_LIFETIME_SECONDS;
+  return `${expiresAt}.${await csrfMac(secret, origin, access, auth, expiresAt)}`;
+}
+export async function employeeFilesCsrfValid(candidate: string, secret: string, origin: string, access: NativeStaffAccessConfiguration,
+  auth: AuthenticatedNativeStaffWithAdmissionVersion, nowSeconds = Math.floor(Date.now() / 1000)): Promise<boolean> {
+  const match = TOKEN.exec(candidate);
+  if (!match) return false;
+  const expiresAt = Number(match[1]);
+  // Valid strictly before its expiry, and never for more than the lifetime (a forged far-future expiry fails the MAC anyway).
+  if (!Number.isSafeInteger(expiresAt) || nowSeconds >= expiresAt || expiresAt > nowSeconds + CSRF_LIFETIME_SECONDS) return false;
+  const expected = await csrfMac(secret, origin, access, auth, expiresAt);
+  return timingSafeEqual(Buffer.from(match[2]!, 'hex'), Buffer.from(expected, 'hex'));
 }
 
 /** Deliberately not mounted by the production entrypoint. The Ops Team screen calls these; it is built separately. */
@@ -69,8 +78,7 @@ export function createEmployeeReadAdminRouter(configuration: EmployeeReadAdminCo
       if ('error' in admitted) return admitted.error;
       const { fixed, actor } = admitted;
       const listing = await listEmployeeFilesAccess(fixed.database, actor, c.req.param('staffId'), { gatewayIds: fixed.gatewayIds });
-      const bucket = Math.floor(Date.now() / 1000 / CSRF_BUCKET_SECONDS);
-      return reply(200, listing.canManage ? { ...listing, csrfToken: await csrfToken(fixed.csrfSecret, fixed.opsOrigin, fixed.access, actor, bucket) } : listing);
+      return reply(200, listing.canManage ? { ...listing, csrfToken: await issueEmployeeFilesCsrf(fixed.csrfSecret, fixed.opsOrigin, fixed.access, actor) } : listing);
     } catch (error) {
       return error instanceof EmployeeProvisioningError ? reply(error.status, { error: error.code }) : reply(503, { error: 'unavailable' });
     }
@@ -80,7 +88,7 @@ export function createEmployeeReadAdminRouter(configuration: EmployeeReadAdminCo
       const admitted = await admit(c.req.raw, true);
       if ('error' in admitted) return admitted.error;
       const { fixed, actor } = admitted;
-      if (!await csrfValid(c.req.header('X-CSRF-Token') ?? '', fixed.csrfSecret, fixed.opsOrigin, fixed.access, actor)) return reply(403, { error: 'invalid-csrf' });
+      if (!await employeeFilesCsrfValid(c.req.header('X-CSRF-Token') ?? '', fixed.csrfSecret, fixed.opsOrigin, fixed.access, actor)) return reply(403, { error: 'invalid-csrf' });
       if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(c.req.header('Content-Type') ?? '')) return reply(400, { error: 'invalid-command' });
       let body: unknown;
       try { body = await readBoundedJson(c.req.raw, 8192, 'employee file administration'); }

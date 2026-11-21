@@ -49,7 +49,6 @@ export function parseEmployeeReadCommand(value: unknown): EmployeeReadCommand {
     || (['register-root', 'register-exclusive-root'].includes(kind) && (!uuid(command.gatewayId) || !sha(command.rootFingerprint) || !label(command.displayName)))
     || (kind === 'advance-root' && (!positive(command.expectedGeneration) || !sha(command.rootFingerprint) || !label(command.displayName)
       || typeof command.status !== 'string' || !['active', 'disabled'].includes(command.status)))
-    || (kind === 'grant-write' && Number(command.expiresAt) > Math.floor(Date.now() / 1000) + WRITE_GRANT_MAX_SECONDS)
     || (['grant-read', 'deny-read', 'grant-write'].includes(kind) && (!uuid(command.grantId) || !positive(command.rootGeneration) || !sha(command.rootFingerprint)
       || typeof command.targetStaffId !== 'string' || !STAFF.test(command.targetStaffId) || !isNativeAccessSubject(command.targetAccessSubject)
       || !positive(command.targetAdmissionVersion) || !positive(command.expiresAt) || command.expiresAt > 253402300799))
@@ -83,6 +82,9 @@ function actorSnapshot(authenticated: AuthenticatedNativeStaffWithAdmissionVersi
 export async function provisionEmployeeRead(database: D1Database, authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
   value: unknown, options: Readonly<{ gatewayIds: readonly string[] }>): Promise<EmployeeReadCommandReceipt> {
   const actor = actorSnapshot(authenticated), command = parseEmployeeReadCommand(value);
+  // Contract (1, error table): a write grant beyond 30 days is a 409 conflict, the same answer D1 gives (0245 trigger).
+  if (command.kind === 'grant-write' && Number(command.expiresAt) > Math.floor(Date.now() / 1000) + WRITE_GRANT_MAX_SECONDS)
+    throw new EmployeeProvisioningError(409, 'conflict');
   if (actor.verifiedLogin && !await assertCurrentStaffLogin(database, actor.verifiedLogin)) throw new EmployeeProvisioningError(403, 'denied');
   const gateways = [...options.gatewayIds];
   if (!gateways.length || gateways.length > 100 || !gateways.every(uuid)) throw new EmployeeProvisioningError(503, 'unavailable');
@@ -115,11 +117,13 @@ export async function provisionEmployeeRead(database: D1Database, authenticated:
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(command_id) DO NOTHING`).bind(command.commandId, requestHash, command.kind, actor.staffId,
         actor.accessSubject, actor.admissionVersion, actor.profileVersion, actor.email, actor.verifiedUntil, rootId!, gatewayId,
         command.grantId ?? null, generation, payload),
-      session.prepare(`SELECT command_id commandId,action kind,root_id rootId,grant_id grantId,result_generation generation,request_sha256 requestHash FROM ${table} WHERE command_id=?`).bind(command.commandId),
+      // The single receipt resolver, read inside the same batch (atomic with the insert and its authority triggers).
+      receiptStatement(session, command.commandId),
     ]);
-    const receipt = results[1]?.results[0] as { commandId: string; kind: string; rootId: string; grantId: string | null; generation: number; requestHash: string } | undefined;
-    if (!results.every(result => result.success) || !receipt || receipt.requestHash !== requestHash) throw new EmployeeProvisioningError(503, 'unavailable');
-    return Object.freeze({ schemaVersion: 1, commandId: receipt.commandId, kind: receipt.kind, rootId: receipt.rootId, grantId: receipt.grantId, generation: receipt.generation });
+    const row = results[1]?.results[0] as ReceiptRow | undefined;
+    // The stored request hash must be this request's: a different request under the same id never yields a receipt.
+    if (!results.every(result => result.success) || !row || row.requestHash !== requestHash) throw new EmployeeProvisioningError(503, 'unavailable');
+    return decodeReceipt(row);
   } catch (error) {
     if (error instanceof EmployeeProvisioningError) throw error;
     const message = error instanceof Error ? error.message : '';
@@ -140,16 +144,22 @@ const MANAGER_SQL = `SELECT 1 ok FROM native_staff_admissions a JOIN native_staf
         OR EXISTS(SELECT 1 FROM staff_permission_overrides o WHERE o.staff_id=a.staff_id AND o.permission_key='employee.files.manage' AND o.scope='global' AND o.effect='allow'))
       AND NOT EXISTS(SELECT 1 FROM staff_permission_overrides o WHERE o.staff_id=a.staff_id AND o.permission_key='employee.files.manage' AND o.effect='deny')`;
 
-/** The one replay resolver over both command tables: the exact stored historical receipt, or null. */
+type ReceiptRow = { commandId: string; kind: string; rootId: string; grantId: string | null; generation: number; requestHash: string };
+/** The one receipt resolver: a single statement over both command tables (ids are unique across them, enforced in D1). */
+function receiptStatement(session: D1DatabaseSession, commandId: string): D1PreparedStatement {
+  return session.prepare(`SELECT command_id commandId,action kind,root_id rootId,grant_id grantId,result_generation generation,request_sha256 requestHash
+      FROM ops_employee_read_commands WHERE command_id=?1
+    UNION ALL SELECT command_id,action,root_id,grant_id,result_generation,request_sha256 FROM ops_employee_files_write_commands WHERE command_id=?1`).bind(commandId);
+}
+function decodeReceipt(row: ReceiptRow): EmployeeReadCommandReceipt {
+  return Object.freeze({ schemaVersion: 1, commandId: row.commandId, kind: row.kind, rootId: row.rootId, grantId: row.grantId, generation: row.generation });
+}
+/** Replay lookup by id (no request to compare): the same statement and decoder as the live path. */
 export async function resolveEmployeeFilesCommandReceipt(database: D1Database, commandId: string): Promise<EmployeeReadCommandReceipt | null> {
   if (!uuid(commandId)) return null;
-  const session = database.withSession('first-primary');
-  for (const table of ['ops_employee_read_commands', 'ops_employee_files_write_commands']) {
-    const row = await session.prepare(`SELECT command_id commandId,action kind,root_id rootId,grant_id grantId,result_generation generation FROM ${table} WHERE command_id=?`)
-      .bind(commandId).first<{ commandId: string; kind: string; rootId: string; grantId: string | null; generation: number }>();
-    if (row) return Object.freeze({ schemaVersion: 1, commandId: row.commandId, kind: row.kind, rootId: row.rootId, grantId: row.grantId, generation: row.generation });
-  }
-  return null;
+  const rows = await receiptStatement(database.withSession('first-primary'), commandId).all<ReceiptRow>();
+  if (!rows.success || rows.results.length > 1) throw new EmployeeProvisioningError(503, 'unavailable');
+  return rows.results[0] ? decodeReceipt(rows.results[0]) : null;
 }
 
 export type EmployeeFilesAccessListing = Readonly<{

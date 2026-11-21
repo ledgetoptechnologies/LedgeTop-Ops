@@ -5,7 +5,7 @@ import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrati
 import { resolveNativeStaffIdentityWithAdmissionVersion } from '../src/worker/native-staff-identity';
 import type { AuthenticatedNativeStaffWithAdmissionVersion as Actor } from '../src/worker/native-staff-auth';
 import { listEmployeeFilesAccess, provisionEmployeeRead as provision, resolveEmployeeFilesCommandReceipt as resolveReceipt } from '../src/worker/employee-read-provisioning';
-import { createEmployeeReadAdminRouter } from '../src/worker/employee-read-admin-routes';
+import { createEmployeeReadAdminRouter, CSRF_LIFETIME_SECONDS, employeeFilesCsrfValid, issueEmployeeFilesCsrf } from '../src/worker/employee-read-admin-routes';
 
 const uuid = () => crypto.randomUUID();
 const directory = new URL('../migrations/', import.meta.url);
@@ -42,9 +42,17 @@ describe('0245 staff Files write access: schema gates, provisioning and the Team
     for (const name of readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/u.test(name) && name.slice(0, 4) <= '0223').sort()) await migrate(db, name);
     // Rows and receipts written before 0245 must be unchanged by it.
     gatewayId = uuid(); owner = await person('role-owner'); employee = await person();
+    // Seeded with the 0223 command table directly: the current Worker code expects 0245 to be applied first.
     const register = root('register-root'), read = grant('grant-read', register.rootId);
-    await run(register);
-    legacy = { commandId: read.commandId, grantId: read.grantId, rootId: register.rootId, receipt: await run(read) };
+    const command = (c: Record<string, unknown>, rootId: string, grantId: string | null) => db.prepare(`INSERT INTO ops_employee_read_commands(command_id,
+      request_sha256,action,actor_staff_id,actor_access_subject,actor_admission_version,actor_profile_version,actor_email,verified_until,root_id,
+      configured_gateway_id,grant_id,result_generation,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?)`).bind(c.commandId, 'd'.repeat(64), c.kind,
+      owner.identity.staffId, owner.identity.verifiedAccessSubject, owner.admissionVersion, owner.identity.profileVersion, owner.identity.email,
+      owner.verifiedUntil, rootId, gatewayId, grantId, JSON.stringify(c)).run();
+    await command(register, register.rootId, null);
+    await command(read, register.rootId, read.grantId);
+    legacy = { commandId: read.commandId, grantId: read.grantId, rootId: register.rootId,
+      receipt: { schemaVersion: 1, commandId: read.commandId, kind: 'grant-read', rootId: register.rootId, grantId: read.grantId, generation: 1 } };
     await migrate(db, '0245_staff_files_write_access.sql');
   }, 90_000);
   afterAll(async () => { await mf?.dispose(); });
@@ -70,7 +78,7 @@ describe('0245 staff Files write access: schema gates, provisioning and the Team
     const shared = root('register-root'); await run(shared);
     await expect(run(grant('grant-write', shared.rootId))).rejects.toMatchObject({ status: 409, code: 'conflict' });
     const exclusive = root('register-exclusive-root'); await run(exclusive);
-    await expect(run(grant('grant-write', exclusive.rootId, employee, now() + 31 * day))).rejects.toMatchObject({ status: 400 });
+    await expect(run(grant('grant-write', exclusive.rootId, employee, now() + 31 * day))).rejects.toMatchObject({ status: 409, code: 'conflict' });
     const legacyStaff = await person(undefined, false);
     await expect(run({ ...grant('grant-write', exclusive.rootId), targetStaffId: legacyStaff.identity.staffId,
       targetAccessSubject: `access|${legacyStaff.identity.staffId}`, targetAdmissionVersion: 1 })).rejects.toMatchObject({ status: 409 });
@@ -140,6 +148,20 @@ describe('0245 staff Files write access: schema gates, provisioning and the Team
     expect((await listEmployeeFilesAccess(db, owner, legacyStaff.identity.staffId, { gatewayIds: [gatewayId] })).target)
       .toEqual({ staffId: legacyStaff.identity.staffId, accessSubject: null, admissionVersion: null, grantable: false });
     await expect(listEmployeeFilesAccess(db, owner, 'no-such-staff', { gatewayIds: [gatewayId] })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('CSRF tokens expire at exactly 15 minutes and cannot be extended', async () => {
+    const access = { enabled: true, issuer: 'https://example.cloudflareaccess.com', staffAudience: 'a'.repeat(32) }, secret = 's'.repeat(32), t0 = 1_800_000_000;
+    const token = await issueEmployeeFilesCsrf(secret, origin, access, owner, t0);
+    expect(CSRF_LIFETIME_SECONDS).toBe(900);
+    expect(await employeeFilesCsrfValid(token, secret, origin, access, owner, t0)).toBe(true);
+    expect(await employeeFilesCsrfValid(token, secret, origin, access, owner, t0 + 899)).toBe(true);
+    expect(await employeeFilesCsrfValid(token, secret, origin, access, owner, t0 + 900)).toBe(false);
+    const [exp, mac] = token.split('.');
+    expect(await employeeFilesCsrfValid(`${Number(exp) + 60}.${mac}`, secret, origin, access, owner, t0)).toBe(false);  // moved expiry
+    expect(await employeeFilesCsrfValid(token, secret, origin, access, owner, t0 - 1)).toBe(false);  // more than 15 minutes ahead
+    expect(await employeeFilesCsrfValid(token, secret, origin, access, employee, t0)).toBe(false);  // another person
+    expect(await employeeFilesCsrfValid(token, 't'.repeat(32), origin, access, owner, t0)).toBe(false);
   });
 
   it('requires the CSRF token from the listing for browser commands', async () => {
