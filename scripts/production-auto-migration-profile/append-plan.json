@@ -3,6 +3,14 @@
   "status": "review-candidate-not-executable",
   "sourceCommit": "e191147d28ceee64622e13265c017d77b1bd9691",
   "actualReceipt": {
+    "path": "C:/Users/fstor/.codex/artifacts/ui-preserved-ledger-actual-history-20261027.json",
+    "sha256": "d26d0517dff914668d6cf4b824797dd167803b32c26898dbab7e749792103ab6",
+    "purpose": "Actual ordered production migration-name metadata for preserved-runtime UI review; no SQL body claim",
+    "query": "SELECT name,id FROM d1_migrations ORDER BY id LIMIT 1025",
+    "sourceCommit": "c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8",
+    "bodyHashClaim": false
+  },
+  "operationsActualReceipt": {
     "path": "scripts/production-auto-migration-profile/installed-schema-preservation-v1/actual-metadata-evidence.fixture.json",
     "sha256": "6c5070bd045049e7d1b773a69d52a56eb9114912a7360f718ec0229b30f31a76",
     "purpose": "Sanitized actual production migration-name and schema-digest metadata (installed-schema-preservation-v1 observation); no SQL body claim",
@@ -11,6 +19,7 @@
     "observedAt": "2026-11-05T15:43:28.683Z",
     "bodyHashClaim": false
   },
+  "scope": "Ops-only re-base for the ordered 0227..0244 apply: the operations section uses the 2026-11-05 observation (operationsActualReceipt) and source e191147d. The client section, actualReceipt and requestDecision are unchanged from main (source 1e09732c, 2026-10-27 receipt); the Client append is owned separately.",
   "appliesNoProductionDDL": true,
   "applicationOrder": "Per app, preserve exact observed id/name rows and append each exact pending source migration in lexical/current-source order; never sort or renumber historical observed rows.",
   "apps": {
@@ -1898,11 +1907,11 @@
     },
     "client": {
       "observedBase": {
-        "rowCount": 159,
+        "rowCount": 158,
         "firstId": 1,
-        "lastId": 159,
-        "orderedRowsSha256": "0e0f5079e60f940afcebf50ddffc21c80e54148af24fe668d7984dd3ab03efc1",
-        "orderedNamesSha256": "82d2d85ff5abdab7b6919d955244ce39fa228b94c374fd77bd8ff1796bdc5773"
+        "lastId": 158,
+        "orderedRowsSha256": "5b68178ca8f66e79407abe28d10aa393a7d37f15fdbd4309e01e2b4aac198a4e",
+        "orderedNamesSha256": "8964f7012574c7aea19e94529729a8fa3255687707c17df8bb0a08bea8136ee6"
       },
       "preserveExactly": [
         {
@@ -3168,37 +3177,29 @@
           "replay": false,
           "rename": false,
           "drop": false
-        },
-        {
-          "id": 159,
-          "name": "0242_client_ops_triage_inquiries.sql",
-          "action": "retain-as-installed-history",
-          "replay": false,
-          "rename": false,
-          "drop": false
         }
       ],
       "appendInExactSourceOrder": [
         {
-          "ledgerId": 160,
+          "ledgerId": 159,
           "name": "0235_windows_portal_successor_candidates.sql",
           "gitBlobOid": "4f3698714c7061ba9c455b12a5211b7acddbe650",
           "sha256": "50046477dda2efe378d4b01c7de9f4ff2383d1511cf56c4c7a9633b4e41c0841"
         },
         {
-          "ledgerId": 161,
+          "ledgerId": 160,
           "name": "0236_windows_portal_successor_content_start_audit.sql",
           "gitBlobOid": "29f5c96adfa974540f824e41d423fde896f839cd",
           "sha256": "fcbc6f9f802dee3e2bfe592f1476f485b24d7f5414ca86143ddd9a299e82ffcf"
         },
         {
-          "ledgerId": 162,
+          "ledgerId": 161,
           "name": "0239_native_project_assignment_proof_v3.sql",
           "gitBlobOid": "7d487ae0eab2fa3dd829a1e16b68502007f10b66",
           "sha256": "40d2e31d4d8d4fbf60752aee8fd4ec8d65ece6d7a728d7215303372b48a4e40a"
         },
         {
-          "ledgerId": 163,
+          "ledgerId": 162,
           "name": "0241_app_release_pilot.sql",
           "gitBlobOid": "54e33aef18145276d13e37d2de13721bbf597b9f",
           "sha256": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048"
@@ -3269,7 +3270,7 @@
     "staffBoundary": "Ops native staff reconciliation remains OFF; no Access Group read or native-staff cutover is a Client request prerequisite. Ops 0225 is staff schema; Ops 0230 is app-release pilot schema, not staff activation."
   },
   "limitations": [
-    "The actual receipt is the sanitized installed-schema-preservation-v1 observation of ordered migration name/id metadata and schema digests; it does not attest SQL bodies or foreign-key state.",
+    "The actual receipt is ordered migration name/id metadata only; it does not attest SQL bodies, database schema objects, or foreign-key state.",
     "Retired Client 0112/0113 fixture blobs exist in Git only under test/fixtures/production-history; their fixture hashes are not a verified hash of installed D1 SQL bodies.",
     "This candidate cannot authorize production DDL, Worker deployment, or feature flag changes."
   ]

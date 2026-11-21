@@ -9,6 +9,14 @@
     "worktreeVerifiedAgainstCommit": true
   },
   "actualReceipt": {
+    "path": "C:/Users/fstor/.codex/artifacts/ui-preserved-ledger-actual-history-20261027.json",
+    "sha256": "d26d0517dff914668d6cf4b824797dd167803b32c26898dbab7e749792103ab6",
+    "purpose": "Actual ordered production migration-name metadata for preserved-runtime UI review; no SQL body claim",
+    "query": "SELECT name,id FROM d1_migrations ORDER BY id LIMIT 1025",
+    "sourceCommit": "c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8",
+    "bodyHashClaim": false
+  },
+  "operationsActualReceipt": {
     "path": "scripts/production-auto-migration-profile/installed-schema-preservation-v1/actual-metadata-evidence.fixture.json",
     "sha256": "6c5070bd045049e7d1b773a69d52a56eb9114912a7360f718ec0229b30f31a76",
     "purpose": "Sanitized actual production migration-name and schema-digest metadata (installed-schema-preservation-v1 observation); no SQL body claim",
@@ -17,6 +25,7 @@
     "observedAt": "2026-11-05T15:43:28.683Z",
     "bodyHashClaim": false
   },
+  "scope": "Ops-only re-base for the ordered 0227..0244 apply: the operations section uses the 2026-11-05 observation (operationsActualReceipt) and source e191147d. The client section, actualReceipt and requestDecision are unchanged from main (source 1e09732c, 2026-10-27 receipt); the Client append is owned separately.",
   "databases": {
     "operations": {
       "databaseId": "6ebf7514-d306-4615-ae56-ad869c874dbd",
@@ -2168,7 +2177,7 @@
     },
     "client": {
       "databaseId": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
-      "rowCount": 159,
+      "rowCount": 158,
       "orderedRows": [
         {
           "name": "0001_initial.sql",
@@ -2801,15 +2810,11 @@
         {
           "name": "0240_viewer_direct_grant_receipt_immutability.sql",
           "id": 158
-        },
-        {
-          "name": "0242_client_ops_triage_inquiries.sql",
-          "id": 159
         }
       ],
-      "orderedRowsSha256": "0e0f5079e60f940afcebf50ddffc21c80e54148af24fe668d7984dd3ab03efc1",
-      "orderedNamesSha256": "82d2d85ff5abdab7b6919d955244ce39fa228b94c374fd77bd8ff1796bdc5773",
-      "sourceMigrationCount": 161,
+      "orderedRowsSha256": "5b68178ca8f66e79407abe28d10aa393a7d37f15fdbd4309e01e2b4aac198a4e",
+      "orderedNamesSha256": "8964f7012574c7aea19e94529729a8fa3255687707c17df8bb0a08bea8136ee6",
+      "sourceMigrationCount": 160,
       "sourceMigrations": [
         {
           "name": "0001_initial.sql",
@@ -3610,11 +3615,6 @@
           "name": "0241_app_release_pilot.sql",
           "gitBlobOid": "54e33aef18145276d13e37d2de13721bbf597b9f",
           "sha256": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048"
-        },
-        {
-          "name": "0242_client_ops_triage_inquiries.sql",
-          "gitBlobOid": "4f2b0bcf77a7a5cf6b67e4730ae79254b909e356",
-          "sha256": "8f25db33d95c77425a52031d0e4255b133e2a2b91025d427c0d118ee305a4b66"
         }
       ],
       "sourceOnlyPending": [
