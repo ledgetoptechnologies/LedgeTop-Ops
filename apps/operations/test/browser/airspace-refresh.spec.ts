@@ -79,3 +79,23 @@ test("Airspace refresh stays inside the banner and preserves stale data on failu
   await expect(page.getByText("Wisconsin event")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("the banner shows the feed disclaimer once and readable source names", async ({ page }) => {
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/session") return route.fulfill({ json: {
+      user: { id: "pilot", email: "pilot@example.com", displayName: "Pilot", status: "Active", profileType: "Employee", isAdministrator: false, permissions: ["airspace.view"], divisions: [] },
+      csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
+    } });
+    if (path === "/api/airspace/tfrs") return route.fulfill({ json: { ...initial,
+      disclaimer: "\n  Situational awareness only.\n  Verify current NOTAMs before flight.",
+      sources: [{ source: "faa-tfr", status: "fresh", last_success_at: "2026-08-13T16:00:00Z" }, { source: "faa-sua", status: "fresh", last_success_at: "2026-08-13T16:00:00Z" }, { source: "faa-new", status: "fresh", last_success_at: null }] } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  await page.goto("/airspace");
+  const banner = page.locator(".airspace-safety-banner");
+  await expect(banner.locator("strong")).toHaveText("Situational awareness only");
+  await expect(banner.locator("p")).toHaveText("Verify current NOTAMs before flight.");
+  const sources = page.locator(".source-strip strong");
+  await expect(sources).toHaveText(["FAA temporary flight restrictions", "FAA special-use airspace", "faa-new"]);
+});

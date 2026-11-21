@@ -283,7 +283,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
       <OverviewTile icon="projects" value={counting ? "…" : String(projects.length)} label="Projects" action="View projects" onClick={() => navigate("projects")} />
       <OverviewTile icon="progress" value={countingRequests ? "…" : String(openRequests)} label="Requests in progress" action="View requests" onClick={() => navigate("requests")} />
       <OverviewTile icon="done" value={counting ? "…" : String(completed.length)} label="Completed requests" action="See history" onClick={() => navigate("requests")} />
-      <OverviewTile icon="files" value="Files" label="Deliveries" action="Open deliveries" onClick={() => navigate("deliveries")} />
+      <OverviewTile icon="files" label="Deliveries" action="Open deliveries" onClick={() => navigate("deliveries")} />
     </div>
     {requests.length > 0 && <RequestProgress requests={requests} />}
     {supplement}
@@ -304,10 +304,11 @@ const TILE_PATHS: Record<TileIcon, string> = {
   done: "M5 12.5l4.5 4.5L19 7.5",
   files: "M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM14 3v5h5",
 };
-function OverviewTile({ icon, value, label, action, onClick }: { icon: TileIcon; value: string; label: string; action: string; onClick: () => void }) {
+// The home payload carries no delivery count, so the Deliveries tile shows no number rather than a made-up one.
+function OverviewTile({ icon, value, label, action, onClick }: { icon: TileIcon; value?: string; label: string; action: string; onClick: () => void }) {
   return <button type="button" className={`portal-overview-tile portal-overview-tile-${icon}`} onClick={onClick}>
     <span className="portal-overview-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d={TILE_PATHS[icon]} /></svg></span>
-    <span className="portal-overview-value">{value}</span>
+    {value !== undefined && <span className="portal-overview-value">{value}</span>}
     <span className="portal-overview-label">{label}</span>
     <span className="portal-overview-action">{action} →</span>
   </button>;
