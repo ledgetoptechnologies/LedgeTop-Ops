@@ -479,6 +479,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const attempt=this.getAttempt(attemptId);
       const provider=attempt?.providerId&&this.getProvider(attempt.providerId);
       if(attempt?.status!=='cancelled'||!provider||provider.id!==observedProvider.id||provider.endpoint!==observedProvider.endpoint||
+        provider.type!==observedProvider.type||
         !this.providerCancellationTargetMatches(attempt,observedProvider)||
         observedTask.uuid!==attempt.providerTaskId||!['cancelled','failed','completed'].includes(observedTask.status))return false;
       if(!this.providerCancellationUnsettled(provider.id,attemptId))return true;

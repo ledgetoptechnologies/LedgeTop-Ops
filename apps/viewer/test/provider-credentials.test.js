@@ -510,6 +510,12 @@ test('node deletion waits for durable remote cancellation evidence, including le
   assert.equal((await cancel(active, 'check-running-0001')).status, 200);
   assert.equal(c.processing.providerCancellationUnsettled(provider.id, active.id), true);
 
+  const observedTask = { uuid: active.providerTaskId, status: 'cancelled' };
+  c.processing.updateProviderMetadata(provider.id, { type: 'clusterodm', enabled: false });
+  assert.equal(c.processing.recordProviderCancellationSettled(active.id, provider, observedTask), false);
+  assert.equal(c.processing.providerCancellationUnsettled(provider.id, active.id), true);
+  c.processing.updateProviderMetadata(provider.id, { type: provider.type });
+
   remoteStatus = 50;
   assert.equal((await cancel(active, 'check-cancelled-0001')).status, 200);
   assert.equal(c.processing.providerCancellationUnsettled(provider.id, active.id), false);
