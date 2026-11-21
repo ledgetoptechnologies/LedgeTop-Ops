@@ -19,6 +19,7 @@ public sealed record PortalFolderPage(string FolderHandle, IReadOnlyList<PortalF
 public sealed class PortalClient : IDisposable
 {
     private const string Base = "/api/client/operations/data/windows-catalog";
+    internal const string DeliveriesPath = Base + "/deliveries";
     private const string DownloadPrefix = "/api/client/operations/data/windows-successor/files/";
     private const long MaximumSafeInteger = 9007199254740991;
     private static readonly UTF8Encoding Utf8 = new(false, true);
@@ -40,7 +41,7 @@ public sealed class PortalClient : IDisposable
 
     public async Task<PortalDeliveries> GetDeliveriesAsync(string? cursor = null, CancellationToken cancellationToken = default)
     {
-        using var json = await GetAsync(Base + "/deliveries" + Cursor(cursor), 5 * 1024 * 1024, cancellationToken);
+        using var json = await GetAsync(DeliveriesPath + Cursor(cursor), 5 * 1024 * 1024, cancellationToken);
         try {
             var root = json.RootElement; Mode(root);
             Exact(root, "schemaVersion", "resourceMode", "items", "page");

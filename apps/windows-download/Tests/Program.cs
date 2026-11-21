@@ -5,6 +5,12 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args is ["--client-files-policy-only"]) {
+    await QueuedDownloadSourceTests.ClientPolicy();
+    Console.WriteLine("PASS client Files policy");
+    return;
+}
+
 if (args.Length > 0 && args[0] == "--synthetic-access-child-v1") {
     Environment.ExitCode = await AccessSessionTests.RunChildAsync(args);
     return;

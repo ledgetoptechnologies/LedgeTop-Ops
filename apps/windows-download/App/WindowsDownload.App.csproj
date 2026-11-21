@@ -19,6 +19,13 @@
   <ItemGroup Condition="'$(LedgeTopDeveloperBuild)' != ''">
     <AssemblyMetadata Include="LedgeTop.BuildMode" Value="developer" />
   </ItemGroup>
+  <ItemGroup Condition="'$(LedgeTopFreshStaging)' == 'true'">
+    <AssemblyMetadata Include="LedgeTop.FreshGenerationStagingQualification" Value="true" />
+  </ItemGroup>
+  <Target Name="RequireFreshStagingPilot" BeforeTargets="BeforeBuild" Condition="'$(LedgeTopFreshStaging)' != ''">
+    <Error Condition="!$([System.String]::Equals('$(LedgeTopFreshStaging)', 'true', StringComparison.Ordinal)) Or !$([System.String]::Equals('$(LedgeTopPackage)', 'true', StringComparison.Ordinal)) Or !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'pilot', StringComparison.Ordinal)) Or '$(LedgeTopDeveloperBuild)' != ''"
+           Text="LedgeTopFreshStaging requires an explicitly packaged pilot build." />
+  </Target>
   <Target Name="RequireDeveloperOptIn" BeforeTargets="BeforeBuild"
           Condition="'$(LedgeTopDeveloperBuild)' != '' And !$([System.String]::Equals('$(LedgeTopDeveloperBuild)', 'true', StringComparison.Ordinal))">
     <Error Text="LedgeTopDeveloperBuild must be exactly 'true' (got '$(LedgeTopDeveloperBuild)')." />
