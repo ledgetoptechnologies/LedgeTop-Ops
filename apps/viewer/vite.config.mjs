@@ -6,7 +6,24 @@ import { resolve } from 'node:path';
 // exercises the same code paths as production.
 const BACKEND_PORT = process.env.VIEWER_BACKEND_PORT || 8090;
 
+// Loads the workspace motion module (workspace-motion.mjs) on the workspace page. It is injected
+// here so the page markup stays untouched; it can move into workspace.html as a plain module script.
+export const WORKSPACE_MOTION_SCRIPT = '<script type="module" src="/workspace-motion.mjs"></script>';
+export function workspaceMotionPlugin() {
+  return {
+    name: 'ltds-workspace-motion',
+    transformIndexHtml: {
+      order: 'pre',
+      handler(html, context) {
+        if (!/(^|[\\/])workspace\.html$/.test(context?.filename || context?.path || '') || html.includes('/workspace-motion.mjs')) return html;
+        return html.replace('</body>', `  ${WORKSPACE_MOTION_SCRIPT}\n</body>`);
+      },
+    },
+  };
+}
+
 export default defineConfig({
+  plugins: [workspaceMotionPlugin()],
   server: {
     host: '0.0.0.0',
     port: 8080,
