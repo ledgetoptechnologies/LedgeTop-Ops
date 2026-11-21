@@ -13,6 +13,20 @@ const schemaInventory = `SELECT json_group_array(json_array(type,name,tbl_name,s
   OR (type='view' AND name='client_onboarding_live_issuances')
   ORDER BY type COLLATE BINARY,name COLLATE BINARY
 )`;
+const destinationSchemaInventory = `SELECT json_group_array(json_array(type,name,tbl_name,sql)) inventory FROM (
+  SELECT 'column' type,name,'client_onboarding_issuance_commands' tbl_name,
+    json_array(upper(type),"notnull",dflt_value,pk) sql
+  FROM pragma_table_info('client_onboarding_issuance_commands') WHERE name='destination_intent_json'
+  UNION ALL
+  SELECT 'column',name,'client_onboarding_decisions',json_array(upper(type),"notnull",dflt_value,pk)
+  FROM pragma_table_info('client_onboarding_decisions') WHERE name='destination_issuance_sha256'
+  UNION ALL
+  SELECT type,name,tbl_name,sql FROM sqlite_schema
+  WHERE type='trigger' AND (
+    (tbl_name='client_onboarding_issuance_commands' AND name='client_onboarding_destination_intent_exact')
+    OR (tbl_name='client_onboarding_decisions' AND name='client_onboarding_destination_approval_exact'))
+  ORDER BY type COLLATE BINARY,name COLLATE BINARY
+)`;
 const mailSchemaInventory = `SELECT json_group_array(json_array(type,name,tbl_name,sql)) inventory FROM (
   SELECT type,name,tbl_name,sql FROM sqlite_schema
   WHERE (type IN ('table','index','trigger') AND tbl_name IN (
@@ -39,6 +53,12 @@ async function issuanceSchemaFence(db: Pick<D1Database, "prepare">, query: strin
 
 export function targetIssuanceSchemaFence(db: Pick<D1Database, "prepare">): Promise<D1PreparedStatement> {
   return issuanceSchemaFence(db, schemaInventory, REVIEWED_SCHEMA_SHA256);
+}
+
+/** Ordinary destination invitations depend on their own columns and guards. */
+export function destinationIssuanceSchemaFence(db: Pick<D1Database, "prepare">): Promise<D1PreparedStatement> {
+  return issuanceSchemaFence(db, destinationSchemaInventory,
+    "9ac1831914cc6857ddd41df7fff9cd2de4d8a52f0ddd69fb23fab9d18af7f77d");
 }
 
 /** Email path only: guard both reveal tables and every outbox object as well. */

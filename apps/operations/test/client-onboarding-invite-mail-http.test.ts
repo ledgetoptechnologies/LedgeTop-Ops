@@ -8,7 +8,7 @@ vi.mock("../src/worker/client-onboarding-handoff",async original=>({
  issueClientOnboardingWithHandoff:vi.fn(),issueClientOnboardingMailWithHandoff:calls.issue,
  revealClientOnboardingSecret:vi.fn(),
 }));
-vi.mock("../src/worker/client-onboarding-target-schema",()=>({mailIssuanceSchemaFence:calls.schema}));
+vi.mock("../src/worker/client-onboarding-target-schema",()=>({destinationIssuanceSchemaFence:vi.fn(),mailIssuanceSchemaFence:calls.schema}));
 import {handleClientOnboardingStaffHttp,type ClientOnboardingStaffHttpDependencies} from "../src/worker/client-onboarding-staff-http";
 const origin="https://ops.ledgetopdroneservices.com";
 const actor={identity:{kind:"native" as const,staffId:"staff:test",verifiedAccessSubject:"access|staff:test",

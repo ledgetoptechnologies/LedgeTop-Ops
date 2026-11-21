@@ -12,7 +12,7 @@ import { authenticateNativeStaffWithAdmissionVersion,
 import { assertInviteMailKeyringsDisjoint, issueClientOnboardingWithHandoff, issueClientOnboardingMailWithHandoff, revealClientOnboardingSecret,
   snapshotClientOnboardingKeyring, type ClientOnboardingKeyring } from "./client-onboarding-handoff";
 import { normalizeInviteDeliveryAddress, snapshotInviteMailKeyring } from "./client-onboarding-invite-mail-crypto";
-import { mailIssuanceSchemaFence, targetIssuanceSchemaFence } from "./client-onboarding-target-schema";
+import { destinationIssuanceSchemaFence, mailIssuanceSchemaFence, targetIssuanceSchemaFence } from "./client-onboarding-target-schema";
 import { readClientOnboardingSubmissionForReview, listClientOnboardingSubmissionsForReview } from "./client-onboarding-review";
 import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approval";
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
@@ -362,7 +362,16 @@ export async function handleClientOnboardingStaffHttp(request: Request,
         const choices = await readClientOnboardingScopeChoices(authority.database, auth);
         unexpired(auth);
         if (inviteDestinationBindingsJson === undefined) return response(200, choices);
-        const destinationSourceIds = allowedInviteDestinationBindings(inviteDestinationBindingsJson, choices).map(binding => binding.sourceId);
+        const eligibleDestinations = allowedInviteDestinationBindings(inviteDestinationBindingsJson, choices).map(binding => binding.sourceId);
+        let destinationSourceIds: typeof eligibleDestinations = [];
+        if (eligibleDestinations.length > 0) {
+          try {
+            await destinationIssuanceSchemaFence(authority.database.withSession("first-primary"));
+            destinationSourceIds = eligibleDestinations;
+          } catch {
+            // An explicit destination configuration must not fall back to legacy issuance.
+          }
+        }
         let targetDestinationSourceIds: typeof destinationSourceIds = [];
         if (destinationSourceIds.length > 0 && dependencies.inviteTargetChoicesEnabled === "true"
           && dependencies.inviteTargetIssuanceEnabled === "true") {

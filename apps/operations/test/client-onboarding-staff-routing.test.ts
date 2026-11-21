@@ -41,10 +41,11 @@ vi.mock("../src/worker/client-onboarding-shared-company-plan",async original=>({
   ...await original<typeof import("../src/worker/client-onboarding-shared-company-plan")>(),
   prepareClientOnboardingSharedCompanyPlan:calls.sharedPlan,readClientOnboardingSharedCompanyChoices:calls.sharedChoices,
 }));
-const targetSchema = vi.hoisted(() => vi.fn());
+const { targetSchema, destinationSchema } = vi.hoisted(() => ({ targetSchema: vi.fn(), destinationSchema: vi.fn() }));
 vi.mock("../src/worker/client-onboarding-target-schema", async original => ({
   ...await original<typeof import("../src/worker/client-onboarding-target-schema")>(),
   targetIssuanceSchemaFence: targetSchema,
+  destinationIssuanceSchemaFence: destinationSchema,
 }));
 import worker from "../src/worker/index";
 import { clientOnboardingStaffHttpRequest } from "../src/worker/client-onboarding-staff-http";
@@ -96,7 +97,12 @@ it("reports only configured destination bindings that survive the native authori
   calls.scopeChoices.mockResolvedValue({ scopes });
   const path = "/api/client-onboarding/staff/scope-choices";
   const csrf = await session(environment);
+  const withSession = vi.fn((_mode: string) => ({}));
+  environment.OPS_DB = { ...database, withSession } as unknown as D1Database;
+  destinationSchema.mockRejectedValueOnce(new Error("fixture_schema_missing"));
+  expect(await (await send(path, "POST", {}, csrf, environment)).json()).toEqual({ scopes, destinationSourceIds: [] });
   expect(await (await send(path, "POST", {}, csrf, environment)).json()).toEqual({ scopes, destinationSourceIds: ["project-alpha:secondary"] });
+  expect(withSession.mock.calls.every(call => call[0] === "first-primary")).toBe(true);
   environment.CLIENT_ONBOARDING_INVITE_DESTINATION_BINDINGS = "[]";
   expect(await (await send(path, "POST", {}, csrf, environment)).json()).toEqual({ scopes, destinationSourceIds: [] });
   delete environment.CLIENT_ONBOARDING_INVITE_DESTINATION_BINDINGS;
@@ -138,15 +144,17 @@ it("reports target-capable destinations only with both flags, a full connection 
     return response.json();
   };
   const ordinary = { scopes, destinationSourceIds: [secondary] };
+  environment.OPS_DB = { ...database, withSession: vi.fn(() => ({})) } as unknown as D1Database;
   const primarySession = {};
-  const withSession = vi.fn(() => primarySession);
+  const withSession = vi.fn((_mode: string) => primarySession);
   const opsDb = { ...database, withSession } as unknown as D1Database;
   targetSchema.mockRejectedValueOnce(new Error("client_onboarding_target_schema_unavailable"));
   expect(await read({ OPS_DB: opsDb })).toEqual(ordinary);
   targetSchema.mockResolvedValueOnce(undefined);
   expect(await read({ OPS_DB: opsDb })).toEqual({ ...ordinary, targetDestinationSourceIds: [secondary] });
-  expect(withSession.mock.calls).toEqual([["first-primary"], ["first-primary"]]);
+  expect(withSession.mock.calls.every(call => call[0] === "first-primary")).toBe(true);
   expect(targetSchema.mock.calls).toEqual([[primarySession], [primarySession]]);
+  expect(withSession).toHaveBeenCalledTimes(4);
   targetSchema.mockClear();
   expect(await read({ CLIENT_ONBOARDING_INVITE_TARGET_CHOICES_ENABLED: undefined })).toEqual(ordinary);
   expect(await read({ CLIENT_ONBOARDING_INVITE_TARGET_ISSUANCE_ENABLED: "TRUE" })).toEqual(ordinary);

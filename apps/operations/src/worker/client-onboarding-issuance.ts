@@ -4,7 +4,7 @@ import type { AuthenticatedNativeStaff } from "./native-staff-auth";
 import { assertCurrentStaffLogin, snapshotStaffLoginProof } from "./staff-login-bindings";
 import { parseInviteDestinationIntent } from "./client-onboarding-invite-destinations";
 import { inviteTargetProofStatement, type VerifiedInviteTarget } from "./client-onboarding-target-choices";
-import { mailIssuanceSchemaFence, targetIssuanceSchemaFence } from "./client-onboarding-target-schema";
+import { destinationIssuanceSchemaFence, mailIssuanceSchemaFence, targetIssuanceSchemaFence } from "./client-onboarding-target-schema";
 import { bindInviteMailDigest, snapshotInviteMailEnvelope, type InviteMailEnvelope } from "./client-onboarding-invite-mail-crypto";
 
 export type ClientOnboardingProposedScope = Readonly<{ businessAreaId: string; divisionId: string | null }>;
@@ -165,6 +165,8 @@ export async function issueClientOnboardingInvitation(database: D1Database, raw:
     ];
     if (orderedTargets.length > 0) statements.unshift(await targetIssuanceSchemaFence(db));
     if (mail) statements.unshift(await mailIssuanceSchemaFence(db));
+    else if (input.destinationIntentJson && orderedTargets.length === 0)
+      statements.unshift(await destinationIssuanceSchemaFence(db));
     for (const { context, pin } of orderedTargets)
       statements.push(inviteTargetProofStatement(db, context, pin, input.invitationId, requestSha256));
     if (encryptedRow) statements.push(db.prepare(`INSERT INTO client_onboarding_handoffs
