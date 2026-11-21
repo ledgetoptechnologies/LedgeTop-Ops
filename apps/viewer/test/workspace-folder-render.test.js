@@ -148,12 +148,13 @@ test('an externally removed selected task waits for an active editor and then cl
   assert.equal(rewrites,1);assert.equal(renders,1);
 });
 
-test('Undo appears after a slow successful response and uses its server expiry', async () => {
+test('Undo follows the server window after a slow response despite browser clock skew', async () => {
   const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
   const start=source.indexOf('function clearFolderUndo('),end=source.indexOf('\nfunction clearTaskDrag(',start);
   const task={id:'one',projectId:'p',folderId:null,folderRevision:0};
   const target={children:[],replaceChildren(...items){this.children=items;}};
-  let wall=Date.parse('2026-11-20T22:00:00.000Z'),monotonic=0,reply,delay;
+  const responseTime=Date.parse('2026-11-20T22:00:00.000Z');
+  let wall=responseTime+60_000,monotonic=0,reply,delay;
   const context={
     state:{tasks:[task]},folderUndo:null,folderUndoTimer:null,projectDataGeneration:0,
     canDragFolderTask:()=>true,folderAuthorizationGuard:()=>()=>true,
@@ -171,10 +172,16 @@ test('Undo appears after a slow successful response and uses its server expiry',
   wall+=15_000;monotonic+=15_000;
   assert.deepEqual(target.children,[]);assert.equal(delay,undefined);
   const moved={...task,folderId:'folder',folderRevision:1};
-  const undoExpiresAt=new Date(wall+10_000).toISOString();
-  reply({task:moved,undoExpiresAt});await pending;
+  const serverTime=new Date(responseTime).toISOString();
+  const undoExpiresAt=new Date(responseTime+10_000).toISOString();
+  reply({task:moved,undoExpiresAt,serverTime});await pending;
   assert.equal(target.children[1].textContent,'Undo');assert.equal(delay,10_000);
-  wall+=10_001;monotonic+=10_001;
-  context.offerFolderUndo(moved,null,undoExpiresAt);
+  wall=responseTime-60_000;
+  context.offerFolderUndo(moved,null,undoExpiresAt,new Date(responseTime+8_000).toISOString());
+  assert.equal(target.children[1].textContent,'Undo');assert.equal(delay,2_000);
+  monotonic+=2_000;
+  target.children[1].onclick();
+  assert.deepEqual(target.children,[],'the click guard uses the monotonic deadline');
+  context.offerFolderUndo(moved,null,undoExpiresAt,new Date(responseTime+10_001).toISOString());
   assert.deepEqual(target.children,[],'an expired server result cannot advertise a new window');
 });
