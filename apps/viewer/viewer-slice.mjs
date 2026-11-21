@@ -12,10 +12,11 @@ export function slicePlane(bounds,{axis='elevation',fraction=.5,flipped=false}={
   return plane;
 }
 
-export function createViewerSlice({renderer,scene,panel,getRoots,getBounds,supported=()=>true,describe=()=>''}) {
+export function createViewerSlice({renderer,scene,panel,getRoots,getBounds,supported=()=>true,describe=()=>'',getExternal=()=>null}) {
   const plane=new THREE.Plane(),helper=new THREE.PlaneHelper(plane,1,0xffa13e),original=new WeakMap();
   helper.visible=false;scene.add(helper);renderer.localClippingEnabled=true;
   let settings={enabled:false,axis:'elevation',fraction:.5,flipped:false};
+  let refreshGeneration=0;
   const listeners=[];
   const field=name=>panel.querySelector(`[data-slice="${name}"]`);
   const status=field('status');
@@ -33,6 +34,30 @@ export function createViewerSlice({renderer,scene,panel,getRoots,getBounds,suppo
     }
   });}
   function refresh({updateMaterials=true}={}){
+    const generation=++refreshGeneration;
+    const external=getExternal();
+    const hint=panel.querySelector('#slice-hint');
+    if(hint)hint.textContent=external?'View only. Saved measurements and volume calculations still use the full source surface and their own reference base.':'View only. The orange outline marks the cut plane. Saved measurements and volume calculations still use the full source surface and their own reference base.';
+    const axisLabels=external?{elevation:'Z (native)',easting:'X (native)',northing:'Y (native)'}:{elevation:'Horizontal (elevation)',easting:'North–south',northing:'East–west'};
+    for(const option of field('axis').options||[])if(axisLabels[option.value])option.textContent=axisLabels[option.value];
+    if(external){
+      let ready=external.available===true;
+      if(!ready)settings.enabled=false;
+      const success=!ready||external.set({...settings});
+      // A synchronous bridge interruption can reset the panel recursively.
+      // Never let an older refresh overwrite the newer fail-closed state.
+      if(generation!==refreshGeneration)return;
+      ready=ready&&getExternal()?.available===true;
+      if(!success)settings.enabled=false;
+      if(!ready)settings.enabled=false;
+      if(updateMaterials)for(const root of getRoots())visit(root,false);
+      helper.visible=false;
+      field('enabled').checked=settings.enabled;field('enabled').disabled=!ready;
+      for(const name of ['axis','position','flip'])field(name).disabled=!ready||!settings.enabled;
+      field('axis').value=settings.axis;field('position').value=String(settings.fraction*100);field('flip').setAttribute('aria-pressed',String(settings.flipped));
+      status.textContent=!ready||!success?'Slicing is unavailable for this point cloud.':settings.enabled?'Native-coordinate slice active. Saved measurements use the full source.':'Slicing off. The whole surface is visible.';
+      return;
+    }
     const bounds=getBounds(),available=supported(),ready=available&&bounds&&!bounds.isEmpty();
     if(!ready)settings.enabled=false;
     if(ready){plane.copy(slicePlane(bounds,settings));helper.size=Math.max(1,bounds.getSize(new THREE.Vector3()).length());}

@@ -21,7 +21,7 @@
   function hasVisiblePointCloudNodes(pointCloud) {
     if (!Array.isArray(pointCloud?.visibleNodes)) return false;
     return pointCloud.visibleNodes.some((node) => Boolean(
-      node?.sceneNode?.geometry && node.sceneNode.visible !== false,
+      node?.sceneNode?.geometry?.attributes?.position?.count > 0 && node.sceneNode.visible !== false,
     ));
   }
 
@@ -46,6 +46,7 @@
     let phase = 'starting';
     let failureCode = null;
     let phaseBeforeAccess = null;
+    let visibleAtLastObservation = false;
 
     function stableStage() {
       if (phase === 'starting') return 'startup';
@@ -134,6 +135,11 @@
       if (retry) retry.hidden = true;
       notify('ready', 'points_visible', 'nodes');
     }
+    function visibilityChanged(visible) {
+      const nowVisible=visible===true;
+      if(nowVisible&&!visibleAtLastObservation&&phase==='ready')notify('ready','points_visible','nodes');
+      visibleAtLastObservation=nowVisible;
+    }
 
     retry?.addEventListener('click', () => {
       if (phase !== 'failed') return;
@@ -168,7 +174,7 @@
       fail('authorization_unavailable', { retryable: false });
     }
 
-    return { beginStartup, beginLoad, metadataReady, pointsVisible, fail,
+    return { beginStartup, beginLoad, metadataReady, pointsVisible, visibilityChanged, fail,
       accessRequired, accessRestored, accessUnavailable, phase: () => phase };
   }
 

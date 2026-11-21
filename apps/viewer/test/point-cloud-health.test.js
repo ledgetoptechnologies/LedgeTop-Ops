@@ -94,6 +94,25 @@ test('visible points clear the watchdog and notify only the same-origin parent',
   }]);
 });
 
+test('visibility recovery emits one new ready event without repeated notifications',()=>{
+  const f=fixture();f.health.beginStartup();f.health.beginLoad();f.health.metadataReady();
+  f.health.visibilityChanged(true);f.health.pointsVisible();assert.equal(f.messages.length,1);
+  f.health.visibilityChanged(true);assert.equal(f.messages.length,1);
+  f.health.visibilityChanged(false);f.health.visibilityChanged(false);assert.equal(f.messages.length,1);
+  f.health.visibilityChanged(true);assert.equal(f.messages.length,2);
+  f.health.visibilityChanged(true);assert.equal(f.messages.length,2);
+});
+
+test('new iframe HUD remains compatible with a cached older health module',()=>{
+  const shell=fs.readFileSync(path.join(__dirname,'..','public','pointcloud.html'),'utf8');
+  const start=shell.indexOf('    setInterval(() => {',shell.indexOf('// Read Potree\'s per-frame visibility counters'));
+  const end=shell.indexOf('    }, 500);',start);assert.ok(start>=0&&end>start);
+  const body=shell.slice(start+'    setInterval(() => {'.length,end),legacy={calls:0,pointsVisible(){this.calls++;}},budget={points:0},cloud={numVisiblePoints:12};
+  const tick=new Function('viewer','hasVisiblePointCloudNodes','pointCloudHealth','budgetState',body);
+  assert.doesNotThrow(()=>tick({scene:{pointclouds:[cloud]}},()=>true,legacy,budget));assert.equal(legacy.calls,1);assert.equal(budget.points,12);
+  assert.doesNotThrow(()=>tick({scene:{pointclouds:[cloud]}},()=>false,legacy,budget));assert.equal(legacy.calls,1);assert.equal(budget.points,0);
+});
+
 test('expired access after visible points is reported and renewal preserves the ready cloud', () => {
   const f = fixture();
   f.health.pointsVisible();
@@ -120,6 +139,12 @@ test('stale point totals cannot mark an empty black canvas ready', () => {
   assert.equal(hasVisiblePointCloudNodes({
     numVisiblePoints: 12_646,
     visibleNodes: [{ sceneNode: { visible: true, geometry: {} } }],
+  }), false);
+  assert.equal(hasVisiblePointCloudNodes({
+    visibleNodes: [{ sceneNode: { visible: true, geometry: {attributes:{position:{count:0}}} } }],
+  }), false);
+  assert.equal(hasVisiblePointCloudNodes({
+    visibleNodes: [{ sceneNode: { visible: true, geometry: {attributes:{position:{count:3}}} } }],
   }), true);
 });
 
