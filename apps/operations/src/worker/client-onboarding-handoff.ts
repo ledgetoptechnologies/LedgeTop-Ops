@@ -6,6 +6,9 @@ import { hashClientOnboardingInvitationSecret } from "./client-onboarding-submis
 import { isNativeAccessSubject } from "./native-access-subject";
 import type { AuthenticatedNativeStaff } from "./native-staff-auth";
 import { assertCurrentStaffLogin, snapshotStaffLoginProof } from "./staff-login-bindings";
+import type { VerifiedInviteTarget } from "./client-onboarding-target-choices";
+import { inviteMailIntent, normalizeInviteDeliveryAddress, openInviteMail, sealInviteMail, snapshotInviteMailKeyring, resolveInviteMailKeys,
+  type InviteMailEnvelope, type InviteMailKeyring } from "./client-onboarding-invite-mail-crypto";
 
 export type ClientOnboardingKeyring = Readonly<{ activeKeyId: string; keys: Readonly<Record<string, string>> }>;
 export type ClientOnboardingRevelation = Readonly<{
@@ -75,7 +78,9 @@ function actor(value: unknown): AuthenticatedNativeStaff | null {
     ...(login ? { verifiedLogin: login } : {}) };
 }
 function baseRequest(value: unknown) {
-  const row = record(value, ["commandId", "expiresAt", "targetClientRecordId", "scopes"]);
+  const keys = ["commandId", "expiresAt", "targetClientRecordId", "scopes"];
+  const legacy = record(value, keys);
+  const row = legacy ?? record(value, [...keys, "destinationIntent"]);
   if (!row || typeof row.commandId !== "string" || !UUID.test(row.commandId)
     || !instant(row.expiresAt) || Date.parse(row.expiresAt) <= Date.now()
     || Date.parse(row.expiresAt) > Date.now() + MAX_INVITATION_LIFETIME_MS
@@ -91,7 +96,8 @@ function baseRequest(value: unknown) {
   }) as ClientOnboardingProposedScope[] | null;
   if (scopes && new Set(scopes.map(scope => `${scope.businessAreaId}\0${scope.divisionId ?? ""}`)).size !== scopes.length) return null;
   return { commandId: row.commandId, expiresAt: row.expiresAt,
-    targetClientRecordId: row.targetClientRecordId as string | null, scopes };
+    targetClientRecordId: row.targetClientRecordId as string | null, scopes,
+    ...(!legacy ? { destinationIntent: row.destinationIntent } : {}) };
 }
 export function snapshotClientOnboardingKeyring(value: unknown): ClientOnboardingKeyring {
   const ring = record(value, ["activeKeyId", "keys"]);
@@ -144,7 +150,7 @@ async function decrypt(row: HandoffRow, ring: ClientOnboardingKeyring): Promise<
   return secret;
 }
 export async function issueClientOnboardingWithHandoff(database: D1Database, raw: unknown,
-  keyring: ClientOnboardingKeyring): Promise<ClientOnboardingIssuanceReceipt> {
+  keyring: ClientOnboardingKeyring, targets?: readonly VerifiedInviteTarget[]): Promise<ClientOnboardingIssuanceReceipt> {
   try {
     const ring = snapshotClientOnboardingKeyring(keyring);
     const envelope = record(raw, ["authenticatedNativeStaff", "request"]);
@@ -161,10 +167,10 @@ export async function issueClientOnboardingWithHandoff(database: D1Database, raw
       const secret = await decrypt(row, ring);
       const full = { authenticatedNativeStaff: authenticated, request: { ...base,
         invitationId: row.invitation_id, invitationSecret: secret } };
-      const evidence = await clientOnboardingIssuanceEvidence(full);
+      const evidence = await clientOnboardingIssuanceEvidence(full, targets);
       if (!same(evidence.requestSha256, row.request_sha256) || !same(evidence.secretSha256, row.secret_sha256)) throw Error();
       return issueClientOnboardingInvitation(database, full, { keyId: row.key_id, nonceHex: row.nonce_hex,
-        ciphertextHex: row.ciphertext_hex, aadSha256: row.aad_sha256 });
+        ciphertextHex: row.ciphertext_hex, aadSha256: row.aad_sha256 }, targets);
     };
     const existing = await find();
     if (existing) return await replay(existing);
@@ -172,7 +178,7 @@ export async function issueClientOnboardingWithHandoff(database: D1Database, raw
     const bytes = new Uint8Array(32); crypto.getRandomValues(bytes);
     const invitationSecret = Buffer.from(bytes).toString("hex");
     const full = { authenticatedNativeStaff: authenticated, request: { ...base, invitationId, invitationSecret } };
-    const evidence = await clientOnboardingIssuanceEvidence(full);
+    const evidence = await clientOnboardingIssuanceEvidence(full, targets);
     const authenticatedData = aad(base.commandId, invitationId, authenticated.identity.staffId,
       authenticated.identity.verifiedAccessSubject, evidence.requestSha256);
     const nonce = new Uint8Array(12); crypto.getRandomValues(nonce);
@@ -181,7 +187,85 @@ export async function issueClientOnboardingWithHandoff(database: D1Database, raw
     try {
       return await issueClientOnboardingInvitation(database, full, { keyId: ring.activeKeyId,
         nonceHex: Buffer.from(nonce).toString("hex"), ciphertextHex: Buffer.from(ciphertext).toString("hex"),
-        aadSha256: await sha256(authenticatedData) });
+        aadSha256: await sha256(authenticatedData) }, targets);
+    } catch { return await replay(await find()); }
+  } catch { return issueDenied(); }
+}
+
+/** Unmounted email issuance. The caller must enforce its default-off feature gate and current scope authority. */
+export async function issueClientOnboardingMailWithHandoff(database: D1Database, raw: unknown,
+  keyring: ClientOnboardingKeyring, recipient: unknown, mailKeys: InviteMailKeyring): Promise<Readonly<{
+    invitationId: string; expiresAt: string; requestSha256: string; state: "pending" | "submitted";
+    mailStatus: "queued" | "sent" | "failed" | "unknown";
+  }>> {
+  try {
+    const ring = snapshotClientOnboardingKeyring(keyring), mailRing = snapshotInviteMailKeyring(mailKeys), address = normalizeInviteDeliveryAddress(recipient);
+    const envelope = record(raw, ["authenticatedNativeStaff", "request"]);
+    const authenticated = envelope && actor(envelope.authenticatedNativeStaff), base = envelope && baseRequest(envelope.request);
+    if (!authenticated || !base || !address || base.targetClientRecordId !== null
+      || Object.values(ring.keys).some(value => Object.values(mailRing.encryptionKeys).includes(value)
+        || Object.values(mailRing.fingerprintKeys).includes(value))) throw Error();
+    if (authenticated.verifiedLogin && !await assertCurrentStaffLogin(database, authenticated.verifiedLogin)) throw Error();
+    const db = database.withSession("first-primary");
+    const find = async () => parseRow(await db.prepare(`SELECT handoff.command_id,handoff.invitation_id,
+      handoff.actor_staff_id,handoff.actor_access_subject,handoff.request_sha256,handoff.secret_sha256,handoff.expires_at,
+      handoff.key_id,handoff.nonce_hex,handoff.ciphertext_hex,handoff.aad_sha256
+      FROM client_onboarding_handoffs handoff JOIN client_onboarding_live_issuances live ON live.invitation_id=handoff.invitation_id
+      WHERE handoff.command_id=? AND handoff.actor_staff_id=? AND handoff.actor_access_subject=?`)
+      .bind(base.commandId,authenticated.identity.staffId,authenticated.identity.verifiedAccessSubject).first());
+    const replay = async (row: HandoffRow | null) => {
+      if (!row || row.expires_at !== base.expiresAt || Date.parse(row.expires_at) <= Date.now()) throw Error();
+      const secret = await decrypt(row,ring);
+      const full = { authenticatedNativeStaff: authenticated, request: { ...base, invitationId: row.invitation_id, invitationSecret: secret } };
+      const saved = await db.prepare(`SELECT mail.key_id,mail.recipient_fingerprint_key_id,mail.recipient_fingerprint,
+        mail.nonce_hex,mail.ciphertext_hex,mail.aad_sha256,mail.state,invitation.state invitation_state
+        FROM client_onboarding_invite_mail_outbox mail JOIN client_onboarding_invitations invitation ON invitation.invitation_id=mail.invitation_id
+        WHERE mail.command_id=? AND mail.invitation_id=? AND mail.request_sha256=? AND mail.expires_at=?`)
+        .bind(row.command_id,row.invitation_id,row.request_sha256,row.expires_at).first<Record<string, unknown>>();
+      if (!saved || typeof saved.key_id !== "string" || typeof saved.recipient_fingerprint_key_id !== "string"
+        || (saved.invitation_state !== "pending" && saved.invitation_state !== "submitted")) throw Error();
+      const keys = resolveInviteMailKeys(mailRing,saved.key_id,saved.recipient_fingerprint_key_id);
+      const ordinary = await clientOnboardingIssuanceEvidence(full);
+      const intent = await inviteMailIntent(address,ordinary.requestSha256,keys.fingerprintKeyId,keys.fingerprintKeyHex);
+      const evidence = await clientOnboardingIssuanceEvidence(full,undefined,
+        { fingerprintKeyId: intent.recipientFingerprintKeyId, recipientFingerprint: intent.recipientFingerprint });
+      if (!same(evidence.requestSha256,row.request_sha256) || !same(evidence.secretSha256,row.secret_sha256)) throw Error();
+      const stored = { keyId:saved.key_id,fingerprintKeyId:saved.recipient_fingerprint_key_id,
+        recipientFingerprint:saved.recipient_fingerprint,nonceHex:saved.nonce_hex,ciphertextHex:saved.ciphertext_hex,aadSha256:saved.aad_sha256 } as InviteMailEnvelope;
+      const binding = { commandId:row.command_id,invitationId:row.invitation_id,requestSha256:row.request_sha256,
+        secretSha256:row.secret_sha256,expiresAt:row.expires_at,staffId:row.actor_staff_id,accessSubject:row.actor_access_subject };
+      const clear = await openInviteMail(stored,binding,keys);
+      if (clear.recipient !== address || !same(clear.secret,secret)) throw Error();
+      const mailStatus = saved.state === "pending" || saved.state === "claimed" ? "queued"
+        : saved.state === "sent" ? "sent" : saved.state === "failed" || saved.state === "suppressed" ? "failed"
+          : saved.state === "attempted" || saved.state === "unknown" ? "unknown" : null;
+      if (!mailStatus) throw Error();
+      if (authenticated.verifiedLogin && !await assertCurrentStaffLogin(database,authenticated.verifiedLogin)) throw Error();
+      return Object.freeze({ invitationId:row.invitation_id,expiresAt:row.expires_at,requestSha256:row.request_sha256,
+        state:saved.invitation_state as "pending" | "submitted",mailStatus });
+    };
+    const existing = await find();
+    if (existing) return await replay(existing);
+    const invitationId = crypto.randomUUID(), secretBytes = crypto.getRandomValues(new Uint8Array(32));
+    const secret = Buffer.from(secretBytes).toString("hex");
+    const full = { authenticatedNativeStaff:authenticated,request:{ ...base,invitationId,invitationSecret:secret } };
+    const keys = resolveInviteMailKeys(mailRing,mailRing.activeEncryptionKeyId,mailRing.activeFingerprintKeyId);
+    const ordinary = await clientOnboardingIssuanceEvidence(full);
+    const intent = await inviteMailIntent(address,ordinary.requestSha256,keys.fingerprintKeyId,keys.fingerprintKeyHex);
+    const evidence = await clientOnboardingIssuanceEvidence(full,undefined,
+      { fingerprintKeyId:intent.recipientFingerprintKeyId,recipientFingerprint:intent.recipientFingerprint });
+    const binding = { commandId:base.commandId,invitationId,requestSha256:evidence.requestSha256,secretSha256:evidence.secretSha256,
+      expiresAt:base.expiresAt,staffId:authenticated.identity.staffId,accessSubject:authenticated.identity.verifiedAccessSubject };
+    const mail = await sealInviteMail(address,secret,binding,keys);
+    if (mail.recipientFingerprint !== intent.recipientFingerprint || mail.fingerprintKeyId !== intent.recipientFingerprintKeyId) throw Error();
+    const authenticatedData = aad(base.commandId,invitationId,authenticated.identity.staffId,authenticated.identity.verifiedAccessSubject,evidence.requestSha256);
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt({ name:"AES-GCM",iv:nonce,additionalData:encoder.encode(authenticatedData) },
+      await aesKey(ring.activeKeyId,ring),encoder.encode(secret));
+    try {
+      await issueClientOnboardingInvitation(database,full,{ keyId:ring.activeKeyId,nonceHex:Buffer.from(nonce).toString("hex"),
+        ciphertextHex:Buffer.from(ciphertext).toString("hex"),aadSha256:await sha256(authenticatedData) },undefined,mail);
+      return await replay(await find());
     } catch { return await replay(await find()); }
   } catch { return issueDenied(); }
 }
@@ -195,6 +279,10 @@ export async function revealClientOnboardingSecret(database: D1Database, raw: un
     if (authenticated.verifiedLogin && !await assertCurrentStaffLogin(database, authenticated.verifiedLogin)) throw Error();
     const identity = authenticated.identity;
     const db = database.withSession("first-primary");
+    // Old databases do not have the mail table. If installed, both the read
+    // and the atomic consumption write reject mail-mode commands.
+    const mailInstalled = Boolean(await db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='client_onboarding_invite_mail_outbox'").first());
+    const mailGuard = mailInstalled ? "AND NOT EXISTS(SELECT 1 FROM client_onboarding_invite_mail_outbox mail WHERE mail.command_id=handoff.command_id)" : "";
     const row = parseRow(await db.prepare(`SELECT handoff.command_id,handoff.invitation_id,handoff.actor_staff_id,
       handoff.actor_access_subject,handoff.request_sha256,handoff.secret_sha256,handoff.expires_at,handoff.key_id,
       handoff.nonce_hex,handoff.ciphertext_hex,handoff.aad_sha256 FROM client_onboarding_handoffs handoff
@@ -202,7 +290,7 @@ export async function revealClientOnboardingSecret(database: D1Database, raw: un
       JOIN client_onboarding_live_issuances live ON live.invitation_id=invitation.invitation_id
       JOIN native_staff_profiles profile ON profile.staff_id=handoff.actor_staff_id AND profile.version=? AND profile.login_email=?
       WHERE handoff.command_id=? AND handoff.actor_staff_id=? AND handoff.actor_access_subject=?
-        AND invitation.state='pending' AND invitation.version=1`).bind(identity.profileVersion, identity.email,
+        AND invitation.state='pending' AND invitation.version=1 ${mailGuard}`).bind(identity.profileVersion, identity.email,
           envelope.commandId, identity.staffId, identity.verifiedAccessSubject).first());
     if (!row || Date.parse(row.expires_at) <= Date.now()) throw Error();
     const invitationSecret = await decrypt(row, ring);
@@ -216,7 +304,7 @@ export async function revealClientOnboardingSecret(database: D1Database, raw: un
         JOIN client_onboarding_live_issuances live ON live.invitation_id=invitation.invitation_id
         JOIN native_staff_profiles profile ON profile.staff_id=handoff.actor_staff_id AND profile.version=? AND profile.login_email=?
         WHERE handoff.command_id=? AND handoff.actor_staff_id=? AND handoff.actor_access_subject=?
-          AND invitation.state='pending' AND invitation.version=1
+          AND invitation.state='pending' AND invitation.version=1 ${mailGuard}
           AND NOT EXISTS(SELECT 1 FROM client_onboarding_reveal_consumptions consumed
             WHERE consumed.command_id=handoff.command_id)`)
         .bind(revealId, identity.staffId, identity.verifiedAccessSubject, authenticated.verifiedUntil,

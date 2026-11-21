@@ -13,6 +13,8 @@ export type ReviewFields = { clientType: "consumer" | "business"; name: string; 
   organizationName: string; organizationEmail: string; organizationPhone: string; addressLine1: string;
   addressLine2: string; city: string; state: string; postalCode: string; country: string };
 export type Review = { invitationId: string; submissionId: string; fieldsSha256: string; submittedAt: string;
+  destinationSourceIds?: string[];
+  targetApprovalPending?: true;
   targetClientRecordId: string | null; scopes: Array<{ businessAreaId: string; divisionId: string | null }>; fields: ReviewFields };
 export type Approval = { decisionId: string; submissionId: string; clientRecordId: string; clientRecordVersion: number;
   organizationRecordId?: string; organizationRecordVersion?: number; relationshipVersion: number; replayed: boolean };
@@ -75,8 +77,8 @@ export const uncertainFailure = (caught: unknown) => {
 export const refusalStatus = (caught: unknown) => { const status = Number((caught as RequestFailure | null)?.status ?? 0); return [401, 403, 404].includes(status) ? status : 0; };
 /** A definite refusal: the privileged view that asked must close. */
 export const authorityLost = (caught: unknown) => refusalStatus(caught) !== 0;
-export const post = (session: StaffSession, route: string, body: unknown) => json(`${endpoint}/${route}`, { method: "POST",
-  headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken }, body: JSON.stringify(body) });
+export const post = (session: StaffSession, route: string, body: unknown, signal?: AbortSignal) => json(`${endpoint}/${route}`, { method: "POST",
+  headers: { "Content-Type": "application/json", "X-CSRF-Token": session.csrfToken }, body: JSON.stringify(body), signal });
 
 export function validSession(value: Record<string, unknown>): value is StaffSession & Record<string, unknown> {
   return typeof value.csrfToken === "string" && SHA.test(value.csrfToken) && ISO(value.verifiedUntil);
@@ -94,7 +96,11 @@ export function validReview(value: Record<string, unknown>): value is Review & R
   return typeof value.invitationId === "string" && typeof value.submissionId === "string"
     && typeof value.fieldsSha256 === "string" && SHA.test(value.fieldsSha256) && ISO(value.submittedAt)
     && (value.targetClientRecordId === null || typeof value.targetClientRecordId === "string")
+    && (value.targetApprovalPending === undefined || value.targetApprovalPending === true)
     && Array.isArray(value.scopes) && value.scopes.length > 0 && value.scopes.length <= 128
+    && (value.destinationSourceIds === undefined || (Array.isArray(value.destinationSourceIds) && value.destinationSourceIds.length > 0
+      && value.destinationSourceIds.length <= 2 && new Set(value.destinationSourceIds).size === value.destinationSourceIds.length
+      && value.destinationSourceIds.every(id => id === "project-alpha:primary" || id === "project-alpha:secondary")))
     && record(value.fields) && (value.fields.clientType === "consumer" || value.fields.clientType === "business")
     && typeof value.fields.name === "string" && typeof value.fields.email === "string";
 }

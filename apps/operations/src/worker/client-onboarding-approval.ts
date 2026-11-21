@@ -3,7 +3,7 @@ import type { AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staf
 import { approveNativeOnlyClientOnboarding,
   type NativeOnlyClientOnboardingApprovalOutcome } from "./native-directory-onboarding-write-composer";
 import type { NativeDirectoryDestinationAuthority, NativeDirectoryScope, NativeDirectoryWriterActor } from "./native-directory-profile-writer";
-import { readClientOnboardingSubmissionForReview } from "./client-onboarding-review";
+import { readClientOnboardingSubmissionForReview, verifyReviewDestinationIntent } from "./client-onboarding-review";
 import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
 import { resolveProjectAlphaApiV2Connection } from "./project-alpha-api-v2-connections";
 import { readConfiguredProjectAlphaDirectoryInventory } from "./project-alpha-directory-inventory-api-v2";
@@ -109,13 +109,14 @@ async function consumerSourceHasOrganizationFields(database: D1Database, submiss
 export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
   authenticated: AuthenticatedNativeStaffWithAdmissionVersion,
   submissionId: unknown, expectedFieldsSha256: unknown, rawSourceIds: unknown = [],
-  projectAlphaApiV2Connections?: string, rawOrganizationSelection?:unknown): Promise<ClientOnboardingApprovalReceipt> {
+  projectAlphaApiV2Connections?: string, rawOrganizationSelection?:unknown, inviteDestinationBindingsJson?: string): Promise<ClientOnboardingApprovalReceipt> {
   try {
     const sourceIds = parseClientOnboardingEnrollmentSourceIds(rawSourceIds);
     if (typeof submissionId !== "string" || !UUID.test(submissionId)
       || typeof expectedFieldsSha256 !== "string" || !HEX.test(expectedFieldsSha256)
       || sourceIds === null || Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
     const review = await readClientOnboardingSubmissionForReview(database, authenticated, submissionId);
+    const destinationIssuanceSha256 = await verifyReviewDestinationIntent(database, authenticated, review, sourceIds, inviteDestinationBindingsJson);
     const kind = approvalKind(review.fields);
     const organizationSelection=rawOrganizationSelection===undefined ? null
       : parseClientOnboardingOrganizationSelection(rawOrganizationSelection);
@@ -191,6 +192,7 @@ export async function approveNewNativeOnlyClientOnboarding(database: D1Database,
     const outcome = await approveNativeOnlyClientOnboarding(database, {
       decisionId, invitationId: review.invitationId, submissionId: review.submissionId,
       fieldsSha256: review.fieldsSha256, requestSha256, reason, reviewedFieldsJson,
+      destinationIssuanceSha256,
       enrollmentSourceIds: sourceIds,
       scopes: review.scopes, verifiedUntil: authenticated.verifiedUntil,
       relationship: { mode: "change", expectedVersion: 0, mutationId: relationshipMutationId },
