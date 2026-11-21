@@ -261,6 +261,14 @@ It proves the following:
   mismatch) means a write was acknowledged but the state is not as pinned. Such
   a stop always needs a reviewed manual reconciliation, and reconcile refuses it
   with `baseline_receipt_postcheck_failed`.
+- The baseline is the **latest** receipt. Its recorded final ledger (count and
+  tail) must equal the current ledger. After an ambiguous apply or a failed
+  post-apply read, the current ledger may also hold one more row: the row of the
+  file that receipt stopped on. An older receipt is refused with
+  `baseline_receipt_not_latest`. This stops an older receipt from bypassing a
+  later `postcheck_failed` stop.
+- Every recorded file's seeded rows are still exactly the pinned seed: one
+  control row each for 0227, 0229, 0230 and 0231, and 15 catalog rows for 0244.
 
 If all of this holds, the status is `reconciled` and the receipt names the exact
 next step. Any other state is refused with status `reconciliation-required` and
@@ -270,7 +278,15 @@ the first failing check, for example:
 - a recorded file whose objects are missing;
 - a partial object set for an unrecorded file;
 - a row count that differs from the start counts plus the expected deltas;
-- an earlier post-check failure.
+- an earlier post-check failure, or a baseline receipt that is not the latest;
+- a seeded control or catalog row count that differs from the pin.
+
+**Receipts are evidence. Never edit, rewrite or hand-craft a receipt** to get past
+a refusal. Ordinary staff activity can change the `staff_users` or
+`staff_permission_overrides` counts between runs, for example a new staff
+account or a granted override. Resuming after that needs a separately reviewed
+manual reconciliation. The tool intentionally has no option to accept new
+counts.
 
 That state needs a reviewed manual reconciliation; the tool cannot continue it.
 For a partial file, list its objects read-only before deciding, for example for

@@ -283,7 +283,7 @@ export function ops0227To0244LedgerPosition(snapshot, plan) {
   let exact = 0;
   while (exact < plan.files.length && ledger[prior + exact]?.name === plan.files[exact].name && ledger[prior + exact]?.id === prior + exact + 1) exact++;
   const expectedNextFile = ledger.length < prior ? OPS_0227_0244_FILES[0].name : plan.files[exact]?.name ?? null;
-  return { ledgerCount: ledger.length, ledgerTail: ledger.at(-1)?.name ?? null, expectedNextFile,
+  return { ledgerCount: ledger.length, ledgerTail: ledger.at(-1)?.name ?? null, expectedNextFile, exactPrefixCount: exact,
     message: `ledger has ${ledger.length} rows ending ${ledger.at(-1)?.name ?? 'nothing'}; expected next file ${expectedNextFile ?? 'none (all ten recorded)'}` };
 }
 
@@ -298,10 +298,12 @@ export function loadOps0227To0244BaselineReceipt(filename, { plan, target } = {}
   const start = value?.rowCounts?.start;
   if (!isPlain(value) || value.contract !== OPS_0227_0244_CONTRACT || value.planSha256 !== plan.planSha256
     || value.target?.databaseId !== target.databaseId || value.target?.accountId !== target.accountId
-    || !exactKeys(start, TRACKED_ROWS) || TRACKED_ROWS.some(key => !Number.isSafeInteger(start[key]) || start[key] < 0))
+    || !exactKeys(start, TRACKED_ROWS) || TRACKED_ROWS.some(key => !Number.isSafeInteger(start[key]) || start[key] < 0)
+    || !Number.isSafeInteger(value.finalLedger?.count) || typeof value.finalLedger?.lastMigration !== 'string')
     fail('baseline_receipt_invalid');
   return Object.freeze({ startCounts: Object.freeze({ ...start }), stopPhase: value.stop?.phase ?? null,
-    stopCode: value.stop?.code ?? null });
+    stopCode: value.stop?.code ?? null, stopStep: value.stop?.step ?? null,
+    finalLedger: Object.freeze({ count: value.finalLedger.count, lastMigration: value.finalLedger.lastMigration }) });
 }
 
 export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null) {
@@ -323,6 +325,10 @@ export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null) 
     if (index < applied) {
       checks.push(check(`recorded_objects_exact:${file.name}`, { objects: file.expectedAddedObjects, sha256: file.expectedAddedSchemaSha256 },
         { objects: rows.map(({ type, name, tbl_name }) => ({ type, name, tbl_name })), sha256: schemaRowsSha256(rows) }));
+      // Seeded rows of the file's own new tables (controls, 0244 catalog) must still be exactly the pinned seed.
+      for (const [table, count] of Object.entries(file.expectedNewTableRows)) {
+        if (count > 0) checks.push(check(`recorded_seed_rows:${table}`, count, snapshot.tableRows[table] ?? null));
+      }
       if (file.name.startsWith('0240')) checks.push(check(`recorded_grants:${file.name}`, { permissions: 2, rolePermissions: 2 * p.ownerAdminRoles },
         { permissions: p.flightLogsPermissions, rolePermissions: p.flightLogsRolePermissions }));
     } else {
@@ -339,6 +345,17 @@ export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null) 
     if (baseline.stopPhase === 'post-check' || /postcheck_failed|post_check_failed/u.test(baseline.stopCode ?? ''))
       return { ok: false, code: 'reconciliation_required:baseline_receipt_postcheck_failed', appliedCount: applied, nextStep: null,
         ...position, message: `${position.message}; the earlier run stopped on a failed post-check (${baseline.stopCode})`, checks };
+    // The baseline must be the latest receipt: its final ledger equals the current ledger. After an ambiguous
+    // apply or a failed post-apply read, the ledger may also hold that one file's row.
+    const accepted = [{ count: baseline.finalLedger.count, lastMigration: baseline.finalLedger.lastMigration }];
+    if (/apply_ambiguous|post_read_failed/u.test(baseline.stopCode ?? '') && baseline.stopStep)
+      accepted.push({ count: baseline.finalLedger.count + 1, lastMigration: baseline.stopStep });
+    const latest = check('baseline_receipt_is_latest', true, accepted.some(row => row.count === ledger.length
+      && row.lastMigration === (ledger.at(-1)?.name ?? null)));
+    checks.push(latest);
+    if (!latest.ok) return { ok: false, code: 'reconciliation_required:baseline_receipt_not_latest', appliedCount: applied, nextStep: null,
+      ...position, message: `${position.message}; the baseline receipt recorded ${baseline.finalLedger.count} rows ending `
+        + `${baseline.finalLedger.lastMigration}. Use the latest receipt`, checks };
     const has0240 = plan.files.slice(0, applied).some(file => file.name.startsWith('0240'));
     const expected = { ...baseline.startCounts,
       permissionsRows: baseline.startCounts.permissionsRows + (has0240 ? 2 : 0),
@@ -488,6 +505,16 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
   try { current = await read(OPS_0227_0244_PRE_READ_QUERY); }
   catch (error) { stop(null, 'initial-read', errorCode(error)); }
   if (current) {
+    const recordedPrefix = ops0227To0244LedgerPosition(current, plan).exactPrefixCount;
+    const existingTables = new Set(current.schema.filter(row => row.type === 'table').map(row => row.name));
+    const seedTables = plan.files.slice(0, recordedPrefix).flatMap(file => Object.entries(file.expectedNewTableRows)
+      .filter(([table, count]) => count > 0 && existingTables.has(table)).map(([table]) => table)).sort();
+    if (seedTables.length > 0) {
+      try { current = await read(ops0227To0244SnapshotQuery(seedTables)); }
+      catch (error) { stop(null, 'initial-read', errorCode(error)); current = null; }
+    }
+  }
+  if (current) {
     const rec = reconcileOps0227To0244Snapshot(current, plan, baseline);
     state.reconcile = { ok: rec.ok, code: rec.code, appliedCount: rec.appliedCount, nextStep: rec.nextStep, ledgerCount: rec.ledgerCount,
       expectedNextFile: rec.expectedNextFile, message: rec.message, checks: rec.checks };
@@ -565,6 +592,7 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
       // The write was acknowledged but the state is not as pinned: never reconciled or resumed automatically.
       stop(file.name, 'post-check', 'reconciliation_required:postcheck_failed',
         post.checks.filter(item => !item.ok).map(item => item.name).join(','));
+      current = after;
       persist(); break;
     }
     log(`applied and verified: ${file.name} (ledger ${after.ledger.length}, tail ${after.ledger.at(-1).name})`);
