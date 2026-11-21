@@ -252,6 +252,11 @@ it("looks up an exact staff-authorized directory target without returning profil
     expect((await send("/api/client-onboarding/staff/create", "POST", command, csrf, enabledIssue)).status).toBe(200);
     expect(calls.issue.mock.calls.at(-1)?.[3]).toEqual([{ context, pin }]);
     calls.issue.mockClear();
+    sqlite.exec("DELETE FROM native_directory_grants WHERE permission='directory.identity.link'");
+    expect((await send("/api/client-onboarding/staff/create", "POST", command, csrf, enabledIssue)).status).toBe(403);
+    expect(calls.issue).not.toHaveBeenCalled();
+    expect(calls.reveal).not.toHaveBeenCalled();
+    sqlite.exec("INSERT INTO native_directory_grants VALUES ('staff:onboarding','directory.identity.link',1,'allow','global',NULL,NULL,NULL)");
     sqlite.exec(`CREATE TABLE client_onboarding_invitations(invitation_id TEXT PRIMARY KEY,issued_by,bound_access_subject);
       CREATE TABLE client_onboarding_issuance_commands(invitation_id TEXT PRIMARY KEY,request_sha256,destination_intent_json,
         issuer_admission_version,issuer_profile_version);
@@ -319,7 +324,7 @@ it("looks up an exact staff-authorized directory target without returning profil
     sqlite.exec("DELETE FROM native_directory_grants WHERE effect='deny'; INSERT INTO project_alpha_active_directory_mappings SELECT * FROM project_alpha_active_directory_mappings WHERE resource_type='client'");
     expect((await lookup()).status).toBe(403);
     const quota = sqlite.prepare("SELECT rate_key,request_count,request_limit FROM native_staff_onboarding_rate_limits").all();
-    expect(quota).toEqual([{ rate_key: expect.stringMatching(/^subject:[A-Za-z0-9_-]{43}$/), request_count: 10, request_limit: 20 }]);
+    expect(quota).toEqual([{ rate_key: expect.stringMatching(/^subject:[A-Za-z0-9_-]{43}$/), request_count: 11, request_limit: 20 }]);
     sqlite.exec("UPDATE native_staff_onboarding_rate_limits SET request_count=20,window_bucket=CAST(unixepoch('now') / 60 AS INTEGER)");
     expect((await lookup()).status).toBe(429);
     const searchPath = "/api/client-onboarding/staff/target-search";
