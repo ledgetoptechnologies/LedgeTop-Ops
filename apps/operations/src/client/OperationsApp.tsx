@@ -6541,6 +6541,87 @@ function StaffAccessEditor({
   </div>;
 }
 
+// A definite answer (4xx) ends a command; a network failure or 5xx leaves its result unknown,
+// so the command id is kept for a deliberate retry and nothing is retried automatically.
+const legacyStaffUncertain = (caught: unknown) => !(caught instanceof ApiError) || caught.status >= 500;
+
+function LegacyStaffAdd({ onChanged }: { onChanged: () => Promise<unknown> | void }) {
+  const [open, setOpen] = useState(false);
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [pending, setPending] = useState<{ commandId: string; key: string } | null>(null);
+  const submit = async (event: { preventDefault(): void }) => {
+    event.preventDefault();
+    if (busy) return;
+    const key = `${displayName.trim()}\n${email.trim().toLowerCase()}`;
+    const commandId = pending?.key === key ? pending.commandId : crypto.randomUUID();
+    setBusy(true); setMessage("");
+    try {
+      await api("/api/admin/staff", { method: "POST", body: JSON.stringify({ commandId, displayName, email }) });
+      setPending(null); setDisplayName(""); setEmail(""); setOpen(false);
+      setMessage("Staff member added.");
+    } catch (caught) {
+      if (legacyStaffUncertain(caught)) {
+        setPending({ commandId, key });
+        setMessage("Result unknown. Check the list before submitting again.");
+      } else { setPending(null); setMessage((caught as Error).message); }
+    } finally {
+      setBusy(false);
+      await onChanged();
+    }
+  };
+  return <Card title="Add staff member">
+    {open ? <form className="form-grid legacy-staff-add" onSubmit={(event) => void submit(event)}>
+      <label>Name<input required maxLength={200} value={displayName} disabled={busy} onChange={(event) => setDisplayName(event.target.value)} /></label>
+      <label>Email<input required type="email" maxLength={254} value={email} disabled={busy} onChange={(event) => setEmail(event.target.value)} /></label>
+      <div className="actions">
+        <button type="submit" className="button-orange button-small" disabled={busy}>{busy ? "Adding…" : "Add staff member"}</button>
+        <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+    </form> : <div className="actions"><button type="button" className="button-orange button-small" onClick={() => { setOpen(true); setMessage(""); }}>Add staff member</button></div>}
+    {message && <div className="notice" role="status">{message}</div>}
+  </Card>;
+}
+
+function LegacyStaffProfileControls({ person, onChanged }: { person: any; onChanged: () => Promise<unknown> | void }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(person.display_name as string);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const send = async (change: { displayName?: string; status?: "active" | "inactive" }) => {
+    if (busy) return;
+    setBusy(true); setMessage("");
+    try {
+      await api(`/api/admin/staff/${encodeURIComponent(person.id)}`, {
+        method: "PATCH", body: JSON.stringify({ expectedUpdatedAt: person.updated_at, ...change }) });
+      setEditing(false);
+    } catch (caught) {
+      setMessage(legacyStaffUncertain(caught) ? "Result unknown. Check the list before trying again." : (caught as Error).message);
+    } finally {
+      setBusy(false);
+      await onChanged();
+    }
+  };
+  const active = person.status === "active";
+  return <div className="legacy-staff-profile">
+    {editing ? <form onSubmit={(event) => { event.preventDefault(); void send({ displayName: name }); }}>
+      <label>Name<input required maxLength={200} value={name} disabled={busy} onChange={(event) => setName(event.target.value)} /></label>
+      <div className="actions">
+        <button type="submit" className="button-orange button-small" disabled={busy}>Save name</button>
+        <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => setEditing(false)}>Cancel</button>
+      </div>
+    </form> : <div className="actions">
+      <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { setName(person.display_name); setEditing(true); }}>Edit name</button>
+      <button type="button" className="button-ghost button-small" disabled={busy}
+        onClick={() => { if (!active || confirm(`Deactivate ${person.display_name}?`)) void send({ status: active ? "inactive" : "active" }); }}>
+        {active ? "Deactivate" : "Reactivate"}</button>
+    </div>}
+    {message && <div className="notice" role="status">{message}</div>}
+  </div>;
+}
+
 function Team({ session }: { session: Session }) {
   const nativeApi = useMemo(() => createNativeTeamApi(), []);
   const native = useLoad(async () => {
@@ -6551,7 +6632,7 @@ function Team({ session }: { session: Session }) {
     }
   }, [nativeApi]);
   const { data, error, reload } = useLoad(
-    () => api<{ staff: any[] }>("/api/team/staff"),
+    () => api<{ staff: any[]; can_manage_staff?: boolean }>("/api/team/staff"),
     [],
   );
   const [busy, setBusy] = useState<string | null>(null);
@@ -6584,6 +6665,7 @@ function Team({ session }: { session: Session }) {
         ? <NativeTeamOnboardingPanel onChanged={reload} />
         : <div className="notice" role="status">Employee invitations are not enabled in this environment.</div>)}
       <ErrorLine error={error} />
+      {session.user.isAdministrator && data?.can_manage_staff === true && <LegacyStaffAdd onChanged={reload} />}
       <div className="card-grid">
         {data?.staff.map((person) => (
           <Card key={person.id}>
@@ -6606,6 +6688,8 @@ function Team({ session }: { session: Session }) {
               <h3>{person.display_name}</h3>
               <p>{person.email}</p>
               <small>{person.roles || "No inherited role"}</small>
+              {session.user.isAdministrator && person.id !== session.user.id && person.profile_editable === true
+                && <LegacyStaffProfileControls key={`${person.id}:${person.updated_at}`} person={person} onChanged={reload} />}
               {native.data?.ready && <NativeTeamProfileEditor staffId={person.id}
                 protectedOwner={person.owner_role === true || person.id === "staff-beau-koltz"} onChanged={reload} />}
               {native.data?.ready && session.user.isAdministrator && <NativeTeamLogsEligibility staffId={person.id} />}
