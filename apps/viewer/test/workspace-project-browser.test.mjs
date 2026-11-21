@@ -357,9 +357,13 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images/image-1/content') return { status: 200, body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><rect width="100" height="80" fill="#555"/></svg>'), type: 'image/svg+xml' };
   if (pathname === '/api/v1/attempts/attempt-johnson') {
     const sequence = ++runtime.logSequence;
+    const createdAt = new Date().toISOString();
     return json({
       attempt: fixtures.tasks[0].latestAttempt,
-      logs: [{ createdAt: new Date().toISOString(), level: 'info', message: `Running stage odm_dem · browser refresh ${sequence}` }],
+      logs: [
+        ...Array.from({ length: runtime.longTaskOutput ? 50 : 0 }, (_, index) => ({ createdAt, level: 'info', message: `Fixture output line ${index}` })),
+        { createdAt, level: 'info', message: `Running stage odm_dem · browser refresh ${sequence}` },
+      ],
     });
   }
   if (runtime.testIngestRecovery && pathname === '/api/v1/attempts/attempt-johnson-old/recover-ingest' && method === 'POST') {
@@ -792,11 +796,35 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('.modal-close').click()`);
     // Expanded task output refreshes in place; full historical diagnostics
     // remain available through the separately exercised Diagnostics route.
-    const firstLog = runtime.logSequence;
-    const refreshStart = runtime.requests.length;
-    await waitForRequest(runtime, refreshStart, 'GET', '/api/v1/attempts/attempt-johnson');
-    assert.ok(runtime.logSequence > firstLog, `${viewport.name}: running-task log data did not refresh`);
-    await waitFor(client, `document.querySelector('.task-live-output .log-tail')?.textContent.includes('browser refresh ${runtime.logSequence}')`, `${viewport.name}: refreshed task output did not reach the visible panel`);
+    const fullscreen = '.task-live-output [data-action="fullscreen-logs"]';
+    const tailSelector = '.task-live-output .log-tail';
+    const focusTargets = viewport.mobile ? [fullscreen] : [
+      fullscreen, '.task-live-output [data-action="download-logs"]', tailSelector, '#project-filter',
+    ];
+    runtime.longTaskOutput = true;
+    try {
+      for (const selector of focusTargets) {
+        if (selector === tailSelector) {
+          await waitFor(client, `document.querySelector(${JSON.stringify(tailSelector)})?.textContent.includes('Fixture output line 49')`, 'Long task output did not render');
+        }
+        assert.equal(await client.evaluate(`(() => {
+          const target = document.querySelector(${JSON.stringify(selector)});
+          window.__taskOutputFocus = target;
+          target.focus({preventScroll:true});
+          if (target.matches('.log-tail')) target.scrollTop = 24;
+          return document.activeElement === target && (!target.matches('.log-tail') || target.scrollTop === 24);
+        })()`), true, `${viewport.name}: fixture could not focus ${selector}`);
+        const firstLog = runtime.logSequence;
+        const refreshStart = runtime.requests.length;
+        await waitForRequest(runtime, refreshStart, 'GET', '/api/v1/attempts/attempt-johnson');
+        assert.ok(runtime.logSequence > firstLog, `${viewport.name}: running-task log data did not refresh`);
+        await waitFor(client, `document.querySelector('.task-live-output .log-tail')?.textContent.endsWith('browser refresh ${runtime.logSequence}')`, `${viewport.name}: refreshed task output did not reach the visible panel`);
+        assert.equal(await client.evaluate(`document.activeElement === window.__taskOutputFocus && document.querySelector(${JSON.stringify(selector)}) === window.__taskOutputFocus`), true, `${viewport.name}: task output refresh replaced or blurred ${selector}`);
+        if (selector === tailSelector) assert.equal(await client.evaluate('window.__taskOutputFocus.scrollTop'), 24, 'Refresh moved the scrolled log tail');
+      }
+    } finally {
+      runtime.longTaskOutput = false;
+    }
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: expanded task overflows horizontally`);
     await waitFor(client, "document.querySelector('.task-ortho-preview canvas')?.getAttribute('aria-label') === 'Published orthophoto preview' || document.querySelector('.task-ortho-preview img') !== null", `${viewport.name}: real orthophoto preview did not render`);
     assert.equal(await client.evaluate(`(() => { const canvas=document.querySelector('.task-ortho-preview canvas'); if(!canvas)return true; return [...canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data].some(value=>value>0) })()`), true, `${viewport.name}: orthophoto preview canvas is empty`);

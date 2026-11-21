@@ -433,6 +433,26 @@ function taskEditActive(region){
   return region.contains(document.activeElement)||work.unsavedGcpMark||work.pendingGcpSave;
 }
 
+function patchTaskOutput(panel,task,attempt,logs){
+  const template=document.createElement('template');
+  template.innerHTML=logPanel(task,attempt,logs);
+  const fresh=template.content.firstElementChild;
+  if(!fresh)return;
+
+  for(const selector of ['.subsection-heading p','.task-output-status']){
+    const current=panel.querySelector(selector),next=fresh.querySelector(selector);
+    if(current.innerHTML!==next.innerHTML)current.replaceChildren(...next.childNodes);
+  }
+  const currentError=panel.querySelector('.form-note'),nextError=fresh.querySelector('.form-note');
+  const tail=panel.querySelector('.log-tail'),nextTail=fresh.querySelector('.log-tail');
+  if(nextError&&!currentError)tail.before(nextError);
+  if(currentError&&!nextError)currentError.remove();
+  if(tail.textContent===nextTail.textContent)return;
+  const scrollTop=tail.scrollTop,atEnd=tail.scrollHeight-tail.clientHeight-scrollTop<24;
+  tail.textContent=nextTail.textContent;
+  tail.scrollTop=atEnd?tail.scrollHeight:scrollTop;
+}
+
 function patchSelectedTaskDetail(){
   const task=state.tasks.find(item=>item.id===state.expandedTaskId&&item.projectId===state.selectedProjectId);
   if(!task||state.taskPage==='gcp')return false;
@@ -827,12 +847,7 @@ async function refreshTaskDetails(taskId,quiet=false){
     if(!current())return;
     if(state.expandedTaskId===taskId){
       const panel=quiet?content.querySelector(`[data-task-output="${CSS.escape(taskId)}"]`):null;
-      if(panel){
-        const pre=panel.querySelector('.log-tail'),scrollTop=pre?.scrollTop||0,atEnd=pre?pre.scrollHeight-pre.clientHeight-scrollTop<24:true,focused=document.activeElement===pre,holder=document.createElement('div');
-        holder.innerHTML=logPanel(refreshedTask,state.taskDetails[taskId].attempt,state.taskDetails[taskId].logs);
-        const replacement=holder.firstElementChild;
-        if(replacement){panel.replaceWith(replacement);replacement.querySelectorAll('[data-action]').forEach(element=>element.onclick=()=>action(element));const tail=replacement.querySelector('.log-tail');if(tail){tail.scrollTop=atEnd?tail.scrollHeight:scrollTop;if(focused)tail.focus({preventScroll:true})}}
-      }
+      if(panel)patchTaskOutput(panel,refreshedTask,state.taskDetails[taskId].attempt,state.taskDetails[taskId].logs);
       if(quiet){projectPaintPending=patchProjectFolderView();}
       else{render();document.querySelector(`[data-action="toggle-task"][data-id="${CSS.escape(taskId)}"]`)?.focus()}
     }
