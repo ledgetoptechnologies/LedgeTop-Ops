@@ -25,7 +25,7 @@ for (const environment of ["production", "staging"] as const) {
         if (url.pathname.endsWith("/session")) return route.fulfill({ json: { csrfToken: `123456.${"cd".repeat(32)}` } });
         if (url.pathname.endsWith("/inspect")) return route.fulfill({ json: { intentId, revision: 1, state: "issued",
           target: { targetId: "11111111-1111-4111-8111-111111111111", targetRevision: 2, clientRecordId: "retained-client", displayLabel: "Existing client" },
-          expiresAt: new Date(Date.now() + 60_000).toISOString() } });
+          expiresAt: new Date(Date.now() + 60_000).toISOString(), permissions: ["operations.service_home.read"], permissionSchemaVersion: 3 } });
         throw new Error("Read-only browser inspection must not redeem enrollment");
       }
       const response = await route.fetch({ url: `${fixtureOrigin}${url.pathname}${url.search}` });
