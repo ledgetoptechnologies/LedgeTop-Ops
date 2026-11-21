@@ -1087,14 +1087,28 @@ test('project folders navigate and survive browser history in a real browser', {
     await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
     await waitFor(client,`Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'Undo did not restore the task');
     assert.equal(processing.getTask('task-johnson').folderId,'folder-site');
-    await client.evaluate(`(()=>{
+    const dragTaskTo = (folderId, expectedLabel = null) => client.evaluate(`(()=>{
       const transfer=new DataTransfer(), handle=document.querySelector('[data-folder-drag][data-id="task-johnson"]');
       handle.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));
-      const target=document.querySelector('[data-folder-drop-destinations] [data-task-drop-folder="${createdId}"]');
+      const target=document.querySelector(${JSON.stringify(`[data-folder-drop-destinations] [data-task-drop-folder="${folderId}"]`)});
+      const expectedLabel=${JSON.stringify(expectedLabel)};
+      if(!target?.getClientRects().length||(expectedLabel&&target.textContent.trim()!==expectedLabel))throw Error('Visible drop destination unavailable');
       target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
       if(!target.classList.contains('folder-drop-active'))throw Error('Destination did not highlight');
       target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
     })()`);
+    const beforeRootDrop=processing.getTask('task-johnson');
+    const requestsBeforeRootDrop=runtime.requests.length;
+    await dragTaskTo('','Project root');
+    await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'root drop did not remove the task from its former folder');
+    const rootMoves=runtime.requests.slice(requestsBeforeRootDrop).filter(request=>request.method==='PATCH'&&request.path==='/api/v1/tasks/task-johnson/folder');
+    assert.deepEqual(rootMoves.map(request=>request.body),[{folderId:null,expectedFolderId:'folder-site',expectedFolderRevision:beforeRootDrop.folderRevision}]);
+    const rootTask=processing.getTask('task-johnson');
+    assert.equal(rootTask.folderId,null);
+    assert.equal(rootTask.folderRevision,beforeRootDrop.folderRevision+1);
+    await client.evaluate(`document.querySelector('[data-action="folder-root"]').click()`);
+    await waitFor(client,`!new URL(location.href).searchParams.has('folder')&&Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'dropped task did not appear at Project root');
+    await dragTaskTo(createdId);
     await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'drag move did not settle');
     assert.equal(processing.getTask('task-johnson').folderId,createdId);
     await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="folder-client"]').click()`);
