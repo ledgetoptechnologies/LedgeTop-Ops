@@ -14,10 +14,10 @@ export function defaultTaskName(project,date=new Date()){
 // A browser-owned controller. In background mode, closing hides the dialog
 // while submission continues; explicit disposal still aborts local work.
 // Accepted durable copy/finalization operations are never silently cancelled.
-export function mountNewTask({container,dialog,project,providers=[],presets=[],datasets=[],api,token,fetcher=fetch,onComplete=()=>{},onDispose=()=>{},canUpload=true,canImport=true,canManagePresets=false,allowBackground=false}){
+export function mountNewTask({container,dialog,project,providers=[],orchestratorProviderId='',presets=[],datasets=[],api,token,fetcher=fetch,onComplete=()=>{},onDispose=()=>{},canUpload=true,canImport=true,canManagePresets=false,allowBackground=false}){
   const controller=new AbortController(),{signal}=controller;
   dialog.classList.add('new-task-modal');
-  let source='pc',files=[],selectedPaths=new Set(),busy=false,datasetId='',currentProviders=providers,submissionId=crypto.randomUUID(),copyKey=crypto.randomUUID();
+  let orchestratorId=orchestratorProviderId,confirmedNode='',pickerMessage='',source='pc',files=[],selectedPaths=new Set(),busy=false,datasetId='',currentProviders=providers,submissionId=crypto.randomUUID(),copyKey=crypto.randomUUID();
   let prepared=null,browseGeneration=0,sourceOperation=null,datasetKey=crypto.randomUUID(),submissionFingerprint='',pendingPhotoResume=null,datasetRequestName='';
   const ready=datasets.filter(item=>item.projectId===project.id&&item.status==='finalized');
   const uid=`new-task-${crypto.randomUUID().slice(0,8)}`;
@@ -70,23 +70,23 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
   // A boundary drawn on the photo map becomes this task's boundary option.
   function applyBoundary(geojson){if(busy)return;if(!taskOptions.supports('boundary','json')){photoMap?.clearBoundary();say('The processing node does not accept a boundary');return;}boundaryApplied=Boolean(geojson);taskOptions.setValue('boundary',geojson?JSON.stringify(geojson):null);say(geojson?'Boundary set for this task':'');}
   function showProgress(item){const total=item.total||files.length,done=item.completed||0;let message;if(item.phase==='preparing'){progress.value=100*done/Math.max(1,total);message=`Preparing upload locally: ${done.toLocaleString()} / ${total.toLocaleString()} photos checked. Creating integrity checksums; no photos are being transferred yet.`;}else if(item.phase==='uploading'){progress.value=100*item.completedBytes/Math.max(1,item.totalBytes);const speed=item.bytesPerSecond>0?`${(item.bytesPerSecond/1024**2).toFixed(1)} MB/s`:'Estimating speed…';message=`Uploading to Viewer: ${done.toLocaleString()} / ${total.toLocaleString()} photos · ${(item.completedBytes/1024**2).toFixed(1)} / ${(item.totalBytes/1024**2).toFixed(1)} MB · ${speed}`;}else{progress.value=100;message='Upload received. Assembling and verifying your source photos on the server…';}say(message);}
-  function providerOptions(){const picker=orchestratorPicker(currentProviders);node.innerHTML=picker.options.map(item=>`<option value="${escape(item.id)}" ${item.disabled?'disabled':''}>${escape(item.label)}</option>`).join('');node.value=picker.selectedId;node.disabled=busy||!picker.usable;providerNote();}
+  function providerOptions(){const picker=orchestratorPicker(currentProviders,orchestratorId,{previousId:confirmedNode});node.innerHTML=picker.options.map(item=>`<option value="${escape(item.id)}" ${item.disabled?'disabled':''}>${escape(item.label)}</option>`).join('');node.value=picker.selectedId;node.disabled=busy||!picker.usable;if(!confirmedNode&&picker.usable&&picker.selectedId)confirmedNode=picker.selectedId;pickerMessage=picker.message;providerNote();}
   const compatiblePreset=(preset,provider)=>Boolean(provider&&preset.enabled&&(!preset.providerType||preset.providerType===provider.type)&&(!preset.capabilityFingerprint||preset.capabilityFingerprint===provider.capabilityFingerprint));
   function providerNote(preserveOverrides=true){const item=currentProviders.find(item=>item.id===node.value),preset=form.elements.presetId,previous=preset.value,selected=presets.find(p=>p.id===previous),eligible=presets.filter(p=>compatiblePreset(p,item));
-    form.querySelector('[data-provider-note]').textContent=[orchestratorPicker(currentProviders).message,previous&&!eligible.some(p=>p.id===previous)?'Selected preset is incompatible with this node':''].filter(Boolean).join(' · ');
+    form.querySelector('[data-provider-note]').textContent=[pickerMessage,previous&&!eligible.some(p=>p.id===previous)?'Selected preset is incompatible with this node':''].filter(Boolean).join(' · ');
     preset.innerHTML='<option value="">Default</option>'+eligible.map(p=>`<option value="${escape(p.id)}">${escape(p.displayName)}</option>`).join('')+(previous&&!eligible.some(p=>p.id===previous)?`<option value="${escape(previous)}" disabled>${escape(selected?.displayName||'Previous preset')} (incompatible)</option>`:'');
     preset.value=previous||'';syncTaskOptions({preserveOverrides});
   }
   const capabilityRefreshes=new Map();
   async function refreshTaskCapabilities({requireFresh=false}={}){
-    if(!node.value&&!requireFresh){const nodes=await api('/api/v1/processing/providers?limit=100',{signal});if(signal.aborted)return;currentProviders=nodes.providers||[];providerOptions();}
+    if(!node.value&&!requireFresh){const nodes=await api('/api/v1/processing/providers?limit=100',{signal});if(signal.aborted)return;currentProviders=nodes.providers||[];orchestratorId=nodes.orchestratorProviderId||'';providerOptions();}
     const providerId=node.value;if(!providerId){if(requireFresh)throw new Error('Choose a processing node first.');return;}
     if(capabilityRefreshes.has(providerId))return capabilityRefreshes.get(providerId);
     const pending=(async()=>{try{
       await api(`/api/v1/processing/providers/${encodeURIComponent(providerId)}/capabilities/refresh`,{method:'POST',body:{},signal});
       const [nodes,result]=await Promise.all([api('/api/v1/processing/providers?limit=100',{signal}),api('/api/v1/processing/presets',{signal})]);
       if(signal.aborted)return;
-      currentProviders=nodes.providers||[];const selectedPreset=presets.find(item=>item.id===form.elements.presetId.value);presets=result.presets||presets;
+      currentProviders=nodes.providers||[];orchestratorId=nodes.orchestratorProviderId||'';const selectedPreset=presets.find(item=>item.id===form.elements.presetId.value);presets=result.presets||presets;
       if(selectedPreset&&!presets.some(item=>item.id===selectedPreset.id))presets=[...presets,{...selectedPreset,enabled:false}];
       if(node.value===providerId)providerOptions();
     }finally{capabilityRefreshes.delete(providerId)}})();
@@ -103,7 +103,7 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
       host.querySelectorAll('[data-open]').forEach(button=>button.onclick=()=>{if(usable())void browse(page.entries[Number(button.dataset.open)].relativePath);});host.querySelectorAll('[data-pick]').forEach(input=>input.onchange=()=>{const path=page.entries[Number(input.dataset.pick)].relativePath;if(!usable()){input.checked=selectedPaths.has(path);return;}if(input.checked)selectedPaths.add(path);else selectedPaths.delete(path);update();});
     }catch(error){if(!signal.aborted&&source==='server'&&generation===browseGeneration)host.textContent=error.message;}}
   async function waitOperation(operation){let item=operation;if(!item?.id)throw new Error('Source preparation did not return a background operation.');while(!['succeeded','complete','completed','failed','cancelled'].includes(item.status)){if(signal.aborted)throw new DOMException('Cancelled','AbortError');say(allowBackground?'Preparing source photos on the server. You can browse this workspace; keep this browser tab open until the task is submitted.':'Preparing your source photos. Closing stops task submission; accepted preparation remains in Background work.');await new Promise((resolve,reject)=>{const done=()=>{signal.removeEventListener('abort',abort);resolve();},timer=setTimeout(done,1500),abort=()=>{clearTimeout(timer);reject(new DOMException('Cancelled','AbortError'));};signal.addEventListener('abort',abort,{once:true});});item=(await api(`/api/v1/operations/${encodeURIComponent(item.id)}`,{signal})).operation;if(!item?.id)throw new Error('Source preparation status is unavailable.');sourceOperation=item;}if(!['succeeded','complete','completed'].includes(item.status))throw new Error(item.errorMessage||item.error?.message||'Source preparation failed. Check Background work before retrying.');}
-  form.querySelector('[data-files]').onchange=event=>selectFiles(event.target.files);form.querySelector('[data-folder]').onchange=event=>selectFiles(event.target.files);node.onchange=()=>{providerNote();refreshOptionsOnOpen();};
+  form.querySelector('[data-files]').onchange=event=>selectFiles(event.target.files);form.querySelector('[data-folder]').onchange=event=>selectFiles(event.target.files);node.onchange=()=>{confirmedNode=node.value;providerOptions();refreshOptionsOnOpen();};
   form.elements.presetId.onchange=()=>{photoMap?.clearBoundary();syncTaskOptions();refreshOptionsOnOpen();};
   form.querySelector('[data-edit-options]').onclick=event=>{const editor=form.querySelector('.task-options-editor'),open=optionsHost.hidden;optionsHost.hidden=!open;editor.open=open;event.currentTarget.setAttribute('aria-expanded',String(open));if(open){editor.scrollIntoView({block:'nearest'});refreshOptionsOnOpen();}};
   form.querySelector('[data-cancel]').addEventListener('click',()=>dialog.close());

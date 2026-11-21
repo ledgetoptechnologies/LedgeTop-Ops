@@ -39,9 +39,10 @@ test('file/path inputs and required outputs cannot be edited as arbitrary string
   const model=createTaskOptionsModel({provider:{capabilities:{options:[{name:'gltf',type:'bool',value:false},{name:'align',type:'string'}]}}});
   assert.equal(model.entries()[0].inherited,true);assert.throws(()=>model.setOverride('gltf',false));assert.throws(()=>model.setOverride('align','/etc/source'));
 });
+const FC=JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:[[[-90,45],[-89.999,45],[-89.999,45.001],[-90,45]]]}}]});
 class Element {
   constructor(tag,ownerDocument){this.tag=tag;this.ownerDocument=ownerDocument;this.children=[];this.listeners={};this.value='';this.attrs={};this.classes=new Set();}
-  append(...children){this.children.push(...children);}setAttribute(name,value){this.attrs[name]=String(value);}getAttribute(name){return this.attrs[name]??null;}
+  append(...children){this.children.push(...children);}setAttribute(name,value){this.attrs[name]=String(value);}removeAttribute(name){delete this.attrs[name];}getAttribute(name){return this.attrs[name]??null;}
   addEventListener(name,fn){this.listeners[name]=fn;}replaceChildren(){this.children=[];}remove(){this.removed=true;}
   get classList(){const self=this;return{toggle(name,on){if(on)self.classes.add(name);else self.classes.delete(name);}};}
   all(){return this.children.flatMap(child=>[child,...(child.all?child.all():[])]);}
@@ -166,7 +167,7 @@ test('booleans render as Enable checkboxes, numbers as number inputs, enums as s
   assert.match(row(container,'boundary').all().find(element=>element.className==='task-option-type').textContent,/\(json\)/);
   const load=row(container,'boundary').find('data-option-load'),file=row(container,'boundary').all().find(element=>element.type==='file');
   assert.equal(load.tag,'button');assert.equal(file.hidden,true);let clicked=0;file.click=()=>{clicked++;};load.listeners.click();assert.equal(clicked,1);
-  const geojson='{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}';
+  const geojson=FC;
   file.files=[{size:geojson.length,text:async()=>geojson}];await file.listeners.change();assert.deepEqual(editor.getOptions(),{boundary:geojson});
   boundary.value='{not json';boundary.listeners.input();assert.equal(editor.validate().valid,false);assert.match(row(container,'boundary').find('data-option-error').textContent,/valid JSON/);
   boundary.value='';boundary.listeners.input();assert.deepEqual(editor.getOptions(),{});
@@ -198,6 +199,58 @@ test('per-option reset appears only when changed and returns the default',()=>{
 test('programmatic boundary value is applied only for supported JSON options',()=>{
   const {editor}=mount({provider:{capabilities:{options:[{name:'boundary',type:'json',value:''},specs[0]]}}});
   assert.equal(editor.supports('boundary','json'),true);assert.equal(editor.supports('dtm','json'),false);
-  editor.setValue('boundary','{"type":"FeatureCollection","features":[]}');assert.deepEqual(editor.getOptions(),{boundary:'{"type":"FeatureCollection","features":[]}'});
+  editor.setValue('boundary',FC);assert.deepEqual(editor.getOptions(),{boundary:FC});
+  editor.setValue('boundary','{"type":"FeatureCollection","features":[]}');assert.throws(()=>editor.getOptions(),/one polygon/);
   editor.setValue('boundary',null);assert.deepEqual(editor.getOptions(),{});
+});
+
+function mountWithView(options){
+  const listeners={},view={innerWidth:360,innerHeight:640};
+  const document={defaultView:view,createElement(tag){const element=new Element(tag,this);element.style={};element.offsetHeight=60;return element;},addEventListener(name,fn){listeners[name]=fn;},removeEventListener(name){delete listeners[name];}};
+  const container=new Element('div',document),editor=mountTaskOptions({container,...options});return{container,editor,listeners,view};
+}
+test('tooltips open on tap and close on a second tap, Escape, outside tap or scroll, and stay on screen',()=>{
+  const {container,editor,listeners}=mountWithView({provider});
+  const info=row(container,'resolution').find('data-option-info'),tip=row(container,'resolution').all().find(element=>element.attrs.role==='tooltip');
+  info.getBoundingClientRect=()=>({left:330,right:346,top:600,bottom:616});
+  assert.equal(tip.hidden,true,'closed until asked');
+  info.listeners.focus();info.listeners.click();assert.equal(tip.hidden,false,'a tap (focus then click) opens it');
+  const left=parseFloat(tip.style.left),top=parseFloat(tip.style.top),width=parseFloat(tip.style.width);
+  assert.ok(left>=8&&left+width<=352,'kept inside the right edge');assert.ok(top>=8&&top+60<=632,'kept inside the bottom edge');
+  info.listeners.mouseleave();assert.equal(tip.hidden,false,'a pinned tooltip survives the pointer leaving');
+  info.listeners.click();assert.equal(tip.hidden,true,'a second tap closes it');
+  info.listeners.mouseenter();assert.equal(tip.hidden,false);info.listeners.mouseleave();assert.equal(tip.hidden,true,'hover alone is transient');
+  info.listeners.focus();let prevented=0;info.listeners.keydown({key:'Escape',preventDefault(){prevented++;}});assert.equal(tip.hidden,true);assert.equal(prevented,1);
+  info.listeners.click();listeners.pointerdown({target:{}});assert.equal(tip.hidden,true,'outside tap closes');
+  info.listeners.click();container.find('data-option','dtm');container.children[0].children[2].listeners.scroll();assert.equal(tip.hidden,true,'scrolling the list closes');
+  const other=row(container,'count').find('data-option-info'),otherTip=row(container,'count').all().find(element=>element.attrs.role==='tooltip');other.getBoundingClientRect=()=>({left:0,right:16,top:10,bottom:26});
+  info.listeners.click();other.listeners.click();assert.equal(tip.hidden,true,'only one tooltip at a time');assert.equal(otherTip.hidden,false);
+  editor.dispose();assert.equal(listeners.pointerdown,undefined,'document listener removed');
+});
+test('a JSON file read is ignored after a newer read or a re-render, and read errors are shown',async()=>{
+  const json={name:'cameras',type:'json',value:''};
+  const {container,editor}=mount({provider:{id:'p',capabilities:{options:[json,specs[0]]}}});
+  let file=row(container,'cameras').all().find(element=>element.type==='file');
+  let releaseOld;const old=new Promise(resolve=>{releaseOld=resolve;});
+  file.files=[{size:10,text:()=>old}];const first=file.listeners.change();
+  file.files=[{size:10,text:async()=>'{"new":true}'}];await file.listeners.change();
+  releaseOld('{"old":true}');await first;assert.deepEqual(editor.getOptions(),{cameras:'{"new":true}'},'stale read ignored');
+  let releaseLate;file.files=[{size:10,text:()=>new Promise(resolve=>{releaseLate=resolve;})}];const late=file.listeners.change();
+  editor.update({provider:{id:'p2',capabilities:{options:[json,specs[0]]}}});releaseLate('{"late":true}');await late;assert.deepEqual(editor.getOptions(),{},'node change discards the pending read');
+  file=row(container,'cameras').all().find(element=>element.type==='file');file.files=[{size:10,text:async()=>{throw new Error('denied');}}];await file.listeners.change();
+  assert.match(row(container,'cameras').find('data-option-error').textContent,/could not be read/);assert.deepEqual(editor.getOptions(),{});
+});
+test('boundary option accepts only one small simple closed polygon',()=>{
+  const spec={name:'boundary',type:'json'};assert.equal(parseTaskOption(spec,FC),FC);
+  const polygon=ring=>JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:[ring]}}]});
+  for(const [text,reason] of [
+    ['{"type":"Polygon","coordinates":[[[0,0],[0.1,0],[0.1,0.1],[0,0]]]}',/one polygon/],
+    [polygon([[0,0],[0.1,0],[0.1,0.1]]),/3 to 200/],
+    [polygon([[0,0],[0.1,0],[0.1,0.1],[0.01,0]]),/closed/],
+    [polygon([[0,0],[2,0],[2,2],[0,0]]),/larger/],
+    [polygon([[0,0],[0.1,0],[0.2,0],[0,0]]),/no area/],
+    [polygon([[0,0],[0.1,0.2],[0.1,0],[0,0.1],[0,0]]),/cross/],
+    [polygon([[0,0],[200,0],[0.1,0.1],[0,0]]),/longitude/],
+  ])assert.throws(()=>parseTaskOption(spec,text),reason);
+  assert.equal(parseTaskOption({name:'cameras',type:'json'},'{"any":1}'),'{"any":1}','other JSON options are not boundary-checked');
 });

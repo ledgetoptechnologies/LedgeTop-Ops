@@ -1,6 +1,7 @@
 import {parsePhotoExif,PHOTO_HEADER_BYTES as HEADER_BYTES} from './server/photoExif.mjs';
 export {parsePhotoExif} from './server/photoExif.mjs';
 const MAX_FILES=20_000;
+const CAPTURED_AT=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?$/;
 const abort=()=>{throw new DOMException('Photo preview cancelled','AbortError');};
 function check(signal){if(signal?.aborted)abort();}
 const fileOrder=new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
@@ -138,7 +139,7 @@ export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet'),onBou
     async setLocations(preview,{signal}={}){
       if(disposed)return null;const epoch=++generation;controller?.abort();controller=new AbortController();const local=controller,cancel=()=>local.abort();
       signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)local.abort();clear();
-      const points=Array.isArray(preview?.points)?preview.points:[],locations=points.slice(0,MAX_FILES).filter(p=>Number.isFinite(p.latitude)&&Number.isFinite(p.longitude)&&Math.abs(p.latitude)<=90&&Math.abs(p.longitude)<=180).map(p=>({latitude:p.latitude,longitude:p.longitude,name:String(p.name||'Photo'),trueHeading:Number.isFinite(p.trueHeading)&&p.trueHeading>=0&&p.trueHeading<360?p.trueHeading:null,...(typeof p.capturedAt==='string'&&p.capturedAt.length<=40?{capturedAt:p.capturedAt}:{})}));
+      const points=Array.isArray(preview?.points)?preview.points:[],locations=points.slice(0,MAX_FILES).filter(p=>Number.isFinite(p.latitude)&&Number.isFinite(p.longitude)&&Math.abs(p.latitude)<=90&&Math.abs(p.longitude)<=180).map(p=>({latitude:p.latitude,longitude:p.longitude,name:String(p.name||'Photo'),trueHeading:Number.isFinite(p.trueHeading)&&p.trueHeading>=0&&p.trueHeading<360?p.trueHeading:null,...(typeof p.capturedAt==='string'&&CAPTURED_AT.test(p.capturedAt)?{capturedAt:p.capturedAt}:{})}));
       const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
       try{return await render({locations,missingGps:count(preview?.missingGpsCount),omitted:count(preview?.unscannedCount)+Math.max(0,points.length-MAX_FILES)},epoch,local.signal);}catch{return null;}finally{signal?.removeEventListener('abort',cancel);}
     },

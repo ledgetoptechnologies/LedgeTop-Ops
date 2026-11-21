@@ -119,3 +119,15 @@ test('Ctrl+wheel zooms the map around the pointer; a plain wheel is left to scro
   f.preview.dispose();assert.equal(surface.listeners.wheel,undefined);
   const state={accumulated:0};assert.equal(wheelZoomStep({ctrlKey:false,deltaY:500},state),0);assert.equal(wheelZoomStep({ctrlKey:true,deltaY:3,deltaMode:1},state),-1);
 });
+
+test('impossible or placeholder EXIF dates are not used to order the line',()=>{
+  for(const stamp of ['0000:00:00 00:00:00','2026:13:01 10:00:00','2026:02:30 10:00:00','2025:02:29 10:00:00','2026:04:31 10:00:00','2026:05:01 24:00:00','2026:05:01 10:60:00','2026:05:01 10:00:60','1969:12:31 23:59:59','2100:01:01 00:00:00']){
+    const point=parsePhotoExif(timedJpeg(stamp));assert.equal(point.latitude,45.5,stamp);assert.equal('capturedAt' in point,false,stamp);
+  }
+  assert.equal(parsePhotoExif(timedJpeg('2024:02:29 23:59:59')).capturedAt,'2024-02-29T23:59:59','leap day is valid');
+});
+test('server capture times with an unexpected format are dropped before ordering',async()=>{
+  const f=mapFixture();
+  await f.preview.setLocations({points:[{latitude:2,longitude:2,name:'b.jpg',capturedAt:'2026-05-01T10:00:01'},{latitude:1,longitude:1,name:'a.jpg',capturedAt:'not a time'}]});
+  assert.deepEqual(f.paths[0].latlngs,[[1,1],[2,2]],'mixed validity falls back to file name order');f.preview.dispose();
+});

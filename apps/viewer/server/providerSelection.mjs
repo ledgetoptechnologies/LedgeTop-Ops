@@ -21,6 +21,16 @@ export function providerSubmissionState(provider, {now=Date.now(),maxHealthAgeMs
   const queued=Number(provider.capabilities.taskQueueCount)>0||Number(provider.activeAttempts)>0;
   return {eligible:true,status:queued?'busy':'ready',label:queued?'Available · queues work':'Ready',reason:null};
 }
+// The orchestrator that receives normal new-task submissions: the configured
+// provider id when set, otherwise the only ClusterODM provider, otherwise the
+// only provider of a single-node deployment. Anything else is ambiguous.
+export function resolveOrchestrator(providers,configuredId=''){
+  const list=Array.isArray(providers)?providers.filter(provider=>provider&&typeof provider.id==='string'):[];
+  if(configuredId)return list.find(provider=>provider.id===configuredId)||null;
+  const clusters=list.filter(provider=>provider.type==='clusterodm');
+  if(clusters.length)return clusters.length===1?clusters[0]:null;
+  return list.length===1?list[0]:null;
+}
 export function selectSubmissionProvider(providers,currentId='',options={}) {
   const eligible=(Array.isArray(providers)?providers:[]).filter(provider=>providerSubmissionState(provider,options).eligible);
   if(eligible.some(provider=>provider.id===currentId))return currentId;

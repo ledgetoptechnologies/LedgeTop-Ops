@@ -1,3 +1,4 @@
+import { boundaryProblem } from './server/boundaryGeojson.mjs';
 // The server remains the authority for capability, preset and submission checks.
 const REQUIRED = new Set(['pc-ept', 'gltf', '3d-tiles']);
 const FILE_OPTIONS = new Set(['align', 'cameras', 'boundary', 'geo', 'gcp', 'image-groups', 'input', 'output', 'project-path']);
@@ -60,7 +61,10 @@ export function parseTaskOption(spec, raw) {
     value = Number(raw);
     if (!Number.isFinite(value) || (spec.type === 'int' && !Number.isSafeInteger(value))) throw new Error(spec.type === 'int' ? 'Enter a whole number.' : 'Enter a finite number.');
   } else if (typeof raw !== 'string' || raw.length > 4000) throw new Error('Enter text of at most 4,000 characters.');
-  else if (spec.type === 'json') { try { JSON.parse(raw); } catch { throw new Error('Enter valid JSON.'); } }
+  else if (spec.type === 'json') {
+    try { JSON.parse(raw); } catch { throw new Error('Enter valid JSON.'); }
+    if (spec.name === 'boundary') { const problem = boundaryProblem(raw); if (problem) throw new Error(problem); }
+  }
   const domain = taskOptionDomain(spec);
   if (domain?.values && !domain.values.includes(value)) throw new Error('Choose one of the node’s supported values.');
   if (typeof value === 'number' && ((domain?.min !== undefined && value < domain.min) || (domain?.max !== undefined && value > domain.max))) throw new Error('Value is outside the node’s supported range.');
@@ -122,7 +126,21 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
   const changedLabel = make('label', 'task-options-changed'), changedOnly = make('input'); changedOnly.type = 'checkbox'; changedOnly.setAttribute('data-show-changed', ''); changedLabel.append(changedOnly, make('span', '', 'Show only changed')); toolbar.append(changedLabel);
   const list = make('div', 'task-options-list'); root.append(list);
   const status = make('p', 'task-options-status'); status.setAttribute('role', 'status'); root.append(status); container.append(root);
-  let rows = [], disposed = false, disabled = false;
+  let rows = [], disposed = false, disabled = false, renderEpoch = 0, openTip = null;
+  // Tooltips: hover or keyboard focus shows; a tap or click pins it open and a
+  // second tap, Escape, an outside tap or scrolling closes it. Placed with
+  // fixed coordinates clamped to the viewport so it is never cut off.
+  function placeTip(info, tip) {
+    const view = document.defaultView; if (!view || !info.getBoundingClientRect || !tip.style) return;
+    const margin = 8, box = info.getBoundingClientRect(), width = Math.max(0, Math.min(320, view.innerWidth - margin * 2));
+    tip.style.width = `${width}px`; tip.style.left = `${Math.max(margin, Math.min(box.left, view.innerWidth - width - margin))}px`;
+    const height = tip.offsetHeight || 0, below = box.bottom + 4, above = box.top - 4 - height;
+    tip.style.top = `${below + height > view.innerHeight - margin && above >= margin ? above : Math.max(margin, Math.min(below, view.innerHeight - margin - height))}px`;
+  }
+  function hideTip() { if (!openTip) return; openTip.tip.hidden = true; openTip.info.removeAttribute?.('data-open'); openTip = null; }
+  function showTip(info, tip, pinned) { if (openTip && openTip.tip !== tip) hideTip(); openTip = { info, tip, pinned: Boolean(pinned || (openTip?.tip === tip && openTip.pinned)) }; info.setAttribute('data-open', ''); tip.hidden = false; placeTip(info, tip); }
+  const outside = event => { if (openTip && event.target !== openTip.info && event.target !== openTip.tip) hideTip(); };
+  document.addEventListener?.('pointerdown', outside, true);
   function filter() { const query = search.value.toLowerCase().trim(); for (const row of rows) row.element.hidden = !row.search.includes(query) || Boolean(changedOnly.checked && !row.changed()); }
   function showErrors(errors) {
     const byName = new Map(errors.map(error => [error.name, error.message]));
@@ -131,7 +149,7 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
     status.textContent = general.map(error => error.message).join(' ');
   }
   function render() {
-    list.replaceChildren(); rows = []; status.textContent = '';
+    hideTip(); renderEpoch++; list.replaceChildren(); rows = []; status.textContent = '';
     const entries = model.entries();
     entries.forEach((entry, index) => {
       const { spec } = entry, id = `${prefix}-${index}`, row = make('div', 'task-option'); row.setAttribute('data-option', spec.name); row.setAttribute('role', 'group'); row.setAttribute('aria-labelledby', `${id}-name`);
@@ -140,7 +158,11 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
       const inherited = entry.inherited === undefined || entry.inherited === null || entry.inherited === '' ? 'not set' : String(entry.inherited);
       const description = [taskOptionDescription(spec), entry.missing ? '' : `${entry.inheritedFrom}: ${inherited}.`, entry.restriction || ''].filter(Boolean).join(' ');
       const info = make('button', 'task-option-info', 'i'); info.type = 'button'; info.setAttribute('aria-label', `About ${spec.name}`); info.setAttribute('aria-describedby', `${id}-tip`); info.setAttribute('data-option-info', '');
-      const tip = make('span', 'task-option-tip', description); tip.id = `${id}-tip`; tip.setAttribute('role', 'tooltip');
+      const tip = make('span', 'task-option-tip', description); tip.id = `${id}-tip`; tip.setAttribute('role', 'tooltip'); tip.hidden = true;
+      info.addEventListener('mouseenter', () => showTip(info, tip, false)); info.addEventListener('mouseleave', () => { if (openTip?.tip === tip && !openTip.pinned) hideTip(); });
+      info.addEventListener('focus', () => showTip(info, tip, false)); info.addEventListener('blur', () => { if (openTip?.tip === tip) hideTip(); });
+      info.addEventListener('click', () => { if (openTip?.tip === tip && openTip.pinned) hideTip(); else showTip(info, tip, true); });
+      info.addEventListener('keydown', event => { if (event.key === 'Escape' && openTip?.tip === tip) { event.preventDefault?.(); hideTip(); } });
       const reset = make('button', 'task-option-reset', entry.missing ? 'Remove' : '↺'); reset.type = 'button'; reset.setAttribute('data-option-reset', '');
       const resetLabel = entry.missing ? `Remove retained change ${spec.name}` : `Reset ${spec.name} to ${entry.inheritedFrom.toLowerCase()}`; reset.setAttribute('aria-label', resetLabel); reset.title = resetLabel;
       head.append(name, info, tip, reset); row.append(head);
@@ -173,10 +195,15 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
       reset.addEventListener('click', () => { if (disabled || !model.entries().find(item => item.spec.name === spec.name)?.overridden) return; model.setOverride(spec.name, undefined); if (entry.missing) { render(); return; } showValue(entry.inherited); showModified(false); showErrors(model.validate().errors); filter(); });
       control.addEventListener('input', save); control.addEventListener('change', save);
       loadButton?.addEventListener('click', () => { if (!disabled && !control.disabled) { fileInput.value = ''; fileInput.click(); } });
+      let readId = 0;
       fileInput?.addEventListener('change', async () => {
-        const file = fileInput.files?.[0]; if (!file || disabled) return;
+        const file = fileInput.files?.[0], epoch = renderEpoch, current = ++readId; if (!file || disabled) return;
         if (file.size > 4000) { error.textContent = 'Choose a JSON file of at most 4,000 characters.'; error.hidden = false; return; }
-        control.value = await file.text(); if (!disposed) save();
+        let text;
+        try { text = await file.text(); } catch { if (!disposed && epoch === renderEpoch && current === readId) { error.textContent = 'The file could not be read.'; error.hidden = false; } return; }
+        // A newer read, a node or preset change, or a re-render wins.
+        if (disposed || disabled || epoch !== renderEpoch || current !== readId) return;
+        control.value = text; save();
       });
       rows.push({ name: spec.name, element: row, control, error, changed: () => changed, search: spec.name.toLowerCase() }); list.append(row);
     });
@@ -184,7 +211,7 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
     else showErrors(model.validate().errors);
     filter();
   }
-  search.addEventListener('input', filter); changedOnly.addEventListener('change', filter); render();
+  search.addEventListener('input', filter); changedOnly.addEventListener('change', filter); list.addEventListener('scroll', hideTip, { passive: true }); render();
   return {
     getOptions: model.getOptions,
     validate() { const result = model.validate(); showErrors(result.errors); return result; },
@@ -193,6 +220,6 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
     setValue(name, value) { if (disposed) return; model.setOverride(name, value === null ? undefined : value); render(); },
     supports(name, type) { return model.entries().some(entry => entry.spec.name === name && !entry.missing && !entry.restriction && (!type || entry.spec.type === type)); },
     setDisabled(value) { if (!disposed) { disabled = Boolean(value); search.disabled = disabled; render(); } },
-    dispose() { disposed = true; root.remove(); },
+    dispose() { disposed = true; renderEpoch++; hideTip(); document.removeEventListener?.('pointerdown', outside, true); root.remove(); },
   };
 }
