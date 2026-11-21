@@ -6,6 +6,7 @@ import { OnboardClientButton } from "../../src/client/OnboardClientButton";
 
 type Call = { path: string; body: unknown };
 const calls: Call[] = [];
+let createdFixture: { commandId: string; expiresAt: string } | null = null;
 const fixtureWindow = window as Window & { onboardingCalls?: Call[]; onboardingMode?: string; copied?: string[]; opened?: string[]; release?: () => void };
 fixtureWindow.onboardingCalls = calls;
 fixtureWindow.copied = [];
@@ -141,12 +142,17 @@ window.fetch = async (input, init) => {
   if (route === "create") {
     if (mode === "create-denied" || mode === "target-denied" || mode === "destination-copy-denied") return denied();
     if (mode === "delayed-create") await held();
+    createdFixture = { commandId: body.commandId, expiresAt: body.expiresAt };
     return Response.json({ invitationId, expiresAt: body.expiresAt, requestSha256: "c".repeat(64), state: "pending" });
   }
   if (route === "reveal") {
+    if (mode.endsWith("expiry-delayed")) await held();
+    if (!createdFixture || createdFixture.commandId !== body.commandId) throw new Error("fixture_create_receipt_missing");
+    const revealExpiry = mode.endsWith("expiry-mismatch")
+      ? new Date(Date.parse(createdFixture.expiresAt) + 60_000).toISOString() : createdFixture.expiresAt;
     if (mode === "uncertain") return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     const fragment = (mode === "destination-copy-mismatched-link" ? "e" : "d").repeat(64);
-    return Response.json({ commandId: body.commandId, invitationId, expiresAt: "2099-01-01T00:00:00.000Z", invitationSecret: "d".repeat(64),
+    return Response.json({ commandId: body.commandId, invitationId, expiresAt: revealExpiry, invitationSecret: "d".repeat(64),
       recipientUrl: mode === "no-link" || mode === "destination-copy-no-link" ? null : `https://portal.example.test/onboarding/${invitationId}#${fragment}` });
   }
   return Response.json({ error: "not_found" }, { status: 404 });
