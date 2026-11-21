@@ -5,9 +5,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { downloadProviderArchive } = require('./providerArchiveTransport');
 const { sanitizeLogMessage } = require('./processingSecurity');
+const { stable } = require('../lod-converter-policy.cjs');
 
 const STATUS = Object.freeze({ 10: 'queued_upstream', 20: 'running', 30: 'failed', 40: 'completed', 50: 'cancelled' });
 const VIEWER_ACCEPTANCE_ACK = Object.freeze({ version: 1, transport: 'https', pathTemplate: '/task/{taskId}/viewer-acceptance' });
+const PRODUCER_BINDING = Object.freeze({ version: 1, transport: 'https', pathTemplate: '/task/{taskId}/producer-binding' });
 
 async function boundedText(response,maxBytes) { const reader=response.body.getReader();const chunks=[];let total=0;try{for(;;){const {done,value}=await reader.read();if(done)break;total+=value.byteLength;if(total>maxBytes){await reader.cancel('provider response exceeds size limit');throw new Error('provider response exceeds size limit');}chunks.push(value);}}finally{reader.releaseLock();}return Buffer.concat(chunks.map((c)=>Buffer.from(c))).toString('utf8'); }
 async function boundedJson(response,maxBytes=1024*1024){if(!String(response.headers.get('content-type')||'').includes('json'))throw new Error('provider returned an unexpected content type');return JSON.parse(await boundedText(response,maxBytes));}
@@ -141,11 +143,45 @@ class NodeOdmProvider {
       availableMemory: info.availableMemory ?? null, cpuCores: info.cpuCores ?? null,
       providerType: detectedType, detectionMethod: 'capability-signature', options: normalizedOptions,
       ...(viewerAcceptanceAck?{viewerAcceptanceAck}:{}),
+      ...(endpoint.protocol === 'https:' && !endpoint.search && !endpoint.hash
+        && info.producerBinding?.version === 1 && info.producerBinding?.transport === 'https'
+        && info.producerBinding?.pathTemplate === PRODUCER_BINDING.pathTemplate ? { producerBinding: PRODUCER_BINDING } : {}),
       testedBaseline: detectedType === 'clusterodm' ? '1.5.x' : '2.2.3',
       compatibilityWarning: null,
     };
-    const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,...(capabilities.viewerAcceptanceAck?{viewerAcceptanceAck:capabilities.viewerAcceptanceAck}:{}),options:capabilities.options};
+    const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,...(capabilities.viewerAcceptanceAck?{viewerAcceptanceAck:capabilities.viewerAcceptanceAck}:{}),...(capabilities.producerBinding?{producerBinding:capabilities.producerBinding}:{}),options:capabilities.options};
     return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(compatibilityContract)).digest('hex') };
+  }
+
+  // Explicit read only. No caller invokes this automatically, and this mapping
+  // is neither a signature, historical-incarnation proof nor fresh byte QA.
+  async producerBinding(uuid, { environment, signal = null } = {}) {
+    const uuidPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+    const endpoint = new URL(this.endpoint);
+    if (endpoint.protocol !== 'https:' || endpoint.pathname !== '/' || endpoint.search || endpoint.hash
+      || !uuidPattern.test(uuid) || !['STAGING', 'PRODUCTION'].includes(environment)) {
+      throw providerCapabilityError('producer_binding_unavailable', 'A scoped TLS producer binding is required.');
+    }
+    const response = await this.request(`/task/${uuid}/producer-binding`, {}, {}, { signal });
+    let value;
+    try { value = await boundedJson(response, 64 * 1024); }
+    catch { throw providerCapabilityError('producer_binding_invalid', 'Provider returned an invalid producer binding.'); }
+    const expectedKeys = ['schemaVersion','providerTaskId','producerGeneration','environment','jobId',
+      'nativeTaskId','nodeId','archiveSha256','archiveEvidence','bindingSha256'].sort();
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).sort().join('\0') !== expectedKeys.join('\0')
+      || value.schemaVersion !== 1 || value.providerTaskId !== uuid || value.environment !== environment
+      || !Number.isSafeInteger(value.producerGeneration) || value.producerGeneration < 1
+      || !uuidPattern.test(value.jobId) || !uuidPattern.test(value.nativeTaskId)
+      || typeof value.nodeId !== 'string' || !/^[A-Za-z0-9_.-]{1,120}$/.test(value.nodeId)
+      || !/^[a-f0-9]{64}$/.test(value.archiveSha256 || '') || !/^[a-f0-9]{64}$/.test(value.bindingSha256 || '')
+      || value.archiveEvidence !== 'producer-record-not-fresh-byte-verification') {
+      throw providerCapabilityError('producer_binding_invalid', 'Provider returned an invalid producer binding.');
+    }
+    const { bindingSha256, ...body } = value;
+    const actual = crypto.createHash('sha256').update('ltds-producer-binding-v1\0').update(stable(body)).digest('hex');
+    if (actual !== bindingSha256) throw providerCapabilityError('producer_binding_invalid', 'Producer binding consistency check failed.');
+    return value;
   }
 
   async initialize({ uuid, name, options, outputs }, { signal=null } = {}) {

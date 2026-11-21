@@ -275,6 +275,7 @@ async function verifiedLodAsset(input, directory, fullMeshPath) {
       manifestFiles: integrity.files,
     },
     provenance: checked.provenance,
+    renderArtifacts: checked.artifacts,
   };
 }
 
