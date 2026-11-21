@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { confirmAction } from "@ltds/ui";
 import { api, ApiError } from "./api";
 
 type Candidate = Readonly<{ publicId:string; revision:string; name:string; status:string; archived:boolean;
@@ -43,7 +44,7 @@ export function ProjectAlphaOperationalProjectAdoption({root,contextVersion,cont
   const review=async(event?:FormEvent)=>{
     event?.preventDefault();const exact=externalId.trim();
     if(!/^[0-9a-f]{32}$/.test(selected)||!exact||exact!==externalId||exact.length>191||/\p{C}/u.test(exact)){setError("Select a candidate and enter a new, unused Operations Project ID.");return;}
-    if(!reviewKey&&!window.confirm("Reserve this new Operations Project ID and create short-lived review evidence for the selected customer Project? This does not grant access or publish anything."))return;
+    if(!reviewKey&&!await confirmAction({title:"Reserve this new Operations Project ID and create short-lived review evidence for the selected customer Project?",description:"This does not grant access or publish anything.",confirmLabel:"Reserve and review"}))return;
     const key=reviewKey||crypto.randomUUID();if(!reviewKey)setReviewKey(key);
     setBusy(true);setError("");setStatus("");
     try{
@@ -54,7 +55,7 @@ export function ProjectAlphaOperationalProjectAdoption({root,contextVersion,cont
   };
   const reserve=async()=>{
     if(!reviewItemId||busy||reservationId)return;
-    if(!reserveKey&&!window.confirm("Reserve this exact reviewed adoption intent? This still does not bind the Project or grant access."))return;
+    if(!reserveKey&&!await confirmAction({title:"Reserve this exact reviewed adoption intent?",description:"This still does not bind the Project or grant access.",confirmLabel:"Reserve intent"}))return;
     const key=reserveKey||crypto.randomUUID();if(!reserveKey)setReserveKey(key);
     setBusy(true);setError("");setStatus("");
     try{
@@ -65,7 +66,7 @@ export function ProjectAlphaOperationalProjectAdoption({root,contextVersion,cont
   };
   const bind=async()=>{
     if(!reservationId||busy||commandId)return;
-    if(!window.confirm("Create the new Operations Project and queue the exact Project Alpha bind command? This does not grant client access or publish a portal."))return;
+    if(!await confirmAction({title:"Create the new Operations Project and queue the exact Project Alpha bind command?",description:"This does not grant client access or publish a portal.",confirmLabel:"Create project"}))return;
     setBusy(true);setError("");setStatus("");
     try{
       const response=await api<{status?:string;commandId?:string}>(`${base}/bind`,{method:"POST",headers:{"Idempotency-Key":reservationId},body:JSON.stringify({expectedContextVersion:contextVersion,reservationId})});
@@ -75,7 +76,7 @@ export function ProjectAlphaOperationalProjectAdoption({root,contextVersion,cont
   };
   const finalize=async()=>{
     if(!reservationId||!commandId||busy||finalized)return;
-    if(!finalizationStarted&&!window.confirm("Send the exact queued bind command and verify Project Alpha acknowledgement before activating its Operations mapping? No client access or public link is created."))return;
+    if(!finalizationStarted&&!await confirmAction({title:"Send the exact queued bind command and verify Project Alpha acknowledgement before activating its Operations mapping?",description:"No client access or public link is created.",confirmLabel:"Send and verify"}))return;
     setFinalizationStarted(true);setBusy(true);setError("");setStatus("");
     try{
       const response=await api<{stage?:string;outcome?:{status?:string}}>(`${base}/finalize`,{method:"POST",headers:{"Idempotency-Key":commandId},body:JSON.stringify({expectedContextVersion:contextVersion,reservationId,commandId})});

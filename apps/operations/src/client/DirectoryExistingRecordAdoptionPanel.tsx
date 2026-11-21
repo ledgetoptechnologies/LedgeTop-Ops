@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { confirmAction } from "@ltds/ui";
 import { api, ApiError } from "./api";
 
 const ENDPOINT = "/api/admin/integrations/project-alpha/api-v2/directory/read-adoptions";
@@ -104,7 +105,7 @@ function ExactRecordReview({sources,disabled}:{sources:readonly string[];disable
   };
   const seal=async()=>{
     if(disabled||busy||!compared||compared.fields.some(field=>!decisions[field.field]))return;
-    if(!window.confirm("Seal these enum-only field dispositions? This does not update local records or Project Alpha."))return;
+    if(!await confirmAction({title:"Seal these enum-only field dispositions?",description:"This does not update local records or Project Alpha.",confirmLabel:"Seal field review"}))return;
     setBusy(true);setReviewError("");setMessage("");
     try{const response=await api<{outcome?:unknown}>(`${ENDPOINT}/${encodeURIComponent(compared.reviewId)}/field-review`,{method:"POST",body:JSON.stringify({decisions})}),outcome=response.outcome;
       if(object(outcome)&&(outcome.status==="sealed"||outcome.status==="replayed")&&typeof outcome.receiptId==="string"&&UUID.test(outcome.receiptId)){
@@ -115,7 +116,7 @@ function ExactRecordReview({sources,disabled}:{sources:readonly string[];disable
   };
   const finalize=async()=>{
     if(disabled||busy||!receiptId)return;
-    if(!window.confirm("Finalize this sealed review? Explicitly adopted scalar fields will update the Operations record, Project Alpha will be rebound to that exact record, and the canonical mapping will activate. This does not grant client portal, Delivery, folder, workspace, or public-link access."))return;
+    if(!await confirmAction({title:"Finalize this sealed review?",description:"Explicitly adopted scalar fields will update the Operations record, Project Alpha will be rebound to that exact record, and the canonical mapping will activate. This does not grant client portal, Delivery, folder, workspace, or public-link access.",confirmLabel:"Finalize review"}))return;
     setBusy(true);setReviewError("");setMessage("");
     try{const response=await api<{outcome?:unknown}>(`${ENDPOINT}/field-reviews/${encodeURIComponent(receiptId)}/finalize`,{method:"POST",headers:{"Idempotency-Key":finalizationKey.current||=crypto.randomUUID()},body:JSON.stringify({})}),outcome=response.outcome;
       if(object(outcome)&&(outcome.status==="finalized"||outcome.status==="replayed")&&typeof outcome.finalizationId==="string"&&UUID.test(outcome.finalizationId)){

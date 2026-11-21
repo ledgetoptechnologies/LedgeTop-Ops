@@ -54,6 +54,16 @@ export function requestChoice<T extends string>(request: ChoiceRequest<T>): Prom
   return new Promise(resolve => enqueue({ kind: "choice", request, resolve: resolve as (value: string | null) => void }));
 }
 
+/**
+ * The in-app replacement for window.confirm: one explicit action plus Cancel.
+ * Resolves true only when the action is chosen; Cancel, Escape and a missing host are all "no".
+ */
+export async function confirmAction({ title, description, confirmLabel, tone = "primary", cancelLabel }: {
+  title: string; description?: string; confirmLabel: string; tone?: "primary" | "danger"; cancelLabel?: string;
+}): Promise<boolean> {
+  return await requestChoice({ title, description, choices: [{ value: "confirm", label: confirmLabel, tone }], cancelLabel }) === "confirm";
+}
+
 // Isolated component fixtures may render without a host. Fall back to the
 // native prompt where it exists; an unsupported prompt resolves as cancelled.
 function nativeTextFallback(request: TextRequest): string | null {

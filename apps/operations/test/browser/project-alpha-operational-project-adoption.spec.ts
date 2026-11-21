@@ -26,22 +26,23 @@ async function fixture(page:Page,enabled=true){
 }
 
 test("customer project list completes exact PA-first adoption with frozen uncertain retries and no access action",async({page})=>{
-  const calls=await fixture(page),dialogs:string[]=[];page.on("dialog",async dialog=>{dialogs.push(dialog.message());await dialog.accept();});
+  const calls=await fixture(page),dialogs:string[]=[],nativeDialogs:string[]=[];page.on("dialog",async dialog=>{nativeDialogs.push(dialog.message());await dialog.dismiss();});
+  const confirm=async(action:string)=>{const dialog=page.getByRole("dialog");dialogs.push(await dialog.innerText());await dialog.getByRole("button",{name:action,exact:true}).click();await expect(dialog).toHaveCount(0);};
   await page.goto(path);const panel=page.getByRole("region",{name:"Adopt a Project Alpha project for this customer"});
   await expect(panel).toBeVisible();await panel.getByRole("button",{name:"Find unbound Projects for this customer"}).click();
   await panel.getByLabel(/PA Project/).check();await panel.getByLabel("New, unused Operations Project ID").fill("new-ops-project");
-  await panel.getByRole("button",{name:"Create review evidence"}).click();await expect(panel.getByRole("alert")).toContainText("review uncertain");
+  await panel.getByRole("button",{name:"Create review evidence"}).click();await confirm("Reserve and review");await expect(panel.getByRole("alert")).toContainText("review uncertain");
   await panel.getByRole("button",{name:"Retry frozen review request"}).click();
   const reviews=calls.filter(call=>call.path.endsWith("/review"));expect(reviews).toHaveLength(2);
   expect(reviews[1]).toEqual(reviews[0]);expect(reviews[0]!.body).toEqual({expectedContextVersion:"context-one",externalProjectId:"new-ops-project",projectAlphaPublicId:publicId});
-  await panel.getByRole("button",{name:"Reserve reviewed intent"}).click();await panel.getByRole("button",{name:"Create Project and queue bind command"}).click();
-  await panel.getByRole("button",{name:"Finalize and verify Project binding"}).click();await expect(panel.getByRole("alert")).toContainText("Do not create a replacement command");
+  await panel.getByRole("button",{name:"Reserve reviewed intent"}).click();await confirm("Reserve intent");await panel.getByRole("button",{name:"Create Project and queue bind command"}).click();await confirm("Create project");
+  await panel.getByRole("button",{name:"Finalize and verify Project binding"}).click();await confirm("Send and verify");await expect(panel.getByRole("alert")).toContainText("Do not create a replacement command");
   await panel.getByRole("button",{name:"Resume verification of the same bind command"}).click();
   await expect(panel.getByRole("status")).toContainText("mapping activated");await expect(panel.getByRole("status")).toContainText("Client access and public links remain unchanged");
   const finals=calls.filter(call=>call.path.endsWith("/finalize"));expect(finals).toHaveLength(2);expect(finals[1]).toEqual(finals[0]);
   expect(calls.every(call=>call.headers["x-csrf-token"]==="csrf")).toBe(true);
   expect(calls.some(call=>/access|portal|link/.test(call.path))).toBe(false);
-  expect(dialogs.join(" ")).toContain("new Operations Project ID");
+  expect(dialogs.join(" ")).toContain("new Operations Project ID");expect(dialogs).toHaveLength(4);expect(nativeDialogs).toEqual([]);
 });
 
 test("operational panel is absent when its server-derived availability is off",async({page})=>{

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as 
 import type { ViewerSessionGrant, ViewerShellSessionGrant } from "@ltds/shared";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
-export { AppDialogHost, requestChoice, requestText, type ChoiceRequest, type TextRequest } from "./app-dialogs";
+export { AppDialogHost, confirmAction, requestChoice, requestText, type ChoiceRequest, type TextRequest } from "./app-dialogs";
 export { formatSessionExpiry, formatSessionRemaining } from "./session-time";
 import { GetAppDialog } from "./GetAppDialog";
 export { GetAppDialog } from "./GetAppDialog";

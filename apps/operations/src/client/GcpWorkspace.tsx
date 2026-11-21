@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEve
 import mapboxgl from "mapbox-gl";
 import type { Feature, FeatureCollection, Point } from "geojson";
 import type { ViewerDatasetSummary, ViewerDisplayUnits, ViewerProcessingTask } from "@ltds/shared";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, StatusPill, confirmAction } from "@ltds/ui";
 import type { ViewerAdminClient } from "./viewer-admin-client";
 import {
   formatGcpDistance,
@@ -259,7 +259,7 @@ export function GcpWorkspace({ client, datasets, tasks, mapToken, units, canRead
           setDetail((current) => current && ({ ...current, points: current.points.map((point) => point.id === value.point.id ? value.point : point) }));
         }, "GCP point updated."); }}>
           <label>Label<input name="label" defaultValue={selectedPoint.label} required /></label><label>Latitude<input name="latitude" type="number" min="-90" max="90" step="any" defaultValue={selectedPoint.latitude} required /></label><label>Longitude<input name="longitude" type="number" min="-180" max="180" step="any" defaultValue={selectedPoint.longitude} required /></label><label>Elevation ({gcpElevationUnitName(units)})<input name="elevation" type="number" step="any" defaultValue={gcpElevationDisplayValue(selectedPoint.elevationM,units)} required /></label><label>Description<input name="description" defaultValue={selectedPoint.description || ""} /></label>
-          <button className="button-orange" disabled={busy}>Save point</button><button type="button" className="button-danger" disabled={busy} onClick={() => { if (window.confirm(`Remove ${selectedPoint.label} and all of its image marks?`)) void run(async () => {
+          <button className="button-orange" disabled={busy}>Save point</button><button type="button" className="button-danger" disabled={busy} onClick={async () => { if (await confirmAction({ title: `Remove ${selectedPoint.label}?`, description: "This removes the point and all of its image marks.", confirmLabel: "Remove point", tone: "danger" })) void run(async () => {
             await client.request(`/api/v1/gcp-points/${encodeURIComponent(selectedPoint.id)}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } });
             setDetail((current) => current && ({ ...current, points: current.points.filter((point) => point.id !== selectedPoint.id) })); setSelectedPointId(null);
           }, "GCP point removed."); }}>Remove point</button>
@@ -289,7 +289,7 @@ export function GcpWorkspace({ client, datasets, tasks, mapToken, units, canRead
             }); setCorrespondences((current) => [...current, value.correspondence]);
           }
         }, "Pixel correspondence saved.")}
-        onRemove={() => { if (selectedCorrespondence && window.confirm("Remove this image mark?")) void run(async () => {
+        onRemove={async () => { if (selectedCorrespondence && await confirmAction({ title: "Remove this image mark?", confirmLabel: "Remove mark", tone: "danger" })) void run(async () => {
           await client.request(`/api/v1/gcp-correspondences/${encodeURIComponent(selectedCorrespondence.id)}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } });
           setCorrespondences((current) => current.filter((item) => item.id !== selectedCorrespondence.id));
         }, "Pixel correspondence removed."); }}

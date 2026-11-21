@@ -1,6 +1,6 @@
 import { projectAlphaSourceName } from "@ltds/shared";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Card, Skeleton } from "@ltds/ui";
+import { Card, confirmAction, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { projectAdoptionReviewFailureMessage } from "./project-adoption-review-message";
 import { DirectoryExistingRecordAdoptionPanel } from "./DirectoryExistingRecordAdoptionPanel";
@@ -464,7 +464,7 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
   };
   const seal = async () => {
     if (disabled || reviewBusy || !comparison || comparison.fields.some(field => !decisions[field.field])) return;
-    if (!window.confirm("Seal these enum-only field dispositions? This does not update local records or Project Alpha.")) return;
+    if (!await confirmAction({ title: "Seal these enum-only field dispositions?", description: "This does not update local records or Project Alpha.", confirmLabel: "Seal field review" })) return;
     setReviewBusy(true); setReviewError(""); setReviewMessage("");
     try {
       const response = await api<{ outcome?: unknown }>(`${DIRECTORY_READ_ADOPTION_ENDPOINT}/${encodeURIComponent(comparison.reviewId)}/field-review`,
@@ -482,7 +482,7 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
   };
   const finalize = async () => {
     if (disabled || reviewBusy || !sealedReceiptId) return;
-    if (!window.confirm("Finalize this sealed review? Explicitly adopted scalar fields will update the Operations record, Project Alpha will be rebound to that exact record, and the canonical mapping will activate. This does not grant client portal, Delivery, folder, workspace, or public-link access.")) return;
+    if (!await confirmAction({ title: "Finalize this sealed review?", description: "Explicitly adopted scalar fields will update the Operations record, Project Alpha will be rebound to that exact record, and the canonical mapping will activate. This does not grant client portal, Delivery, folder, workspace, or public-link access.", confirmLabel: "Finalize review" })) return;
     setReviewBusy(true); setReviewError(""); setReviewMessage("");
     try {
       const response = await api<{ outcome?: unknown }>(`${DIRECTORY_READ_ADOPTION_ENDPOINT}/field-reviews/${encodeURIComponent(sealedReceiptId)}/finalize`, {
@@ -501,7 +501,7 @@ function ApiV2OperatorPanel({ disabled }: { disabled: boolean }) {
   };
   const grantOwnerView = async () => {
     if (disabled || ownerGrantBusy || !ownerViewGrantEnabled) return;
-    if (!window.confirm("Grant only the protected Operations owner global Directory profile-view access in staging? This does not grant edit, client activation, PA writes, portal access, or public-link authority.")) return;
+    if (!await confirmAction({ title: "Grant only the protected Operations owner global Directory profile-view access in staging?", description: "This does not grant edit, client activation, PA writes, portal access, or public-link authority.", confirmLabel: "Grant view access" })) return;
     setOwnerGrantBusy(true); setOwnerGrantMessage("");
     try {
       const response = await api<{ status?: string; permission?: string; scope?: string }>(STAGING_DIRECTORY_OWNER_VIEW_GRANT_ENDPOINT, {
@@ -606,7 +606,7 @@ function ProjectManagement({ connector, route, disabled, onRefresh }: { connecto
     const value = template.trim();
     const validation = enabled ? projectManagementTemplateError(value) : null;
     if (validation) { setError(validation); return; }
-    if (!window.confirm(`${enabled ? "Enable" : "Disable"} the reviewed Project Alpha project-creation link for ${connector.displayName}? This does not register or alter the source connection.`)) return;
+    if (!await confirmAction({ title: `${enabled ? "Enable" : "Disable"} the reviewed Project Alpha project-creation link for ${connector.displayName}?`, description: "This does not register or alter the source connection.", confirmLabel: enabled ? "Enable link" : "Disable link", tone: enabled ? "primary" : "danger" })) return;
     setBusy(true); setError(""); setMessage("");
     try {
       const result = await api<{ projectManagement: ProjectManagementRoute }>(
@@ -717,7 +717,7 @@ function ProjectAdoptionPanel({ disabled }: { disabled: boolean }) {
     if (!sourceReady || !PA_PUBLIC_ID.test(selected) || !exact || exact !== externalId || exact.length > 191 || /\p{C}/u.test(exact)) {
       setError("Select a candidate and enter a new, unused Operations Project ID."); return;
     }
-    if (!reviewKey && !window.confirm("Durably reserve this Operations Project ID for the selected PA source and create short-lived review evidence? The destination reservation is retained even if you reset this flow. This does not bind, grant access, or publish a portal.")) return;
+    if (!reviewKey && !await confirmAction({ title: "Durably reserve this Operations Project ID for the selected PA source and create short-lived review evidence?", description: "The destination reservation is retained even if you reset this flow. This does not bind, grant access, or publish a portal.", confirmLabel: "Reserve and review" })) return;
     const request = reviewRequest ?? { idempotencyKey: crypto.randomUUID(), sourceId,
       externalProjectId: exact, projectAlphaPublicId: selected };
     const idempotencyKey = request.idempotencyKey;
@@ -740,7 +740,7 @@ function ProjectAdoptionPanel({ disabled }: { disabled: boolean }) {
   };
   const reserve = async () => {
     if (!reviewItemId || busy || reservationId) return;
-    if (!reserveKey && !window.confirm("Reserve this exact reviewed adoption intent? This still does not bind, grant client access, or publish a portal.")) return;
+    if (!reserveKey && !await confirmAction({ title: "Reserve this exact reviewed adoption intent?", description: "This still does not bind, grant client access, or publish a portal.", confirmLabel: "Reserve intent" })) return;
     const idempotencyKey = reserveKey || crypto.randomUUID();
     if (!reserveKey) setReserveKey(idempotencyKey);
     setBusy(true); setError(""); setMessage("");
@@ -763,7 +763,7 @@ function ProjectAdoptionPanel({ disabled }: { disabled: boolean }) {
   };
   const bind = async () => {
     if (!reservationId || busy || commandId) return;
-    if (!window.confirm("Create the native Operations Project and enqueue the exact PA binding command? This does not acknowledge remote completion, grant client access, or publish a portal.")) return;
+    if (!await confirmAction({ title: "Create the native Operations Project and enqueue the exact PA binding command?", description: "This does not acknowledge remote completion, grant client access, or publish a portal.", confirmLabel: "Create project" })) return;
     setBusy(true); setError(""); setMessage("");
     try {
       const response = await api<{ status?: string; commandId?: string; replayed?: boolean }>(
@@ -783,7 +783,7 @@ function ProjectAdoptionPanel({ disabled }: { disabled: boolean }) {
   };
   const finalize = async () => {
     if (!reservationId || !commandId || busy || disabled || finalized) return;
-    if (!finalizationStarted && !window.confirm("Send the exact queued binding command to Project Alpha and verify its canonical response before activating the Operations mapping? This does not grant client access or publish a portal. An uncertain write requires reconciliation, not a new command.")) return;
+    if (!finalizationStarted && !await confirmAction({ title: "Send the exact queued binding command to Project Alpha and verify its canonical response before activating the Operations mapping?", description: "This does not grant client access or publish a portal. An uncertain write requires reconciliation, not a new command.", confirmLabel: "Send and verify" })) return;
     setFinalizationStarted(true); setBusy(true); setError(""); setMessage("");
     try {
       const response = await api<{ stage?: string; outcome?: { status?: string; reason?: string } }>(
@@ -800,8 +800,8 @@ function ProjectAdoptionPanel({ disabled }: { disabled: boolean }) {
       setError(`${operatorError(caught, "Project adoption finalization outcome is uncertain.")} Keep these exact IDs and review server state; do not queue a replacement command.`);
     } finally { setBusy(false); }
   };
-  const reset = () => {
-    if (busy || !window.confirm("Clear this local operator flow? Server-side destination, review, reservation, or queued command records are retained.")) return;
+  const reset = async () => {
+    if (busy || !await confirmAction({ title: "Clear this local operator flow?", description: "Server-side destination, review, reservation, or queued command records are retained.", confirmLabel: "Clear flow", tone: "danger" })) return;
     setProjects([]); setNextCursor(null); setSelected(""); setExternalId(""); setReviewRequest(null); setReviewKey(""); setReviewItemId("");
     setReserveKey(""); setReservationId(""); setCommandId(""); setFinalizationStarted(false); setFinalized(false); setMessage(""); setError("");
   };
@@ -884,12 +884,12 @@ export function ProjectAlphaConnections() {
   const portalAction = async (connector: Connector, action: "configure" | "activate" | "suspend") => {
     if (syncing) return;
     const authority = data?.portal?.authorities.find(row => row.sourceId === connector.sourceId);
-    const warning = action === "configure"
-      ? "Stage this connection's deployed event-key commitment? This does not register the source or grant client access."
+    const confirmation = action === "configure"
+      ? { title: "Stage this connection's deployed event-key commitment?", description: "This does not register the source or grant client access.", confirmLabel: "Stage commitment" }
       : action === "activate"
-        ? "Activate this connection's client portal for independently authorized workspaces?"
-        : "Pause this connection's client portal? Existing records and grants are retained.";
-    if (!window.confirm(warning)) return;
+        ? { title: "Activate this connection's client portal for independently authorized workspaces?", confirmLabel: "Activate portal" }
+        : { title: "Pause this connection's client portal?", description: "Existing records and grants are retained.", confirmLabel: "Pause portal", tone: "danger" as const };
+    if (!await confirmAction(confirmation)) return;
     setSyncing(connector.sourceId); setError(""); setMessage("");
     try {
       await api(`${ENDPOINT}/${encodeURIComponent(connector.sourceId)}/portal`, { method: "POST", body: JSON.stringify({
@@ -902,7 +902,7 @@ export function ProjectAlphaConnections() {
   const recoverPortalUpdate = async () => {
     const recovery = data?.portal?.recovery;
     if (syncing || !recovery) return;
-    if (!window.confirm("Cancel the unfinished portal configuration update and leave affected client portals paused? You can review and activate each connection afterward.")) return;
+    if (!await confirmAction({ title: "Cancel the unfinished portal configuration update and leave affected client portals paused?", description: "You can review and activate each connection afterward.", confirmLabel: "Cancel update", tone: "danger", cancelLabel: "Keep update" })) return;
     setSyncing("portal-recovery"); setError(""); setMessage("");
     try {
       await api(`${ENDPOINT}/recover-portal-update`, { method: "POST", body: JSON.stringify({ expectedVersion: recovery.version }) });

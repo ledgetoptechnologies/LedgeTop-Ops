@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Card, Dialog, EmptyState, Loading, StatusPill, Skeleton } from "@ltds/ui";
+import { Card, confirmAction, Dialog, EmptyState, Loading, StatusPill, Skeleton } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
@@ -264,7 +264,7 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
     const action = state.data?.sync.requestSync;
     if (!action || state.busy || state.syncBusy || contextSignal.aborted) return;
     const href = sameOriginAction(action, exactRoot.sourceId, "POST", endpoint);
-    if (!href || !window.confirm(`Request an immediate synchronization from ${state.data!.source.displayName}? Project Alpha remains the project owner.`)) return;
+    if (!href || !await confirmAction({ title: `Request an immediate synchronization from ${state.data!.source.displayName}?`, description: "Project Alpha remains the project owner.", confirmLabel: "Sync now" })) return;
     const controller = new AbortController(), request = ++sequence.current; pending.current = controller;
     setState(value => ({ ...value, syncBusy: true, error: "" }));
     try {
@@ -288,7 +288,7 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
     if (!nativeAction || !contextVersion || state.busy || nativeAttempt || !nativeForm.name.trim()) return;
     if (nativeForm.operation === "update" && (!updateTarget || updateTarget.id !== nativeForm.externalProjectId))
       return setState(value => ({ ...value, error: "Choose an existing canonical project before preparing an update." }));
-    if (!window.confirm("Prepare this exact Project Alpha project request? Preparation does not create the project.")) return;
+    if (!await confirmAction({ title: "Prepare this exact Project Alpha project request?", description: "Preparation does not create the project.", confirmLabel: "Prepare request" })) return;
     setState(value => ({ ...value, syncBusy: true, error: "" }));
     try {
       const prepared = await api<unknown>(nativeAction.prepareHref, { method: "POST", body: JSON.stringify({
@@ -306,7 +306,7 @@ function ProjectManagementRouting({ client, contextVersion, contextSignal, onInv
     if (!nativeAction || !contextVersion || !nativeAttempt || state.syncBusy) return;
     const request = nativeAttempt.request as { command?: { commandId?: unknown } };
     if (typeof request.command?.commandId !== "string") return setState(value => ({ ...value, error: "The prepared project reference is invalid." }));
-    if (!nativeAttempt.sent && !window.confirm(`${frozenOperation === "create" ? "Create" : "Update"} this exact project in Project Alpha? After transmission, cancellation is not available.`)) return;
+    if (!nativeAttempt.sent && !await confirmAction({ title: `${frozenOperation === "create" ? "Create" : "Update"} this exact project in Project Alpha?`, description: "After transmission, cancellation is not available.", confirmLabel: frozenOperation === "create" ? "Create project" : "Update project" })) return;
     setNativeAttempt(value => value && ({ ...value, sent: true, message: "Project request transmitted. Keep this reference until the outcome is confirmed." }));
     setState(value => ({ ...value, syncBusy: true, error: "" }));
     try {

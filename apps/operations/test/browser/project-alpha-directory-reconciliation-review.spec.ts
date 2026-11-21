@@ -1,5 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 
+/** Confirmations are the in-app dialog: choose its named action and wait for it to close. */
+async function confirmInApp(page: Page, action: string) {
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: action, exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+}
+
 const root = "/api/admin/project-alpha/private/directory/reconciliation";
 const findingA = "10000000-0000-4000-8000-000000000001";
 const findingB = "10000000-0000-4000-8000-000000000002";
@@ -110,8 +117,8 @@ test("pages both sources, exposes only reconciliation metadata, and acquires one
   expect(recordRequest?.url.searchParams.get("resourceType")).toBe("organization");
   expect(recordRequest?.url.searchParams.has("search")).toBe(false);
   await selector.selectOption("native-organization-2");
-  page.once("dialog", dialog => void dialog.accept());
   await panel.getByRole("button", { name: "Acquire as inactive mapping" }).click();
+  await confirmInApp(page, "Acquire as inactive mapping");
   await expect(panel.getByRole("article", { name: /Ledge Top Drone Services/ }).getByRole("status"))
     .toContainText("mapping is inactive and pending separate activation review");
   await expect(panel.getByRole("button", { name: /activate/i })).toHaveCount(0);
@@ -136,11 +143,11 @@ test("retries an uncertain acquisition with the same UUID and reports stale and 
   const panel = page.locator("#project-alpha-reconciliation-review");
   await panel.getByRole("button", { name: "Choose existing organization record" }).click();
   await panel.getByLabel("Exact existing Operations organization record").selectOption("native-organization-1");
-  page.once("dialog", dialog => void dialog.accept());
   await panel.getByRole("button", { name: "Acquire as inactive mapping" }).click();
+  await confirmInApp(page, "Acquire as inactive mapping");
   await expect(panel.getByRole("alert")).toContainText("outcome is uncertain");
-  page.once("dialog", dialog => void dialog.accept());
   await panel.getByRole("button", { name: "Acquire as inactive mapping" }).click();
+  await confirmInApp(page, "Acquire as inactive mapping");
   await expect(panel.getByRole("alert")).toContainText("snapshot or record version changed");
   const posts = state.requests.filter(request => request.method === "POST");
   expect(posts).toHaveLength(2);
@@ -152,7 +159,7 @@ test("retries an uncertain acquisition with the same UUID and reports stale and 
   const conflictPanel = page.locator("#project-alpha-reconciliation-review");
   await conflictPanel.getByRole("button", { name: "Choose existing organization record" }).click();
   await conflictPanel.getByLabel("Exact existing Operations organization record").selectOption("native-organization-1");
-  page.once("dialog", dialog => void dialog.accept());
   await conflictPanel.getByRole("button", { name: "Acquire as inactive mapping" }).click();
+  await confirmInApp(page, "Acquire as inactive mapping");
   await expect(conflictPanel.getByRole("alert")).toContainText("conflicts with an existing reservation");
 });
