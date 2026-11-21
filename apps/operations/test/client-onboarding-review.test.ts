@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { readClientOnboardingSubmissionForReview } from "../src/worker/client-onboarding-review";
+import { readClientOnboardingSubmissionForReview, verifyReviewDestinationIntent } from "../src/worker/client-onboarding-review";
 
 const submissionId = "33333333-3333-4333-8333-333333333333";
 const actor = { identity: { kind: "native" as const, staffId: "staff:reviewer",
@@ -15,7 +15,7 @@ function database(row: unknown) {
   const bind = vi.fn(() => ({ first }));
   const prepare = vi.fn(() => ({ bind }));
   const db = { withSession: vi.fn(() => ({ prepare })) } as unknown as D1Database;
-  return { db, prepare, bind };
+  return { db, prepare, bind, first };
 }
 
 describe("client onboarding submission review authority", () => {
@@ -39,5 +39,23 @@ describe("client onboarding submission review authority", () => {
     const fake = database(null);
     await expect(readClientOnboardingSubmissionForReview(fake.db, actor, submissionId))
       .rejects.toThrow("client_onboarding_review_denied");
+  });
+
+  it("holds recorded target intent even when the stored JSON is malformed", async () => {
+    const row = { invitation_id: "11111111-1111-4111-8111-111111111111", submission_id: submissionId,
+      fields_json: JSON.stringify(fields), fields_sha256: "e".repeat(64), submitted_at: "2098-01-01T00:00:00.000Z",
+      target_client_record_id: null, scopes_json: JSON.stringify([{ businessAreaId: "area:onboarding", divisionId: null }]) };
+    const fake = database(row);
+    for (const target of ['[{"kind":"client"}]', "malformed"]) {
+      fake.first.mockResolvedValueOnce(row).mockResolvedValueOnce({ target_intent_json: target, request_sha256: "a".repeat(64) });
+      const review = await readClientOnboardingSubmissionForReview(fake.db, actor, submissionId);
+      expect(review).toMatchObject({ targetClientRecordId: null, targetApprovalPending: true });
+      expect(review).not.toHaveProperty("target_intent_json");
+      await expect(verifyReviewDestinationIntent(fake.db, actor, review, [], undefined)).rejects.toThrow("client_onboarding_review_denied");
+    }
+    fake.first.mockResolvedValueOnce(row).mockResolvedValueOnce({ target_intent_json: null, request_sha256: "a".repeat(64) });
+    const ordinary = await readClientOnboardingSubmissionForReview(fake.db, actor, submissionId);
+    expect(ordinary).not.toHaveProperty("targetApprovalPending");
+    await expect(verifyReviewDestinationIntent(fake.db, actor, ordinary, [], undefined)).resolves.toBeUndefined();
   });
 });

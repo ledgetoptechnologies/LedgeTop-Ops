@@ -54,6 +54,7 @@ export async function planAndExecuteNativeDirectoryOnboardingWrites(db: D1Databa
 
 export type NativeOnlyClientOnboardingApproval = Readonly<{
   decisionId: string; invitationId: string; submissionId: string; fieldsSha256: string; requestSha256: string;
+  destinationIssuanceSha256?: string;
   reason: string; reviewedFieldsJson: string; scopes: readonly Readonly<{ businessAreaId: string; divisionId: string | null }>[];
   verifiedUntil: string; profile: NativeDirectoryProfileWrite;
   organizationProfile?: NativeDirectoryProfileWrite;
@@ -267,11 +268,12 @@ export async function approveNativeOnlyClientOnboarding(db: D1Database,
   const decision = session.prepare(`INSERT INTO client_onboarding_decisions
     (decision_id,invitation_id,submission_id,fields_sha256,request_sha256,outcome,reviewer_staff_id,reviewer_subject,
      reviewer_email,original_admission_version,original_profile_version,reason,reviewed_fields_json,client_record_id,
-     client_record_version,organization_record_id,organization_record_version,relationship_version,receipt_json)
-     VALUES(?,?,?,?,?,'approved',?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(input.decisionId,input.invitationId,input.submissionId,
+     client_record_version,organization_record_id,organization_record_version,relationship_version,receipt_json${input.destinationIssuanceSha256 ? ",destination_issuance_sha256" : ""})
+     VALUES(?,?,?,?,?,'approved',?,?,?,?,?,?,?,?,?,?,?,?,?${input.destinationIssuanceSha256 ? ",?" : ""})`).bind(input.decisionId,input.invitationId,input.submissionId,
       input.fieldsSha256,input.requestSha256,actor.staffId,actor.accessSubject,actor.loginEmail,actor.admissionVersion,
       actor.profileVersion,input.reason,reviewed,profile.recordId,clientVersion,organization?.recordId ?? null,
-      organization ? organization.expectedLocalVersion + 1 : null,relationshipVersion,receipt);
+      organization ? organization.expectedLocalVersion + 1 : null,relationshipVersion,receipt,
+      ...(input.destinationIssuanceSha256 ? [input.destinationIssuanceSha256] : []));
   try { await session.batch([fence,...organizationAdmissionStatements,...organizationStatements,
     ...clientAdmissionStatements,...profileStatements,decision,
     session.prepare("DELETE FROM client_onboarding_decision_fences WHERE decision_id=?").bind(input.decisionId)]); }

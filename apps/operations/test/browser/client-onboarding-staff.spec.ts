@@ -115,6 +115,230 @@ test("capability remains hidden when the dedicated administrator session is disa
   await expect(page.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
 });
 
+test("an ambiguous destination Copy result preserves the original invitation after reopen", async ({ page }) => {
+  await render(page, "destination-copy-denied", "?dialog=1");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  const dialog = page.getByRole("dialog");
+  await trigger.click();
+  const drone = dialog.getByRole("checkbox", { name: "Ledge Top Drone Services" });
+  const technologies = dialog.getByRole("checkbox", { name: "Ledge Top Technologies" });
+  await drone.check();
+  await expect(dialog.getByRole("radio", { name: "Email the client" })).toBeEnabled();
+  const sessionReadsBeforeCreate = (await bodies(page, "session")).length;
+  await dialog.getByRole("button", { name: "Create invitation" }).click();
+  const reference = dialog.getByRole("alert").filter({ hasText: "The invitation result isn't confirmed." }).locator("code");
+  await expect(reference).toBeVisible();
+  await expect.poll(async () => (await bodies(page, "session")).length).toBe(sessionReadsBeforeCreate + 1);
+  const issued = await bodies(page, "create");
+  expect(issued).toHaveLength(1);
+  expect(issued[0].destinationSourceIds).toEqual(["project-alpha:primary"]);
+  await expect(reference).toHaveText(String(issued[0].commandId));
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await expect(dialog).toHaveCount(0);
+  await trigger.click();
+  await expect(reference).toHaveText(String(issued[0].commandId));
+  await expect(drone).toBeChecked();
+  await expect(drone).toBeDisabled();
+  await expect(technologies).not.toBeChecked();
+  await expect(technologies).toBeDisabled();
+  await expect(dialog.getByRole("radio", { name: "Email the client" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Generate and Copy" })).toHaveCount(0);
+  expect(await bodies(page, "create")).toEqual(issued);
+  expect(await bodies(page, "reveal")).toHaveLength(0);
+  expect(await bodies(page, "create-email")).toHaveLength(0);
+});
+
+for (const mode of ["destination-copy", "destination-copy-blocked", "destination-copy-no-link", "destination-copy-mismatched-link"]) {
+  test(`destination invitation preserves one reveal when copying: ${mode}`, async ({ page }) => {
+    await render(page, mode, "?dialog=1");
+    await page.getByRole("button", { name: "Onboard client" }).click();
+    await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+    await page.getByRole("button", { name: "Create invitation" }).click();
+    await expect(page.getByRole("button", { name: "Generate and Email" })).toBeDisabled();
+    await page.getByRole("button", { name: "Generate and Copy" }).click();
+    const clipboard = () => page.evaluate(() => (window as Window & { copied?: string[] }).copied);
+    if (mode === "destination-copy-no-link" || mode === "destination-copy-mismatched-link") {
+      await expect(page.getByRole("heading", { name: "Invitation code ready" })).toBeVisible();
+      expect(await clipboard()).toEqual([]);
+      await expect(page.getByRole("button", { name: "Open form in a new tab" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Generate and Copy" })).toHaveCount(0);
+      await page.getByRole("button", { name: "Copy invitation code" }).click();
+      await expect.poll(clipboard).toEqual(["d".repeat(64)]);
+    } else {
+      if (mode === "destination-copy-blocked") {
+        await expect(page.getByRole("alert")).toContainText("Copying was blocked");
+        expect(await clipboard()).toEqual([]);
+        await page.getByRole("button", { name: "Copy link" }).click();
+      }
+      await expect.poll(clipboard).toEqual([`https://portal.example.test/onboarding/11111111-1111-4111-8111-111111111111#${"d".repeat(64)}`]);
+    }
+    expect(await bodies(page, "create")).toHaveLength(1);
+    expect(await bodies(page, "reveal")).toHaveLength(1);
+    expect(await bodies(page, "create-email")).toEqual([]);
+  });
+}
+
+test("email issuance stays unavailable without a boolean capability", async ({ page }) => {
+  for (const mode of ["email-gate-off", "email-malformed-gate"]) {
+    await render(page, mode, "?dialog=1");
+    await page.getByRole("button", { name: "Onboard client" }).click();
+    await expect(page.getByRole("checkbox", { name: "Ledge Top Drone Services" })).toBeEnabled();
+    await expect(page.getByRole("radio", { name: "Email the client" })).toHaveCount(0);
+    expect(await bodies(page, "create-email")).toHaveLength(0);
+  }
+});
+
+for (const [mode, message] of [
+  ["email-delayed", "Email is queued."],
+  ["email-sent", "The email provider accepted the message."],
+  ["email-failed", "Email delivery failed."],
+  ["email-unknown", "Email delivery status is unknown."],
+  ["email-denied", "The email invitation result isn't confirmed."],
+  ["email-malformed-receipt", "The email invitation result isn't confirmed."],
+] as const) {
+  test(`email issuance stays on the original command: ${mode}`, async ({ page }) => {
+    await render(page, mode, "?dialog=1");
+    const trigger = page.getByRole("button", { name: "Onboard client" });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "Onboard client" });
+    await dialog.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+    await dialog.getByRole("radio", { name: "Email the client" }).check();
+    const address = dialog.getByRole("textbox", { name: "Recipient email" });
+    const confirmed = dialog.getByRole("checkbox", { name: "I confirmed the recipient address" });
+    const submit = dialog.getByRole("button", { name: "Generate and Email" });
+    await address.fill("first@example.test");
+    await confirmed.check();
+    await address.fill("client@example.test");
+    await expect(submit).toBeDisabled();
+    await confirmed.check();
+    await submit.click();
+    if (mode === "email-delayed") {
+      await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+      await expect(dialog.getByRole("radio", { name: "Copy a link" })).toBeDisabled();
+      await expect.poll(async () => (await bodies(page, "create-email")).length).toBe(1);
+      await page.evaluate(() => (window as Window & { release: () => void }).release());
+    }
+    await expect(dialog.getByText(message, { exact: false })).toBeVisible();
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await trigger.click();
+    await expect(dialog.getByText(message, { exact: false })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Generate and Email" })).toHaveCount(0);
+    const emailCalls = await bodies(page, "create-email");
+    expect(emailCalls).toEqual([{ commandId: expect.any(String), expiresAt: expect.any(String),
+      destinationSourceIds: ["project-alpha:primary"], recipient: "client@example.test", recipientConfirmed: true }]);
+    if (mode === "email-denied" || mode === "email-malformed-receipt") {
+      await expect(dialog.getByText(emailCalls[0]!.commandId as string, { exact: true })).toBeVisible();
+    }
+    expect(await bodies(page, "create")).toEqual([]);
+    expect(await bodies(page, "reveal")).toEqual([]);
+    expect(await page.evaluate(() => (window as Window & { copied?: string[] }).copied)).toEqual([]);
+  });
+}
+
+test("targeted invitation verifies a separate proof for each chosen business", async ({ page }) => {
+  await render(page, "target-both", "?dialog=1");
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  await page.getByRole("checkbox", { name: "Ledge Top Technologies" }).check();
+  await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+  await page.getByRole("radio", { name: "Email the client" }).check();
+  await page.getByRole("textbox", { name: "Recipient email" }).fill("fixture@example.test");
+  await page.getByRole("radio", { name: "Existing client", exact: true }).check();
+  await expect(page.getByRole("textbox", { name: "Recipient email" })).toHaveCount(0);
+  const create = page.getByRole("button", { name: "Create invitation" });
+  for (const business of ["Ledge Top Technologies", "Ledge Top Drone Services"]) {
+    const picker = page.getByRole("group", { name: business, exact: true });
+    const input = picker.getByRole("searchbox");
+    await input.fill("Fixture");
+    await input.press("Enter");
+    await expect(create).toBeDisabled();
+    expect(await bodies(page, "create")).toEqual([]);
+    await picker.getByRole("button", { name: "Fixture client", exact: true }).click();
+    await expect(picker.getByText("Selected Fixture client")).toBeVisible();
+  }
+  await create.click();
+  await expect(page.getByText(/Invitation created/)).toBeVisible();
+  expect(await bodies(page, "target-choices")).toEqual([
+    { sourceId: "project-alpha:secondary", kind: "client", publicId: "a".repeat(32) },
+    { sourceId: "project-alpha:primary", kind: "client", publicId: "b".repeat(32) },
+  ]);
+  expect(await bodies(page, "create")).toEqual([{ commandId: expect.any(String), expiresAt: expect.any(String),
+    destinationSourceIds: ["project-alpha:secondary", "project-alpha:primary"], targetChoices: [
+      { sourceId: "project-alpha:secondary", kind: "client", publicId: "a".repeat(32), choice: "c".repeat(64) },
+      { sourceId: "project-alpha:primary", kind: "client", publicId: "b".repeat(32), choice: "d".repeat(64) },
+    ] }]);
+  expect(await bodies(page, "create-email")).toEqual([]);
+  expect(await bodies(page, "reveal")).toEqual([]);
+});
+
+test("changing destinations discards a delayed target proof", async ({ page }) => {
+  await render(page, "target-stale", "?dialog=1");
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  const business = page.getByRole("checkbox", { name: "Ledge Top Technologies" });
+  await business.check();
+  await page.getByRole("radio", { name: "Existing client", exact: true }).check();
+  const picker = page.getByRole("group", { name: "Ledge Top Technologies", exact: true });
+  await picker.getByRole("searchbox").fill("Fixture");
+  await picker.getByRole("button", { name: "Search", exact: true }).click();
+  await picker.getByRole("button", { name: "Fixture client", exact: true }).click();
+  await expect.poll(async () => (await bodies(page, "target-choices")).length).toBe(1);
+  await business.uncheck();
+  await business.check();
+  await page.evaluate(() => (window as Window & { release: () => void }).release());
+  await expect(picker.getByRole("searchbox")).toHaveValue("");
+  await expect(picker.getByText(/Selected/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Create invitation" })).toBeDisabled();
+  expect(await bodies(page, "create")).toEqual([]);
+});
+
+test("an ineligible selected business cannot silently fall back to a new client", async ({ page }) => {
+  await render(page, "target-one-source", "?dialog=1");
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  await page.getByRole("checkbox", { name: "Ledge Top Technologies" }).check();
+  await page.getByRole("radio", { name: "Existing client", exact: true }).check();
+  await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+  await expect(page.getByRole("radio", { name: "Existing client", exact: true })).toBeChecked();
+  await expect(page.getByText("Existing records are unavailable for Ledge Top Drone Services.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create invitation" })).toBeDisabled();
+  expect(await bodies(page, "create")).toEqual([]);
+});
+
+test("targeted denial keeps the original command on dialog reopen", async ({ page }) => {
+  await render(page, "target-denied", "?dialog=1");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  await trigger.click();
+  await page.getByRole("checkbox", { name: "Ledge Top Technologies" }).check();
+  await page.getByRole("radio", { name: "New client with an existing organization" }).check();
+  const picker = page.getByRole("group", { name: "Ledge Top Technologies", exact: true });
+  await picker.getByRole("searchbox").fill("Fixture");
+  await picker.getByRole("button", { name: "Search", exact: true }).click();
+  await picker.getByRole("button", { name: "Fixture organization", exact: true }).click();
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await expect(page.getByText("The invitation result isn't confirmed.")).toBeVisible();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await trigger.click();
+  const [command] = await bodies(page, "create");
+  expect(command?.targetChoices).toEqual([{ sourceId: "project-alpha:secondary", kind: "organization",
+    publicId: "a".repeat(32), choice: "c".repeat(64) }]);
+  await expect(page.getByText(command?.commandId as string, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
+  expect(await bodies(page, "create")).toHaveLength(1);
+  expect(await bodies(page, "create-email")).toEqual([]);
+  expect(await bodies(page, "reveal")).toEqual([]);
+});
+
+test("a targeted submission can be read without offering ordinary approval", async ({ page }) => {
+  await render(page, "target-review-held");
+  await openSubmission(page, "Reviewed Client");
+  await expect(page.getByRole("heading", { name: "Review Client" })).toBeVisible();
+  await expect(page.getByText("Needs existing-record review.")).toBeVisible();
+  await expect(page.getByRole("button", { name: /approve/i })).toHaveCount(0);
+  expect(await bodies(page, "enrollment-choices")).toEqual([]);
+  expect(await bodies(page, "approve")).toEqual([]);
+  expect(await bodies(page, "approve-shared-company")).toEqual([]);
+});
+
 test("reviewers find pending submissions in the inbox, page through them and open one without copying an ID", async ({ page }) => {
   await render(page);
   const inbox = page.getByRole("region", { name: "Submissions awaiting review" });
