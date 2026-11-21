@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { authenticateNativeStaffWithAdmissionVersion, type AuthenticatedNativeStaffWithAdmissionVersion, type NativeStaffAccessConfiguration } from "./native-staff-auth";
 import { recheckEmployeeWriteAuthority, resolveEmployeeWriteAuthority, type EmployeeReadAuthority } from "./employee-read-authority";
 import { canonicalEmployeeReadPath } from "./employee-read-transport";
@@ -70,7 +70,7 @@ export function canonicalJson(value: unknown): string {
 }
 async function sha256Hex(bytes: Uint8Array | string): Promise<string> {
   const data = typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
-  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", data)), b => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", data as Uint8Array<ArrayBuffer>)), b => b.toString(16).padStart(2, "0")).join("");
 }
 const b64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
 
@@ -144,7 +144,7 @@ export function createEmployeeFilesWriteRouter(configuration: FilesWriteConfigur
 
   router.use("/roots/:rootId/operations", gate);
   router.use("/roots/:rootId/uploads/*", gate);
-  async function gate(c: Parameters<Parameters<typeof router.use>[1]>[0], next: () => Promise<void>) {
+  async function gate(c: Context<Bindings>, next: () => Promise<void>) {
     if (!config) return reply(503, { error: "files-write-unavailable" });
     if (new URL(c.req.url).origin !== config.opsOrigin || new URL(c.req.url).search
       || (c.req.header("Origin") !== undefined && c.req.header("Origin") !== config.opsOrigin)
@@ -181,7 +181,7 @@ export function createEmployeeFilesWriteRouter(configuration: FilesWriteConfigur
     const signature = await signFilesEnvelope(fixed.signingSeed, bytes);
     let response: Response;
     try {
-      response = await fetcher(transport.origin + "/v2/op", { method: "POST", redirect: "manual", body,
+      response = await fetcher(transport.origin + "/v2/op", { method: "POST", redirect: "manual", body: body as Uint8Array<ArrayBuffer>,
         headers: { "CF-Access-Client-Id": fixed.accessClientId, "CF-Access-Client-Secret": fixed.accessClientSecret,
           "X-Ltfiles-Envelope": b64url(bytes), "X-Ltfiles-Signature": b64url(signature), "Content-Type": "application/octet-stream" } });
     } catch { return reply(502, { error: "retry-with-same-operation-id" }); }

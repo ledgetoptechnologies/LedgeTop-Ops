@@ -13,7 +13,7 @@ const migrate = async (db: D1Database, name: string) =>
   db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), 'utf8')).map(sql => db.prepare(sql)));
 const fromB64url = (text: string) => Uint8Array.from(atob(text.replace(/-/gu, '+').replace(/_/gu, '/') + '='.repeat((4 - text.length % 4) % 4)), c => c.charCodeAt(0));
 const sha = async (data: Uint8Array | string) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
-  typeof data === 'string' ? new TextEncoder().encode(data) : data)), b => b.toString(16).padStart(2, '0')).join('');
+  (typeof data === 'string' ? new TextEncoder().encode(data) : data) as Uint8Array<ArrayBuffer>)), b => b.toString(16).padStart(2, '0')).join('');
 
 describe('0246 staff Files write routes, audit-before-sign and the Ed25519 signer (source-only)', () => {
   let mf: Miniflare, db: D1Database, owner: Actor, employee: Actor, gatewayId: string, rootId: string, grantId: string;
@@ -115,9 +115,9 @@ describe('0246 staff Files write routes, audit-before-sign and the Ed25519 signe
     expect((await post(app, { operationId: upload, operation: 'upload.begin', args: { path: 'jobs/u.bin', parentId: 'f'.repeat(32), size: data.length,
       sha256: await sha(data), precondition: { kind: 'create' } } })).status).toBe(200);
     const put = (body: Uint8Array, index = 0, op = upload) => app.request(`${origin}/api/staff/files/roots/${rootId}/uploads/${op}/chunks/${index}`, { method: 'PUT',
-      headers: { 'X-Chunk-Sha256': '', 'Content-Length': String(body.length) }, body }).then(r => r);
+      headers: { 'X-Chunk-Sha256': '', 'Content-Length': String(body.length) }, body: body as Uint8Array<ArrayBuffer> });
     const putSigned = async (body: Uint8Array, index = 0, op = upload) => app.request(`${origin}/api/staff/files/roots/${rootId}/uploads/${op}/chunks/${index}`,
-      { method: 'PUT', headers: { 'X-Chunk-Sha256': await sha(body), 'Content-Length': String(body.length) }, body });
+      { method: 'PUT', headers: { 'X-Chunk-Sha256': await sha(body), 'Content-Length': String(body.length) }, body: body as Uint8Array<ArrayBuffer> });
     expect((await put(data)).status).toBe(400);
     expect((await putSigned(data)).status).toBe(200);
     expect((await putSigned(data)).status).toBe(200);  // identical chunk replay
