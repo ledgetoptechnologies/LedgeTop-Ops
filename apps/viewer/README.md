@@ -625,6 +625,31 @@ WGS84 UTM 16N
 
 ## Feature notes
 
+- **Property lines** (Wisconsin only): a "Property lines" toggle in the map,
+  model and point cloud views draws parcel outlines from the Wisconsin
+  Statewide Parcel Map (release V12). The browser calls this server
+  (`GET /api/v1/property-lines/parcels?bbox=west,south,east,north&model=id`), which
+  asks the state's public ArcGIS service with fixed parameters for geometry
+  only (no owner, address or value fields), with a size, record, time and
+  rate limit and a ten-minute cache. The third party never sees the viewer's
+  session, link or browser, and the page's content security policy is
+  unchanged. The state confirmed in writing on 2026-11-18 that the data is public domain,
+  so staff, client sessions and public links with live access to the model all
+  have the layer; there is no setting. Models without a verified UTM georeference
+  do not show the layer and make no property-lines request; models outside Wisconsin
+  show the toggle as unavailable with the reason. In 3D the lines follow the
+  published DTM when its heights agree with the scene, otherwise they are drawn
+  flat at the site's lowest level and show through the surface; the panel says
+  which. Lines are approximate and not a survey; the panel and an on-view note
+  say so whenever the layer is on. The state data is NAD83-based: against a
+  model in a WGS84 or ITRF-based frame expect roughly 1 to 1.5 m of offset in
+  Wisconsin, within the parcel map's own accuracy (the panel says this too).
+  Each request names the model; the server checks live access to that model
+  (session, admin, or a live share at its current revision) and accepts only
+  boxes inside the model's site window (verified centre plus a half-size from
+  the surveyed area, default 1.5 km, plus margin). The service URL changes with each yearly
+  release: update `WISCONSIN_PARCELS` in `server/propertyLines.js` (URL,
+  release and credit together).
 - **LOD mesh** (when verified tile derivatives exist): hierarchical B3DM tiles,
   REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom).
   Detail `2..24` maps exponentially to the raw camera screen-space-error target

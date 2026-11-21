@@ -25,6 +25,7 @@ const { reconcileImportedCameraPhotoLinks } = require('./cameraPhotos');
 const { workspaceConnectSources } = require('./workspaceConnectPolicy');
 const { createHttpDrainMonitor } = require('./httpDrainMonitor');
 const { httpRequestLifecycle } = require('./httpRequestLifecycle');
+const { createPropertyLinesApi } = require('./propertyLines');
 
 const problems = validate();
 if (problems.length) {
@@ -165,6 +166,7 @@ app.use(adminAuth.router);
 app.use(shareApi);
 if (processingRepository) app.use(createProjectShareApi({ repository, processing: processingRepository }));
 app.use(createApiV1(repository));
+app.use(createPropertyLinesApi({ repository }));
 if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager, providerCredentials }));
 app.use(apiRouter);
 app.use(assetsRouter);
