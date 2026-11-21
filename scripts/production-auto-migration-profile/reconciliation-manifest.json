@@ -4,22 +4,23 @@
   "purpose": "Exact source inventory and ordered actual D1 migration metadata for an append-only unified request reconciliation review.",
   "source": {
     "repository": "ltds-ops-monorepo",
-    "commit": "1e09732cf4c8f863800cde3cc0ebbedd5a72a2ca",
-    "commitShort": "1e09732c",
+    "commit": "e191147d28ceee64622e13265c017d77b1bd9691",
+    "commitShort": "e191147d",
     "worktreeVerifiedAgainstCommit": true
   },
   "actualReceipt": {
-    "path": "C:/Users/fstor/.codex/artifacts/ui-preserved-ledger-actual-history-20261027.json",
-    "sha256": "d26d0517dff914668d6cf4b824797dd167803b32c26898dbab7e749792103ab6",
-    "purpose": "Actual ordered production migration-name metadata for preserved-runtime UI review; no SQL body claim",
+    "path": "scripts/production-auto-migration-profile/installed-schema-preservation-v1/actual-metadata-evidence.fixture.json",
+    "sha256": "6c5070bd045049e7d1b773a69d52a56eb9114912a7360f718ec0229b30f31a76",
+    "purpose": "Sanitized actual production migration-name and schema-digest metadata (installed-schema-preservation-v1 observation); no SQL body claim",
     "query": "SELECT name,id FROM d1_migrations ORDER BY id LIMIT 1025",
-    "sourceCommit": "c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8",
+    "sourceCommit": "2686c535658398baf746b78a41e8af6b79f04538",
+    "observedAt": "2026-11-05T15:43:28.683Z",
     "bodyHashClaim": false
   },
   "databases": {
     "operations": {
       "databaseId": "6ebf7514-d306-4615-ae56-ad869c874dbd",
-      "rowCount": 221,
+      "rowCount": 226,
       "orderedRows": [
         {
           "name": "0001_operations.sql",
@@ -904,11 +905,31 @@
         {
           "name": "0221_portal_correspondence_lifecycle_write_guards.sql",
           "id": 221
+        },
+        {
+          "name": "0222_employee_read_roots.sql",
+          "id": 222
+        },
+        {
+          "name": "0223_employee_read_provisioning.sql",
+          "id": 223
+        },
+        {
+          "name": "0224_windows_portal_publication_chain_index.sql",
+          "id": 224
+        },
+        {
+          "name": "0225_native_staff_lifecycle_bridge.sql",
+          "id": 225
+        },
+        {
+          "name": "0226_staff_login_bindings.sql",
+          "id": 226
         }
       ],
-      "orderedRowsSha256": "ddee5f48f005691ea6c7cb0f7ce4b810fec2d4496b03f693606fe5cf7d318df0",
-      "orderedNamesSha256": "605b3ccec883bd460ec64284dc36d09c75ae98b4e3cfdc659e4f0409073f5a56",
-      "sourceMigrationCount": 231,
+      "orderedRowsSha256": "93cdb96e07dd057f64805e0d2bd14780e8a9da06e2e5d3449ff4c34bef03755a",
+      "orderedNamesSha256": "cfbd55059a5e08b52809561c0b466eb59e1e90adeb56f7421627fcf4a57e01e2",
+      "sourceMigrationCount": 236,
       "sourceMigrations": [
         {
           "name": "0001_operations.sql",
@@ -2064,34 +2085,34 @@
           "name": "0231_owner_google_ads_summary.sql",
           "gitBlobOid": "a8a2ef010e637b5a77e6d3d09048d142afdcff70",
           "sha256": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481"
+        },
+        {
+          "name": "0240_flight_logs_permissions.sql",
+          "gitBlobOid": "7daf4310ede9f31ddf592032ef72a0b956105001",
+          "sha256": "7dae537a441d929cb8d33390dc88abe2ba766886a5b4d6bf2b0861575e41eb3a"
+        },
+        {
+          "name": "0241_staff_usernames.sql",
+          "gitBlobOid": "8d449403c8c8483a2cf2304483cf0d19e471d7cb",
+          "sha256": "44a707432e16ea06c8ea161d4181582baa6fa2b916b654cae92165d5989e53c5"
+        },
+        {
+          "name": "0242_native_staff_onboarding_approval_actor_authority.sql",
+          "gitBlobOid": "4501209ca327ea44c589c55f5a3153854fcf45c3",
+          "sha256": "045db046a21b80e42aec764cb693615cca8737a2a0a4686676d60baf15664cee"
+        },
+        {
+          "name": "0243_staff_logs_device_eligibility.sql",
+          "gitBlobOid": "5b60ab6fd39360678052f5afec74a0dd8ca905ed",
+          "sha256": "60dee9a1e92fc881d52f2f7d21b0307f6afe1571d07421c929c3e0defea179b5"
+        },
+        {
+          "name": "0244_staff_operations_access_writer.sql",
+          "gitBlobOid": "47c4aaa13b9a2044d1dd607864369f759470411d",
+          "sha256": "e291acac31395ae7bd22c5b43ed44331ee9f989f074869a92dd26dd69547f815"
         }
       ],
       "sourceOnlyPending": [
-        {
-          "name": "0222_employee_read_roots.sql",
-          "gitBlobOid": "ab5b32a74fc7718cf54cfe282a3f0b558dfa8652",
-          "sha256": "1b91e7eebe6580df7a780a8b473e3325fde2d9a8a8dc37282bc40c6f32e8edda"
-        },
-        {
-          "name": "0223_employee_read_provisioning.sql",
-          "gitBlobOid": "f33b1bf4f3ed357cfea14f0e82a3a385ecd52d2c",
-          "sha256": "d55a0d5e16f37f231e0938516a1ee7248b0e3b4190e8de5e6c68e1e9a3e1810a"
-        },
-        {
-          "name": "0224_windows_portal_publication_chain_index.sql",
-          "gitBlobOid": "a95e8eefe0eff504cff2e42a376a293cd1081505",
-          "sha256": "4252667cceb62ca9bbbb3efd8804a7dc69f58dae1396240f0109fbac6abbcd15"
-        },
-        {
-          "name": "0225_native_staff_lifecycle_bridge.sql",
-          "gitBlobOid": "f8b68381f455e5e863eadc211e500a90283080ea",
-          "sha256": "1363221a710d774fc9e4c7547f7199d2bdc6b41ca62c8078c98ac5334603c175"
-        },
-        {
-          "name": "0226_staff_login_bindings.sql",
-          "gitBlobOid": "46df71ee49ea588b70a00949033a53f60ecce8c4",
-          "sha256": "c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5"
-        },
         {
           "name": "0227_owner_intel_reads.sql",
           "gitBlobOid": "57c41601fad7fb7003d55e2802bcb7a485c441c9",
@@ -2116,13 +2137,38 @@
           "name": "0231_owner_google_ads_summary.sql",
           "gitBlobOid": "a8a2ef010e637b5a77e6d3d09048d142afdcff70",
           "sha256": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481"
+        },
+        {
+          "name": "0240_flight_logs_permissions.sql",
+          "gitBlobOid": "7daf4310ede9f31ddf592032ef72a0b956105001",
+          "sha256": "7dae537a441d929cb8d33390dc88abe2ba766886a5b4d6bf2b0861575e41eb3a"
+        },
+        {
+          "name": "0241_staff_usernames.sql",
+          "gitBlobOid": "8d449403c8c8483a2cf2304483cf0d19e471d7cb",
+          "sha256": "44a707432e16ea06c8ea161d4181582baa6fa2b916b654cae92165d5989e53c5"
+        },
+        {
+          "name": "0242_native_staff_onboarding_approval_actor_authority.sql",
+          "gitBlobOid": "4501209ca327ea44c589c55f5a3153854fcf45c3",
+          "sha256": "045db046a21b80e42aec764cb693615cca8737a2a0a4686676d60baf15664cee"
+        },
+        {
+          "name": "0243_staff_logs_device_eligibility.sql",
+          "gitBlobOid": "5b60ab6fd39360678052f5afec74a0dd8ca905ed",
+          "sha256": "60dee9a1e92fc881d52f2f7d21b0307f6afe1571d07421c929c3e0defea179b5"
+        },
+        {
+          "name": "0244_staff_operations_access_writer.sql",
+          "gitBlobOid": "47c4aaa13b9a2044d1dd607864369f759470411d",
+          "sha256": "e291acac31395ae7bd22c5b43ed44331ee9f989f074869a92dd26dd69547f815"
         }
       ],
       "actualOnlyHistorical": []
     },
     "client": {
       "databaseId": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
-      "rowCount": 158,
+      "rowCount": 159,
       "orderedRows": [
         {
           "name": "0001_initial.sql",
@@ -2755,11 +2801,15 @@
         {
           "name": "0240_viewer_direct_grant_receipt_immutability.sql",
           "id": 158
+        },
+        {
+          "name": "0242_client_ops_triage_inquiries.sql",
+          "id": 159
         }
       ],
-      "orderedRowsSha256": "5b68178ca8f66e79407abe28d10aa393a7d37f15fdbd4309e01e2b4aac198a4e",
-      "orderedNamesSha256": "8964f7012574c7aea19e94529729a8fa3255687707c17df8bb0a08bea8136ee6",
-      "sourceMigrationCount": 160,
+      "orderedRowsSha256": "0e0f5079e60f940afcebf50ddffc21c80e54148af24fe668d7984dd3ab03efc1",
+      "orderedNamesSha256": "82d2d85ff5abdab7b6919d955244ce39fa228b94c374fd77bd8ff1796bdc5773",
+      "sourceMigrationCount": 161,
       "sourceMigrations": [
         {
           "name": "0001_initial.sql",
@@ -3560,6 +3610,11 @@
           "name": "0241_app_release_pilot.sql",
           "gitBlobOid": "54e33aef18145276d13e37d2de13721bbf597b9f",
           "sha256": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048"
+        },
+        {
+          "name": "0242_client_ops_triage_inquiries.sql",
+          "gitBlobOid": "4f2b0bcf77a7a5cf6b67e4730ae79254b909e356",
+          "sha256": "8f25db33d95c77425a52031d0e4255b133e2a2b91025d427c0d118ee305a4b66"
         }
       ],
       "sourceOnlyPending": [

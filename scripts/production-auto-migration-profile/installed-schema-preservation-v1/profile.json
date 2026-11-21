@@ -6,8 +6,8 @@
   "metadataInputSha256": "303d293beff70fcf253981297ab2575afe491e9fd173de1b4cd888c643fd11d1",
   "accountId": "846c924bf17bf4f3dd15c97a4c5d1d51",
   "source": {
-    "commit": "2686c535658398baf746b78a41e8af6b79f04538",
-    "tree": "2e612a24a6b3b80df181e85d0bb73749bc3247e8",
+    "commit": "e191147d28ceee64622e13265c017d77b1bd9691",
+    "tree": "30487633df2327d904018c5d97bc52a9a02f5ed5",
     "provenance": "actual production metadata observation plus exact Git migration tree; names and hashes only"
   },
   "controls": {
@@ -2079,16 +2079,46 @@
           "name": "0231_owner_google_ads_summary.sql",
           "gitBlobOid": "a8a2ef010e637b5a77e6d3d09048d142afdcff70",
           "sha256": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481"
+        },
+        {
+          "name": "0240_flight_logs_permissions.sql",
+          "gitBlobOid": "7daf4310ede9f31ddf592032ef72a0b956105001",
+          "sha256": "7dae537a441d929cb8d33390dc88abe2ba766886a5b4d6bf2b0861575e41eb3a"
+        },
+        {
+          "name": "0241_staff_usernames.sql",
+          "gitBlobOid": "8d449403c8c8483a2cf2304483cf0d19e471d7cb",
+          "sha256": "44a707432e16ea06c8ea161d4181582baa6fa2b916b654cae92165d5989e53c5"
+        },
+        {
+          "name": "0242_native_staff_onboarding_approval_actor_authority.sql",
+          "gitBlobOid": "4501209ca327ea44c589c55f5a3153854fcf45c3",
+          "sha256": "045db046a21b80e42aec764cb693615cca8737a2a0a4686676d60baf15664cee"
+        },
+        {
+          "name": "0243_staff_logs_device_eligibility.sql",
+          "gitBlobOid": "5b60ab6fd39360678052f5afec74a0dd8ca905ed",
+          "sha256": "60dee9a1e92fc881d52f2f7d21b0307f6afe1571d07421c929c3e0defea179b5"
+        },
+        {
+          "name": "0244_staff_operations_access_writer.sql",
+          "gitBlobOid": "47c4aaa13b9a2044d1dd607864369f759470411d",
+          "sha256": "e291acac31395ae7bd22c5b43ed44331ee9f989f074869a92dd26dd69547f815"
         }
       ],
-      "sourceInventoryCount": 231,
-      "sourceInventorySha256": "1deee5b8f69de8dabafa8cb3653706961fc48a67d0b85ca282139639b5dfc178",
+      "sourceInventoryCount": 236,
+      "sourceInventorySha256": "3f87575d24ce4a3de7afcda9ac7a5e86b956ff03a334aaa77df93a44db03775f",
       "pendingSourceNames": [
         "0227_owner_intel_reads.sql",
         "0228_competitor_intel_ingest.sql",
         "0229_owner_intel_source_feed.sql",
         "0230_app_release_pilot.sql",
-        "0231_owner_google_ads_summary.sql"
+        "0231_owner_google_ads_summary.sql",
+        "0240_flight_logs_permissions.sql",
+        "0241_staff_usernames.sql",
+        "0242_native_staff_onboarding_approval_actor_authority.sql",
+        "0243_staff_logs_device_eligibility.sql",
+        "0244_staff_operations_access_writer.sql"
       ],
       "schema": {
         "objectCount": 2472,
@@ -3631,7 +3661,12 @@
         "0228_competitor_intel_ingest.sql",
         "0229_owner_intel_source_feed.sql",
         "0230_app_release_pilot.sql",
-        "0231_owner_google_ads_summary.sql"
+        "0231_owner_google_ads_summary.sql",
+        "0240_flight_logs_permissions.sql",
+        "0241_staff_usernames.sql",
+        "0242_native_staff_onboarding_approval_actor_authority.sql",
+        "0243_staff_logs_device_eligibility.sql",
+        "0244_staff_operations_access_writer.sql"
       ]
     },
     "client": {
