@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
-    "viewer:check": "npm --prefix apps/viewer run check && node --test scripts/viewer-monorepo-boundaries.test.mjs",
+    "viewer:check": "npm --prefix apps/viewer run check && node --test scripts/viewer-monorepo-boundaries.test.mjs scripts/viewer-brand.test.mjs",
     "viewer:build": "npm --prefix apps/viewer run build",
     "production:deploy": "node scripts/production-deploy.mjs",
     "production:deploy:test": "node --test scripts/production-deploy.test.mjs",

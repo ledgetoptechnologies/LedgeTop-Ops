@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LTDS Point Cloud</title>
+  <title>Point cloud · Viewer · Ledge Top</title>
   <link rel="stylesheet" href="/potree/build/potree/potree.css">
   <link rel="stylesheet" href="/potree/libs/jquery-ui/jquery-ui.min.css">
   <link rel="stylesheet" href="/potree/libs/spectrum/spectrum.css">
   <link rel="stylesheet" href="/potree/libs/jstree/themes/mixed/style.min.css">
   <style>
-    :root { --brand-orange: #EE5007; }
+    :root { --brand-orange: #ee5007; --brand-orange-action: #cc4706; --brand-orange-dark: #a83a05; }
     html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: #050505; font-family: 'Outfit', sans-serif; }
     #potree_render_area { position: absolute; inset: 0; }
     #potree_sidebar_container { display: none; }
@@ -42,15 +42,15 @@
     #pc-retry {
       min-width: 92px; min-height: 40px; padding: 8px 16px;
       border: 1px solid rgba(238,80,7,0.75); border-radius: 7px;
-      background: #EE5007; color: white; font: inherit; font-weight: 700;
+      background: var(--brand-orange-action); color: white; font: inherit; font-weight: 700;
       cursor: pointer;
     }
-    #pc-retry:hover { background: #ff641d; }
+    #pc-retry:hover { background: var(--brand-orange-dark); }
     #pc-retry:focus-visible { outline: 3px solid white; outline-offset: 2px; }
     #pc-retry[hidden] { display: none; }
     .spinner {
       width: 50px; height: 50px; border-radius: 50%;
-      border: 4px solid rgba(238,80,7,0.12); border-top-color: #EE5007;
+      border: 4px solid rgba(238,80,7,0.12); border-top-color: var(--brand-orange);
       animation: spin 1s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -178,7 +178,7 @@
     const PROJECT_TITLE = qs.get('title') || 'Point Cloud';
     const POINT_COUNT = qs.get('points') ? parseInt(qs.get('points'), 10) : null;
     const DISPLAY_UNITS = qs.get('units') === 'metric' ? 'm' : 'ft';
-    document.title = `LTDS Point Cloud — ${PROJECT_TITLE}`;
+    document.title = `${PROJECT_TITLE} · Point cloud · Viewer · Ledge Top`;
     document.getElementById('pc-loading-text').textContent =
       (POINT_COUNT ? `Streaming ${(POINT_COUNT / 1e6).toFixed(0)}M point cloud…` : 'Streaming point cloud…');
 
@@ -542,7 +542,7 @@
         const canvas = document.createElement('canvas');
         canvas.width = canvas.height = 64;
         const ctx = canvas.getContext('2d');
-        ctx.strokeStyle = '#EE5007'; ctx.lineWidth = 6;
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--brand-orange').trim(); ctx.lineWidth = 6;
         ctx.beginPath(); ctx.arc(32, 32, 22, 0, Math.PI * 2); ctx.stroke();
         ctx.fillStyle = '#ffffff';
         ctx.beginPath(); ctx.arc(32, 32, 6, 0, Math.PI * 2); ctx.fill();

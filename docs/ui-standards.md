@@ -29,7 +29,7 @@ standard.
 
 - The generic **LT mark** plus the words **Ledge Top** on every domain and
   every standalone page (sign-in, onboarding, admin tools, share links,
-  recovery pages). Use `Brand`/`LtMark` from `@ltds/ui`, or the inline SVG in
+  recovery pages). Use `Brand`/`LtMark` from `@ltds/ui`, or `/lt-mark.svg` in
   the Viewer. Never hot-link a logo from another site and never use
   per-domain names such as "Ledge Top Drone Services" or "LTDS" in the UI.
 - Brand orange is `#ee5007` (`--orange`). Use it for the mark, accents,
@@ -40,6 +40,29 @@ standard.
   contact or admin." (or "…contact or admin to …") instead of writing a new
   sentence such as "Contact your Ledge Top representative".
 
+### Where the brand is defined
+
+- `packages/ui/src/brand.ts` is the one definition of the mark (`LT_MARK`,
+  `LT_MARK_SVG`, `LT_FAVICON_SVG`) and the brand colours (`BRAND_COLORS`).
+  `LtMark`/`Brand` render from it, and `styles.css` carries the same values as
+  `--orange`, `--orange-action` and `--orange-dark`.
+- The Viewer (`apps/viewer`) is plain JavaScript and its image is built from its
+  own folder, so it cannot import `packages/ui`. It gets a generated copy
+  instead: `node scripts/viewer-brand.mjs --write` writes
+  `apps/viewer/public/lt-mark.svg`, `apps/viewer/brand-colors.mjs` (colour
+  constants for canvas, three.js and Leaflet code) and every app's
+  `favicon.svg` from
+  `brand.ts`. Viewer pages show the mark with `<img src="/lt-mark.svg">` and
+  define `--brand-orange`, `--brand-orange-action`, `--brand-orange-dark`
+  (pages) and `--orange`, `--orange-bright` (workspace CSS) with the shared
+  values; CSS that may load without those variables uses them with a fallback,
+  for example `var(--brand-orange, #ee5007)`, and the test checks the fallback.
+- `scripts/viewer-brand.test.mjs` (CI and `npm run viewer:check`) fails when the
+  generated files, `styles.css`, the Viewer's colour variables or its page
+  titles drift from `brand.ts` and the title pattern above. To change the
+  brand, edit `brand.ts`, run the generator, then update the values the test
+  names.
+
 ## 3. Tokens
 
 ### Colour
@@ -49,6 +72,7 @@ standard.
 | `--orange` | `#ee5007` | Brand mark, non-text accents, focus outline, selected indicator |
 | `--orange-action` | `#cc4706` | Filled primary buttons and white-text badges or avatars (4.7:1) |
 | `--orange-dark` | `#a83a05` | Primary hover/active (`--orange-hover` aliases it), orange text on light backgrounds |
+| `--orange-bright` (Viewer only) | `#ff6b24` | Orange text, links and hover on the Viewer's dark surfaces |
 | `--orange-soft` | `#fff0e8` | Tinted backgrounds for selected/brand areas |
 | `--ink` | `#151b22` | Body text |
 | `--muted` | `#66717d` | Secondary text (4.6:1 on the page background) |
