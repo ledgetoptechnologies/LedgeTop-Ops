@@ -657,3 +657,19 @@ test("latched expiry survives a backward clock step before the reveal reply", as
   expect(await bodies(page, "create")).toEqual([create]);
   expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
 });
+
+test("legacy reveal with a different link fragment only offers the validated manual code", async ({ page }) => {
+  const { dialog, reveal, create } = await prepareExpiringInvitation(page, "legacy-mismatched-link");
+  await reveal.click();
+  await expect(dialog.getByRole("heading", { name: "Invitation code ready" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /^(Copy link|Open form|Create one-time link)/ })).toHaveCount(0);
+  expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+  await dialog.getByRole("button", { name: "Copy invitation code" }).click();
+  await expect.poll(() => page.evaluate(() => (window as Window & { copied?: string[] }).copied)).toEqual(["d".repeat(64)]);
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  await expect(dialog.getByRole("heading", { name: "Invitation code ready" })).toBeVisible();
+  expect(await copiedAndOpened(page)).toEqual({ copies: 1, opens: 0 });
+  expect(await bodies(page, "create")).toEqual([create]);
+  expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+});

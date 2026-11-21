@@ -124,7 +124,7 @@ window.fetch = async (input, init) => {
       ? new Date(Date.parse(createdFixture.expiresAt) + 60_000).toISOString() : createdFixture.expiresAt;
     if (mode === "uncertain") return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     return Response.json({ commandId: body.commandId, invitationId, expiresAt: revealExpiry, invitationSecret: "d".repeat(64),
-      recipientUrl: mode === "no-link" ? null : `https://portal.example.test/onboarding/${invitationId}#${"d".repeat(64)}` });
+      recipientUrl: mode === "no-link" ? null : `https://portal.example.test/onboarding/${invitationId}#${(mode === "legacy-mismatched-link" ? "e" : "d").repeat(64)}` });
   }
   return Response.json({ error: "not_found" }, { status: 404 });
 };

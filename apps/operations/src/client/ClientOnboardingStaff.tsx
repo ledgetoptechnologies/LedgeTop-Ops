@@ -48,13 +48,13 @@ export function validScopeChoices(value: Record<string, unknown>): ScopeChoice[]
   }
   return value.scopes as ScopeChoice[];
 }
-/** Accepts only an https onboarding link for exactly this invitation. */
-export function safeRecipientLink(value: unknown, invitationId: string): string | null {
+/** Accepts only an HTTPS onboarding link for the revealed invitation and secret. */
+export function safeRecipientLink(value: unknown, invitationId: string, invitationSecret: string): string | null {
   if (typeof value !== "string" || value.length > 512) return null;
   try {
     const url = new URL(value);
     return url.protocol === "https:" && !url.username && !url.password && !url.search
-      && url.pathname === `/onboarding/${invitationId}` && /^#[0-9a-f]{64}$/.test(url.hash) ? url.href : null;
+      && url.pathname === `/onboarding/${invitationId}` && url.hash === `#${invitationSecret}` ? url.href : null;
   } catch { return null; }
 }
 export function ClientOnboardingStaff({ embedded = false, onBusyChange }: { embedded?: boolean; onBusyChange?: (busy: boolean) => void } = {}) {
@@ -217,7 +217,7 @@ export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { s
         throw new Error("invalid_response");
       if (stopIfExpired()) return;
       setRevealed({ invitationId: created.invitationId,
-        link: safeRecipientLink(value.recipientUrl, created.invitationId), secret: value.invitationSecret });
+        link: safeRecipientLink(value.recipientUrl, created.invitationId, value.invitationSecret), secret: value.invitationSecret });
     } catch (caught) {
       if (uncertainFailure(caught)) setUncertain("reveal");
       else { setError("The link couldn't be created. It won't be attempted again from this page."); onRefused(caught); }
