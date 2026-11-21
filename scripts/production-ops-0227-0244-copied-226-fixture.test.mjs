@@ -26,6 +26,7 @@ before(() => {
   built = path.join(tmp, 'copied-226.sqlite');
   const result = buildOpsCopied226File(built);
   assert.deepEqual(result.mismatches, []);
+  assert.equal(result.published, true);
 });
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
@@ -61,8 +62,50 @@ test('pins list exactly migrations 0001..0226 with their source SHA-256, matchin
   assert.deepEqual(pins.catalogPermissionKeysPresent, [...OPS_0244_CATALOG_PERMISSION_KEYS].sort());
 });
 
-test('build refuses to overwrite an existing file', () => {
+function ownDir(label) {
+  const dir = path.join(tmp, `${label}-${++counter}`);
+  fs.mkdirSync(dir);
+  return dir;
+}
+const SENTINEL = Buffer.from('pre-existing bytes that must survive\n');
+
+test('build refuses a target that already exists and leaves its bytes and the directory unchanged', () => {
+  const dir = ownDir('pre-existing');
+  const target = path.join(dir, 'copied-226.sqlite');
+  fs.writeFileSync(target, SENTINEL);
+  assert.throws(() => buildOpsCopied226File(target), /ops_copied_226:output_exists/u);
+  assert.ok(fs.readFileSync(target).equals(SENTINEL));
+  assert.deepEqual(fs.readdirSync(dir), ['copied-226.sqlite']);
   assert.throws(() => buildOpsCopied226File(built), /ops_copied_226:output_exists/u);
+});
+
+test('build refuses a target created after the source checks and build, just before publish', () => {
+  const dir = ownDir('race');
+  const target = path.join(dir, 'copied-226.sqlite');
+  let hookRan = false;
+  assert.throws(() => buildOpsCopied226File(target, {
+    beforePublish: published => {
+      hookRan = true;
+      assert.equal(published, target);
+      // The copy is already built and verified in scratch; another writer now claims the target path.
+      assert.equal(fs.readdirSync(dir).filter(name => name.startsWith('.ops-copied-226-build-')).length, 1);
+      fs.writeFileSync(target, SENTINEL, { flag: 'wx' });
+    },
+  }), /ops_copied_226:output_exists/u);
+  assert.equal(hookRan, true);
+  assert.ok(fs.readFileSync(target).equals(SENTINEL));
+  // The scratch build is removed; only the other writer's file remains.
+  assert.deepEqual(fs.readdirSync(dir), ['copied-226.sqlite']);
+});
+
+test('a successful build publishes only the verified file and removes its scratch directory', () => {
+  const dir = ownDir('publish');
+  const target = path.join(dir, 'copied-226.sqlite');
+  const result = buildOpsCopied226File(target);
+  assert.equal(result.ok, true);
+  assert.equal(result.published, true);
+  assert.deepEqual(fs.readdirSync(dir), ['copied-226.sqlite']);
+  assert.equal(verifyOpsCopied226File(target).ok, true);
 });
 
 test('build refuses when a source migration differs from its pin', () => {

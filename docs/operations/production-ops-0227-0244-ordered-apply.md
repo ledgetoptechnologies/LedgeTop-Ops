@@ -415,9 +415,13 @@ node scripts/production-ops-0227-0244-copied-226-fixture.mjs --build "$env:TEMP\
 ```
 
 `--build` checks each of the 226 source files against its pinned SHA-256 first.
-It refuses to overwrite an existing file. It applies the files with the same
-Wrangler splitter the operator uses, then verifies the result against the pins.
-It prints `ok` and any mismatches, and exits 1 on a mismatch.
+It builds the copy in its own scratch folder next to the target, applying the
+files with the same Wrangler splitter the operator uses, and verifies it there
+against the pins. Only a copy that passes is published, as a hard link that
+fails if anything already exists at the target. The builder never opens or
+overwrites the target path, even when another process creates that file
+during the build. The scratch folder is always removed. It prints `ok`,
+`published` and any mismatches, and exits 1 on a mismatch.
 
 ```powershell
 node scripts/production-ops-0227-0244-copied-226-fixture.mjs --verify "$env:TEMP\ops-rehearsal\copied-226.sqlite"

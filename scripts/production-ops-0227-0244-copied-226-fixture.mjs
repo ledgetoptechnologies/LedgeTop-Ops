@@ -105,17 +105,32 @@ export function verifyOpsCopied226File(filename, { pins = loadOpsCopied226Pins()
   return { ok: mismatches.length === 0, mismatches, observed };
 }
 
-/** Builds a new disposable file (refuses to overwrite) after checking the source files match the pins byte for byte. */
-export function buildOpsCopied226File(filename, { root = ROOT, pins = loadOpsCopied226Pins() } = {}) {
-  if (fs.existsSync(filename)) fail('output_exists');
+/** Builds a new disposable file after checking the source files match the pins byte for byte. Never overwrites:
+ * the copy is built and verified in a scratch file, then published with an exclusive hard link. A copy that fails
+ * verification is not published. `beforePublish` is a test hook that runs just before the link. */
+export function buildOpsCopied226File(filename, { root = ROOT, pins = loadOpsCopied226Pins(), beforePublish = null } = {}) {
+  const target = path.resolve(filename);
+  // Early, friendly refusal only. The guarantee is the exclusive link below.
+  if (fs.existsSync(target)) fail('output_exists');
   const names = migrationNames(root).slice(0, COUNT);
   if (names.length !== pins.migrations.length) fail('source_migration_count_mismatch');
   for (const [index, pin] of pins.migrations.entries()) {
     if (names[index] !== pin.name) fail(`source_migration_name_mismatch:${pin.id}`);
     if (hash(fs.readFileSync(path.join(root, 'apps', 'operations', 'migrations', pin.name))) !== pin.sha256) fail(`source_migration_sha256_mismatch:${pin.name}`);
   }
-  buildOpsChainDatabase({ root, count: COUNT, filename }).close();
-  return verifyOpsCopied226File(filename, { pins });
+  // Build in an owned scratch directory beside the target (same volume), verify there, then publish with
+  // link(2), which fails with EEXIST if anything exists at the target. The target path is never opened.
+  const scratchDir = fs.mkdtempSync(path.join(path.dirname(target), '.ops-copied-226-build-'));
+  try {
+    const scratch = path.join(scratchDir, 'copied-226.sqlite');
+    buildOpsChainDatabase({ root, count: COUNT, filename: scratch }).close();
+    const result = verifyOpsCopied226File(scratch, { pins });
+    if (!result.ok) return { ...result, published: false };
+    beforePublish?.(target);
+    try { fs.linkSync(scratch, target); }
+    catch (error) { if (error?.code === 'EEXIST') fail('output_exists'); throw error; }
+    return { ...result, published: true };
+  } finally { fs.rmSync(scratchDir, { recursive: true, force: true }); }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -126,9 +141,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const build = args.includes('--build');
     const file = target(build ? '--build' : '--verify');
     const result = build ? buildOpsCopied226File(file) : verifyOpsCopied226File(file);
-    out({ file, mode: build ? 'build' : 'verify', ok: result.ok, mismatches: result.mismatches,
+    out({ file, mode: build ? 'build' : 'verify', ok: result.ok, ...(build ? { published: result.published } : {}), mismatches: result.mismatches,
       ledger: result.observed.ledger, schema: result.observed.schema, existingSchema: result.observed.existingSchema });
-    if (!result.ok) process.exitCode = 1;
+    if (!result.ok || (build && !result.published)) process.exitCode = 1;
   } else {
     const text = serializeOpsCopied226Pins(buildOpsCopied226Pins());
     if (args.includes('--write')) fs.writeFileSync(OPS_COPIED_226_PINS_PATH, text);
