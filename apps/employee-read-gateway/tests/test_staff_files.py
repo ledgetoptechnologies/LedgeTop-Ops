@@ -152,7 +152,7 @@ class ServiceTests(unittest.TestCase):
         self.clock = Clock()
         self.limits = Limits(chunk_size=8, max_file_bytes=64, grant_quota_bytes=100, global_quota_bytes=200,
                              free_margin_bytes=0, sessions_per_staff=2, sessions_total=3)
-        self.config = Config(ROOT_ID, 1, pin.fingerprint, self.root, self.internal, AUDIENCE, CLIENT_ID, self.limits)
+        self.config = Config(ROOT_ID, 1, pin.fingerprint, self.root, self.internal, AUDIENCE, CLIENT_ID, self.limits, writes_enabled=True)
         self.files = StaffFiles(self.config, self.clock)
 
     def tearDown(self):

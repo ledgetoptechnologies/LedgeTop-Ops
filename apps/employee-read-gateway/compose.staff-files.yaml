@@ -23,6 +23,11 @@ services:
       FILES_ROOT_ID: "<root id from Ops>"
       FILES_ROOT_GENERATION: "1"
       FILES_ROOT_FINGERPRINT: "<fingerprint printed by enroll>"
+      FILES_GATEWAY_ID: "<gateway id registered in Ops>"
+      FILES_HOST: "<NAS host name>"
+      FILES_DATASET: "/mnt/<pool>/<staff files dataset>"   # the same host path as the /data bind below
+      # Writes stay off until QA's verified inventory is set (JSON; see docs/staff-files-protocol.md):
+      FILES_ROOT_INVENTORY: '<verified inventory JSON>'
     volumes:
       - type: bind
         source: /mnt/<pool>/<staff files dataset>

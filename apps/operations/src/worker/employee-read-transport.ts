@@ -18,6 +18,9 @@ export type EmployeeReadSelection = Readonly<{
 }>;
 export type EmployeeGatewayConfiguration = Readonly<{
   origin: string; gatewayId: string; keyId: string; key: Uint8Array;
+  /** Read cutover (slice 2c): exactly one scheme per gateway, never both and no fallback. Absent means hmac-v1 (unchanged).
+   * ed25519-nas-link: `key` is the Ops-only 32-byte files-read seed, sent over the NAS link Access service token. */
+  scheme?: "hmac-v1" | "ed25519-nas-link"; accessClientId?: string; accessClientSecret?: string;
 }>;
 export type EmployeeGatewayDependencies = Readonly<{
   fetch: typeof fetch;
@@ -50,7 +53,11 @@ function inputSnapshot(proof: EmployeeReadProof, selection: EmployeeReadSelectio
   const s = Object.freeze({ operation: selection.operation, path: selection.path,
     expectedSha256: selection.expectedSha256, range: r === null ? null : Object.freeze({ start: r.start, end: r.end }),
     cursor: selection.cursor ?? null, snapshotId: selection.snapshotId ?? null });
-  const c = { origin: config.origin, gatewayId: config.gatewayId, keyId: config.keyId, key: new Uint8Array(config.key) };
+  const c = { origin: config.origin, gatewayId: config.gatewayId, keyId: config.keyId, key: new Uint8Array(config.key),
+    scheme: config.scheme ?? "hmac-v1", accessClientId: config.accessClientId, accessClientSecret: config.accessClientSecret };
+  if (c.scheme !== "hmac-v1" && (c.scheme !== "ed25519-nas-link" || c.key.length !== 32 || typeof c.accessClientId !== "string"
+    || !/^[A-Za-z0-9._-]{1,256}$/.test(c.accessClientId) || typeof c.accessClientSecret !== "string" || c.accessClientSecret.length < 16)) throw Error();
+  if (c.scheme === "hmac-v1" && (c.accessClientId !== undefined || c.accessClientSecret !== undefined)) throw Error();
   const origin = new URL(c.origin);
   if (origin.protocol !== "https:" || origin.origin !== c.origin || origin.username || origin.password
     || origin.pathname !== "/" || origin.search || origin.hash || !UUID.test(c.gatewayId)
@@ -83,6 +90,21 @@ export async function signEmployeeReadBody(body: string, config: EmployeeGateway
     "POST", "/v1/read", digest].join("\n");
   const key = await crypto.subtle.importKey("raw", new Uint8Array(config.key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return hex(await crypto.subtle.sign("HMAC", key, encoder.encode(material)));
+}
+
+const READ_CONTEXT = "ltfiles-v1read";
+const PKCS8_ED25519_PREFIX = Uint8Array.from([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]);
+/** files-read scope: Ed25519 over the exact bytes of the v1 field layout under its own domain string
+ * ("ltfiles-v1read", gatewayId, keyId, timestamp, nonce, POST, /v1/read, sha256(body)), joined by LF. */
+export async function signEmployeeReadBodyEd25519(body: string, config: EmployeeGatewayConfiguration,
+  timestamp: number, nonce: string): Promise<string> {
+  if (!Number.isSafeInteger(timestamp) || timestamp < 0 || !/^[0-9a-f]{32}$/.test(nonce) || config.key.length !== 32) throw Error();
+  const digest = hex(await crypto.subtle.digest("SHA-256", encoder.encode(body)));
+  const material = [READ_CONTEXT, config.gatewayId, config.keyId, String(timestamp), nonce, "POST", "/v1/read", digest].join("\n");
+  const pkcs8 = new Uint8Array(48); pkcs8.set(PKCS8_ED25519_PREFIX); pkcs8.set(config.key, 16);
+  const key = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
+  const signature = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, key, encoder.encode(material)));
+  return btoa(String.fromCharCode(...signature)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function staticError(status: number, code: string): Response {
@@ -168,12 +190,16 @@ export async function readEmployeeGateway(proof: EmployeeReadProof, selection: E
       expectedSha256: s.expectedSha256, range: s.range, cursor: s.cursor, snapshotId: s.snapshotId, expiresAt, deadlineAt });
     if (encoder.encode(body).length > 16_384) throw Error();
     const nonce = hex(crypto.getRandomValues(new Uint8Array(16)).buffer);
-    const signature = await signEmployeeReadBody(body, c, timestamp, nonce);
+    // Exactly one scheme per gateway: the HMAC headers are never sent to an Ed25519 gateway, or the reverse.
+    const requestHeaders: Record<string, string> = c.scheme === "ed25519-nas-link"
+      ? { "Content-Type": "application/json", "CF-Access-Client-Id": c.accessClientId!, "CF-Access-Client-Secret": c.accessClientSecret!,
+        "X-Ltfiles-Read-Key-Id": c.keyId, "X-Ltfiles-Read-Time": String(timestamp), "X-Ltfiles-Read-Nonce": nonce,
+        "X-Ltfiles-Read-Signature": await signEmployeeReadBodyEd25519(body, c, timestamp, nonce) }
+      : { "Content-Type": "application/json", "X-Ops-Read-Key-Id": c.keyId,
+        "X-Ops-Read-Time": String(timestamp), "X-Ops-Read-Nonce": nonce, "X-Ops-Read-Signature": await signEmployeeReadBody(body, c, timestamp, nonce) };
     if (!await valid()) return staticError(403, "employee_read_denied");
     timer = setTimeout(abort, Math.max(1, deadlineAt * 1000 - Date.now()));
-    upstream = await fetcher(`${c.origin}/v1/read`, { method: "POST", redirect: "manual", signal: controller.signal,
-      headers: { "Content-Type": "application/json", "X-Ops-Read-Key-Id": c.keyId,
-        "X-Ops-Read-Time": String(timestamp), "X-Ops-Read-Nonce": nonce, "X-Ops-Read-Signature": signature }, body });
+    upstream = await fetcher(`${c.origin}/v1/read`, { method: "POST", redirect: "manual", signal: controller.signal, headers: requestHeaders, body });
     if (!await valid()) { await discard(upstream); return staticError(403, "employee_read_denied"); }
     if ([404, 408, 409, 412, 413, 416, 429, 503, 507].includes(upstream.status)) {
       const status = upstream.status; await discard(upstream); return staticError(status, "employee_read_unavailable");
