@@ -520,7 +520,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
    * Grants are never edited: project shares and project-scoped client grants resolve tasks by project on every request,
    * so the task leaves the old project's shares and joins the new project's shares. Task-scoped client grants that named
    * the old project stop resolving (fail closed). Model-level links stay valid; they are not project-scoped.
-   * Undo (10 s, same actor, last placement change only) reverses an unchanged move without asking again.
+   * Undo (10 s, same actor, last placement change only) reverses an unchanged move. Publish permission is checked again at
+   * Undo time, and the earlier confirmation is reused only when it covered exactly the exposure being reversed.
    */
   moveTaskToProject(taskId,targetProjectId,folderId,actorId,guard) { return this.transaction(()=>{
     const fail=(code,message,extra={})=>{throw Object.assign(new Error(message),{code,...extra});};
@@ -533,9 +534,10 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     if(!target||target.status!=='active')fail('target_project_unavailable','The destination project is unavailable.');
     if(target.id===task.projectId)fail('same_project','The task is already in this project; move it between folders instead.');
     const timestamp=now();
+    let forward=null;
     if(guard.undo){
       const previous=this.database.prepare(`SELECT action,actor_id,created_at,details_json FROM audit_events WHERE entity_type='processing_task' AND entity_id=? AND action IN ${TASK_PLACEMENT_ACTIONS} ORDER BY rowid DESC LIMIT 1`).get(taskId);
-      const details=json(previous?.details_json);
+      const details=forward=json(previous?.details_json);
       if(!previous||previous.action!=='processing_task.project_changed'||previous.actor_id!==actorId||details?.undo||
           details?.projectId!==task.projectId||details?.folderId!==task.folderId||details?.previousProjectId!==target.id||details?.previousFolderId!==folderId||
           !(Date.parse(timestamp)<Date.parse(previous.created_at)+FOLDER_UNDO_WINDOW_MS))
@@ -563,9 +565,15 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const liveShares=projectId=>Number(this.database.prepare('SELECT COUNT(*) AS n FROM public_project_shares WHERE project_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)').get(projectId,timestamp).n);
     const publishedOutputs=outputs.filter(output=>output.status==='published').length;
     const sharing={published:publishedOutputs>0,publishedOutputs,sourceLiveProjectShares:liveShares(task.projectId),targetLiveProjectShares:liveShares(target.id)};
-    if(sharing.published&&!guard.undo){
+    // Any move that changes a published task's audience, Undo included, needs the caller's publish permission now.
+    // An Undo reuses the forward confirmation only for the identical exposure in reverse; otherwise it must confirm again.
+    const forwardConfirmationCovers=Boolean(guard.undo&&forward?.published===true&&forward.sharingChangeConfirmed===true&&
+      forward.publishedOutputs===sharing.publishedOutputs&&forward.sourceLiveProjectShares===sharing.targetLiveProjectShares&&
+      forward.targetLiveProjectShares===sharing.sourceLiveProjectShares);
+    const sharingConfirmed=guard.confirmSharingChange===true||forwardConfirmationCovers;
+    if(sharing.published){
       if(!guard.canChangePublished)fail('publish_permission_required','Moving a published task changes who can see it and requires publishing permission.');
-      if(guard.confirmSharingChange!==true)fail('sharing_change_unconfirmed','This task is published. Confirm that clients of the old project lose access and clients of the new project gain it.',{details:sharing});
+      if(!sharingConfirmed)fail('sharing_change_unconfirmed','This task is published. Confirm that clients of the old project lose access and clients of the new project gain it.',{details:sharing});
     }
     // One statement moves task and folder together so the folder trigger sees the new project.
     this.database.prepare('UPDATE processing_tasks SET project_id=?,folder_id=?,updated_at=? WHERE id=? AND project_id=?').run(target.id,folderId,timestamp,taskId,task.projectId);
@@ -574,7 +582,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     this.database.prepare('UPDATE webodm_task_imports SET project_id=? WHERE task_id=?').run(target.id,taskId);
     const auditId=this.insertAudit({actorId,action:'processing_task.project_changed',entityType:'processing_task',entityId:taskId,details:{
       projectId:target.id,previousProjectId:task.projectId,folderId,previousFolderId:task.folderId,datasetId:dataset.id,movedOutputs,
-      ...sharing,sharingChangeConfirmed:guard.confirmSharingChange===true,undo:guard.undo===true}});
+      ...sharing,sharingChangeConfirmed:sharing.published&&sharingConfirmed,undo:guard.undo===true}});
     const updated=this.getTask(taskId);
     if(updated?.projectId!==target.id)fail('task_move_conflict','The task move could not be confirmed.');
     if(guard.undo)return{...updated,sharing};

@@ -67,7 +67,7 @@ test('a task moves to another project with its dataset, outputs and folder, audi
   // Undo is actor-scoped, needs no new confirmation and restores the original project and folder.
   assert.throws(()=>processing.moveTaskToProject(task.id,source.id,sourceFolder.id,'someone-else',guardFor(moved,{undo:true})),{code:'task_move_undo_conflict'});
   assert.throws(()=>processing.moveTaskToProject(task.id,source.id,null,'staff',guardFor(moved,{undo:true})),{code:'task_move_undo_conflict'});
-  const restored=processing.moveTaskToProject(task.id,source.id,sourceFolder.id,'staff',guardFor(moved,{undo:true}));
+  const restored=processing.moveTaskToProject(task.id,source.id,sourceFolder.id,'staff',guardFor(moved,{undo:true,canChangePublished:true}));
   assert.equal(restored.projectId,source.id);assert.equal(restored.folderId,sourceFolder.id);assert.equal(restored.undoExpiresAt,undefined);
   assert.equal(processing.getDataset(task.datasetId).projectId,source.id);assert.equal(processing.getModelOutput(output).projectId,source.id);
   assert.throws(()=>processing.moveTaskToProject(task.id,target.id,null,'staff',guardFor(restored,{undo:true})),{code:'task_move_undo_conflict'},'an Undo cannot be undone');
@@ -131,6 +131,45 @@ test('a moved task leaves the old project shares and appears through the new pro
   if(modelLink)assert.equal(repository.getPublicShare(modelLink.id).revokedAt,null);
 });
 
+test('Undo of a project move rechecks publish permission and reuses confirmation only for the same exposure',t=>{
+  const f=fixture(t),{processing,repository,database,source,target}=f;
+  const snapshot=taskId=>({task:(({projectId,folderId,folderRevision})=>({projectId,folderId,folderRevision}))(processing.getTask(taskId)),
+    audits:database.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE entity_id=? AND action='processing_task.project_changed'").get(taskId).n});
+  const refusedUnchanged=(taskId,move,code)=>{const before=snapshot(taskId);assert.throws(move,{code});assert.deepEqual(snapshot(taskId),before,`${code} leaves placement and audit unchanged`);};
+
+  // (a) Moved while unpublished by someone without publish scope; published before the Undo.
+  const late=publishedTask(f,source,'Published later');
+  database.prepare("UPDATE model_outputs SET status='ready' WHERE id=?").run(late.output);
+  const lateMoved=processing.moveTaskToProject(late.task.id,target.id,null,'writer',guardFor(late.task));
+  assert.equal(lateMoved.sharing.published,false,'an unpublished move needs no publish scope');
+  database.prepare("UPDATE model_outputs SET status='published' WHERE id=?").run(late.output);
+  const lateUndo=extra=>()=>processing.moveTaskToProject(late.task.id,source.id,null,'writer',guardFor(lateMoved,{undo:true,...extra}));
+  refusedUnchanged(late.task.id,lateUndo({}),'publish_permission_required');
+  refusedUnchanged(late.task.id,lateUndo({confirmSharingChange:true}),'publish_permission_required');
+  refusedUnchanged(late.task.id,lateUndo({canChangePublished:true}),'sharing_change_unconfirmed');
+  const lateRestored=lateUndo({canChangePublished:true,confirmSharingChange:true})();
+  assert.equal(lateRestored.projectId,source.id);
+
+  // (b) Published and confirmed forward move; publish permission is gone before the Undo.
+  const {task}=publishedTask(f,source,'Revoked');
+  const moved=processing.moveTaskToProject(task.id,target.id,null,'staff',guardFor(task,{confirmSharingChange:true,canChangePublished:true}));
+  const undo=extra=>()=>processing.moveTaskToProject(task.id,source.id,null,'staff',guardFor(moved,{undo:true,...extra}));
+  refusedUnchanged(task.id,undo({}),'publish_permission_required');
+  // The same actor with current publish scope reverses the identical exposure without confirming again.
+  const restored=undo({canChangePublished:true})();
+  assert.equal(restored.projectId,source.id);
+  const audit=JSON.parse(database.prepare("SELECT details_json FROM audit_events WHERE entity_id=? AND action='processing_task.project_changed' ORDER BY rowid DESC LIMIT 1").get(task.id).details_json);
+  assert.equal(audit.undo,true);assert.equal(audit.sharingChangeConfirmed,true);
+
+  // (c) The exposure changed after the forward move: a new live share on the destination needs a fresh confirmation.
+  const second=processing.getTask(task.id);
+  const again=processing.moveTaskToProject(task.id,target.id,null,'staff',guardFor(second,{confirmSharingChange:true,canChangePublished:true}));
+  repository.createProjectShare({projectId:target.id,publicIdHash:crypto.randomBytes(32).toString('hex'),permissions:{view:true}});
+  const changedUndo=extra=>()=>processing.moveTaskToProject(task.id,source.id,null,'staff',guardFor(again,{undo:true,canChangePublished:true,...extra}));
+  refusedUnchanged(task.id,changedUndo({}),'sharing_change_unconfirmed');
+  assert.equal(changedUndo({confirmSharingChange:true})().projectId,source.id);
+});
+
 test('project move API checks permissions, idempotency, concurrency and reports sharing',async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-task-move-api-')),db=openDatabase(path.join(root,'db.sqlite'));
   const processing=new ProcessingRepository(db),repository=new ViewerRepository(db);
@@ -170,6 +209,13 @@ test('project move API checks permissions, idempotency, concurrency and reports 
   const refusal=await unconfirmed.json();assert.equal(refusal.code,'sharing_change_unconfirmed');assert.equal(refusal.details.published,true);
   const confirmed=await call(published,body(published,{confirmSharingChange:true}));
   assert.equal(confirmed.status,200);assert.equal((await confirmed.json()).task.projectId,target.id);
+  // Undo is re-authorized at Undo time: a task published after the forward move cannot be moved back without publish scope.
+  const {output:lateOutput,task:lateTask}=(()=>{const value=publishedTask(f,source,'Late publish');db.prepare("UPDATE model_outputs SET status='ready' WHERE id=?").run(value.output);return value;})();
+  const lateMove=await call(lateTask,body(lateTask),tokens.noPublish);assert.equal(lateMove.status,200);const lateMoved=(await lateMove.json()).task;
+  db.prepare("UPDATE model_outputs SET status='published' WHERE id=?").run(lateOutput);
+  const lateUndo=await call(lateTask,{projectId:source.id,folderId:null,expectedProjectId:target.id,expectedFolderId:null,expectedFolderRevision:lateMoved.folderRevision,undo:true},tokens.noPublish);
+  assert.equal(lateUndo.status,403);assert.equal((await lateUndo.json()).code,'publish_permission_required');
+  assert.equal(processing.getTask(lateTask.id).projectId,target.id);
   const busy=draftTask(f,source,'Busy');db.prepare("UPDATE processing_tasks SET status='processing' WHERE id=?").run(busy.id);
   const busyResponse=await call(busy,body(busy));assert.equal(busyResponse.status,409);assert.equal((await busyResponse.json()).code,'task_busy');
 });
