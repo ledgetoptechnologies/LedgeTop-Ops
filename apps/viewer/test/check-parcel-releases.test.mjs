@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import {
-  checkAll, exitCodeFor, formatReport, issuesFor, releaseVersion, syncIssues,
+  AUTOMATION_AUTHOR, checkAll, exitCodeFor, formatReport, issueMarker, issuesFor, releaseVersion, syncIssues,
 } from '../scripts/check-parcel-releases.mjs';
 
 const require = createRequire(import.meta.url);
@@ -133,32 +133,71 @@ test('check: discovery outages are warnings, not failures', async () => {
   assert.deepEqual(issuesFor(report), []);
 });
 
-test('issues: an open issue with the same title is updated, never duplicated', async () => {
-  const issues = [{ title: 'Parcel source update available: Wisconsin V13', body: 'new body' }, { title: 'Parcel source down: Wisconsin', body: 'down' }];
+const BOT = { login: 'github-actions[bot]' };
+const UPDATE = 'Parcel source update available: Wisconsin V13';
+const DOWN = 'Parcel source down: Wisconsin';
+const ownIssues = () => [
+  { title: UPDATE, marker: issueMarker('wi-statewide-parcels', 'update'), body: `new body\n${issueMarker('wi-statewide-parcels', 'update')}` },
+  { title: DOWN, marker: issueMarker('wi-statewide-parcels', 'down'), body: `down\n${issueMarker('wi-statewide-parcels', 'down')}` },
+];
+function githubMock(openIssues) {
   const calls = [];
   const fetchImpl = async (url, options) => {
     calls.push({ method: options.method, url, body: options.body ? JSON.parse(options.body) : null, auth: options.headers.Authorization });
-    if (options.method === 'GET') return json([
-      { number: 7, title: 'Parcel source update available: Wisconsin V13', pull_request: { url: 'x' } },
-      { number: 9, title: 'Parcel source update available: Wisconsin V13' },
-    ]);
-    return json({ number: options.method === 'POST' ? 12 : 9 });
+    if (options.method === 'GET') return json(openIssues);
+    return json({ number: options.method === 'POST' ? 12 : Number(url.split('/').pop()) });
   };
-  const actions = await syncIssues(issues, { repo: 'example/repo', token: 't', fetchImpl });
+  return { calls, fetchImpl };
+}
+
+test('issues: carry a hidden marker naming the source and finding', () => {
+  const report = { checkedAt: 'x', results: [{ id: 'wi-statewide-parcels', region: 'Wisconsin', release: 'V12 (2026)', layerUrl: WISCONSIN.layerUrl,
+    layer: { up: false, reason: 'HTTP 500' }, newer: { version: 13, title: 't', via: 'ArcGIS search', url: null, inPlace: false } }] };
+  const issues = issuesFor(report);
+  assert.deepEqual(issues.map(i => i.marker), ['<!-- parcel-source-release-check:wi-statewide-parcels:down -->', '<!-- parcel-source-release-check:wi-statewide-parcels:update -->']);
+  for (const issue of issues) assert.ok(issue.body.endsWith(issue.marker));
+  assert.equal(AUTOMATION_AUTHOR, 'github-actions[bot]');
+});
+
+test('issues: the automation updates its own open issue, never duplicating it', async () => {
+  const { calls, fetchImpl } = githubMock([
+    { number: 7, title: UPDATE, user: BOT, body: issueMarker('wi-statewide-parcels', 'update'), pull_request: { url: 'x' } },
+    { number: 9, title: UPDATE, user: BOT, body: `old body\n${issueMarker('wi-statewide-parcels', 'update')}` },
+  ]);
+  const actions = await syncIssues(ownIssues(), { repo: 'example/repo', token: 't', fetchImpl });
   assert.deepEqual(actions, [
-    { action: 'updated', number: 9, title: 'Parcel source update available: Wisconsin V13' },
-    { action: 'opened', number: 12, title: 'Parcel source down: Wisconsin' },
+    { action: 'updated', number: 9, title: UPDATE },
+    { action: 'opened', number: 12, title: DOWN },
   ]);
   assert.deepEqual(calls.map(c => `${c.method} ${c.url}`), [
     'GET https://api.github.com/repos/example/repo/issues?state=open&per_page=100&page=1',
     'PATCH https://api.github.com/repos/example/repo/issues/9',
     'POST https://api.github.com/repos/example/repo/issues',
   ], 'the pull request with the same title is not treated as the issue');
-  assert.deepEqual(calls[1].body, { body: 'new body' });
-  assert.deepEqual(calls[2].body, { title: 'Parcel source down: Wisconsin', body: 'down' });
+  assert.deepEqual(calls[1].body, { body: ownIssues()[0].body });
+  assert.deepEqual(calls[2].body, { title: DOWN, body: ownIssues()[1].body });
   assert.ok(calls.every(c => c.auth === 'Bearer t'));
   assert.deepEqual(await syncIssues([], { fetchImpl: () => assert.fail('no call') }), []);
-  await assert.rejects(syncIssues(issues, { repo: 'example/repo', token: '', fetchImpl }), /GITHUB_TOKEN/);
+  await assert.rejects(syncIssues(ownIssues(), { repo: 'example/repo', token: '', fetchImpl }), /GITHUB_TOKEN/);
+});
+
+test('issues: a same-title issue the automation does not own is never edited', async () => {
+  const marker = issueMarker('wi-statewide-parcels', 'update');
+  const { calls, fetchImpl } = githubMock([
+    { number: 3, title: UPDATE, user: { login: 'operator' }, body: 'Notes an operator wrote by hand.' },
+    { number: 4, title: UPDATE, user: { login: 'operator' }, body: `Copied the marker by hand.\n${marker}` },
+    { number: 5, title: UPDATE, user: BOT, body: 'Bot issue without the marker.' },
+    { number: 6, title: UPDATE, user: BOT, body: issueMarker('wi-statewide-parcels', 'down') },
+    { number: 8, title: UPDATE, user: BOT, body: `own issue\n${marker}` },
+  ]);
+  const actions = await syncIssues([ownIssues()[0]], { repo: 'example/repo', token: 't', fetchImpl });
+  assert.deepEqual(actions, [{ action: 'updated', number: 8, title: UPDATE }], 'only its own marked, bot-authored issue');
+  assert.deepEqual(calls.filter(c => c.method !== 'GET').map(c => c.url), ['https://api.github.com/repos/example/repo/issues/8']);
+
+  // Only a manual issue holds the title: it is left alone and the automation opens its own.
+  const manual = githubMock([{ number: 3, title: UPDATE, user: { login: 'operator' }, body: 'Notes an operator wrote by hand.' }]);
+  assert.deepEqual(await syncIssues([ownIssues()[0]], { repo: 'example/repo', token: 't', fetchImpl: manual.fetchImpl }), [{ action: 'opened', number: 12, title: UPDATE }]);
+  assert.deepEqual(manual.calls.map(c => c.method), ['GET', 'POST'], 'no PATCH of the manual issue');
 });
 
 test('workflow: monthly and manual only, small, minimal permissions, no install', () => {
@@ -166,7 +205,7 @@ test('workflow: monthly and manual only, small, minimal permissions, no install'
   assert.match(workflow, /schedule:\n\s+- cron: '\d+ \d+ 1 \* \*'/);
   assert.match(workflow, /workflow_dispatch:/);
   assert.doesNotMatch(workflow, /\n\s+(push|pull_request|pull_request_target):/);
-  assert.match(workflow, /runs-on: ubuntu-latest/);
+  assert.match(workflow, /\n  check:\n(\s+#[^\n]*\n)*    if: github\.ref == 'refs\/heads\/main'\n    runs-on: ubuntu-latest\n/, 'job-level main-only guard, before a runner is allocated');
   assert.match(workflow, /timeout-minutes: 5/);
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+issues: write\n/);
   assert.doesNotMatch(workflow, /npm (ci|install)|pnpm|yarn/);

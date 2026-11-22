@@ -152,27 +152,31 @@ export function formatReport(report) {
 
 const REGISTRY_PATH = 'apps/viewer/server/parcelSources.js';
 
+// The only author whose issues this check edits.
+export const AUTOMATION_AUTHOR = 'github-actions[bot]';
+// Hidden, stable marker naming the source and finding; an issue is the
+// automation's own only with this marker and the automation author.
+export const issueMarker = (sourceId, kind) => `<!-- parcel-source-release-check:${sourceId}:${kind} -->`;
+
 // One issue per finding, with a fixed title so a repeat finding updates the
-// open issue instead of opening another.
+// automation's open issue instead of opening another.
 export function issuesFor(report) {
   const issues = [];
+  const add = (r, kind, title, lines) => {
+    const marker = issueMarker(r.id, kind);
+    issues.push({ title, marker, body: [...lines, '', 'Opened by the parcel source release check. It never changes the registry itself.', marker].join('\n') });
+  };
   for (const r of report.results) {
-    if (!r.layer.up) issues.push({
-      title: `Parcel source down: ${r.region}`,
-      body: [`The configured ${r.region} parcel layer did not answer the monthly check.`, '',
+    if (!r.layer.up) add(r, 'down', `Parcel source down: ${r.region}`,
+      [`The configured ${r.region} parcel layer did not answer the monthly check.`, '',
         `- Layer: ${r.layerUrl}`, `- Reason: ${r.layer.reason}`, `- Checked: ${report.checkedAt}`, '',
-        'Property lines for this region show "service unavailable" while this lasts. If the state moved the layer, find the new release, check its fields and update `' + REGISTRY_PATH + '`.',
-        '', 'Opened by the parcel source release check. It never changes the registry itself.'].join('\n'),
-    });
-    if (r.newer) issues.push({
-      title: `Parcel source update available: ${r.region} V${r.newer.version}`,
-      body: [`A newer ${r.region} parcel release was found. The Viewer still uses ${r.release}.`, '',
+        'Property lines for this region show "service unavailable" while this lasts. If the state moved the layer, find the new release, check its fields and update `' + REGISTRY_PATH + '`.']);
+    if (r.newer) add(r, 'update', `Parcel source update available: ${r.region} V${r.newer.version}`,
+      [`A newer ${r.region} parcel release was found. The Viewer still uses ${r.release}.`, '',
         `- Found: ${r.newer.title} (${r.newer.via})`, `- URL: ${r.newer.url || 'not listed'}`,
         r.newer.inPlace ? '- The configured layer itself now reports this release (replaced in place).' : `- Configured layer: ${r.layerUrl}`,
         `- Checked: ${report.checkedAt}`, '',
-        'To adopt it: read the new layer\'s metadata (`?f=json`), confirm the id field, spatial reference (Web Mercator) and extent, then update `layerUrl`, `release`, `credit` and `discovery.currentVersion` in `' + REGISTRY_PATH + '` and run the property-lines tests.',
-        '', 'Opened by the parcel source release check. It never changes the registry itself.'].join('\n'),
-    });
+        'To adopt it: read the new layer\'s metadata (`?f=json`), confirm the id field, spatial reference (Web Mercator) and extent, then update `layerUrl`, `release`, `credit` and `discovery.currentVersion` in `' + REGISTRY_PATH + '` and run the property-lines tests.']);
   }
   return issues;
 }
@@ -195,7 +199,10 @@ export async function syncIssues(issues, { repo, token, fetchImpl = globalThis.f
   }
   const actions = [];
   for (const issue of issues) {
-    const existing = open.find(item => item.title === issue.title);
+    // Only the automation's own issue is edited; a same-title issue someone
+    // else opened is left alone.
+    const existing = open.find(item => item.title === issue.title && item.user?.login === AUTOMATION_AUTHOR
+      && typeof item.body === 'string' && item.body.includes(issue.marker));
     if (existing) { await call('PATCH', `/issues/${existing.number}`, { body: issue.body }); actions.push({ action: 'updated', number: existing.number, title: issue.title }); }
     else { const created = await call('POST', '/issues', { title: issue.title, body: issue.body }); actions.push({ action: 'opened', number: created.number, title: issue.title }); }
   }
