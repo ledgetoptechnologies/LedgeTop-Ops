@@ -170,6 +170,38 @@ test('Undo of a project move rechecks publish permission and reuses confirmation
   assert.equal(changedUndo({confirmSharingChange:true})().projectId,source.id);
 });
 
+test('a task whose runs used other datasets, or whose dataset another task runs on, does not change project',t=>{
+  const f=fixture(t),{processing,database,source,target}=f;
+  const provider=processing.upsertProvider({type:'nodeodm',displayName:'Provider history',endpoint:'http://127.0.0.1:3000',enabled:true});
+  const finishedAttempt=(taskId,datasetId,status='failed')=>{const attempt=processing.createAttempt({taskId,datasetId,providerId:provider.id,options:{},createdBy:'ops:test'});
+    database.prepare('UPDATE processing_attempts SET status=? WHERE id=?').run(status,attempt.id);database.prepare("UPDATE processing_jobs SET status='complete' WHERE attempt_id=?").run(attempt.id);
+    database.prepare("UPDATE processing_tasks SET status='failed' WHERE id=?").run(taskId);return attempt;};
+  const photos=label=>{const dataset=processing.createDataset({projectId:source.id,displayName:label,storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()});processing.finalizeDataset(dataset.id,[],'b'.repeat(64));return dataset;};
+  const state=task=>({task:(({projectId,folderId,folderRevision,datasetId})=>({projectId,folderId,folderRevision,datasetId}))(processing.getTask(task.id)),
+    datasets:database.prepare('SELECT id,project_id FROM datasets ORDER BY id').all().map(row=>`${row.id}:${row.project_id}`),
+    outputs:database.prepare('SELECT id,project_id FROM model_outputs ORDER BY id').all().map(row=>`${row.id}:${row.project_id}`),
+    audits:database.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='processing_task.project_changed'").get().n});
+  const refused=(task,code)=>{const before=state(task);assert.throws(()=>processing.moveTaskToProject(task.id,target.id,null,'staff',guardFor(processing.getTask(task.id),{confirmSharingChange:true,canChangePublished:true})),{code});assert.deepEqual(state(task),before,`${code} leaves placement, data and audit unchanged`);};
+
+  // Shape 1: an earlier run of this task used other photos than its current primary dataset.
+  const historical=draftTask(f,source,'Historical'),earlier=photos('Earlier photos');
+  finishedAttempt(historical.id,earlier.id);
+  refused(historical,'task_has_historical_datasets');
+
+  // Shape 2: another task's run uses this task's primary dataset while its own primary differs.
+  const owner=draftTask(f,source,'Owner'),borrower=draftTask(f,source,'Borrower');
+  finishedAttempt(borrower.id,owner.datasetId);
+  refused(owner,'dataset_referenced_by_other_task');
+  assert.equal(processing.getDataset(owner.datasetId).projectId,source.id);
+
+  // Allowed move: every run used the primary dataset, so a failed historical run can still be retried afterwards.
+  const single=draftTask(f,source,'Single'),failed=finishedAttempt(single.id,single.datasetId);
+  const moved=processing.moveTaskToProject(single.id,target.id,null,'staff',guardFor(processing.getTask(single.id)));
+  assert.equal(moved.projectId,target.id);assert.equal(processing.getDataset(single.datasetId).projectId,target.id);
+  const retried=processing.retryAttempt(failed.id,'ops:test');
+  assert.ok(retried,'historical retry works after an allowed move');assert.equal(retried.datasetId,single.datasetId);assert.equal(retried.taskId,single.id);
+});
+
 test('project move API checks permissions, idempotency, concurrency and reports sharing',async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-task-move-api-')),db=openDatabase(path.join(root,'db.sqlite'));
   const processing=new ProcessingRepository(db),repository=new ViewerRepository(db);

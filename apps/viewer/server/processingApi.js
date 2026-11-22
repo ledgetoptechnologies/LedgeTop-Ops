@@ -562,7 +562,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       return res.json({task,sharing,...(undoExpiresAt?{undoExpiresAt}:{})});
     }catch(e){
       const status=e.code==='publish_permission_required'?403
-        :['task_move_conflict','task_move_undo_conflict','task_busy','dataset_shared','dataset_name_conflict','sharing_change_unconfirmed','same_project'].includes(e.code)?409:400;
+        :['task_move_conflict','task_move_undo_conflict','task_busy','dataset_shared','task_has_historical_datasets','dataset_referenced_by_other_task','dataset_name_conflict','sharing_change_unconfirmed','same_project'].includes(e.code)?409:400;
       return error(res,status,e.code||'invalid_task_move',e.code?e.message:undefined,e.details);
     }
   });

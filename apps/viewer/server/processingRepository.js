@@ -560,6 +560,12 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     if(!dataset||dataset.projectId!==task.projectId||['finalizing','trashed'].includes(dataset.status))fail('dataset_unavailable','The task source dataset cannot move with it.');
     if(this.database.prepare('SELECT 1 FROM processing_tasks WHERE dataset_id=? AND id<>? AND purged_at IS NULL LIMIT 1').get(dataset.id,taskId))
       fail('dataset_shared','Another task uses the same source photos, so this task cannot move to another project on its own.');
+    // Attempts and imports can name a dataset other than the task's primary one. Moving only the primary would strand those
+    // runs (a retry would be refused) or carry another task's dataset away, so both shapes are refused for now.
+    if(this.database.prepare('SELECT 1 FROM processing_attempts WHERE task_id=? AND dataset_id IS NOT NULL AND dataset_id<>? UNION ALL SELECT 1 FROM webodm_task_imports WHERE task_id=? AND dataset_id<>? LIMIT 1').get(taskId,dataset.id,taskId,dataset.id))
+      fail('task_has_historical_datasets','Earlier runs of this task used other source photos, so it cannot move to another project yet.');
+    if(this.database.prepare('SELECT 1 FROM processing_attempts WHERE dataset_id=? AND task_id<>? UNION ALL SELECT 1 FROM webodm_task_imports WHERE dataset_id=? AND task_id<>? LIMIT 1').get(dataset.id,taskId,dataset.id,taskId))
+      fail('dataset_referenced_by_other_task','A run of another task uses these source photos, so this task cannot move to another project on its own.');
     if(this.database.prepare("SELECT 1 FROM datasets WHERE id<>? AND project_id=? AND status<>'trashed' AND display_name=? COLLATE NOCASE").get(dataset.id,target.id,dataset.displayName))
       fail('dataset_name_conflict','The destination project already has a source dataset with this name. Rename one of them first.');
     const liveShares=projectId=>Number(this.database.prepare('SELECT COUNT(*) AS n FROM public_project_shares WHERE project_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)').get(projectId,timestamp).n);
