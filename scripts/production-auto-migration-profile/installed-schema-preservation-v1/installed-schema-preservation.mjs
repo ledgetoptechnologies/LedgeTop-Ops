@@ -20,7 +20,7 @@ function deepFreeze(value) {
 }
 export const PROFILE = deepFreeze(JSON.parse(readFileSync(PROFILE_PATH, 'utf8')));
 export const ACCOUNT_ID = '846c924bf17bf4f3dd15c97a4c5d1d51';
-export const SOURCE_COMMIT = '2686c535658398baf746b78a41e8af6b79f04538';
+export const SOURCE_COMMIT = 'e191147d28ceee64622e13265c017d77b1bd9691';
 export const PRODUCTION_DATABASES = Object.freeze({
   operations: '6ebf7514-d306-4615-ae56-ad869c874dbd',
   client: '7f40a7b7-c3ec-470e-a626-e798867f71f8',
@@ -548,7 +548,7 @@ export function validateInstalledSchemaPreservationReleaseAdmissionOffline(class
     authorizesMigration: false, authorizesFeatureActivation: false });
 }
 
-const PINNED_PROFILE_BYTES_SHA256 = '4267e120dd08ef7eb7a405e1e75e8f700b5147cbde4169f27268cc4f09ad821f';
+const PINNED_PROFILE_BYTES_SHA256 = 'aaa00f2a567a3cb66d047ffba75dd82a8311854598da346e1b15ac9a3222f821';
 const PROFILE_BYTES_SHA256 = hash(Buffer.from(readFileSync(PROFILE_PATH, 'utf8').replace(/\r\n/gu, '\n')));
 if (PROFILE_BYTES_SHA256 !== PINNED_PROFILE_BYTES_SHA256) fail('preservation_profile_bytes_unpinned');
 export const PROFILE_SHA256 = PROFILE_BYTES_SHA256;

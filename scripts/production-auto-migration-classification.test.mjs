@@ -15,7 +15,9 @@ import {
   validateAppendOnlyMigrationReadiness,
 } from './production-auto-migration-classification.mjs';
 import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
-import { APPROVED_SOURCE_COMMIT } from './production-auto-migration-profile/append-only-inventory-gate.mjs';
+import { APPROVED_SOURCE_COMMIT, evaluateApprovedAppendOnlyLedger, validateApprovedAppendOnlySourceInventory }
+  from './production-auto-migration-profile/append-only-inventory-gate.mjs';
+import { readSourceMigrationInventory } from './production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs';
 import { PROFILE, canonical } from './production-deploy.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,6 +43,7 @@ const fullRows = Object.fromEntries(Object.entries(baseRows).map(([app, rows]) =
 assert.equal(execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), COMMIT);
 assert.equal(manifest.source.commit, APPROVED_SOURCE_COMMIT);
 assert.equal(manifest.actualReceipt.sourceCommit, 'c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8');
+assert.equal(manifest.operationsActualReceipt.sourceCommit, '2686c535658398baf746b78a41e8af6b79f04538');
 assert.equal(plan.actualReceipt.sourceCommit, 'c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8');
 assert.equal(plan.sourceCommit, APPROVED_SOURCE_COMMIT);
 
@@ -184,7 +187,7 @@ test('fully appended inventories are classified but schema readiness remains sep
   assert.equal(result.status, 'inventory-current-schema-check-required');
   assert.equal(result.migrationRequired, false);
   assert.equal(result.applicationSchemaReady, false);
-  assert.deepEqual(result.databases.map((row) => row.installedRowCount), [231, 162]);
+  assert.deepEqual(result.databases.map((row) => row.installedRowCount), [236, 162]);
   assert.ok(result.databases.every((row) => row.status === 'fully-appended-source-inventory' && row.appendEnvelope.length === 0));
   assert.deepEqual(validateAppendOnlyMigrationReadiness(result, {
     sourceCommit: result.sourceCommit, now: Date.parse(result.observedAt), appendOnlyProfile: profile,
@@ -315,7 +318,7 @@ test('unknown, tampered, or stale append profile refuses before provider request
   }), { code: 'append_readiness_stale' });
 });
 
-test('current 0242 source successor is refused by the unchanged historical profile before provider requests', async () => {
+test('current 0242 Client source successor is refused by the unchanged Client profile before provider requests', async () => {
   const provider = fakeProvider(baseRows);
   const currentClientNames = readdirSync(path.join(root, 'apps/client/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
@@ -330,17 +333,50 @@ test('current 0242 source successor is refused by the unchanged historical profi
   assert.equal(provider.calls, 0);
 });
 
-test('current Logs and staff successors are refused by the unchanged historical profile before provider requests', async () => {
-  const provider = fakeProvider(strictSourceRows);
-  const currentOperationsNames = readdirSync(path.join(root, 'apps/operations/migrations'))
-    .filter((name) => name.endsWith('.sql')).sort();
+test('current Ops source (0227..0231, 0240..0244) matches the Ops section of the regenerated profile', () => {
+  const current = readSourceMigrationInventory(COMMIT);
+  const currentOperationsNames = current.rows.operations.map((row) => row.name);
   assert.equal(currentOperationsNames.length, 236);
   assert.deepEqual(currentOperationsNames.slice(-5), [
     '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql', '0242_native_staff_onboarding_approval_actor_authority.sql',
     '0243_staff_logs_device_eligibility.sql', '0244_staff_operations_access_writer.sql',
   ]);
+  const common = { ...profile, sourceCommit: COMMIT, app: 'operations', sourceRows: current.rows.operations,
+    sourceFiles: current.files.operations, localMigrationNames: currentOperationsNames };
+  assert.equal(validateApprovedAppendOnlySourceInventory(common).length, 236);
+  const base = evaluateApprovedAppendOnlyLedger({ ...common, databaseId: PRODUCTION_MIGRATION_TARGET.databases[0].databaseId,
+    ledgerRows: baseRows.operations });
+  assert.equal(base.status, 'preserved-base-awaiting-entire-approved-append');
+  assert.equal(base.installedRowCount, 226);
+  assert.deepEqual(base.appendEnvelope.map((row) => row.name), currentOperationsNames.slice(226));
+  assert.deepEqual(base.appendEnvelope.map((row) => row.ledgerId), [227, 228, 229, 230, 231, 232, 233, 234, 235, 236]);
+  const full = evaluateApprovedAppendOnlyLedger({ ...common, databaseId: PRODUCTION_MIGRATION_TARGET.databases[0].databaseId,
+    ledgerRows: fullRows.operations });
+  assert.equal(full.status, 'fully-appended-source-inventory');
+  assert.equal(full.installedRowCount, 236);
+});
+
+test('a source successor beyond the regenerated profile is refused before provider requests', async (t) => {
+  const successor = mkdtempSync(path.join(os.tmpdir(), 'append-profile-successor-source-'));
+  t.after(() => {
+    const resolved = path.resolve(successor);
+    assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()));
+    rmSync(resolved, { recursive: true, force: true });
+  });
+  for (const app of ['operations', 'client']) {
+    const from = path.join(approvedFixture, 'apps', app, 'migrations'), to = path.join(successor, 'apps', app, 'migrations');
+    mkdirSync(to, { recursive: true });
+    for (const name of readdirSync(from)) writeFileSync(path.join(to, name), readFileSync(path.join(from, name)));
+  }
+  writeFileSync(path.join(successor, 'apps/operations/migrations/0245_unreviewed.sql'), 'SELECT 1;\n');
+  for (const command of [['init', '-q'], ['config', 'core.autocrlf', 'false'], ['config', 'user.email', 'fixture@example.invalid'],
+    ['config', 'user.name', 'Successor fixture'], ['add', 'apps'], ['commit', '-qm', 'successor fixture']]) {
+    execFileSync('git', ['-C', successor, ...command]);
+  }
+  const head = execFileSync('git', ['-C', successor, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const provider = fakeProvider(baseRows);
   await assert.rejects(readProductionMigrationReadiness(args(provider.fetchImpl, {
-    appendOnlyProfile: profile, root, sourceCommit: COMMIT,
+    appendOnlyProfile: profile, root: successor, sourceCommit: head,
   })), { code: 'source_inventory_count_mismatch' });
   assert.equal(provider.calls, 0);
 });
@@ -370,8 +406,8 @@ test('pinned profile JSON hashes survive a fresh autocrlf Windows checkout', (t)
   rmSync(path.join(profileDirectory, 'append-plan.json'));
   execFileSync('git', ['-C', checkout, 'checkout-index', '--force', '--all']);
   const expected = {
-    'reconciliation-manifest.json': '33f661636025c8432aa862b158703df9053f79ca7532813cea0e23cc3c181faa',
-    'append-plan.json': '142ccefd193341dafb0796fa046ecd7f559d9ab6af6f70217f9a52043a16685d',
+    'reconciliation-manifest.json': '07f38c53f6627f35f160765e57fdeb3da470fb35d7129003b734b559bb0285a6',
+    'append-plan.json': 'a8ce124b87985f1dd7251bf34ec32cd740b4debb3ac54cbdc4796a9c776791fa',
   };
   for (const [name, sha256] of Object.entries(expected)) {
     const checked = readFileSync(path.join(profileDirectory, name));
@@ -388,8 +424,8 @@ test('partial, reordered, altered, and wrong-target ledgers are refused', async 
     ['partial append', { operations: [...baseRows.operations, ...fullRows.operations.slice(baseRows.operations.length, -1)], client: fullRows.client }],
     ['reordered', { operations: [...baseRows.operations].reverse(), client: fullRows.client }],
     ['altered name', { operations: baseRows.operations.map((row, index) => index === 10 ? { ...row, name: '0000_tampered.sql' } : row), client: fullRows.client }],
-    ['noncontiguous append ID', { operations: fullRows.operations.map((row, index) => index === 221 ? { ...row, id: row.id + 1 } : row), client: fullRows.client }],
-    ['unexpected suffix', { operations: [...fullRows.operations, { id: 232, name: '0232_unapproved.sql' }], client: fullRows.client }],
+    ['noncontiguous append ID', { operations: fullRows.operations.map((row, index) => index === 226 ? { ...row, id: row.id + 1 } : row), client: fullRows.client }],
+    ['unexpected suffix', { operations: [...fullRows.operations, { id: 237, name: '0245_unapproved.sql' }], client: fullRows.client }],
   ]) {
     await t.test(label, async () => assert.rejects(
       readProductionMigrationReadiness(args(fakeProvider(rows).fetchImpl, { appendOnlyProfile: profile })),

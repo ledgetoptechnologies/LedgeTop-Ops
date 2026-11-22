@@ -110,7 +110,9 @@ test('sanitized actual metadata classifies the exact installed ledgers and pendi
   assert.equal(result.status, 'installed-schema-preserved-with-pending-source-migrations');
   assert.deepEqual(result.databases.operations.pendingSourceNames, [
     '0227_owner_intel_reads.sql', '0228_competitor_intel_ingest.sql', '0229_owner_intel_source_feed.sql',
-    '0230_app_release_pilot.sql', '0231_owner_google_ads_summary.sql',
+    '0230_app_release_pilot.sql', '0231_owner_google_ads_summary.sql', '0240_flight_logs_permissions.sql',
+    '0241_staff_usernames.sql', '0242_native_staff_onboarding_approval_actor_authority.sql',
+    '0243_staff_logs_device_eligibility.sql', '0244_staff_operations_access_writer.sql',
   ]);
   assert.deepEqual(result.databases.client.pendingSourceNames, [
     '0235_windows_portal_successor_candidates.sql', '0236_windows_portal_successor_content_start_audit.sql',
@@ -149,15 +151,24 @@ test('synthetic classifier source commit accepts only identical pinned inventori
     sourceRows: source.rows, sourceFiles: changedFiles, now: fresh(fixture) }), /operations_source_bytes_mismatch/);
 });
 
-test('the unchanged historical profile rejects the complete current 236-file Operations inventory', () => {
+test('the regenerated profile accepts the complete current 236-file Operations inventory and refuses a successor', () => {
   const current = readSourceMigrationInventory(SOURCE_COMMIT);
   assert.equal(current.rows.operations.length, 236);
   assert.deepEqual(current.rows.operations.slice(-5).map(row => row.name), [
     '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql', '0242_native_staff_onboarding_approval_actor_authority.sql',
     '0243_staff_logs_device_eligibility.sql', '0244_staff_operations_access_writer.sql',
   ]);
+  const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
+    sourceRows: current.rows, sourceFiles: current.files, now: fresh(fixture) });
+  assert.equal(result.databases.operations.sourceInventoryCount, 236);
+  assert.equal(result.databases.operations.pendingSourceNames.length, 10);
+  const bytes = Buffer.from('SELECT 1;\n');
+  const extra = { name: '0245_unreviewed.sql', sha256: hash(bytes),
+    gitBlobOid: createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes])).digest('hex') };
   assert.throws(() => validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
-    sourceRows: current.rows, sourceFiles: current.files, now: fresh(fixture) }), /preservation_operations_source_inventory_mismatch/u);
+    sourceRows: { ...current.rows, operations: [...current.rows.operations, extra] },
+    sourceFiles: { ...current.files, operations: [...current.files.operations, { name: extra.name, bytes }] },
+    now: fresh(fixture) }), /preservation_operations_source_inventory_mismatch/u);
 });
 
 test('ledger reorder, migration ledger drift, and schema drift are rejected', () => {
