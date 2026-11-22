@@ -122,17 +122,44 @@ export interface NativeViewerWorkItem {
   title: string; projectName: string | null; businessName: string | null;
   sharedAt: string; updatedAt: string; expiresAt: string | null;
   permissions: { measure: boolean; cameras: boolean; download: boolean };
+  /** Opaque per-account project grouping key; absent from older portals. Never an address. */
+  projectKey?: string;
+  /** Root-first folders above the task; absent from older portals, which keep the flat list. */
+  folderPath?: Array<{ id: string; name: string }>;
 }
 export interface NativeViewerWorkPage { workspaceId: string; contextVersion: string; items: NativeViewerWorkItem[]; nextCursor: string | null }
 const viewerId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const timestamp = (value: unknown): value is string => text(value, 64) && Number.isFinite(Date.parse(value));
+/** A safe folder label: control characters (C0 and DEL) removed, trimmed, at most 160 characters, never empty. */
+export function folderLabel(name: string): string {
+  const label = name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 160).trim();
+  return label || "Untitled folder";
+}
+/**
+ * Structure is strict (at most 16 exact {id,name} entries, opaque ids, string names, no repeated folder): anything else
+ * rejects the page. A name is only a label, so an unusual one is neutralized with folderLabel and the rest is kept.
+ */
+function parseFolderPath(value: unknown): Array<{ id: string; name: string }> | null | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 16) return null;
+  const seen = new Set<string>(), path: Array<{ id: string; name: string }> = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || Object.keys(entry).sort().join(",") !== "id,name") return null;
+    const { id, name } = entry as { id: unknown; name: unknown };
+    if (typeof id !== "string" || !viewerId.test(id) || seen.has(id) || typeof name !== "string" || name.length > 4096) return null;
+    seen.add(id); path.push({ id, name: folderLabel(name) });
+  }
+  return path;
+}
+const projectKeyPattern = /^[A-Za-z0-9_-]{16,128}$/;
 function validViewerWorkItem(item: NativeViewerWorkItem, workspaceId: string): boolean {
   const permissions = item?.permissions;
   return !!item && typeof item === "object" && item.workspaceId === workspaceId && typeof item.grantId === "string" && viewerId.test(item.grantId) &&
     typeof item.taskId === "string" && viewerId.test(item.taskId) && (item.scopeType === "project" || item.scopeType === "task") &&
     text(item.title, 400) && (item.projectName === null || text(item.projectName, 400)) && (item.businessName === null || text(item.businessName, 400)) &&
     timestamp(item.sharedAt) && timestamp(item.updatedAt) && (item.expiresAt === null || timestamp(item.expiresAt)) &&
-    !!permissions && typeof permissions === "object" && typeof permissions.measure === "boolean" && typeof permissions.cameras === "boolean" && typeof permissions.download === "boolean";
+    !!permissions && typeof permissions === "object" && typeof permissions.measure === "boolean" && typeof permissions.cameras === "boolean" && typeof permissions.download === "boolean" &&
+    parseFolderPath(item.folderPath) !== null && (item.projectKey === undefined || (typeof item.projectKey === "string" && projectKeyPattern.test(item.projectKey)));
 }
 /** Lists 3D work shared directly with one exact client account. The cursor belongs to that account only. */
 export async function loadNativeViewerWork(workspaceId: string, cursor: string | null, signal?: AbortSignal, request: PortalRequest = requestJson): Promise<NativeViewerWorkPage> {
@@ -140,7 +167,8 @@ export async function loadNativeViewerWork(workspaceId: string, cursor: string |
   const value = await request<NativeViewerWorkPage>(`${nativeWorkspaceBase(workspaceId)}/viewer${query}`, { signal });
   if (!value || value.workspaceId !== workspaceId || !text(value.contextVersion) || !Array.isArray(value.items) || !nullableText(value.nextCursor) ||
       (cursor !== null && value.nextCursor === cursor) || value.items.some(item => !validViewerWorkItem(item, workspaceId))) throw invalid();
-  return value;
+  // Folder names are rendered only in their neutralized form.
+  return { ...value, items: value.items.map(item => item.folderPath === undefined ? item : { ...item, folderPath: parseFolderPath(item.folderPath)! }) };
 }
 /** Issues (or renews, with a fresh key) a Viewer session for one task under the exact grant that listed it. */
 export async function openNativeViewerTaskSession(workspaceId: string, grantId: string, taskId: string, displayUnits: "imperial" | "metric",

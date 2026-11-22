@@ -1,4 +1,5 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
+import { BoundedTestCdp as CdpClient } from './bounded-test-cdp.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -7,10 +8,12 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { writeArrayBuffer } from 'geotiff';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
 const token = 'browser_workspace_token_1234567890abcdef';
 const manualFixture = process.env.LTDS_WORKSPACE_MANUAL_QA === '1';
 const manualFixtureGrant = 'local_fixture_grant_00000000000000000000';
@@ -166,8 +169,18 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     });
   }
   if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.filter(item=>!runtime.archivedProjects.has(item.id)), nextCursor: null });
+  const projectFolders = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/folders$/);
+  if (projectFolders && method === 'GET') return json({folders:[]});
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
-  if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)), nextCursor: null });
+  if (pathname === '/api/v1/tasks') {
+    const projectId=url.searchParams.get('projectId');
+    const tasks=fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)&&(!projectId||item.projectId===projectId))
+      .map(item=>{
+        const stored=runtime.folderProcessing?.getTask(item.id);
+        return stored?{...item,folderId:stored.folderId,folderRevision:stored.folderRevision,status:stored.status}:item;
+      });
+    return json({tasks,nextCursor:null});
+  }
   if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'PATCH') return json({ provider: { ...fixtures.providers[0], ...body } });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return json({ provider: fixtures.providers[0] });
@@ -344,9 +357,13 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images/image-1/content') return { status: 200, body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><rect width="100" height="80" fill="#555"/></svg>'), type: 'image/svg+xml' };
   if (pathname === '/api/v1/attempts/attempt-johnson') {
     const sequence = ++runtime.logSequence;
+    const createdAt = new Date().toISOString();
     return json({
       attempt: fixtures.tasks[0].latestAttempt,
-      logs: [{ createdAt: new Date().toISOString(), level: 'info', message: `Running stage odm_dem · browser refresh ${sequence}` }],
+      logs: [
+        ...Array.from({ length: runtime.longTaskOutput ? 50 : 0 }, (_, index) => ({ createdAt, level: 'info', message: `Fixture output line ${index}` })),
+        { createdAt, level: 'info', message: `Running stage odm_dem · browser refresh ${sequence}` },
+      ],
     });
   }
   if (runtime.testIngestRecovery && pathname === '/api/v1/attempts/attempt-johnson-old/recover-ingest' && method === 'POST') {
@@ -422,7 +439,10 @@ function startFixtureServer() {
           await runtime.taskDetailResponseGate;
         }
         if (manualFixture && request.method !== 'GET') console.log(`Synthetic mutation: ${request.method} ${url.pathname}`);
-        result = url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.failOrthophotoResponse
+        if(runtime.folderBackend&&(/^\/api\/v1\/projects\/[^/]+\/folders(?:\/[^/]+)?$/.test(url.pathname)||/^\/api\/v1\/tasks\/[^/]+\/folder$/.test(url.pathname))){
+          const upstream=await fetch(`${runtime.folderBackend}${url.pathname}`,{method:request.method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':request.headers['idempotency-key']||'folder-browser-fixture-key'},...(raw?{body:raw}:{})});
+          result={status:upstream.status,type:'application/json',body:Buffer.from(await upstream.arrayBuffer())};
+        }else result = url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.failOrthophotoResponse
           ? json({ error: 'synthetic_preview_unavailable' }, 503)
           : apiResponse(url, runtime, request.method, body);
       }
@@ -453,51 +473,28 @@ function startFixtureServer() {
   });
 }
 
-class CdpClient {
-  constructor(socket) {
-    this.socket = socket;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.events = [];
-    socket.addEventListener('message', event => {
-      const message = JSON.parse(event.data);
-      if (message.id) {
-        const pending = this.pending.get(message.id);
-        if (!pending) return;
-        this.pending.delete(message.id);
-        if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message}`));
-        else pending.resolve(message.result || {});
-      } else {
-        this.events.push(message);
-      }
-    });
-  }
+async function createDevToolsTarget(devTools, label = 'create browser target') {
+  const origin = new URL(devTools);
+  assert.equal(origin.protocol, 'http:');
+  assert.equal(origin.hostname, '127.0.0.1');
+  const response = await fetch(new URL('/json/new?about:blank', origin), {
+    method: 'PUT',
+    redirect: 'error',
+    signal: AbortSignal.timeout(10_000),
+  });
+  assert.equal(response.ok, true, label);
+  const target = await response.json();
+  const socket = new URL(target.webSocketDebuggerUrl);
+  assert.equal(socket.protocol, 'ws:');
+  assert.equal(socket.host, origin.host);
+  return target;
+}
 
-  static async connect(url) {
-    const socket = new WebSocket(url);
-    await new Promise((resolve, reject) => {
-      socket.addEventListener('open', resolve, { once: true });
-      socket.addEventListener('error', reject, { once: true });
-    });
-    return new CdpClient(socket);
-  }
-
-  command(method, params = {}) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
-      this.socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  async evaluate(expression) {
-    const result = await this.command('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
-    return result.result?.value;
-  }
-
-  close() {
-    this.socket.close();
+async function closeDevToolsTarget(client) {
+  try {
+    await client.command('Page.close').catch(() => {});
+  } finally {
+    client.close();
   }
 }
 
@@ -650,9 +647,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
   runtime.operations = structuredClone(fixtures.operations);
   runtime.derivatives = structuredClone(fixtures.derivatives);
   const requestStart = runtime.requests.length;
-  const targetResponse = await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' });
-  assert.equal(targetResponse.ok, true, `create browser target for ${viewport.name}`);
-  const target = await targetResponse.json();
+  const target = await createDevToolsTarget(devTools, `create browser target for ${viewport.name}`);
   const client = await CdpClient.connect(target.webSocketDebuggerUrl);
   try {
     await client.command('Page.enable');
@@ -757,7 +752,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['View', 'Model report', 'Share'], `${viewport.name}: published task shortcuts must remain focused on viewing and sharing`);
     await client.evaluate(`document.querySelector('.task-more-actions > summary').click()`);
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Details & processing','Files & versions','Processing history','Ground control points']);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Move to folder','Details & processing','Files & versions','Processing history','Ground control points']);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
@@ -801,11 +796,35 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('.modal-close').click()`);
     // Expanded task output refreshes in place; full historical diagnostics
     // remain available through the separately exercised Diagnostics route.
-    const firstLog = runtime.logSequence;
-    const refreshStart = runtime.requests.length;
-    await waitForRequest(runtime, refreshStart, 'GET', '/api/v1/attempts/attempt-johnson');
-    assert.ok(runtime.logSequence > firstLog, `${viewport.name}: running-task log data did not refresh`);
-    await waitFor(client, `document.querySelector('.task-live-output .log-tail')?.textContent.includes('browser refresh ${runtime.logSequence}')`, `${viewport.name}: refreshed task output did not reach the visible panel`);
+    const fullscreen = '.task-live-output [data-action="fullscreen-logs"]';
+    const tailSelector = '.task-live-output .log-tail';
+    const focusTargets = viewport.mobile ? [fullscreen] : [
+      fullscreen, '.task-live-output [data-action="download-logs"]', tailSelector, '#project-filter',
+    ];
+    runtime.longTaskOutput = true;
+    try {
+      for (const selector of focusTargets) {
+        if (selector === tailSelector) {
+          await waitFor(client, `document.querySelector(${JSON.stringify(tailSelector)})?.textContent.includes('Fixture output line 49')`, 'Long task output did not render');
+        }
+        assert.equal(await client.evaluate(`(() => {
+          const target = document.querySelector(${JSON.stringify(selector)});
+          window.__taskOutputFocus = target;
+          target.focus({preventScroll:true});
+          if (target.matches('.log-tail')) target.scrollTop = 24;
+          return document.activeElement === target && (!target.matches('.log-tail') || target.scrollTop === 24);
+        })()`), true, `${viewport.name}: fixture could not focus ${selector}`);
+        const firstLog = runtime.logSequence;
+        const refreshStart = runtime.requests.length;
+        await waitForRequest(runtime, refreshStart, 'GET', '/api/v1/attempts/attempt-johnson');
+        assert.ok(runtime.logSequence > firstLog, `${viewport.name}: running-task log data did not refresh`);
+        await waitFor(client, `document.querySelector('.task-live-output .log-tail')?.textContent.endsWith('browser refresh ${runtime.logSequence}')`, `${viewport.name}: refreshed task output did not reach the visible panel`);
+        assert.equal(await client.evaluate(`document.activeElement === window.__taskOutputFocus && document.querySelector(${JSON.stringify(selector)}) === window.__taskOutputFocus`), true, `${viewport.name}: task output refresh replaced or blurred ${selector}`);
+        if (selector === tailSelector) assert.equal(await client.evaluate('window.__taskOutputFocus.scrollTop'), 24, 'Refresh moved the scrolled log tail');
+      }
+    } finally {
+      runtime.longTaskOutput = false;
+    }
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: expanded task overflows horizontally`);
     await waitFor(client, "document.querySelector('.task-ortho-preview canvas')?.getAttribute('aria-label') === 'Published orthophoto preview' || document.querySelector('.task-ortho-preview img') !== null", `${viewport.name}: real orthophoto preview did not render`);
     assert.equal(await client.evaluate(`(() => { const canvas=document.querySelector('.task-ortho-preview canvas'); if(!canvas)return true; return [...canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data].some(value=>value>0) })()`), true, `${viewport.name}: orthophoto preview canvas is empty`);
@@ -1021,10 +1040,96 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown');
     assert.deepEqual(exceptions, [], `${viewport.name}: uncaught browser exceptions`);
   } finally {
-    await client.command('Page.close').catch(() => {});
-    client.close();
+    await closeDevToolsTarget(client);
   }
 }
+
+test('project folders navigate and survive browser history in a real browser', {timeout:60000,skip:manualFixture}, async t=>{
+  const executable=browserPath();if(!executable)return t.skip('Chromium-family browser required');
+  const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client,folderServer,folderDb,folderRoot;
+  try{
+    const express=require('express'),auth=require('../server/auth'),{openDatabase}=require('../server/database'),{ViewerRepository}=require('../server/repository'),{ProcessingRepository}=require('../server/processingRepository'),{createProcessingApi}=require('../server/processingApi');
+    folderRoot=mkdtempSync(path.join(tmpdir(),'viewer-folder-api-'));folderDb=openDatabase(path.join(folderRoot,'viewer.sqlite'));
+    const repository=new ViewerRepository(folderDb),processing=new ProcessingRepository(folderDb);processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:browser-audit',permissions:['viewer.projects.read','viewer.projects.write','viewer.processing.read','viewer.processing.write'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+    processing.createProject({id:'project-johnson',displayName:'Synthetic'});const dataset=processing.createDataset({id:'dataset-johnson',projectId:'project-johnson',displayName:'Source',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});processing.finalizeDataset(dataset.id,[],'a'.repeat(64));processing.createTask({id:'task-johnson',projectId:'project-johnson',datasetId:dataset.id,displayName:'Johnson reconstruction'});
+    const now=new Date().toISOString();folderDb.prepare('INSERT INTO project_folders(id,project_id,parent_id,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('folder-client','project-johnson',null,'Client folder',now,now);folderDb.prepare('INSERT INTO project_folders(id,project_id,parent_id,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('folder-site','project-johnson','folder-client','Site folder',now,now);processing.moveTaskToFolder('task-johnson','folder-site','staff');
+    const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));folderServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
+    ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
+    await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-open"][data-id="folder-client"]'))`,'client folder unavailable');
+    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="folder-client"]').click()`);
+    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-open"][data-id="folder-site"]')) && new URL(location.href).searchParams.get('folder')==='folder-client'`,'nested folder unavailable');
+    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="folder-site"]').click()`);
+    await waitFor(client,`document.querySelector('#workspace-content').textContent.includes('Johnson reconstruction') && new URL(location.href).searchParams.get('folder')==='folder-site'`,'nested task unavailable');
+    await client.evaluate('history.back()');
+    await waitFor(client,`new URL(location.href).searchParams.get('folder')==='folder-client' && Boolean(document.querySelector('[data-action="folder-open"][data-id="folder-site"]'))`,'folder history did not restore');
+    await client.command('Page.reload');
+    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-open"][data-id="folder-site"]')) && new URL(location.href).searchParams.get('folder')==='folder-client'`,'folder reload did not restore');
+    await client.evaluate(`document.querySelector('[data-action="folder-create"]').click()`);
+    await waitFor(client,`Boolean(document.querySelector('#folder-create-form'))`,'folder create form unavailable');
+    await client.evaluate(`(()=>{const f=document.querySelector('#folder-create-form');f.elements.displayName.value='Temporary folder';f.requestSubmit()})()`);
+    await waitFor(client,`Array.from(document.querySelectorAll('[data-action="folder-open"]')).some(button=>button.textContent.includes('Temporary folder'))`,'new folder unavailable');
+    const createdId=processing.projectFolders('project-johnson').find(folder=>folder.displayName==='Temporary folder').id;
+    await client.evaluate(`document.querySelector('[data-action="folder-rename"][data-id="${createdId}"]').click()`);
+    await waitFor(client,`Boolean(document.querySelector('#folder-rename-form'))`,'rename form unavailable');
+    await client.evaluate(`(()=>{const f=document.querySelector('#folder-rename-form');f.elements.displayName.value='Renamed folder';f.requestSubmit()})()`);
+    await waitFor(client,`document.querySelector('[data-action="folder-open"][data-id="${createdId}"]')?.textContent.includes('Renamed folder')`,'renamed folder unavailable');
+    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="folder-site"]').click()`);
+    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-move-task"][data-id="task-johnson"]'))`,'move task action unavailable');
+    await client.evaluate(`document.querySelector('[data-action="folder-move-task"][data-id="task-johnson"]').click()`);
+    await waitFor(client,`Boolean(document.querySelector('#folder-move-form'))`,'move form unavailable');
+    await client.evaluate(`(()=>{const f=document.querySelector('#folder-move-form');f.elements.folderId.value='${createdId}';f.requestSubmit()})()`);
+    await waitFor(client,`!document.querySelector('#workspace-modal').open && !document.querySelector('#workspace').hasAttribute('aria-busy')`,'task move did not settle');
+    assert.equal(processing.getTask('task-johnson').folderId,createdId);
+    await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
+    await waitFor(client,`Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'Undo did not restore the task');
+    assert.equal(processing.getTask('task-johnson').folderId,'folder-site');
+    const dragTaskTo = (folderId, expectedLabel = null) => client.evaluate(`(()=>{
+      const transfer=new DataTransfer(), handle=document.querySelector('[data-folder-drag][data-id="task-johnson"]');
+      handle.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+      const target=document.querySelector(${JSON.stringify(`[data-folder-drop-destinations] [data-task-drop-folder="${folderId}"]`)});
+      const expectedLabel=${JSON.stringify(expectedLabel)};
+      if(!target?.getClientRects().length||(expectedLabel&&target.textContent.trim()!==expectedLabel))throw Error('Visible drop destination unavailable');
+      target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+      if(!target.classList.contains('folder-drop-active'))throw Error('Destination did not highlight');
+      target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+    })()`);
+    const beforeRootDrop=processing.getTask('task-johnson');
+    const requestsBeforeRootDrop=runtime.requests.length;
+    await dragTaskTo('','Project root');
+    await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'root drop did not remove the task from its former folder');
+    const rootMoves=runtime.requests.slice(requestsBeforeRootDrop).filter(request=>request.method==='PATCH'&&request.path==='/api/v1/tasks/task-johnson/folder');
+    assert.deepEqual(rootMoves.map(request=>request.body),[{folderId:null,expectedFolderId:'folder-site',expectedFolderRevision:beforeRootDrop.folderRevision}]);
+    const rootTask=processing.getTask('task-johnson');
+    assert.equal(rootTask.folderId,null);
+    assert.equal(rootTask.folderRevision,beforeRootDrop.folderRevision+1);
+    await client.evaluate(`document.querySelector('[data-action="folder-root"]').click()`);
+    await waitFor(client,`!new URL(location.href).searchParams.has('folder')&&Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'dropped task did not appear at Project root');
+    await dragTaskTo(createdId);
+    await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'drag move did not settle');
+    assert.equal(processing.getTask('task-johnson').folderId,createdId);
+    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="folder-client"]').click()`);
+    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-delete"][data-id="folder-site"]'))`,'empty folder unavailable');
+    await confirmAppAction(client,runtime,'[data-action="folder-delete"][data-id="folder-site"]',{title:'Delete folder'});
+    await waitFor(client,`!document.querySelector('[data-action="folder-open"][data-id="folder-site"]')`,'empty folder remained visible');
+    assert.equal(processing.getTask('task-johnson').folderId,createdId);
+    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="${createdId}"]').click()`);
+    await waitFor(client,`Boolean(document.querySelector('[data-project-task="task-johnson"]'))`,'moved task not visible');
+    await client.evaluate(`(()=>{const filter=document.querySelector('#project-filter');window.folderTestFilter=filter;
+      filter.value='Johnson';filter.dispatchEvent(new Event('input',{bubbles:true}));filter.focus();
+    })()`);
+    processing.moveTaskToFolder('task-johnson',null,'another-staff-actor');
+    await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')`,'background move never appeared',12000);
+    assert.equal(await client.evaluate(`document.activeElement===window.folderTestFilter&&document.querySelector('#project-filter')===window.folderTestFilter&&window.folderTestFilter.value==='Johnson'`),true);
+  }finally{
+    if(client)client.close();
+    if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}
+    if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}if(folderServer){folderServer.closeAllConnections?.();await new Promise(resolve=>folderServer.close(resolve));}folderDb?.close();if(folderRoot)rmSync(folderRoot,{recursive:true,force:true});try{await removeBrowserProfile(profile,t);}finally{release();}
+  }
+});
 
 test('project-first workspace is interactive and overflow-free in real desktop and mobile browsers', { timeout: 180_000, skip: manualFixture }, async t => {
   const executable = browserPath();
@@ -1081,7 +1186,7 @@ test('orthophoto preview settles on the mounted task after navigation during dec
       runtime.requests = [];
       runtime.failOrthophotoResponse = fail;
       runtime.orthophotoResponseGate = new Promise(resolve => { releaseResponse = resolve; });
-      const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+      const target = await createDevToolsTarget(devTools);
       const client = await CdpClient.connect(target.webSocketDebuggerUrl);
       try {
         await client.command('Page.enable');
@@ -1107,8 +1212,7 @@ test('orthophoto preview settles on the mounted task after navigation during dec
         assert.equal(runtime.requests.filter(item => item.path === '/api/v1/processing/outputs/output-johnson/assets/ortho').length, 1, 'Rerender must reuse one in-flight decode rather than issuing duplicate reads');
       } finally {
         releaseResponse?.();
-        await client.command('Page.close').catch(() => {});
-        client.close();
+        await closeDevToolsTarget(client);
       }
     });
   } finally {
@@ -1174,7 +1278,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         attemptCount: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       }] : [];
       const originalOutput = structuredClone(runtime.outputs[0]);
-      const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+      const target = await createDevToolsTarget(devTools);
       const client = await CdpClient.connect(target.webSocketDebuggerUrl);
       try {
         await client.command('Page.enable');
@@ -1248,8 +1352,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         assert.deepEqual(exceptions, []);
       } finally {
         releaseTaskDetail?.();
-        await client.command('Page.close').catch(() => {});
-        client.close();
+        await closeDevToolsTarget(client);
       }
     });
   } finally {
@@ -1271,7 +1374,7 @@ test('recovery UI keeps one request identity across an uncertain response in a r
  try{
   ({server,runtime,origin}=await startFixtureServer());runtime.testIngestRecovery=true;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
   browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-  const devTools=await waitForDevTools(profile),target=await(await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json();client=await CdpClient.connect(target.webSocketDebuggerUrl);
+  const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
   await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
   await client.command('Page.navigate',{url:`${origin}/workspace?section=diagnostics`});
   await waitFor(client,`Boolean(document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]'))`,'diagnostic row unavailable');

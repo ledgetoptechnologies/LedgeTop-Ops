@@ -36,10 +36,13 @@ function createClientDeliveryCatalog(repository) {
           ? processing.listActivePublishedProjectTasksPage(projectId, { limit: Number(limit), cursor: cursor || null, strictPublished: true })
           : { items: [processing.getActivePublishedProjectTask(projectId, taskId, { strictPublished: true })].filter(Boolean), nextCursor: null };
         if (taskId !== undefined && page.items.length !== 1) return null;
+        // Paths are read only for the already-visible tasks on this page, in the same snapshot.
+        const folderPaths = processing.clientTaskFolderPaths(project.id, page.items.map(task => task.taskId));
         return { schemaVersion: 1, project: { id: project.id, displayName: project.displayName },
           tasks: page.items.map(task => ({ id: task.taskId, displayName: task.taskDisplayName,
             modelId: task.modelId, modelVersionId: task.modelVersionId,
-            modelTitle: task.modelDisplayName, publishedAt: task.publishedAt })), nextCursor: page.nextCursor };
+            modelTitle: task.modelDisplayName, publishedAt: task.publishedAt,
+            folderPath: folderPaths.get(task.taskId) || [] })), nextCursor: page.nextCursor };
       });
       return result ? res.json(result) : res.status(404).json({ error: 'Published delivery unavailable', code: 'delivery_unavailable' });
     } catch (error) {
