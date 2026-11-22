@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createDemUpdateQueue } from '../dem-update-queue.mjs';
+import { PREVIEW_RENDER_DIM } from '../raster-preview.mjs';
 
 const source=fs.readFileSync(new URL('../main.js',import.meta.url),'utf8');
 const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
@@ -62,6 +63,7 @@ test('actual DEM settings renderer paints only the latest requested elevation bo
   const start=source.indexOf('async function applyDemSettings('),fn=source.slice(start,source.indexOf('\nfunction resetDemSettings',start));
   const painted=[],pending=[],demSettings={};
   const context={modeAbortController:{signal:{aborted:false}},demSettings,dom:{demColormap:{value:'viridis'},demShading:{value:'1'},demMin:{value:'0'},demMax:{value:'10'}},document:{getElementById:()=>({value:'0'})},demLayers:{dsm:{ds:{},overlay:{setUrl:url=>painted.push(url)},grid:{redraw(){}}}},overviewCanvas:()=>{const captured=`${demSettings.minFt}:${demSettings.maxFt}`;return new Promise(resolve=>pending.push(()=>resolve({canvas:{toDataURL:()=>captured}})));},renderDemTile(){},state:{activeMode:'dsm'},refreshLegendFor(){},applyDemOpacity(){}};
+  context.PREVIEW_RENDER_DIM=PREVIEW_RENDER_DIM;
   vm.createContext(context);vm.runInContext(fn,context);
   const queue=createDemUpdateQueue(context.applyDemSettings);queue.request({immediate:true});assert.equal(pending.length,1);
   context.dom.demMin.value='5';context.dom.demMax.value='15';queue.request({immediate:true});pending.shift()();await tick();assert.equal(painted.length,0);assert.equal(pending.length,1);

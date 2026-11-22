@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createRasterTileQueue } from '../raster-tile-queue.mjs';
+import { selectRasterDetailImage } from '../raster-detail.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
@@ -111,13 +113,15 @@ test('actual tile reader uses each overview axis spacing when overview dimension
     L: { GridLayer: { extend: definition => definition } },
     document: { createElement: () => ({ getContext: () => ({ drawImage() {} }) }) },
     latLonToUtm: (lat, lon) => [lon, lat], geoPool: null, setTimeout,
+    rasterTileQueue: createRasterTileQueue(),
+    selectRasterDetailImage,
   };
   vm.createContext(context);
   const start = source.indexOf('const GeoTiffGridLayer =');
   vm.runInContext(source.slice(start, source.indexOf('\n// Per-pixel inverse-warp sampler', start)) + '\nglobalThis.createTile = GeoTiffGridLayer.createTile;', context);
   const ds = { isDem: true, W: 1000, H: 997, minE: 0, maxE: 1000, minN: 0, maxN: 997, nodata: -9999, images: [image(1000, 997), image(500, 499)] };
   await new Promise((resolve, reject) => context.createTile.call({
-    ds, getTileSize: () => ({ x: 256, y: 256 }),
+    ds, tileJobs: new WeakMap(), retiredTiles: new WeakSet(), getTileSize: () => ({ x: 256, y: 256 }),
     _map: { unproject: ([x, y]) => ({ lat: 800 - y * 2, lng: 100 + x * 2 }) },
     renderFn: (_raster, _w, _h, _ds, warp) => { renderedWarp = warp; return {}; },
   }, { x: 0, y: 0, z: 0 }, error => error ? reject(error) : resolve()));
