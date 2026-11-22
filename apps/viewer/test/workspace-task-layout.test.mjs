@@ -142,8 +142,8 @@ test('project actions prioritize enabled new task for empty projects and keep se
   const html=f.context.selectedProject();
   assert.match(html,/data-action="project-process"[^>]*>New task/);
   assert.doesNotMatch(html,/data-action="project-process"[^>]*disabled/);
-  assert.ok(html.indexOf('New task')<html.indexOf('>Share<'));
-  assert.ok(html.indexOf('>Share<')<html.indexOf('<details'));
+  assert.ok(html.indexOf('New task')<html.indexOf('>Share project<'));
+  assert.ok(html.indexOf('>Share project<')<html.indexOf('<details'));
   const menu=html.slice(html.indexOf('<details'),html.indexOf('</details>'));
   assert.match(menu,/Rename project/);assert.match(menu,/Import existing results/);assert.match(menu,/Delete project/);
   f.state.projects[0].status='archived';assert.doesNotMatch(f.context.selectedProject(),/data-action="project-process"/);
