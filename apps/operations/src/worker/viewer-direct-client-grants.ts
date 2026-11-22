@@ -40,8 +40,24 @@ export const DIRECT_VIEWER_GRANTS_PER_CLIENT=100;
  * while that receipt matches the row and has not expired (restrictedReceiptLiveSql). A row whose receipt is
  * missing, duplicated or does not match neither counts nor issues (resolveRestrictedGrant also rejects it). */
 function effectiveGrantSql(alias?:string){const c=alias?`${alias}.`:'';
- return `${c}status='active' AND ${c}revoked_at IS NULL AND (${c}authorization_expires_at IS NULL OR datetime(${c}authorization_expires_at)>datetime('now')
+ return `${c}status='active' AND ${c}revoked_at IS NULL AND (${c}authorization_expires_at IS NULL
+  OR ${expiryJulianSql(`${c}authorization_expires_at`)}>julianday('now')
   OR (${c}authorization_expires_at='${RESTRICTED_GRANT_EXPIRY}' AND ${restrictedReceiptLiveSql(alias??'viewer_direct_client_grants')}))`;}
+/** Expiry instant (Julian day, UTC) of a stored expiry string, matching expiryMillis. New rows and receipts
+ * store canonical UTC (`…Z`); rows written before that may carry any offset the create schema accepts
+ * (±HH:MM up to ±23:59). SQLite's own parser rejects offsets above 14 hours, so the offset is applied here
+ * by hand. A string with neither `Z` nor a ±HH:MM suffix yields NULL: it never counts as live, and
+ * expiryMillis likewise refuses it, so it is never issued either. */
+function expiryJulianSql(value:string){
+ return `(CASE WHEN substr(${value},-1)='Z' THEN julianday(${value})
+  WHEN substr(${value},-6,1) IN ('+','-') AND substr(${value},-3,1)=':' THEN julianday(substr(${value},1,length(${value})-6))
+   -(CASE substr(${value},-6,1) WHEN '+' THEN 1 ELSE -1 END)*(CAST(substr(${value},-5,2) AS INTEGER)*60+CAST(substr(${value},-2,2) AS INTEGER))/1440.0
+  END)`;}
+const isoExpiry=z.iso.datetime({offset:true});
+/** Milliseconds for an expiry the create schema accepts; NaN for anything else (treated as unusable). */
+function expiryMillis(value:string){return isoExpiry.safeParse(value).success?Date.parse(value):Number.NaN;}
+/** The one stored form of an expiry: canonical UTC ISO (`YYYY-MM-DDTHH:MM:SS.sssZ`). */
+function canonicalExpiry(value:string|null){return value===null?null:new Date(expiryMillis(value)).toISOString();}
 /** SQL form of the receipt checks in resolveRestrictedGrant. It is deliberately no stricter than that
  * function, so a grant the issuer would honour always counts toward the cap; a receipt it would reject
  * for a stricter reason can only be over-counted (never issued). */
@@ -56,7 +72,7 @@ function restrictedReceiptLiveSql(grantTable:string){const g=`${grantTable}.`,j=
    AND ${j('$.grant.permissions.download')}=${g}can_download
    AND ${j('$.recipientAuthorityPin.workspaceId')}=${g}workspace_id AND ${j('$.recipientAuthorityPin.sourceId')}=${g}source_id
    AND (json_type(receipt.response_json,'$.grant.expiresAt')='null'
-    OR julianday(${j('$.grant.expiresAt')})>julianday('now')))`;}
+    OR ${expiryJulianSql(j('$.grant.expiresAt'))}>julianday('now')))`;}
 const inputSchema=z.object({sourceId:source,workspaceId:opaque,viewerProjectId:opaque,taskId:opaque.nullable(),
  scopeType:z.enum(['project','task']),includeFuturePublished:z.boolean(),confirmedScope:z.literal(true),
  expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict(),exclusions:exclusionsSchema.optional()}).strict()
@@ -305,9 +321,9 @@ async function resolveRestrictedGrant(env: Env, row: DirectViewerClientGrantRow,
    || grant.permissions.download !== (row.can_download === 1)
    || envelope.recipientAuthorityPin.workspaceId !== row.workspace_id
    || envelope.recipientAuthorityPin.sourceId !== row.source_id) return null;
- if (grant.expiresAt !== null && (!Number.isFinite(Date.parse(grant.expiresAt))
-   || (!includeExpired && Date.parse(grant.expiresAt) <= Date.now()))) return null;
- return { ...row, authorization_expires_at: grant.expiresAt, exclusions: exclusionsSchema.parse(envelope.exclusions) };
+ if (grant.expiresAt !== null && (!Number.isFinite(expiryMillis(grant.expiresAt))
+   || (!includeExpired && expiryMillis(grant.expiresAt) <= Date.now()))) return null;
+ return { ...row, authorization_expires_at: canonicalExpiry(grant.expiresAt), exclusions: exclusionsSchema.parse(envelope.exclusions) };
 }
 
 async function receipt(env:Env,actor:string,idempotencyKey:string,fingerprint:string){
@@ -459,7 +475,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  // Checked here for a clear early answer and again inside the INSERT so concurrent creates cannot pass it.
  if((count??0)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
  const result={grantId:id,sourceId:g.sourceId,workspaceId:g.workspaceId,viewerProjectId:g.viewerProjectId,taskId:g.taskId,scopeType:g.scopeType,
- includeFuturePublished:g.includeFuturePublished,permissions:g.permissions,expiresAt:g.expiresAt,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:row.display_name};
+ includeFuturePublished:g.includeFuturePublished,permissions:g.permissions,expiresAt:canonicalExpiry(g.expiresAt),grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:row.display_name};
  try{await database.batch([
  database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
  can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
@@ -488,7 +504,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    WHERE authority.client_authority_id=claim.client_authority_id AND authority.workspace_id=w.id AND authority.state='active'
      AND authority.target_id=? AND authority.target_revision=? AND authority.ownership_epoch=? AND authority.root_kind=w.root_type)`:''})`)
  .bind(id,g.sourceId,g.workspaceId,g.viewerProjectId,g.taskId,g.scopeType,+g.includeFuturePublished,+g.permissions.measure,+g.permissions.cameras,+g.permissions.download,
- g.exclusions?RESTRICTED_GRANT_EXPIRY:g.expiresAt,principal.id,now,now,...guard.bindings,g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
+ g.exclusions?RESTRICTED_GRANT_EXPIRY:result.expiresAt,principal.id,now,now,...guard.bindings,g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
  g.workspaceId,g.sourceId,row.active_generation_id,row.source_sequence,row.root_version,
  row.claim_authority_id,row.claim_source_id,row.claim_source_workspace_id,row.claim_ownership_epoch,
  ...(operationsAuthority?[operationsAuthority.targetId,operationsAuthority.targetRevision,operationsAuthority.ownershipEpoch]:[])),

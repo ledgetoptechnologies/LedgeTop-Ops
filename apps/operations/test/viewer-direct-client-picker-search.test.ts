@@ -291,27 +291,28 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
   return kind==='v1'?{version:1,grant,recipientAuthorityPin:pin}
    :{version:2,grant,recipientAuthorityPin:pin,exclusions:{version:1,folderIds:[],taskIds:['00000000-0000-4000-8000-000000000001']}};
  }
- async function seedRestricted(database:D1Database,prefix:string,count:number,kind:Receipt){
-  const now=new Date().toISOString();
+ async function seedRestricted(database:D1Database,prefix:string,count:number,kind:Receipt,expiry?:string){
+  const now=new Date().toISOString();let statements:D1PreparedStatement[]=[];
   for(let index=0;index<count;index++){
    const id=`${prefix}-${String(index).padStart(4,'0')}`,project=`${prefix}-project-${index}`;
-   const expiresAt=kind==='expired'?PAST:kind==='live-no-expiry'?null:FUTURE;
-   const statements=[database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+   const expiresAt=expiry??(kind==='expired'?PAST:kind==='live-no-expiry'?null:FUTURE);
+   statements.push(database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
     can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
-    VALUES(?,'project-alpha:primary','ws-one',?,NULL,'project',1,1,0,0,?,1,'active','staff-one',?,?)`).bind(id,project,SENTINEL,now,now)];
+    VALUES(?,'project-alpha:primary','ws-one',?,NULL,'project',1,1,0,0,?,1,'active','staff-one',?,?)`).bind(id,project,SENTINEL,now,now));
    const receipts=kind==='missing'?0:kind==='duplicate'?2:1;
    for(let copy=0;copy<receipts;copy++)statements.push(database.prepare(`INSERT INTO viewer_direct_client_grant_mutation_receipts
     (actor_staff_id,idempotency_key,action,request_fingerprint,grant_id,response_json,created_at) VALUES('staff-one',?,'grant.create','fingerprint',?,?,?)`)
     .bind(`restricted-receipt-${++receiptSequence}`,id,JSON.stringify(envelope(id,project,expiresAt,kind)),now));
-   await database.batch(statements);
+   // Seed in batches: one D1 round trip per row is too slow for 100-row fixtures.
+   if(statements.length>=100||index===count-1){await database.batch(statements);statements=[];}
   }
  }
  async function seedOrdinary(database:D1Database,prefix:string,count:number,expiresAt:string|null){
   const now=new Date().toISOString();
-  for(let index=0;index<count;index++)await database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+  if(count>0)await database.batch(Array.from({length:count},(_,index)=>database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
    can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
    VALUES(?,'project-alpha:primary','ws-one',?,NULL,'project',1,1,0,0,?,1,'active','staff-one',?,?)`)
-   .bind(`${prefix}-${String(index).padStart(4,'0')}`,`${prefix}-project-${index}`,expiresAt,now,now).run();
+   .bind(`${prefix}-${String(index).padStart(4,'0')}`,`${prefix}-project-${index}`,expiresAt,now,now)));
  }
  const createFor=(env:Env,idempotencyKey:string,viewerProjectId='viewer-project')=>createDirectViewerClientGrant({env,principal,idempotencyKey,
   request:new Request('https://ops.example.test/'),grant:{sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId,taskId:null,scopeType:'project',
@@ -338,7 +339,7 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
   expect(await issuable(env)).toEqual([]);
   const created=await createFor(env,'restricted-expired-cap-01');
   expect(created.replayed).toBe(false);expect(await issuable(env)).toEqual([created.grant.grantId]);
- });
+ },120_000);
  it('refuses at 100 live restricted grants with no writes, and still issues them',async()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
   await seedRestricted(database,'restricted-live',99,'live');await seedRestricted(database,'restricted-open',1,'live-no-expiry');
@@ -346,7 +347,7 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
   const before=await counts(database);
   await expect(createFor(env,'restricted-live-cap-00001')).rejects.toMatchObject({status:409,code:'grant_limit'});
   expect(await counts(database)).toEqual(before);
- });
+ },120_000);
  it('neither counts nor issues restricted grants with a missing, duplicated or mismatched receipt',async()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
   for(const kind of ['missing','duplicate','wrong-version','wrong-workspace','wrong-permissions','v1'] as const)
@@ -354,7 +355,7 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
   expect(await issuable(env)).toEqual([]);
   const created=await createFor(env,'restricted-invalid-cap-01');
   expect(created.replayed).toBe(false);expect(await issuable(env)).toEqual([created.grant.grantId]);
- });
+ },120_000);
  it('holds the boundary across ordinary and restricted grants together',async()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
   await seedOrdinary(database,'ordinary-live',50,FUTURE);await seedOrdinary(database,'ordinary-open',9,null);
@@ -368,7 +369,7 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
   const before=await counts(database);
   await expect(createFor(env,'mixed-boundary-cap-00002','another-project')).rejects.toMatchObject({status:409,code:'grant_limit'});
   expect(await counts(database)).toEqual(before);
- });
+ },120_000);
  it('counts a live restricted grant inside the INSERT when it lands after the precheck',async()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'restricted-live',99,'live');
   const before=await counts(database);
@@ -377,13 +378,79 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
   expect(race.state.raced).toBe(true);
   // Only the racing grant and its receipt were written; this request wrote nothing.
   expect(await counts(database)).toEqual({grants:before.grants!+1,receipts:before.receipts!+1,audit:before.audit});
- });
+ },120_000);
+ // Expiries with an offset. The create schema accepts ±HH:MM up to ±23:59; SQLite's parser rejects offsets above
+ // 14 hours, so storage is canonical UTC and older stored offsets are applied by hand on read.
+ const OFFSET_FUTURE='2099-01-01T00:00:00+15:00',OFFSET_FUTURE_UTC='2098-12-31T09:00:00.000Z';
+ const OFFSET_FAR='2099-01-01T00:00:00-23:59',OFFSET_FAR_UTC='2099-01-01T23:59:00.000Z';
+ const exclusions={version:1 as const,folderIds:[],taskIds:['00000000-0000-4000-8000-000000000002']};
+ const createWith=(env:Env,idempotencyKey:string,viewerProjectId:string,expiresAt:string|null,restricted:boolean)=>createDirectViewerClientGrant({env,principal,
+  idempotencyKey,request:new Request('https://ops.example.test/'),grant:{sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId,taskId:null,
+   scopeType:'project',includeFuturePublished:true,confirmedScope:true,expiresAt,permissions:{measure:true,cameras:false,download:false},
+   ...(restricted?{exclusions}:{})}});
+ const issuableExpiry=async(env:Env)=>Object.fromEntries((await readDirectViewerClientGrants(env,{sourceId:'project-alpha:primary',workspaceId:'ws-one'}))
+  .map(row=>[row.id,row.authorization_expires_at]));
+ it('stores a non-UTC offset expiry as canonical UTC, and list, mint selection, replay and the cap agree on it',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'restricted-live',98,'live');
+  mocks.catalog.mockResolvedValueOnce({project:{id:'offset-restricted'},tasks:[]});
+  const restricted=await createWith(env,'offset-restricted-key-01','offset-restricted',OFFSET_FUTURE,true);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'offset-ordinary'},tasks:[]});
+  const ordinary=await createWith(env,'offset-ordinary-key-0001','offset-ordinary',OFFSET_FAR,false);
+  expect(restricted.grant.expiresAt).toBe(OFFSET_FUTURE_UTC);expect(ordinary.grant.expiresAt).toBe(OFFSET_FAR_UTC);
+  const stored=await database.prepare(`SELECT id,authorization_expires_at expiry FROM viewer_direct_client_grants WHERE id IN (?,?)`)
+   .bind(restricted.grant.grantId,ordinary.grant.grantId).all<{id:string;expiry:string}>();
+  expect(Object.fromEntries(stored.results.map(row=>[row.id,row.expiry]))).toEqual({[restricted.grant.grantId]:SENTINEL,[ordinary.grant.grantId]:OFFSET_FAR_UTC});
+  const receipt=await database.prepare(`SELECT json_extract(response_json,'$.grant.expiresAt') expiry FROM viewer_direct_client_grant_mutation_receipts WHERE grant_id=?`)
+   .bind(restricted.grant.grantId).first<string>('expiry');
+  expect(receipt).toBe(OFFSET_FUTURE_UTC);
+  // Mint selection (the issuer's read) and the staff listing both see the canonical instant.
+  const selected=await issuableExpiry(env);
+  expect(Object.keys(selected)).toHaveLength(100);
+  expect(selected[restricted.grant.grantId]).toBe(OFFSET_FUTURE_UTC);expect(selected[ordinary.grant.grantId]).toBe(OFFSET_FAR_UTC);
+  const listed=(await listDirectViewerClientGrantWorkspace(env,principal,{include:'grants'})).grants;
+  expect(listed.find(grant=>grant.grantId===restricted.grant.grantId)?.expiresAt).toBe(OFFSET_FUTURE_UTC);
+  expect(listed.find(grant=>grant.grantId===ordinary.grant.grantId)?.expiresAt).toBe(OFFSET_FAR_UTC);
+  // The same request replays to the same stored grant.
+  expect(await createWith(env,'offset-restricted-key-01','offset-restricted',OFFSET_FUTURE,true)).toEqual({grant:restricted.grant,replayed:true});
+  expect(await createWith(env,'offset-ordinary-key-0001','offset-ordinary',OFFSET_FAR,false)).toEqual({grant:ordinary.grant,replayed:true});
+  // Both count: the client is now at 100.
+  const before=await counts(database);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'another-project'},tasks:[]});
+  await expect(createFor(env,'offset-cap-key-00000001','another-project')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(await counts(database)).toEqual(before);
+ },120_000);
+ it('counts and issues legacy receipts and rows stored with a large offset, and drops past or unparseable ones',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  await seedRestricted(database,'legacy-offset',97,'live',OFFSET_FUTURE);
+  await seedRestricted(database,'legacy-offset-past',5,'live','2020-01-01T00:00:00-23:59');
+  await seedRestricted(database,'legacy-no-suffix',5,'live','2099-01-01T00:00:00');
+  await seedRestricted(database,'legacy-garbage',5,'live','not-a-date');
+  await seedOrdinary(database,'ordinary-offset',2,OFFSET_FAR);
+  await seedOrdinary(database,'ordinary-offset-past',5,'2020-01-01T00:00:00+15:00');
+  const selected=await issuableExpiry(env);
+  expect(Object.keys(selected)).toHaveLength(99);
+  expect(new Set(Object.entries(selected).map(([id,expiry])=>id.startsWith('legacy-offset-')?expiry:null))).toEqual(new Set([OFFSET_FUTURE_UTC,null]));
+  const created=await createFor(env,'legacy-offset-cap-000001');expect(created.replayed).toBe(false);
+  expect(Object.keys(await issuableExpiry(env))).toHaveLength(100);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'another-project'},tasks:[]});
+  const before=await counts(database);
+  await expect(createFor(env,'legacy-offset-cap-000002','another-project')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(await counts(database)).toEqual(before);
+ },120_000);
+ it('counts a legacy large-offset restricted grant inside the INSERT and the diagnosis when it lands after the precheck',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'legacy-offset',99,'live',OFFSET_FUTURE);
+  const before=await counts(database);
+  const race=racingEnv(env,database,()=>seedRestricted(database,'legacy-offset-race',1,'live',OFFSET_FUTURE));
+  await expect(createFor(race.env,'legacy-offset-race-00001')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(race.state.raced).toBe(true);
+  expect(await counts(database)).toEqual({grants:before.grants!+1,receipts:before.receipts!+1,audit:before.audit});
+ },120_000);
  it('ignores an expired restricted grant inside the INSERT when it lands after the precheck',async()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'restricted-live',99,'live');
   const race=racingEnv(env,database,()=>seedRestricted(database,'restricted-race-expired',1,'expired'));
   const created=await createFor(race.env,'restricted-race-cap-00002');
   expect(race.state.raced).toBe(true);expect(created.replayed).toBe(false);expect(await issuable(env)).toHaveLength(100);
- });
+ },120_000);
 });
 describe('direct Viewer picker authorization is unchanged',()=>{
  for(const include of [undefined,'all','clients','grants'] as const)
