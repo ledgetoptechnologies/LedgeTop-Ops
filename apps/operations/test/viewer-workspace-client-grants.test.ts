@@ -3,6 +3,7 @@ import { Miniflare } from "miniflare";
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/worker/types";
+import { sha256 } from "../src/worker/crypto";
 import { drainViewerSessionRevocations } from "../src/worker/viewer-integration";
 import {
   registerViewerProcessingRoutes,
@@ -101,6 +102,27 @@ const createEnvelope = (key: string, associationId: string | null = null) => ({ 
   idempotencyKey: key, grant: { accountId: "account-one", projectId: "project-one",
     scopeType: associationId ? "task" : "project", associationId, includeFuturePublished: !associationId,
     expiresAt: null, permissions: { measure: true, cameras: true, download: false } } });
+
+const grantCounts = async () => ({
+  grants: await delivery.prepare("SELECT COUNT(*) count FROM viewer_client_grants").first<number>("count"),
+  receipts: await delivery.prepare("SELECT COUNT(*) count FROM viewer_client_grant_mutation_receipts").first<number>("count"),
+  audit: await delivery.prepare("SELECT COUNT(*) count FROM viewer_client_grant_audit").first<number>("count"),
+});
+
+// A legacy whole-project grant created before new ones were refused (410): the grant row,
+// its create receipt (same fingerprint the worker computes) and its audit row.
+async function seedEarlierLegacyProjectGrant(grantId: string, idempotencyKey: string) {
+  const fingerprint = await sha256(JSON.stringify(["viewer-association-mutation:v1", "grant.create", createEnvelope(idempotencyKey).grant]));
+  await delivery.batch([
+    delivery.prepare(`INSERT INTO viewer_client_grants(id,account_id,project_id,scope_type,association_id,include_future_published,
+      can_measure,can_view_cameras,can_download,authorization_expires_at,created_by_staff_id)
+      VALUES(?,'account-one','project-one','project',NULL,1,1,1,0,NULL,'staff-one')`).bind(grantId),
+    delivery.prepare(`INSERT INTO viewer_client_grant_mutation_receipts(actor_staff_id,idempotency_key,action,request_fingerprint,grant_id)
+      VALUES('staff-one',?,'grant.create',?,?)`).bind(idempotencyKey, fingerprint, grantId),
+    delivery.prepare(`INSERT INTO viewer_client_grant_audit(id,grant_id,action,actor_staff_id,idempotency_key,details_json)
+      VALUES(?,?,'grant.created','staff-one',?,'{}')`).bind(`audit-${grantId}`, grantId, idempotencyKey),
+  ]);
+}
 
 beforeEach(setup);
 afterEach(async () => Promise.all(instances.splice(0).map(instance => instance.dispose())));
@@ -209,35 +231,55 @@ describe("Viewer workspace client-grant machine bridge", () => {
     }]);
   });
 
-  it("creates atomically, replays identically, conflicts on key reuse, and denies stale task associations", async () => {
-    const original = createEnvelope("create-idempotency-0001");
+  it("refuses a new legacy whole-project grant with 410 and writes nothing", async () => {
+    const refused = await machine(createEnvelope("legacy-project-key-0001"), "legacy-project-nonce-01");
+    expect(refused.status).toBe(410);
+    expect(await refused.text()).toMatch(/Share whole projects from the Viewer/);
+    expect(await grantCounts()).toEqual({ grants: 0, receipts: 0, audit: 0 });
+  });
+
+  it("creates task grants atomically, replays identically, conflicts on key reuse, and denies stale task associations", async () => {
+    const original = createEnvelope("create-idempotency-0001", "association-one");
     expect((await machine(original, "create-first-nonce-0001")).status).toBe(201);
     const replay = await machine(original, "create-replay-nonce-001");
     expect(replay.status).toBe(200);
     expect((await replay.json() as { replayed: boolean }).replayed).toBe(true);
-    expect(await delivery.prepare("SELECT COUNT(*) count FROM viewer_client_grants").first<number>("count")).toBe(1);
-    expect(await delivery.prepare("SELECT COUNT(*) count FROM viewer_client_grant_audit").first<number>("count")).toBe(1);
-    expect((await machine(createEnvelope("create-idempotency-0001", "association-one"), "create-conflict-nonce-01")).status).toBe(409);
+    expect(await grantCounts()).toEqual({ grants: 1, receipts: 1, audit: 1 });
+    // Reusing the key for a different body (here a whole-project grant) is a key conflict, checked before the 410.
+    expect((await machine(createEnvelope("create-idempotency-0001"), "create-conflict-nonce-01")).status).toBe(409);
+    expect(await grantCounts()).toEqual({ grants: 1, receipts: 1, audit: 1 });
     await delivery.prepare("UPDATE viewer_model_associations SET project_source_version='stale'").run();
     expect((await machine(createEnvelope("stale-association-key-1", "association-one"), "stale-association-nonce1")).status).toBe(404);
+  });
+
+  it("still answers an idempotent replay of a whole-project grant created before the 410", async () => {
+    await seedEarlierLegacyProjectGrant("legacy-project-grant-1", "legacy-replay-key-00001");
+    const replay = await machine(createEnvelope("legacy-replay-key-00001"), "legacy-replay-nonce-0001");
+    expect(replay.status).toBe(200);
+    const body = await replay.json() as { replayed: boolean };
+    expect(body.replayed).toBe(true);
+    expect(await grantCounts()).toEqual({ grants: 1, receipts: 1, audit: 1 });
+    const listed = await machine({ subject: "ops:staff-one", action: "list" }, "legacy-replay-list-nonce1");
+    expect(((await listed.json()) as { grants: Array<{ id: string }> }).grants.map(grant => grant.id)).toEqual(["legacy-project-grant-1"]);
   });
 
   it("rolls back grant and receipt when authoritative audit persistence fails", async () => {
     await delivery.prepare(`CREATE TRIGGER reject_grant_audit BEFORE INSERT ON viewer_client_grant_audit
       BEGIN SELECT RAISE(ABORT,'injected authoritative audit failure'); END`).run();
-    expect((await machine(createEnvelope("audit-rollback-key-001"), "audit-rollback-nonce-01")).status).toBe(500);
+    expect((await machine(createEnvelope("audit-rollback-key-001", "association-one"), "audit-rollback-nonce-01")).status).toBe(500);
     expect(await delivery.prepare("SELECT COUNT(*) count FROM viewer_client_grants").first<number>("count")).toBe(0);
     expect(await delivery.prepare("SELECT COUNT(*) count FROM viewer_client_grant_mutation_receipts").first<number>("count")).toBe(0);
   });
 
-  it("revokes once, bumps versions, drains the outbox, and safely replays", async () => {
+  it("revokes an existing legacy whole-project grant once, bumps versions, drains the outbox, and safely replays", async () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const parsed = JSON.parse(String(init?.body)) as { sourceAuthorization: { id: string; version: number } };
       return new Response(JSON.stringify({ sourceAuthorization: { type: "model_association", ...parsed.sourceAuthorization },
         revokedGrants: 1, revokedSessions: 2 }), { status: 200, headers: { "Content-Type": "application/json" } });
     });
-    const created = await machine(createEnvelope("revoke-create-key-0001"), "revoke-create-nonce-01");
-    const grantId = ((await created.json()) as { grants: Array<{ id: string }> }).grants[0]!.id;
+    // New legacy whole-project grants are refused (410); grants created before that stay revocable.
+    const grantId = "legacy-project-grant-2";
+    await seedEarlierLegacyProjectGrant(grantId, "revoke-create-key-0001");
     const revoke = { subject: "ops:staff-one", action: "revoke", idempotencyKey: "revoke-key-value-00001", grantId, reason: "Access removed" };
     const first = await machine(revoke, "revoke-first-nonce-0001");
     expect(first.status).toBe(202);
@@ -296,7 +338,11 @@ describe('native Viewer workspace machine bridge',()=>{
   it('rejects inert legacy project grants and account/project pairs without current grants',async()=>{
     const invalid=createEnvelope('project-inert-grant-0001');invalid.grant.includeFuturePublished=false;
     expect((await machine(invalid,'inert-project-nonce-001')).status).toBe(400);
-    const wrong=createEnvelope('wrong-account-pair-0001');wrong.grant.accountId='another-account';
+    const valid=createEnvelope('project-valid-grant-0001');
+    expect((await machine(valid,'valid-project-nonce-001')).status).toBe(410);
+    expect(await grantCounts()).toEqual({grants:0,receipts:0,audit:0});
+    const wrong=createEnvelope('wrong-account-pair-0001','association-one');wrong.grant.accountId='another-account';
     expect((await machine(wrong,'wrong-account-nonce-001')).status).toBe(404);
+    expect(await grantCounts()).toEqual({grants:0,receipts:0,audit:0});
   });
 });
