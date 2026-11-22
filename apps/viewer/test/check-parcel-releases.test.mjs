@@ -162,7 +162,7 @@ test('issues: an open issue with the same title is updated, never duplicated', a
 });
 
 test('workflow: monthly and manual only, small, minimal permissions, no install', () => {
-  const workflow = fs.readFileSync(new URL('../../../.github/workflows/parcel-source-release-check.yml', import.meta.url), 'utf8');
+  const workflow = fs.readFileSync(new URL('../../../.github/workflows/parcel-source-release-check.yml', import.meta.url), 'utf8').split('\r\n').join('\n');
   assert.match(workflow, /schedule:\n\s+- cron: '\d+ \d+ 1 \* \*'/);
   assert.match(workflow, /workflow_dispatch:/);
   assert.doesNotMatch(workflow, /\n\s+(push|pull_request|pull_request_target):/);
