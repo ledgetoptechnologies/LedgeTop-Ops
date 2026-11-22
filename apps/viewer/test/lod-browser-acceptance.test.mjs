@@ -1675,10 +1675,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
         : event.method === 'Runtime.exceptionThrown'
           ? event.params.exceptionDetails.url
           : null;
-      return typeof url === 'string' && (
-        url.includes('/@vite/client')
-        || url === 'https://ledgetopdroneservices.com/images/DroneLogo01.webp'
-      );
+      return typeof url === 'string' && url.includes('/@vite/client');
     };
     const errors = client.events.filter((event) => (
       event.method === 'Runtime.exceptionThrown' || (event.method === 'Log.entryAdded' && event.params.entry.level === 'error')
@@ -4218,6 +4215,95 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures under the production CSP with
     const cspFailures = client.events.filter(event => event.method === 'Log.entryAdded'
       && /content security policy|unsafe-eval|EvalError/i.test(event.params.entry?.text || ''));
     assert.deepEqual(cspFailures, [], 'Production CSP must not block decoder workers');
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise((resolve) => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    releaseLock();
+    await removeBrowserProfile(profile);
+  }
+});
+
+test('built routes load the same-origin brand mark and the basemap tiles under the production image CSP', { timeout: 90_000 }, async (t) => {
+  const executable = browserPath();
+  if (!executable) {
+    t.skip('Chrome or Edge is required for brand CSP browser acceptance.');
+    return;
+  }
+
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  try {
+    const csp = productionCspHeader();
+    const imgSrc = csp.split(';').map(value => value.trim()).find(value => value.startsWith('img-src'));
+    assert.equal(imgSrc, "img-src 'self' data: blob: https://server.arcgisonline.com");
+    for (const page of ['index.html', 'workspace.html', 'admin-login.html', 'lt-mark.svg'])
+      assert.ok(existsSync(path.join(root, 'dist', page)), `Build the production viewer before this browser test (dist/${page})`);
+    const fixture = await startFixture(path.join(root, 'test', 'fixtures', 'ktx2-tiles'), {
+      contentSecurityPolicy: csp, productionBuild: true,
+    });
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-brand-csp-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort, browser);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Network.enable');
+    await client.command('Emulation.setDeviceMetricsOverride', {
+      width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, screenWidth: 1440, screenHeight: 900,
+    });
+    // Record every CSP violation from the first byte of each document.
+    await client.command('Page.addScriptToEvaluateOnNewDocument', { source: `window.__cspViolations = [];
+      document.addEventListener('securitypolicyviolation', event => window.__cspViolations.push({
+        directive: event.effectiveDirective, blocked: event.blockedURI }));` });
+    const brandMarks = `[...document.querySelectorAll('img')].filter(image => new URL(image.src, location.href).pathname === '/lt-mark.svg')`;
+    const checkRoute = async (route, label) => {
+      await client.command('Page.navigate', { url: `${fixture.origin}${route}` });
+      await waitFor(client, `(() => { const marks = ${brandMarks};
+        return document.readyState === 'complete' && marks.length > 0 && marks.every(image => image.complete && image.naturalWidth > 0); })()`,
+      `${label}: same-origin brand mark did not load`, 20_000);
+      return client.evaluate(`({ marks: ${brandMarks}.map(image => ({ src: new URL(image.src).pathname, width: image.naturalWidth })),
+        violations: window.__cspViolations })`);
+    };
+
+    // Model viewer, opened on the orthophoto view so Leaflet requests the Esri basemap.
+    const viewer = await checkRoute(`/?project=${fixtureId}&view=ortho`, 'viewer');
+    await waitFor(client, `(() => { const tiles = [...document.querySelectorAll('img.leaflet-tile')]
+      .filter(image => image.src.startsWith('https://server.arcgisonline.com/'));
+      return tiles.some(image => image.complete && image.naturalWidth > 0); })()`,
+    'viewer: no Esri basemap tile loaded (is the network reachable?)', 30_000);
+    const tiles = await client.evaluate(`[...document.querySelectorAll('img.leaflet-tile')]
+      .filter(image => image.src.startsWith('https://server.arcgisonline.com/') && image.complete && image.naturalWidth > 0).length`);
+    assert.ok(tiles > 0, 'basemap tiles must render');
+    assert.deepEqual(viewer.violations, [], `viewer CSP violations: ${JSON.stringify(viewer.violations)}`);
+
+    // The staff workspace and the admin sign-in page carry the same mark.
+    for (const [route, label] of [['/workspace.html', 'workspace'], ['/admin-login.html', 'admin sign-in']]) {
+      const result = await checkRoute(route, label);
+      assert.ok(result.marks.length > 0 && result.marks.every(mark => mark.width > 0), `${label}: ${JSON.stringify(result.marks)}`);
+      assert.deepEqual(result.violations.filter(violation => violation.directive === 'img-src'), [],
+        `${label} image CSP violations: ${JSON.stringify(result.violations)}`);
+    }
+
+    const blockedImages = client.events.filter(event => event.method === 'Network.loadingFailed' && event.params.blockedReason === 'csp');
+    assert.deepEqual(blockedImages, [], 'No request may be blocked by CSP');
+    assert.ok(fixture.requests.includes('/lt-mark.svg'), 'brand mark must be served from the Viewer origin');
+    assert.equal(fixture.requests.some(pathname => /DroneLogo|ledgetopdroneservices/i.test(pathname)), false);
+    t.diagnostic(`brand CSP smoke: viewer marks=${viewer.marks.length}, basemap tiles=${tiles}`);
   } finally {
     if (client) {
       await client.command('Page.close', {}, 2_000).catch(() => {});
