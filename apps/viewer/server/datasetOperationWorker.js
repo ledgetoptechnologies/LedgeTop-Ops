@@ -7,6 +7,7 @@ const { importWebodmTask } = require('./webodmTaskImport');
 const { cleanupLodRecoveryMaterialization, processLodRecovery } = require('./lodRecovery');
 const { processingReadyEvent } = require('./processingReadyEvent');
 const { copyTaskPhotos } = require('./taskPhotoImports');
+const {cleanupUploadPreservingGcp}=require('./gcpUploadRetention');
 
 async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
 function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
@@ -22,7 +23,7 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
   const existing = processing.getDataset(upload.datasetId, true);
   if (existing?.status === 'finalized') {
     processing.completeUpload(upload.id);
-    storage.cleanupUpload(upload.id);
+    cleanupUploadPreservingGcp(processing,storage,upload.id);
     return { dataset: existing };
   }
   if (!existing || upload.status !== 'finalizing') throw Object.assign(new Error('upload is not finalizing'), { code: 'upload_not_finalizing' });
@@ -43,7 +44,7 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
   }
   const dataset = processing.finalizeDataset(existing.id, files, manifestHash(files));
   processing.completeUpload(upload.id);
-  storage.cleanupUpload(upload.id);
+  cleanupUploadPreservingGcp(processing,storage,upload.id);
   return { dataset };
 }
 
