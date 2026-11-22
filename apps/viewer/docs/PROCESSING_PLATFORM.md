@@ -164,6 +164,14 @@ An administrator with `viewer.processing.publish` may inspect an unpublished `re
 
 Adopted catalog moves are journaled before filesystem mutation. If a same-filesystem Terra rename succeeds but later catalog registration fails, maintenance restores the deterministic destination to its original import path (or removes a duplicate copy) before clearing the intent. This reconciliation survives restart and prevents unaccounted dataset bytes even when the failed operation is never manually retried.
 
+## Moving tasks between folders and projects
+
+Staff use **Move to…** on a task (or drag its **Move** handle) to choose a project and then a folder in it. Moves inside a project use `PATCH /api/v1/tasks/:id/folder`. Moves to another project use `PATCH /api/v1/tasks/:id/project` with `{projectId, folderId, expectedProjectId, expectedFolderId, expectedFolderRevision, confirmSharingChange?, undo?}` and an `Idempotency-Key`. Both share one placement revision, so a stale folder or project guard returns `409 task_move_conflict`/`folder_conflict`.
+
+A project move needs `viewer.processing.write`, `viewer.projects.write` and `viewer.datasets.write`, plus `viewer.processing.publish` when the task has a published output. In one transaction it moves the task, its source dataset, every `model_outputs` row and WebODM import record of the task; files on disk do not move. It is refused while the task is queued or processing, an attempt is live, a processing or derivative job is pending or leased, a dataset operation or output storage mutation is open, or an LOD recovery uses an output (`task_busy`); when another task uses the same dataset (`dataset_shared`); and when the destination already has a dataset with the same name (`dataset_name_conflict`). The move is audited as `processing_task.project_changed` with the old and new project and folder, output count and sharing counts. The mover can undo it for 10 seconds.
+
+Sharing: no grant is edited. Project shares and project-scoped client grants find tasks by project on every request, so the task stops being visible through the old project's shares and becomes visible through the new project's shares. Task-scoped client grants recorded against the old project stop resolving (they fail closed and must be re-granted on the new project). Model-level public links are not project-scoped and keep working. Because of this, moving a published task requires `confirmSharingChange: true`; without it the route returns `409 sharing_change_unconfirmed` with the published-output and live-share counts. Undo restores the previous project without a second confirmation.
+
 ## Existing-model catalog migration
 
 Durable mounted-tree scans discover WebODM outputs without API credentials and

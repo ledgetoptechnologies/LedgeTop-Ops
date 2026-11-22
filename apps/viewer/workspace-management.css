@@ -106,7 +106,11 @@
 [data-folder-drag]{cursor:grab}
 [data-folder-drag]:active{cursor:grabbing}
 .folder-drop-destinations{position:sticky;bottom:12px;z-index:2;display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-height:32vh;overflow:auto;margin-top:12px;padding:12px;border:1px solid var(--orange);border-radius:10px;background:#171a20;box-shadow:0 8px 24px #0008}
-.folder-drop-destinations [data-task-drop-folder]{padding:7px 10px;border:1px dashed #7e8796;border-radius:6px}
-[data-task-drop-folder].folder-drop-active{outline:2px solid var(--orange);outline-offset:2px;background:#4b2418}
+.folder-drop-destinations [data-task-drop-folder],.folder-drop-destinations [data-task-drop-project]{padding:7px 10px;border:1px dashed #7e8796;border-radius:6px}
+.folder-drop-destinations [data-task-drop-project]{border-color:var(--orange)}
+[data-task-drop-project].folder-drop-active,[data-task-drop-folder].folder-drop-active{outline:2px solid var(--orange);outline-offset:2px;background:#4b2418}
 #workspace-folder-undo{position:fixed;left:max(16px,env(safe-area-inset-left));bottom:max(16px,env(safe-area-inset-bottom));z-index:10;display:flex;gap:12px;align-items:center;padding:10px 14px;border:1px solid #555e70;border-radius:8px;background:#171a20;color:#fff;box-shadow:0 8px 24px #0008}
 #workspace-folder-undo:empty{display:none}
+.task-move-form .task-move-confirm{display:flex;flex-direction:row;gap:10px;align-items:flex-start}
+.task-move-form .task-move-confirm input{flex:none;width:auto;margin-top:3px}
+.task-move-project-note[hidden]{display:none}
