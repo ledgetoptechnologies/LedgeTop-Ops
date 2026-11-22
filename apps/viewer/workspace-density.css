@@ -1,0 +1,155 @@
+/* Compact density for the Viewer workspace, matching the Operations and
+   Client Hub density pass: smaller base type and headings, tighter cards,
+   rows, buttons and tables. Loaded last so it overrides the older sheets
+   without rewriting them. Rules that must beat CSS imported later by
+   workspace modules (workspace-task-workflow.css) use a :root prefix.
+   Desktop controls are at least 32px tall; phone widths and coarse
+   pointers keep the 44px targets set in the original sheets. */
+
+body{font-size:14px;line-height:1.45}
+
+/* Shell, header and navigation */
+.workspace-brand{gap:9px;padding:2px 6px 12px}
+.brand-mark{width:32px;height:32px;border-radius:8px}
+.workspace-nav .nav-link{min-height:34px;padding:.35rem .6rem;font-size:.84rem}
+.nav-collapse{min-height:34px;font-size:.8rem}
+.nav-group-label{margin:.75rem .55rem .3rem}
+.workspace-nav-foot{padding:8px 10px}
+.workspace-header{min-height:56px;padding:9px 20px;gap:12px}
+.workspace-header h1{font-size:20px;line-height:1.2}
+.eyebrow{font-size:10px}
+.workspace-actions{gap:7px}
+.primary-button,.secondary-button,.icon-button{min-height:32px;padding:6px 12px;border-radius:8px;font-size:13px;font-weight:600;line-height:1.3}
+#workspace-content{padding:16px 20px}
+
+/* Cards, metrics and lists */
+.metric-grid{gap:10px}
+.metric-card{padding:11px 14px}
+.metric-card strong{margin-top:3px;font-size:21px;line-height:1.2}
+.metric-card small{margin-top:3px;font-size:12px}
+.content-grid,.management-grid,.project-columns{gap:12px}
+.content-grid,.project-columns{margin-top:12px}
+.content-card{padding:14px}
+.card-heading{margin-bottom:10px}
+.card-heading h2{font-size:15px}
+.data-list,.quick-actions{gap:6px}
+.data-row{gap:10px;padding:8px 12px}
+.manage-row{gap:10px;padding:8px 12px}
+.quick-action{padding:8px 12px}
+.empty-state{padding:22px 12px}
+.top-gap{margin-top:12px}
+.section-heading,.project-detail-heading,.subsection-heading,.modal-heading{gap:12px}
+.section-heading h2,.project-detail-heading h2,.modal-heading h2{margin:0 0 4px;font-size:18px;line-height:1.25}
+.section-heading p,.project-detail-heading p,.subsection-heading p{margin:2px 0;font-size:13px}
+.status{padding:2px 8px}
+
+/* Forms */
+.manage-form{gap:10px}
+.manage-form label{gap:4px}
+.manage-form input,.manage-form select{padding:7px 10px}
+.project-search input{min-height:34px;padding:7px 12px;border-radius:8px}
+
+/* Project list and expanded project */
+.project-workspace{gap:10px}
+.project-list{gap:6px}
+.project-open{gap:12px;padding:9px 14px}
+.project-name strong{font-size:14px}
+.project-name small,.project-open small{margin-top:1px;font-size:12px}
+.project-summary{font-size:12px}
+.activity-chip{padding:2px 8px;font-size:11px}
+.project-row>.project-detail{padding:12px 14px}
+.project-detail-heading{margin-bottom:10px}
+.project-detail-heading .project-tasks-title{font-size:15px}
+.product-download-item{min-height:44px;gap:10px}
+
+/* Task rows and task detail */
+.task-list{gap:6px}
+.task-summary{min-height:52px}
+.task-summary-toggle{gap:10px;padding:8px 12px}
+.task-quick-actions{padding:7px 10px}
+.task-quick-actions .primary-button,.task-quick-actions .secondary-button{min-height:32px}
+.task-detail{padding:12px 14px 14px}
+.task-detail h3,.task-subsection h3{margin:0 0 8px;font-size:14px}
+.task-detail-heading{margin-bottom:8px}
+.task-overview-grid{gap:14px}
+.task-facts>div{gap:12px;padding:5px 0;font-size:13px}
+.task-metric{padding:8px}
+.task-subsection{margin-top:12px;padding-top:12px}
+.task-disclosure{margin-top:8px}
+.task-disclosure>summary{padding:8px 12px}
+.task-disclosure-body{padding:10px 12px}
+.task-disclosure-body>.task-subsection>.subsection-heading{margin-bottom:8px}
+.task-workspace-page{margin-top:12px;padding:14px}
+.task-streaming-settings{margin-top:14px;padding-top:12px}
+.linked-dataset-actions{margin-top:10px}
+.log-tail{padding:10px}
+.inline-review{padding:9px 12px}
+.attempt-diagnostic{padding:10px 12px}
+.attempt-diagnostic-grid{gap:10px}
+.attempt-log-section{margin-top:10px}
+:root .task-page-navigation{margin-top:10px;gap:6px}
+
+/* "More" menus: 32px on desktop, 44px kept for touch below */
+.project-more-actions>summary{min-width:34px;min-height:32px;padding:0 9px;font-size:20px}
+:root .task-more-actions .project-more-menu button{min-height:32px}
+
+/* Dialogs and sharing */
+.workspace-modal{padding:16px;border-radius:12px}
+.modal-heading{margin-bottom:12px}
+.modal-heading .icon-button{padding:5px 9px;font-size:18px}
+.share-view-controls{padding:10px 12px}
+.share-columns,.diagnostic-grid{gap:12px}
+.share-columns>div>.content-card,.share-columns>.content-card{margin-bottom:10px}
+.share-legacy>summary{min-height:32px}
+:root .authenticated-share-options{padding:10px 12px}
+:root .authenticated-share-options>.content-card{margin-top:10px}
+
+/* Providers, Background work, Recycle Bin, Diagnostics */
+.provider-summary{gap:10px;margin-top:12px}
+.provider-card{padding:11px 14px}
+.provider-list-item{padding:8px 10px}
+.provider-workspace{margin-top:12px}
+.provider-workspace .provider-list-item{min-height:52px}
+.provider-workspace>section{padding:16px}
+.provider-detail h3{font-size:18px}
+.detail-list{margin:12px 0}
+.provider-options{margin:12px 0}
+.provider-master-detail{gap:14px}
+.import-choice{margin-bottom:12px}
+.import-tab{padding:8px}
+.import-activity{margin-bottom:12px;padding:12px 14px}
+.import-activity .card-heading h2{font-size:15px}
+.recycle-bin{gap:12px}
+.recycle-bin>.section-heading,.trash-group{padding:12px 14px}
+.trash-group-heading h2{font-size:15px}
+.diagnostic-run-history{padding:14px}
+.diagnostic-run-history>.section-heading{margin-bottom:12px}
+.diagnostic-run-groups{gap:12px}
+.diagnostic-project-group>h3{font-size:15px}
+.gcp-import-disclosure summary{padding:8px 12px}
+.gcp-import-disclosure .gcp-import-form{padding:10px 12px}
+.gcp-marker-workspace,.gcp-layout{gap:12px}
+.gcp-mark-list{margin-top:12px;padding-top:10px}
+.recovery-current-tab{margin-top:10px;padding-top:10px}
+:root .task-transfer-tray{padding:12px 14px}
+#workspace-toast{padding:9px 14px}
+
+/* Phones and touch: keep 44px targets and the narrow-width spacing. */
+@media (max-width:720px){
+  .workspace-header{padding:9px 14px}
+  #workspace-content{padding:12px}
+  .workspace-actions>button,.task-quick-actions .primary-button,.task-quick-actions .secondary-button{min-height:44px}
+  .workspace-nav .nav-link{min-height:44px}
+  .project-more-actions>summary{min-width:44px;min-height:44px}
+  :root .task-more-actions .project-more-menu button,.share-legacy>summary{min-height:44px}
+  .project-open{padding:10px 12px}
+  .task-detail{padding:12px}
+}
+@media (pointer:coarse){
+  .primary-button,.secondary-button,.workspace-nav .nav-link,.task-quick-actions .primary-button,.task-quick-actions .secondary-button,.share-legacy>summary,:root .task-more-actions .project-more-menu button{min-height:44px}
+  .project-more-actions>summary{min-width:44px;min-height:44px}
+}
+/* Narrow project lists keep their tight two-row layout. */
+@container project-list (max-width:719.98px){.project-open{gap:3px 12px}}
+/* Phones: two metric cards per row instead of one tall stack. */
+@media (min-width:360px) and (max-width:420px){.metric-grid,.metric-grid.dashboard-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
