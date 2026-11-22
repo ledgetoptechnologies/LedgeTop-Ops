@@ -20,7 +20,7 @@ concurrency:
 jobs:
   check:
     # Manual runs from any other branch are skipped before a runner starts.
-    if: github.ref == 'refs/heads/main'
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
