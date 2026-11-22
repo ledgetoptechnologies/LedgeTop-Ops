@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const path = require('node:path');
+const { canonicalProjectExclusions, projectExclusionPredicate } = require('./projectExclusions');
 const { storageTrashRetentionMs } = require('./storageRetention');
 const { compareUtf8, safeRelativePath, sanitizeLogMessage } = require('./processingSecurity');
 const { odmGcpList } = require('./gcpOdm');
@@ -57,6 +58,11 @@ const BUILT_IN_PRESETS = [
 ];
 
 function now() { return new Date().toISOString(); }
+/** A client-facing folder label: control characters (C0 and DEL) removed, trimmed, at most 160 characters, never empty. */
+function clientFolderName(value) {
+  const name = String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 160).trim();
+  return name || 'Untitled folder';
+}
 function json(value, fallback = {}) { try { return JSON.parse(value); } catch { return fallback; } }
 const MIN_DERIVATIVE_RESERVATION_BYTES=8_589_934_592n;
 function derivativeReservationBytes(inputBytes,type){const bytes=Number(inputBytes);if(!Number.isSafeInteger(bytes)||bytes<0)throw Object.assign(new Error('derivative input size cannot be reserved safely'),{code:'invalid_storage_estimate'});const multiplier=type==='ept'?8n:4n,estimate=BigInt(bytes)*multiplier,reserved=estimate>MIN_DERIVATIVE_RESERVATION_BYTES?estimate:MIN_DERIVATIVE_RESERVATION_BYTES;if(reserved>BigInt(Number.MAX_SAFE_INTEGER))throw Object.assign(new Error('derivative reservation exceeds the safe accounting range'),{code:'storage_estimate_too_large'});return Number(reserved);}
@@ -184,6 +190,12 @@ function indexedFileMetadata(file) {
     width:positiveIntegerOrNull(metadata.width),height:positiveIntegerOrNull(metadata.height)};
 }
 
+// Control characters (C0, DEL, C1), zero-width, line/paragraph separators and bidi controls are refused in new folder names; stored names are not rewritten.
+const UNSAFE_FOLDER_NAME=/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+// Each audited move advances the revision inside the same write transaction.
+const FOLDER_MOVE_REVISION = "(SELECT COUNT(*) FROM audit_events WHERE entity_type='processing_task' AND entity_id=processing_tasks.id AND action='processing_task.folder_changed')";
+const FOLDER_UNDO_WINDOW_MS = 10_000;
+
 class ProcessingRepository {
   constructor(database, { logMaxBytes = 10 * 1024 * 1024 } = {}) {
     this.database = database;
@@ -270,7 +282,7 @@ class ProcessingRepository {
   restoreMetadataEntity(trashId,actorId=null,{finalizeTrash=true}={}){return this.transaction(()=>{const item=this.getTrash(trashId);if(!item||item.permanentlyDeletedAt||!['project','task'].includes(item.entityType))return null;const t=now();if(item.entityType==='project'){const project=this.getProject(item.entityId);if(!project)return null;if(project.status==='archived'){if(this.database.prepare("SELECT 1 FROM projects WHERE id<>? AND status='active' AND display_name=? COLLATE NOCASE").get(project.id,project.displayName))return null;if(this.database.prepare("UPDATE projects SET status='active',archived_at=NULL,updated_at=? WHERE id=? AND status='archived'").run(t,project.id).changes!==1)return null;}else if(project.status!=='active')return null;}else{const task=this.getTask(item.entityId),project=task&&this.getProject(task.projectId);if(!task||project?.status!=='active')return null;if(task.status==='archived'){const allowed=new Set(['draft','queued','processing','ready_for_review','published','failed','cancelled']),status=allowed.has(item.originalStatus)?item.originalStatus:'draft';if(this.database.prepare("UPDATE processing_tasks SET status=?,archived_at=NULL,updated_at=? WHERE id=? AND status='archived'").run(status,t,task.id).changes!==1)return null;}}if(finalizeTrash){this.database.prepare('UPDATE storage_trash SET permanently_deleted_at=? WHERE id=? AND permanently_deleted_at IS NULL').run(t,trashId);this.insertAudit({actorId,action:`${item.entityType}.restored`,entityType:item.entityType,entityId:item.entityId,details:{trashId}});}return item.entityType==='project'?this.getProject(item.entityId):this.getTask(item.entityId);});}
   finishMetadataRestore(trashId,actorId=null){return this.transaction(()=>{const item=this.getTrash(trashId);if(!item||item.permanentlyDeletedAt||!['project','task'].includes(item.entityType))return null;const entity=item.entityType==='project'?this.getProject(item.entityId):this.getTask(item.entityId);if(!entity||entity.status==='archived')return null;const t=now();if(this.database.prepare('UPDATE storage_trash SET permanently_deleted_at=? WHERE id=? AND permanently_deleted_at IS NULL').run(t,trashId).changes!==1)return null;this.insertAudit({actorId,action:`${item.entityType}.restored`,entityType:item.entityType,entityId:item.entityId,details:{trashId}});return entity;});}
   canRestoreMetadataEntity(trashId){const item=this.getTrash(trashId);if(!item)return false;if(item.permanentlyDeletedAt)return true;if(item.entityType==='project'){const project=this.getProject(item.entityId);return Boolean(project&&['active','archived'].includes(project.status)&&!this.database.prepare("SELECT 1 FROM projects WHERE id<>? AND status='active' AND display_name=? COLLATE NOCASE").get(project.id,project.displayName));}if(item.entityType==='task'){const task=this.getTask(item.entityId),project=task&&this.getProject(task.projectId);return Boolean(task&&task.status==='archived'&&project&&['active','archived'].includes(project.status));}return false;}
-  purgeMetadataEntity(trashId,actorId=null){return this.transaction(()=>{const item=this.getTrash(trashId);if(!item||item.permanentlyDeletedAt||!['project','task'].includes(item.entityType))return null;const entity=item.entityType==='project'?this.getProject(item.entityId):this.getTask(item.entityId);if(!entity||entity.status!=='archived')return null;const t=now(),tombstone=`deleted-${item.entityType}-${item.entityId}`;if(item.entityType==='project')this.database.prepare("UPDATE projects SET display_name=?,description=NULL,tags_json='[]',metadata_json='{}',created_by=NULL,purged_at=?,updated_at=? WHERE id=? AND purged_at IS NULL").run(tombstone,t,t,item.entityId);else this.database.prepare("UPDATE processing_tasks SET display_name=?,description=NULL,metadata_json='{}',created_by=NULL,published_model_id=NULL,purged_at=?,updated_at=? WHERE id=? AND purged_at IS NULL").run(tombstone,t,t,item.entityId);if(this.database.prepare('UPDATE storage_trash SET permanently_deleted_at=? WHERE id=? AND permanently_deleted_at IS NULL').run(t,trashId).changes!==1)return null;this.insertAudit({actorType:actorId?'admin':'system',actorId,action:`${item.entityType}.purged`,entityType:item.entityType,entityId:item.entityId,details:{trashId,metadataTombstone:true}});return this.getTrash(trashId);});}
+  purgeMetadataEntity(trashId,actorId=null){return this.transaction(()=>{const item=this.getTrash(trashId);if(!item||item.permanentlyDeletedAt||!['project','task'].includes(item.entityType))return null;const entity=item.entityType==='project'?this.getProject(item.entityId):this.getTask(item.entityId);if(!entity||entity.status!=='archived')return null;const t=now(),tombstone=`deleted-${item.entityType}-${item.entityId}`;let removedFolders=0;if(item.entityType==='project'){this.database.prepare("UPDATE projects SET display_name=?,description=NULL,tags_json='[]',metadata_json='{}',created_by=NULL,purged_at=?,updated_at=? WHERE id=? AND purged_at IS NULL").run(tombstone,t,t,item.entityId);/* Folder names and hierarchy are project metadata: release task membership, then delete leaf-to-root with no renaming or re-parenting. */this.database.prepare('UPDATE processing_tasks SET folder_id=NULL WHERE project_id=? AND folder_id IS NOT NULL').run(item.entityId);const deleteLeaves=this.database.prepare('DELETE FROM project_folders WHERE project_id=? AND NOT EXISTS(SELECT 1 FROM project_folders c WHERE c.parent_id=project_folders.id)');for(let removed;(removed=deleteLeaves.run(item.entityId).changes)>0;)removedFolders+=removed;if(this.database.prepare('SELECT 1 FROM project_folders WHERE project_id=? LIMIT 1').get(item.entityId))throw Object.assign(new Error('Project folders could not be removed; folder hierarchy needs review'),{code:'folder_hierarchy_invalid'});}else this.database.prepare("UPDATE processing_tasks SET display_name=?,description=NULL,metadata_json='{}',created_by=NULL,published_model_id=NULL,folder_id=NULL,purged_at=?,updated_at=? WHERE id=? AND purged_at IS NULL").run(tombstone,t,t,item.entityId);if(this.database.prepare('UPDATE storage_trash SET permanently_deleted_at=? WHERE id=? AND permanently_deleted_at IS NULL').run(t,trashId).changes!==1)return null;this.insertAudit({actorType:actorId?'admin':'system',actorId,action:`${item.entityType}.purged`,entityType:item.entityType,entityId:item.entityId,details:{trashId,metadataTombstone:true,...(item.entityType==='task'?{previousFolderId:entity.folderId??null}:{removedFolders})}});return this.getTrash(trashId);});}
   addContainerTrashMember(containerTrashId,memberTrashId){return this.transaction(()=>{const container=this.getTrash(containerTrashId),member=this.getTrash(memberTrashId);if(!container||container.permanentlyDeletedAt||!member||member.permanentlyDeletedAt||container.id===member.id)return null;this.database.prepare('INSERT OR IGNORE INTO container_trash_members(container_trash_id,member_trash_id,entity_type,entity_id,created_at) VALUES (?,?,?,?,?)').run(container.id,member.id,member.entityType,member.entityId,now());this.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=? AND permanently_deleted_at IS NULL').run(container.purgeAfter,member.id);return this.getTrash(member.id);});}
   refreshContainerTrashBytes(containerTrashId){const total=Number(this.database.prepare('SELECT COALESCE(SUM(t.byte_size),0) n FROM container_trash_members m JOIN storage_trash t ON t.id=m.member_trash_id WHERE m.container_trash_id=?').get(containerTrashId)?.n||0);this.database.prepare('UPDATE storage_trash SET byte_size=? WHERE id=? AND permanently_deleted_at IS NULL').run(total,containerTrashId);return this.getTrash(containerTrashId);}
   listContainerTrashMembers(containerTrashId){return this.database.prepare('SELECT member_trash_id FROM container_trash_members WHERE container_trash_id=? ORDER BY created_at,member_trash_id').all(containerTrashId).map(row=>this.getTrash(row.member_trash_id)).filter(Boolean);}
@@ -441,11 +453,66 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   updatePreset(id,input,audit=null){return this.transaction(()=>{const current=this.getPreset(id);if(!current)return null;if(current.builtIn)throw Object.assign(new Error('built-in presets are immutable'),{code:'built_in_preset'});const name=bounded(input.displayName??current.displayName),description=input.description===undefined?current.description:(bounded(input.description,2000)||null),t=now();if(!name)throw Object.assign(new Error('display name is required'),{code:'display_name_required'});this.database.prepare('UPDATE processing_presets SET display_name=?,description=?,options_json=?,provider_type=?,capability_fingerprint=?,enabled=?,updated_at=? WHERE id=? AND built_in=0').run(name,description,JSON.stringify(input.options??current.options),input.providerType??current.providerType,input.capabilityFingerprint??current.capabilityFingerprint,(input.enabled??current.enabled)?1:0,t,id);if(audit)this.insertAudit({...audit,entityId:id});return this.getPreset(id);});}
   deletePreset(id,audit=null){return this.transaction(()=>{const current=this.getPreset(id);if(!current)return false;if(current.builtIn)throw Object.assign(new Error('built-in presets are immutable'),{code:'built_in_preset'});const deleted=this.database.prepare('DELETE FROM processing_presets WHERE id=? AND built_in=0').run(id).changes===1;if(deleted&&audit)this.insertAudit({...audit,entityId:id});return deleted;});}
 
-  task(row) { return row && { id:row.id,projectId:row.project_id,datasetId:row.dataset_id,displayName:row.display_name,description:row.description,status:row.status,activeAttemptId:row.active_attempt_id,publishedModelId:row.published_model_id,metadata:json(row.metadata_json),createdBy:row.created_by,createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,purgedAt:row.purged_at }; }
+  projectFolders(projectId) { return this.database.prepare('SELECT id,project_id,parent_id,display_name FROM project_folders WHERE project_id=? ORDER BY display_name COLLATE NOCASE,id').all(projectId).map(row=>({id:row.id,projectId:row.project_id,parentId:row.parent_id,displayName:row.display_name})); }
+  createProjectFolder(projectId,{displayName,parentId=null},actorId) { return this.transaction(()=>{
+    const project=this.getProject(projectId),name=typeof displayName==='string'?displayName.trim():'';
+    if(!project||project.status!=='active')throw Object.assign(new Error('project is unavailable'),{code:'project_unavailable'});
+    if(!name||name.length>160||UNSAFE_FOLDER_NAME.test(displayName))throw Object.assign(new Error('invalid folder name'),{code:'invalid_folder_name'});
+    if(parentId!==null&&typeof parentId!=='string')throw Object.assign(new Error('invalid parent folder'),{code:'invalid_parent_folder'});
+    let parent=parentId,depth=0;const seen=new Set();
+    while(parent!==null){if(seen.has(parent)||++depth>=16)throw Object.assign(new Error('folder depth exceeded'),{code:'folder_depth_exceeded'});seen.add(parent);const row=this.database.prepare('SELECT parent_id FROM project_folders WHERE id=? AND project_id=?').get(parent,projectId);if(!row)throw Object.assign(new Error('parent folder is unavailable'),{code:'invalid_parent_folder'});parent=row.parent_id;}
+    if(this.database.prepare("SELECT 1 FROM project_folders WHERE project_id=? AND COALESCE(parent_id,'')=COALESCE(?,'') AND display_name=? COLLATE NOCASE").get(projectId,parentId,name))throw Object.assign(new Error('folder name already exists'),{code:'folder_name_conflict'});
+    const id=crypto.randomUUID(),t=now();this.database.prepare('INSERT INTO project_folders(id,project_id,parent_id,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(id,projectId,parentId,name,t,t);
+    this.insertAudit({actorId,action:'project_folder.created',entityType:'project_folder',entityId:id,details:{projectId,parentId}});
+    return {id,projectId,parentId,displayName:name};
+  }); }
+  renameProjectFolder(projectId,folderId,displayName,actorId) { return this.transaction(()=>{
+    const project=this.getProject(projectId),folder=this.database.prepare('SELECT * FROM project_folders WHERE id=? AND project_id=?').get(folderId,projectId);
+    if(!folder)return null;if(!project||project.status!=='active')throw Object.assign(new Error('project is unavailable'),{code:'project_unavailable'});
+    const name=typeof displayName==='string'?displayName.trim():'';if(!name||name.length>160||UNSAFE_FOLDER_NAME.test(displayName))throw Object.assign(new Error('invalid folder name'),{code:'invalid_folder_name'});
+    if(this.database.prepare("SELECT 1 FROM project_folders WHERE project_id=? AND COALESCE(parent_id,'')=COALESCE(?,'') AND display_name=? COLLATE NOCASE AND id<>?").get(projectId,folder.parent_id,name,folderId))throw Object.assign(new Error('folder name already exists'),{code:'folder_name_conflict'});
+    this.database.prepare('UPDATE project_folders SET display_name=?,updated_at=? WHERE id=? AND project_id=?').run(name,now(),folderId,projectId);
+    this.insertAudit({actorId,action:'project_folder.renamed',entityType:'project_folder',entityId:folderId,details:{projectId}});
+    return{id:folderId,projectId,parentId:folder.parent_id,displayName:name};
+  }); }
+  deleteEmptyProjectFolder(projectId,folderId,actorId) { return this.transaction(()=>{
+    const project=this.getProject(projectId),folder=this.database.prepare('SELECT id FROM project_folders WHERE id=? AND project_id=?').get(folderId,projectId);
+    if(!folder)return false;if(!project||project.status!=='active')throw Object.assign(new Error('project is unavailable'),{code:'project_unavailable'});
+    if(this.database.prepare('SELECT 1 FROM project_folders WHERE parent_id=? LIMIT 1').get(folderId)||this.database.prepare('SELECT 1 FROM processing_tasks WHERE folder_id=? LIMIT 1').get(folderId))throw Object.assign(new Error('Move all tasks and remove subfolders before deleting this folder'),{code:'folder_not_empty'});
+    this.database.prepare('DELETE FROM project_folders WHERE id=? AND project_id=?').run(folderId,projectId);
+    this.insertAudit({actorId,action:'project_folder.deleted',entityType:'project_folder',entityId:folderId,details:{projectId}});
+    return true;
+  }); }
+  // The HTTP handler always requires a guard. Direct fixture setup can use the repository alone.
+  moveTaskToFolder(taskId,folderId,actorId,guard=null) { return this.transaction(()=>{
+    const task=this.getTask(taskId);if(!task)return null;const project=this.getProject(task.projectId);
+    if(!project||project.status!=='active'||task.status==='archived')throw Object.assign(new Error('task is unavailable'),{code:'task_unavailable'});
+    if(guard&&(guard.expectedFolderId!==task.folderId||guard.expectedFolderRevision!==task.folderRevision)){
+      throw Object.assign(new Error('The task has moved. Check its current folder and try again.'),{code:'folder_conflict'});
+    }
+    const timestamp=now();
+    if(guard?.undo){
+      const previous=this.database.prepare("SELECT actor_id,created_at,details_json FROM audit_events WHERE entity_type='processing_task' AND entity_id=? AND action='processing_task.folder_changed' ORDER BY rowid DESC LIMIT 1").get(taskId);
+      const details=json(previous?.details_json);
+      if(!previous||previous.actor_id!==actorId||details?.undo||details?.previousFolderId!==folderId||
+          details?.folderId!==task.folderId||!(Date.parse(timestamp)<Date.parse(previous.created_at)+FOLDER_UNDO_WINDOW_MS)){
+        throw Object.assign(new Error('This move can no longer be undone.'),{code:'folder_undo_conflict'});
+      }
+    }
+    if(folderId!==null&&(typeof folderId!=='string'||!this.database.prepare('SELECT 1 FROM project_folders WHERE id=? AND project_id=?').get(folderId,task.projectId)))throw Object.assign(new Error('folder is unavailable'),{code:'invalid_folder'});
+    if(guard&&folderId===task.folderId)return task;
+    this.database.prepare('UPDATE processing_tasks SET folder_id=?,updated_at=? WHERE id=?').run(folderId,timestamp,taskId);
+    const auditId=this.insertAudit({actorId,action:'processing_task.folder_changed',entityType:'processing_task',entityId:taskId,details:{projectId:task.projectId,folderId,previousFolderId:task.folderId,undo:guard?.undo===true}});
+    const updated=this.getTask(taskId);
+    if(!guard||guard.undo)return updated;
+    const audit=this.database.prepare('SELECT created_at FROM audit_events WHERE id=?').get(auditId);
+    return {...updated,undoExpiresAt:new Date(Date.parse(audit.created_at)+FOLDER_UNDO_WINDOW_MS).toISOString()};
+  }); }
+  task(row) { return row && { id:row.id,projectId:row.project_id,folderId:row.folder_id??null,...(row.folder_revision===undefined?{}:{folderRevision:row.folder_revision}),datasetId:row.dataset_id,displayName:row.display_name,description:row.description,status:row.status,activeAttemptId:row.active_attempt_id,publishedModelId:row.published_model_id,metadata:json(row.metadata_json),createdBy:row.created_by,createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,purgedAt:row.purged_at }; }
   createTask(input) { const project=this.getProject(input.projectId),dataset=this.getDataset(input.datasetId);if(!project||project.status!=='active'||!dataset||dataset.status!=='finalized'||dataset.projectId!==project.id)throw Object.assign(new Error('task project and finalized dataset must match'),{code:'invalid_project_or_dataset'});const id=input.id||crypto.randomUUID(),t=now();this.database.prepare(`INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,description,status,metadata_json,created_by,created_at,updated_at) VALUES (?,?,?,?,?,'draft',?,?,?,?)`).run(id,input.projectId,input.datasetId,bounded(input.displayName),bounded(input.description,4000)||null,JSON.stringify(input.metadata||{}),input.createdBy||null,t,t);return this.getTask(id); }
   createTaskDraft({subject,submissionId,requestHash,projectId,datasetId,displayName}){return this.transaction(()=>{const existing=this.database.prepare('SELECT * FROM task_draft_requests WHERE subject=? AND submission_id=?').get(subject,submissionId);if(existing)return existing.request_hash===requestHash?{task:this.getTask(existing.task_id),replayed:true}:{conflict:true};const task=this.createTask({projectId,datasetId,displayName,createdBy:subject}),t=now();this.database.prepare('INSERT INTO task_draft_requests(subject,submission_id,request_hash,task_id,created_at) VALUES (?,?,?,?,?)').run(subject,submissionId,requestHash,task.id,t);this.database.prepare('INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),'admin',subject,'processing_task.created','processing_task',task.id,JSON.stringify({submissionId,projectId,datasetId}),t);return{task,replayed:false};});}
-  getTask(id) { const task=this.task(this.database.prepare('SELECT * FROM processing_tasks WHERE id=?').get(id));return task?.purgedAt?null:(task||null); }
-  listTasksPage({projectId=null,limit=50,cursor=null}={}) { const n=pageLimit(limit),c=decodeCursor(cursor),where=["status<>'archived'","purged_at IS NULL"],args=[];if(projectId){where.push('project_id=?');args.push(projectId);}if(c){where.push('(created_at<? OR (created_at=? AND id<?))');args.push(c.createdAt,c.createdAt,c.id);}const rows=this.database.prepare(`SELECT * FROM processing_tasks WHERE ${where.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT ?`).all(...args,n+1),more=rows.length>n,items=rows.slice(0,n),latest=new Map(),byId=new Map();if(items.length){const attempts=this.database.prepare(`SELECT * FROM processing_attempts WHERE task_id IN (${items.map(()=>'?').join(',')}) ORDER BY task_id,attempt_number DESC`).all(...items.map((r)=>r.id));for(const row of attempts){const value=this.attempt(row);byId.set(row.id,value);if(!latest.has(row.task_id))latest.set(row.task_id,value);}}return{items:items.map((r)=>{const task=this.task(r);return{...task,latestAttempt:byId.get(task.activeAttemptId)||latest.get(r.id)||null};}),nextCursor:more?encodeCursor(items.at(-1)):null}; }
+  getTask(id) { const task=this.task(this.database.prepare(`SELECT processing_tasks.*, ${FOLDER_MOVE_REVISION} AS folder_revision FROM processing_tasks WHERE id=?`).get(id));return task?.purgedAt?null:(task||null); }
+  listTasksPage({projectId=null,limit=50,cursor=null}={}) { const n=pageLimit(limit),c=decodeCursor(cursor),where=["status<>'archived'","purged_at IS NULL"],args=[];if(projectId){where.push('project_id=?');args.push(projectId);}if(c){where.push('(created_at<? OR (created_at=? AND id<?))');args.push(c.createdAt,c.createdAt,c.id);}const rows=this.database.prepare(`SELECT processing_tasks.*, ${FOLDER_MOVE_REVISION} AS folder_revision FROM processing_tasks WHERE ${where.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT ?`).all(...args,n+1),more=rows.length>n,items=rows.slice(0,n),latest=new Map(),byId=new Map();if(items.length){const attempts=this.database.prepare(`SELECT * FROM processing_attempts WHERE task_id IN (${items.map(()=>'?').join(',')}) ORDER BY task_id,attempt_number DESC`).all(...items.map((r)=>r.id));for(const row of attempts){const value=this.attempt(row);byId.set(row.id,value);if(!latest.has(row.task_id))latest.set(row.task_id,value);}}return{items:items.map((r)=>{const task=this.task(r);return{...task,latestAttempt:byId.get(task.activeAttemptId)||latest.get(r.id)||null};}),nextCursor:more?encodeCursor(items.at(-1)):null}; }
   listTasks(projectId) { return this.listTasksPage({projectId,limit:100}).items; }
   attempt(row) { return row && { id:row.id,taskId:row.task_id,datasetId:row.dataset_id,attemptNumber:row.attempt_number,providerId:row.provider_id,providerTaskId:row.provider_task_id,presetId:row.preset_id,options:json(row.options_json),capabilityFingerprint:row.capability_fingerprint,status:row.status,progress:row.progress,providerOutputCursor:row.provider_output_cursor,errorCode:row.error_code,errorMessage:row.error_message,resultModelId:row.result_model_id,resultModelVersionId:row.result_model_version_id,createdBy:row.created_by,createdAt:row.created_at,updatedAt:row.updated_at,startedAt:row.started_at,upstreamCompletedAt:row.upstream_completed_at,ingestedAt:row.ingested_at,completedAt:row.completed_at,submissionPhase:row.submission_phase||'new',uploadedFileCount:Number(row.uploaded_file_count)||0 }; }
   createAttempt(input) {
@@ -686,7 +753,48 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   modelOutput(row){if(!row)return null;const model=this.database.prepare('SELECT display_name FROM models WHERE id=?').get(row.model_id);return{id:row.id,modelId:row.model_id,taskId:row.task_id,attemptId:row.attempt_id,projectId:row.project_id,displayName:model?.display_name||'',rootKey:row.root_key,relativePath:row.relative_path,storageMode:row.storage_mode||'managed',status:row.status,byteSize:Number(row.byte_size||0),assetCount:Number(row.asset_count||0),createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,trashedAt:row.trashed_at};}
   getModelOutput(id){return this.modelOutput(this.database.prepare('SELECT * FROM model_outputs WHERE id=?').get(id));}
   activePublishedProjectTask(row){return row&&{projectId:row.project_id,projectDisplayName:row.project_display_name,projectDefaultUnits:row.project_default_units,taskId:row.task_id,taskDisplayName:row.task_display_name,taskCreatedAt:row.task_created_at,modelId:row.model_id,modelDisplayName:row.model_display_name,modelVersionId:row.model_version_id,attemptId:row.attempt_id,publishedAt:row.published_at};}
-  getActivePublishedProjectTask(projectId,taskId,{strictPublished=false}={}){return this.activePublishedProjectTask(this.database.prepare(`SELECT
+  validateProjectExclusions(projectId, value) {
+    const exclusions = canonicalProjectExclusions(value);
+    const project = this.getProject(projectId);
+    if (!exclusions || project?.status !== 'active' || !this.database.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_folders'",
+    ).get()) return null;
+    const folder = this.database.prepare('SELECT 1 FROM project_folders WHERE project_id=? AND id=?');
+    const task = this.database.prepare('SELECT 1 FROM processing_tasks WHERE project_id=? AND id=? AND purged_at IS NULL');
+    if (!exclusions.folderIds.every(id => folder.get(projectId, id))
+      || !exclusions.taskIds.every(id => task.get(projectId, id))) return null;
+    return exclusions;
+  }
+
+  getActivePublishedProjectTask(projectId, taskId, options) {
+    return this.activePublishedProjectTask(activePublishedProjectTaskRow(this.database, projectId, taskId, options));
+  }
+  /**
+   * Folder path (root first) for tasks the caller has ALREADY filtered to client-visible published tasks. Only the
+   * ancestry of those exact tasks is read, so a folder holding no visible task is never named. A chain that is too
+   * deep, cyclic or crosses projects yields [] rather than a partial path. Names are capped at 160 characters.
+   */
+  clientTaskFolderPaths(projectId,taskIds){
+    const paths=new Map(taskIds.map(id=>[id,[]]));
+    if(!taskIds.length||taskIds.length>50||!this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_folders'").get())return paths;
+    const rows=this.database.prepare(`WITH RECURSIVE chain(task_id,folder_id,parent_id,name,depth) AS (
+        SELECT t.id,f.id,f.parent_id,substr(f.display_name,1,160),1 FROM processing_tasks t
+          JOIN project_folders f ON f.id=t.folder_id AND f.project_id=t.project_id
+          WHERE t.project_id=? AND t.id IN (${taskIds.map(()=>'?').join(',')})
+        UNION ALL
+        SELECT c.task_id,f.id,f.parent_id,substr(f.display_name,1,160),c.depth+1 FROM chain c
+          JOIN project_folders f ON f.id=c.parent_id AND f.project_id=? WHERE c.depth<16)
+      SELECT task_id,folder_id,parent_id,name,depth FROM chain ORDER BY task_id,depth DESC`).all(projectId,...taskIds,projectId);
+    const chains=new Map();for(const row of rows){if(!chains.has(row.task_id))chains.set(row.task_id,[]);chains.get(row.task_id).push(row);}
+    for(const[taskId,chain]of chains){
+      // Rows are deepest-ancestor first; the path is complete only when that ancestor is a project root folder.
+      if(chain[0].parent_id!==null||chain.length!==chain[0].depth||new Set(chain.map(row=>row.folder_id)).size!==chain.length)continue;
+      // Legacy names may hold control characters (including DEL); emit only what the shared parser accepts.
+      paths.set(taskId,chain.map(row=>({id:row.folder_id,name:clientFolderName(row.name)})));
+    }
+    return paths;
+  }
+  listActivePublishedProjectTasksPage(projectId,{limit=50,cursor=null,strictPublished=false,exclusions}={}){const scope=projectExclusionPredicate(this.database,exclusions);strictPublished ||= exclusions !== undefined;const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[projectId,...scope.args],after=c?' AND (t.created_at<? OR (t.created_at=? AND t.id<?))':'';if(c)args.push(c.createdAt,c.createdAt,c.id);const rows=this.database.prepare(`SELECT
       p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
       t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
       m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
@@ -696,18 +804,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
       JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
         AND o.project_id=p.id AND o.status='published'
-      WHERE p.id=? AND p.status='active' AND t.id=?${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}`).get(projectId,taskId));}
-  listActivePublishedProjectTasksPage(projectId,{limit=50,cursor=null,strictPublished=false}={}){const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[projectId],after=c?' AND (t.created_at<? OR (t.created_at=? AND t.id<?))':'';if(c)args.push(c.createdAt,c.createdAt,c.id);const rows=this.database.prepare(`SELECT
-      p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
-      t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
-      m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
-      o.attempt_id,o.updated_at AS published_at
-      FROM projects p
-      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL
-      JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
-      JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
-        AND o.project_id=p.id AND o.status='published'
-      WHERE p.id=? AND p.status='active'${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}${after}
+      WHERE p.id=? AND p.status='active'${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}${scope.sql}${after}
       ORDER BY t.created_at DESC,t.id DESC LIMIT ?`).all(...args,n+1),items=rows.slice(0,n).map((row)=>this.activePublishedProjectTask(row)),last=items.at(-1);return{items,nextCursor:rows.length>n?encodeCursor(strictPublished?{created_at:last.taskCreatedAt,id:last.taskId}:{createdAt:last.taskCreatedAt,id:last.taskId}):null};}
   listActivePublishedProjectsPage({limit=50,cursor=null,q=''}={}) {
     const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[];
@@ -1371,4 +1468,16 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   retryEvent(id,message,attemptCount){const terminal=attemptCount>=12,t=now(),next=new Date(Date.now()+Math.min(3600_000,5000*2**Math.min(attemptCount,10))).toISOString();this.database.prepare('UPDATE event_outbox SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=?').run(terminal?'failed':'pending',next,bounded(sanitizeLogMessage(message),1000),t,id);}
 }
 
-module.exports = { BUILT_IN_PRESETS, ProcessingRepository };
+function activePublishedProjectTaskRow(database,projectId,taskId,{strictPublished=false,exclusions}={}){const scope=projectExclusionPredicate(database,exclusions);strictPublished ||= exclusions !== undefined;return database.prepare(`SELECT
+      p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
+      t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
+      m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
+      o.attempt_id,o.updated_at AS published_at
+      FROM projects p
+      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL
+      JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
+      JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
+        AND o.project_id=p.id AND o.status='published'
+      WHERE p.id=? AND p.status='active' AND t.id=?${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}${scope.sql}`).get(projectId,taskId,...scope.args);}
+
+module.exports = { BUILT_IN_PRESETS, ProcessingRepository, activePublishedProjectTaskRow };

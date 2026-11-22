@@ -72,7 +72,11 @@ async function decodeCursor(env: Env, raw: string, scope: string): Promise<Curso
 async function grantScope(context: {contextVersion:string;identityId:string;workspaceId:string;sourceId:string}, rows: Row[]) {
   return sha256(JSON.stringify([context.sourceId,context.workspaceId,context.identityId,context.contextVersion,
     rows.map(row=>[row.id,row.grant_version,row.viewer_project_id,row.task_id,row.scope_type,row.authorization_expires_at,
-      row.can_measure,row.can_view_cameras,row.can_download])]));
+      row.can_measure,row.can_view_cameras,row.can_download,...(row.exclusions ? [row.exclusions] : [])])]));
+}
+
+export function directViewerProjectKey(sourceId:string,workspaceId:string,viewerProjectId:string):Promise<string>{
+  return sha256(JSON.stringify(["direct-viewer-project-key-v1",sourceId,workspaceId,viewerProjectId]));
 }
 
 async function grantAuthorizedForContext(env:Env,context:Awaited<ReturnType<typeof contextFor>>,row:Row):Promise<boolean>{
@@ -110,12 +114,17 @@ export async function listDirectClientViewerItems(env: Env, request: DirectClien
       const row=rows[index]!;
       let catalog;
       try { catalog=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,
-        ...(row.scope_type==="task"?{taskId:row.task_id!}:{}),...(after?{cursor:after}:{}),limit:25}); }
+        ...(row.scope_type==="task"?{taskId:row.task_id!}:{}),...(after?{cursor:after}:{}),exclusions:row.exclusions,limit:25}); }
       catch(error){if(error instanceof ViewerServiceError&&error.code==="not_found"){index++;after=null;continue;}throw error;}
-      for(const task of catalog.tasks)items.push({grantId:row.id,workspaceId:input.workspaceId,taskId:task.id,scopeType:row.scope_type,
+      // Opaque grouping key: a one-way digest bound to this source and workspace, so the raw Viewer project id never
+      // reaches the client, keys differ across workspaces, and no route accepts it as an address.
+      const projectKey=await directViewerProjectKey(input.sourceId,input.workspaceId,row.viewer_project_id);
+      for(const task of catalog.tasks)items.push({grantId:row.id,workspaceId:input.workspaceId,taskId:task.id,scopeType:row.scope_type,projectKey,
         title:clean(task.displayName||task.modelTitle),projectName:clean(catalog.project.displayName),businessName:clean(businessName),
         sharedAt:row.created_at,updatedAt:task.publishedAt,expiresAt:row.authorization_expires_at,
-        permissions:{measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1}});
+        permissions:{measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1},
+        // Validated by the shared parser; passed through unchanged. Grouping only: it never widens access.
+        ...(task.folderPath?{folderPath:task.folderPath.map(folder=>({id:folder.id,name:folder.name}))}:{})});
       if(catalog.nextCursor)after=catalog.nextCursor;else{index++;after=null;}
     }
     const current=await contextFor(env,input);if(!current)return failure("denied");
@@ -134,15 +143,21 @@ export async function issueDirectClientViewerSession(env: Env, request: DirectCl
     const rawRows=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId,grantId:input.grantId});
     const rows=[] as Row[];for(const candidate of rawRows)if(await grantAuthorizedForContext(env,context,candidate))rows.push(candidate);
     const row=rows.find(row=>row.id===input.grantId);if(!row || (row.scope_type==="task"&&row.task_id!==input.taskId))return failure("denied");
-    const client=viewerServiceClient(env),catalog=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,limit:1});
+    const client=viewerServiceClient(env),catalog=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,exclusions:row.exclusions,limit:1});
     const task=catalog.tasks[0];if(!task || task.id!==input.taskId)return failure("denied");
+    // Restricted grants bind every credential to the Viewer's exact task authorization
+    // generation. A missing generation (older Viewer) fails closed; a changed one makes
+    // replay of an older receipt or intent mismatch, so only a fresh issue can succeed.
+    const generation=row.exclusions?task.authorizationGeneration:undefined;
+    if(row.exclusions&&(!Number.isSafeInteger(generation)||generation!<1))return failure("denied");
     const scope=await grantScope(context,[row]);
-    const fingerprint=await sha256(JSON.stringify([scope,input.taskId,task.modelId,task.modelVersionId,input.displayUnits]));
+    const fingerprint=await sha256(JSON.stringify([scope,input.taskId,task.modelId,task.modelVersionId,input.displayUnits,
+      ...(generation!==undefined?[generation]:[])]));
     const key=`direct_${await sha256(JSON.stringify([input.identityId,input.idempotencyKey]))}`;
     const receipt=await database(env).prepare(`SELECT request_fingerprint,response_json,expires_at FROM viewer_session_issuance_receipts
       WHERE actor_id=? AND audience='client' AND idempotency_key=?`).bind(input.identityId,key)
       .first<{request_fingerprint:string;response_json:string;expires_at:string}>();
-    if(receipt && receipt.request_fingerprint!==fingerprint)return failure("invalid_request");
+    if(receipt && receipt.request_fingerprint!==fingerprint)return failure(generation!==undefined?"denied":"invalid_request");
     const recheck=async()=>{
       const current=await contextFor(env,input);if(!current)return false;
       const freshRaw=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId,grantId:input.grantId});
@@ -168,18 +183,20 @@ export async function issueDirectClientViewerSession(env: Env, request: DirectCl
     const intent=await database(env).prepare(`SELECT request_fingerprint,authorization_expires_at FROM viewer_direct_client_session_intents
       WHERE actor_identity_id=? AND idempotency_key=?`).bind(input.identityId,key)
       .first<{request_fingerprint:string;authorization_expires_at:string}>();
-    if(!intent||intent.request_fingerprint!==fingerprint)return failure("invalid_request");
+    if(!intent||intent.request_fingerprint!==fingerprint)return failure(intent&&generation!==undefined?"denied":"invalid_request");
     const deadline=expiry(intent.authorization_expires_at);
     if(!Number.isFinite(deadline)||deadline>maximumDeadline||deadline<=Date.now()+60_000)return failure("denied");
     if(!await recheck())return failure("denied");
     const grant=await client.createSession({modelId:task.modelId,modelVersionId:task.modelVersionId,subject:`client:${input.identityId}`,
       audience:"client",idempotencyKey:key,authorizationExpiresAt:new Date(deadline).toISOString(),displayUnits:input.displayUnits,
       permissions:{view:true,measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1,personalMeasurements:true},
-      sourceAuthorization:{type:"direct_client_grant",id:row.id,version:row.grant_version}});
+      sourceAuthorization:{type:"direct_client_grant",id:row.id,version:row.grant_version},
+      ...(row.exclusions ? { restrictedScope:{version:1,projectId:row.viewer_project_id,taskId:input.taskId,generation:generation!,exclusions:row.exclusions} as const } : {})});
     // Publication can change in Viewer while the remote session is being minted.
     // Do not return a capability for a task/version no longer in the allowed set.
-    const latest=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,limit:1});
-    if(latest.tasks[0]?.modelId!==task.modelId||latest.tasks[0]?.modelVersionId!==task.modelVersionId)return failure("denied");
+    const latest=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,exclusions:row.exclusions,limit:1});
+    if(latest.tasks[0]?.modelId!==task.modelId||latest.tasks[0]?.modelVersionId!==task.modelVersionId
+      ||(generation!==undefined&&latest.tasks[0]?.authorizationGeneration!==generation))return failure("denied");
     if(!await recheck())return failure("denied");
     const result={...grant,modelId:task.modelId};
     await database(env).prepare(`INSERT INTO viewer_session_issuance_receipts(actor_id,audience,idempotency_key,request_fingerprint,response_json,expires_at)

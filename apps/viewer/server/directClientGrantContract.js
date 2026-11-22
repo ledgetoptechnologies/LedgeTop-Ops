@@ -1,5 +1,7 @@
 'use strict';
 
+const { canonicalProjectExclusions } = require('./projectExclusions');
+
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const text = (value, max = 500) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
 const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
@@ -22,8 +24,9 @@ function grantScope(value) {
       : id(value.taskId) && value.includeFuturePublished === false);
 }
 function validDirectGrantInput(value) {
-  return exact(value, ['sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt', 'confirmedScope'])
-    && grantScope(value) && value.confirmedScope === true;
+  return exact(value, ['sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt', 'confirmedScope', 'exclusions'])
+    && grantScope(value) && value.confirmedScope === true
+    && (value.exclusions === undefined || (value.scopeType === 'project' && canonicalProjectExclusions(value.exclusions) !== null));
 }
 function validDirectGrant(value) {
   return exact(value, ['grantId', 'sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt',

@@ -2,9 +2,11 @@ import { createRoot } from "react-dom/client";
 import "@ltds/ui/styles.css";
 import "../../src/client/styles.css";
 import { ClientOnboardingStaff } from "../../src/client/ClientOnboardingStaff";
+import { OnboardClientButton } from "../../src/client/OnboardClientButton";
 
 type Call = { path: string; body: unknown };
 const calls: Call[] = [];
+let createdFixture: { commandId: string; expiresAt: string } | null = null;
 const fixtureWindow = window as Window & { onboardingCalls?: Call[]; onboardingMode?: string; copied?: string[]; opened?: string[]; release?: () => void };
 fixtureWindow.onboardingCalls = calls;
 fixtureWindow.copied = [];
@@ -109,13 +111,23 @@ window.fetch = async (input, init) => {
   if (route === "approve-shared-company") { approved = true; return Response.json({ decisionId: body.planId, planId: body.planId, outcome: "approved",
     invitationId, submissionId: body.submissionId, clientRecordId: "55555555-5555-4555-8555-555555555555", clientRecordVersion: 1,
     organizationRecordId: "org:ltds", organizationRecordVersion: 6, relationshipVersion: 1, replayed: false, members: [], portalActivation: "pending" }); }
-  if (route === "create") return Response.json({ invitationId, expiresAt: body.expiresAt, requestSha256: "c".repeat(64), state: "pending" });
+  if (route === "create") {
+    if (mode === "create-denied") return denied();
+    if (mode === "delayed-create") await held();
+    createdFixture = { commandId: body.commandId, expiresAt: body.expiresAt };
+    return Response.json({ invitationId, expiresAt: body.expiresAt, requestSha256: "c".repeat(64), state: "pending" });
+  }
   if (route === "reveal") {
+    if (mode.endsWith("expiry-delayed")) await held();
+    if (!createdFixture || createdFixture.commandId !== body.commandId) throw new Error("fixture_create_receipt_missing");
+    const revealExpiry = mode.endsWith("expiry-mismatch")
+      ? new Date(Date.parse(createdFixture.expiresAt) + 60_000).toISOString() : createdFixture.expiresAt;
     if (mode === "uncertain") return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
-    return Response.json({ commandId: body.commandId, invitationId, expiresAt: "2099-01-01T00:00:00.000Z", invitationSecret: "d".repeat(64),
-      recipientUrl: mode === "no-link" ? null : `https://portal.example.test/onboarding/${invitationId}#${"d".repeat(64)}` });
+    return Response.json({ commandId: body.commandId, invitationId, expiresAt: revealExpiry, invitationSecret: "d".repeat(64),
+      recipientUrl: mode === "no-link" ? null : `https://portal.example.test/onboarding/${invitationId}#${(mode === "legacy-mismatched-link" ? "e" : "d").repeat(64)}` });
   }
   return Response.json({ error: "not_found" }, { status: 404 });
 };
 
-createRoot(document.getElementById("root")!).render(<ClientOnboardingStaff />);
+createRoot(document.getElementById("root")!).render(location.search === "?dialog=1"
+  ? <main><h1>Client Hub</h1><OnboardClientButton /></main> : <ClientOnboardingStaff />);

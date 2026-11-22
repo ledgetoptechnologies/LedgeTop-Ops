@@ -10,7 +10,7 @@ vi.mock("../../client/src/worker/client-portal/direct-viewer-workspace-context",
 vi.mock("../../client/src/worker/client-portal/workspace-v2",()=>({
   nativePortalScopesAllowed:mock.allowed}));
 vi.mock("../src/worker/viewer-integration",()=>({viewerServiceClient:()=>({clientDeliveryCatalog:mock.catalog,createSession:mock.create})}));
-import { issueDirectClientViewerSession, listDirectClientViewerItems } from "../src/worker/viewer-direct-client-session-issuer";
+import { directViewerProjectKey, issueDirectClientViewerSession, listDirectClientViewerItems } from "../src/worker/viewer-direct-client-session-issuer";
 import {directViewerGrantMatchesRecipientAuthority} from "../src/worker/viewer-direct-client-grants";
 
 const auth:DirectClientViewerAuthorizationV1={protocolVersion:1,sourceId:"project-alpha:primary",workspaceId:"workspace-one",identityId:"identity-one",
@@ -143,5 +143,78 @@ describe("direct Viewer recipient authorization",()=>{
     mock.rows.mockResolvedValue([{...row(),scope_type:"project",task_id:null,can_download:1}]);
     expect(await listDirectClientViewerItems(env(),{...auth,cursor:first.nextCursor})).toMatchObject({ok:false,code:"invalid_request"});
     expect(mock.catalog).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("direct Viewer project grouping key",()=>{
+  it("gives same-named projects different opaque keys, bound to the workspace, without the Viewer project id",async()=>{
+    const list=async(projectId:string)=>{
+      mock.rows.mockResolvedValue([{...row(),viewer_project_id:projectId,scope_type:"project",task_id:null}]);
+      mock.catalog.mockResolvedValueOnce({schemaVersion:1,project:{id:projectId,displayName:"Same name"},tasks:[task],nextCursor:null});
+      const result=await listDirectClientViewerItems(env(),auth);if(!result.ok)throw new Error(result.code);return result.items;};
+    const first=await list("project-alpha-0001"),second=await list("project-beta-0002");
+    expect(first[0]!.projectName).toBe(second[0]!.projectName);
+    expect(first[0]!.projectKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(first[0]!.projectKey).not.toBe(second[0]!.projectKey);
+    expect(first[0]!.projectKey).toBe(await directViewerProjectKey(auth.sourceId,auth.workspaceId,"project-alpha-0001"));
+    // Another workspace gets a different key for the same project, so keys never correlate across accounts.
+    expect(await directViewerProjectKey(auth.sourceId,"workspace-two","project-alpha-0001")).not.toBe(first[0]!.projectKey);
+    for(const items of [first,second])expect(JSON.stringify(items)).not.toMatch(/project-alpha-0001|project-beta-0002/);
+  });
+});
+
+describe("direct Viewer folder paths",()=>{
+  it("passes the folder path through unchanged and omits it for older Viewer responses",async()=>{
+    const folderPath=[{id:"folder-outer",name:"Synthetic outer"},{id:"folder-inner",name:"Synthetic inner"}];
+    mock.catalog.mockResolvedValueOnce({schemaVersion:1,project:{id:"project-one",displayName:"Property survey"},tasks:[{...task,folderPath}],nextCursor:null});
+    const withPath=await listDirectClientViewerItems(env(),auth);
+    expect(withPath.ok&&withPath.items[0]!.folderPath).toEqual(folderPath);
+    const older=await listDirectClientViewerItems(env(),auth);
+    expect(older.ok&&older.items[0]).not.toHaveProperty("folderPath");
+  });
+  it("lets a folder move change only the path: same grant, permissions and session decision",async()=>{
+    const list=async(folderPath:Array<{id:string;name:string}>)=>{
+      mock.catalog.mockResolvedValueOnce({schemaVersion:1,project:{id:"project-one",displayName:"Property survey"},tasks:[{...task,folderPath}],nextCursor:null});
+      const result=await listDirectClientViewerItems(env(),auth);if(!result.ok)throw new Error(result.code);return result.items[0]!;};
+    const before=await list([{id:"folder-a",name:"Synthetic A"}]),after=await list([{id:"folder-b",name:"Synthetic B"}]);
+    const {folderPath:beforePath,...beforeRest}=before,{folderPath:afterPath,...afterRest}=after;
+    expect(beforePath).not.toEqual(afterPath);expect(afterRest).toEqual(beforeRest);
+  });
+});
+
+describe("restricted (exclusion) grants and the Viewer task authorization generation",()=>{
+  const exclusions={version:1 as const,folderIds:["folder-hidden"],taskIds:[]};
+  const restrictedRow=()=>({...row(),scope_type:"project",task_id:null,exclusions});
+  const catalogAt=(generation?:number,modelVersionId="version-one")=>({schemaVersion:1,project:{id:"project-one",displayName:"Property survey"},
+    tasks:[{...task,modelVersionId,...(generation===undefined?{}:{authorizationGeneration:generation})}],nextCursor:null});
+  it("mints only with the exact captured generation and passes exclusions to every catalog read",async()=>{
+    mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(7));
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:true});
+    expect(mock.create.mock.calls[0]![0].restrictedScope).toEqual({version:1,projectId:"project-one",taskId:"task-one",generation:7,exclusions});
+    for(const call of mock.catalog.mock.calls)expect(call[0].exclusions).toEqual(exclusions);
+  });
+  it("fails closed when an older Viewer returns no generation for a restricted grant",async()=>{
+    mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(undefined));
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});expect(mock.create).not.toHaveBeenCalled();
+  });
+  it("does not return a minted grant when the task moves (generation changes) during the Viewer call",async()=>{
+    mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(7));
+    mock.create.mockImplementationOnce(async()=>{mock.catalog.mockResolvedValue(catalogAt(9));
+      return {grant:"hidden",grantExpiresAt:new Date(Date.now()+60_000).toISOString()};});
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});expect(receipts.size).toBe(0);
+  });
+  it("A->B->A: an old receipt is never replayed; a fresh key issues at the new generation",async()=>{
+    mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(7));
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:true});
+    mock.catalog.mockResolvedValue(catalogAt(9)); // moved out and back: same place, new generation
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});
+    expect(mock.create).toHaveBeenCalledTimes(1);
+    expect(await issueDirectClientViewerSession(env(),{...session,idempotencyKey:"direct-client-session-fresh-key-01"})).toMatchObject({ok:true});
+    expect(mock.create.mock.calls[1]![0].restrictedScope.generation).toBe(9);
+  });
+  it("an unrestricted grant keeps its existing contract without a generation",async()=>{
+    mock.catalog.mockResolvedValue(catalogAt(undefined));
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:true});
+    expect(mock.create.mock.calls[0]![0].restrictedScope).toBeUndefined();
   });
 });
