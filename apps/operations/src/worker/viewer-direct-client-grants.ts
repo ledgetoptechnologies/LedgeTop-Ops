@@ -32,13 +32,31 @@ export const directViewerClientGrantListQuerySchema=z.object({q:z.string().trim(
 export const DIRECT_VIEWER_GRANT_PAGE_SIZE=100;
 /** Effective shares per client; see readDirectViewerClientGrants for why this is a real limit. */
 export const DIRECT_VIEWER_GRANTS_PER_CLIENT=100;
-/** An effective grant: active, unrevoked and unexpired. The client-portal read and every per-client
- * cap check use this one boundary, so expired rows (which never change status) neither show nor count.
- * A restricted (exclusion-scoped) grant stores the RESTRICTED_GRANT_EXPIRY sentinel and keeps its real
- * expiry in the v2 creation receipt, so it is included here: reads then resolve it through
- * resolveRestrictedGrant, and the cap counts it until it is revoked. */
+/** An effective grant: active, unrevoked and unexpired. The client-portal read, the create precheck,
+ * the in-INSERT cap and the post-write diagnosis all use this one boundary, so expired rows (which never
+ * change status) neither show nor count.
+ * A restricted (exclusion-scoped) grant keeps the fail-closed RESTRICTED_GRANT_EXPIRY sentinel on its row
+ * for older readers; its real lifetime is in its single v2 creation receipt. Such a row is effective only
+ * while that receipt matches the row and has not expired (restrictedReceiptLiveSql). A row whose receipt is
+ * missing, duplicated or does not match neither counts nor issues (resolveRestrictedGrant also rejects it). */
 function effectiveGrantSql(alias?:string){const c=alias?`${alias}.`:'';
- return `${c}status='active' AND ${c}revoked_at IS NULL AND (${c}authorization_expires_at IS NULL OR datetime(${c}authorization_expires_at)>datetime('now') OR ${c}authorization_expires_at='${RESTRICTED_GRANT_EXPIRY}')`;}
+ return `${c}status='active' AND ${c}revoked_at IS NULL AND (${c}authorization_expires_at IS NULL OR datetime(${c}authorization_expires_at)>datetime('now')
+  OR (${c}authorization_expires_at='${RESTRICTED_GRANT_EXPIRY}' AND ${restrictedReceiptLiveSql(alias??'viewer_direct_client_grants')}))`;}
+/** SQL form of the receipt checks in resolveRestrictedGrant. It is deliberately no stricter than that
+ * function, so a grant the issuer would honour always counts toward the cap; a receipt it would reject
+ * for a stricter reason can only be over-counted (never issued). */
+function restrictedReceiptLiveSql(grantTable:string){const g=`${grantTable}.`,j=(path:string)=>`json_extract(receipt.response_json,'${path}')`;
+ return `(SELECT count(*) FROM viewer_direct_client_grant_mutation_receipts receipt WHERE receipt.grant_id=${g}id AND receipt.action='grant.create')=1
+  AND EXISTS(SELECT 1 FROM viewer_direct_client_grant_mutation_receipts receipt WHERE receipt.grant_id=${g}id AND receipt.action='grant.create'
+   AND json_valid(receipt.response_json) AND ${j('$.version')}=2 AND json_type(receipt.response_json,'$.exclusions')='object'
+   AND ${j('$.grant.grantId')}=${g}id AND ${j('$.grant.viewerProjectId')}=${g}viewer_project_id
+   AND ${j('$.grant.scopeType')}='project' AND ${g}scope_type='project' AND ${j('$.grant.grantVersion')}=${g}grant_version
+   AND ${j('$.grant.workspaceId')}=${g}workspace_id AND ${j('$.grant.sourceId')}=${g}source_id
+   AND ${j('$.grant.permissions.measure')}=${g}can_measure AND ${j('$.grant.permissions.cameras')}=${g}can_view_cameras
+   AND ${j('$.grant.permissions.download')}=${g}can_download
+   AND ${j('$.recipientAuthorityPin.workspaceId')}=${g}workspace_id AND ${j('$.recipientAuthorityPin.sourceId')}=${g}source_id
+   AND (json_type(receipt.response_json,'$.grant.expiresAt')='null'
+    OR julianday(${j('$.grant.expiresAt')})>julianday('now')))`;}
 const inputSchema=z.object({sourceId:source,workspaceId:opaque,viewerProjectId:opaque,taskId:opaque.nullable(),
  scopeType:z.enum(['project','task']),includeFuturePublished:z.boolean(),confirmedScope:z.literal(true),
  expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict(),exclusions:exclusionsSchema.optional()}).strict()
