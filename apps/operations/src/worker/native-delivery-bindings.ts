@@ -565,6 +565,156 @@ export async function searchNativeDeliveryTargets(env:Env,principal:StaffPrincip
   for(const proof of proofs)await assertOps(env,proof);await activeStaff(env,principal);
   return {targets,truncated:targets.length===20||candidates.results.length>100};
 }
+export interface NativeShareRecipient {
+  sourceId:string;sourceName:string;workspaceId:string;workspaceName:string;principalPublicId:string;displayName:string;email:string|null;
+}
+export interface NativeShareProject { projectId:string;projectName:string;projectEndSupported:boolean }
+// Per keystroke: at most 40 people scanned, 20 staff-authority checks (5 per
+// root) and 20 preview proofs. Per chosen person: 200 authority checks and 40 proofs.
+const SHARE_PEOPLE_LIMIT=10,SHARE_PEOPLE_SCAN=40,SHARE_SEARCH_PROOFS=20,SHARE_SEARCH_AUTHORITY=20,SHARE_ROOT_AUTHORITY=5,SHARE_PROJECTS_PER_PERSON=3;
+const SHARE_PROJECT_LIMIT=20,SHARE_PROJECT_PROOFS=40,SHARE_PROJECT_AUTHORITY=200,SHARE_ROOT_PROJECTS=500;
+type ShareRoot={sourceId:string;rootType:string;rootPublicId:string};
+/** The one active workspace for a source root, as the target search required.
+ * A root with two active workspaces is ambiguous and offers nobody. */
+async function uniqueShareWorkspace(env:Env,root:ShareRoot):Promise<string|null>{
+  const rows=await primary(env.DELIVERY_DB).prepare(`SELECT w.id FROM portal_v2_workspaces w
+    WHERE w.project_alpha_source_id=? AND w.project_alpha_source_id<>? AND w.root_type=? AND COALESCE(w.pa_organization_public_id,w.pa_client_public_id)=?
+      AND w.status='active' AND w.legacy_account_id IS NULL AND ${portalRootAccessAllowedSql(env,'w')} ORDER BY w.id LIMIT 2`)
+    .bind(root.sourceId,PRIMARY_ALPHA_SOURCE_ID,root.rootType,root.rootPublicId).all<{id:string}>();
+  return rows.results.length===1?rows.results[0]!.id:null;
+}
+/** The project a folder is already bound to in this workspace, if any. Once
+ * bound, no other project can be granted on this folder there. */
+async function boundShareProject(env:Env,workspaceId:string,prefix:string):Promise<string|null>{
+  const row=await binding(env,workspaceId,prefix);
+  return row&&row.status==='active'&&row.revoked_at===null&&row.project_id?row.project_id:null;
+}
+/** Every active project under the root, by name; filtered before any limit. */
+async function rootProjects(env:Env,root:ShareRoot,nameQuery:string|null){
+  const like=nameQuery?'%'+nameQuery.replace(/[\\%_]/g,'\\$&')+'%':null;
+  const rows=await primary(env.OPS_DB).prepare(`SELECT p.id FROM pa_projects p
+      LEFT JOIN pa_clients client ON client.id=p.client_id AND client.projection_source_id=p.projection_source_id AND client.active=1
+      LEFT JOIN pa_organizations organization ON organization.id=COALESCE(p.organization_id,client.organization_id)
+        AND organization.projection_source_id=p.projection_source_id AND organization.active=1
+      WHERE p.active=1 AND p.projection_source_id=? AND p.projection_source_id<>?
+        AND (CASE WHEN organization.id IS NOT NULL THEN 'organization' ELSE 'standalone_client' END)=?
+        AND (CASE WHEN organization.id IS NOT NULL THEN ${organizationPublic} ELSE ${clientPublic} END)=?
+        AND (? IS NULL OR p.name LIKE ? ESCAPE '\\')
+      ORDER BY p.name COLLATE NOCASE,p.id LIMIT ?`).bind(root.sourceId,PRIMARY_ALPHA_SOURCE_ID,root.rootType,root.rootPublicId,like,like,SHARE_ROOT_PROJECTS+1)
+    .all<{id:string}>();
+  return {ids:rows.results.slice(0,SHARE_ROOT_PROJECTS).map(row=>row.id),overflow:rows.results.length>SHARE_ROOT_PROJECTS};
+}
+function shareAuthority(env:Env,principal:StaffPrincipal,prefix:string){
+  const cache=new Map<string,boolean>();
+  return async(sourceIdValue:string,projectId:string)=>{const key=JSON.stringify([sourceIdValue,projectId]);let value=cache.get(key);
+    if(value===undefined){try{await opsProof(env,principal,prefix,sourceIdValue,projectId,'create');value=true;}
+      catch(cause){if(cause instanceof HTTPException&&cause.status===404)value=false;else throw cause;}cache.set(key,value);}
+    return value;};
+}
+async function sharePrepare(env:Env,principal:StaffPrincipal,folderRef:string,sourceIdValue:string,workspaceId:string,projectId:string,principalPublicId:string){
+  try{return await prepare(env,principal,parse({folderRef,sourceId:sourceIdValue,workspaceId,projectId,principalPublicId,reasonCode:'staff_delivery',expiresAt:null}),'create',true);}
+  catch(cause){if(cause instanceof HTTPException&&[400,403,404,409].includes(cause.status))return null;throw cause;}
+}
+/** Person-first discovery for the combined share dialog. Read only. A person
+ * is offered only after the caller passes the per-project staff proof and the
+ * person passes the same `prepare` proof a native preview uses for at least
+ * one project. Projects are resolved separately once a person is chosen.
+ * `truncated` is derived only from what this caller may already reach. */
+export async function searchNativeShareRecipients(env:Env,principal:StaffPrincipal,folderRef:string,q:string):Promise<{recipients:NativeShareRecipient[];truncated:boolean}>{
+  await ready(env);await activeStaff(env,principal);const query=q.normalize('NFC').trim();
+  if(query.length<2||query.length>100)return error(400,'native_delivery_query_invalid');
+  const prefix=normalizePrefix(await authorizeItem(env,principal,folderRef));
+  const pattern='%'+query.replace(/[\\%_]/g,'\\$&')+'%';
+  const people=await primary(env.DELIVERY_DB).prepare(`SELECT principal.workspace_id,principal.public_id,w.project_alpha_source_id source_id,w.root_type,
+      COALESCE(w.pa_organization_public_id,w.pa_client_public_id) root_public_id
+    FROM pa_portal_principals principal JOIN portal_v2_workspaces w ON w.id=principal.workspace_id AND w.status='active' AND w.legacy_account_id IS NULL
+      AND w.project_alpha_source_id IS NOT NULL AND w.project_alpha_source_id<>?
+    WHERE principal.status='active' AND ${projectedPrincipalIdentitySql('principal')} IS NOT NULL
+      AND (principal.display_name LIKE ? ESCAPE '\\' OR principal.email_hint LIKE ? ESCAPE '\\')
+    ORDER BY principal.display_name COLLATE NOCASE,principal.workspace_id,principal.public_id LIMIT ?`)
+    .bind(PRIMARY_ALPHA_SOURCE_ID,pattern,pattern,SHARE_PEOPLE_SCAN).all<{workspace_id:string;public_id:string;source_id:string;root_type:string;root_public_id:string|null}>();
+  const checkAuthority=shareAuthority(env,principal,prefix),roots=new Map<string,{workspace:string|null;projects:string[];capped:boolean}>();
+  // `reached`: this caller passed staff authority somewhere in this search.
+  // `missed`: someone may have been skipped only because a limit stopped the checks.
+  let reached=false,missed=false;
+  const allowed=async(sourceIdValue:string,projectId:string)=>{const value=await checkAuthority(sourceIdValue,projectId);if(value)reached=true;return value;};
+  const recipients:NativeShareRecipient[]=[],proofs:Prepared[]=[];let budget=SHARE_SEARCH_PROOFS,authority=SHARE_SEARCH_AUTHORITY,truncated=false;
+  for(const person of people.results){
+    if(!person.root_public_id||!['organization','standalone_client'].includes(person.root_type))continue;
+    const root={sourceId:person.source_id,rootType:person.root_type,rootPublicId:person.root_public_id},rootKey=JSON.stringify(root);
+    let resolved=roots.get(rootKey);
+    if(!resolved){
+      // Authority first: a caller without native rights stops here for every root.
+      const ids:string[]=[],all=await rootProjects(env,root,null);let checks=0,capped=all.overflow;
+      for(const [index,id] of all.ids.entries()){
+        if(authority===0||checks===SHARE_ROOT_AUTHORITY||ids.length===SHARE_PROJECTS_PER_PERSON){capped||=index<all.ids.length;break;}checks++;authority--;
+        if(await allowed(root.sourceId,id))ids.push(id);}
+      resolved={workspace:ids.length?await uniqueShareWorkspace(env,root):null,projects:ids,capped};roots.set(rootKey,resolved);
+    }
+    if(!resolved.projects.length){if(resolved.capped)missed=true;continue;}
+    if(resolved.workspace!==person.workspace_id)continue;
+    if(recipients.length===SHARE_PEOPLE_LIMIT){truncated=true;break;}
+    const bound=await boundShareProject(env,person.workspace_id,prefix);
+    const tries=bound?(await allowed(person.source_id,bound)?[bound]:[]):resolved.projects;let proved=false;
+    for(const projectId of tries){
+      if(budget===0){truncated=true;break;}budget--;
+      const p=await sharePrepare(env,principal,folderRef,person.source_id,person.workspace_id,projectId,person.public_id);
+      if(!p)continue;proofs.push(p);proved=true;
+      recipients.push({sourceId:person.source_id,sourceName:display(p.ops.sourceName),workspaceId:person.workspace_id,workspaceName:display(p.delivery.workspaceName),
+        principalPublicId:person.public_id,displayName:display(p.delivery.recipientName),email:p.delivery.recipientEmail});break;
+    }
+    // Never drop someone silently: if their root had projects left unchecked,
+    // they may be grantable on one of those, so the result is marked incomplete.
+    if(!proved&&!bound&&resolved.capped)missed=true;
+    if(truncated)break;
+  }
+  if(people.results.length===SHARE_PEOPLE_SCAN||missed)truncated=true;
+  // A caller who passed no staff authority learns nothing about how many people match.
+  if(!reached)truncated=false;
+  for(const proof of proofs){await assertOps(env,proof);await assertDelivery(env,proof);}await activeStaff(env,principal);
+  return {recipients,truncated};
+}
+/** Projects one chosen connected-workspace person can be granted on for this
+ * folder. A folder already bound in that workspace offers only its project.
+ * Otherwise every project under the root is checked (authority, then the
+ * preview proof) before any limit; `complete` is false whenever the list may
+ * be partial, and `q` narrows by project name. */
+export async function searchNativeShareProjects(env:Env,principal:StaffPrincipal,value:{folderRef:string;sourceId:string;workspaceId:string;principalPublicId:string;q:string}):Promise<{projects:NativeShareProject[];bound:boolean;complete:boolean}>{
+  await ready(env);await activeStaff(env,principal);
+  if(!source.safeParse(value.sourceId).success||!opaque.safeParse(value.workspaceId).success||!opaque.safeParse(value.principalPublicId).success)
+    return error(400,'native_delivery_invalid');
+  const nameQuery=value.q.normalize('NFC').trim();if(nameQuery.length>100)return error(400,'native_delivery_query_invalid');
+  const prefix=normalizePrefix(await authorizeItem(env,principal,value.folderRef));
+  // Every "not for you" case (unknown or ambiguous workspace, no staff
+  // authority, a bound project you may not use) gives the same empty answer,
+  // so this route reveals nothing about links you could not see by hand.
+  const nothing={projects:[],bound:false,complete:true};
+  const workspace=await primary(env.DELIVERY_DB).prepare(`SELECT w.root_type,COALESCE(w.pa_organization_public_id,w.pa_client_public_id) root_public_id FROM portal_v2_workspaces w
+    WHERE w.id=? AND w.project_alpha_source_id=? AND w.status='active' AND w.legacy_account_id IS NULL`).bind(value.workspaceId,value.sourceId)
+    .first<{root_type:string;root_public_id:string|null}>();
+  if(!workspace?.root_public_id)return nothing;
+  const root={sourceId:value.sourceId,rootType:workspace.root_type,rootPublicId:workspace.root_public_id};
+  if(await uniqueShareWorkspace(env,root)!==value.workspaceId)return nothing;
+  const allowed=shareAuthority(env,principal,prefix),all=await rootProjects(env,root,null);let authority=SHARE_PROJECT_AUTHORITY,authorized=false;
+  // Authority before anything about the folder's link in this workspace.
+  for(const id of all.ids){if(authority===0)break;authority--;if(await allowed(value.sourceId,id)){authorized=true;break;}}
+  if(!authorized)return nothing;
+  const bound=await boundShareProject(env,value.workspaceId,prefix);
+  if(bound&&!await allowed(value.sourceId,bound))return nothing;
+  const listed=bound?{ids:[bound],overflow:false}:nameQuery?await rootProjects(env,root,nameQuery):all;
+  const projects:NativeShareProject[]=[],proofs:Prepared[]=[];let budget=SHARE_PROJECT_PROOFS,complete=!listed.overflow;
+  authority=SHARE_PROJECT_AUTHORITY;
+  for(const projectId of listed.ids){
+    if(authority===0){complete=false;break;}authority--;
+    if(!await allowed(value.sourceId,projectId))continue;
+    if(projects.length===SHARE_PROJECT_LIMIT||budget===0){complete=false;break;}budget--;
+    const p=await sharePrepare(env,principal,value.folderRef,value.sourceId,value.workspaceId,projectId,value.principalPublicId);if(!p)continue;
+    projects.push({projectId,projectName:display(p.ops.projectName),projectEndSupported:p.projectEndSupported===true});proofs.push(p);
+  }
+  for(const proof of proofs){await assertOps(env,proof);await assertDelivery(env,proof);}await activeStaff(env,principal);
+  // A name filter never yields the complete set.
+  return {projects,bound:Boolean(bound),complete:complete&&!nameQuery};
+}
 export async function searchNativeDeliveryRecipients(env:Env,principal:StaffPrincipal,value:{folderRef:string;sourceId:string;workspaceId:string;projectId:string;q:string}){
   await ready(env);await activeStaff(env,principal);const query=value.q.normalize('NFC').trim();if(query.length<2||query.length>100)return error(400,'native_delivery_query_invalid');
   const prefix=normalizePrefix(await authorizeItem(env,principal,value.folderRef));
