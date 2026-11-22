@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "status": "review-candidate-not-executable",
-  "sourceCommit": "1e09732cf4c8f863800cde3cc0ebbedd5a72a2ca",
+  "sourceCommit": "e191147d28ceee64622e13265c017d77b1bd9691",
   "actualReceipt": {
     "path": "C:/Users/fstor/.codex/artifacts/ui-preserved-ledger-actual-history-20261027.json",
     "sha256": "d26d0517dff914668d6cf4b824797dd167803b32c26898dbab7e749792103ab6",
@@ -10,16 +10,26 @@
     "sourceCommit": "c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8",
     "bodyHashClaim": false
   },
+  "operationsActualReceipt": {
+    "path": "scripts/production-auto-migration-profile/installed-schema-preservation-v1/actual-metadata-evidence.fixture.json",
+    "sha256": "6c5070bd045049e7d1b773a69d52a56eb9114912a7360f718ec0229b30f31a76",
+    "purpose": "Sanitized actual production migration-name and schema-digest metadata (installed-schema-preservation-v1 observation); no SQL body claim",
+    "query": "SELECT name,id FROM d1_migrations ORDER BY id LIMIT 1025",
+    "sourceCommit": "2686c535658398baf746b78a41e8af6b79f04538",
+    "observedAt": "2026-11-05T15:43:28.683Z",
+    "bodyHashClaim": false
+  },
+  "scope": "Ops-only re-base for the ordered 0227..0244 apply: the operations section uses the 2026-11-05 observation (operationsActualReceipt) and source e191147d. The client section, actualReceipt and requestDecision are unchanged from main (source 1e09732c, 2026-10-27 receipt); the Client append is owned separately.",
   "appliesNoProductionDDL": true,
   "applicationOrder": "Per app, preserve exact observed id/name rows and append each exact pending source migration in lexical/current-source order; never sort or renumber historical observed rows.",
   "apps": {
     "operations": {
       "observedBase": {
-        "rowCount": 221,
+        "rowCount": 226,
         "firstId": 1,
-        "lastId": 221,
-        "orderedRowsSha256": "ddee5f48f005691ea6c7cb0f7ce4b810fec2d4496b03f693606fe5cf7d318df0",
-        "orderedNamesSha256": "605b3ccec883bd460ec64284dc36d09c75ae98b4e3cfdc659e4f0409073f5a56"
+        "lastId": 226,
+        "orderedRowsSha256": "93cdb96e07dd057f64805e0d2bd14780e8a9da06e2e5d3449ff4c34bef03755a",
+        "orderedNamesSha256": "cfbd55059a5e08b52809561c0b466eb59e1e90adeb56f7421627fcf4a57e01e2"
       },
       "preserveExactly": [
         {
@@ -1789,39 +1799,49 @@
           "replay": false,
           "rename": false,
           "drop": false
+        },
+        {
+          "id": 222,
+          "name": "0222_employee_read_roots.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 223,
+          "name": "0223_employee_read_provisioning.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 224,
+          "name": "0224_windows_portal_publication_chain_index.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 225,
+          "name": "0225_native_staff_lifecycle_bridge.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 226,
+          "name": "0226_staff_login_bindings.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
         }
       ],
       "appendInExactSourceOrder": [
-        {
-          "ledgerId": 222,
-          "name": "0222_employee_read_roots.sql",
-          "gitBlobOid": "ab5b32a74fc7718cf54cfe282a3f0b558dfa8652",
-          "sha256": "1b91e7eebe6580df7a780a8b473e3325fde2d9a8a8dc37282bc40c6f32e8edda"
-        },
-        {
-          "ledgerId": 223,
-          "name": "0223_employee_read_provisioning.sql",
-          "gitBlobOid": "f33b1bf4f3ed357cfea14f0e82a3a385ecd52d2c",
-          "sha256": "d55a0d5e16f37f231e0938516a1ee7248b0e3b4190e8de5e6c68e1e9a3e1810a"
-        },
-        {
-          "ledgerId": 224,
-          "name": "0224_windows_portal_publication_chain_index.sql",
-          "gitBlobOid": "a95e8eefe0eff504cff2e42a376a293cd1081505",
-          "sha256": "4252667cceb62ca9bbbb3efd8804a7dc69f58dae1396240f0109fbac6abbcd15"
-        },
-        {
-          "ledgerId": 225,
-          "name": "0225_native_staff_lifecycle_bridge.sql",
-          "gitBlobOid": "f8b68381f455e5e863eadc211e500a90283080ea",
-          "sha256": "1363221a710d774fc9e4c7547f7199d2bdc6b41ca62c8078c98ac5334603c175"
-        },
-        {
-          "ledgerId": 226,
-          "name": "0226_staff_login_bindings.sql",
-          "gitBlobOid": "46df71ee49ea588b70a00949033a53f60ecce8c4",
-          "sha256": "c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5"
-        },
         {
           "ledgerId": 227,
           "name": "0227_owner_intel_reads.sql",
@@ -1851,6 +1871,36 @@
           "name": "0231_owner_google_ads_summary.sql",
           "gitBlobOid": "a8a2ef010e637b5a77e6d3d09048d142afdcff70",
           "sha256": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481"
+        },
+        {
+          "ledgerId": 232,
+          "name": "0240_flight_logs_permissions.sql",
+          "gitBlobOid": "7daf4310ede9f31ddf592032ef72a0b956105001",
+          "sha256": "7dae537a441d929cb8d33390dc88abe2ba766886a5b4d6bf2b0861575e41eb3a"
+        },
+        {
+          "ledgerId": 233,
+          "name": "0241_staff_usernames.sql",
+          "gitBlobOid": "8d449403c8c8483a2cf2304483cf0d19e471d7cb",
+          "sha256": "44a707432e16ea06c8ea161d4181582baa6fa2b916b654cae92165d5989e53c5"
+        },
+        {
+          "ledgerId": 234,
+          "name": "0242_native_staff_onboarding_approval_actor_authority.sql",
+          "gitBlobOid": "4501209ca327ea44c589c55f5a3153854fcf45c3",
+          "sha256": "045db046a21b80e42aec764cb693615cca8737a2a0a4686676d60baf15664cee"
+        },
+        {
+          "ledgerId": 235,
+          "name": "0243_staff_logs_device_eligibility.sql",
+          "gitBlobOid": "5b60ab6fd39360678052f5afec74a0dd8ca905ed",
+          "sha256": "60dee9a1e92fc881d52f2f7d21b0307f6afe1571d07421c929c3e0defea179b5"
+        },
+        {
+          "ledgerId": 236,
+          "name": "0244_staff_operations_access_writer.sql",
+          "gitBlobOid": "47c4aaa13b9a2044d1dd607864369f759470411d",
+          "sha256": "e291acac31395ae7bd22c5b43ed44331ee9f989f074869a92dd26dd69547f815"
         }
       ],
       "historicalRowsWithoutCurrentSource": []

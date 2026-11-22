@@ -2,13 +2,20 @@
 
 This source-only, held profile captures the production metadata observation at
 `2026-11-05T15:43:28.683Z` and pins migration names, Git blob IDs, and SHA-256
-digests at source commit `2686c535658398baf746b78a41e8af6b79f04538` (tree
-`2e612a24a6b3b80df181e85d0bb73749bc3247e8`). The sanitized fixture contains
-ordered D1 migration identities and schema counts/digests; it contains no
-business rows, raw schema SQL, credentials, or provider response bodies.
+digests at source commit `e191147d28ceee64622e13265c017d77b1bd9691` (tree
+`30487633df2327d904018c5d97bc52a9a02f5ed5`; 236 Ops and 161 Client files). The
+observation itself was taken with source `2686c535`. Only the Ops source
+inventory and pending list were regenerated for the 236-file source, and the
+installed ledgers, schema digests and Client inventory are unchanged. The
+sanitized fixture contains ordered D1 migration identities and schema
+counts/digests. It contains no business rows, raw schema SQL, credentials, or
+provider response bodies.
 
 The captured ledgers contain 226 Ops rows and 159 Client rows. Ops has the
-targeted `0226_staff_login_bindings.sql` at id 226, with 0227–0231 pending.
+targeted `0226_staff_login_bindings.sql` at id 226. Ten files are pending, in
+order: 0227–0231 and 0240–0244. They are applied by
+`scripts/production-ops-0227-0244-ordered-once.mjs`. After that apply, this
+profile no longer matches the installed ledger, and it needs a fresh capture.
 Client has the targeted, out-of-source-order `0242_client_ops_triage_inquiries.sql`
 at id 159, with 0235, 0236, 0239, and 0241 pending; historical rows 0112/0113
 remain preserved. These are explicit installed-state exceptions, not complete

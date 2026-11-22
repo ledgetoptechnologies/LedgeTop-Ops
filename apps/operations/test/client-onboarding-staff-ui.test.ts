@@ -26,11 +26,12 @@ describe("client onboarding staff UI security boundary", () => {
   });
 
   it("accepts only an https onboarding link for exactly the revealed invitation", () => {
-    expect(safeRecipientLink(`https://portal.example.test/onboarding/${id}#${secret}`, id)).toBe(`https://portal.example.test/onboarding/${id}#${secret}`);
+    expect(safeRecipientLink(`https://portal.example.test/onboarding/${id}#${secret}`, id, secret)).toBe(`https://portal.example.test/onboarding/${id}#${secret}`);
     for (const value of [`http://portal.example.test/onboarding/${id}#${secret}`, `https://portal.example.test/onboarding/other#${secret}`,
       `https://portal.example.test/onboarding/${id}?next=x#${secret}`, `https://user@portal.example.test/onboarding/${id}#${secret}`,
+      `https://portal.example.test/onboarding/${id}#${"e".repeat(64)}`,
       `https://portal.example.test/onboarding/${id}#short`, `javascript:alert(1)//onboarding/${id}#${secret}`, null, 7])
-      expect(safeRecipientLink(value, id)).toBeNull();
+      expect(safeRecipientLink(value, id, secret)).toBeNull();
   });
 
   it("accepts only well-formed named scope choices", () => {

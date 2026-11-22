@@ -41,8 +41,43 @@ export interface ViewerClientDeliveryCatalog {
   schemaVersion: 1;
   project: { id: string; displayName: string };
   tasks: Array<{ id: string; displayName: string; modelId: string; modelVersionId: string;
-    modelTitle: string; publishedAt: string }>;
+    modelTitle: string; publishedAt: string;
+    /** Root-first folders holding the task; [] at the project root; absent from older Viewer images. */
+    folderPath?: ViewerClientFolderPathEntry[] }>;
   nextCursor: string | null;
+}
+
+/** One folder in a client-visible task's path. Only folders above a visible, published task are ever named. */
+export interface ViewerClientFolderPathEntry { id: string; name: string }
+export const VIEWER_CLIENT_FOLDER_PATH_MAX_DEPTH = 16;
+export const VIEWER_CLIENT_FOLDER_NAME_MAX_LENGTH = 160;
+
+/**
+ * A safe client label for one folder name: control characters (C0 and DEL) removed, trimmed, at most 160 characters,
+ * never empty. One legacy name is neutralized here instead of failing the whole page.
+ */
+export function viewerClientFolderLabel(name: string): string {
+  const label = name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, VIEWER_CLIENT_FOLDER_NAME_MAX_LENGTH).trim();
+  return label || "Untitled folder";
+}
+
+/**
+ * Validates a folder path from the Viewer. Structure is strict: an array of at most 16 exact {id,name} objects with
+ * opaque ids, string names and no repeated folder; anything else returns null so callers reject rather than render it.
+ * Names are labels only, so an unusual name is neutralized with viewerClientFolderLabel and the rest is kept.
+ */
+export function parseViewerClientFolderPath(value: unknown): ViewerClientFolderPathEntry[] | null {
+  if (!Array.isArray(value) || value.length > VIEWER_CLIENT_FOLDER_PATH_MAX_DEPTH) return null;
+  const seen = new Set<string>(), path: ViewerClientFolderPathEntry[] = [];
+  for (const raw of value) {
+    const entry = record(raw);
+    if (!entry || Object.keys(entry).sort().join(",") !== "id,name" || typeof entry.id !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(entry.id) || seen.has(entry.id) || typeof entry.name !== "string" ||
+      entry.name.length > 4096)
+      return null;
+    seen.add(entry.id); path.push({ id: entry.id, name: viewerClientFolderLabel(entry.name) });
+  }
+  return path;
 }
 
 /** Minimal project choices with at least one currently published client task. */
@@ -866,6 +901,7 @@ export class ViewerServiceClient {
       const task = record(raw);
       if (!task || !id(task.id) || seen.has(task.id) || !title(task.displayName) || !id(task.modelId) || !id(task.modelVersionId) ||
         !title(task.modelTitle) || typeof task.publishedAt !== "string" || !Number.isFinite(Date.parse(task.publishedAt)) ||
+        (task.folderPath !== undefined && parseViewerClientFolderPath(task.folderPath) === null) ||
         (input.taskId !== undefined && task.id !== input.taskId))
         throw new ViewerServiceError("Viewer returned an invalid delivery task", "invalid_response");
       seen.add(task.id);
@@ -877,6 +913,7 @@ export class ViewerServiceClient {
       tasks: payload.tasks.map(raw => { const task = record(raw)!; return {
         id: task.id as string, displayName: task.displayName as string, modelId: task.modelId as string,
         modelVersionId: task.modelVersionId as string, modelTitle: task.modelTitle as string, publishedAt: task.publishedAt as string,
+        ...(task.folderPath !== undefined ? { folderPath: parseViewerClientFolderPath(task.folderPath)! } : {}),
       }; }), nextCursor: payload.nextCursor as string | null };
   }
 

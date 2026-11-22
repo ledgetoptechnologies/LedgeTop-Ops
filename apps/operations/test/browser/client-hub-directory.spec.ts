@@ -663,7 +663,13 @@ for (const onboarding of ["available", "not enabled"] as const)
     await page.goto("/clients");
     await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
     await expect.poll(() => sessionChecks).toBe(1);
-    const onboard = page.getByRole("link", { name: "Onboard client" });
-    if (onboarding === "available") await expect(onboard).toHaveAttribute("href", "/administration/client-onboarding");
-    else await expect(onboard).toHaveCount(0);
+    const onboard = page.getByRole("button", { name: "Onboard client", exact: true });
+    const review = page.getByRole("link", { name: "Review submissions", exact: true });
+    if (onboarding === "available") {
+      await expect(onboard).toBeVisible();
+      await expect(review).toHaveAttribute("href", "/administration/client-onboarding");
+    } else {
+      await expect(onboard).toHaveCount(0);
+      await expect(review).toHaveCount(0);
+    }
   });

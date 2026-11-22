@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Card, EmptyState, Skeleton } from "@ltds/ui";
 import type { RequestError } from "./bulk-download";
 import { loadNativeViewerWork, openNativeViewerTaskSession, type NativeViewerWorkItem } from "./native-portal-api";
 import type { PortalWorkspace } from "./portal-api";
-import { directViewerTaskPath, sharedViewerRows, viewerWorkAccounts } from "./shared-viewer-work";
+import { directViewerTaskPath, sharedViewerGroups, sharedViewerHasFolders, sharedViewerRows, viewerWorkAccounts,
+  type SharedViewerFolderGroup, type SharedViewerProjectGroup } from "./shared-viewer-work";
 import { createViewerSessionIssuer, openClientViewerWindowWithIssuer, viewerLaunchFailureMessage } from "./viewer-window-launch";
 import type { ModelViewerSession } from "./viewer-window-launch";
 import { readClientViewerUnits } from "./viewer-units-preference";
@@ -23,7 +24,8 @@ const unavailable = (caught: unknown) => [403, 404].includes((caught as RequestE
 const shortDate = (value: string) => new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 
 /**
- * Every Viewer task shared directly with the signed-in person, as one flat list. Account
+ * Every Viewer task shared directly with the signed-in person, grouped by project and then by the same folders
+ * staff see (a flat list when the portal sends no folders). Account
  * (workspace) names are never shown: some are internal labels. Each row opens with its
  * own account and grant, so nothing is merged or switched.
  */
@@ -41,6 +43,7 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
   const sessionIssuers = useRef(new Map<string, () => Promise<ModelViewerSession>>());
   const controllers = useRef(new Map<string, AbortController>());
   const generation = useRef(0);
+  const headingPrefix = useId();
 
   const loadFirst = useCallback(async (workspaceId: string, current: number) => {
     controllers.current.get(workspaceId)?.abort();
@@ -85,6 +88,8 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
 
   const states = accounts.map(account => ({ account, state: work.get(account) ?? { status: "loading" as const } }));
   const rows = sharedViewerRows(states.flatMap(({ state }) => state.status === "ready" ? state.items : []));
+  // Older portals send no folder path: keep the flat list until any loaded row has one. Regrouped after every page.
+  const grouped = sharedViewerHasFolders(rows);
   const loading = states.some(({ state }) => state.status === "loading");
   const failed = states.filter(({ state }) => state.status === "error");
   const unchecked = states.filter(({ state }) => state.status === "unavailable");
@@ -120,21 +125,25 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
     }).finally(() => setOpeningTask(current => current === key ? null : current));
   };
 
+  const taskRow = (row: NativeViewerWorkItem, showProject: boolean) => {
+    const key = `${row.workspaceId}:${row.taskId}`;
+    return <li key={key}>
+      <div><strong>{row.title}</strong>
+        {showProject && row.projectName && <span>{row.projectName}</span>}
+        <small>Shared {shortDate(row.sharedAt)}{row.expiresAt ? ` · Available until ${shortDate(row.expiresAt)}` : ""}</small></div>
+      <a className="button button-orange" href={directViewerTaskPath(row)} aria-disabled={openingTask !== null || undefined}
+        onClick={event => openTask(row, event)}>Open 3D model<span className="visually-hidden">: {row.title}</span></a>
+      {launchMessages.has(key) && <p className="shared-viewer-work-launch" role="status" aria-live="polite">{launchMessages.get(key)}</p>}
+    </li>;
+  };
   return <Card title="Shared 3D work" className="shared-viewer-work">
     {failed.length > 0 && <div className="shared-viewer-work-problem" role="alert">
       <p>Some shared 3D work couldn’t be loaded.</p>
       <button type="button" className="button-ghost button-small" onClick={() => failed.forEach(({ account }) => void loadFirst(account, generation.current))}>Try again</button>
     </div>}
-    {rows.length > 0 && <ul className="shared-viewer-work-list">{rows.map(row => {
-      const key = `${row.workspaceId}:${row.taskId}`;
-      return <li key={key}>
-      <div><strong>{row.title}</strong>
-        {row.projectName && <span>{row.projectName}</span>}
-        <small>Shared {shortDate(row.sharedAt)}{row.expiresAt ? ` · Available until ${shortDate(row.expiresAt)}` : ""}</small></div>
-      <a className="button button-orange" href={directViewerTaskPath(row)} aria-disabled={openingTask !== null || undefined}
-        onClick={event => openTask(row, event)}>Open 3D model<span className="visually-hidden">: {row.title}</span></a>
-      {launchMessages.has(key) && <p className="shared-viewer-work-launch" role="status" aria-live="polite">{launchMessages.get(key)}</p>}
-    </li>})}</ul>}
+    {rows.length > 0 && !grouped && <ul className="shared-viewer-work-list">{rows.map(row => taskRow(row, true))}</ul>}
+    {rows.length > 0 && grouped && <SharedViewerGroupedList groups={sharedViewerGroups(rows)} idPrefix={headingPrefix}
+      renderTask={row => taskRow(row, false)} />}
     {loading && <Skeleton variant="list" rows={2} label="Loading shared 3D work…" />}
     {unchecked.length > 0 && <p className="shared-viewer-work-problem" role="status">{unchecked.length === states.length
       ? "Shared 3D work isn’t available here yet." : "Some shared 3D work isn’t available here yet."}</p>}
@@ -145,4 +154,29 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
         {state.moreError ? "Try again" : "Load more 3D work"}</button>
     </div>)}
   </Card>;
+}
+
+/**
+ * Projects, then nested folders before tasks at each level, as staff see them. Folder and project names render as
+ * React text only, never as HTML. Heading levels stop at 6; deeper nesting stays clear through the nested lists.
+ */
+export function SharedViewerGroupedList({ groups, idPrefix, renderTask }: {
+  groups: SharedViewerProjectGroup[]; idPrefix: string; renderTask: (row: NativeViewerWorkItem) => ReactNode;
+}) {
+  const taskList = (items: NativeViewerWorkItem[]) => items.length > 0 &&
+    <ul className="shared-viewer-work-list">{items.map(renderTask)}</ul>;
+  const folderList = (folders: SharedViewerFolderGroup[], level: number): ReactNode => folders.length > 0 &&
+    <ul className="shared-viewer-work-folders">{folders.map(folder => <li key={folder.id} className="shared-viewer-work-folder">
+      <div role="heading" aria-level={Math.min(level, 6)} className="shared-viewer-work-folder-name">{folder.name}</div>
+      {folderList(folder.folders, level + 1)}
+      {taskList(folder.tasks)}
+    </li>)}</ul>;
+  return <div className="shared-viewer-work-groups">{groups.map((project, index) => {
+    const headingId = `${idPrefix}-project-${index}`;
+    return <section key={project.key} className="shared-viewer-work-project" aria-labelledby={project.projectName ? headingId : undefined}>
+      {project.projectName && <h3 id={headingId}>{project.projectName}</h3>}
+      {folderList(project.folders, 4)}
+      {taskList(project.tasks)}
+    </section>;
+  })}</div>;
 }

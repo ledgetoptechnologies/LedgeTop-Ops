@@ -1,8 +1,9 @@
 'use strict';
 
 // Property lines proxy. The browser asks this Viewer for parcel outlines in a
-// small bounding box; this server asks the State of Wisconsin's public parcel
-// service with fixed parameters and returns geometry only. The third party
+// small bounding box; this server asks the registered public parcel service
+// for that location (parcelSources.js; today the State of Wisconsin's) with
+// fixed parameters and returns geometry only. The third party
 // sees this server, never the viewer's session, link, browser or address.
 //
 // Accepts only `bbox=west,south,east,north` (WGS84 degrees). Never forwards a
@@ -14,6 +15,7 @@ const { isAdminRequest } = require('./adminAuth');
 const { revisionMatches } = require('./publicSharePolicy');
 const { createUtmProjection } = require('../utm-conversion.mjs');
 const { parcelsInBounds, uploadSourceDescription } = require('./propertyLinesBoundary');
+const { PARCEL_SOURCES, PARCEL_DISCLAIMER, WISCONSIN, extentTouches, selectParcelSource } = require('./parcelSources');
 
 // Datum convention, end to end (one rule, no exceptions):
 //   NAD83 geographic lon/lat, and NO datum transformation anywhere.
@@ -31,24 +33,12 @@ const { parcelsInBounds, uploadSourceDescription } = require('./propertyLinesBou
 //   lines up as the data does; a model whose metadata says WGS84 is told
 //   about the expected 1 to 1.5 m datum offset instead of being silently
 //   shifted (property-lines.mjs, modelHorizontalDatum).
-const DATUM = 'NAD83';
 const WEB_MERCATOR_RADIUS = 6378137;
 const DEG = Math.PI / 180;
 
-// Release V12 (2026). The service name changes between releases; update the
-// URL and release together when the state publishes the next version.
-const WISCONSIN_PARCELS = Object.freeze({
-  layerUrl: 'https://services3.arcgis.com/n6uYoouQZW75n5WI/ArcGIS/rest/services/Wisconsin_Statewide_Parcels_DB/FeatureServer/0',
-  name: 'Wisconsin Statewide Parcel Map',
-  release: 'V12 (2026)',
-  credit: "Product of the Version 12 Statewide Parcel Map Database Project (V12). Created by the Wisconsin State Cartographer's Office; administered by the Wisconsin Land Information Program at the Department of Administration.",
-  datumNote: 'The state data is NAD83-based and is drawn with no datum shift. Against a model in a WGS84 or ITRF-based frame, expect roughly 1 to 1.5 m of offset in Wisconsin, within the parcel map\u2019s own accuracy.',
-  disclaimer: 'Property lines are approximate and for reference only. They are not a survey and do not show legal ownership boundaries. No warranty of accuracy, completeness or currency is made. Only a licensed land surveyor can determine a boundary.',
-  // Layer extent published by the service (Web Mercator xmin -10340314.53,
-  // ymin 5234954.18, xmax -9658524.28, ymax 5955260.21), as lon/lat rounded
-  // outward.
-  extent: Object.freeze({ west: -92.89, south: 42.49, east: -86.76, north: 47.09 }),
-});
+// The Wisconsin source now lives in the parcel-source registry
+// (parcelSources.js), with the release and the monthly release check.
+const WISCONSIN_PARCELS = WISCONSIN;
 
 const LIMITS = Object.freeze({
   maxSpanDegrees: 0.06,
@@ -73,9 +63,9 @@ function lonLatToWebMercator(lon, lat) {
     WEB_MERCATOR_RADIUS * Math.log(Math.tan(Math.PI / 4 + Number(lat) * DEG / 2))];
 }
 
-// Strict: exactly four plain decimal numbers, a small box, inside or touching
-// the state's published extent.
-function parseBoundingBox(value) {
+// Strict: exactly four plain decimal numbers, a small box. `outside` when it
+// touches no registered source's published extent.
+function parseBoundingBox(value, sources = PARCEL_SOURCES) {
   if (typeof value !== 'string' || value.length > 120) return { error: 'invalid_bbox' };
   const parts = value.split(',');
   if (parts.length !== 4 || !parts.every(part => /^-?\d{1,3}(\.\d{1,9})?$/.test(part))) return { error: 'invalid_bbox' };
@@ -83,31 +73,33 @@ function parseBoundingBox(value) {
   if (![west, south, east, north].every(Number.isFinite) || west < -180 || east > 180 || south < -85 || north > 85 || west >= east || south >= north)
     return { error: 'invalid_bbox' };
   if (east - west > LIMITS.maxSpanDegrees || north - south > LIMITS.maxSpanDegrees) return { error: 'bbox_too_large' };
-  const e = WISCONSIN_PARCELS.extent;
-  if (east < e.west || west > e.east || north < e.south || south > e.north) return { outside: true, bounds: { west, south, east, north } };
-  return { bounds: { west, south, east, north } };
+  const bounds = { west, south, east, north };
+  if (!selectParcelSource(bounds, sources)) return { outside: true, bounds };
+  return { bounds };
 }
 
 // Fixed query: geometry only (plus the service's own row id), the layer's
 // native Web Mercator in and out (no reprojection and no datum
 // transformation; see the datum convention above), bounded record count. No attribute such as owner, address or value
 // is ever requested.
-function upstreamQueryUrl(bounds, layerUrl = WISCONSIN_PARCELS.layerUrl) {
+// source: a registry entry, or a bare layer URL for the Wisconsin query.
+function upstreamQueryUrl(bounds, source = WISCONSIN) {
+  const { layerUrl, query } = typeof source === 'string' ? { ...WISCONSIN, layerUrl: source } : source;
   const [xmin, ymin] = lonLatToWebMercator(bounds.west, bounds.south);
   const [xmax, ymax] = lonLatToWebMercator(bounds.east, bounds.north);
   const round = v => Math.round(v * 100) / 100;
   const params = new URLSearchParams({
-    where: '1=1',
-    geometry: JSON.stringify({ xmin: round(xmin), ymin: round(ymin), xmax: round(xmax), ymax: round(ymax), spatialReference: { wkid: 3857 } }),
+    where: query.where,
+    geometry: JSON.stringify({ xmin: round(xmin), ymin: round(ymin), xmax: round(xmax), ymax: round(ymax), spatialReference: { wkid: query.wkid } }),
     geometryType: 'esriGeometryEnvelope',
-    inSR: '3857',
+    inSR: String(query.wkid),
     spatialRel: 'esriSpatialRelIntersects',
-    outFields: 'OBJECTID',
+    outFields: query.outFields,
     returnGeometry: 'true',
     returnZ: 'false',
     returnM: 'false',
-    outSR: '3857',
-    geometryPrecision: '2',
+    outSR: String(query.wkid),
+    geometryPrecision: String(query.geometryPrecision),
     resultRecordCount: String(LIMITS.maxParcels),
     f: 'json',
   });
@@ -115,7 +107,7 @@ function upstreamQueryUrl(bounds, layerUrl = WISCONSIN_PARCELS.layerUrl) {
 }
 
 // Esri JSON (Web Mercator rings) -> { status, parcels: [{ id, rings: lon/lat }] }.
-function normalizeUpstream(body) {
+function normalizeUpstream(body, idField = WISCONSIN.query.idField) {
   if (!body || typeof body !== 'object' || body.error) return { status: 'unavailable', parcels: [] };
   if (!Array.isArray(body.features)) return { status: 'unavailable', parcels: [] };
   if (body.exceededTransferLimit === true || body.features.length > LIMITS.maxParcels) return { status: 'too_many', parcels: [] };
@@ -132,7 +124,7 @@ function normalizeUpstream(body) {
       }
       if (out.length >= 2) rings.push(out);
     }
-    const id = Number(feature?.attributes?.OBJECTID);
+    const id = Number(feature?.attributes?.[idField]);
     if (rings.length) parcels.push({ id: Number.isSafeInteger(id) ? id : null, rings });
   }
   return { status: parcels.length ? 'ok' : 'none', parcels };
@@ -200,6 +192,25 @@ function modelSiteWindow(version) {
   return { projection: createUtmProjection({ zoneLon0Deg: lon0, hemisphere: g.hemisphere }), minE: e - half, maxE: e + half, minN: n - half, maxN: n + half };
 }
 
+// The site window as lon/lat bounds (corners and edge midpoints), used to
+// pick the model's parcel source.
+function siteLonLatBounds(site) {
+  if (!site) return null;
+  const midE = (site.minE + site.maxE) / 2, midN = (site.minN + site.maxN) / 2;
+  const points = [[site.minE, site.minN], [midE, site.minN], [site.maxE, site.minN], [site.maxE, midN],
+    [site.maxE, site.maxN], [midE, site.maxN], [site.minE, site.maxN], [site.minE, midN]].map(([e, n]) => site.projection.utmToLatLon(e, n));
+  if (!points.every(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon))) return null;
+  const lats = points.map(p => p[0]), lons = points.map(p => p[1]);
+  return { west: Math.min(...lons), south: Math.min(...lats), east: Math.max(...lons), north: Math.max(...lats) };
+}
+
+// The model's state parcel source: the first registered source whose extent
+// touches the model's site window, or null (no state source here).
+function parcelSourceForModel(version, sources = PARCEL_SOURCES) {
+  const bounds = siteLonLatBounds(modelSiteWindow(version));
+  return bounds ? selectParcelSource(bounds, sources) : null;
+}
+
 function boundsInsideSite(bounds, site) {
   if (!site) return false;
   const corners = [[bounds.south, bounds.west], [bounds.south, bounds.east], [bounds.north, bounds.east], [bounds.north, bounds.west]];
@@ -241,7 +252,9 @@ async function readLimited(response, maxBytes) {
   return Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).toString('utf8');
 }
 
-function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, layerUrl = WISCONSIN_PARCELS.layerUrl, limits = LIMITS } = {}) {
+// One fetcher (cache, slots) per registry source.
+function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, config = WISCONSIN, layerUrl = config.layerUrl, limits = LIMITS } = {}) {
+  const target = layerUrl === config.layerUrl ? config : { ...config, layerUrl };
   const cache = new Map();
   const pending = new Map();
   const perCaller = new Map();
@@ -256,7 +269,7 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, laye
   }
 
   async function fetchUpstream(bounds) {
-    const response = await fetchImpl(upstreamQueryUrl(bounds, layerUrl), {
+    const response = await fetchImpl(upstreamQueryUrl(bounds, target), {
       method: 'GET',
       headers: { Accept: 'application/json' },
       redirect: 'error',
@@ -267,7 +280,7 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, laye
     const text = await readLimited(response, limits.maxResponseBytes);
     let body;
     try { body = JSON.parse(text); } catch { return { status: 'unavailable', parcels: [] }; }
-    return normalizeUpstream(body);
+    return normalizeUpstream(body, target.query.idField);
   }
 
   return {
@@ -303,9 +316,9 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, laye
   };
 }
 
-function sourceDescription() {
-  const { name, release, credit, disclaimer, datumNote } = WISCONSIN_PARCELS;
-  return { id: 'wi-statewide-parcels', name, release, credit, disclaimer, datumNote, datum: DATUM, region: 'Wisconsin' };
+function sourceDescription(config = WISCONSIN) {
+  const { id, name, release, credit, disclaimer, datumNote, datum, region } = config;
+  return { id, name, release, credit, disclaimer, datumNote, datum, region };
 }
 
 // boundaries: optional uploaded-boundary store (propertyLinesBoundary.js).
@@ -322,8 +335,17 @@ function uploadVisible(upload, audience) {
   return audience === 'staff' || audience === 'client' || (audience === 'public' && upload.manifest.publicVisible === true);
 }
 
-function createPropertyLinesApi({ repository, source = createParcelSource(), validator, boundaries = null } = {}) {
+// sources: the parcel-source registry. source: optional single fetcher used
+// for every registered source (tests); otherwise each source gets its own
+// fetcher, created on first use (fetchImpl: tests only).
+function createPropertyLinesApi({ repository, sources = PARCEL_SOURCES, source = null, fetchImpl, validator, boundaries = null } = {}) {
   const router = trackedRouter();
+  const fetchers = new Map();
+  const fetcherFor = config => {
+    if (source) return source;
+    if (!fetchers.has(config.id)) fetchers.set(config.id, createParcelSource(fetchImpl ? { config, fetchImpl } : { config }));
+    return fetchers.get(config.id);
+  };
   // 401 when nothing was presented; 403 when a session, admin login or share
   // was presented but is revoked, stale, expired or for another model.
   const denied = (req, res) => {
@@ -341,7 +363,12 @@ function createPropertyLinesApi({ repository, source = createParcelSource(), val
     const offered = propertyLinesOffered(caller.audience) && Boolean(modelSiteWindow(caller.version));
     const upload = boundaries?.activeForModel(caller.model?.id);
     if (upload && !uploadVisible(upload, caller.audience)) return res.json({ offered: false, source: null });
-    return res.json({ offered, source: upload ? uploadSourceDescription(upload.manifest, WISCONSIN_PARCELS.disclaimer) : sourceDescription() });
+    if (upload) return res.json({ offered, source: uploadSourceDescription(upload.manifest, PARCEL_DISCLAIMER) });
+    // A model outside every registered extent is described by the first
+    // source, as before the registry: the browser's own coverage check says
+    // "not available here" and its tiles come back 'outside'.
+    const state = parcelSourceForModel(caller.version, sources) || sources[0];
+    return res.json({ offered, source: state ? sourceDescription(state) : null });
   });
 
   router.get('/api/v1/property-lines/parcels', async (req, res) => {
@@ -349,7 +376,7 @@ function createPropertyLinesApi({ repository, source = createParcelSource(), val
     const keys = Object.keys(req.query || {}).sort();
     if (keys.length !== 2 || keys[0] !== 'bbox' || keys[1] !== 'model' || typeof req.query.model !== 'string')
       return res.status(400).json({ error: 'only bbox and model are accepted', code: 'invalid_request' });
-    const parsed = parseBoundingBox(req.query.bbox);
+    const parsed = parseBoundingBox(req.query.bbox, sources);
     if (parsed.error) return res.status(400).json({ error: parsed.error, code: parsed.error });
     const caller = await resolve(req, req.query.model);
     if (!caller) return denied(req, res);
@@ -365,7 +392,12 @@ function createPropertyLinesApi({ repository, source = createParcelSource(), val
       return res.status(403).json({ error: 'property lines are not offered for this viewer', code: 'property_lines_not_offered' });
     if (upload) return res.json(parcelsInBounds(upload.parcels, parsed.bounds));
     if (parsed.outside) return res.json({ status: 'outside', parcels: [] });
-    const result = await source.parcels(parsed.bounds, { caller: caller.caller });
+    // The model's source wherever its extent reaches this tile; otherwise the
+    // first source that does (the tile is inside the model's site window,
+    // checked above, and touches at least one source).
+    const modelSource = parcelSourceForModel(caller.version, sources);
+    const config = modelSource && extentTouches(modelSource.extent, parsed.bounds) ? modelSource : selectParcelSource(parsed.bounds, sources);
+    const result = await fetcherFor(config).parcels(parsed.bounds, { caller: caller.caller });
     if (result.status === 'busy') return res.status(429).json({ status: 'unavailable', parcels: [], code: 'busy' });
     if (result.status === 'unavailable') return res.status(502).json({ status: 'unavailable', parcels: [] });
     return res.json({ status: result.status, parcels: result.parcels });
@@ -376,6 +408,10 @@ function createPropertyLinesApi({ repository, source = createParcelSource(), val
 
 module.exports = {
   WISCONSIN_PARCELS,
+  PARCEL_SOURCES,
+  sourceDescription,
+  parcelSourceForModel,
+  siteLonLatBounds,
   LIMITS,
   createPropertyLinesApi,
   createParcelSource,
