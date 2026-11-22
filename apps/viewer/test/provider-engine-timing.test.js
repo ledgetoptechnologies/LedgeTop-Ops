@@ -133,8 +133,8 @@ test('migration 83 preserves populated schema 42 and refuses incompatible ledger
   const laterMigrations=MIGRATIONS.splice(laterStart);
   try{applyMigrations(db);}
   finally{MIGRATIONS.push(...laterMigrations);}
-  assert.deepEqual(laterMigrations.map(entry=>entry.version),[48,83]);
-  const [folderMigration,migration]=laterMigrations;
+  assert.deepEqual(laterMigrations.map(entry=>entry.version),[48,52,83]);
+  const [folderMigration,generationMigration,migration]=laterMigrations;
   assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,42);
   const c={db,processing:new ProcessingRepository(db)};
   const project=c.processing.createProject({displayName:'Upgrade fixture'}),data=dataset(c,project);
@@ -152,6 +152,7 @@ test('migration 83 preserves populated schema 42 and refuses incompatible ledger
   db=openDatabase(databasePath);
   const upgraded=new ProcessingRepository(db);
   assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=48').get().name,folderMigration.name);
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=52').get().name,generationMigration.name);
   assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=83').get().name,migration.name);
   assert.equal(upgraded.getTask(task.id).folderId,null);
   assert.deepEqual(upgraded.getAttempt(attempt.id),attempt);
