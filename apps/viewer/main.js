@@ -1657,6 +1657,9 @@ function applyViewerSession(session, { initialize = false } = {}) {
   scheduleSessionRenewal(session);
   sessionRenewalBlocked = false;
   setSessionAccessState('active');
+  // Every accepted session update: a new model version or authority replaces
+  // the property lines at once; the same context changes nothing.
+  void propertyLines?.sync();
   recoverFailedLodTiles();
   pcApi()?.renewAccess?.(EPT_URL);
   viewerProductDownloads?.refresh();
@@ -4091,6 +4094,7 @@ function installPropertyLines() {
     },
     projectId: () => PROJECT?.id || null,
     projectVersion: () => PROJECT?.activeVersion?.id || '',
+    authorityKey: () => (VIEW_MODE === 'session' ? `${activeViewerSession?.audience || ''}|${activeViewerSession?.subject || ''}` : ''),
     getMode: () => state.activeMode,
     getCloudMode: () => state.cloudMode,
     getMap: () => map || null,

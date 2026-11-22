@@ -32,7 +32,7 @@ function fixture({ controller = true } = {}) {
     // covered together in viewer-header-browser.test.mjs.
     installStaffNavigationGuard() {},
     viewerSlice:{reset:()=>measurements.sliceResets++},
-    propertyLines:{suspend:()=>propertyLines.push('suspend'),resume:async()=>{propertyLines.push('resume');}},
+    propertyLines:{suspend:()=>propertyLines.push('suspend'),resume:async()=>{propertyLines.push('resume');},sync:async()=>{propertyLines.push('sync');}},
     window, document: { getElementById: id => reportNodes[id] || null }, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,
     reviewControllerCandidate: REQUEST,
@@ -305,7 +305,7 @@ test('unavailable access immediately hides personal records and same-person rene
   await f.context.handleSessionRenewalMessage({version:1,type:'ltds-viewer:renew-session',requestId:REQUEST,grant:'11111111-2222-4333-8444-555555555555'},{reviewChannel:true});
   assert.equal(f.context.sessionAccessState,'active');assert.equal(f.measurements.installs,1);assert.equal(f.measurements.invalidated,false);
   assert.equal(f.measurements.records.size,0,'a fresh private store reloads rather than restoring stale records');
-  assert.deepEqual([f.propertyLines[0],f.propertyLines.at(-1)],['suspend','resume'],'property lines drop with access and are offered again after renewal');
+  assert.deepEqual([f.propertyLines[0],...f.propertyLines.slice(-2)],['suspend','resume','sync'],'property lines drop with access, are offered again after renewal and follow the accepted session');
 });
 
 test('same-person proactive renewal preserves the existing personal workspace',async()=>{

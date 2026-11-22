@@ -121,11 +121,13 @@ export function createPropertyLinesController(deps) {
     try { preferences.setHidden(projectId, value); } catch { /* kept for this page */ }
   }
 
+  // Project + model version + who the access belongs to. Hide follows the project only.
   function lifecycleKey() {
     const id = deps.projectId() || null;
     if (!id) return { id, key: null };
     const version = deps.projectVersion?.() ?? '';
-    return { id, key: `${id}|${version}` };
+    const authority = deps.authorityKey?.() ?? '';
+    return { id, key: JSON.stringify([id, version, authority]) };
   }
 
   function stopWork() {
@@ -357,9 +359,11 @@ export function createPropertyLinesController(deps) {
     // A view without a drawing surface shows nothing and waits for the next view change.
     if (!active) { stopWork(); clearDrawings(); settle('idle'); return; }
     if (av.reason === 'pending') { status = 'pending'; render(); scheduleRetry(); return; }
-    const myLife = life;
+    const myLife = life, myKey = lifeKey;
     const request = propertyLinesRequestBounds({ modelBounds: siteBounds, viewBounds: active === 'map' ? mapViewBounds() : null });
     const mySeq = ++seq;
+    // Also compare the live project/version/authority, in case it changed without a sync yet.
+    const stillCurrent = () => mySeq === seq && myLife === life && myKey === lifecycleKey().key;
     if (request.status !== 'ok') {
       fetcher.cancel(); clearDrawings();
       if (request.status === 'unknown') { status = 'pending'; render(); scheduleRetry(); } else settle(request.status);
@@ -368,14 +372,14 @@ export function createPropertyLinesController(deps) {
     const key = boundsKey(request.bounds);
     if (!(current && current.key === key)) { status = 'loading'; render(); }
     const result = current && current.key === key ? { status: 'ok', parcels: current.parcels } : await fetcher.request(request.bounds, { immediate });
-    if (result.status === 'aborted' || mySeq !== seq || myLife !== life || !isOn()) return;
+    if (result.status === 'aborted' || !stillCurrent() || !isOn()) { if (lifeKey !== lifecycleKey().key) void refresh(); return; }
     if (result.status !== 'ok') { clearDrawings(); current = null; count = 0; settle(result.status); return; }
     current = { key, parcels: result.parcels };
     count = result.parcels.length;
     if (active === 'map') { drawMap(); settle('ready'); return; }
     status = 'loading'; render();
     const lines = await drapedLines(mySeq);
-    if (mySeq !== seq || myLife !== life || !isOn()) return;
+    if (!stillCurrent() || !isOn()) { if (lifeKey !== lifecycleKey().key) void refresh(); return; }
     if (!lines) { status = 'pending'; render(); scheduleRetry(); return; }
     if (lines.tooMany) { clearDrawings(); settle('too_many'); return; }
     heightNote = lines.note;
@@ -436,6 +440,15 @@ export function createPropertyLinesController(deps) {
     return loadOffer();
   }
 
+  // The page accepted new session or project details: when the project,
+  // model version or authority changed, drop everything from the old one at
+  // once and ask for the new offer. The same context is a no-op.
+  function sync() {
+    if (!syncLifecycle()) return Promise.resolve();
+    render();
+    return loadOffer();
+  }
+
   // The current view became ready (tiles, point cloud or raster loaded):
   // refill the pending retry budget and try again. Never changes Hide.
   function wake() {
@@ -450,6 +463,7 @@ export function createPropertyLinesController(deps) {
     refresh,
     toggle,
     wake,
+    sync,
     suspend,
     resume,
     get state() {
