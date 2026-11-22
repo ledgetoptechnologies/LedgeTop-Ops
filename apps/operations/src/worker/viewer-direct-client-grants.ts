@@ -56,8 +56,16 @@ function expiryJulianSql(value:string){
 const isoExpiry=z.iso.datetime({offset:true});
 /** Milliseconds for an expiry the create schema accepts; NaN for anything else (treated as unusable). */
 function expiryMillis(value:string){return isoExpiry.safeParse(value).success?Date.parse(value):Number.NaN;}
-/** The one stored form of an expiry: canonical UTC ISO (`YYYY-MM-DDTHH:MM:SS.sssZ`). */
-function canonicalExpiry(value:string|null){return value===null?null:new Date(expiryMillis(value)).toISOString();}
+const CANONICAL_EXPIRY=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+/** The one stored form of an expiry: canonical UTC ISO (`YYYY-MM-DDTHH:MM:SS.sssZ`), or undefined when that
+ * instant has no such form. The schema accepts 9999-12-31T23:59:59-01:00, whose UTC instant falls in year
+ * 10000 (`+010000-…`): the create schema, the Viewer's expiry check and SQLite would all reject or misread it. */
+function canonicalExpiry(value:string|null):string|null|undefined{
+ if(value===null)return null;
+ const millis=expiryMillis(value);if(!Number.isFinite(millis))return undefined;
+ const canonical=new Date(millis).toISOString();
+ return CANONICAL_EXPIRY.test(canonical)&&isoExpiry.safeParse(canonical).success?canonical:undefined;
+}
 /** SQL form of the receipt checks in resolveRestrictedGrant. It is deliberately no stricter than that
  * function, so a grant the issuer would honour always counts toward the cap; a receipt it would reject
  * for a stricter reason can only be over-counted (never issued). */
@@ -323,7 +331,8 @@ async function resolveRestrictedGrant(env: Env, row: DirectViewerClientGrantRow,
    || envelope.recipientAuthorityPin.sourceId !== row.source_id) return null;
  if (grant.expiresAt !== null && (!Number.isFinite(expiryMillis(grant.expiresAt))
    || (!includeExpired && expiryMillis(grant.expiresAt) <= Date.now()))) return null;
- return { ...row, authorization_expires_at: canonicalExpiry(grant.expiresAt), exclusions: exclusionsSchema.parse(envelope.exclusions) };
+ // A receipt written before canonical storage keeps its original string if it has no canonical form.
+ return { ...row, authorization_expires_at: canonicalExpiry(grant.expiresAt) ?? grant.expiresAt, exclusions: exclusionsSchema.parse(envelope.exclusions) };
 }
 
 async function receipt(env:Env,actor:string,idempotencyKey:string,fingerprint:string){
@@ -451,7 +460,10 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
   }
   return {grant:createReceiptGrant(prior.response,prior.grantId,g.exclusions),replayed:true};
  }
- if(g.expiresAt!==null&&Date.parse(g.expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
+ // After the replay check, so an already committed request still replays; before any read or write.
+ const expiresAt=canonicalExpiry(g.expiresAt);
+ if(expiresAt===undefined)fail(400,'expired_at_invalid','Expiration is outside the supported range');
+ if(expiresAt!==null&&Date.parse(expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
  let catalog;
  try{catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{}),...(g.exclusions?{exclusions:g.exclusions,validateExclusions:true}:{})});}
  catch(error){
@@ -475,7 +487,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  // Checked here for a clear early answer and again inside the INSERT so concurrent creates cannot pass it.
  if((count??0)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
  const result={grantId:id,sourceId:g.sourceId,workspaceId:g.workspaceId,viewerProjectId:g.viewerProjectId,taskId:g.taskId,scopeType:g.scopeType,
- includeFuturePublished:g.includeFuturePublished,permissions:g.permissions,expiresAt:canonicalExpiry(g.expiresAt),grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:row.display_name};
+ includeFuturePublished:g.includeFuturePublished,permissions:g.permissions,expiresAt,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:row.display_name};
  try{await database.batch([
  database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
  can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)

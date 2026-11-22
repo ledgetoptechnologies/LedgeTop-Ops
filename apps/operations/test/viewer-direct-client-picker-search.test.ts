@@ -2,6 +2,7 @@ import {readFileSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
+import {sha256} from '../src/worker/crypto';
 import type {Env,StaffPrincipal} from '../src/worker/types';
 const mocks=vi.hoisted(()=>({catalog:vi.fn(),scope:vi.fn(),proof:vi.fn(),guard:vi.fn()}));
 vi.mock('../src/worker/viewer-integration',()=>({viewerServiceClient:()=>({clientDeliveryCatalog:mocks.catalog,revokePublishedSessionSourceAuthorization:vi.fn()})}));
@@ -444,6 +445,57 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
   await expect(createFor(race.env,'legacy-offset-race-00001')).rejects.toMatchObject({status:409,code:'grant_limit'});
   expect(race.state.raced).toBe(true);
   expect(await counts(database)).toEqual({grants:before.grants!+1,receipts:before.receipts!+1,audit:before.audit});
+ },120_000);
+ // Year-9999 boundary: 9999-12-31T23:59:59-01:00 passes the create schema, but its UTC instant is in year
+ // 10000, which has no YYYY form for the issuer schema or SQLite. It is refused before any write.
+ const BEYOND='9999-12-31T23:59:59-01:00',LARGEST='9999-12-31T23:59:59.999Z';
+ const ledger=async(database:D1Database)=>({...await counts(database),
+  revocations:await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grant_revocations`).first<number>('n')});
+ it('refuses an expiry whose UTC instant is beyond year 9999 with no writes, restricted or not',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  const before=await ledger(database);
+  for(const restricted of [false,true])
+   await expect(createWith(env,`beyond-9999-key-${restricted?'r':'o'}0001`,'viewer-project',BEYOND,restricted))
+    .rejects.toMatchObject({status:400,code:'expired_at_invalid'});
+  expect(mocks.catalog).not.toHaveBeenCalled();
+  expect(await ledger(database)).toEqual(before);
+ },120_000);
+ it('accepts the largest representable expiry and stores it in a form the issuer schema and SQLite both read',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  const ordinary=await createWith(env,'largest-expiry-key-o0001','viewer-project',LARGEST,false);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'largest-restricted'},tasks:[]});
+  const restricted=await createWith(env,'largest-expiry-key-r0001','largest-restricted','9999-12-31T23:59:59Z',true);
+  expect(ordinary.grant.expiresAt).toBe(LARGEST);expect(restricted.grant.expiresAt).toBe('9999-12-31T23:59:59.000Z');
+  for(const value of [ordinary.grant.expiresAt,restricted.grant.expiresAt]){
+   expect(value).toMatch(/^\d{4}-\d\d-\d\dT/);
+   expect(await database.prepare(`SELECT julianday(?) IS NOT NULL ok`).bind(value).first<number>('ok')).toBe(1);
+  }
+  expect(await issuableExpiry(env)).toEqual({[ordinary.grant.grantId]:LARGEST,[restricted.grant.grantId]:'9999-12-31T23:59:59.000Z'});
+  expect(await createWith(env,'largest-expiry-key-o0001','viewer-project',LARGEST,false)).toEqual({grant:ordinary.grant,replayed:true});
+ },120_000);
+ it('still replays a grant committed with that expiry before the range check, with no new writes',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  // A pre-pin receipt, as an earlier build stored it: the raw public result with the request's original expiry.
+  const request={sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId:'viewer-project',taskId:null,scopeType:'project' as const,
+   includeFuturePublished:true,confirmedScope:true as const,expiresAt:BEYOND,permissions:{measure:true,cameras:false,download:false}};
+  const id='committed-beyond-9999',now=new Date().toISOString();
+  const committed={grantId:id,sourceId:request.sourceId,workspaceId:'ws-one',viewerProjectId:'viewer-project',taskId:null,scopeType:'project',
+   includeFuturePublished:true,permissions:request.permissions,expiresAt:BEYOND,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:'One'};
+  await database.batch([
+   database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+    can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+    VALUES(?,'project-alpha:primary','ws-one','viewer-project',NULL,'project',1,1,0,0,?,1,'active','staff-one',?,?)`).bind(id,BEYOND,now,now),
+   database.prepare(`INSERT INTO viewer_direct_client_grant_mutation_receipts(actor_staff_id,idempotency_key,action,request_fingerprint,grant_id,response_json,created_at)
+    VALUES('staff-one','committed-beyond-key-001','grant.create',?,?,?,?)`)
+    .bind(await sha256(JSON.stringify(['direct.create',request])),id,JSON.stringify(committed),now)]);
+  const before=await ledger(database);
+  expect(await createDirectViewerClientGrant({env,principal,idempotencyKey:'committed-beyond-key-001',request:new Request('https://ops.example.test/'),grant:request}))
+   .toEqual({grant:committed,replayed:true});
+  expect(await ledger(database)).toEqual(before);
+  // A new key with the same body is a new create, and is refused.
+  await expect(createDirectViewerClientGrant({env,principal,idempotencyKey:'committed-beyond-key-002',request:new Request('https://ops.example.test/'),grant:request}))
+   .rejects.toMatchObject({status:400,code:'expired_at_invalid'});
+  expect(await ledger(database)).toEqual(before);
  },120_000);
  it('ignores an expired restricted grant inside the INSERT when it lands after the precheck',async()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'restricted-live',99,'live');
