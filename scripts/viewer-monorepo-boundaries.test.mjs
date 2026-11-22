@@ -27,6 +27,7 @@ const reviewedAckMigrations = [
   { version: 41, name: 'viewer_acceptance_ack_outbox' },
   { version: 42, name: 'viewer_acceptance_ack_outbox_schema_reconcile' },
 ];
+const reviewedGcpOriginalsMigration = { version: 46, name: 'viewer_gcp_permanent_source_originals' };
 const reviewedFolderMigration = { version: 48, name: 'project_organizational_folders' };
 const reviewedTimerMigration = { version: 83, name: 'provider_engine_processing_elapsed' };
 const reviewedTimerSqlSha256 = 'c8b8205fbcf5b066030223c1176527f347ffc1bf4861b6ccf32e5845000f3214';
@@ -41,11 +42,13 @@ const reviewedConverter = {
 // Schema 41 adds a task/provider/attempt-bound durable ACK outbox with immutable
 // identity; schema 42 validates and preserves legacy rows, maps accepted to
 // delivered, and prevents ACK deletion. Unknown or mismatched rows abort the
-// migration. Schema 48 adds project folders and same-project task placement;
-// schema 83 adds an attempt- and provider-task-bound engine elapsed
-// record. The candidate image verification and attestation pins advance from
-// the upstream 38 to 83; the other runtime, numerical, promotion and digest
-// guards remain fully compared.
+// migration. Schema 46 (ledger v11 gap below 83) adds the permanent, immutable
+// archive of original GCP source CSVs and links gcp_sets to it; schema 48 adds
+// project folders and same-project task placement; schema 83 adds an attempt-
+// and provider-task-bound engine elapsed record. The candidate image
+// verification and attestation pins advance from the upstream 38 to 83 (the
+// highest version); the other runtime, numerical, promotion and digest guards
+// remain fully compared.
 // The reviewed Obj2Tiles build updates its bounded-concurrency patch and adds
 // the ImageSharp 3.2.0 locked dependency/license notices. The image verifier pins
 // the exact patch, lock-set and license-notice digests, checks the embedded
@@ -313,10 +316,10 @@ test('No script writes the Viewer image to a registry', () => {
   assert.deepEqual(writers.filter(file => !file.endsWith('.test.mjs')), []);
 });
 
-test('Viewer publication preserves the ACK and folder migrations and pins the exact timer schema', () => {
+test('Viewer publication preserves the ACK, GCP-original and folder migrations and pins the exact timer schema', () => {
   const migrations = MIGRATIONS.filter(({ version }) => version >= reviewedAckMigrations[0].version);
   assert.deepEqual(migrations.map(({ version, name }) => ({ version, name })),
-    [...reviewedAckMigrations, reviewedFolderMigration, reviewedTimerMigration], 'another schema advance requires a new explicit gate review');
+    [...reviewedAckMigrations, reviewedGcpOriginalsMigration, reviewedFolderMigration, reviewedTimerMigration], 'another schema advance requires a new explicit gate review');
   const timer = migrations.at(-1);
   const sqlSha256 = createHash('sha256').update(timer.sql.replace(/\r\n/g, '\n')).digest('hex');
   assert.equal(sqlSha256, reviewedTimerSqlSha256, 'migration 83 SQL must match the reviewed timer schema');

@@ -158,4 +158,30 @@ function migrateGcpSourceOriginals(database) {
   }
 }
 
-module.exports = { GcpSourceOriginals, MAX_GCP_SOURCE_BYTES, migrateGcpSourceOriginals, sourceText };
+// Schema 46 is stamped through the shared ledger (versions 43 and up), so an
+// existing stamp is accepted only when every object this migration creates is
+// present exactly as created: the archive table, its dataset index, the three
+// immutability triggers and the gcp_sets.source_original_id relationship.
+// Whitespace is normalized because SQLite stores each statement as written.
+const V46_OBJECTS = new Map([
+  ['table:viewer_gcp_source_originals', `CREATE TABLE ${TABLE} ( id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL, project_id TEXT, source_file_id TEXT, file_name TEXT NOT NULL, sha256 TEXT NOT NULL CHECK(length(sha256)=64), byte_size INTEGER NOT NULL CHECK(byte_size>=0 AND byte_size<=${MAX_GCP_SOURCE_BYTES}), content BLOB NOT NULL CHECK(typeof(content)='blob' AND length(content)=byte_size), fidelity TEXT NOT NULL CHECK(fidelity IN ('original_bytes','legacy_utf8_snapshot')), created_by TEXT, retained_at TEXT NOT NULL, UNIQUE(dataset_id,sha256,file_name,fidelity) )`],
+  ['index:viewer_gcp_original_dataset', `CREATE INDEX viewer_gcp_original_dataset ON ${TABLE}(dataset_id,retained_at)`],
+  ['trigger:viewer_gcp_original_no_update', `CREATE TRIGGER viewer_gcp_original_no_update BEFORE UPDATE ON ${TABLE} BEGIN SELECT RAISE(ABORT,'original GCP source is immutable'); END`],
+  ['trigger:viewer_gcp_original_no_delete', `CREATE TRIGGER viewer_gcp_original_no_delete BEFORE DELETE ON ${TABLE} BEGIN SELECT RAISE(ABORT,'original GCP source is permanently retained'); END`],
+  ['trigger:viewer_gcp_original_no_replace', `CREATE TRIGGER viewer_gcp_original_no_replace BEFORE INSERT ON ${TABLE} WHEN EXISTS (SELECT 1 FROM ${TABLE} WHERE id=NEW.id OR (dataset_id=NEW.dataset_id AND sha256=NEW.sha256 AND file_name=NEW.file_name AND fidelity=NEW.fidelity)) BEGIN SELECT RAISE(ABORT,'original GCP source is immutable'); END`],
+]);
+const normalizeSql = (sql) => String(sql ?? '').replace(/\s+/g, ' ').trim();
+
+function gcpSourceOriginalsV46Present(database) {
+  const found = new Map(database.prepare(`SELECT type,name,sql FROM sqlite_master
+    WHERE (tbl_name=? OR name=?) AND name NOT LIKE 'sqlite_autoindex_%'`).all(TABLE, TABLE)
+    .map((row) => [`${row.type}:${row.name}`, normalizeSql(row.sql)]));
+  if (found.size !== V46_OBJECTS.size) return false;
+  for (const [key, sql] of V46_OBJECTS) if (found.get(key) !== sql) return false;
+  const column = database.prepare('PRAGMA table_info(gcp_sets)').all().find((item) => item.name === 'source_original_id');
+  if (!column || column.type !== 'TEXT' || column.notnull !== 0 || column.dflt_value !== null || column.pk !== 0) return false;
+  return database.prepare('PRAGMA foreign_key_list(gcp_sets)').all().some((key) => key.from === 'source_original_id'
+    && key.table === TABLE && key.to === 'id' && key.on_delete === 'RESTRICT');
+}
+
+module.exports = { GcpSourceOriginals, MAX_GCP_SOURCE_BYTES, gcpSourceOriginalsV46Present, migrateGcpSourceOriginals, sourceText };
