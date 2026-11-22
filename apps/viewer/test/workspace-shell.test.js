@@ -40,7 +40,7 @@ test('workspace management panels issue real bearer API mutations',()=>{
     '/api/v1/storage/trash/',
   ]) assert.ok(source.includes(route),`missing workspace API ${route}`);
   assert.match(source,/Idempotency-Key/);
-  assert.match(source,/selectedAssetKinds:result\.assetKinds/);
+  assert.match(source,/const selectedAssetKinds=\[\.\.\.result\.assetKinds\]/);assert.match(source,/body:\{selectedAssetKinds\}/);
   assert.doesNotMatch(source,/credential\.token|rootKey/);
 });
 test('workspace supports bounded resumable browser uploads and staff share lifecycle',()=>{
