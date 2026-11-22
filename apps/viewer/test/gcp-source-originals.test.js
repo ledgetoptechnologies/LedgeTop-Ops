@@ -45,6 +45,26 @@ test('ordinary SQL updates and deletes cannot remove or replace a retained origi
   assert.deepEqual(originals.get(saved.id).bytes, Buffer.from('a,b\n1,2\n'));
 });
 
+for (const recursive of [0, 1]) {
+  for (const collision of ['id', 'source']) {
+    test(`replacement writes cannot erase originals with recursive triggers ${recursive} (${collision})`, (t) => {
+      const { database, originals } = fixture(t);
+      database.exec(`PRAGMA recursive_triggers=${recursive}`);
+      const bytes = Buffer.from('a,b\r\n1,2\r\n'), saved = originals.retain(input(bytes));
+      const replacement = collision === 'id' ? Buffer.from('different original') : bytes;
+      const hash = crypto.createHash('sha256').update(replacement).digest('hex');
+      assert.throws(() => database.prepare(`INSERT OR REPLACE INTO viewer_gcp_source_originals
+        (id,dataset_id,project_id,source_file_id,file_name,sha256,byte_size,content,fidelity,created_by,retained_at)
+        VALUES (?,?,?,NULL,?,?,?,?,'original_bytes','other',?)`)
+        .run(collision === 'id' ? saved.id : 'replacement-id', 'dataset-1', 'project-1',
+          'control.csv', hash, replacement.length, replacement, new Date().toISOString()), /immutable|permanently retained/);
+      assert.deepEqual(originals.get(saved.id).bytes, bytes);
+      assert.equal(originals.list('dataset-1').length, 1);
+      assert.equal(originals.retain(input(bytes)).id, saved.id);
+    });
+  }
+}
+
 test('retry deduplicates exact bytes; dataset movement preserves origin without adding access', (t) => {
   const { originals } = fixture(t), bytes = Buffer.from('a,b\r\n1,2\r\n');
   const saved = originals.retain(input(bytes));

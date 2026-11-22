@@ -57,9 +57,19 @@ class GcpSourceOriginals {
     if (typeof datasetId !== 'string' || !datasetId || (projectId !== null && (typeof projectId !== 'string' || !projectId)))
       throw fail('invalid_gcp_original_lineage');
     const sha256 = crypto.createHash('sha256').update(content).digest('hex');
+    // Resolve an exact retry before INSERT so the replacement guard below can
+    // reject every collision, including SQLite REPLACE with recursive triggers
+    // disabled. Retain owns BEGIN IMMEDIATE; migration also holds a write lock.
+    const existing = this.database.prepare(`SELECT * FROM ${TABLE}
+      WHERE dataset_id=? AND sha256=? AND file_name=? AND fidelity=?`)
+      .get(datasetId, sha256, fileName, fidelity);
+    if (existing) {
+      if (!Buffer.from(existing.content).equals(content)) throw fail('gcp_original_retention_conflict');
+      return metadata(existing);
+    }
     this.database.prepare(`INSERT INTO ${TABLE}
       (id,dataset_id,project_id,source_file_id,file_name,sha256,byte_size,content,fidelity,created_by,retained_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dataset_id,sha256,file_name,fidelity) DO NOTHING`)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
       .run(crypto.randomUUID(), datasetId, projectId, sourceFileId, fileName, sha256, content.length,
         content, fidelity, actorId, new Date().toISOString());
     const saved = this.database.prepare(`SELECT * FROM ${TABLE} WHERE dataset_id=? AND sha256=? AND file_name=? AND fidelity=?`)
@@ -118,6 +128,10 @@ function migrateGcpSourceOriginals(database) {
     BEGIN SELECT RAISE(ABORT,'original GCP source is immutable'); END;
   CREATE TRIGGER viewer_gcp_original_no_delete BEFORE DELETE ON ${TABLE}
     BEGIN SELECT RAISE(ABORT,'original GCP source is permanently retained'); END;
+  CREATE TRIGGER viewer_gcp_original_no_replace BEFORE INSERT ON ${TABLE}
+    WHEN EXISTS (SELECT 1 FROM ${TABLE} WHERE id=NEW.id OR
+      (dataset_id=NEW.dataset_id AND sha256=NEW.sha256 AND file_name=NEW.file_name AND fidelity=NEW.fidelity))
+    BEGIN SELECT RAISE(ABORT,'original GCP source is immutable'); END;
   ALTER TABLE gcp_sets ADD COLUMN source_original_id TEXT REFERENCES ${TABLE}(id) ON DELETE RESTRICT;`);
   const archive = new GcpSourceOriginals(database);
   const page = database.prepare('SELECT id FROM gcp_sets WHERE (? IS NULL OR id>?) ORDER BY id LIMIT 64');
