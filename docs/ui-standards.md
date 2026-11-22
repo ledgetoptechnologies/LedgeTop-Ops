@@ -57,7 +57,7 @@ standard.
   (pages) and `--orange`, `--orange-bright` (workspace CSS) with the shared
   values; CSS that may load without those variables uses them with a fallback,
   for example `var(--brand-orange, #ee5007)`, and the test checks the fallback.
-- `scripts/viewer-brand.test.mjs` (CI and `npm run viewer:check`) fails when the
+- `scripts/viewer-brand.test.mjs` (its own CI step) fails when the
   generated files, `styles.css`, the Viewer's colour variables or its page
   titles drift from `brand.ts` and the title pattern above. To change the
   brand, edit `brand.ts`, run the generator, then update the values the test
