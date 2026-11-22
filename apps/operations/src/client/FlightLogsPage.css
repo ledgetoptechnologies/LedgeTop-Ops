@@ -184,3 +184,7 @@
 .flight-review-actions { display: flex; gap: 6px; align-items: center; }
 .flight-review-banner.stale { opacity: 0.6; }
 .flight-reassign { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.flight-battery-editor { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+.flight-battery-editor label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.flight-battery-editor input { max-width: min(220px, 100%); padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.flight-battery-editor small { flex-basis: 100%; }

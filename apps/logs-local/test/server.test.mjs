@@ -197,6 +197,24 @@ test('sensitive writes fail closed when Ops authority is missing or unreachable'
   }
 });
 
+test('battery reference RPC requires a key, replays once and checks fresh import authority even on replay', async t => {
+  let canImport = true;
+  const { rpc, db } = await harness(t, { authority: () => ({ active: true, canViewAll: true, canImport, administrator: false }) });
+  await db.prepare("INSERT INTO aircraft (id, serial, created_at, updated_at) VALUES ('air', 'synthetic-air', 'now', 'now')").run();
+  await db.prepare("INSERT INTO batteries (id, serial, created_at, updated_at) VALUES ('bat', 'synthetic-bat', 'now', 'now')").run();
+  await db.prepare(`INSERT INTO flights (id, file_hash, source_system, pilot_id, pilot_attribution, aircraft_id, battery_id, created_at, updated_at)
+    VALUES ('flight', ?, 'opendronelog', 'staff-beau', 'backup_owner', 'air', 'bat', 'now', 'now')`).bind('a'.repeat(64)).run();
+  const args = [{ aircraftId: 'air', batteryId: 'bat', referenceName: '1' }];
+  assert.equal((await rpc('setBatteryReference', args)).body.error.code, 'idempotency_key_invalid');
+  const key = { headers: { 'Idempotency-Key': 'battery-reference-0001' } };
+  const once = await rpc('setBatteryReference', args, key);
+  assert.equal(once.body.ok, true, JSON.stringify(once.body));
+  assert.deepEqual((await rpc('setBatteryReference', args, key)).body, once.body);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action = 'battery.reference'").first()).n, 1);
+  canImport = false;
+  assert.equal((await rpc('setBatteryReference', args, key)).body.error.code, 'forbidden');
+});
+
 test('telemetry for an unknown flight is a 404 envelope, not bytes', async t => {
   const { call } = await harness(t);
   const missing = await call('GET', '/internal/v1/logs/flights/nope/telemetry', { role: 'staff' });

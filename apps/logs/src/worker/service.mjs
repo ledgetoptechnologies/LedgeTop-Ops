@@ -5,6 +5,7 @@ import { encryptKeychain } from './keychain-crypto.mjs';
 import { LogsError } from './errors.mjs';
 import { flightItem, viewScope } from './analytics.mjs';
 export { LogsError };
+export { setBatteryReference } from './battery-references.mjs';
 
 export const PERMISSIONS = { view: 'flight_logs.view', import: 'flight_logs.import' };
 // Real ODL data has flights with ~15,000 messages, so the per-flight cap is generous, and anything over it
@@ -291,8 +292,8 @@ export async function getFlight(env, actor, flightId) {
 }
 
 const FLIGHT_DETAIL_SQL = `SELECT f.*, f.telemetry_key IS NOT NULL AS has_track, a.id AS aircraft_id, a.serial AS aircraft_serial, a.model AS aircraft_model,
-  a.name AS aircraft_name, b.id AS battery_id, b.serial AS battery_serial, c.serial AS controller_serial, NULL AS tags
-  FROM flights f LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN batteries b ON b.id = f.battery_id LEFT JOIN controllers c ON c.id = f.controller_id`;
+  a.name AS aircraft_name, b.id AS battery_id, b.serial AS battery_serial, br.reference_name AS battery_reference_name, c.serial AS controller_serial, NULL AS tags
+  FROM flights f LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN batteries b ON b.id = f.battery_id LEFT JOIN controllers c ON c.id = f.controller_id LEFT JOIN battery_references br ON br.aircraft_id = f.aircraft_id AND br.battery_id = f.battery_id`;
 
 /** Returns the stored track (gzip JSON) for Ops to pass through to the browser. */
 export async function getTelemetry(env, actor, flightId) {

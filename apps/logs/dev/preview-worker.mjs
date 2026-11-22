@@ -23,16 +23,6 @@ export default {
         const actor = JSON.parse(request.headers.get('x-actor'));
         return new Response(await service.getTelemetry(env, actor, get[1]), { headers: { 'Content-Type': 'application/octet-stream' } });
       }
-      if (url.pathname === '/sql' && request.method === 'POST') {
-        const { sql } = await request.json();
-        for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await env.LOGS_DB.prepare(statement).run();
-        return Response.json({ ok: true });
-      }
-      if (url.pathname === '/state') {
-        const flights = await env.LOGS_DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='flights'").first();
-        const done = flights ? await env.LOGS_DB.prepare("SELECT COUNT(*) AS n FROM imports WHERE status = 'completed'").first() : null;
-        return Response.json({ migrated: Boolean(flights), completedImports: done?.n ?? 0 });
-      }
       return new Response('Not found', { status: 404 });
     } catch (error) {
       return Response.json({ ok: false, error: { code: error.code ?? 'internal', status: error.status ?? 500, message: error.message } }, { status: error.status ?? 500 });

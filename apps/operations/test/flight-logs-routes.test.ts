@@ -12,6 +12,7 @@ let runtime: Miniflare, db: D1Database;
 function fakeBinding(calls: unknown[][]): FlightLogsBinding {
   const ok = <T>(value: T) => Promise.resolve({ ok: true as const, value });
   return {
+    setBatteryReference: (actor, input, options) => { calls.push(["setBatteryReference", actor, input, options]); return ok(input); },
     inventory: actor => { calls.push(["inventory", actor]); return ok({ fileHashes: [] }); },
     startImport: (actor, input) => { calls.push(["startImport", actor, input]); return ok({ importId: "import-1" }); },
     importFlights: (actor, importId, batch) => { calls.push(["importFlights", actor, importId, batch]); return ok({ created: [], existing: [] }); },
@@ -374,4 +375,29 @@ describe("flight attribution review routes", () => {
     expect((await db.prepare("SELECT COUNT(*) AS n FROM audit_events").first<{ n: number }>())!.n).toBe(before);
     expect((await app("owner", fakeBinding([]))("/api/admin/flight-logs/review/status")).status).toBe(503);
   });
+});
+
+
+it("names batteries only for active import-authorized staff, validates bounded input, and forwards the action key", async () => {
+  const calls: unknown[][] = [], path = "/api/flight-logs/aircraft/a1/batteries/b1/reference";
+  const put = (referenceName: unknown, key = "battery-reference-key-0001") => ({ method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify({ referenceName }) });
+  for (const staff of ["pilot", "viewer", "gone"]) expect((await app(staff, fakeBinding(calls))(path, put("1"))).status).toBe(403);
+  expect(calls).toEqual([]);
+  expect((await app("owner", fakeBinding(calls), "staging")(path, put("1"))).status).toBe(503);
+  for (const invalid of [42, {}, "x".repeat(41), undefined]) expect((await app("owner", fakeBinding(calls))(path, put(invalid))).status).toBe(400);
+  expect(calls).toEqual([]);
+  for (const name of ["1", "new name", null]) {
+    expect((await app("owner", fakeBinding(calls))(path, put(name))).status).toBe(200);
+    expect(calls.at(-1)).toEqual(["setBatteryReference", { staffId: "owner", permissions: ["flight_logs.view", "flight_logs.import"] }, { aircraftId: "a1", batteryId: "b1", referenceName: name }, { idempotencyKey: "battery-reference-key-0001" }]);
+  }
+  expect((await app("owner", fakeBinding(calls))(path, put("1", "bad"))).status).toBe(400);
+  expect((await app("owner", { ...fakeBinding([]), setBatteryReference: undefined })(path, put("1"))).status).toBe(503);
+});
+
+
+it("preserves the deterministic battery-name conflict code for editable retry", async () => {
+  const service: FlightLogsBinding = { ...fakeBinding([]), setBatteryReference: () => Promise.resolve({ ok: false as const, error: { code: "battery_name_taken", status: 409, message: "That name is used." } }) };
+  const response = await app("owner", service)("/api/flight-logs/aircraft/a1/batteries/b1/reference", { method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": "battery-reference-key-0001" }, body: JSON.stringify({ referenceName: "1" }) });
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: "That name is used.", code: "battery_name_taken" });
 });
