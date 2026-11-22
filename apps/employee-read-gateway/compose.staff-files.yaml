@@ -1,0 +1,53 @@
+# Ledge Top staff Files: the service to ADD to the lt-ops-workers stack on the NAS. STAGING ONLY until Beau approves
+# production. The NAS never builds: it runs the published image pinned by the digest from the publisher's receipt.
+#
+# What it reaches: ONE dataset, mounted at /data. /data/root is what staff see (one exclusive folder tree: no SMB share,
+# no other writer); /data/.ltfiles (uploads in progress, trash, state) is created beside it, on the same dataset.
+# Neither may be inside anything TrueNAS Cloud Sync uploads to R2 (QA records the Cloud Sync source list first).
+# Settings: the shared NAS link file only (NAS_LINK_CLIENT_ID, NAS_LINK_AUDIENCE, OPS_FILES_SIGNING_PUBLIC_KEYS);
+# no Files secret lives on the NAS. The root pin below comes from `enroll` and is registered in Ops.
+# Network: reached only through Beau's nginx on the NAS link Access app; NO published ports. Outbound HTTPS is
+# needed only to the Access certs URL of the team issuer.
+services:
+  ledgetop-staff-files:
+    image: ghcr.io/ledgetoptechnologies/ledgetop-staff-files@sha256:<digest>
+    platform: linux/amd64
+    pull_policy: missing
+    restart: unless-stopped
+    init: true
+    user: "<files user uid>:<files user gid>"   # its own NAS user, read-write on this dataset only
+    env_file:
+      - path: /mnt/Plugins/App_Data/LedgeTop-Ops-Workers/shared/nas-link.env
+        required: true
+    environment:
+      FILES_ROOT_ID: "<root id from Ops>"
+      FILES_ROOT_GENERATION: "1"
+      FILES_ROOT_FINGERPRINT: "<fingerprint printed by enroll>"
+    volumes:
+      - type: bind
+        source: /mnt/<pool>/<staff files dataset>
+        target: /data
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 1
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 128
+    ulimits:
+      core: 0
+      nofile: { soft: 1024, hard: 1024 }
+    logging:
+      driver: json-file
+      options: { max-size: "1m", max-file: "3" }
+    # networks: [<the stack's private network shared with nginx>]
+
+# Enrollment (once, before the first start, with the same mount and user):
+#   docker compose run --rm ledgetop-staff-files enroll --root-id <root id from Ops> --generation 1
+# Settling an operation the service could not decide after a crash (it holds all writes until then; stop the service
+# first so only one process uses its state):
+#   docker compose run --rm ledgetop-staff-files resolve-hold --operation-id <id> --as applied|rejected --operator <name>

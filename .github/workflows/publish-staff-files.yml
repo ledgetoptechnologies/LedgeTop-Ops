@@ -1,0 +1,161 @@
+name: Publish staff Files image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/employee-read-gateway/**
+      - .github/workflows/publish-staff-files.yml
+
+concurrency:
+  group: publish-staff-files-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  verify:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the gateway and staff Files tests without network, mounts or capabilities
+        run: |
+          docker build --file apps/employee-read-gateway/Dockerfile.test --tag staff-files-test apps/employee-read-gateway
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m staff-files-test
+
+  publish:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ steps.names.outputs.image }}
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the package name
+        id: names
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/${owner}/ledgetop-staff-files"
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${image}:sha-${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Authenticate to GHCR with the workflow token
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite an existing commit tag
+        shell: bash
+        run: |
+          if docker buildx imagetools inspect "${{ steps.names.outputs.tag }}" >/dev/null 2>&1; then
+            echo "The immutable commit tag already exists: ${{ steps.names.outputs.tag }}" >&2
+            exit 1
+          fi
+
+      - name: Build and publish the linux/amd64 image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: apps/employee-read-gateway
+          file: apps/employee-read-gateway/Dockerfile.staff-files
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ steps.names.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=Ledge Top staff Files
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify immutable commit tag digest
+        shell: bash
+        env:
+          TAG: ${{ steps.names.outputs.tag }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          for attempt in 1 2 3; do
+            if docker buildx imagetools inspect "${TAG}" --format '{{json .Manifest}}' > commit-manifest.json; then
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then exit 1; fi
+            sleep 2
+          done
+          resolved_digest="$(jq -r .digest commit-manifest.json)"
+          if [[ -z "${EXPECTED_DIGEST}" || -z "${resolved_digest}" || "${resolved_digest}" != "${EXPECTED_DIGEST}" ]]; then
+            echo "Published immutable tag did not resolve to the build output digest." >&2
+            exit 1
+          fi
+
+      - name: Tag the verified digest as an immutable candidate (never latest)
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          # main never moves latest or stable: it writes immutable sha and candidate tags only.
+          tag="candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:${tag}" "${IMAGE}@${EXPECTED_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:${tag}" --format '{{json .Manifest}}' > candidate-manifest.json
+          if [[ "$(jq -r .digest candidate-manifest.json)" != "${EXPECTED_DIGEST}" ]]; then
+            echo "candidate digest does not match verified main image" >&2
+            exit 1
+          fi
+
+      - name: Write the immutable deployment receipt
+        id: receipt
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          receipt="staff-files-${GITHUB_SHA}.json"
+          jq -n \
+            --arg platform "linux/amd64" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg image "${IMAGE}" \
+            --arg digest "${DIGEST}" \
+            --arg reference "${IMAGE}@${DIGEST}" \
+            --arg deploymentReference "${IMAGE}:candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            '{schemaVersion:1,target:"staff-files",platform:$platform,commit:$commit,image:$image,digest:$digest,reference:$reference,deploymentReference:$deploymentReference}' \
+            > "${receipt}"
+          echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Staff Files image"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Digest: \`${DIGEST}\`"
+            echo "- Pin by digest \`${IMAGE}@${DIGEST}\` (never the sha tag). Staging only until Beau approves production."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the deployment receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staff-files-${{ github.sha }}
+          path: ${{ steps.receipt.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30

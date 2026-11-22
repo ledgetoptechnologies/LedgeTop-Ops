@@ -129,6 +129,17 @@ describe("unmounted employee read HTTP factory with real RS256 verification", ()
     expect(response.headers.get("Cache-Control")).toContain("no-store"); expect(h.fetcher).not.toHaveBeenCalled();
     expect((await h.call("/api/admin/employee-files/commands", {}, "POST")).status).toBe(404);
   });
+  it("returns the read-only staff policy in the shared v1 shape and refuses extra query parameters", async () => {
+    const h = harness(), response = await h.call(base + "/policy");
+    expect(response.status).toBe(200);
+    const policy = await response.json() as Record<string, unknown>;
+    expect(policy).toEqual({ schemaVersion: 1, role: "staff",
+      roots: [{ id: rootId, name: "Synthetic files", backend: "nas", rights: ["read"], listPath: `${base}/roots/${rootId}/entries` }],
+      providerEnabled: false, hydrationEnabled: false, minimumAppVersion: "0.0.0", sessionExpiresAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u) });
+    expect(response.headers.get("Cache-Control")).toContain("no-store"); expect(h.fetcher).not.toHaveBeenCalled();
+    expect((await h.call(base + "/policy?x=1")).status).toBe(400);
+    expect((await h.call(base + "/policy", {}, "GET", await signed({ service_token_id: "synthetic-machine" }))).status).toBe(401);
+  });
   it.each(["machine", "multi-audience", "wrong-audience", "wrong-issuer", "tampered"])("rejects %s Access assertion before grant resolution", async kind => {
     const h = harness(); let assertion = token;
     if (kind === "machine") assertion = await signed({ service_token_id: "synthetic-machine" });

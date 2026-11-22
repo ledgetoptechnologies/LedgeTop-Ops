@@ -31,8 +31,8 @@ test('mutable tags are written only by the four reviewed promotions', () => {
     'promote-thumbnail-renderer.yml#promote', 'promote-viewer.yml#promote']);
 });
 
-test('the thumbnail and proxy publishers write only immutable sha and candidate tags', () => {
-  for (const name of ['publish-thumbnail-renderer.yml', 'publish-proxy-generator.yml']) {
+test('the thumbnail, proxy and staff Files publishers write only immutable sha and candidate tags', () => {
+  for (const name of ['publish-thumbnail-renderer.yml', 'publish-proxy-generator.yml', 'publish-staff-files.yml']) {
     const code = read(name).replace(/^\s*#.*$/gm, '');
     assert.ok(!/:(?:latest|stable)\b/.test(code.replace(/echo[^\n]*/g, '')), `${name}: no mutable tag`);
     assert.match(code, /candidate-\$\{GITHUB_SHA\}-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}/, `${name}: candidate tag`);
