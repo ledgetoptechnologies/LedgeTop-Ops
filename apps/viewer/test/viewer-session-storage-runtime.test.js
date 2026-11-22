@@ -51,7 +51,7 @@ function fixture({ denied = 'getter', active = false, reject = false } = {}) {
     TILES_URL: null, EPT_URL: null, ORTHO_URL: null, DSM_URL: null, DTM_URL: null,
     SHARE_PERMISSIONS: {}, PROJECT: null, activeViewerSession: null,
     sessionAllowedOrigins: [], reviewSessionChannel: null, reviewControllerCandidate: null,
-    state: { meshSource: 'none' }, tilesRenderer: null, viewerProductDownloads: null,
+    state: { meshSource: 'none' }, tilesRenderer: null, viewerProductDownloads: null, propertyLines: null,
     sessionAccessGeneration: 0, sessionRenewalBlocked: false, sessionRenewalPending: false,
     sessionRenewalAttempt: null, sessionRenewalResponseTimer: null, pendingReviewRenewalRequestId: null,
     sessionRenewalBackoffIndex: 0, sessionRenewalMinimumDelayMs: 1000,

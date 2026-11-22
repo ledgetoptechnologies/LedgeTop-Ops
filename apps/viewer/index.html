@@ -545,6 +545,15 @@
           </div>
         </div>
 
+        <div class="panel" id="panel-property-lines" hidden>
+          <h3><svg viewBox="0 0 24 24"><path d="M3 4h8v7H3zM11 4h10v10H11zM3 11h8v9H3zM11 14h10v6H11z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Property lines</h3>
+          <div class="tool-grid">
+            <button class="layer-btn full" id="layer-property-lines" aria-pressed="false" aria-label="Show property lines" aria-describedby="property-lines-status">Show</button>
+          </div>
+          <p class="hint" id="property-lines-status" role="status" aria-live="polite"></p>
+          <div class="hint" id="property-lines-about" hidden><p data-pl="disclaimer"></p><p>Source: <span data-pl="source"></span></p></div>
+        </div>
+
         <div class="panel" id="panel-measure">
           <h3><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg> Measurements</h3>
           <div class="tool-grid">
@@ -562,15 +571,6 @@
             <label class="slider-row" id="map-volume-custom-row" style="display:none;"><span>Elevation</span><input id="map-volume-custom" type="number" step="0.1"><span class="val" id="map-volume-custom-unit">ft</span></label>
             <div class="hint">Volume integrates DSM/DTM cells inside the polygon against the selected horizontal reference plane.</div>
           </div>
-        </div>
-
-        <div class="panel" id="panel-property-lines" hidden>
-          <h3><svg viewBox="0 0 24 24"><path d="M3 4h8v7H3zM11 4h10v10H11zM3 11h8v9H3zM11 14h10v6H11z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Property lines</h3>
-          <div class="tool-grid">
-            <button class="layer-btn full" id="layer-property-lines" aria-pressed="false" aria-label="Show property lines" aria-describedby="property-lines-status">Show</button>
-          </div>
-          <p class="hint" id="property-lines-status" role="status" aria-live="polite"></p>
-          <div class="hint" id="property-lines-about" hidden><p data-pl="disclaimer"></p><p>Source: <span data-pl="source"></span></p></div>
         </div>
 
         <div class="panel" id="panel-slice" style="display:none;">

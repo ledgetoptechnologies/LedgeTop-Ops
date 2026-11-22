@@ -625,7 +625,8 @@ WGS84 UTM 16N
 
 ## Feature notes
 
-- **Property lines** (Wisconsin only): a "Property lines" toggle in the map,
+- **Property lines** (Wisconsin only): a "Property lines" card below Camera
+  Positions, with one Show/Hide toggle for the map,
   model and point cloud views draws parcel outlines from the Wisconsin
   Statewide Parcel Map (release V12). The browser calls this server
   (`GET /api/v1/property-lines/parcels?bbox=west,south,east,north&model=id`), which
@@ -641,7 +642,12 @@ WGS84 UTM 16N
   published DTM when its heights agree with the scene, otherwise they are drawn
   flat at the site's lowest level and show through the surface; the panel says
   which. Lines are approximate and not a survey; the panel and an on-view note
-  say so whenever the layer is on. The state data is NAD83-based: against a
+  say so whenever lines are drawn. The layer is on by default wherever it is
+  offered and available; a viewer's Hide is kept per project for later views
+  and reloads in that browser (localStorage key `ltds-viewer:property-lines-hidden`,
+  project ids only), and another project starts at its own default. Results
+  from an earlier project, model version or access state are dropped, and
+  losing access removes the lines until access returns. The state data is NAD83-based: against a
   model in a WGS84 or ITRF-based frame expect roughly 1 to 1.5 m of offset in
   Wisconsin, within the parcel map's own accuracy (the panel says this too).
   Each request names the model; the server checks live access to that model
