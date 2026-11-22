@@ -1,0 +1,43 @@
+name: Parcel source release check
+
+# Monthly: checks each parcel source in apps/viewer/server/parcelSources.js
+# still answers and looks for a newer state release. Opens or updates one
+# issue per finding (fixed titles). Never changes the registry. Fails only
+# when a configured layer is down.
+on:
+  schedule:
+    - cron: '17 14 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: parcel-source-release-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the registry and the check script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            apps/viewer/package.json
+            apps/viewer/server/parcelSources.js
+            apps/viewer/scripts/check-parcel-releases.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Use the supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Check parcel sources
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/viewer/scripts/check-parcel-releases.mjs --github-issues
