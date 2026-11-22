@@ -1109,6 +1109,7 @@ function loadTiles() {
       preserveIncomingModelView = false;
     }
     emitLodDebugSnapshot('root-ready', true);
+    propertyLines?.wake();
   });
   rendererInstance.addEventListener('load-tileset', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
@@ -1461,6 +1462,9 @@ function setSessionAccessState(next, reason = null) {
   else if(next==='active'&&measurementWorkspace&&(previous==='unavailable'||measurementWorkspace.isInvalidated?.())){
     installMeasurementWorkspace();
   }
+  // Property lines follow access: dropped while it is unavailable, offered again once it returns.
+  if(next==='unavailable')propertyLines?.suspend();
+  else if(next==='active')void propertyLines?.resume();
   if(next==='active'&&measurementWorkspace&&measurementDraftRecovery.hasPending()){
     const workspace=measurementWorkspace;
     void measurementDraftRecovery.restore(activeViewerSession,workspace).then(restored=>{if(!restored&&workspace===measurementWorkspace&&sessionAccessState==='active')workspace.showRecoveryNotice?.(measurementDraftRecovery.hasPending());});
@@ -1654,6 +1658,9 @@ function applyViewerSession(session, { initialize = false } = {}) {
   scheduleSessionRenewal(session);
   sessionRenewalBlocked = false;
   setSessionAccessState('active');
+  // Every accepted session update: a new model version or authority replaces
+  // the property lines at once; the same context changes nothing.
+  void propertyLines?.sync();
   recoverFailedLodTiles();
   pcApi()?.renewAccess?.(EPT_URL);
   viewerProductDownloads?.refresh();
@@ -3546,6 +3553,7 @@ async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal
     orthoLayers.grid.addTo(map);
     restoreOrFit('ortho', orthoLayers.ds.llBounds);
     applyOrthoOpacity();
+    propertyLines?.wake();
   } catch (err) {
     if (err?.name === 'AbortError' || signal?.aborted || epoch !== modeEpoch || state.activeMode !== 'ortho') return;
     console.error('[viewer-runtime] orthophoto initialization failed');
@@ -3581,6 +3589,7 @@ async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.si
     dom.demLegend.style.display = 'flex';
     applyDemOpacity();
     refreshLegendFor(dl.ds);
+    propertyLines?.wake();
   } catch (err) {
     if (err?.name === 'AbortError' || signal?.aborted || epoch !== modeEpoch || state.activeMode !== type) return;
     console.error(`[viewer-runtime] ${type.toUpperCase()} initialization failed`);
@@ -3883,6 +3892,7 @@ function loadPointCloudDirect() {
       directPointCloudLoad = null;
       viewerDiagnostic('pointcloud_ready', { mode: 'cloud', stage: 'nodes' });
       hideLoading();
+      propertyLines?.wake();
     } catch (err) {
       onFail(err);
     }
@@ -4000,7 +4010,7 @@ window.addEventListener('message', (event) => {
     applyPcPanelState();
     if (pendingPointCloudView) pushViewToPointCloud(pendingPointCloudView);
     syncCameraLayer();
-    propertyLines?.refresh();
+    propertyLines?.wake();
   } else if (message.type === 'camera-open') {
     if (!state.camerasVisible || !SHARE_PERMISSIONS.cameras
       || !Number.isSafeInteger(message.index) || message.index < 0 || message.index >= camFeatures.length) return;
@@ -4067,7 +4077,8 @@ async function propertyLinesGroundGrid(ext, signal) {
 }
 
 function installPropertyLines() {
-  if (propertyLines) return;
+  // Installed once per page; a later init() asks for the current project's offer again.
+  if (propertyLines) { propertyLines.loadOffer(); return; }
   propertyLines = createPropertyLinesController({
     L, THREE, LineSegments2, LineSegmentsGeometry, LineMaterial,
     fetchImpl: (...args) => fetch(...args),
@@ -4083,6 +4094,8 @@ function installPropertyLines() {
       notice: document.getElementById('property-lines-notice'),
     },
     projectId: () => PROJECT?.id || null,
+    projectVersion: () => PROJECT?.activeVersion?.id || '',
+    authorityKey: () => (VIEW_MODE === 'session' ? `${activeViewerSession?.audience || ''}|${activeViewerSession?.subject || ''}` : ''),
     getMode: () => state.activeMode,
     getCloudMode: () => state.cloudMode,
     getMap: () => map || null,
@@ -5282,6 +5295,7 @@ function updateStats() {
 // expose for debugging/verification
 window.__ltds = { scene: () => scene, camera: () => camera, controls: () => controls,
   tiles: () => tilesRenderer, state, worldToUtm, latLonToUtm, utmToLatLon,
+  propertyLines: () => propertyLines?.state ?? null,
   lodDiagnostics: () => emitLodDebugSnapshot('manual', true),
   sessionDiagnostics,
   lodTrace: () => lodTraceEntries.map(entry => structuredClone(entry)),

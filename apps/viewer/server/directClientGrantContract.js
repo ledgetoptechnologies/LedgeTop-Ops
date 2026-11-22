@@ -6,6 +6,12 @@ const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,12
 const source = value => typeof value === 'string' && /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(value);
 const date = value => value === null || typeof value === 'string' && value.length <= 40 && /^\d{4}-\d\d-\d\dT/.test(value) && Number.isFinite(Date.parse(value));
 const cursor = value => value === null || id(value);
+// Name-ordered client picker cursor from Operations: "v1." + base64url.
+const clientCursor = value => cursor(value) || typeof value === 'string' && value.length <= 1500 && /^v1\.[A-Za-z0-9_-]+$/.test(value);
+const directClient = client => exact(client, ['sourceId', 'workspaceId', 'displayName', 'businessName', 'organizationName', 'rootType'])
+  && source(client.sourceId) && id(client.workspaceId) && text(client.displayName) && text(client.businessName)
+  && (client.organizationName === undefined || client.organizationName === null || text(client.organizationName))
+  && (client.rootType === undefined || ['organization', 'standalone_client'].includes(client.rootType));
 const exact = (value, fields) => object(value) && Object.keys(value).every(key => fields.includes(key));
 const permissions = value => exact(value, ['measure', 'cameras', 'download']) && ['measure', 'cameras', 'download'].every(key => typeof value[key] === 'boolean');
 
@@ -32,19 +38,21 @@ function validDirectSnapshot(value, action) {
     && exact(value.sessionRevocation, ['pending', 'revokedGrants', 'revokedSessions']) && typeof value.sessionRevocation.pending === 'boolean'
     && ['revokedGrants', 'revokedSessions'].every(key => value.sessionRevocation[key] === undefined || Number.isSafeInteger(value.sessionRevocation[key]) && value.sessionRevocation[key] >= 0);
   return exact(value, ['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor'])
-    && Array.isArray(value.clients) && value.clients.length <= 50 && value.clients.every(client => exact(client, ['sourceId', 'workspaceId', 'displayName', 'businessName'])
-      && source(client.sourceId) && id(client.workspaceId) && text(client.displayName) && text(client.businessName))
+    && Array.isArray(value.clients) && value.clients.length <= 50 && value.clients.every(directClient)
     && Array.isArray(value.grants) && value.grants.length <= 500 && value.grants.every(validDirectGrant)
-    && cursor(value.clientsNextCursor) && (value.grantsNextCursor === undefined || cursor(value.grantsNextCursor));
+    && clientCursor(value.clientsNextCursor) && (value.grantsNextCursor === undefined || cursor(value.grantsNextCursor));
 }
 function directListQuery(query) {
-  if (!exact(query, ['q', 'cursor', 'limit', 'viewerProjectId'])) return null;
+  if (!exact(query, ['q', 'cursor', 'limit', 'viewerProjectId', 'include', 'grantsCursor'])) return null;
+  if (query.include !== undefined && !['all', 'clients', 'grants'].includes(query.include)) return null;
+  if (query.grantsCursor !== undefined && !id(query.grantsCursor)) return null;
   if (query.q !== undefined && (typeof query.q !== 'string' || query.q.length > 120 || /[\u0000-\u001f\u007f]/.test(query.q))) return null;
-  if (query.cursor !== undefined && !cursor(query.cursor)) return null;
+  if (query.cursor !== undefined && (query.cursor === null || !clientCursor(query.cursor))) return null;
   if (query.viewerProjectId !== undefined && !id(query.viewerProjectId)) return null;
   if (query.limit !== undefined && (typeof query.limit !== 'string' || !/^\d{1,2}$/.test(query.limit) || Number(query.limit) < 1 || Number(query.limit) > 50)) return null;
   return { ...(query.q !== undefined ? { q: query.q } : {}), ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
-    ...(query.limit !== undefined ? { limit: Number(query.limit) } : {}), ...(query.viewerProjectId !== undefined ? { viewerProjectId: query.viewerProjectId } : {}) };
+    ...(query.limit !== undefined ? { limit: Number(query.limit) } : {}), ...(query.viewerProjectId !== undefined ? { viewerProjectId: query.viewerProjectId } : {}),
+    ...(query.include !== undefined ? { include: query.include } : {}), ...(query.grantsCursor !== undefined ? { grantsCursor: query.grantsCursor } : {}) };
 }
 
 module.exports = { validDirectGrantInput, validDirectSnapshot, directListQuery };

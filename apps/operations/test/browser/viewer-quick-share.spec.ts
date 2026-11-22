@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
 const VIEWER = "https://viewer.ledgetopdroneservices.com";
 const date = "2026-10-20T12:00:00.000Z";
@@ -44,32 +44,60 @@ async function mockOps(page: Page, permissions: string[], handle: Handler = () =
     const handled = handle(url, request.method(), route);
     if (handled) return handled;
     if (url.pathname === "/api/viewer/overview") return route.fulfill({ json: overview });
-    if (url.pathname === "/api/viewer/direct-share-catalog") return route.fulfill({ json: projects });
+    if (url.pathname === "/api/viewer/direct-share-catalog") { const q = (url.searchParams.get("q") ?? "").toLowerCase();
+      return route.fulfill({ json: { ...projects, projects: projects.projects.filter(item => item.name.toLowerCase().includes(q)) } }); }
     if (url.pathname === "/api/viewer/direct-share-catalog/vp-seawall/tasks") return route.fulfill({ json: tasks });
-    if (url.pathname === "/api/viewer/direct-client-grants" && request.method() === "GET") return route.fulfill({ json: { clients, clientsNextCursor: null, grants: [] } });
+    if (url.pathname === "/api/viewer/direct-client-grants" && request.method() === "GET") return route.fulfill({ json: clientWorkspace(url, clients, []) });
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
   return calls;
 }
+/** Search-first: the grant read lists no clients; a client search (include=clients) lists only the clients matching q. */
+function clientWorkspace(url: URL, list: typeof clients, grants: unknown[]) {
+  if (url.searchParams.get("include") !== "clients") return { clients: [], clientsNextCursor: null, grants };
+  const q = (url.searchParams.get("q") ?? "").toLowerCase();
+  return { clients: list.filter(item => item.displayName.toLowerCase().includes(q)), clientsNextCursor: null, grants: [] };
+}
 const posts = (calls: Call[]) => calls.filter(call => call.method === "POST" && call.path === "/api/viewer/direct-client-grants");
+const catalogSearches = (calls: Call[]) => calls.filter(call => call.path.startsWith("/api/viewer/direct-share-catalog?"));
 
+async function findProject(page: Page, name: string) {
+  await page.getByRole("searchbox", { name: "Search Viewer projects" }).fill(name);
+}
 async function openShare(page: Page, item: string) {
   await page.goto("/viewer");
+  await findProject(page, "Seawall");
   await page.getByRole("list", { name: "Viewer projects" }).getByRole("button", { name: /Seawall survey/ }).click();
   await page.getByRole("list", { name: "Published models in Seawall survey" }).getByRole("button", { name: new RegExp(item) }).click();
   return page.getByRole("dialog");
 }
+/** Clients are only listed after typing in the dialog's client search. */
+async function findClient(dialog: Locator, name: string) {
+  await dialog.getByRole("combobox", { name: "Client or organization" }).fill(name);
+}
 
 test("the 3D models page is one overview; old section links land on it", async ({ page }) => {
-  await mockOps(page, MANAGER);
+  const calls = await mockOps(page, MANAGER);
   for (const path of ["/viewer/models", "/viewer/sharing", "/viewer/processing", "/viewer/processing?tab=tasks", "/operations/processing"]) {
+    const searched = catalogSearches(calls).length;
     await page.goto(path);
     await expect(page).toHaveURL(/\/viewer$/);
     await expect(page.getByRole("heading", { name: "Viewer workspace", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Quick share" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Seawall survey 2 published models" })).toBeVisible();
+    // Search-first: no project is listed, or requested, until two characters are typed.
+    await expect(page.getByRole("list", { name: "Viewer projects" })).toHaveCount(0);
+    await findProject(page, "a");
+    await page.waitForTimeout(400);
+    expect(catalogSearches(calls)).toHaveLength(searched);
+    await findProject(page, "an");
     await expect(page.getByRole("button", { name: "Ranch mapping", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Seawall survey 2 published models" })).toHaveCount(0);
+    expect(catalogSearches(calls).at(-1)!.path).toBe("/api/viewer/direct-share-catalog?limit=10&q=an");
+    await findProject(page, "Sea");
+    await expect(page.getByRole("button", { name: "Seawall survey 2 published models" })).toBeVisible();
+    await findProject(page, "");
+    await expect(page.getByRole("list", { name: "Viewer projects" })).toHaveCount(0);
     await expect(page.getByRole("navigation", { name: "3D Viewer sections" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /^(Client models|Sharing & setup|Processing)$/ })).toHaveCount(0);
   }
@@ -81,6 +109,7 @@ test("staff share one published model with a client, with no business project or
   const dialog = await openShare(page, "Seawall orthomosaic");
   await expect(dialog.getByRole("heading", { name: "Share Seawall orthomosaic" })).toBeVisible();
   await expect(dialog.getByRole("tab", { name: "Client Workspace" })).toHaveAttribute("aria-selected", "true");
+  await findClient(dialog, "Harbor");
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
   await expect(dialog.getByRole("checkbox", { name: "See camera photos" })).not.toBeChecked();
   await dialog.getByRole("checkbox", { name: "See camera photos" }).check();
@@ -108,6 +137,7 @@ test("a share can end today in Central time, but not on a day that has already e
   const calls = await mockOps(page, MANAGER, (url, method, route) =>
     url.pathname === "/api/viewer/direct-client-grants" && method === "POST" ? route.fulfill({ status: 201, json: { grant: grant(), replayed: false } }) : undefined);
   const dialog = await openShare(page, "Seawall orthomosaic");
+  await findClient(dialog, "Harbor");
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
   await dialog.getByRole("checkbox", { name: /^Never/ }).uncheck();
   const lastDay = dialog.getByLabel("Last day (Central time)");
@@ -131,6 +161,7 @@ test("an unconfirmed share is retried with the identical body and key, and the s
     return route.fulfill(attempts === 1 ? { status: 503, json: { error: "Viewer unavailable" } } : { status: 200, json: { grant: grant(), replayed: true } });
   });
   const dialog = await openShare(page, "Seawall orthomosaic");
+  await findClient(dialog, "Harbor");
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
   await dialog.getByRole("button", { name: "Review share" }).click();
   await dialog.getByRole("button", { name: "Share", exact: true }).click();
@@ -164,6 +195,7 @@ test("a duplicate reported after an unconfirmed share is not treated as a failur
       : { status: 409, json: { error: "An active share already exists", code: "duplicate_active_grant" } });
   });
   const dialog = await openShare(page, "Seawall orthomosaic");
+  await findClient(dialog, "Harbor");
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
   await dialog.getByRole("button", { name: "Review share" }).click();
   await dialog.getByRole("button", { name: "Share", exact: true }).click();
@@ -183,6 +215,7 @@ test("a whole-project share needs the separate future-models opt-in", async ({ p
       ? route.fulfill({ status: 201, json: { grant: grant({ taskId: null, scopeType: "project", includeFuturePublished: true }), replayed: false } }) : undefined);
   const dialog = await openShare(page, "Whole project");
   await expect(dialog.getByRole("heading", { name: "Share Seawall survey (whole project)" })).toBeVisible();
+  await findClient(dialog, "Coastal");
   await dialog.getByRole("option", { name: /Coastal Engineering/ }).click();
   const optIn = dialog.getByRole("checkbox", { name: "Also share every model published to this project later" });
   await expect(optIn).not.toBeChecked();
@@ -197,27 +230,37 @@ test("a whole-project share needs the separate future-models opt-in", async ({ p
 });
 
 test("a client whose connection changed is reloaded, never substituted", async ({ page }) => {
-  let reads = 0;
+  let searches = 0;
   const calls = await mockOps(page, MANAGER, (url, method, route) => {
     if (url.pathname !== "/api/viewer/direct-client-grants") return undefined;
     if (method === "POST") return route.fulfill({ status: 409, json: { error: "Client connection is unavailable; refresh the client connection", code: "relationship_missing" } });
-    reads += 1;
-    return route.fulfill({ json: { clients: reads === 1 ? clients : clients.slice(0, 1), clientsNextCursor: null, grants: [] } });
+    if (url.searchParams.get("include") === "clients") searches += 1;
+    // After the first search, Harbor Authority's connection is gone.
+    return route.fulfill({ json: clientWorkspace(url, searches <= 1 ? clients : clients.slice(0, 1), []) });
   });
   const dialog = await openShare(page, "Seawall orthomosaic");
+  await findClient(dialog, "Harbor");
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
   await dialog.getByRole("button", { name: "Review share" }).click();
   await dialog.getByRole("button", { name: "Share", exact: true }).click();
   await expect(dialog.getByRole("alert")).toHaveText("Something changed with this client. Choose them again from the list.");
-  await expect(dialog.getByRole("option", { name: /Coastal Engineering/ })).toBeVisible();
+  // The choice is dropped and the search starts over; nothing is chosen in its place.
+  await expect(dialog.getByRole("button", { name: "Change" })).toHaveCount(0);
+  await expect(dialog.getByRole("combobox", { name: "Client or organization" })).toHaveValue("");
+  await expect(dialog.getByRole("option")).toHaveCount(0);
+  await findClient(dialog, "Harbor");
+  await expect(dialog.getByText("No clients match that name.")).toBeVisible();
   await expect(dialog.getByRole("option", { name: /Harbor Authority/ })).toHaveCount(0);
+  await findClient(dialog, "Coastal");
+  await expect(dialog.getByRole("option", { name: /Coastal Engineering/ })).toBeVisible();
+  expect(searches).toBe(3);
   expect(posts(calls)).toHaveLength(1);
 });
 
 test("existing client shares for the model are listed and can be stopped", async ({ page }) => {
   const calls = await mockOps(page, MANAGER, (url, method, route) => {
     if (url.pathname === "/api/viewer/direct-client-grants" && method === "GET")
-      return route.fulfill({ json: { clients, clientsNextCursor: null, grants: [grant(), grant({ grantId: "grant-other", taskId: "task-mesh", clientDisplayName: "Other" })] } });
+      return route.fulfill({ json: clientWorkspace(url, clients, [grant(), grant({ grantId: "grant-other", taskId: "task-mesh", clientDisplayName: "Other" })]) });
     if (url.pathname === "/api/viewer/direct-client-grants/grant-1" && method === "DELETE") return route.fulfill({ json: { grant: grant({ revokedAt: date }), sessionRevocation: { pending: false } } });
     return undefined;
   });
@@ -225,6 +268,9 @@ test("existing client shares for the model are listed and can be stopped", async
   const existing = dialog.locator(".viewer-direct-share-existing");
   await expect(existing).toContainText("Harbor Authority");
   await expect(existing).not.toContainText("Other");
+  // Existing shares come from the grant read alone; no client list is requested.
+  expect(calls.some(call => call.path.includes("include=clients"))).toBe(false);
+  expect(calls.some(call => call.path === "/api/viewer/direct-client-grants?viewerProjectId=vp-seawall&include=grants")).toBe(true);
   page.once("dialog", confirm => void confirm.accept());
   await existing.getByRole("button", { name: "Stop sharing" }).click();
   await expect(dialog.getByRole("status").filter({ hasText: "Stopped sharing with Harbor Authority" })).toBeVisible();
@@ -266,6 +312,8 @@ test("when sharing is off the overview still works and Quick share says so calml
     url.pathname.startsWith("/api/viewer/direct-share-catalog") ? route.fulfill({ status: 404, json: { error: "Not found" } }) : undefined);
   await page.goto("/viewer");
   await expect(page.getByText("5", { exact: true })).toBeVisible();
+  // Search-first: the catalog is first asked, and found to be off, when staff search.
+  await findProject(page, "Seawall");
   await expect(page.getByRole("status").filter({ hasText: "Quick share isn't available yet" })).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
@@ -280,7 +328,7 @@ test("view-only staff see totals but no Quick share or connection tools", async 
 });
 
 test("a slower earlier search can't replace a newer one, and a failed search hides the old list", async ({ page }) => {
-  await mockOps(page, MANAGER, (url, _method, route) => {
+  const calls = await mockOps(page, MANAGER, (url, _method, route) => {
     if (url.pathname !== "/api/viewer/direct-share-catalog") return undefined;
     const q = url.searchParams.get("q");
     if (q === "sea") return new Promise<void>(resolve => setTimeout(() => void route.fulfill({ json: { projects: [projects.projects[0]], nextCursor: null } }).then(resolve), 1_500));
@@ -290,8 +338,10 @@ test("a slower earlier search can't replace a newer one, and a failed search hid
   });
   await page.goto("/viewer");
   const list = page.getByRole("list", { name: "Viewer projects" });
-  await expect(list.getByRole("button")).toHaveCount(2);
   const search = page.getByRole("searchbox", { name: "Search Viewer projects" });
+  await expect(search).toBeVisible();
+  await expect(list).toHaveCount(0);
+  expect(catalogSearches(calls)).toHaveLength(0);
   await search.fill("sea");
   await expect(list).toHaveCount(0);
   await page.waitForTimeout(400);
@@ -355,13 +405,15 @@ test("Client Workspace is the first and selected method", async ({ page }) => {
 test("a client who already has access is marked, and the review says what sharing again does", async ({ page }) => {
   const calls = await mockOps(page, MANAGER, (url, method, route) => {
     if (url.pathname !== "/api/viewer/direct-client-grants" || method !== "GET") return undefined;
-    return route.fulfill({ json: { clients, clientsNextCursor: null, grants: [grant(),
-      grant({ grantId: "grant-project", workspaceId: "ws-coastal", taskId: null, scopeType: "project", includeFuturePublished: true, clientDisplayName: "Coastal Engineering" })] } });
+    return route.fulfill({ json: clientWorkspace(url, clients, [grant(),
+      grant({ grantId: "grant-project", workspaceId: "ws-coastal", taskId: null, scopeType: "project", includeFuturePublished: true, clientDisplayName: "Coastal Engineering" })]) });
   });
   const dialog = await openShare(page, "Seawall orthomosaic");
+  await findClient(dialog, "Coastal");
+  await expect(dialog.getByRole("option", { name: /Coastal Engineering/ })).toContainText("Already has access");
+  await findClient(dialog, "Harbor");
   const harbor = dialog.getByRole("option", { name: /Harbor Authority/ });
   await expect(harbor).toContainText("Already has access");
-  await expect(dialog.getByRole("option", { name: /Coastal Engineering/ })).toContainText("Already has access");
   // One business: no business line under each client.
   await expect(harbor).not.toContainText("Ledge Top");
   await harbor.click();
@@ -371,6 +423,7 @@ test("a client who already has access is marked, and the review says what sharin
   await expect(dialog.getByRole("button", { name: "Share", exact: true })).toBeDisabled();
   await dialog.getByRole("button", { name: "Back" }).click();
   await dialog.getByRole("button", { name: "Change" }).click();
+  await findClient(dialog, "Coastal");
   await dialog.getByRole("option", { name: /Coastal Engineering/ }).click();
   await dialog.getByRole("button", { name: "Review share" }).click();
   await expect(review).toContainText("already has this model through a whole-project share. This adds a separate share for this model");
@@ -380,9 +433,11 @@ test("a client who already has access is marked, and the review says what sharin
 
 test("clients from more than one business show which business they come through", async ({ page }) => {
   await mockOps(page, MANAGER, (url, method, route) =>
-    url.pathname === "/api/viewer/direct-client-grants" && method === "GET" ? route.fulfill({ json: { clients: [clients[0],
-      { sourceId: "project-alpha:source-2", workspaceId: "ws-bay", displayName: "Bay Marine", businessName: "LTT" }], clientsNextCursor: null, grants: [] } }) : undefined);
+    url.pathname === "/api/viewer/direct-client-grants" && method === "GET" ? route.fulfill({ json: clientWorkspace(url, [clients[0]!,
+      { sourceId: "project-alpha:source-2", workspaceId: "ws-bay", displayName: "Bay Marine", businessName: "LTT" }], []) }) : undefined);
   const dialog = await openShare(page, "Seawall orthomosaic");
+  // "in" matches both Coastal Engineering and Bay Marine.
+  await findClient(dialog, "in");
   await expect(dialog.getByRole("option", { name: /Coastal Engineering/ })).toContainText("via Ledge Top");
   await expect(dialog.getByRole("option", { name: /Bay Marine/ })).toContainText("via Ledge Top LTT");
 });
@@ -391,6 +446,7 @@ test("a project with no published models doesn't offer a whole-project share", a
   await mockOps(page, MANAGER, (url, _method, route) => url.pathname === "/api/viewer/direct-share-catalog/vp-ranch/tasks"
     ? route.fulfill({ json: { project: { viewerProjectId: "vp-ranch", name: "Ranch mapping" }, tasks: [], nextCursor: null } }) : undefined);
   await page.goto("/viewer");
+  await findProject(page, "Ranch");
   await page.getByRole("list", { name: "Viewer projects" }).getByRole("button", { name: "Ranch mapping", exact: true }).click();
   await expect(page.getByText("No published models yet.")).toBeVisible();
   await expect(page.getByRole("button", { name: /Whole project/ })).toHaveCount(0);
@@ -426,6 +482,7 @@ test("an unconfirmed client share older than the retry window is held: no new re
     return route.fulfill({ status: 503, json: { error: "Viewer unavailable" } });
   });
   const dialog = await openShare(page, "Seawall orthomosaic");
+  await findClient(dialog, "Harbor");
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
   await dialog.getByRole("button", { name: "Review share" }).click();
   await dialog.getByRole("button", { name: "Share", exact: true }).click();
@@ -472,6 +529,7 @@ test("a new client share leaves camera photos off unless staff turn them on", as
   const calls = await mockOps(page, MANAGER, (url, method, route) =>
     url.pathname === "/api/viewer/direct-client-grants" && method === "POST" ? route.fulfill({ status: 201, json: { grant: grant(), replayed: false } }) : undefined);
   const dialog = await openShare(page, "Seawall orthomosaic");
+  await findClient(dialog, "Harbor");
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
   await expect(dialog.getByRole("checkbox", { name: "See camera photos" })).not.toBeChecked();
   await dialog.getByRole("button", { name: "Review share" }).click();
@@ -482,6 +540,7 @@ test("a new client share leaves camera photos off unless staff turn them on", as
   await expect(dialog.getByRole("status").filter({ hasText: "Shared with Harbor Authority" })).toBeVisible();
   expect(posts(calls)[0]!.body).toMatchObject({ permissions: { measure: true, cameras: false, download: false } });
   // The next share starts from the same defaults, not from what was last chosen.
+  await findClient(dialog, "Harbor");
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
   await expect(dialog.getByRole("checkbox", { name: "See camera photos" })).not.toBeChecked();
 });

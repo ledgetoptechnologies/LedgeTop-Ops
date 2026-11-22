@@ -61,8 +61,15 @@ describe("staff direct Viewer grant routes",()=>{
   expect(response.headers.get("cache-control")).toContain("no-store");
   expect(mock.list).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({id:"staff-one"}),{q:"Client",limit:25,viewerProjectId:"project-one"});
  });
+ it("passes the name-ordered picker and grant paging fields",async()=>{
+  const cursor="v1.WyJhIiwid29ya3NwYWNlLW9uZSJd";
+  expect((await app()(`?q=a%25_b&include=clients&cursor=${cursor}&grantsCursor=grant-one&viewerProjectId=project-one`)).status).toBe(200);
+  expect(mock.list).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({id:"staff-one"}),
+   {q:"a%_b",include:"clients",cursor,grantsCursor:"grant-one",limit:25,viewerProjectId:"project-one"});
+ });
  it("rejects unbounded or ambiguous picker queries before reading records",async()=>{
-  const request=app();for(const query of ["?limit=51","?q=a&q=b","?sourceId=other"])
+  const request=app();for(const query of ["?limit=51","?q=a&q=b","?sourceId=other","?include=everything","?include=clients&cursor=workspace-one",
+   "?cursor=v1.WyJhIiwid29ya3NwYWNlLW9uZSJd","?grantsCursor=bad.cursor"])
    expect((await request(query)).status).toBe(400);expect(mock.list).not.toHaveBeenCalled();
  });
  it("keeps the additive surface closed when the Viewer integration is disabled",async()=>{

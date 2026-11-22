@@ -191,7 +191,7 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
     // Viewer layer: uploaded source outside Wisconsin is offered and drawn.
     await open('viewer');
     assert.equal(await client.evaluate("document.getElementById('layer-property-lines').disabled"), false, 'not limited to Wisconsin');
-    await client.evaluate("document.getElementById('layer-property-lines').click()");
+    // Shown by default: no click needed.
     await waitFor("document.getElementById('property-lines-status').dataset.state === 'ready'", 'drawn');
     assert.equal(await client.evaluate('Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && typeof l.getLatLngs === "function").length'), 2, 'halo and line');
     const about = await client.evaluate("document.getElementById('property-lines-about').textContent");

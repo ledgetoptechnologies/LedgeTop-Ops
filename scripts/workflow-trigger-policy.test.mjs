@@ -43,13 +43,34 @@ function assertTriggerPolicy(source) {
   }
 }
 
+const PARCEL_RELEASE_CHECK = 'parcel-source-release-check.yml';
+const PARCEL_SCHEDULE = "  schedule:\n    - cron: '17 14 1 * *'\n";
+function assertWorkflowPolicy(name, source) {
+  if (name === 'production-auto-release.yml') assertProductionAutoReleasePolicy(source);
+  else if (name === 'production-auto-diagnostic.yml') assertProductionAutoDiagnosticPolicy(source);
+  else if (name === PARCEL_RELEASE_CHECK) assertParcelReleaseCheckPolicy(source);
+  else assertTriggerPolicy(source);
+}
+
 for (const name of fs.readdirSync(directory).filter(name => /\.ya?ml$/.test(name)).sort()) {
-  test(`${name} has a reviewed trigger boundary`, () => {
-    const source = read(path.join(directory, name));
-    if (name === 'production-auto-release.yml') assertProductionAutoReleasePolicy(source);
-    else if (name === 'production-auto-diagnostic.yml') assertProductionAutoDiagnosticPolicy(source);
-    else assertTriggerPolicy(source);
-  });
+  test(`${name} has a reviewed trigger boundary`, () => assertWorkflowPolicy(name, read(path.join(directory, name))));
+}
+
+// The one reviewed schedule: the monthly parcel source check (approved 2026-11-22). Only this exact file and cron,
+// beside a main-guarded manual dispatch, with a read-contents/write-issues token and no other trigger.
+function assertParcelReleaseCheckPolicy(source) {
+  assert.equal((source.match(/^on:/gm) ?? []).length, 1, 'one explicit trigger mapping is required');
+  assert.equal(source.match(/^on:\n((?:[ \t].*\n|\n)*)/m)?.[1], `${PARCEL_SCHEDULE}  workflow_dispatch:\n\n`,
+    'only the reviewed monthly schedule and a manual dispatch are allowed');
+  // Without its schedule, the workflow must pass the ordinary rule: every job main-guarded for manual dispatch.
+  assertTriggerPolicy(source.replace(PARCEL_SCHEDULE, ''));
+  assert.equal(source.match(/^permissions:\n((?: {2}.*\n)*)/m)?.[1], '  contents: read\n  issues: write\n',
+    'the token is limited to reading contents and writing issues');
+  assert.equal((source.match(/^\s*permissions:/gm) ?? []).length, 1, 'no job widens the workflow token');
+  const jobs = [...source.slice(source.indexOf('\njobs:\n') + 7).matchAll(/^ {2}([A-Za-z0-9_-]+):\n/gm)].map(match => match[1]);
+  assert.deepEqual(jobs, ['check'], 'exactly one job');
+  assert.match(source, /^ {2}check:\n(?: {4}#.*\n)* {4}if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}\n/m,
+    'the job runs only on main, guarded before a runner starts');
 }
 
 function assertProductionAutoReleasePolicy(source) {
@@ -255,6 +276,32 @@ test('policy rejects branch pushes, tags, schedules and manual or external dispa
     '  push:\n    branches: [main]\n  repository_dispatch: {}\n',
   ]) assert.throws(() => assertTriggerPolicy(`on:\n${triggers}\njobs:\n`), triggers);
   assert.throws(() => assertTriggerPolicy('on: [push, pull_request]\njobs:\n'));
+});
+
+test('the parcel schedule allowance is limited to its exact file, cron, token and guard', () => {
+  const source = read(path.join(directory, PARCEL_RELEASE_CHECK));
+  assertWorkflowPolicy(PARCEL_RELEASE_CHECK, source);
+  // The same schedule in any other workflow still fails the ordinary rule.
+  for (const name of ['ci.yml', 'parcel-source-release-check.yaml', 'other-release-check.yml'])
+    assert.throws(() => assertWorkflowPolicy(name, source), name);
+  for (const [before, after] of [
+    ["- cron: '17 14 1 * *'", "- cron: '17 14 * * *'"],
+    ["- cron: '17 14 1 * *'", "- cron: '*/5 * * * *'"],
+    ["- cron: '17 14 1 * *'", "- cron: '17 14 1 * *'\n    - cron: '17 14 15 * *'"],
+    ['contents: read', 'contents: write'],
+    ['issues: write', 'issues: write\n  actions: write'],
+    ['permissions:\n  contents: read\n  issues: write\n', ''],
+    ['    runs-on: ubuntu-latest', '    permissions:\n      contents: write\n    runs-on: ubuntu-latest'],
+    ["if: ${{ github.ref == 'refs/heads/main' }}", "if: github.ref == 'refs/heads/main'"],
+    ["if: ${{ github.ref == 'refs/heads/main' }}", "if: ${{ github.ref != '' }}"],
+    ['  workflow_dispatch:\n', '  workflow_dispatch:\n  push:\n    branches: [main]\n'],
+    ['  workflow_dispatch:\n', '  workflow_dispatch:\n  repository_dispatch:\n'],
+    ['  workflow_dispatch:\n', ''],
+    ['jobs:\n', 'jobs:\n  extra:\n    runs-on: ubuntu-latest\n    steps: []\n'],
+  ]) {
+    assert.ok(source.includes(before), before);
+    assert.throws(() => assertWorkflowPolicy(PARCEL_RELEASE_CHECK, source.replace(before, after)), `${before} -> ${after}`);
+  }
 });
 
 test('policy accepts only main pushes with optional exact path filters', () => {

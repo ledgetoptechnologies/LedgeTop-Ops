@@ -82,8 +82,8 @@ import {
   authorizeClientShareDelegation,
   clientDelegatedShareCreationCapability,
   consumeClientDelegatedShareRate,
-  listClientDelegatedShares,
-  listClientDelegatedShareTargets,
+  listClientDelegatedSharePage,
+  listClientDelegatedShareTargetPage,
   revokeClientDelegatedShare,
   verifyAndRecordClientDelegatedShareSignerResult,
 } from "./delegated-shares";
@@ -709,18 +709,22 @@ export function createClientPortalRouter(
     if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     if (!workspaceId.success) throw new HTTPException(404, { message: "Workspace not found" });
-    const shares = await listClientDelegatedShares(c.env, c.get("clientPrincipal"), workspaceId.data);
-    if (!shares) throw new HTTPException(404, { message: "Workspace not found" });
-    return c.json({ shares, creation: clientDelegatedShareCreationCapability(c.env) });
+    const page = await listClientDelegatedSharePage(c.env, c.get("clientPrincipal"), workspaceId.data, {
+      cursor: c.req.query("cursor") || null, limitQuery: c.req.query("limit"),
+    });
+    if (!page) throw new HTTPException(404, { message: "Workspace not found" });
+    return c.json({ shares: page.shares, nextCursor: page.nextCursor, creation: clientDelegatedShareCreationCapability(c.env) });
   });
 
   router.get("/v2/workspaces/:workspaceId/delegated-share-targets", async (c) => {
     if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     if (!workspaceId.success) throw new HTTPException(404, { message: "Workspace not found" });
-    const targets = await listClientDelegatedShareTargets(c.env, c.get("clientPrincipal"), workspaceId.data);
-    if (!targets) throw new HTTPException(404, { message: "Workspace not found" });
-    return c.json({ targets, creation: clientDelegatedShareCreationCapability(c.env) });
+    const page = await listClientDelegatedShareTargetPage(c.env, c.get("clientPrincipal"), workspaceId.data, {
+      cursor: c.req.query("cursor") || null, limitQuery: c.req.query("limit"),
+    });
+    if (!page) throw new HTTPException(404, { message: "Workspace not found" });
+    return c.json({ targets: page.targets, nextCursor: page.nextCursor, creation: clientDelegatedShareCreationCapability(c.env) });
   });
 
   router.post("/v2/workspaces/:workspaceId/delegated-shares", async (c) => {

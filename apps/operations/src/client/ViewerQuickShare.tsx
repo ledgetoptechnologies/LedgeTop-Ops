@@ -15,7 +15,8 @@ export type DirectShareGrant = {
   permissions: { measure: boolean; cameras: boolean; download: boolean };
   expiresAt: string | null; revokedAt: string | null; createdAt: string; clientDisplayName: string | null;
 };
-type GrantWorkspace = { clients: DirectShareClient[]; clientsNextCursor: string | null; grants: DirectShareGrant[] };
+type GrantWorkspace = { clients: DirectShareClient[]; clientsNextCursor: string | null; grants: DirectShareGrant[];
+  grantsNextCursor?: string | null; grantsIncomplete?: boolean };
 /** What is being shared: a whole Viewer project (and its future published models) or one published task. */
 export type ViewerShareTarget = { project: { viewerProjectId: string; name: string }; task: ViewerCatalogTask | null };
 
@@ -46,6 +47,61 @@ function validGrantWorkspace(value: unknown): value is GrantWorkspace {
       && typeof client.displayName === "string" && typeof client.businessName === "string")
     && value.grants.every(grant => isRecord(grant) && typeof grant.grantId === "string" && typeof grant.workspaceId === "string"
       && isRecord(grant.permissions));
+}
+
+/** Search-first: nothing is listed until at least this many characters are typed. */
+export const QUICK_SHARE_MIN_QUERY = 2;
+/** At most this many matches are shown; staff keep typing to narrow the list. */
+export const QUICK_SHARE_RESULT_LIMIT = 10;
+export const searchReady = (q: string) => q.trim().length >= QUICK_SHARE_MIN_QUERY;
+
+/** The project search request, or null while the text is too short to search. */
+export function projectSearchPath(q: string): string | null {
+  if (!searchReady(q)) return null;
+  return `/api/viewer/direct-share-catalog?${new URLSearchParams({ limit: String(QUICK_SHARE_RESULT_LIMIT), q: q.trim() })}`;
+}
+
+/** The client search request (clients only, never the grant list), or null while the text is too short. */
+export function clientSearchPath(viewerProjectId: string, q: string): string | null {
+  if (!searchReady(q)) return null;
+  return `/api/viewer/direct-client-grants?${new URLSearchParams({ viewerProjectId, limit: String(QUICK_SHARE_RESULT_LIMIT), include: "clients", q: q.trim() })}`;
+}
+
+/** One page of matching clients, bounded to the result limit. */
+export async function searchDirectShareClients(fetchJson: (path: string) => Promise<unknown>, viewerProjectId: string, q: string)
+  : Promise<{ clients: DirectShareClient[]; more: boolean } | null> {
+  const path = clientSearchPath(viewerProjectId, q);
+  if (!path) return null;
+  const value = await fetchJson(path);
+  if (!validGrantWorkspace(value)) throw new Error("invalid_response");
+  return { clients: value.clients.slice(0, QUICK_SHARE_RESULT_LIMIT), more: !!value.clientsNextCursor || value.clients.length > QUICK_SHARE_RESULT_LIMIT };
+}
+
+/** Arrow, Home and End keys over a result list; null when the key does not move the selection. */
+export function nextActiveOption(active: number, key: string, count: number): number | null {
+  if (!count) return null;
+  if (key === "ArrowDown") return active < 0 ? 0 : Math.min(count - 1, active + 1);
+  if (key === "ArrowUp") return active < 0 ? count - 1 : Math.max(0, active - 1);
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  return null;
+}
+
+export const DIRECT_SHARE_GRANT_PAGE_LIMIT = 50;
+/** Loads every page of this project's grants (the server pages grants 100 at a time), and no clients:
+ * clients are only listed by a typed search. If the page limit is reached the result says so. */
+export async function loadDirectShareWorkspace(fetchJson: (path: string) => Promise<unknown>, viewerProjectId: string)
+  : Promise<GrantWorkspace> {
+  const first = await fetchJson(`/api/viewer/direct-client-grants?${new URLSearchParams({ viewerProjectId, include: "grants" })}`);
+  if (!validGrantWorkspace(first)) throw new Error("invalid_response");
+  const grants = [...first.grants];
+  let cursor = typeof first.grantsNextCursor === "string" ? first.grantsNextCursor : null, pages = 1;
+  while (cursor && pages < DIRECT_SHARE_GRANT_PAGE_LIMIT) {
+    const page = await fetchJson(`/api/viewer/direct-client-grants?${new URLSearchParams({ viewerProjectId, include: "grants", grantsCursor: cursor })}`);
+    if (!validGrantWorkspace(page)) throw new Error("invalid_response");
+    grants.push(...page.grants); cursor = typeof page.grantsNextCursor === "string" ? page.grantsNextCursor : null; pages++;
+  }
+  return { ...first, grants, grantsNextCursor: cursor, grantsIncomplete: !!cursor };
 }
 
 /** Grants that already cover this exact target: the project grant, or a grant for the same task. */
@@ -161,7 +217,9 @@ type PendingDirectShare = {
 type PendingPublicLink = { body: string; key: string; sentAt: number; label: string; expiryDay: string; neverExpires: boolean; download: boolean; cameras: boolean; units: "imperial" | "metric" };
 
 /** Search Viewer projects, pick a published model (or the whole project), then share it. */
-export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCreatePublic: boolean; canRevokePublic: boolean }) {
+export function ViewerQuickShare({ canCreatePublic, canRevokePublic, onOpenViewer, opening = false }: {
+  canCreatePublic: boolean; canRevokePublic: boolean; onOpenViewer?: () => void; opening?: boolean;
+}) {
   const [query, setQuery] = useState("");
   const [projects, setProjects] = useState<ProjectPage | null>(null);
   const [projectError, setProjectError] = useState("");
@@ -172,26 +230,27 @@ export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCrea
   const [target, setTarget] = useState<ViewerShareTarget | null>(null);
   const projectRun = useRef(0), taskRun = useRef(0);
 
-  const loadProjects = useCallback(async (q: string, cursor: string | null) => {
+  const loadProjects = useCallback(async (q: string) => {
     const run = ++projectRun.current;
     setProjectError("");
+    const path = projectSearchPath(q);
+    if (!path) { setProjects(null); return; }
     try {
-      const params = new URLSearchParams({ limit: "25" });
-      if (q.trim()) params.set("q", q.trim());
-      if (cursor) params.set("cursor", cursor);
-      const value = await api<unknown>(`/api/viewer/direct-share-catalog?${params}`);
+      const value = await api<unknown>(path);
       if (run !== projectRun.current) return;
       if (!validViewerCatalogProjects(value)) throw new Error("invalid_response");
-      setProjects(current => cursor && current ? { projects: [...current.projects, ...value.projects], nextCursor: value.nextCursor } : value);
+      setProjects({ projects: value.projects.slice(0, QUICK_SHARE_RESULT_LIMIT), nextCursor: value.nextCursor });
     } catch (caught) {
       if (run !== projectRun.current) return;
-      if (!cursor) setProjects(null);
+      setProjects(null);
       if (statusOf(caught) === 404) { setOff(true); return; }
       setProjectError(statusOf(caught) === 403 ? "You don't have permission to share Viewer models." : "Viewer projects couldn't be loaded. Try again.");
     }
   }, []);
   useEffect(() => {
-    const timer = window.setTimeout(() => void loadProjects(query, null), query ? 250 : 0);
+    // Search-first: no project is listed, or requested, until two characters are typed.
+    if (!searchReady(query)) return;
+    const timer = window.setTimeout(() => void loadProjects(query), 250);
     return () => window.clearTimeout(timer);
   }, [query, loadProjects]);
   useEffect(() => () => { projectRun.current += 1; taskRun.current += 1; }, []);
@@ -212,6 +271,8 @@ export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCrea
       setTaskError(statusOf(caught) === 404 ? "This project is no longer available in the Viewer." : "Published models couldn't be loaded. Try again.");
     }
   }, []);
+  const ready = searchReady(query);
+  const openViewer = onOpenViewer && <button type="button" className="button-ghost button-small" disabled={opening} onClick={onOpenViewer}>Open in Viewer</button>;
   const choose = (selected: ViewerCatalogProject) => { setProject(selected); setTasks(null); void loadTasks(selected, null); };
   const back = () => { taskRun.current += 1; setProject(null); setTasks(null); setTaskError(""); };
 
@@ -219,20 +280,21 @@ export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCrea
     <h3 id="viewer-quick-share-heading">Quick share</h3><p className="notice" role="status">{SHARING_OFF}</p>
   </section>;
   return <section className="viewer-quick-share" aria-labelledby="viewer-quick-share-heading">
-    <header><h3 id="viewer-quick-share-heading">Quick share</h3><p>Pick a Viewer project, choose a published model, and share it with a client or by link.</p></header>
+    <header><h3 id="viewer-quick-share-heading">Quick share</h3></header>
+    <p className="viewer-quick-share-pointer">Share whole projects from the Viewer. {openViewer}</p>
     {!project ? <>
       <label className="viewer-quick-share-search">Search Viewer projects
-        <input type="search" value={query} onChange={event => changeQuery(event.target.value)} placeholder="Project name" maxLength={120} /></label>
-      {projectError && <div className="notice error" role="alert">{projectError} <button type="button" className="button-ghost button-small" onClick={() => void loadProjects(query, null)}>Retry</button></div>}
-      {!projects && !projectError && <p className="viewer-quick-share-loading" role="status">Loading projects…</p>}
+        <input type="search" value={query} onChange={event => changeQuery(event.target.value)} placeholder="Type 2 or more letters" maxLength={120} /></label>
+      {projectError && <div className="notice error" role="alert">{projectError} <button type="button" className="button-ghost button-small" onClick={() => void loadProjects(query)}>Retry</button></div>}
+      {ready && !projects && !projectError && <p className="viewer-quick-share-loading" role="status">Searching…</p>}
       {projects && (projects.projects.length ? <ul className="viewer-quick-share-list" aria-label="Viewer projects">{projects.projects.map(item =>
         <li key={item.viewerProjectId}><button type="button" onClick={() => choose(item)}>
           <strong>{item.name}</strong>{item.publishedTaskCount != null && <small>{item.publishedTaskCount} published model{item.publishedTaskCount === 1 ? "" : "s"}</small>}
         </button></li>)}</ul>
-        : <EmptyState title={query.trim() ? "No matching projects" : "No Viewer projects yet"} detail={query.trim() ? "Try a different name." : "Projects created in the Viewer workspace appear here."} />)}
-      {projects?.nextCursor && <button type="button" className="button-ghost button-small" onClick={() => void loadProjects(query, projects.nextCursor)}>Show more projects</button>}
+        : <EmptyState title="No matching projects" detail="Try a different name." />)}
+      {projects?.nextCursor && <p className="viewer-quick-share-empty" role="status">Showing the first {QUICK_SHARE_RESULT_LIMIT}. Keep typing to narrow the list.</p>}
     </> : <>
-      <div className="viewer-quick-share-crumb"><button type="button" className="button-ghost button-small" onClick={back}>All projects</button><strong>{project.name}</strong></div>
+      <div className="viewer-quick-share-crumb"><button type="button" className="button-ghost button-small" onClick={back}>Back to search</button><strong>{project.name}</strong>{openViewer}</div>
       {taskError && <div className="notice error" role="alert">{taskError} <button type="button" className="button-ghost button-small" onClick={() => void loadTasks(project, null)}>Retry</button></div>}
       {!tasks && !taskError && <p className="viewer-quick-share-loading" role="status">Loading published models…</p>}
       {/* A whole-project share needs something published, so it isn't offered for an empty project. */}
@@ -307,6 +369,11 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   const [query, setQuery] = useState("");
   const [workspace, setWorkspace] = useState<GrantWorkspace | null>(null);
   const [loadError, setLoadError] = useState("");
+  // Client search results: null until two characters are typed and the answer arrives.
+  const [results, setResults] = useState<{ clients: DirectShareClient[]; more: boolean } | null>(null);
+  const [searchError, setSearchError] = useState("");
+  const [active, setActive] = useState(-1);
+  const search = useRef(0);
   const [blocked, setBlocked] = useState("");
   const [client, setClient] = useState<DirectShareClient | null>(null);
   const [permissions, setPermissions] = useState(DEFAULT_PERMISSIONS);
@@ -326,36 +393,56 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   const run = useRef(0);
   useEffect(() => { onStateChange(busy, unconfirmed); }, [busy, unconfirmed, onStateChange]);
 
-  const load = useCallback(async (q: string) => {
+  // Existing shares for this project; never the client list.
+  const load = useCallback(async () => {
     const current = ++run.current;
     setLoadError("");
     try {
-      const params = new URLSearchParams({ viewerProjectId: target.project.viewerProjectId, limit: "25" });
-      if (q.trim()) params.set("q", q.trim());
-      const value = await api<unknown>(`/api/viewer/direct-client-grants?${params}`);
+      const value = await loadDirectShareWorkspace(path => api<unknown>(path), target.project.viewerProjectId);
       if (current !== run.current) return;
-      if (!validGrantWorkspace(value)) throw new Error("invalid_response");
       setWorkspace(value);
+      // Existing-access checks need every share; say so plainly if some could not be listed.
+      if (value.grantsIncomplete) setLoadError("Some existing shares for this project could not be listed.");
     } catch (caught) {
       if (current !== run.current) return;
       setWorkspace(null);
       const status = statusOf(caught);
       if (status === 404) setBlocked("Client Workspace sharing isn't turned on yet.");
       else if (status === 403) setBlocked("Administrator access is required to share with clients.");
-      else setLoadError("Clients couldn't be loaded. Try again.");
+      else setLoadError("Existing shares couldn't be loaded. Try again.");
+    }
+  }, [target.project.viewerProjectId]);
+  useEffect(() => { void load(); }, [load]);
+  const runSearch = useCallback(async (q: string) => {
+    const current = ++search.current;
+    setSearchError("");
+    try {
+      const value = await searchDirectShareClients(path => api<unknown>(path), target.project.viewerProjectId, q);
+      if (current !== search.current) return;
+      setResults(value); setActive(value?.clients.length ? 0 : -1);
+    } catch (caught) {
+      if (current !== search.current) return;
+      setResults(null); setActive(-1);
+      const status = statusOf(caught);
+      if (status === 404) setBlocked("Client Workspace sharing isn't turned on yet.");
+      else if (status === 403) setBlocked("Administrator access is required to share with clients.");
+      else setSearchError("Clients couldn't be searched. Try again.");
     }
   }, [target.project.viewerProjectId]);
   useEffect(() => {
-    const timer = window.setTimeout(() => void load(query), query ? 250 : 0);
+    // Search-first: no client is listed, or requested, until two characters are typed.
+    if (!searchReady(query)) return;
+    const timer = window.setTimeout(() => void runSearch(query), 250);
     return () => window.clearTimeout(timer);
-  }, [query, load]);
-  useEffect(() => () => { run.current += 1; }, []);
-  const changeQuery = (value: string) => { run.current += 1; setWorkspace(null); setLoadError(""); setQuery(value); };
+  }, [query, runSearch]);
+  useEffect(() => () => { run.current += 1; search.current += 1; }, []);
+  // A new search drops the previous results at once, so Enter or a click can't pick from an old list.
+  const changeQuery = (value: string) => { search.current += 1; setResults(null); setActive(-1); setSearchError(""); setQuery(value); };
 
   const existing = workspace ? grantsForTarget(workspace.grants, target) : [];
   const expiresAt = unconfirmed && pending.current ? pending.current.expiresAt : neverExpires ? null : futureChicagoEndOfDay(expiryDay);
   const today = chicagoToday();
-  const businessCount = new Set(workspace?.clients.map(item => item.businessName)).size;
+  const businessCount = new Set((client ? [client] : results?.clients ?? []).map(item => item.businessName)).size;
   // The API refuses a second share of the same scope to the same client; a whole-project share and a model share sit side by side.
   const clientGrants = client ? existing.filter(grant => sameClient(grant, client)) : [];
   const sameScope = clientGrants.find(grant => target.task ? grant.scopeType === "task" && grant.taskId === target.task.taskId : grant.scopeType === "project");
@@ -363,6 +450,14 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   const pick = (next: DirectShareClient | null) => {
     if (busy || unconfirmed) return;
     setClient(next); setReviewing(false); setIncludeFuture(false); setError(""); setMessage(""); pending.current = null;
+    if (!next) changeQuery("");
+  };
+  const onSearchKey = (event: KeyboardEvent<HTMLInputElement>) => {
+    const count = results?.clients.length ?? 0;
+    const moved = nextActiveOption(active, event.key, count);
+    if (moved !== null) { event.preventDefault(); setActive(moved); return; }
+    if (event.key === "Enter") { event.preventDefault(); const chosen = results?.clients[active]; if (chosen) pick(chosen); return; }
+    if (event.key === "Escape" && query) { event.preventDefault(); changeQuery(""); }
   };
 
   const send = async () => {
@@ -376,7 +471,7 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
       pending.current = null; setUnconfirmed(false); setReviewing(false); setClient(null);
       setPermissions(DEFAULT_PERMISSIONS); setNeverExpires(true); setExpiryDay(""); setIncludeFuture(false);
       setMessage(`Shared with ${attempt.clientName}. They'll see it in their Ledge Top portal.`);
-      void load(query);
+      changeQuery(""); void load();
     } catch (caught) {
       if (uncertain(caught)) {
         setUnconfirmed(true);
@@ -390,14 +485,14 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
             ? `${attempt.clientName} already has this share, possibly from your earlier attempt. Check "Already shared with" above.`
             : `${attempt.clientName} already has this share. To change it, stop sharing first, then share again.`
           : (caught as Error).message);
-        if (code === "relationship_missing") { setClient(null); setReviewing(false); void load(query); }
-        if (code === "duplicate_active_grant") void load(query);
+        if (code === "relationship_missing") { setClient(null); setReviewing(false); changeQuery(""); void load(); }
+        if (code === "duplicate_active_grant") void load();
       }
     } finally { setBusy(false); }
   };
   const hold = () => {
     if (pending.current) pending.current = { ...pending.current, body: "" };
-    setHeld(true); setError(SHARE_HELD); void load(query);
+    setHeld(true); setError(SHARE_HELD); void load();
   };
   useEffect(() => {
     if (!unconfirmed || held || !pending.current) return;
@@ -426,7 +521,7 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
         method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ reason: "Revoked by staff" }),
       });
       setMessage(`Stopped sharing with ${grant.clientDisplayName ?? "the client"}.`);
-      void load(query);
+      void load();
     } catch (caught) { setError((caught as Error).message); }
     finally { setBusy(false); }
   };
@@ -439,19 +534,27 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
       <div><span>{grant.clientDisplayName ?? "Client"}</span><small>{grant.scopeType === "project" ? "Whole project" : "This model"} · {chicagoDate(grant.expiresAt)}{grant.permissions.download ? " · downloads allowed" : ""}</small></div>
       <button type="button" className="button-ghost button-small viewer-stop-share" disabled={busy || unconfirmed} onClick={() => void revoke(grant)}>Stop sharing</button>
     </li>)}</ul></div>}
+    {loadError && <div className="notice error" role="alert">{loadError} <button type="button" className="button-ghost button-small" onClick={() => void load()}>Retry</button></div>}
     {!client ? <>
-      <label>Client or organization<input type="search" value={query} onChange={event => changeQuery(event.target.value)} placeholder="Search clients" maxLength={120} /></label>
-      {loadError && <div className="notice error" role="alert">{loadError} <button type="button" className="button-ghost button-small" onClick={() => void load(query)}>Retry</button></div>}
-      {!workspace ? !loadError && <p role="status">Loading clients…</p> : workspace.clients.length
-        ? <ul className="viewer-direct-share-clients" role="listbox" aria-label="Clients">{workspace.clients.map(item => {
+      <label htmlFor="viewer-direct-share-client-search">Client or organization</label>
+      <input id="viewer-direct-share-client-search" type="search" role="combobox" aria-autocomplete="list" aria-controls="viewer-direct-share-client-list"
+        aria-expanded={!!results?.clients.length} aria-activedescendant={results && active >= 0 ? `viewer-direct-share-client-${active}` : undefined}
+        value={query} onChange={event => changeQuery(event.target.value)} onKeyDown={onSearchKey} placeholder="Type 2 or more letters" maxLength={120} autoComplete="off" />
+      {searchError && <div className="notice error" role="alert">{searchError} <button type="button" className="button-ghost button-small" onClick={() => void runSearch(query)}>Retry</button></div>}
+      <ul id="viewer-direct-share-client-list" className="viewer-direct-share-clients" role="listbox" aria-label="Matching clients" hidden={!results?.clients.length}>
+        {(results?.clients ?? []).map((item, index) => {
           const via = businessLabel(item.businessName, businessCount);
-          return <li key={`${item.sourceId}/${item.workspaceId}`}>
-            <button type="button" role="option" aria-selected={false} onClick={() => pick(item)}><strong>{item.displayName}</strong>
-              {via && <small>{via}</small>}
-              {existing.some(grant => sameClient(grant, item)) && <small className="viewer-direct-share-has-access">Already has access</small>}</button>
+          return <li key={`${item.sourceId}/${item.workspaceId}`} id={`viewer-direct-share-client-${index}`} role="option" aria-selected={index === active}
+            className={index === active ? "active" : undefined} onMouseDown={event => event.preventDefault()} onClick={() => pick(item)}>
+            <strong>{item.displayName}</strong>
+            {via && <small>{via}</small>}
+            {existing.some(grant => sameClient(grant, item)) && <small className="viewer-direct-share-has-access">Already has access</small>}
           </li>;
-        })}</ul>
-        : <p>{query.trim() ? "No clients match that name." : "No clients are ready for portal sharing yet."}</p>}
+        })}
+      </ul>
+      <p className="viewer-quick-share-empty" role="status">{!searchReady(query) || searchError ? "" : !results ? "Searching…"
+        : !results.clients.length ? "No clients match that name."
+        : results.more ? `Showing the first ${QUICK_SHARE_RESULT_LIMIT}. Keep typing to narrow the list.` : ""}</p>
     </> : <form className="viewer-direct-share-form" onSubmit={confirm}>
       <div className="viewer-direct-share-recipient"><div><strong>{client.displayName}</strong>{business && <small>{business}</small>}</div>
         <button type="button" className="button-ghost button-small" disabled={busy || unconfirmed} onClick={() => pick(null)}>Change</button></div>
@@ -480,7 +583,7 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
             This adds a separate share for this model with the options above; their whole-project access stays as it is.</p>}
           {errorNotice}
           <div className="actions">
-            {held ? <button type="button" className="button-ghost" onClick={() => void load(query)}>Check again</button>
+            {held ? <button type="button" className="button-ghost" onClick={() => void load()}>Check again</button>
               : <button type="submit" className="button-orange" disabled={busy || (!unconfirmed && !!sameScope)}>{busy ? "Sharing…" : unconfirmed ? "Try again" : "Share"}</button>}
             {!unconfirmed && <button type="button" className="button-ghost" disabled={busy} onClick={() => setReviewing(false)}>Back</button>}
           </div>

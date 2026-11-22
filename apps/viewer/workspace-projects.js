@@ -18,7 +18,7 @@ import { resumeCurrentTabWorkspaceRecovery } from './workspace-current-tab-recov
 import { createWorkspaceNavigationWork, workspaceNavigationState } from './workspace-navigation-state.mjs';
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -185,7 +185,7 @@ async function openShareModal(projectId,onlyOutputId=null){
   // Direct sharing has its own authority and must not wait for project lookups.
   if(context.clientLoading)void(async()=>{
     let access=null;
-    try{access=directClientAccess(await api(directClientsPath(projectId)));}catch{}
+    try{access=await loadDirectClientAccess(api,projectId);}catch{}
     if(!current()||!can('viewer.client_grants.manage'))return;
     state.clientDirectAccess=access;context.directQuery='';
     if(context.loading)return;
@@ -593,7 +593,7 @@ function selectedProject(){
   if(folderState.projectId!==project.id){folderState.projectId=project.id;folderState.currentId=selectedFolderId;folderState.folders=null;folderState.error=null;folderState.loading=true;queueMicrotask(()=>{if(state.selectedProjectId===project.id)loadProjectFolders(project.id)});}
   const tasks=state.tasks.filter(task=>task.projectId===project.id),datasets=state.datasets.filter(dataset=>dataset.projectId===project.id),sourceSetCount=datasets.filter(dataset=>['draft','finalized'].includes(dataset.status)).length,readyDatasets=datasets.filter(dataset=>dataset.status==='finalized'),active=project.status==='active',hasActiveTask=tasks.some(task=>LIVE_ATTEMPT_STATUSES.has(task.latestAttempt?.status)||['queued','processing'].includes(task.status)),canShare=['viewer.shares.create','viewer.shares.read','viewer.shares.revoke','viewer.client_grants.manage'].some(can);
   const moreActions=`${can('viewer.projects.write')?button('edit-project',project.id,'Rename project'):''}${can('viewer.datasets.import')?button('project-import',project.id,'Import existing results'):''}${can('viewer.projects.read')?button('project-property-lines',project.id,'Property lines source'):''}${can('viewer.projects.write')&&!hasActiveTask?dangerButton('trash-project',project.id,'Delete project'):''}`;
-  const actions=active?`${can('viewer.processing.write')?`<button class="primary-button" data-action="project-process" data-id="${esc(project.id)}">New task</button>`:''}${canShare?button('project-share',project.id,'Share'):''}${moreActions?`<details class="project-more-actions"><summary aria-label="More project actions" title="More project actions">⋯</summary><div class="project-more-menu">${moreActions}</div></details>`:''}`:'';
+  const actions=active?`${can('viewer.processing.write')?`<button class="primary-button" data-action="project-process" data-id="${esc(project.id)}">New task</button>`:''}${canShare?button('project-share',project.id,'Share project'):''}${moreActions?`<details class="project-more-actions"><summary aria-label="More project actions" title="More project actions">⋯</summary><div class="project-more-menu">${moreActions}</div></details>`:''}`:'';
   const folders=folderState.folders||[],current=folderState.currentId,path=folderPath(folders,current),visibleFolders=folders.filter(folder=>(folder.parentId||null)===current),visibleTasks=tasks.filter(task=>(task.folderId||null)===current);
   const crumbs=`<nav aria-label="Folder path" class="import-breadcrumb">${button('folder-root',project.id,project.displayName,false,'data-task-drop-folder=""')}${path.map(folder=>`<span aria-hidden="true">/</span>${button('folder-open',folder.id,folder.displayName,false,`data-task-drop-folder="${esc(folder.id)}"`)}`).join('')}</nav>`;
   const folderContent=folderState.loading?`<p role="status">Loading folders…</p><div class="task-list">${visibleTasks.map(taskPanel).join('')}</div>`:folderState.error?`<p role="alert">${esc(folderState.error)} Showing all project tasks.</p>${button('folder-retry',project.id,'Retry folders')}<div class="task-list">${tasks.map(taskPanel).join('')||empty('No tasks in this project yet.')}</div>`:`${crumbs}${active&&can('viewer.projects.write')?button('folder-create',project.id,'New folder'):''}<div class="data-list" aria-label="Folders">${visibleFolders.map(folder=>`<div class="manage-row" data-task-drop-folder="${esc(folder.id)}"><span aria-hidden="true">📁</span>${button('folder-open',folder.id,folder.displayName)}${active&&can('viewer.projects.write')?`<div class="row-actions">${button('folder-rename',folder.id,'Rename',false,`aria-label="Rename ${esc(folder.displayName)}"`)}${button('folder-delete',folder.id,'Delete',false,`aria-label="Delete ${esc(folder.displayName)}"`)}</div>`:''}</div>`).join('')}</div><div class="task-list">${visibleTasks.map(taskPanel).join('')||(!visibleFolders.length?empty('No folders or tasks here yet.'):'')}</div>`;
@@ -1106,36 +1106,50 @@ function directShareContext(onlyOutputId){
 }
 function directClientShareCard(onlyOutputId){
   const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
-  return card('Share with a client',`<p class="form-note">Choose a client and what they can see. No business project or model setup is needed.</p>${directShareForm({...context,access,query:state.shareContext.directQuery||''})}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,{...context,dateTime})}`);
+  return card('Share with a client',`<p class="form-note">Choose a client and what they can see. No business project or model setup is needed.</p>${directShareForm(context)}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,{...context,dateTime})}`);
 }
 function rerenderClientSharePanel(projectId,onlyOutputId){
   const panel=modalContent.querySelector('[data-client-share-panel]');
-  if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
+  if(panel){panel.querySelector?.('#direct-client-grant-form')?.clientPicker?.dispose();panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
 }
 function bindDirectShare(form,projectId,onlyOutputId){
-  const context=directShareContext(onlyOutputId),read=()=>readDirectShareForm(form,{...context,clients:state.clientDirectAccess?.clients||[]});
+  const context=directShareContext(onlyOutputId),shareContext=state.shareContext,live=()=>state.shareContext===shareContext&&form.isConnected&&modal.open;
+  let picked=null;const read=()=>readDirectShareForm(form,{...context,clients:picked?[picked]:[]});
   const summary=form.querySelector('[data-direct-summary]'),taskInputs=[...form.querySelectorAll('input[name="taskId"]')];
-  const sync=()=>{const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';summary.textContent=current.summary};
-  form.onchange=sync;sync();
-  const shareContext=state.shareContext,live=()=>state.shareContext===shareContext&&form.isConnected&&modal.open;
-  const search=async more=>{
-    if(form.shareBusy)return;
-    const query=more?shareContext.directQuery||'':form.elements.clientQuery.value;
-    try{
-      const result=directClientAccess(await api(directClientsPath(projectId,{query,cursor:more?state.clientDirectAccess.clientsNextCursor:null})));
-      if(!result||!live()||form.shareBusy)return;
-      shareContext.directQuery=query;
-      state.clientDirectAccess={...result,clients:more?[...state.clientDirectAccess.clients,...result.clients]:result.clients};
-      rerenderClientSharePanel(projectId,onlyOutputId);
-    }catch(error){toast(directShareErrorText(error),true)}
+  const review=form.querySelector('[data-direct-review]'),reviewButton=form.querySelector('[data-direct-review-button]');
+  // Review step: the choices are frozen and repeated in plain words before anything is sent.
+  const setReviewing=on=>{
+    form.reviewing=on;review.hidden=!on;reviewButton.hidden=on;
+    for(const element of form.querySelectorAll('fieldset,input[name="expiresAt"],input[name="measure"],input[name="cameras"],input[name="download"],input[name="confirmedScope"]'))element.disabled=on;
+    if(!on)sync();
   };
-  form.querySelector('[data-action="search-direct-clients"]').onclick=()=>search(false);
-  form.elements.clientQuery.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();search(false)}};
-  const more=form.querySelector('[data-action="more-direct-clients"]');if(more)more.onclick=()=>search(true);
+  const sync=()=>{const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';
+    if(form.elements.includeLater)form.elements.includeLater.disabled=current.scope!=='project';summary.textContent=current.summary};
+  form.onchange=sync;
+  form.querySelector('[data-direct-back]').onclick=()=>setReviewing(false);
+  // Type-to-filter picker: each keystroke (debounced) asks the server, and an older answer never replaces a newer one.
+  // Choosing a client only fills the form; the confirmation checkbox and Share button are still required.
+  const pickerRoot=form.querySelector('[data-client-picker]');
+  // Search-first: no client is listed until staff type at least two characters.
+  if(pickerRoot)form.clientPicker=bindClientPicker(pickerRoot,{initial:null,
+    fetchPage:async({query,cursor,signal})=>{
+      const result=directClientAccess(await api(directClientsPath(projectId,{query,cursor,include:'clients'}),{signal}));
+      if(!result)throw new Error('Clients could not be loaded.');if(!live())throw new Error('Share dialog closed');return result;
+    },
+    onSelect:client=>{
+      // Any change of client, including clearing it, needs a fresh confirmation for the new recipient.
+      const changed=(picked?JSON.stringify([picked.sourceId,picked.workspaceId]):'')!==(client?JSON.stringify([client.sourceId,client.workspaceId]):'');
+      picked=client;if(changed&&form.elements.confirmedScope)form.elements.confirmedScope.checked=false;if(form.isConnected)sync()}});
+  sync();
   // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
   form.onsubmit=async event=>{
     event.preventDefault();if(form.shareBusy)return;
-    let bodies,target;try{target=read();bodies=target.bodies()}catch(error){summary.textContent=error.message;return}
+    let bodies,target;try{target=read();bodies=target.bodies()}catch(error){summary.textContent=error.message;if(form.reviewing)setReviewing(false);return}
+    if(!form.reviewing){
+      const body=bodies[0];
+      form.querySelector('[data-direct-review-text]').textContent=directShareReviewText({summary:target.summary,permissions:body.permissions,expiresAt:body.expiresAt,dateTime});
+      setReviewing(true);form.querySelector('[data-direct-send]').focus();return;
+    }
     // Inputs stay frozen while sending so the summary always matches what is being shared.
     const controls=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);
     for(const [element] of controls)element.disabled=true;
@@ -1149,10 +1163,10 @@ function bindDirectShare(form,projectId,onlyOutputId){
     }catch(error){
       toast(directShareErrorText(error),true);
       if(live())summary.textContent=(shared?`Shared ${shared} of ${bodies.length}. Share again to finish; already shared tasks are not duplicated. `:'')+directShareErrorText(error);
-    }finally{form.shareBusy=false;if(form.isConnected)for(const [element,disabled] of controls)element.disabled=disabled}
+    }finally{form.shareBusy=false;if(form.isConnected){for(const [element,disabled] of controls)element.disabled=disabled;if(shared!==bodies.length)setReviewing(false)}}
     // A partial share keeps the form and its retry keys exactly as they were.
     if(shared!==bodies.length||!live())return;
-    try{const result=directClientAccess(await api(directClientsPath(projectId,{query:shareContext.directQuery||''})));if(result&&live())state.clientDirectAccess=result}catch{}
+    try{const result=await loadDirectClientAccess(api,projectId);if(result&&live())state.clientDirectAccess=result}catch{}
     if(live())rerenderClientSharePanel(projectId,onlyOutputId);
   };
 }
