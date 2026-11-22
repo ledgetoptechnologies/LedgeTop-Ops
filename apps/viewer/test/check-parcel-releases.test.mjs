@@ -205,7 +205,7 @@ test('workflow: monthly and manual only, small, minimal permissions, no install'
   assert.match(workflow, /schedule:\n\s+- cron: '\d+ \d+ 1 \* \*'/);
   assert.match(workflow, /workflow_dispatch:/);
   assert.doesNotMatch(workflow, /\n\s+(push|pull_request|pull_request_target):/);
-  assert.match(workflow, /\n  check:\n(\s+#[^\n]*\n)*    if: github\.ref == 'refs\/heads\/main'\n    runs-on: ubuntu-latest\n/, 'job-level main-only guard, before a runner is allocated');
+  assert.match(workflow, /\n  check:\n(\s+#[^\n]*\n)*    if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}\n    runs-on: ubuntu-latest\n/, 'job-level main-only guard, before a runner is allocated');
   assert.match(workflow, /timeout-minutes: 5/);
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+issues: write\n/);
   assert.doesNotMatch(workflow, /npm (ci|install)|pnpm|yarn/);

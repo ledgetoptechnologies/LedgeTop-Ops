@@ -82,11 +82,11 @@ test("a generic create denial keeps the original invitation reference after reop
   await expect.poll(async () => (await bodies(page, "session")).length).toBe(sessionReadsBeforeCreate + 1);
   const issued = await bodies(page, "create");
   expect(issued).toHaveLength(1);
-  await expect(reference).toHaveText(String(issued[0].commandId));
+  await expect(reference).toHaveText(String(issued[0]!.commandId));
   await dialog.getByRole("button", { name: "Close" }).click();
   await expect(dialog).toHaveCount(0);
   await trigger.click();
-  await expect(reference).toHaveText(String(issued[0].commandId));
+  await expect(reference).toHaveText(String(issued[0]!.commandId));
   await expect(dialog.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Create one-time link" })).toHaveCount(0);
   expect(await bodies(page, "create")).toEqual(issued);

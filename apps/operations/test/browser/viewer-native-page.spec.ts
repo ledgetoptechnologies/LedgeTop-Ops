@@ -157,6 +157,8 @@ for (const width of [320, 390]) test(`the 3D models page and attempt review fit 
         : processingRoutes(url, method, route));
   await mockViewer(context, { recovery: { "attempt-ben": true } });
   await page.goto("/viewer");
+  // Quick share is search-first: projects are listed only after typing.
+  await page.getByRole("searchbox", { name: "Search Viewer projects" }).fill("Seawall");
   await expect(page.getByRole("list", { name: "Viewer projects" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.goto("/operations/processing?attemptId=attempt-ben");
