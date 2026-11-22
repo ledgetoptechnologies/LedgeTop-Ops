@@ -4667,8 +4667,20 @@ function updateLoading(t, p, cancellable = false) {
   dom.loadingText.textContent = t;
   dom.loadingProgress.textContent = p || '';
   dom.loadingCancel.style.display = cancellable ? '' : 'none';
+  // A plain percentage also drives a slim bar that eases to the new value.
+  const bar = document.getElementById('loading-bar');
+  const percent = /^(\d+(?:\.\d+)?)%$/.exec(String(p || '').trim());
+  if (bar) {
+    bar.hidden = !percent;
+    if (percent) bar.style.setProperty('--loading-fraction', String(Math.min(100, Number(percent[1])) / 100));
+    else bar.style.removeProperty('--loading-fraction');
+  }
 }
-function hideLoading() { dom.loadingOverlay.classList.add('hidden'); dom.loadingCancel.style.display = 'none'; }
+function hideLoading() {
+  dom.loadingOverlay.classList.add('hidden'); dom.loadingCancel.style.display = 'none';
+  const bar = document.getElementById('loading-bar');
+  if (bar) { bar.hidden = true; bar.style.removeProperty('--loading-fraction'); }
+}
 let errorHideTimer = null;
 function hideError() {
   if (errorHideTimer) clearTimeout(errorHideTimer);

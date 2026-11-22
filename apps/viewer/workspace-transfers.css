@@ -1,1 +1,62 @@
-progress{width:100%;height:9px;accent-color:var(--orange)}.check{display:flex!important;grid-template-columns:auto 1fr!important;align-items:center;justify-content:flex-start}.check input{width:auto}.share-result{display:grid;grid-template-columns:1fr auto;gap:8px}.share-result input{min-width:0;border:1px solid var(--border);border-radius:8px;background:#0d0e12;color:var(--text);padding:10px}
+.check{display:flex!important;grid-template-columns:auto 1fr!important;align-items:center;justify-content:flex-start}.check input{width:auto}.share-result{display:grid;grid-template-columns:1fr auto;gap:8px}.share-result input{min-width:0;border:1px solid var(--border);border-radius:8px;background:#0d0e12;color:var(--text);padding:10px}
+
+/* Progress bars: a slim rounded track with an orange fill. Known progress shows its value (the
+   workspace motion module eases between values); unknown progress shows a calm sweep instead of
+   the browser's default stripes. */
+progress,.operation-progress progress,.task-output-status>progress,.import-progress progress{-webkit-appearance:none;appearance:none;display:block;width:100%;height:6px;border:0;border-radius:999px;overflow:hidden;background:#24262c;color:var(--orange)}
+progress::-webkit-progress-bar{border-radius:999px;background:#24262c}
+progress::-webkit-progress-value{border-radius:999px;background:linear-gradient(90deg,var(--orange),var(--orange-bright))}
+progress::-moz-progress-bar{border-radius:999px;background:linear-gradient(90deg,var(--orange),var(--orange-bright))}
+progress.motion-progress-tween{background:linear-gradient(90deg,var(--orange),var(--orange-bright)) left center/var(--motion-progress) 100% no-repeat #24262c}
+progress.motion-progress-tween::-webkit-progress-bar,progress.motion-progress-tween::-webkit-progress-value{background:transparent}
+progress.motion-progress-tween::-moz-progress-bar{background:transparent}
+progress:indeterminate,progress:indeterminate::-webkit-progress-bar{background:#24262c linear-gradient(90deg,rgba(238,80,7,0),rgba(255,107,36,.9) 50%,rgba(238,80,7,0)) no-repeat;background-size:40% 100%;animation:progress-sweep 1.8s cubic-bezier(.45,0,.55,1) infinite}
+progress:indeterminate::-moz-progress-bar{background:transparent}
+@keyframes progress-sweep{from{background-position:-70% 0}to{background-position:170% 0}}
+
+/* Background work page: compact, even rhythm. The search bar no longer touches the first card,
+   both cards share one heading style, and rows are tighter. Scoped to this page only. */
+#workspace-section:has(>.background-toolbar){display:grid;gap:12px}
+#workspace-section>.background-toolbar{margin:0}
+#workspace-section>.background-toolbar .project-search input{min-height:36px;padding:7px 12px}
+#workspace-section:has(>.background-toolbar)>.content-card{margin:0;padding:14px}
+#workspace-section:has(>.background-toolbar)>.content-card>.card-heading{gap:10px;margin-bottom:10px}
+#workspace-section:has(>.background-toolbar)>.content-card>.card-heading h2{margin:2px 0 0;font-size:16px}
+#workspace-section:has(>.background-toolbar) .operation-list{gap:6px}
+#workspace-section:has(>.background-toolbar) .operation-row{gap:6px;padding:10px 12px}
+#workspace-section:has(>.background-toolbar) .operation-heading small{margin-top:2px}
+#workspace-section:has(>.background-toolbar) .operation-progress{gap:10px}
+#workspace-section:has(>.background-toolbar) .operation-progress strong{min-width:64px;color:var(--muted);font-variant-numeric:tabular-nums}
+#workspace-section:has(>.background-toolbar) .operation-meta{flex-wrap:wrap;justify-content:flex-start;gap:4px 14px}
+#workspace-section:has(>.background-toolbar) .operation-failure{display:flex;align-items:center;justify-content:space-between;gap:10px}
+#workspace-section:has(>.background-toolbar) .operation-failure{padding-top:8px;border-top:1px solid #25272d}
+#workspace-section:has(>.background-toolbar) .operation-failure p{margin:0;color:#ffb3b3;font-size:12px}
+#workspace-section:has(>.background-toolbar) :is(.operation-failure,.background-list-actions) .secondary-button{flex:none;padding:6px 11px;font-size:13px;white-space:nowrap}
+#workspace-section:has(>.background-toolbar) .background-list-actions{margin-top:10px;justify-content:flex-start}
+#workspace-section:has(>.background-toolbar) .content-card>.form-note{margin:10px 0 0}
+#workspace-section:has(>.background-toolbar) .empty-state{padding:18px 12px}
+
+/* Background indicator: the icon turns slowly while work is running. */
+.background-work-indicator>span[aria-hidden]{display:inline-block}
+.background-work-indicator.has-active>span[aria-hidden]{color:var(--orange-bright);animation:background-work-turn 2.4s linear infinite}
+.background-work-indicator>strong{display:inline-block;font-variant-numeric:tabular-nums}
+@keyframes background-work-turn{to{transform:rotate(360deg)}}
+
+/* Rows the motion module is folding away after they left a list. */
+.motion-leaving{overflow:hidden;pointer-events:none}
+
+/* Quick, eased feedback on controls (colors and borders only; nothing that moves layout). */
+.primary-button,.secondary-button,.icon-button,.text-button,.quick-action,.provider-card,.provider-list-item,.import-tab,.gcp-candidate{transition:background-color .15s ease-out,border-color .15s ease-out,color .15s ease-out,box-shadow .15s ease-out}
+.workspace-modal[open]::backdrop{transition:opacity .2s ease-out}
+@starting-style{.workspace-modal[open]::backdrop{opacity:0}}
+
+@media(max-width:720px){
+  #workspace-section:has(>.background-toolbar)>.background-toolbar{flex-direction:row}
+  #workspace-section:has(>.background-toolbar)>.content-card{padding:12px}
+  #workspace-section:has(>.background-toolbar) .operation-failure{align-items:stretch;flex-direction:column}
+}
+@media(prefers-reduced-motion:reduce){
+  progress:indeterminate,progress:indeterminate::-webkit-progress-bar{animation:none;background:#24262c linear-gradient(90deg,rgba(255,107,36,.55),rgba(255,107,36,.55)) no-repeat;background-size:100% 100%;opacity:.6}
+  .background-work-indicator.has-active>span[aria-hidden]{animation:none}
+  .primary-button,.secondary-button,.icon-button,.text-button,.quick-action,.provider-card,.provider-list-item,.import-tab,.gcp-candidate,.workspace-modal[open]::backdrop{transition:none}
+}

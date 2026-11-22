@@ -34,6 +34,7 @@
     "express": "^4.19.2",
     "geotiff": "^3.0.5",
     "leaflet": "^1.9.4",
+    "motion": "14.9.1",
     "three": "0.185.1",
     "three-mesh-bvh": "^0.9.14",
     "unzipper": "^0.12.3"
