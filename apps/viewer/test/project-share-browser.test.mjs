@@ -308,10 +308,12 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     assert.equal(runtime.requests.slice(start).some(item => item.method !== 'GET'), false, 'Opening Share must remain read-only');
     runtime.holdClientRead = false;
     runtime.releaseClientRead(); runtime.releaseClientRead = null;
-    await waitFor(client, `document.querySelector('#client-grant-form') !== null`, `${viewport.name}: Operations client form did not load`);
+    // Operations refuses new legacy whole-project grants (410), so once the lookup settles the project
+    // dialog points to direct client shares and offers no legacy whole-project form.
+    await waitFor(client, `/New whole-project shares are direct client shares/.test(document.querySelector('[data-client-share-panel]')?.textContent || '')`, `${viewport.name}: Operations client access did not load`);
     assert.equal(await client.evaluate(`window.__legacyRow===document.querySelector('[data-action="revoke-project-share"]')`), true, 'Late client response must not replace legacy link controls');
-    assert.deepEqual(await client.evaluate(`(() => {const form=document.querySelector('#client-grant-form');return {whole:form.elements.wholeProject.checked,future:form.elements.includeFuturePublished.checked,download:form.elements.download.checked}})()`),
-      {whole:false,future:false,download:false}, 'Whole project and future client access require explicit opt-in');
+    assert.equal(await client.evaluate(`document.querySelector('#client-grant-form,[name="wholeProject"],[name="includeFuturePublished"]') === null`), true,
+      'Project dialog must not offer a legacy whole-project Operations grant');
     await client.evaluate(`document.querySelector('.modal-close').click()`);
     assert.equal(runtime.requests.slice(start).some(item => item.method !== 'GET'), false, 'Closing Share must not mutate access');
     await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
