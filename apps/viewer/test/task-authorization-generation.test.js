@@ -52,6 +52,21 @@ test('upgrade from 48 backfills every existing task, stamps 52 and new tasks sta
   applyMigrations(db); // idempotent re-run accepts the verified stamp
 });
 
+test('a database already at 83 without 52 gains 52 and keeps the 83 stamp', t => {
+  const db = fileDb(t, 'upgrade-83');
+  const all = [...MIGRATIONS];
+  useMigrations(t, all.filter(item => item.version !== 52));
+  applyMigrations(db);
+  seedTasks(db, ['task-1']);
+  assert.equal(db.prepare('SELECT 1 FROM schema_migrations WHERE version=52').get(), undefined);
+  MIGRATIONS.splice(0, MIGRATIONS.length, ...all);
+  applyMigrations(db);
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=52').get().name, 'task_authorization_generations');
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=83').get().name, 'provider_engine_processing_elapsed');
+  assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, 83);
+  assert.equal(generationOf(db, 'task-1'), 1);
+});
+
 test('52 refuses an install order without the 48 folder schema, and unstamped objects', t => {
   const without48 = fileDb(t, 'no48');
   useMigrations(t, [...MIGRATIONS].filter(item => item.version <= 42 || item.version === 52));

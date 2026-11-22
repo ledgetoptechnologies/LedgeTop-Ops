@@ -56,7 +56,7 @@ describe("staff access controls", () => {
 
   it("connects each visible admin toggle to the CSRF-protected API, while ordinary team viewers cannot mutate it", () => {
     expect(client).toContain("/access-controls");
-    expect(compactClient).toContain('api<{staff:any[]}>("/api/team/staff")');
+    expect(compactClient).toContain('api<{staff:any[];can_manage_staff?:boolean}>("/api/team/staff")');
     // The editor is offered only where the server says the route would accept the edit.
     expect(compactClient).toContain('session.user.isAdministrator&&person.id!==session.user.id&&person.access_controls_editable===true');
     expect(client).toContain("View all operations, projects, and tasks");

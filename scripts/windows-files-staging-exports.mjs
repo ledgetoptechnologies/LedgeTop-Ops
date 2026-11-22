@@ -11,7 +11,6 @@ export const WINDOWS_STAGING_EXPORT_POLICY = Object.freeze({
       'SharedProfilePortalIngress', 'StaffDirectory', 'ThumbnailRendererContainer', 'ViewerSessionIssuer',
     ]),
     helpers: Object.freeze([
-      'NATIVE_DIRECTORY_OUTBOX_CRON', 'NATIVE_DIRECTORY_RECONCILIATION_CRON', 'PROJECT_ALPHA_API_V2_MONITOR_CRON',
       'dispatchThumbnailRendererApi', 'projectAlphaProjectionApiRequest', 'runScheduledPrimaryProjectAlphaSync',
     ]),
   }),

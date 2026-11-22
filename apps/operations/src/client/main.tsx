@@ -7,7 +7,6 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import "./styles.css";
 import "./request-workflow.css";
 import { OperationsApp } from "./OperationsApp";
-import { ClientOnboardingStaff } from "./ClientOnboardingStaff";
 import { ClientPortalRecipientEnrollment } from "./ClientPortalRecipientEnrollment";
 import { OperationsNativeRecipientEnrollment } from "./OperationsNativeRecipientEnrollment";
 import { OperationsNativeDeliveryAuthority } from "./OperationsNativeDeliveryAuthority";
@@ -26,7 +25,6 @@ import { NATIVE_STAFF_ONBOARDING_PATH, parseNativeStaffInvitation } from "./nati
 
 installAccessAjax();
 
-const onboardingStaffRoute = window.location.pathname === "/administration/client-onboarding";
 const recipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/recipients";
 const operationsRecipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/operations-recipients";
 const operationsDeliveryAuthorityRoute = window.location.pathname === "/administration/client-portal/operations-delivery-authority";
@@ -67,6 +65,4 @@ createRoot(document.getElementById("root")!).render(<StrictMode>{staffOnboarding
   ? <OperationsNativeRecipientEnrollment />
   : recipientEnrollmentRoute
   ? <ClientPortalRecipientEnrollment />
-  : onboardingStaffRoute
-  ? <ClientOnboardingStaff />
   : <OperationsApp />}<AppDialogHost /><SessionEndedNotice /></StrictMode>);

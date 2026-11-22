@@ -2283,6 +2283,20 @@ const MIGRATIONS = [
   {version:52,name:'task_authorization_generations',sql:'SELECT 1;',
     after(database){migrateTaskAuthorizationGenerationsV52(database);},
     verify(database){return taskAuthorizationGenerationsV52Present(database);}},
+  {version:83,name:'provider_engine_processing_elapsed',sql:`
+    CREATE TABLE processing_attempt_engine_timing (
+      attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES processing_attempts(id) ON DELETE CASCADE,
+      provider_task_id TEXT NOT NULL,
+      elapsed_ms INTEGER NOT NULL CHECK(typeof(elapsed_ms)='integer' AND elapsed_ms BETWEEN 0 AND 9007199254740991),
+      terminal INTEGER NOT NULL CHECK(terminal IN (0,1))
+    );
+  `,verify(database){
+    const columns = database.prepare('PRAGMA table_info(processing_attempt_engine_timing)').all();
+    return JSON.stringify(columns.map(({name,type,notnull,pk})=>[name,type,notnull,pk]))===JSON.stringify([
+      ['attempt_id','TEXT',1,1],['provider_task_id','TEXT',1,0],['elapsed_ms','INTEGER',1,0],['terminal','INTEGER',1,0],
+    ]) && database.prepare('PRAGMA foreign_key_list(processing_attempt_engine_timing)').all()
+      .some(row=>row.table==='processing_attempts'&&row.from==='attempt_id'&&row.to==='id'&&row.on_delete==='CASCADE');
+  }},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;

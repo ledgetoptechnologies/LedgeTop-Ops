@@ -8,6 +8,7 @@ import { ApiError, api, setCsrf, setSessionActor } from "./api";
 import { createNativeTeamApi, NativeTeamApiError } from "./native-team-api";
 import { NativeTeamProfileEditor } from "./NativeTeamProfileEditor";
 import { NativeTeamLogsEligibility } from "./NativeTeamLogsEligibility";
+import { NativeTeamOperationsAccess } from "./NativeTeamOperationsAccess";
 import { NativeTeamUsernameEditor } from "./NativeTeamUsernameEditor";
 import { NativeTeamOnboardingPanel } from "./NativeTeamOnboardingPanel";
 import { OperationsViewerShell, parseOperationsViewerShellRoute, operationsViewerShellPath } from "./OperationsViewerShell";
@@ -26,6 +27,7 @@ import {
   canAccessDataPage,
   canonicalClientPath,
   deliverySectionPath,
+  CLIENT_ONBOARDING_PATH,
   operationsLandingPath,
   operationsSectionPath,
   pathDeliverySection,
@@ -53,6 +55,8 @@ import { SopLibrary } from "./SopLibrary";
 import { OperationsNotifications } from "./OperationsNotifications";
 import { OperationsFeedback } from "./OperationsFeedback";
 import { InvitationApprovals } from "./InvitationApprovals";
+import { ClientOnboardingStaff } from "./ClientOnboardingStaff";
+import { endpoint as onboardingStaffEndpoint, json as onboardingStaffJson, validSession as validOnboardingStaffSession } from "./onboarding-staff-api";
 import "./StaffInbox.css";
 import { loadInvitationAdministrationAccess, type InvitationAdministrationAccess } from "./invitation-administration-api";
 import { WorkContextSops } from "./WorkContextSops";
@@ -286,7 +290,10 @@ const destinationRequest = (action: string, count: number, prefix: string): Text
   confirmLabel: action === "move" ? "Move" : "Copy",
 });
 
+const ONBOARDING_ACCESS_UNAVAILABLE = "Client onboarding access could not be verified.";
+
 export function OperationsApp() {
+  const [onboardingReview, setOnboardingReview] = useState(() => location.pathname === CLIENT_ONBOARDING_PATH);
   const [viewerRoute, setViewerRoute] = useState(() => parseOperationsViewerShellRoute(location.pathname, location.search));
   const [session, setSession] = useState<Session | null>(null),
     [error, setError] = useState<StartupFailure | null>(null),
@@ -294,6 +301,7 @@ export function OperationsApp() {
     [mobileNavOpen, setMobileNavOpen] = useState(false),
     [manageOpen, setManageOpen] = useState(false),
     [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
+  const onboardingHeading = useRef<HTMLHeadingElement>(null);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null),
     mobileNavPanel = useRef<HTMLDivElement>(null),
     manageMenu = useRef<HTMLDivElement>(null),
@@ -312,6 +320,12 @@ export function OperationsApp() {
   };
   const normalizeLocation = (value: Session) => {
     setViewerRoute(parseOperationsViewerShellRoute(location.pathname, location.search));
+    const reviewing = location.pathname === CLIENT_ONBOARDING_PATH;
+    setOnboardingReview(reviewing);
+    if (reviewing) {
+      setPage("clients");
+      return;
+    }
     const requested = pathPage(location.pathname);
     const feedbackEnabled = value.capabilities?.clientFeedback?.enabled === true;
     const invitationReview = value.invitationAdministration?.enabled === true && value.invitationAdministration.canReview;
@@ -346,7 +360,22 @@ export function OperationsApp() {
   };
   useEffect(() => {
     const controller = new AbortController();
-    withStartupDeadline(signal => api<Session>("/api/session", {signal}), controller.signal)
+    const onboardingDeepLink = location.pathname === CLIENT_ONBOARDING_PATH;
+    withStartupDeadline(async signal => {
+      if (onboardingDeepLink) {
+        // Preserve the native onboarding gate before the general shell session,
+        // which may still perform first-login binding in legacy environments.
+        try {
+          const staff = await onboardingStaffJson(`${onboardingStaffEndpoint}/session`, {
+            method: "GET", signal, headers: { "X-Native-Staff-Request": "1" },
+          });
+          if (!validOnboardingStaffSession(staff)) throw Error();
+        } catch {
+          throw Error(ONBOARDING_ACCESS_UNAVAILABLE);
+        }
+      }
+      return api<Session>("/api/session", {signal});
+    }, controller.signal)
       .then(async (value) => {
         setCsrf(value.csrfToken);
         setSessionActor(value.user.id);
@@ -374,6 +403,9 @@ export function OperationsApp() {
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
   }, [session]);
+  useEffect(() => {
+    if (onboardingReview && session) onboardingHeading.current?.focus();
+  }, [onboardingReview, session]);
   useEffect(() => {
     if (!mobileNavOpen) return;
     const previousOverflow = document.body.style.overflow;
@@ -416,6 +448,7 @@ export function OperationsApp() {
     setViewerRoute(null);
     setPage(next);
     const target = href || (next === "dashboard" ? "/" : `/${next}`);
+    setOnboardingReview(target === CLIENT_ONBOARDING_PATH);
     // Choosing the page you are already on keeps its filters and scope in the address.
     if (location.pathname !== target) history.pushState(null, "", target);
     if (next === "operations" || next === "delivery" || next === "clients" || next === "notifications")
@@ -424,6 +457,12 @@ export function OperationsApp() {
     setManageOpen(false);
     window.scrollTo(0, 0);
   }
+  if (error?.message === ONBOARDING_ACCESS_UNAVAILABLE)
+    return <main className="onboarding-staff-gate"><Card>
+      <h1>Client onboarding unavailable</h1>
+      <p role="alert">{ONBOARDING_ACCESS_UNAVAILABLE}</p>
+      <a className="button button-ghost onboarding-staff-action" href="/">Return to Operations</a>
+    </Card></main>;
   if (error) return <SignInProblem failure={error} />;
   if (!session)
     return (
@@ -503,10 +542,12 @@ export function OperationsApp() {
       </div>}
       <main className={`ops-main${viewerRoute && page === "viewer" ? " ops-viewer-main" : ""}`}>
         <OperationsBreadcrumb groups={sidebarGroups} page={page} onNavigate={navigate} />
-        {!(viewerRoute && page === "viewer") && <PageHeading page={page} displayName={session.user.displayName} />}
+        {onboardingReview ? <h1 ref={onboardingHeading} tabIndex={-1}>Review submissions</h1>
+          : !(viewerRoute && page === "viewer") && <PageHeading page={page} displayName={session.user.displayName} />}
         {page === "dashboard" && <Dashboard {...props} onNavigate={navigate} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
-        {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage") || session.capabilities?.clientFeedback?.enabled === true || invitationReview) && (
+        {onboardingReview && <ClientOnboardingStaff />}
+        {!onboardingReview && page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage") || session.capabilities?.clientFeedback?.enabled === true || invitationReview) && (
           <ClientHubSurface session={session} />
         )}{" "}
         {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}
@@ -6540,6 +6581,98 @@ function StaffAccessEditor({
   </div>;
 }
 
+// A definite answer (4xx) ends a command; a network failure or 5xx leaves its result unknown,
+// so the command id is kept for a deliberate retry and nothing is retried automatically.
+const legacyStaffUncertain = (caught: unknown) => !(caught instanceof ApiError) || caught.status >= 500;
+
+function LegacyStaffAdd({ onChanged }: { onChanged: () => Promise<unknown> | void }) {
+  const [open, setOpen] = useState(false);
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [pending, setPending] = useState<{ commandId: string; key: string } | null>(null);
+  const submit = async (event: { preventDefault(): void }) => {
+    event.preventDefault();
+    if (busy) return;
+    const key = `${displayName.trim()}\n${email.trim().toLowerCase()}`;
+    const commandId = pending?.key === key ? pending.commandId : crypto.randomUUID();
+    setBusy(true); setMessage("");
+    try {
+      await api("/api/admin/staff", { method: "POST", body: JSON.stringify({ commandId, displayName, email }) });
+      setPending(null); setDisplayName(""); setEmail(""); setOpen(false);
+      setMessage("Staff member added.");
+    } catch (caught) {
+      if (legacyStaffUncertain(caught)) {
+        setPending({ commandId, key });
+        setMessage("Result unknown. Check the list before submitting again.");
+      } else { setPending(null); setMessage((caught as Error).message); }
+    } finally {
+      setBusy(false);
+      await onChanged();
+    }
+  };
+  return <Card title="Add staff member">
+    {open ? <form className="form-grid legacy-staff-add" onSubmit={(event) => void submit(event)}>
+      <label>Name<input required maxLength={200} value={displayName} disabled={busy} onChange={(event) => setDisplayName(event.target.value)} /></label>
+      <label>Email<input required type="email" maxLength={254} value={email} disabled={busy} onChange={(event) => setEmail(event.target.value)} /></label>
+      <div className="actions">
+        <button type="submit" className="button-orange button-small" disabled={busy}>{busy ? "Adding…" : "Add staff member"}</button>
+        <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+    </form> : <div className="actions"><button type="button" className="button-orange button-small" onClick={() => { setOpen(true); setMessage(""); }}>Add staff member</button></div>}
+    {message && <div className="notice" role="status">{message}</div>}
+  </Card>;
+}
+
+function LegacyStaffProfileControls({ person, onChanged }: { person: any; onChanged: () => Promise<unknown> | void }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(person.display_name as string);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const send = async (change: { displayName?: string; status?: "active" | "inactive" }) => {
+    if (busy) return;
+    setBusy(true); setMessage("");
+    try {
+      const result = await api<{ retained?: { roles: number; overrides: number; alternateLogins: number } }>(
+        `/api/admin/staff/${encodeURIComponent(person.id)}`, {
+          method: "PATCH", body: JSON.stringify({ expectedUpdatedAt: person.updated_at, ...change }) });
+      setEditing(false);
+      if (result.retained) setMessage(`Reactivated with ${result.retained.roles} role(s), ${result.retained.overrides} access setting(s) and ${result.retained.alternateLogins} other sign-in email(s).`);
+    } catch (caught) {
+      setMessage(legacyStaffUncertain(caught) ? "Result unknown. Check the list before trying again." : (caught as Error).message);
+    } finally {
+      setBusy(false);
+      await onChanged();
+    }
+  };
+  const active = person.status === "active";
+  const changeStatus = async () => {
+    if (busy) return;
+    const choice = await requestChoice<"confirm">(active
+      ? { title: `Deactivate ${person.display_name}?`, choices: [{ value: "confirm", label: "Deactivate", tone: "danger" }] }
+      : { title: `Reactivate ${person.display_name}?`,
+          description: "Their previous roles, access and sign-in emails come back with them.",
+          choices: [{ value: "confirm", label: "Reactivate", tone: "primary" }] });
+    if (choice === "confirm") await send({ status: active ? "inactive" : "active" });
+  };
+  return <div className="legacy-staff-profile">
+    {editing ? <form onSubmit={(event) => { event.preventDefault(); void send({ displayName: name }); }}>
+      <label>Name<input required maxLength={200} value={name} disabled={busy} onChange={(event) => setName(event.target.value)} /></label>
+      <div className="actions">
+        <button type="submit" className="button-orange button-small" disabled={busy}>Save name</button>
+        <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => setEditing(false)}>Cancel</button>
+      </div>
+    </form> : <div className="actions">
+      <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { setName(person.display_name); setEditing(true); }}>Edit name</button>
+      {(active || person.reactivate_requires_owner !== true) && <button type="button" className="button-ghost button-small" disabled={busy}
+        onClick={() => void changeStatus()}>
+        {active ? "Deactivate" : "Reactivate"}</button>}
+    </div>}
+    {message && <div className="notice" role="status">{message}</div>}
+  </div>;
+}
+
 function Team({ session }: { session: Session }) {
   const nativeApi = useMemo(() => createNativeTeamApi(), []);
   const native = useLoad(async () => {
@@ -6550,7 +6683,7 @@ function Team({ session }: { session: Session }) {
     }
   }, [nativeApi]);
   const { data, error, reload } = useLoad(
-    () => api<{ staff: any[] }>("/api/team/staff"),
+    () => api<{ staff: any[]; can_manage_staff?: boolean }>("/api/team/staff"),
     [],
   );
   const [busy, setBusy] = useState<string | null>(null);
@@ -6583,6 +6716,7 @@ function Team({ session }: { session: Session }) {
         ? <NativeTeamOnboardingPanel onChanged={reload} />
         : <div className="notice" role="status">Employee invitations are not enabled in this environment.</div>)}
       <ErrorLine error={error} />
+      {session.user.isAdministrator && data?.can_manage_staff === true && native.data?.ready === false && <LegacyStaffAdd onChanged={reload} />}
       <div className="card-grid">
         {data?.staff.map((person) => (
           <Card key={person.id}>
@@ -6605,10 +6739,18 @@ function Team({ session }: { session: Session }) {
               <h3>{person.display_name}</h3>
               <p>{person.email}</p>
               <small>{person.roles || "No inherited role"}</small>
+              {session.user.isAdministrator && person.id !== session.user.id && person.profile_editable === true
+                && <LegacyStaffProfileControls key={person.id} person={person} onChanged={reload} />}
               {native.data?.ready && <NativeTeamProfileEditor staffId={person.id}
                 protectedOwner={person.owner_role === true || person.id === "staff-beau-koltz"} onChanged={reload} />}
               {native.data?.ready && session.user.isAdministrator && <NativeTeamLogsEligibility staffId={person.id} />}
               {native.data?.ready && session.user.isAdministrator && <NativeTeamUsernameEditor staffId={person.id} />}
+              {/* Ops-onboarded hires (local, sync-protected, not an owner): the server decides per permission.
+                  Gated only by its own GET (hidden on 404), not by the native session. */}
+              {session.user.isAdministrator && person.id !== session.user.id
+                && person.provisioning_source === "local" && Number(person.sync_protected) === 1
+                && person.owner_role !== true
+                && <NativeTeamOperationsAccess staffId={person.id} name={person.display_name} />}
               {session.user.isAdministrator &&
               person.id !== session.user.id &&
               person.access_controls_editable === true ? (

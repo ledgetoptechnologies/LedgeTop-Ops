@@ -139,11 +139,15 @@ describe("team own-users: mounted Team API with real Access JWT and full local D
     // The fully "unchecked" administrator still administers access controls.
     const third = await person();
     expect((await putControls(otherAdmin, third.id, controls({ viewerAccess: true }))).status).toBe(200);
-    // And there is no route that writes staff rows or role assignments directly.
+    // The legacy staff writer never touches roles and refuses owners (full coverage in team-legacy-staff-management.test.ts).
     const csrf = await csrfToken(env(), { accessSubject: admin.subject } as StaffPrincipal);
     const headers = { "Cf-Access-Jwt-Assertion": await token(admin), Origin: origin, "Content-Type": "application/json", "X-CSRF-Token": csrf };
-    expect((await fetch(new Request(`${origin}/api/admin/staff`, { method: "POST", headers, body: "{}" }))).status).toBe(405);
-    expect((await fetch(new Request(`${origin}/api/admin/staff/${owner.id}`, { method: "PATCH", headers, body: "{}" }))).status).toBe(405);
+    expect((await fetch(new Request(`${origin}/api/admin/staff`, { method: "POST", headers, body: "{}" }))).status).toBe(400);
+    expect((await fetch(new Request(`${origin}/api/admin/staff/${owner.id}`, { method: "PATCH", headers,
+      body: JSON.stringify({ expectedUpdatedAt: "synthetic", status: "inactive" }) }))).status).toBe(409);
+    expect((await fetch(new Request(`${origin}/api/admin/staff/${otherAdmin.id}`, { method: "PATCH", headers,
+      body: JSON.stringify({ expectedUpdatedAt: "synthetic", role: "role-owner" }) }))).status).toBe(400);
+    expect(await db.prepare("SELECT status FROM staff_users WHERE id=?").bind(owner.id).first("status")).toBe("active");
   });
 
   it("R4: a protected (sync_protected) staff member's access controls cannot be changed, native rows included", async () => {

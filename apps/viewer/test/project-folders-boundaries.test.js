@@ -157,7 +157,7 @@ test('every folder route refuses unauthenticated, client-share and under-privile
     {route:base,method:'POST',body:{displayName:'Intruder'},permission:'viewer.projects.write'},
     {route:`${base}/${folder.id}`,method:'PATCH',body:{displayName:'Intruder'},permission:'viewer.projects.write'},
     {route:`${base}/${folder.id}`,method:'DELETE',permission:'viewer.projects.write'},
-    {route:`/api/v1/tasks/${task.id}/folder`,method:'PATCH',body:{folderId:folder.id},permission:'viewer.processing.write'},
+    {route:`/api/v1/tasks/${task.id}/folder`,method:'PATCH',body:{folderId:folder.id,expectedFolderId:null,expectedFolderRevision:0},permission:'viewer.processing.write'},
   ];
   const callers={
     none:{},
@@ -184,7 +184,7 @@ test('every folder route refuses unauthenticated, client-share and under-privile
   // Unknown or foreign identifiers return 404 rather than another project's data.
   const full={authorization:`Bearer ${token('full')}`},missing=crypto.randomUUID();
   assert.equal((await call(`/api/v1/projects/${missing}/folders`,'GET',undefined,full)).status,404);
-  assert.equal((await call(`/api/v1/tasks/${missing}/folder`,'PATCH',{folderId:null},full)).status,404);
+  assert.equal((await call(`/api/v1/tasks/${missing}/folder`,'PATCH',{folderId:null,expectedFolderId:null,expectedFolderRevision:0},full)).status,404);
   assert.equal((await call(`${base}/${missing}`,'DELETE',undefined,full)).status,404);
   assert.equal((await call(`/api/v1/tasks/${task.id}/folder`,'PATCH',{folderId:folder.id,projectId:missing},full)).status,400,'extra fields are rejected');
 });
