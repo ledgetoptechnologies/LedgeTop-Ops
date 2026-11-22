@@ -14,7 +14,8 @@ import { SqliteD1 } from "./d1-sqlite.mjs";
 export const fixtureDir = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(fixtureDir, "..", "..");
 export const PINNED_FILES = ["README.md", "contract.json", "seed-delivery.sql", "seed-ops.sql", "d1-sqlite.mjs",
-  "fixture-db.mjs", "fixture-db.d.mts", "ephemeral-access.mjs", "ephemeral-access.d.mts", "../../apps/operations/test/qa-sharing-698-contract.test.ts"];
+  "fixture-db.mjs", "fixture-db.d.mts", "ephemeral-access.mjs", "ephemeral-access.d.mts",
+  "seed-viewer.sql", "viewer-manifest.json", "viewer-readback.mjs", "viewer-readback.d.mts", "../../apps/operations/test/qa-sharing-698-contract.test.ts"];
 
 function migrations(directory) {
   const absolute = path.join(repoRoot, directory);
@@ -114,6 +115,8 @@ export function checkEntityConsistency() {
   const sources = {
     "seed-delivery.sql": readFileSync(path.join(fixtureDir, "seed-delivery.sql"), "utf8"),
     "seed-ops.sql": readFileSync(path.join(fixtureDir, "seed-ops.sql"), "utf8"),
+    "seed-viewer.sql": readFileSync(path.join(fixtureDir, "seed-viewer.sql"), "utf8"),
+    "viewer-manifest.json": readFileSync(path.join(fixtureDir, "viewer-manifest.json"), "utf8"),
     "contract.json (outside entities)": JSON.stringify(rest),
     "README.md": readFileSync(path.join(fixtureDir, "README.md"), "utf8"),
   };

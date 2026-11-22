@@ -11,7 +11,9 @@
 //    exactly those two URLs; any other network request fails the test);
 //  - the Client->Ops VIEWER_SESSION_ISSUER service binding is the real ViewerSessionIssuer
 //    entrypoint class, called in-process instead of over Workers RPC;
-//  - the external Viewer service client is a test double (the Viewer runtime is QA's).
+//  - the Viewer service calls (catalog, session, source-authorization revocation) are answered by
+//    the Viewer's own repository code over the seeded schema-83 Viewer database
+//    (qa/sharing-698/seed-viewer.sql via viewer-readback.mjs); only HTTP and service auth are skipped.
 import {readFileSync} from 'node:fs';
 import {afterAll,beforeAll,describe,expect,it,vi} from 'vitest';
 import {ViewerServiceError} from '@ltds/shared';
@@ -29,6 +31,7 @@ import {ViewerSessionIssuer} from '../src/worker/viewer-session-issuer-entrypoin
 import clientWorker from '../../client/src/worker/index';
 import {buildFixtureDatabases,checkEntityConsistency,checkProductPin} from '../../../qa/sharing-698/fixture-db.mjs';
 import {createEphemeralAccessSigner,mintFixtureAssertions} from '../../../qa/sharing-698/ephemeral-access.mjs';
+import {buildViewerDatabase,runViewerReadback,viewerServiceFromSeed} from '../../../qa/sharing-698/viewer-readback.mjs';
 
 type Expect={status:number;len?:Record<string,number>;equals?:Record<string,unknown>;matches?:Record<string,string>;absent?:string[]};
 type Case={id:string;area:string;actor:string|null;method:string;path:string;body?:unknown;idempotencyKey?:string;
@@ -60,17 +63,14 @@ function substitute(value:unknown):unknown{
 
 beforeAll(async()=>{
  const {delivery,ops}=buildFixtureDatabases();
- const {viewer,access,origins}=contract;
- boundary.catalog.mockImplementation(async(input:{projectId:string;taskId?:string})=>{
-  if(input.projectId!==viewer.project.id||(input.taskId&&input.taskId!==viewer.task.id))throw new ViewerServiceError('Not published','not_found');
-  return {schemaVersion:1,project:{id:viewer.project.id,displayName:viewer.project.displayName},nextCursor:null,
-   tasks:[{id:viewer.task.id,displayName:viewer.task.displayName,modelId:viewer.task.modelId,modelVersionId:viewer.task.modelVersionId,
-    modelTitle:viewer.task.displayName,publishedAt:'2026-11-01T00:00:00Z'}]};
- });
- boundary.createSession.mockImplementation(async()=>({grant:'qa698-viewer-session',grantExpiresAt:new Date(Date.now()+120_000).toISOString(),
-  sessionTtlSeconds:1800,redeemUrl:'https://viewer.example.test/redeem',embedUrl:'https://viewer.example.test/session'}));
- boundary.revoke.mockImplementation(async(input:{sourceAuthorization:{type:string;id:string;version:number}})=>
-  ({sourceAuthorization:input.sourceAuthorization,revokedGrants:1,revokedSessions:1}));
+ const {access,origins}=contract;
+ const viewerService=viewerServiceFromSeed(buildViewerDatabase());
+ const viewerCall=<T,>(call:()=>T):Promise<T>=>{try{return Promise.resolve(call());}catch(error){
+  const code=(error as {viewerCode?:string}).viewerCode;if(!code)throw error;
+  return Promise.reject(new ViewerServiceError((error as Error).message,code as never,code==='not_found'?404:409));}};
+ boundary.catalog.mockImplementation((input:Parameters<typeof viewerService.clientDeliveryCatalog>[0])=>viewerCall(()=>viewerService.clientDeliveryCatalog(input)));
+ boundary.createSession.mockImplementation((input:Parameters<typeof viewerService.createSession>[0])=>viewerCall(()=>viewerService.createSession(input)));
+ boundary.revoke.mockImplementation((input:Parameters<typeof viewerService.revokePublishedSessionSourceAuthorization>[0])=>viewerCall(()=>viewerService.revokePublishedSessionSourceAuthorization(input)));
 
  const signer=await createEphemeralAccessSigner();
  ({assertions}=await mintFixtureAssertions(signer));
@@ -129,6 +129,9 @@ describe('QA fixture #698 contract (qa/sharing-698/contract.json)',()=>{
  });
  it('uses one registered UUID per entity everywhere (seed, contract, README, signer inputs)',()=>{
   expect(checkEntityConsistency()).toEqual([]);
+ });
+ it('the Viewer side reads back from the schema-83 seed (catalog, publication, session authority)',()=>{
+  expect(runViewerReadback().failures).toEqual([]);
  });
  it('the contract case ids are unique',()=>{
   expect(contract.cases.length).toBeGreaterThan(40);

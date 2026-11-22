@@ -1,0 +1,47 @@
+{
+ "fixture": "QA fixture for #698 (not for merge): Viewer side",
+ "closed": true,
+ "viewerSchema": {
+  "version": 83,
+  "name": "provider_engine_processing_elapsed"
+ },
+ "storage": {
+  "root": "viewer-storage",
+  "note": "Each top-level directory is a Viewer storage root key; mount viewer-storage/models as the Viewer models root."
+ },
+ "entities": {
+  "project": "d0bb7e0a-f09c-48a4-8098-373b90b754df",
+  "task": "54a404cf-93ba-4bfa-88d3-1a53d11647e0",
+  "model": "c46ec866-c9ac-40e9-bdfd-fe884cf2f525",
+  "modelVersion": "fe118cb6-5aec-4674-8e83-458c21d872db",
+  "attempt": "b2ab737d-540b-45de-9ff8-b887af68ca07",
+  "dataset": "14729053-58d0-45fa-ab51-b8469b0b3559",
+  "provider": "67413c5d-3f8c-403a-a665-e4eba38544a5",
+  "glbAsset": "aed6b432-cd90-438b-8104-8a74bc4719d6"
+ },
+ "files": [
+  {
+   "path": "viewer-storage/models/54a404cf-93ba-4bfa-88d3-1a53d11647e0/b2ab737d-540b-45de-9ff8-b887af68ca07.v2/source/odm_texturing/odm_textured_model_geo.glb",
+   "rootKey": "models",
+   "relativePath": "54a404cf-93ba-4bfa-88d3-1a53d11647e0/b2ab737d-540b-45de-9ff8-b887af68ca07.v2/source/odm_texturing/odm_textured_model_geo.glb",
+   "bytes": 136,
+   "sha256": "10a5dbf48f247640a5382c3b60d61096073cb8c5d1250f21253d30057583d378",
+   "asset": "viewer.asset.glb",
+   "contentType": "model/gltf-binary"
+  }
+ ],
+ "sources": [
+  {
+   "path": "seed-viewer.sql",
+   "bytes": 7717,
+   "sha256": "e1c0baf3777e6e2a84e8383716c4ba629ee4d7a5ed33e0eebb35c92703f24783",
+   "normalization": "LF"
+  },
+  {
+   "path": "viewer-readback.mjs",
+   "bytes": 18345,
+   "sha256": "623e5094c4d7babd2f9e40265a9c9bb405f254e2f7c85b74e66011c223145bbc",
+   "normalization": "LF"
+  }
+ ]
+}

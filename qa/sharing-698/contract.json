@@ -55,7 +55,12 @@
   "viewer.project": "d0bb7e0a-f09c-48a4-8098-373b90b754df",
   "viewer.task": "54a404cf-93ba-4bfa-88d3-1a53d11647e0",
   "viewer.model": "c46ec866-c9ac-40e9-bdfd-fe884cf2f525",
-  "viewer.modelVersion": "fe118cb6-5aec-4674-8e83-458c21d872db"
+  "viewer.modelVersion": "fe118cb6-5aec-4674-8e83-458c21d872db",
+  "viewer.dataset": "14729053-58d0-45fa-ab51-b8469b0b3559",
+  "viewer.provider": "67413c5d-3f8c-403a-a665-e4eba38544a5",
+  "viewer.attempt": "b2ab737d-540b-45de-9ff8-b887af68ca07",
+  "viewer.asset.glb": "aed6b432-cd90-438b-8104-8a74bc4719d6",
+  "viewer.audit.publish": "490d4a3c-905e-4072-a3a6-eea5ef457923"
  },
  "access": {
   "clientIssuer": "https://clients-access.example.test",

@@ -4,7 +4,8 @@ This is a source-only handoff for staging QA of the sharing composition in #698.
 
 Codex's QA owns the private launcher, signer custody, the runtime and staff admission. This folder supplies only:
 - the inputs;
-- a disposable seed;
+- a disposable seed for Ops and Client;
+- a disposable schema-83 Viewer catalog and asset seed, with a closed storage manifest and an offline readback;
 - an in-process ephemeral test signer;
 - the expected results.
 
@@ -65,6 +66,58 @@ What the seeds create (all names invented, all mail on `example.test`):
 - **Staff** (OPS_DB). See the authorization model below.
 - **Source authority**: a private-ingress pin `pa_portal_primary_private_authority('project-alpha:primary','qa698-portal-app')`. Both workspaces are unclaimed native workspaces read through it.
 - **No Viewer direct grants.** The contract creates and revokes the one grant itself.
+
+## Viewer side (schema 83)
+
+A third disposable database: a fresh Viewer SQLite file, built by the Viewer's own migrations (`apps/viewer/server/database.js`, head 83 `provider_engine_processing_elapsed`), then `seed-viewer.sql`. Mount `viewer-storage/models/` as the Viewer's `models` storage root. The seed adds rows only, and the Viewer schema is unchanged.
+
+`seed-viewer.sql` publishes one task, using the four registered Viewer UUIDs plus five more Viewer-side entities:
+
+| Entity | Row |
+|---|---|
+| `viewer.project` | `projects`: active, "Boundary survey (QA)" |
+| `viewer.task` | `processing_tasks`: published, `published_model_id` = `viewer.model`, `active_attempt_id` = `viewer.attempt` |
+| `viewer.model` | `models`: provider `ltds-processing`, `provider_model_id` = `viewer.task`, ready, `active_version_id` = `viewer.modelVersion` |
+| `viewer.modelVersion` | `model_versions`: ready, `provider_version_id` = `viewer.attempt`. Also `model_outputs.id`: published, managed v2 layout `<task>/<attempt>.v2` under root `models`. |
+| `viewer.attempt` | `processing_attempts`: published, result = the model and version, dataset = `viewer.dataset` |
+| `viewer.dataset` | `datasets`: finalized, managed, no files |
+| `viewer.provider` | `processing_providers`: `nodeodm`, disabled, `https://nodeodm.example.test` |
+| `viewer.asset.glb` | `model_assets`: kind `glb`, published, hash-pinned; its file is `viewer-storage/models/<task>/<attempt>.v2/source/odm_texturing/odm_textured_model_geo.glb` |
+| `viewer.audit.publish` | `audit_events`: `processing_attempt.published` by `staff.admin` |
+
+`seed-viewer.sql` comes in two parts:
+- **Part 1** is the ready-for-review state the Viewer's ingest leaves.
+- **Part 2** is exactly the writes of `ProcessingRepository.publishAttemptInTransaction(attempt, ['glb'])`, in its order.
+
+The readback replays Part 1 through the real function and requires the same rows.
+
+**`viewer-manifest.json` is closed:**
+- every file under `viewer-storage/` (path, storage root, relative path, bytes, SHA-256, owning asset);
+- `seed-viewer.sql` and `viewer-readback.mjs` (bytes and SHA-256 after LF normalisation).
+
+The readback fails on any extra, missing or changed file.
+
+**Offline readback:** `node qa/sharing-698/viewer-readback.mjs` (after `npm ci` in `apps/viewer`). It uses an in-memory database, the Viewer's own repository code, and no listener, network or Viewer runtime. It checks:
+- schema 83 and the seed;
+- the manifest and the asset rows;
+- that the publication equals the product publish path;
+- the catalog behind `GET /api/v1/client-delivery-catalog` (project page at the route default of 50 and the Ops default of 25, and the exact task at limit 1), plus `/client-delivery-projects`;
+- an unknown task or project returns 404;
+- the session authority behind `POST /api/v1/models/:id/sessions`: a ready model at the registered version, a `direct_client_grant` grant is created, and an inactive version is refused (409);
+- `DELETE /api/v1/published-sessions/source-authorization` revokes that grant (revokedGrants 1), after which the grant no longer redeems and a new session is refused (409).
+
+The Viewer lookups each contract case depends on (printed by the readback; the other 41 cases never reach the Viewer):
+
+| Case | Viewer calls |
+|---|---|
+| C4 create, C6 duplicate | catalog(project, limit 25) |
+| R1 signed read | catalog(project, limit 25) |
+| R2 session | catalog(project, task, limit 1); POST session with `direct_client_grant`; catalog(project, task, limit 1) |
+| V3 revoke | DELETE source-authorization with `direct_client_grant` |
+
+Gaps, stated plainly:
+- **Minimal asset closure.** The model is minimal: one published GLB whose scene is empty. There is no EPT, orthophoto, OBJ/MTL/texture closure, LOD derivatives or processing provenance. A real processing run would have them, and the catalog and session routes don't read them. A redeemed session would open an empty model.
+- **No service auth offline.** The Viewer's HTTP layer and service authentication (`SERVICE_AUTH_*`) are not exercised offline. Ops reaches the Viewer through its normal service binding in the QA runtime.
 
 ## Authorization model
 
@@ -129,7 +182,7 @@ Values are invented. Secrets are generated fresh by the launcher and never commi
 
 1. A private launcher that starts Ops, Client and Viewer from the pins above against the two disposable databases, plus custody of the in-process signer's JWKS and assertions.
 2. **Staff admission**, only if the QA environment enables native admission (see the authorization model).
-3. **A Viewer instance** that has published project `viewer.project` ("Boundary survey (QA)") with one task `viewer.task` ("Boundary survey model (QA)", model `viewer.model`), and that accepts session creation and source-authorization revocation from Ops.
+3. **A Viewer instance** built from the product commit on a fresh database. Apply the Viewer migrations (schema 83), then `seed-viewer.sql`, and mount `viewer-storage/models/` (checked against `viewer-manifest.json`) as its `models` root. It must be reachable from Ops through the normal Viewer service binding and service credentials, which are the launcher's.
 4. **Isolation:** no live shares and no real clients, staff or keys. Tear everything down after the run.
 
 ## Contract
@@ -213,7 +266,9 @@ The cases cover:
   - Nothing in the authorization path is injected. The only stand-ins are what the runtime or launcher supplies:
     - the two Access certificate URLs serve this run's public JWKS (any other network request fails the test);
     - the Client → Ops service binding is the real `ViewerSessionIssuer` entrypoint, called in-process instead of over Workers RPC;
-    - the external Viewer service is a test double.
+    - the Viewer service calls are answered by the Viewer's own repository code over the seeded schema-83 Viewer database (`viewerServiceFromSeed` in `viewer-readback.mjs`). Only the Viewer's HTTP layer and service auth are skipped.
+  - The same run includes the full Viewer readback.
+- **Viewer readback:** `node qa/sharing-698/viewer-readback.mjs` (see "Viewer side").
 
 ## Entities
 
@@ -273,6 +328,11 @@ The cases cover:
 | `viewer.task` | `54a404cf-93ba-4bfa-88d3-1a53d11647e0` |
 | `viewer.model` | `c46ec866-c9ac-40e9-bdfd-fe884cf2f525` |
 | `viewer.modelVersion` | `fe118cb6-5aec-4674-8e83-458c21d872db` |
+| `viewer.dataset` | `14729053-58d0-45fa-ab51-b8469b0b3559` |
+| `viewer.provider` | `67413c5d-3f8c-403a-a665-e4eba38544a5` |
+| `viewer.attempt` | `b2ab737d-540b-45de-9ff8-b887af68ca07` |
+| `viewer.asset.glb` | `aed6b432-cd90-438b-8104-8a74bc4719d6` |
+| `viewer.audit.publish` | `490d4a3c-905e-4072-a3a6-eea5ef457923` |
 
 ## Digests
 
@@ -280,13 +340,17 @@ SHA-256, with line endings normalised to LF. `README.md` is hashed with its own 
 
 | File | SHA-256 |
 |---|---|
-| `README.md` | `33f908b1c19fbcb8bd0c6aac115bbf55296fc78834376617454f73cf37f18c4b` |
-| `contract.json` | `c8b66249e4a2222aead1bf31f0b7135421067f2d1b2d100e09820f83eef0e087` |
+| `README.md` | `77d7303753a28f1c81a1925442f8a51b36dc9d5ea33a0a75b42dcb74f3bb13e1` |
+| `contract.json` | `440ac420a94b765a78e7661b51f0610ef4be651c1c032378798e7c1f12bab2fd` |
 | `seed-delivery.sql` | `677cda97aa26c87ae64f58ab51c96c81adcbe7099a2da76f76f5800d94acae06` |
 | `seed-ops.sql` | `13403e54b6efef6ecab02d584cede8de92e8c2aa8a91cd97dd1b306b55fa20d1` |
 | `d1-sqlite.mjs` | `7d1b3fe633f0cf995f64fd7a3d13353766472ee30e235e732a1ba2ec2c121229` |
-| `fixture-db.mjs` | `a48d655869599e5f05b776188c9400495d20e349bef46bb4098fe81654f43bd5` |
+| `fixture-db.mjs` | `d339bcdf877c9ee4acf42a14d8a1571b0f81f853aa8b961116a24932b4d82648` |
 | `fixture-db.d.mts` | `e932f1b662a30da6a3c391e4118ac8587755158abd12a8a4586a09aeebfcc758` |
 | `ephemeral-access.mjs` | `33683c82305276135e4ff92defd5e2684c082ef1baff0c0da96a31c6d66636fc` |
 | `ephemeral-access.d.mts` | `85a7e709f85badcfe43b5ee26f6312c3f73d201b5fceb90d5a9d09d2752c1026` |
-| `../../apps/operations/test/qa-sharing-698-contract.test.ts` | `7a869bc287ce248a24ef36fe94e9dcfc93d5375d10e59c7eaa16c58fa2273534` |
+| `seed-viewer.sql` | `e1c0baf3777e6e2a84e8383716c4ba629ee4d7a5ed33e0eebb35c92703f24783` |
+| `viewer-manifest.json` | `4df4181092dfb43ded3fa80063bde9f21a0df3b70e7006fac67b1da42ac218d4` |
+| `viewer-readback.mjs` | `623e5094c4d7babd2f9e40265a9c9bb405f254e2f7c85b74e66011c223145bbc` |
+| `viewer-readback.d.mts` | `38cd762c4e42a0b1eb911391c7dbe679f85a1a67d46e48d103faef5d59924748` |
+| `../../apps/operations/test/qa-sharing-698-contract.test.ts` | `e4e275c46c198c3e82db6edbecbcb80c7891cb3d9d0b79d148f3562e01d7014a` |
