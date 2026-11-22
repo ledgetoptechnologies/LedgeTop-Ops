@@ -67,7 +67,8 @@ test('a task moves to another project with its dataset, outputs and folder, audi
   // Undo is actor-scoped, needs no new confirmation and restores the original project and folder.
   assert.throws(()=>processing.moveTaskToProject(task.id,source.id,sourceFolder.id,'someone-else',guardFor(moved,{undo:true})),{code:'task_move_undo_conflict'});
   assert.throws(()=>processing.moveTaskToProject(task.id,source.id,null,'staff',guardFor(moved,{undo:true})),{code:'task_move_undo_conflict'});
-  const restored=processing.moveTaskToProject(task.id,source.id,sourceFolder.id,'staff',guardFor(moved,{undo:true,canChangePublished:true}));
+  assert.throws(()=>processing.moveTaskToProject(task.id,source.id,sourceFolder.id,'staff',guardFor(moved,{undo:true,canChangePublished:true})),{code:'sharing_change_unconfirmed'});
+  const restored=processing.moveTaskToProject(task.id,source.id,sourceFolder.id,'staff',guardFor(moved,{undo:true,canChangePublished:true,confirmSharingChange:true}));
   assert.equal(restored.projectId,source.id);assert.equal(restored.folderId,sourceFolder.id);assert.equal(restored.undoExpiresAt,undefined);
   assert.equal(processing.getDataset(task.datasetId).projectId,source.id);assert.equal(processing.getModelOutput(output).projectId,source.id);
   assert.throws(()=>processing.moveTaskToProject(task.id,target.id,null,'staff',guardFor(restored,{undo:true})),{code:'task_move_undo_conflict'},'an Undo cannot be undone');
@@ -131,7 +132,7 @@ test('a moved task leaves the old project shares and appears through the new pro
   if(modelLink)assert.equal(repository.getPublicShare(modelLink.id).revokedAt,null);
 });
 
-test('Undo of a project move rechecks publish permission and reuses confirmation only for the same exposure',t=>{
+test('Undo of a published project move rechecks publish permission and always needs a fresh confirmation',t=>{
   const f=fixture(t),{processing,repository,database,source,target}=f;
   const snapshot=taskId=>({task:(({projectId,folderId,folderRevision})=>({projectId,folderId,folderRevision}))(processing.getTask(taskId)),
     audits:database.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE entity_id=? AND action='processing_task.project_changed'").get(taskId).n});
@@ -155,13 +156,15 @@ test('Undo of a project move rechecks publish permission and reuses confirmation
   const moved=processing.moveTaskToProject(task.id,target.id,null,'staff',guardFor(task,{confirmSharingChange:true,canChangePublished:true}));
   const undo=extra=>()=>processing.moveTaskToProject(task.id,source.id,null,'staff',guardFor(moved,{undo:true,...extra}));
   refusedUnchanged(task.id,undo({}),'publish_permission_required');
-  // The same actor with current publish scope reverses the identical exposure without confirming again.
-  const restored=undo({canChangePublished:true})();
+  refusedUnchanged(task.id,undo({confirmSharingChange:true}),'publish_permission_required');
+  // Even an unchanged exposure is not taken on trust: a published Undo must confirm again.
+  refusedUnchanged(task.id,undo({canChangePublished:true}),'sharing_change_unconfirmed');
+  const restored=undo({canChangePublished:true,confirmSharingChange:true})();
   assert.equal(restored.projectId,source.id);
   const audit=JSON.parse(database.prepare("SELECT details_json FROM audit_events WHERE entity_id=? AND action='processing_task.project_changed' ORDER BY rowid DESC LIMIT 1").get(task.id).details_json);
   assert.equal(audit.undo,true);assert.equal(audit.sharingChangeConfirmed,true);
 
-  // (c) The exposure changed after the forward move: a new live share on the destination needs a fresh confirmation.
+  // (c) The exposure changed after the forward move: still a fresh confirmation, and nothing else is accepted.
   const second=processing.getTask(task.id);
   const again=processing.moveTaskToProject(task.id,target.id,null,'staff',guardFor(second,{confirmSharingChange:true,canChangePublished:true}));
   repository.createProjectShare({projectId:target.id,publicIdHash:crypto.randomBytes(32).toString('hex'),permissions:{view:true}});

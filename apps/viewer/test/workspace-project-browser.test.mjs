@@ -1179,8 +1179,12 @@ test('Move to… picks a project, then a folder, and drag offers other projects 
     assert.equal(before.projectId,'project-quarry');assert.equal(before.folderId,quarryFolder.id);assert.equal(processing.getDataset('dataset-johnson').projectId,'project-quarry');
     const moves=runtime.requests.filter(request=>request.path==='/api/v1/tasks/task-johnson/project');
     assert.deepEqual(moves.map(request=>request.body),[{projectId:'project-quarry',folderId:quarryFolder.id,expectedProjectId:'project-johnson',expectedFolderId:null,expectedFolderRevision:0,confirmSharingChange:true}]);
-    await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
+    // The fixture output is published, so Undo asks the same sharing question before it sends a confirmed request.
+    const beforeUndo=runtime.requests.length;
+    await confirmAppAction(client,runtime,'#workspace-folder-undo button',{title:'Move published task back'});
     await waitFor(client,`Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'Undo did not bring the task back');
+    assert.deepEqual(runtime.requests.slice(beforeUndo).filter(request=>request.path==='/api/v1/tasks/task-johnson/project').map(request=>request.body),
+      [{projectId:'project-johnson',folderId:null,expectedProjectId:'project-quarry',expectedFolderId:quarryFolder.id,expectedFolderRevision:1,undo:true,confirmSharingChange:true}]);
     assert.equal(processing.getTask('task-johnson').projectId,'project-johnson');assert.equal(processing.getTask('task-johnson').folderId,null);
     // Dragging offers other projects; dropping on one opens the picker on that project.
     await waitFor(client,`!document.querySelector('#workspace').hasAttribute('aria-busy')`,'workspace stayed busy');

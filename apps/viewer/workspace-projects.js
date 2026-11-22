@@ -1073,7 +1073,7 @@ async function moveProjectTask(task,projectId,folderId,receipt,{undo=false,confi
   if(!viewProjectId||!canMoveTaskAcrossProjects()||task.status==='archived'||!Number.isSafeInteger(task.folderRevision)||projectId===task.projectId)return;
   const authorized=folderAuthorizationGuard(viewProjectId,'viewer.processing.write',false);
   const current=()=>authorized()&&originActive()&&canMoveTaskAcrossProjects()&&state.tasks.some(value=>value.id===task.id&&value.projectId===task.projectId&&value.status!=='archived');
-  const body={projectId,folderId,expectedProjectId:task.projectId,expectedFolderId:task.folderId??null,expectedFolderRevision:task.folderRevision,...(undo?{undo:true}:{confirmSharingChange})};
+  const body={projectId,folderId,expectedProjectId:task.projectId,expectedFolderId:task.folderId??null,expectedFolderRevision:task.folderRevision,...(undo?{undo:true}:{}),confirmSharingChange};
   const destination=state.projects.find(project=>project.id===projectId)?.displayName||'the other project';
   let moved=null;
   const result=await mutateFolder(viewProjectId,`/api/v1/tasks/${encodeURIComponent(task.id)}/project`,folderRequestOptions('PATCH',body,receipt),
@@ -1095,7 +1095,16 @@ async function moveProjectTask(task,projectId,folderId,receipt,{undo=false,confi
       const previousProjectId=task.projectId,previousFolderId=task.folderId??null,updated=moved.updated;
       offerMoveUndo(`Task moved to ${destination}`,moved.undoExpiresAt,moved.serverTime,
         ()=>canMoveTaskAcrossProjects()&&state.tasks.some(value=>value.id===updated.id&&value.projectId===updated.projectId&&value.folderRevision===updated.folderRevision),
-        ()=>moveProjectTask(updated,previousProjectId,previousFolderId,{}, {undo:true}));
+        async()=>{
+          // Moving a published task back changes its audience again, so Undo asks the same question as the move.
+          let confirmSharingChange=false;
+          if(taskHasPublishedOutput(updated)){
+            const origin=state.projects.find(project=>project.id===previousProjectId)?.displayName||'the previous project';
+            if(!await dialogs.confirm(`This task is published. Moving it back to ${origin} removes it from the shares of ${destination} and shows it to clients of ${origin}.`,{title:'Move published task back',submitLabel:'Move back'}))return;
+            confirmSharingChange=true;
+          }
+          return moveProjectTask(updated,previousProjectId,previousFolderId,{}, {undo:true,confirmSharingChange});
+        });
     }
   }
   scheduleProjectRefresh(0);
