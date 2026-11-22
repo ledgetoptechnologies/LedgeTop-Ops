@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 
-export const APPROVED_SOURCE_COMMIT = '1e09732cf4c8f863800cde3cc0ebbedd5a72a2ca';
-export const RECONCILIATION_MANIFEST_SHA256 = '33f661636025c8432aa862b158703df9053f79ca7532813cea0e23cc3c181faa';
-export const APPEND_PLAN_SHA256 = '142ccefd193341dafb0796fa046ecd7f559d9ab6af6f70217f9a52043a16685d';
+export const APPROVED_SOURCE_COMMIT = 'e191147d28ceee64622e13265c017d77b1bd9691';
+export const RECONCILIATION_MANIFEST_SHA256 = '07f38c53f6627f35f160765e57fdeb3da470fb35d7129003b734b559bb0285a6';
+export const APPEND_PLAN_SHA256 = 'a8ce124b87985f1dd7251bf34ec32cd740b4debb3ac54cbdc4796a9c776791fa';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OID = /^[a-f0-9]{40}$/u;
@@ -11,7 +11,7 @@ const DATABASE_IDS = Object.freeze({
   operations: '6ebf7514-d306-4615-ae56-ad869c874dbd',
   client: '7f40a7b7-c3ec-470e-a626-e798867f71f8',
 });
-const EXPECTED_COUNTS = Object.freeze({ operations: { base: 221, append: 10, source: 231 }, client: { base: 158, append: 4, source: 160 } });
+const EXPECTED_COUNTS = Object.freeze({ operations: { base: 226, append: 10, source: 236 }, client: { base: 158, append: 4, source: 160 } });
 
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }

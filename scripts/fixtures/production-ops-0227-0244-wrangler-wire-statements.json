@@ -1,0 +1,1035 @@
+{
+  "schemaVersion": 1,
+  "contract": "production-ops-0227-0244-wrangler-wire-v1",
+  "wranglerVersion": "4.118.0",
+  "wranglerCliSha256": "a1a7a98e0b073d39dc3229b1b89f66accb51ae557fb34552250f914f12a81efd",
+  "priorLedger": {
+    "count": 226,
+    "lastMigration": "0226_staff_login_bindings.sql",
+    "namesSha256": "cfbd55059a5e08b52809561c0b466eb59e1e90adeb56f7421627fcf4a57e01e2"
+  },
+  "finalLedger": {
+    "count": 236,
+    "lastMigration": "0244_staff_operations_access_writer.sql",
+    "namesSha256": "f06a64313acf8c1efc046133e59d9dde5a15a7c5a40bd0eba80fb73c679db422"
+  },
+  "files": [
+    {
+      "order": 1,
+      "name": "0227_owner_intel_reads.sql",
+      "ledgerId": 227,
+      "sourceSha256": "7e0d5efb1fdd99020b9f49292aa3fc06231c2ebabc99828c58a8959f8b06ece9",
+      "splitterOutputStatementCount": 13,
+      "setupStatements": [
+        "PRAGMA foreign_keys = ON"
+      ],
+      "statementCount": 12,
+      "statementsSha256": "53aa4c81441a3a97a0d2c305492e49e573eec22d18f8e3e1c4d58fb07ebe25c6",
+      "expectedAddedObjects": [
+        {
+          "type": "table",
+          "name": "owner_intel_bindings",
+          "tbl_name": "owner_intel_bindings"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_business_aliases",
+          "tbl_name": "owner_intel_business_aliases"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_businesses",
+          "tbl_name": "owner_intel_businesses"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_competitor_projections",
+          "tbl_name": "owner_intel_competitor_projections"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_control",
+          "tbl_name": "owner_intel_control"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_read_grants",
+          "tbl_name": "owner_intel_read_grants"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_alias_identity",
+          "tbl_name": "owner_intel_business_aliases"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_alias_retained",
+          "tbl_name": "owner_intel_business_aliases"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_binding_identity",
+          "tbl_name": "owner_intel_bindings"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_projection_immutable",
+          "tbl_name": "owner_intel_competitor_projections"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_projection_retained",
+          "tbl_name": "owner_intel_competitor_projections"
+        }
+      ],
+      "expectedAddedObjectCount": 11,
+      "expectedAddedSchemaSha256": "28af4025af4bb1d954d06e71a73c5e3a4fd991758f6427449010c5d8c4a76464",
+      "expectedNewTableRows": {
+        "owner_intel_bindings": 0,
+        "owner_intel_business_aliases": 0,
+        "owner_intel_businesses": 0,
+        "owner_intel_competitor_projections": 0,
+        "owner_intel_control": 1,
+        "owner_intel_read_grants": 0
+      },
+      "statements": [
+        "CREATE TABLE owner_intel_control (\n singleton INTEGER PRIMARY KEY CHECK(singleton=1),\n schema_version INTEGER NOT NULL CHECK(schema_version=1),\n enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN(0,1)),\n storage_accepted INTEGER NOT NULL DEFAULT 0 CHECK(storage_accepted IN(0,1)),\n CHECK(enabled=0 OR storage_accepted=1)\n)",
+        "INSERT INTO owner_intel_control(singleton,schema_version) VALUES(1,1)",
+        "CREATE TABLE owner_intel_businesses (\n business_id TEXT PRIMARY KEY NOT NULL CHECK(length(business_id) BETWEEN 1 AND 191),\n display_name TEXT NOT NULL CHECK(length(display_name) BETWEEN 1 AND 200),\n version INTEGER NOT NULL DEFAULT 1 CHECK(version>=1),\n status TEXT NOT NULL CHECK(status IN('reviewed','retired'))\n)",
+        "CREATE TABLE owner_intel_business_aliases (\n route_key TEXT PRIMARY KEY NOT NULL CHECK(length(route_key) BETWEEN 1 AND 64 AND route_key NOT GLOB '*[^a-z0-9-]*'),\n business_id TEXT NOT NULL REFERENCES owner_intel_businesses(business_id) ON DELETE RESTRICT,\n status TEXT NOT NULL CHECK(status IN('active','retired'))\n)",
+        "CREATE TABLE owner_intel_read_grants (\n grant_id TEXT PRIMARY KEY NOT NULL,\n staff_id TEXT NOT NULL REFERENCES staff_users(id) ON DELETE RESTRICT,\n business_id TEXT NOT NULL REFERENCES owner_intel_businesses(business_id) ON DELETE RESTRICT,\n permission_key TEXT NOT NULL CHECK(permission_key='intel.owner.read'),\n effect TEXT NOT NULL CHECK(effect IN('allow','deny')),\n active INTEGER NOT NULL DEFAULT 1 CHECK(active IN(0,1)),\n UNIQUE(staff_id,business_id,effect)\n)",
+        "CREATE TRIGGER owner_intel_alias_identity BEFORE UPDATE ON owner_intel_business_aliases\nWHEN NEW.route_key IS NOT OLD.route_key OR NEW.business_id IS NOT OLD.business_id\n OR (OLD.status='retired' AND NEW.status<>'retired')\nBEGIN SELECT RAISE(ABORT,'owner_intel_alias_identity_immutable'); END",
+        "CREATE TRIGGER owner_intel_alias_retained BEFORE DELETE ON owner_intel_business_aliases\nBEGIN SELECT RAISE(ABORT,'owner_intel_alias_retained'); END",
+        "CREATE TABLE owner_intel_bindings (\n binding_id TEXT PRIMARY KEY NOT NULL CHECK(length(binding_id) BETWEEN 1 AND 191),\n business_id TEXT NOT NULL UNIQUE REFERENCES owner_intel_businesses(business_id) ON DELETE RESTRICT,\n configuration_revision INTEGER NOT NULL CHECK(configuration_revision>=1),\n status TEXT NOT NULL CHECK(status IN('reviewed','paused','retired')),\n UNIQUE(binding_id,configuration_revision)\n)",
+        "CREATE TRIGGER owner_intel_binding_identity BEFORE UPDATE ON owner_intel_bindings\nWHEN NEW.binding_id IS NOT OLD.binding_id OR NEW.business_id IS NOT OLD.business_id\n OR NEW.configuration_revision<OLD.configuration_revision\nBEGIN SELECT RAISE(ABORT,'owner_intel_binding_identity_immutable'); END",
+        "CREATE TABLE owner_intel_competitor_projections (\n projection_id TEXT PRIMARY KEY NOT NULL,\n binding_id TEXT NOT NULL,\n configuration_revision INTEGER NOT NULL,\n revision INTEGER NOT NULL CHECK(revision>=1),\n source_contract_sha256 TEXT NOT NULL CHECK(source_contract_sha256='a60a11ddd68df90da80a1e2eaf298434369653d8e8f390b814ed906e7b675b32'),\n read_schema TEXT NOT NULL CHECK(read_schema='ops.intel.competitors.v1'),\n dto_json TEXT NOT NULL CHECK(json_valid(dto_json) AND length(CAST(dto_json AS BLOB))<=262144),\n dto_sha256 TEXT NOT NULL CHECK(length(dto_sha256)=64 AND dto_sha256 NOT GLOB '*[^0-9a-f]*'),\n accepted_at TEXT NOT NULL CHECK(julianday(accepted_at) IS NOT NULL),\n \n \n FOREIGN KEY(binding_id) REFERENCES owner_intel_bindings(binding_id) ON DELETE RESTRICT,\n UNIQUE(binding_id,configuration_revision,revision)\n)",
+        "CREATE TRIGGER owner_intel_projection_immutable BEFORE UPDATE ON owner_intel_competitor_projections\nBEGIN SELECT RAISE(ABORT,'owner_intel_projection_immutable'); END",
+        "CREATE TRIGGER owner_intel_projection_retained BEFORE DELETE ON owner_intel_competitor_projections\nBEGIN SELECT RAISE(ABORT,'owner_intel_projection_retained'); END"
+      ]
+    },
+    {
+      "order": 2,
+      "name": "0228_competitor_intel_ingest.sql",
+      "ledgerId": 228,
+      "sourceSha256": "8aec846b8a170ff36fcd6bd6036a3c725ced3e1c0e9b0677bdc9a9661e360b8d",
+      "splitterOutputStatementCount": 15,
+      "setupStatements": [
+        "PRAGMA foreign_keys=ON"
+      ],
+      "statementCount": 14,
+      "statementsSha256": "f0997303913fc46917750f4d06380621344764feb179b6061cbb7a7f0eaf1922",
+      "expectedAddedObjects": [
+        {
+          "type": "index",
+          "name": "ci_ingest_scope",
+          "tbl_name": "ci_ingest_inbox"
+        },
+        {
+          "type": "table",
+          "name": "ci_ingest_batch_guards",
+          "tbl_name": "ci_ingest_batch_guards"
+        },
+        {
+          "type": "table",
+          "name": "ci_ingest_binding_epochs",
+          "tbl_name": "ci_ingest_binding_epochs"
+        },
+        {
+          "type": "table",
+          "name": "ci_ingest_control",
+          "tbl_name": "ci_ingest_control"
+        },
+        {
+          "type": "table",
+          "name": "ci_ingest_epoch_audit",
+          "tbl_name": "ci_ingest_epoch_audit"
+        },
+        {
+          "type": "table",
+          "name": "ci_ingest_inbox",
+          "tbl_name": "ci_ingest_inbox"
+        },
+        {
+          "type": "table",
+          "name": "ci_ingest_kind_heads",
+          "tbl_name": "ci_ingest_kind_heads"
+        },
+        {
+          "type": "table",
+          "name": "ci_ingest_producer_bindings",
+          "tbl_name": "ci_ingest_producer_bindings"
+        },
+        {
+          "type": "table",
+          "name": "ci_ingest_producer_keys",
+          "tbl_name": "ci_ingest_producer_keys"
+        },
+        {
+          "type": "table",
+          "name": "ci_ingest_subject_heads",
+          "tbl_name": "ci_ingest_subject_heads"
+        },
+        {
+          "type": "trigger",
+          "name": "ci_ingest_epoch_audit_immutable",
+          "tbl_name": "ci_ingest_epoch_audit"
+        },
+        {
+          "type": "trigger",
+          "name": "ci_ingest_epoch_audit_retained",
+          "tbl_name": "ci_ingest_epoch_audit"
+        },
+        {
+          "type": "trigger",
+          "name": "ci_ingest_inbox_immutable",
+          "tbl_name": "ci_ingest_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "ci_ingest_inbox_retained",
+          "tbl_name": "ci_ingest_inbox"
+        }
+      ],
+      "expectedAddedObjectCount": 14,
+      "expectedAddedSchemaSha256": "45590fe8da6b8b52d1f31439a11f62069ba341a0f3ad9be98556e4f70e55ad35",
+      "expectedNewTableRows": {
+        "ci_ingest_batch_guards": 0,
+        "ci_ingest_binding_epochs": 0,
+        "ci_ingest_control": 0,
+        "ci_ingest_epoch_audit": 0,
+        "ci_ingest_inbox": 0,
+        "ci_ingest_kind_heads": 0,
+        "ci_ingest_producer_bindings": 0,
+        "ci_ingest_producer_keys": 0,
+        "ci_ingest_subject_heads": 0
+      },
+      "statements": [
+        "CREATE TABLE ci_ingest_control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN(0,1)))",
+        "CREATE TABLE ci_ingest_producer_keys(\n producer_id TEXT NOT NULL,key_id TEXT NOT NULL,public_key TEXT NOT NULL CHECK(length(public_key)=43),\n key_revision INTEGER NOT NULL CHECK(key_revision>=1),state TEXT NOT NULL CHECK(state IN('active','previous','retired','revoked')),\n PRIMARY KEY(producer_id,key_id)\n)",
+        "CREATE TABLE ci_ingest_producer_bindings(\n producer_id TEXT NOT NULL,binding_id TEXT NOT NULL REFERENCES owner_intel_bindings(binding_id) ON DELETE RESTRICT,\n configuration_revision INTEGER NOT NULL CHECK(configuration_revision>=1),active INTEGER NOT NULL CHECK(active IN(0,1)),\n PRIMARY KEY(producer_id,binding_id)\n)",
+        "CREATE TABLE ci_ingest_inbox(\n operation_id TEXT PRIMARY KEY NOT NULL,producer_id TEXT NOT NULL,key_id TEXT NOT NULL,key_revision INTEGER NOT NULL,\n binding_id TEXT NOT NULL REFERENCES owner_intel_bindings(binding_id) ON DELETE RESTRICT,configuration_revision INTEGER NOT NULL,\n subject_key TEXT NOT NULL,observation_kind TEXT NOT NULL CHECK(observation_kind IN('competitor_profile','baseline_assessment','change','ad_activity','scan_run','self_assessment')),\n epoch TEXT NOT NULL,counter TEXT NOT NULL,payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=43),\n raw_body TEXT NOT NULL CHECK(json_valid(raw_body) AND length(CAST(raw_body AS BLOB))<=262144),\n observation_json TEXT NOT NULL CHECK(json_valid(observation_json) AND length(CAST(observation_json AS BLOB))<=262144),\n receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json)),accepted_at TEXT NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN('accepted_head','accepted_history')),\n UNIQUE(binding_id,configuration_revision,subject_key,epoch,counter)\n)",
+        "CREATE INDEX ci_ingest_scope ON ci_ingest_inbox(binding_id,configuration_revision,observation_kind,accepted_at)",
+        "CREATE TABLE ci_ingest_binding_epochs(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,epoch TEXT NOT NULL,\n PRIMARY KEY(binding_id,configuration_revision))",
+        "CREATE TABLE ci_ingest_subject_heads(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,subject_key TEXT NOT NULL,\n epoch TEXT NOT NULL,counter TEXT NOT NULL,operation_id TEXT NOT NULL REFERENCES ci_ingest_inbox(operation_id),\n PRIMARY KEY(binding_id,configuration_revision,subject_key))",
+        "CREATE TABLE ci_ingest_kind_heads(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,subject_key TEXT NOT NULL,\n observation_kind TEXT NOT NULL,operation_id TEXT NOT NULL REFERENCES ci_ingest_inbox(operation_id),\n PRIMARY KEY(binding_id,configuration_revision,subject_key,observation_kind))",
+        "CREATE TABLE ci_ingest_epoch_audit(operation_id TEXT PRIMARY KEY REFERENCES ci_ingest_inbox(operation_id),binding_id TEXT NOT NULL,\n configuration_revision INTEGER NOT NULL,previous_epoch TEXT,epoch TEXT NOT NULL,accepted_at TEXT NOT NULL)",
+        "CREATE TABLE ci_ingest_batch_guards(operation_id TEXT PRIMARY KEY,assertion INTEGER NOT NULL CHECK(assertion=1))",
+        "CREATE TRIGGER ci_ingest_inbox_immutable BEFORE UPDATE ON ci_ingest_inbox BEGIN SELECT RAISE(ABORT,'ci_inbox_immutable'); END",
+        "CREATE TRIGGER ci_ingest_inbox_retained BEFORE DELETE ON ci_ingest_inbox BEGIN SELECT RAISE(ABORT,'ci_inbox_retained'); END",
+        "CREATE TRIGGER ci_ingest_epoch_audit_immutable BEFORE UPDATE ON ci_ingest_epoch_audit BEGIN SELECT RAISE(ABORT,'ci_epoch_audit_immutable'); END",
+        "CREATE TRIGGER ci_ingest_epoch_audit_retained BEFORE DELETE ON ci_ingest_epoch_audit BEGIN SELECT RAISE(ABORT,'ci_epoch_audit_retained'); END"
+      ]
+    },
+    {
+      "order": 3,
+      "name": "0229_owner_intel_source_feed.sql",
+      "ledgerId": 229,
+      "sourceSha256": "50e6dbd1899a2e601e8218feb4d7af4ca60717551c768b8d904f56cad4ac4c5d",
+      "splitterOutputStatementCount": 24,
+      "setupStatements": [
+        "PRAGMA foreign_keys=ON"
+      ],
+      "statementCount": 23,
+      "statementsSha256": "31804e647b7133fd3fc8503b4c6754eba23b0dde1e5f848ced0228779cdee0f1",
+      "expectedAddedObjects": [
+        {
+          "type": "index",
+          "name": "owner_intel_source_inbox_scope",
+          "tbl_name": "owner_intel_source_inbox"
+        },
+        {
+          "type": "index",
+          "name": "owner_intel_source_projection_read",
+          "tbl_name": "owner_intel_source_projections"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_batch_guards",
+          "tbl_name": "owner_intel_source_batch_guards"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_bindings",
+          "tbl_name": "owner_intel_source_bindings"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_control",
+          "tbl_name": "owner_intel_source_control"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_epoch_audit",
+          "tbl_name": "owner_intel_source_epoch_audit"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_epochs",
+          "tbl_name": "owner_intel_source_epochs"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_inbox",
+          "tbl_name": "owner_intel_source_inbox"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_kind_heads",
+          "tbl_name": "owner_intel_source_kind_heads"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_projections",
+          "tbl_name": "owner_intel_source_projections"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_range_heads",
+          "tbl_name": "owner_intel_source_range_heads"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_source_subject_heads",
+          "tbl_name": "owner_intel_source_subject_heads"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_binding_context_immutable",
+          "tbl_name": "owner_intel_source_bindings"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_binding_retained",
+          "tbl_name": "owner_intel_source_bindings"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_epoch_audit_immutable",
+          "tbl_name": "owner_intel_source_epoch_audit"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_epoch_audit_retained",
+          "tbl_name": "owner_intel_source_epoch_audit"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_inbox_immutable",
+          "tbl_name": "owner_intel_source_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_inbox_retained",
+          "tbl_name": "owner_intel_source_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_no_v1_operation",
+          "tbl_name": "owner_intel_source_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_projection_immutable",
+          "tbl_name": "owner_intel_source_projections"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_projection_retained",
+          "tbl_name": "owner_intel_source_projections"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_v1_no_source_operation",
+          "tbl_name": "ci_ingest_inbox"
+        }
+      ],
+      "expectedAddedObjectCount": 22,
+      "expectedAddedSchemaSha256": "3ddee524ad7cf5a71980689180d5f0c0bad4e416d48f3162394a779ed95bc87a",
+      "expectedNewTableRows": {
+        "owner_intel_source_batch_guards": 0,
+        "owner_intel_source_bindings": 0,
+        "owner_intel_source_control": 1,
+        "owner_intel_source_epoch_audit": 0,
+        "owner_intel_source_epochs": 0,
+        "owner_intel_source_inbox": 0,
+        "owner_intel_source_kind_heads": 0,
+        "owner_intel_source_projections": 0,
+        "owner_intel_source_range_heads": 0,
+        "owner_intel_source_subject_heads": 0
+      },
+      "statements": [
+        "CREATE TABLE owner_intel_source_control (\n singleton INTEGER PRIMARY KEY CHECK(singleton=1),\n schema_version INTEGER NOT NULL CHECK(schema_version=1),\n enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN(0,1)),\n storage_accepted INTEGER NOT NULL DEFAULT 0 CHECK(storage_accepted IN(0,1)),\n CHECK(enabled=0 OR storage_accepted=1)\n)",
+        "INSERT INTO owner_intel_source_control(singleton,schema_version) VALUES(1,1)",
+        "CREATE TABLE owner_intel_source_bindings (\n producer_id TEXT NOT NULL,\n binding_id TEXT NOT NULL,\n configuration_revision INTEGER NOT NULL CHECK(configuration_revision>=1),\n observation_kind TEXT NOT NULL CHECK(observation_kind IN('search_console_summary','own_site')),\n subject_key TEXT NOT NULL,\n source TEXT NOT NULL CHECK(source IN('google_search_console','hermes_site_monitor')),\n source_account_ref TEXT,\n collected_by TEXT NOT NULL,\n reviewed_context_json TEXT NOT NULL CHECK(json_valid(reviewed_context_json) AND length(CAST(reviewed_context_json AS BLOB))<=32768),\n active INTEGER NOT NULL CHECK(active IN(0,1)),\n PRIMARY KEY(producer_id,binding_id,configuration_revision,observation_kind,subject_key),\n FOREIGN KEY(binding_id) REFERENCES owner_intel_bindings(binding_id) ON DELETE RESTRICT\n)",
+        "CREATE TRIGGER owner_intel_source_binding_context_immutable BEFORE UPDATE ON owner_intel_source_bindings\nWHEN NEW.producer_id IS NOT OLD.producer_id OR NEW.binding_id IS NOT OLD.binding_id OR NEW.configuration_revision IS NOT OLD.configuration_revision\n OR NEW.observation_kind IS NOT OLD.observation_kind OR NEW.subject_key IS NOT OLD.subject_key OR NEW.source IS NOT OLD.source\n OR NEW.source_account_ref IS NOT OLD.source_account_ref OR NEW.collected_by IS NOT OLD.collected_by\n OR NEW.reviewed_context_json IS NOT OLD.reviewed_context_json OR (OLD.active=0 AND NEW.active<>0)\nBEGIN SELECT RAISE(ABORT,'owner_intel_source_binding_context_immutable'); END",
+        "CREATE TRIGGER owner_intel_source_binding_retained BEFORE DELETE ON owner_intel_source_bindings\nBEGIN SELECT RAISE(ABORT,'owner_intel_source_binding_retained'); END",
+        "CREATE TABLE owner_intel_source_inbox (\n operation_id TEXT PRIMARY KEY NOT NULL,\n producer_id TEXT NOT NULL,\n key_id TEXT NOT NULL,\n key_revision INTEGER NOT NULL CHECK(key_revision>=1),\n binding_id TEXT NOT NULL,\n configuration_revision INTEGER NOT NULL,\n subject_key TEXT NOT NULL,\n observation_kind TEXT NOT NULL CHECK(observation_kind IN('search_console_summary','own_site')),\n epoch TEXT NOT NULL,\n counter TEXT NOT NULL,\n payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=43),\n raw_body TEXT NOT NULL CHECK(json_valid(raw_body) AND length(CAST(raw_body AS BLOB))<=262144),\n observation_json TEXT NOT NULL CHECK(json_valid(observation_json) AND length(CAST(observation_json AS BLOB))<=262144),\n receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json)),\n accepted_at TEXT NOT NULL,\n outcome TEXT NOT NULL CHECK(outcome IN('accepted_head','accepted_history')),\n UNIQUE(binding_id,configuration_revision,subject_key,epoch,counter),\n FOREIGN KEY(binding_id) REFERENCES owner_intel_bindings(binding_id) ON DELETE RESTRICT\n)",
+        "CREATE INDEX owner_intel_source_inbox_scope ON owner_intel_source_inbox(binding_id,configuration_revision,observation_kind,accepted_at)",
+        "CREATE TABLE owner_intel_source_epochs(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,epoch TEXT NOT NULL,PRIMARY KEY(binding_id,configuration_revision))",
+        "CREATE TABLE owner_intel_source_subject_heads(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,subject_key TEXT NOT NULL,epoch TEXT NOT NULL,counter TEXT NOT NULL,operation_id TEXT NOT NULL REFERENCES owner_intel_source_inbox(operation_id),PRIMARY KEY(binding_id,configuration_revision,subject_key))",
+        "CREATE TABLE owner_intel_source_kind_heads(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,subject_key TEXT NOT NULL,observation_kind TEXT NOT NULL,operation_id TEXT NOT NULL REFERENCES owner_intel_source_inbox(operation_id),PRIMARY KEY(binding_id,configuration_revision,subject_key,observation_kind))",
+        "CREATE TABLE owner_intel_source_range_heads(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,subject_key TEXT NOT NULL,period_days INTEGER NOT NULL CHECK(period_days BETWEEN 1 AND 93),operation_id TEXT NOT NULL REFERENCES owner_intel_source_inbox(operation_id),PRIMARY KEY(binding_id,configuration_revision,subject_key,period_days))",
+        "CREATE TABLE owner_intel_source_epoch_audit(operation_id TEXT PRIMARY KEY REFERENCES owner_intel_source_inbox(operation_id),binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,previous_epoch TEXT,epoch TEXT NOT NULL,accepted_at TEXT NOT NULL)",
+        "CREATE TABLE owner_intel_source_projections (\n projection_id TEXT PRIMARY KEY NOT NULL,\n binding_id TEXT NOT NULL,\n configuration_revision INTEGER NOT NULL,\n observation_kind TEXT NOT NULL CHECK(observation_kind IN('search_console_summary','own_site')),\n subject_key TEXT NOT NULL,\n revision INTEGER NOT NULL CHECK(revision>=1),\n source_operation_id TEXT NOT NULL REFERENCES owner_intel_source_inbox(operation_id),\n source_contract_sha256 TEXT NOT NULL CHECK(source_contract_sha256='ff354e29fbb8e751317db502e18b3654af42f24652a30e67eb61bb60cde0e567'),\n read_schema TEXT NOT NULL CHECK(read_schema='ops.intel.owner-source.v1'),\n dto_json TEXT NOT NULL CHECK(json_valid(dto_json) AND length(CAST(dto_json AS BLOB))<=262144),\n dto_sha256 TEXT NOT NULL CHECK(length(dto_sha256)=64 AND dto_sha256 NOT GLOB '*[^0-9a-f]*'),\n accepted_at TEXT NOT NULL CHECK(julianday(accepted_at) IS NOT NULL),\n FOREIGN KEY(binding_id) REFERENCES owner_intel_bindings(binding_id) ON DELETE RESTRICT,\n UNIQUE(binding_id,configuration_revision,observation_kind,subject_key,revision)\n)",
+        "CREATE INDEX owner_intel_source_projection_read ON owner_intel_source_projections(binding_id,configuration_revision,observation_kind,subject_key,revision DESC)",
+        "CREATE TABLE owner_intel_source_batch_guards(operation_id TEXT PRIMARY KEY,assertion INTEGER NOT NULL CHECK(assertion=1))",
+        "CREATE TRIGGER owner_intel_source_inbox_immutable BEFORE UPDATE ON owner_intel_source_inbox BEGIN SELECT RAISE(ABORT,'owner_intel_source_inbox_immutable'); END",
+        "CREATE TRIGGER owner_intel_source_inbox_retained BEFORE DELETE ON owner_intel_source_inbox BEGIN SELECT RAISE(ABORT,'owner_intel_source_inbox_retained'); END",
+        "CREATE TRIGGER owner_intel_source_epoch_audit_immutable BEFORE UPDATE ON owner_intel_source_epoch_audit BEGIN SELECT RAISE(ABORT,'owner_intel_source_epoch_audit_immutable'); END",
+        "CREATE TRIGGER owner_intel_source_epoch_audit_retained BEFORE DELETE ON owner_intel_source_epoch_audit BEGIN SELECT RAISE(ABORT,'owner_intel_source_epoch_audit_retained'); END",
+        "CREATE TRIGGER owner_intel_source_projection_immutable BEFORE UPDATE ON owner_intel_source_projections BEGIN SELECT RAISE(ABORT,'owner_intel_source_projection_immutable'); END",
+        "CREATE TRIGGER owner_intel_source_projection_retained BEFORE DELETE ON owner_intel_source_projections BEGIN SELECT RAISE(ABORT,'owner_intel_source_projection_retained'); END",
+        "CREATE TRIGGER owner_intel_source_no_v1_operation BEFORE INSERT ON owner_intel_source_inbox\nWHEN EXISTS(SELECT 1 FROM ci_ingest_inbox WHERE operation_id=NEW.operation_id)\nBEGIN SELECT RAISE(ABORT,'intel_operation_id_cross_lane_conflict'); END",
+        "CREATE TRIGGER owner_intel_v1_no_source_operation BEFORE INSERT ON ci_ingest_inbox\nWHEN EXISTS(SELECT 1 FROM owner_intel_source_inbox WHERE operation_id=NEW.operation_id)\nBEGIN SELECT RAISE(ABORT,'intel_operation_id_cross_lane_conflict'); END"
+      ]
+    },
+    {
+      "order": 4,
+      "name": "0230_app_release_pilot.sql",
+      "ledgerId": 230,
+      "sourceSha256": "824bdd58e12a2db1821131aadec48982ff324219cd15c257d7ccc897eaabe45b",
+      "splitterOutputStatementCount": 25,
+      "setupStatements": [
+        "PRAGMA foreign_keys=ON"
+      ],
+      "statementCount": 24,
+      "statementsSha256": "6af6758438b751dd86b887d9899a5702f178d8da6cc6495b10da1a6cfa03c741",
+      "expectedAddedObjects": [
+        {
+          "type": "table",
+          "name": "app_release_catalog",
+          "tbl_name": "app_release_catalog"
+        },
+        {
+          "type": "table",
+          "name": "app_release_control",
+          "tbl_name": "app_release_control"
+        },
+        {
+          "type": "table",
+          "name": "app_release_head",
+          "tbl_name": "app_release_head"
+        },
+        {
+          "type": "table",
+          "name": "app_release_head_history",
+          "tbl_name": "app_release_head_history"
+        },
+        {
+          "type": "table",
+          "name": "app_release_pilot_eligibilities",
+          "tbl_name": "app_release_pilot_eligibilities"
+        },
+        {
+          "type": "table",
+          "name": "app_release_pilot_revocations",
+          "tbl_name": "app_release_pilot_revocations"
+        },
+        {
+          "type": "table",
+          "name": "app_release_withdrawals",
+          "tbl_name": "app_release_withdrawals"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_catalog_immutable_delete",
+          "tbl_name": "app_release_catalog"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_catalog_immutable_update",
+          "tbl_name": "app_release_catalog"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_head_history_immutable_delete",
+          "tbl_name": "app_release_head_history"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_head_history_immutable_update",
+          "tbl_name": "app_release_head_history"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_head_history_insert",
+          "tbl_name": "app_release_head"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_head_history_update",
+          "tbl_name": "app_release_head"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_head_insert_guard",
+          "tbl_name": "app_release_head"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_head_no_delete",
+          "tbl_name": "app_release_head"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_head_update_guard",
+          "tbl_name": "app_release_head"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_pilot_eligibility_immutable_delete",
+          "tbl_name": "app_release_pilot_eligibilities"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_pilot_eligibility_immutable_update",
+          "tbl_name": "app_release_pilot_eligibilities"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_pilot_eligibility_insert_guard",
+          "tbl_name": "app_release_pilot_eligibilities"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_pilot_revocation_immutable_delete",
+          "tbl_name": "app_release_pilot_revocations"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_pilot_revocation_immutable_update",
+          "tbl_name": "app_release_pilot_revocations"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_withdrawal_immutable_delete",
+          "tbl_name": "app_release_withdrawals"
+        },
+        {
+          "type": "trigger",
+          "name": "app_release_withdrawal_immutable_update",
+          "tbl_name": "app_release_withdrawals"
+        }
+      ],
+      "expectedAddedObjectCount": 23,
+      "expectedAddedSchemaSha256": "880e785d9157ad188cbd24b0574b29b9f6bbec708ca34067e0c8915e2ba145c6",
+      "expectedNewTableRows": {
+        "app_release_catalog": 0,
+        "app_release_control": 1,
+        "app_release_head": 0,
+        "app_release_head_history": 0,
+        "app_release_pilot_eligibilities": 0,
+        "app_release_pilot_revocations": 0,
+        "app_release_withdrawals": 0
+      },
+      "statements": [
+        "CREATE TABLE app_release_control (\n singleton INTEGER PRIMARY KEY CHECK(singleton=1),\n schema_version INTEGER NOT NULL CHECK(schema_version=1),\n enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN(0,1)),\n storage_accepted INTEGER NOT NULL DEFAULT 0 CHECK(storage_accepted IN(0,1)),\n CHECK(enabled=0 OR storage_accepted=1)\n)",
+        "INSERT INTO app_release_control(singleton,schema_version) VALUES(1,1)",
+        "CREATE TABLE app_release_catalog (\n release_id TEXT PRIMARY KEY NOT NULL CHECK(length(release_id) BETWEEN 1 AND 128),\n platform TEXT NOT NULL CHECK(platform='windows'),\n channel TEXT NOT NULL CHECK(channel='pilot'),\n version TEXT NOT NULL CHECK(length(version) BETWEEN 7 AND 23),\n version_major INTEGER NOT NULL CHECK(version_major BETWEEN 0 AND 65535),\n version_minor INTEGER NOT NULL CHECK(version_minor BETWEEN 0 AND 65535),\n version_patch INTEGER NOT NULL CHECK(version_patch BETWEEN 0 AND 65535),\n version_revision INTEGER NOT NULL CHECK(version_revision BETWEEN 0 AND 65535),\n installer_type TEXT NOT NULL CHECK(installer_type='exe'),\n artifact_key TEXT NOT NULL UNIQUE CHECK(length(artifact_key) BETWEEN 1 AND 512 AND instr(artifact_key,'..')=0),\n size_bytes INTEGER NOT NULL CHECK(size_bytes BETWEEN 1 AND 1073741824),\n sha256 TEXT NOT NULL CHECK(length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'),\n strong_etag TEXT NOT NULL CHECK(length(strong_etag) BETWEEN 2 AND 512 AND substr(strong_etag,1,1)='\"' AND substr(strong_etag,-1,1)='\"' AND strong_etag NOT LIKE 'W/%'),\n source_commit TEXT NOT NULL CHECK(length(source_commit)=40 AND source_commit NOT GLOB '*[^0-9a-f]*'),\n min_supported TEXT CHECK(min_supported IS NULL OR length(min_supported)<=120),\n notes TEXT CHECK(notes IS NULL OR length(notes)<=600),\n reviewed_by_staff_id TEXT NOT NULL REFERENCES staff_users(id) ON DELETE RESTRICT,\n reviewed_at TEXT NOT NULL CHECK(julianday(reviewed_at) IS NOT NULL),\n UNIQUE(platform,channel,version),\n UNIQUE(platform,channel,version_major,version_minor,version_patch,version_revision),\n CHECK(version=CAST(version_major AS TEXT)||'.'||CAST(version_minor AS TEXT)||'.'||CAST(version_patch AS TEXT)||'.'||CAST(version_revision AS TEXT))\n)",
+        "CREATE TRIGGER app_release_catalog_immutable_update BEFORE UPDATE ON app_release_catalog\nBEGIN SELECT RAISE(ABORT,'app_release_catalog_immutable'); END",
+        "CREATE TRIGGER app_release_catalog_immutable_delete BEFORE DELETE ON app_release_catalog\nBEGIN SELECT RAISE(ABORT,'app_release_catalog_retained'); END",
+        "CREATE TABLE app_release_head (\n platform TEXT NOT NULL CHECK(platform='windows'),\n channel TEXT NOT NULL CHECK(channel='pilot'),\n release_id TEXT NOT NULL REFERENCES app_release_catalog(release_id) ON DELETE RESTRICT,\n revision INTEGER NOT NULL CHECK(revision>=1),\n updated_at TEXT NOT NULL CHECK(julianday(updated_at) IS NOT NULL),\n PRIMARY KEY(platform,channel)\n)",
+        "CREATE TABLE app_release_head_history (\n platform TEXT NOT NULL,\n channel TEXT NOT NULL,\n revision INTEGER NOT NULL,\n release_id TEXT NOT NULL REFERENCES app_release_catalog(release_id) ON DELETE RESTRICT,\n changed_at TEXT NOT NULL,\n PRIMARY KEY(platform,channel,revision)\n)",
+        "CREATE TRIGGER app_release_head_insert_guard BEFORE INSERT ON app_release_head\nWHEN NOT EXISTS(SELECT 1 FROM app_release_catalog r WHERE r.release_id=NEW.release_id AND r.platform=NEW.platform AND r.channel=NEW.channel)\nBEGIN SELECT RAISE(ABORT,'app_release_head_invalid'); END",
+        "CREATE TRIGGER app_release_head_update_guard BEFORE UPDATE ON app_release_head\nWHEN NEW.platform IS NOT OLD.platform OR NEW.channel IS NOT OLD.channel OR NEW.revision<>OLD.revision+1\n OR NOT EXISTS(SELECT 1 FROM app_release_catalog n JOIN app_release_catalog o ON o.release_id=OLD.release_id\n   WHERE n.release_id=NEW.release_id AND n.platform=NEW.platform AND n.channel=NEW.channel\n    AND (n.version_major,n.version_minor,n.version_patch,n.version_revision)>(o.version_major,o.version_minor,o.version_patch,o.version_revision))\nBEGIN SELECT RAISE(ABORT,'app_release_head_must_advance'); END",
+        "CREATE TRIGGER app_release_head_no_delete BEFORE DELETE ON app_release_head\nBEGIN SELECT RAISE(ABORT,'app_release_head_retained'); END",
+        "CREATE TRIGGER app_release_head_history_insert AFTER INSERT ON app_release_head\nBEGIN INSERT INTO app_release_head_history VALUES(NEW.platform,NEW.channel,NEW.revision,NEW.release_id,NEW.updated_at); END",
+        "CREATE TRIGGER app_release_head_history_update AFTER UPDATE ON app_release_head\nBEGIN INSERT INTO app_release_head_history VALUES(NEW.platform,NEW.channel,NEW.revision,NEW.release_id,NEW.updated_at); END",
+        "CREATE TRIGGER app_release_head_history_immutable_update BEFORE UPDATE ON app_release_head_history\nBEGIN SELECT RAISE(ABORT,'app_release_head_history_immutable'); END",
+        "CREATE TRIGGER app_release_head_history_immutable_delete BEFORE DELETE ON app_release_head_history\nBEGIN SELECT RAISE(ABORT,'app_release_head_history_retained'); END",
+        "CREATE TABLE app_release_withdrawals (\n release_id TEXT PRIMARY KEY REFERENCES app_release_catalog(release_id) ON DELETE RESTRICT,\n reason_code TEXT NOT NULL CHECK(length(reason_code) BETWEEN 1 AND 80),\n withdrawn_at TEXT NOT NULL CHECK(julianday(withdrawn_at) IS NOT NULL),\n withdrawn_by_staff_id TEXT NOT NULL REFERENCES staff_users(id) ON DELETE RESTRICT\n)",
+        "CREATE TRIGGER app_release_withdrawal_immutable_update BEFORE UPDATE ON app_release_withdrawals\nBEGIN SELECT RAISE(ABORT,'app_release_withdrawal_immutable'); END",
+        "CREATE TRIGGER app_release_withdrawal_immutable_delete BEFORE DELETE ON app_release_withdrawals\nBEGIN SELECT RAISE(ABORT,'app_release_withdrawal_retained'); END",
+        "CREATE TABLE app_release_pilot_eligibilities (\n eligibility_id TEXT PRIMARY KEY NOT NULL,\n principal_id TEXT NOT NULL REFERENCES staff_users(id) ON DELETE RESTRICT,\n channel TEXT NOT NULL CHECK(channel='pilot'),\n cohort_id TEXT NOT NULL CHECK(length(cohort_id) BETWEEN 1 AND 128),\n cohort_revision INTEGER NOT NULL CHECK(cohort_revision>=1),\n granted_at TEXT NOT NULL CHECK(julianday(granted_at) IS NOT NULL),\n UNIQUE(principal_id,channel),\n UNIQUE(cohort_id,cohort_revision,principal_id)\n)",
+        "CREATE TRIGGER app_release_pilot_eligibility_insert_guard BEFORE INSERT ON app_release_pilot_eligibilities\nWHEN NOT EXISTS(SELECT 1 FROM staff_users s JOIN staff_role_assignments r ON r.staff_id=s.id\n WHERE s.id=NEW.principal_id AND s.status='active' AND r.role_id='role-owner' AND r.scope='global')\nBEGIN SELECT RAISE(ABORT,'app_release_pilot_principal_not_owner'); END",
+        "CREATE TRIGGER app_release_pilot_eligibility_immutable_update BEFORE UPDATE ON app_release_pilot_eligibilities\nBEGIN SELECT RAISE(ABORT,'app_release_pilot_eligibility_immutable'); END",
+        "CREATE TRIGGER app_release_pilot_eligibility_immutable_delete BEFORE DELETE ON app_release_pilot_eligibilities\nBEGIN SELECT RAISE(ABORT,'app_release_pilot_eligibility_retained'); END",
+        "CREATE TABLE app_release_pilot_revocations (\n eligibility_id TEXT PRIMARY KEY REFERENCES app_release_pilot_eligibilities(eligibility_id) ON DELETE RESTRICT,\n reason_code TEXT NOT NULL CHECK(length(reason_code) BETWEEN 1 AND 80),\n revoked_at TEXT NOT NULL CHECK(julianday(revoked_at) IS NOT NULL),\n revoked_by_staff_id TEXT NOT NULL REFERENCES staff_users(id) ON DELETE RESTRICT\n)",
+        "CREATE TRIGGER app_release_pilot_revocation_immutable_update BEFORE UPDATE ON app_release_pilot_revocations\nBEGIN SELECT RAISE(ABORT,'app_release_pilot_revocation_immutable'); END",
+        "CREATE TRIGGER app_release_pilot_revocation_immutable_delete BEFORE DELETE ON app_release_pilot_revocations\nBEGIN SELECT RAISE(ABORT,'app_release_pilot_revocation_retained'); END"
+      ]
+    },
+    {
+      "order": 5,
+      "name": "0231_owner_google_ads_summary.sql",
+      "ledgerId": 231,
+      "sourceSha256": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481",
+      "splitterOutputStatementCount": 26,
+      "setupStatements": [
+        "PRAGMA foreign_keys=ON"
+      ],
+      "statementCount": 25,
+      "statementsSha256": "feeb851ff38234b8b262023aa9e8f8c71f8f18e955865a042cf61ba0f017c26e",
+      "expectedAddedObjects": [
+        {
+          "type": "index",
+          "name": "owner_intel_google_ads_inbox_scope",
+          "tbl_name": "owner_intel_google_ads_inbox"
+        },
+        {
+          "type": "index",
+          "name": "owner_intel_google_ads_projection_read",
+          "tbl_name": "owner_intel_google_ads_projections"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_google_ads_batch_guards",
+          "tbl_name": "owner_intel_google_ads_batch_guards"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_google_ads_bindings",
+          "tbl_name": "owner_intel_google_ads_bindings"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_google_ads_control",
+          "tbl_name": "owner_intel_google_ads_control"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_google_ads_epoch_audit",
+          "tbl_name": "owner_intel_google_ads_epoch_audit"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_google_ads_epochs",
+          "tbl_name": "owner_intel_google_ads_epochs"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_google_ads_inbox",
+          "tbl_name": "owner_intel_google_ads_inbox"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_google_ads_projections",
+          "tbl_name": "owner_intel_google_ads_projections"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_google_ads_range_heads",
+          "tbl_name": "owner_intel_google_ads_range_heads"
+        },
+        {
+          "type": "table",
+          "name": "owner_intel_google_ads_subject_heads",
+          "tbl_name": "owner_intel_google_ads_subject_heads"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_binding_context_immutable",
+          "tbl_name": "owner_intel_google_ads_bindings"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_binding_retained",
+          "tbl_name": "owner_intel_google_ads_bindings"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_epoch_audit_immutable",
+          "tbl_name": "owner_intel_google_ads_epoch_audit"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_epoch_audit_retained",
+          "tbl_name": "owner_intel_google_ads_epoch_audit"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_inbox_immutable",
+          "tbl_name": "owner_intel_google_ads_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_inbox_retained",
+          "tbl_name": "owner_intel_google_ads_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_inbox_subject_key",
+          "tbl_name": "owner_intel_google_ads_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_no_source_operation",
+          "tbl_name": "owner_intel_google_ads_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_no_v1_operation",
+          "tbl_name": "owner_intel_google_ads_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_projection_immutable",
+          "tbl_name": "owner_intel_google_ads_projections"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_google_ads_projection_retained",
+          "tbl_name": "owner_intel_google_ads_projections"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_source_no_google_ads_operation",
+          "tbl_name": "owner_intel_source_inbox"
+        },
+        {
+          "type": "trigger",
+          "name": "owner_intel_v1_no_google_ads_operation",
+          "tbl_name": "ci_ingest_inbox"
+        }
+      ],
+      "expectedAddedObjectCount": 24,
+      "expectedAddedSchemaSha256": "8cd72dc117d5ac9f38fa53fa3fd204ef2702689403aa3e89cb91d2c0420d862d",
+      "expectedNewTableRows": {
+        "owner_intel_google_ads_batch_guards": 0,
+        "owner_intel_google_ads_bindings": 0,
+        "owner_intel_google_ads_control": 1,
+        "owner_intel_google_ads_epoch_audit": 0,
+        "owner_intel_google_ads_epochs": 0,
+        "owner_intel_google_ads_inbox": 0,
+        "owner_intel_google_ads_projections": 0,
+        "owner_intel_google_ads_range_heads": 0,
+        "owner_intel_google_ads_subject_heads": 0
+      },
+      "statements": [
+        "CREATE TABLE owner_intel_google_ads_control (\n singleton INTEGER PRIMARY KEY CHECK(singleton=1),\n schema_version INTEGER NOT NULL CHECK(schema_version=1),\n enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN(0,1)),\n storage_accepted INTEGER NOT NULL DEFAULT 0 CHECK(storage_accepted IN(0,1)),\n CHECK(enabled=0 OR storage_accepted=1)\n)",
+        "INSERT INTO owner_intel_google_ads_control(singleton,schema_version) VALUES(1,1)",
+        "CREATE TABLE owner_intel_google_ads_bindings (\n producer_id TEXT NOT NULL,\n binding_id TEXT NOT NULL,\n configuration_revision INTEGER NOT NULL CHECK(configuration_revision>=1),\n subject_key TEXT NOT NULL CHECK(subject_key='own:google-ads'),\n observation_kind TEXT NOT NULL CHECK(observation_kind='google_ads_summary'),\n account_state TEXT NOT NULL CHECK(account_state IN('connected','no_account')),\n manager_customer_ref TEXT,\n advertiser_customer_ref TEXT,\n source_account_ref TEXT,\n currency_code TEXT,\n time_zone TEXT,\n collected_by TEXT NOT NULL CHECK(length(collected_by) BETWEEN 1 AND 64),\n active INTEGER NOT NULL CHECK(active IN(0,1)),\n CHECK((account_state='connected' AND manager_customer_ref GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]' AND advertiser_customer_ref GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]' AND source_account_ref=advertiser_customer_ref AND currency_code GLOB '[A-Z][A-Z][A-Z]' AND length(time_zone) BETWEEN 1 AND 64)\n   OR (account_state='no_account' AND manager_customer_ref IS NULL AND advertiser_customer_ref IS NULL AND source_account_ref IS NULL AND currency_code IS NULL AND time_zone IS NULL)),\n PRIMARY KEY(producer_id,binding_id,configuration_revision,subject_key),\n UNIQUE(binding_id,configuration_revision,subject_key),\n FOREIGN KEY(binding_id,configuration_revision) REFERENCES owner_intel_bindings(binding_id,configuration_revision) ON DELETE RESTRICT\n)",
+        "CREATE TRIGGER owner_intel_google_ads_binding_context_immutable BEFORE UPDATE ON owner_intel_google_ads_bindings\nWHEN NEW.producer_id IS NOT OLD.producer_id OR NEW.binding_id IS NOT OLD.binding_id OR NEW.configuration_revision IS NOT OLD.configuration_revision\n OR NEW.subject_key IS NOT OLD.subject_key OR NEW.observation_kind IS NOT OLD.observation_kind OR NEW.account_state IS NOT OLD.account_state\n OR NEW.manager_customer_ref IS NOT OLD.manager_customer_ref OR NEW.advertiser_customer_ref IS NOT OLD.advertiser_customer_ref\n OR NEW.source_account_ref IS NOT OLD.source_account_ref OR NEW.currency_code IS NOT OLD.currency_code OR NEW.time_zone IS NOT OLD.time_zone\n OR NEW.collected_by IS NOT OLD.collected_by OR (OLD.active=0 AND NEW.active<>0)\nBEGIN SELECT RAISE(ABORT,'owner_intel_google_ads_binding_context_immutable'); END",
+        "CREATE TRIGGER owner_intel_google_ads_binding_retained BEFORE DELETE ON owner_intel_google_ads_bindings\nBEGIN SELECT RAISE(ABORT,'owner_intel_google_ads_binding_retained'); END",
+        "CREATE TABLE owner_intel_google_ads_inbox (\n operation_id TEXT PRIMARY KEY NOT NULL,\n producer_id TEXT NOT NULL,\n key_id TEXT NOT NULL,\n key_revision INTEGER NOT NULL CHECK(key_revision>=1),\n binding_id TEXT NOT NULL,\n configuration_revision INTEGER NOT NULL,\n subject_key TEXT NOT NULL CHECK(subject_key='own:google-ads'),\n epoch TEXT NOT NULL,\n counter TEXT NOT NULL,\n period_key TEXT NOT NULL CHECK(period_key IN('status','7d','28d','90d')),\n period_days INTEGER CHECK(period_days IS NULL OR period_days IN(7,28,90)),\n payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=43),\n raw_body TEXT NOT NULL CHECK(json_valid(raw_body) AND length(CAST(raw_body AS BLOB))<=262144),\n observation_json TEXT NOT NULL CHECK(json_valid(observation_json) AND length(CAST(observation_json AS BLOB))<=262144),\n receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json)),\n accepted_at TEXT NOT NULL,\n outcome TEXT NOT NULL CHECK(outcome IN('accepted_head','accepted_history')),\n CHECK((period_key='status' AND period_days IS NULL) OR (period_key='7d' AND period_days=7) OR (period_key='28d' AND period_days=28) OR (period_key='90d' AND period_days=90)),\n UNIQUE(binding_id,configuration_revision,subject_key,epoch,counter),\n FOREIGN KEY(producer_id,binding_id,configuration_revision,subject_key) REFERENCES owner_intel_google_ads_bindings(producer_id,binding_id,configuration_revision,subject_key) ON DELETE RESTRICT\n)",
+        "CREATE INDEX owner_intel_google_ads_inbox_scope ON owner_intel_google_ads_inbox(binding_id,configuration_revision,period_key,accepted_at)",
+        "CREATE TABLE owner_intel_google_ads_epochs(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,epoch TEXT NOT NULL,PRIMARY KEY(binding_id,configuration_revision))",
+        "CREATE TABLE owner_intel_google_ads_subject_heads(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,subject_key TEXT NOT NULL,epoch TEXT NOT NULL,counter TEXT NOT NULL,operation_id TEXT NOT NULL REFERENCES owner_intel_google_ads_inbox(operation_id),PRIMARY KEY(binding_id,configuration_revision,subject_key))",
+        "CREATE TABLE owner_intel_google_ads_range_heads(binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,subject_key TEXT NOT NULL,period_key TEXT NOT NULL CHECK(period_key IN('status','7d','28d','90d')),operation_id TEXT NOT NULL REFERENCES owner_intel_google_ads_inbox(operation_id),PRIMARY KEY(binding_id,configuration_revision,subject_key,period_key))",
+        "CREATE TABLE owner_intel_google_ads_epoch_audit(operation_id TEXT PRIMARY KEY REFERENCES owner_intel_google_ads_inbox(operation_id),binding_id TEXT NOT NULL,configuration_revision INTEGER NOT NULL,previous_epoch TEXT,epoch TEXT NOT NULL,accepted_at TEXT NOT NULL)",
+        "CREATE TABLE owner_intel_google_ads_projections (\n projection_id TEXT PRIMARY KEY NOT NULL,\n binding_id TEXT NOT NULL,\n configuration_revision INTEGER NOT NULL,\n subject_key TEXT NOT NULL CHECK(subject_key='own:google-ads'),\n period_key TEXT NOT NULL CHECK(period_key IN('status','7d','28d','90d')),\n period_days INTEGER CHECK(period_days IS NULL OR period_days IN(7,28,90)),\n revision INTEGER NOT NULL CHECK(revision>=1),\n source_operation_id TEXT NOT NULL REFERENCES owner_intel_google_ads_inbox(operation_id),\n source_contract TEXT NOT NULL CHECK(source_contract='ops.owner-google-ads-observation.v1'),\n read_schema TEXT NOT NULL CHECK(read_schema='ops.intel.owner-google-ads.v1'),\n dto_json TEXT NOT NULL CHECK(json_valid(dto_json) AND length(CAST(dto_json AS BLOB))<=262144),\n dto_sha256 TEXT NOT NULL CHECK(length(dto_sha256)=64 AND dto_sha256 NOT GLOB '*[^0-9a-f]*'),\n accepted_at TEXT NOT NULL CHECK(julianday(accepted_at) IS NOT NULL),\n CHECK((period_key='status' AND period_days IS NULL) OR (period_key='7d' AND period_days=7) OR (period_key='28d' AND period_days=28) OR (period_key='90d' AND period_days=90)),\n FOREIGN KEY(binding_id,configuration_revision,subject_key) REFERENCES owner_intel_google_ads_bindings(binding_id,configuration_revision,subject_key) ON DELETE RESTRICT,\n UNIQUE(binding_id,configuration_revision,subject_key,period_key,revision)\n)",
+        "CREATE INDEX owner_intel_google_ads_projection_read ON owner_intel_google_ads_projections(binding_id,configuration_revision,subject_key,period_key,revision DESC)",
+        "CREATE TABLE owner_intel_google_ads_batch_guards(operation_id TEXT PRIMARY KEY,assertion INTEGER NOT NULL CHECK(assertion=1))",
+        "CREATE TRIGGER owner_intel_google_ads_inbox_immutable BEFORE UPDATE ON owner_intel_google_ads_inbox BEGIN SELECT RAISE(ABORT,'owner_intel_google_ads_inbox_immutable'); END",
+        "CREATE TRIGGER owner_intel_google_ads_inbox_retained BEFORE DELETE ON owner_intel_google_ads_inbox BEGIN SELECT RAISE(ABORT,'owner_intel_google_ads_inbox_retained'); END",
+        "CREATE TRIGGER owner_intel_google_ads_epoch_audit_immutable BEFORE UPDATE ON owner_intel_google_ads_epoch_audit BEGIN SELECT RAISE(ABORT,'owner_intel_google_ads_epoch_audit_immutable'); END",
+        "CREATE TRIGGER owner_intel_google_ads_epoch_audit_retained BEFORE DELETE ON owner_intel_google_ads_epoch_audit BEGIN SELECT RAISE(ABORT,'owner_intel_google_ads_epoch_audit_retained'); END",
+        "CREATE TRIGGER owner_intel_google_ads_projection_immutable BEFORE UPDATE ON owner_intel_google_ads_projections BEGIN SELECT RAISE(ABORT,'owner_intel_google_ads_projection_immutable'); END",
+        "CREATE TRIGGER owner_intel_google_ads_projection_retained BEFORE DELETE ON owner_intel_google_ads_projections BEGIN SELECT RAISE(ABORT,'owner_intel_google_ads_projection_retained'); END",
+        "CREATE TRIGGER owner_intel_google_ads_no_v1_operation BEFORE INSERT ON owner_intel_google_ads_inbox\nWHEN EXISTS(SELECT 1 FROM ci_ingest_inbox WHERE operation_id=NEW.operation_id)\nBEGIN SELECT RAISE(ABORT,'intel_operation_id_cross_lane_conflict'); END",
+        "CREATE TRIGGER owner_intel_v1_no_google_ads_operation BEFORE INSERT ON ci_ingest_inbox\nWHEN EXISTS(SELECT 1 FROM owner_intel_google_ads_inbox WHERE operation_id=NEW.operation_id)\nBEGIN SELECT RAISE(ABORT,'intel_operation_id_cross_lane_conflict'); END",
+        "CREATE TRIGGER owner_intel_google_ads_no_source_operation BEFORE INSERT ON owner_intel_google_ads_inbox\nWHEN EXISTS(SELECT 1 FROM owner_intel_source_inbox WHERE operation_id=NEW.operation_id)\nBEGIN SELECT RAISE(ABORT,'intel_operation_id_cross_lane_conflict'); END",
+        "CREATE TRIGGER owner_intel_source_no_google_ads_operation BEFORE INSERT ON owner_intel_source_inbox\nWHEN EXISTS(SELECT 1 FROM owner_intel_google_ads_inbox WHERE operation_id=NEW.operation_id)\nBEGIN SELECT RAISE(ABORT,'intel_operation_id_cross_lane_conflict'); END",
+        "CREATE TRIGGER owner_intel_google_ads_inbox_subject_key BEFORE INSERT ON owner_intel_google_ads_inbox\nWHEN NOT EXISTS(SELECT 1 FROM owner_intel_google_ads_bindings b JOIN owner_intel_bindings m ON m.binding_id=b.binding_id AND m.configuration_revision=b.configuration_revision JOIN owner_intel_businesses x ON x.business_id=m.business_id\n WHERE b.producer_id=NEW.producer_id AND b.binding_id=NEW.binding_id AND b.configuration_revision=NEW.configuration_revision AND b.subject_key=NEW.subject_key AND b.active=1 AND m.status='reviewed' AND x.status='reviewed')\nBEGIN SELECT RAISE(ABORT,'owner_intel_google_ads_binding_not_current'); END"
+      ]
+    },
+    {
+      "order": 6,
+      "name": "0240_flight_logs_permissions.sql",
+      "ledgerId": 232,
+      "sourceSha256": "7dae537a441d929cb8d33390dc88abe2ba766886a5b4d6bf2b0861575e41eb3a",
+      "splitterOutputStatementCount": 4,
+      "setupStatements": [],
+      "statementCount": 4,
+      "statementsSha256": "863a154060d16a170b73086a48901f7651b5e7c256bbe53f6ca4866ac0efd9d0",
+      "expectedAddedObjects": [],
+      "expectedAddedObjectCount": 0,
+      "expectedAddedSchemaSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "expectedNewTableRows": {},
+      "statements": [
+        "INSERT OR IGNORE INTO permissions(key,description)\nVALUES('flight_logs.view','View fleet and flight logs')",
+        "INSERT OR IGNORE INTO permissions(key,description)\nVALUES('flight_logs.import','Import flight logs from OpenDroneLog backups')",
+        "INSERT OR IGNORE INTO role_permissions(role_id,permission_key)\nSELECT id,'flight_logs.view' FROM roles WHERE id IN('role-owner','role-admin')",
+        "INSERT OR IGNORE INTO role_permissions(role_id,permission_key)\nSELECT id,'flight_logs.import' FROM roles WHERE id IN('role-owner','role-admin')"
+      ]
+    },
+    {
+      "order": 7,
+      "name": "0241_staff_usernames.sql",
+      "ledgerId": 233,
+      "sourceSha256": "44a707432e16ea06c8ea161d4181582baa6fa2b916b654cae92165d5989e53c5",
+      "splitterOutputStatementCount": 1,
+      "setupStatements": [],
+      "statementCount": 1,
+      "statementsSha256": "d88098664b644b6ad3d3beeb72f62e1e9bd05e2c79f044beea95a18bf6d24ace",
+      "expectedAddedObjects": [
+        {
+          "type": "table",
+          "name": "staff_usernames",
+          "tbl_name": "staff_usernames"
+        }
+      ],
+      "expectedAddedObjectCount": 1,
+      "expectedAddedSchemaSha256": "b7922c3bfa48e0e51178d4a5914f6afb7f1a7fcde1039f98c496baff418e1373",
+      "expectedNewTableRows": {
+        "staff_usernames": 0
+      },
+      "statements": [
+        "CREATE TABLE staff_usernames (\n  staff_id TEXT PRIMARY KEY NOT NULL REFERENCES staff_users(id) ON DELETE CASCADE,\n  username TEXT NOT NULL UNIQUE\n    CHECK (username = lower(username) AND length(username) BETWEEN 2 AND 32\n      AND username NOT GLOB '*[^a-z0-9._-]*' AND substr(username, 1, 1) GLOB '[a-z0-9]'),\n  set_by_staff_id TEXT NOT NULL,\n  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))\n)"
+      ]
+    },
+    {
+      "order": 8,
+      "name": "0242_native_staff_onboarding_approval_actor_authority.sql",
+      "ledgerId": 234,
+      "sourceSha256": "045db046a21b80e42aec764cb693615cca8737a2a0a4686676d60baf15664cee",
+      "splitterOutputStatementCount": 5,
+      "setupStatements": [
+        "PRAGMA foreign_keys = ON"
+      ],
+      "statementCount": 4,
+      "statementsSha256": "a8048234f1cd03923f064f11beb46ad47ffd72bc1e0c01b0057668376950b293",
+      "expectedAddedObjects": [
+        {
+          "type": "trigger",
+          "name": "native_staff_onboarding_approve_actor_allow",
+          "tbl_name": "native_staff_management_fences"
+        },
+        {
+          "type": "trigger",
+          "name": "native_staff_onboarding_approve_actor_deny",
+          "tbl_name": "native_staff_management_fences"
+        },
+        {
+          "type": "trigger",
+          "name": "native_staff_onboarding_approve_receipt_actor_allow",
+          "tbl_name": "native_staff_management_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "native_staff_onboarding_approve_receipt_actor_deny",
+          "tbl_name": "native_staff_management_commands"
+        }
+      ],
+      "expectedAddedObjectCount": 4,
+      "expectedAddedSchemaSha256": "fc3948cc1d613f6fec959737b3dfaf994ad86112f088ee34cfeb94004cacca7c",
+      "expectedNewTableRows": {},
+      "statements": [
+        "CREATE TRIGGER native_staff_onboarding_approve_actor_allow BEFORE INSERT ON native_staff_management_fences\nWHEN NEW.target_kind='onboarding' AND NEW.capability='staff.onboarding.approve' AND NOT EXISTS (\n  SELECT 1 FROM native_staff_pending_onboarding pending\n  JOIN native_staff_admissions actor ON actor.staff_id=NEW.actor_staff_id\n  JOIN native_staff_profiles profile ON profile.staff_id=actor.staff_id\n  WHERE pending.onboarding_id=NEW.target_onboarding_id\n    AND pending.proposed_staff_id=NEW.target_proposed_staff_id\n    AND pending.state='claimed' AND pending.version=2\n    AND json_array_length(pending.proposal_json,'$.memberships')=0\n    AND json_array_length(pending.proposal_json,'$.directoryGrants')=0\n    AND json_array_length(pending.proposal_json,'$.managementGrants')=0\n    AND actor.active=1 AND actor.bound_access_subject=NEW.actor_access_subject\n    AND actor.bound_access_subject<>pending.claimed_access_subject\n    AND EXISTS(SELECT 1 FROM native_staff_management_delegations allow_row\n      WHERE allow_row.actor_staff_id=NEW.actor_staff_id AND allow_row.contract_version=1\n        AND allow_row.capability='staff.onboarding.approve' AND allow_row.effect='allow'\n        AND allow_row.scope_kind='global' AND allow_row.active=1)\n)\nBEGIN SELECT RAISE(ABORT,'onboarding approval requires current global allow authority'); END",
+        "CREATE TRIGGER native_staff_onboarding_approve_actor_deny BEFORE INSERT ON native_staff_management_fences\nWHEN NEW.target_kind='onboarding' AND NEW.capability='staff.onboarding.approve' AND EXISTS (\n  SELECT 1 FROM native_staff_pending_onboarding pending\n  JOIN native_staff_management_delegations deny_row ON deny_row.actor_staff_id=NEW.actor_staff_id\n    AND deny_row.contract_version=1 AND deny_row.capability='staff.onboarding.approve'\n    AND deny_row.effect='deny' AND deny_row.active=1\n  WHERE pending.onboarding_id=NEW.target_onboarding_id\n    AND pending.proposed_staff_id=NEW.target_proposed_staff_id\n    AND (deny_row.scope_kind='global'\n      OR (deny_row.scope_kind='exact_staff' AND deny_row.target_staff_id=pending.proposed_staff_id))\n)\nBEGIN SELECT RAISE(ABORT,'onboarding approval is denied'); END",
+        "CREATE TRIGGER native_staff_onboarding_approve_receipt_actor_allow BEFORE INSERT ON native_staff_management_commands\nWHEN NEW.target_kind='onboarding' AND NEW.capability='staff.onboarding.approve' AND NOT EXISTS (\n  SELECT 1 FROM native_staff_pending_onboarding pending\n  JOIN native_staff_admissions actor ON actor.staff_id=NEW.actor_staff_id\n  JOIN native_staff_profiles profile ON profile.staff_id=actor.staff_id\n  WHERE pending.onboarding_id=NEW.target_onboarding_id\n    AND pending.proposed_staff_id=NEW.target_proposed_staff_id\n    AND pending.state='claimed' AND pending.version=2\n    AND json_array_length(pending.proposal_json,'$.memberships')=0\n    AND json_array_length(pending.proposal_json,'$.directoryGrants')=0\n    AND json_array_length(pending.proposal_json,'$.managementGrants')=0\n    AND actor.active=1 AND actor.bound_access_subject=NEW.actor_access_subject\n    AND actor.bound_access_subject<>pending.claimed_access_subject\n    AND EXISTS(SELECT 1 FROM native_staff_management_delegations allow_row\n      WHERE allow_row.actor_staff_id=NEW.actor_staff_id AND allow_row.contract_version=1\n        AND allow_row.capability='staff.onboarding.approve' AND allow_row.effect='allow'\n        AND allow_row.scope_kind='global' AND allow_row.active=1)\n)\nBEGIN SELECT RAISE(ABORT,'onboarding approval receipt requires current global allow authority'); END",
+        "CREATE TRIGGER native_staff_onboarding_approve_receipt_actor_deny BEFORE INSERT ON native_staff_management_commands\nWHEN NEW.target_kind='onboarding' AND NEW.capability='staff.onboarding.approve' AND EXISTS (\n  SELECT 1 FROM native_staff_pending_onboarding pending\n  JOIN native_staff_management_delegations deny_row ON deny_row.actor_staff_id=NEW.actor_staff_id\n    AND deny_row.contract_version=1 AND deny_row.capability='staff.onboarding.approve'\n    AND deny_row.effect='deny' AND deny_row.active=1\n  WHERE pending.onboarding_id=NEW.target_onboarding_id\n    AND pending.proposed_staff_id=NEW.target_proposed_staff_id\n    AND (deny_row.scope_kind='global'\n      OR (deny_row.scope_kind='exact_staff' AND deny_row.target_staff_id=pending.proposed_staff_id))\n)\nBEGIN SELECT RAISE(ABORT,'onboarding approval receipt is denied'); END"
+      ]
+    },
+    {
+      "order": 9,
+      "name": "0243_staff_logs_device_eligibility.sql",
+      "ledgerId": 235,
+      "sourceSha256": "60dee9a1e92fc881d52f2f7d21b0307f6afe1571d07421c929c3e0defea179b5",
+      "splitterOutputStatementCount": 11,
+      "setupStatements": [
+        "PRAGMA foreign_keys = ON"
+      ],
+      "statementCount": 10,
+      "statementsSha256": "bbf2173440b351150d651ec4fc5e003861e85c0a6c4e112441e944b231f5cd94",
+      "expectedAddedObjects": [
+        {
+          "type": "index",
+          "name": "staff_logs_device_eligibility_effect",
+          "tbl_name": "staff_logs_device_eligibility"
+        },
+        {
+          "type": "table",
+          "name": "staff_logs_device_eligibility",
+          "tbl_name": "staff_logs_device_eligibility"
+        },
+        {
+          "type": "table",
+          "name": "staff_logs_device_eligibility_commands",
+          "tbl_name": "staff_logs_device_eligibility_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_logs_device_command_apply",
+          "tbl_name": "staff_logs_device_eligibility_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_logs_device_command_authorize",
+          "tbl_name": "staff_logs_device_eligibility_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_logs_device_commands_no_delete",
+          "tbl_name": "staff_logs_device_eligibility_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_logs_device_commands_no_update",
+          "tbl_name": "staff_logs_device_eligibility_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_logs_device_eligibility_insert",
+          "tbl_name": "staff_logs_device_eligibility"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_logs_device_eligibility_no_delete",
+          "tbl_name": "staff_logs_device_eligibility"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_logs_device_eligibility_update",
+          "tbl_name": "staff_logs_device_eligibility"
+        }
+      ],
+      "expectedAddedObjectCount": 10,
+      "expectedAddedSchemaSha256": "2880dfff03634c467c657a0346ac107e578453b53243bec57b46cc6f1184c546",
+      "expectedNewTableRows": {
+        "staff_logs_device_eligibility": 0,
+        "staff_logs_device_eligibility_commands": 0
+      },
+      "statements": [
+        "CREATE TABLE staff_logs_device_eligibility_commands (\n  command_id TEXT NOT NULL PRIMARY KEY\n    CHECK(length(command_id) BETWEEN 1 AND 191 AND instr(command_id,char(0))=0),\n  request_sha256 TEXT NOT NULL\n    CHECK(length(request_sha256)=64 AND request_sha256 NOT GLOB '*[^0-9a-f]*'),\n  actor_staff_id TEXT NOT NULL REFERENCES native_staff_admissions(staff_id) ON DELETE RESTRICT,\n  actor_subject TEXT NOT NULL CHECK(length(actor_subject) BETWEEN 1 AND 191 AND instr(actor_subject,char(0))=0),\n  actor_email TEXT NOT NULL COLLATE BINARY\n    CHECK(length(actor_email) BETWEEN 3 AND 254 AND actor_email=lower(actor_email) COLLATE BINARY\n      AND actor_email=trim(actor_email) AND instr(actor_email,'@')>1 AND instr(actor_email,char(0))=0),\n  actor_admission_version INTEGER NOT NULL\n    CHECK(typeof(actor_admission_version)='integer' AND actor_admission_version BETWEEN 1 AND 9007199254740991),\n  actor_profile_version INTEGER NOT NULL\n    CHECK(typeof(actor_profile_version)='integer' AND actor_profile_version BETWEEN 1 AND 9007199254740991),\n  actor_verified_until_ms INTEGER NOT NULL\n    CHECK(typeof(actor_verified_until_ms)='integer' AND actor_verified_until_ms BETWEEN 1 AND 253402300799000),\n  actor_login_json TEXT\n    CHECK(actor_login_json IS NULL OR (typeof(actor_login_json)='text' AND length(actor_login_json)<=4096 AND json_valid(actor_login_json))),\n  target_staff_id TEXT NOT NULL REFERENCES native_staff_admissions(staff_id) ON DELETE RESTRICT,\n  target_admission_version INTEGER NOT NULL\n    CHECK(typeof(target_admission_version)='integer' AND target_admission_version BETWEEN 1 AND 9007199254740991),\n  expected_revision INTEGER NOT NULL\n    CHECK(typeof(expected_revision)='integer' AND expected_revision BETWEEN 0 AND 9007199254740990),\n  result_revision INTEGER NOT NULL\n    CHECK(typeof(result_revision)='integer' AND result_revision BETWEEN 1 AND 9007199254740991\n      AND result_revision=expected_revision+1),\n  effect TEXT NOT NULL CHECK(effect IN ('allow','deny')),\n  reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 500 AND length(trim(reason))>0 AND instr(reason,char(0))=0),\n  created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))\n    CHECK(julianday(created_at) IS NOT NULL)\n)",
+        "CREATE TABLE staff_logs_device_eligibility (\n  staff_id TEXT NOT NULL PRIMARY KEY REFERENCES native_staff_admissions(staff_id) ON DELETE RESTRICT,\n  revision INTEGER NOT NULL\n    CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9007199254740991),\n  effect TEXT NOT NULL CHECK(effect IN ('allow','deny')),\n  admission_version INTEGER NOT NULL\n    CHECK(typeof(admission_version)='integer' AND admission_version BETWEEN 1 AND 9007199254740991),\n  command_id TEXT NOT NULL UNIQUE\n    REFERENCES staff_logs_device_eligibility_commands(command_id) ON DELETE RESTRICT\n)",
+        "CREATE INDEX staff_logs_device_eligibility_effect ON staff_logs_device_eligibility(effect,staff_id)",
+        "CREATE TRIGGER staff_logs_device_command_authorize\nBEFORE INSERT ON staff_logs_device_eligibility_commands\nWHEN EXISTS(SELECT 1 FROM staff_logs_device_eligibility_commands prior WHERE prior.command_id=NEW.command_id)\n  OR NEW.actor_verified_until_ms<=CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)\n  OR NEW.result_revision<>NEW.expected_revision+1\n  OR NEW.expected_revision<>coalesce((SELECT current.revision FROM staff_logs_device_eligibility current\n      WHERE current.staff_id=NEW.target_staff_id),0)\n  OR NOT EXISTS(\n    SELECT 1 FROM native_staff_admissions actor\n    JOIN native_staff_profiles actor_profile ON actor_profile.staff_id=actor.staff_id\n    JOIN staff_users actor_user ON actor_user.id=actor.staff_id\n    WHERE actor.staff_id=NEW.actor_staff_id AND actor.active=1\n      AND actor.bound_access_subject=NEW.actor_subject\n      AND actor.version=NEW.actor_admission_version\n      AND actor_profile.version=NEW.actor_profile_version\n      AND actor_profile.login_email=NEW.actor_email COLLATE BINARY\n      AND actor_user.email=actor_profile.login_email COLLATE BINARY\n      AND actor_user.access_subject=actor.bound_access_subject\n      AND actor_user.status='active'\n  )\n  OR NOT (\n    EXISTS(SELECT 1 FROM staff_role_assignments role\n      JOIN role_permissions permission ON permission.role_id=role.role_id\n      WHERE role.staff_id=NEW.actor_staff_id AND role.scope='global'\n        AND permission.permission_key='roles.manage')\n    OR EXISTS(SELECT 1 FROM local_staff_role_assignments role\n      JOIN role_permissions permission ON permission.role_id=role.role_id\n      WHERE role.staff_id=NEW.actor_staff_id AND role.scope='global'\n        AND permission.permission_key='roles.manage')\n    OR EXISTS(SELECT 1 FROM staff_permission_overrides permission\n      WHERE permission.staff_id=NEW.actor_staff_id AND permission.permission_key='roles.manage'\n        AND permission.effect='allow' AND permission.scope='global')\n  )\n  OR EXISTS(SELECT 1 FROM staff_permission_overrides permission\n    WHERE permission.staff_id=NEW.actor_staff_id AND permission.permission_key='roles.manage'\n      AND permission.effect='deny' AND permission.scope='global')\n  OR NOT EXISTS(\n    SELECT 1 FROM native_staff_admissions target\n    JOIN native_staff_profiles target_profile ON target_profile.staff_id=target.staff_id\n    JOIN staff_users target_user ON target_user.id=target.staff_id\n    WHERE target.staff_id=NEW.target_staff_id\n      AND target.version=NEW.target_admission_version\n      AND target_profile.login_email=target_user.email COLLATE BINARY\n      AND target_user.access_subject=target.bound_access_subject\n      AND target_user.status=CASE target.active WHEN 1 THEN 'active' ELSE 'inactive' END\n      AND (NEW.effect='deny' OR target.active=1)\n  )\n  OR (NEW.actor_login_json IS NOT NULL AND NOT (\n    json_type(NEW.actor_login_json)='object'\n    AND (SELECT count(*) FROM json_each(NEW.actor_login_json))=11\n    AND (SELECT count(DISTINCT key) FROM json_each(NEW.actor_login_json))=11\n    AND NOT EXISTS(SELECT 1 FROM json_each(NEW.actor_login_json) field\n      WHERE field.key NOT IN ('kind','staffId','canonicalEmail','canonicalSubject','issuer','email','subject',\n        'expiresAt','bindingId','bindingVersion','generation'))\n    AND json_type(NEW.actor_login_json,'$.kind')='text'\n    AND json_extract(NEW.actor_login_json,'$.kind')='alternate'\n    AND json_type(NEW.actor_login_json,'$.staffId')='text'\n    AND json_extract(NEW.actor_login_json,'$.staffId')=NEW.actor_staff_id\n    AND json_type(NEW.actor_login_json,'$.canonicalEmail')='text'\n    AND json_extract(NEW.actor_login_json,'$.canonicalEmail')=NEW.actor_email COLLATE BINARY\n    AND json_type(NEW.actor_login_json,'$.canonicalSubject')='text'\n    AND json_extract(NEW.actor_login_json,'$.canonicalSubject')=NEW.actor_subject COLLATE BINARY\n    AND json_type(NEW.actor_login_json,'$.issuer')='text'\n    AND json_type(NEW.actor_login_json,'$.email')='text'\n    AND json_type(NEW.actor_login_json,'$.subject')='text'\n    AND json_type(NEW.actor_login_json,'$.expiresAt')='integer'\n    AND json_extract(NEW.actor_login_json,'$.expiresAt') BETWEEN 1 AND 253402300799\n    AND json_extract(NEW.actor_login_json,'$.expiresAt')*1000=NEW.actor_verified_until_ms\n    AND json_type(NEW.actor_login_json,'$.bindingId')='text'\n    AND length(json_extract(NEW.actor_login_json,'$.bindingId'))=36\n    AND json_extract(NEW.actor_login_json,'$.bindingId') GLOB '????????-????-4???-[89ab]???-????????????'\n    AND json_extract(NEW.actor_login_json,'$.bindingId') NOT GLOB '*[^0-9a-f-]*'\n    AND json_type(NEW.actor_login_json,'$.bindingVersion')='integer'\n    AND json_extract(NEW.actor_login_json,'$.bindingVersion') BETWEEN 1 AND 9007199254740990\n    AND json_type(NEW.actor_login_json,'$.generation')='integer'\n    AND json_extract(NEW.actor_login_json,'$.generation') BETWEEN 1 AND 9007199254740990\n    AND json_extract(NEW.actor_login_json,'$.expiresAt')>CAST((julianday('now')-2440587.5)*86400 AS INTEGER)\n    AND EXISTS(\n      SELECT 1 FROM staff_login_generations generation\n      JOIN staff_login_bindings binding ON binding.staff_id=generation.staff_id\n      JOIN staff_login_binding_intents intent ON intent.id=binding.intent_id\n      JOIN native_staff_admissions canonical ON canonical.staff_id=binding.staff_id\n      JOIN native_staff_profiles canonical_profile ON canonical_profile.staff_id=canonical.staff_id\n      JOIN staff_users canonical_user ON canonical_user.id=canonical.staff_id\n      WHERE generation.staff_id=NEW.actor_staff_id\n        AND generation.generation=json_extract(NEW.actor_login_json,'$.generation')\n        AND binding.id=json_extract(NEW.actor_login_json,'$.bindingId')\n        AND binding.staff_id=NEW.actor_staff_id\n        AND binding.version=json_extract(NEW.actor_login_json,'$.bindingVersion')\n        AND binding.status='active'\n        AND binding.issuer=json_extract(NEW.actor_login_json,'$.issuer') COLLATE BINARY\n        AND binding.login_email=json_extract(NEW.actor_login_json,'$.email') COLLATE BINARY\n        AND binding.access_subject=json_extract(NEW.actor_login_json,'$.subject') COLLATE BINARY\n        AND binding.login_email<>NEW.actor_email COLLATE NOCASE\n        AND intent.status='claimed' AND intent.binding_id=binding.id\n        AND intent.staff_id=NEW.actor_staff_id AND intent.issuer=binding.issuer COLLATE BINARY\n        AND intent.alternate_email=binding.login_email COLLATE BINARY\n        AND intent.canonical_email=canonical_profile.login_email COLLATE BINARY\n        AND intent.canonical_subject=canonical.bound_access_subject COLLATE BINARY\n        AND canonical.active=1 AND canonical.version=NEW.actor_admission_version\n        AND canonical.bound_access_subject=NEW.actor_subject COLLATE BINARY\n        AND canonical_profile.version=NEW.actor_profile_version\n        AND canonical_profile.login_email=NEW.actor_email COLLATE BINARY\n        AND canonical_user.email=canonical_profile.login_email COLLATE BINARY\n        AND canonical_user.access_subject=canonical.bound_access_subject COLLATE BINARY\n        AND canonical_user.status='active'\n    )\n  ))\nBEGIN SELECT RAISE(ABORT,'logs_device_eligibility_denied'); END",
+        "CREATE TRIGGER staff_logs_device_command_apply\nAFTER INSERT ON staff_logs_device_eligibility_commands\nBEGIN\n  INSERT INTO staff_logs_device_eligibility(staff_id,revision,effect,admission_version,command_id)\n    SELECT NEW.target_staff_id,NEW.result_revision,NEW.effect,NEW.target_admission_version,NEW.command_id\n    WHERE NEW.expected_revision=0;\n  UPDATE staff_logs_device_eligibility\n    SET revision=NEW.result_revision,effect=NEW.effect,\n      admission_version=NEW.target_admission_version,command_id=NEW.command_id\n    WHERE staff_id=NEW.target_staff_id AND revision=NEW.expected_revision\n      AND NEW.expected_revision>0;\n  SELECT RAISE(ABORT,'staff_logs_device_command_not_applied')\n    WHERE NOT EXISTS(SELECT 1 FROM staff_logs_device_eligibility current\n      WHERE current.staff_id=NEW.target_staff_id AND current.revision=NEW.result_revision\n        AND current.effect=NEW.effect AND current.admission_version=NEW.target_admission_version\n        AND current.command_id=NEW.command_id);\nEND",
+        "CREATE TRIGGER staff_logs_device_commands_no_update\nBEFORE UPDATE ON staff_logs_device_eligibility_commands\nBEGIN SELECT RAISE(ABORT,'staff_logs_device_commands_immutable'); END",
+        "CREATE TRIGGER staff_logs_device_commands_no_delete\nBEFORE DELETE ON staff_logs_device_eligibility_commands\nBEGIN SELECT RAISE(ABORT,'staff_logs_device_commands_durable'); END",
+        "CREATE TRIGGER staff_logs_device_eligibility_insert\nBEFORE INSERT ON staff_logs_device_eligibility\nWHEN NOT EXISTS(\n  SELECT 1 FROM staff_logs_device_eligibility_commands command\n  WHERE command.command_id=NEW.command_id AND command.target_staff_id=NEW.staff_id\n    AND command.expected_revision=0 AND command.result_revision=NEW.revision\n    AND command.effect=NEW.effect AND command.target_admission_version=NEW.admission_version\n    AND NEW.revision=1\n    AND NOT EXISTS(SELECT 1 FROM staff_logs_device_eligibility prior WHERE prior.staff_id=NEW.staff_id)\n)\nBEGIN SELECT RAISE(ABORT,'staff_logs_device_eligibility_requires_command'); END",
+        "CREATE TRIGGER staff_logs_device_eligibility_update\nBEFORE UPDATE ON staff_logs_device_eligibility\nWHEN NEW.staff_id IS NOT OLD.staff_id OR NEW.revision<>OLD.revision+1\n  OR NOT EXISTS(\n    SELECT 1 FROM staff_logs_device_eligibility_commands command\n    WHERE command.command_id=NEW.command_id AND command.target_staff_id=NEW.staff_id\n      AND command.expected_revision=OLD.revision AND command.result_revision=NEW.revision\n      AND command.effect=NEW.effect AND command.target_admission_version=NEW.admission_version\n  )\nBEGIN SELECT RAISE(ABORT,'staff_logs_device_eligibility_requires_command'); END",
+        "CREATE TRIGGER staff_logs_device_eligibility_no_delete\nBEFORE DELETE ON staff_logs_device_eligibility\nBEGIN SELECT RAISE(ABORT,'staff_logs_device_eligibility_durable'); END"
+      ]
+    },
+    {
+      "order": 10,
+      "name": "0244_staff_operations_access_writer.sql",
+      "ledgerId": 236,
+      "sourceSha256": "e291acac31395ae7bd22c5b43ed44331ee9f989f074869a92dd26dd69547f815",
+      "splitterOutputStatementCount": 21,
+      "setupStatements": [
+        "PRAGMA foreign_keys = ON"
+      ],
+      "statementCount": 20,
+      "statementsSha256": "38812c0fdcf31bad634f64727e51472edcb9a45cacc6ef58c81f2e82a89bc03f",
+      "expectedAddedObjects": [
+        {
+          "type": "index",
+          "name": "staff_operations_access_commands_override",
+          "tbl_name": "staff_operations_access_commands"
+        },
+        {
+          "type": "table",
+          "name": "staff_operations_access_catalog",
+          "tbl_name": "staff_operations_access_catalog"
+        },
+        {
+          "type": "table",
+          "name": "staff_operations_access_commands",
+          "tbl_name": "staff_operations_access_commands"
+        },
+        {
+          "type": "table",
+          "name": "staff_operations_access_state",
+          "tbl_name": "staff_operations_access_state"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_catalog_no_delete",
+          "tbl_name": "staff_operations_access_catalog"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_catalog_no_insert",
+          "tbl_name": "staff_operations_access_catalog"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_catalog_no_update",
+          "tbl_name": "staff_operations_access_catalog"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_command_apply",
+          "tbl_name": "staff_operations_access_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_command_authorize",
+          "tbl_name": "staff_operations_access_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_commands_no_delete",
+          "tbl_name": "staff_operations_access_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_commands_no_update",
+          "tbl_name": "staff_operations_access_commands"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_override_delete_guard",
+          "tbl_name": "staff_permission_overrides"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_override_insert_guard",
+          "tbl_name": "staff_permission_overrides"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_override_update_guard",
+          "tbl_name": "staff_permission_overrides"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_state_insert",
+          "tbl_name": "staff_operations_access_state"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_state_no_delete",
+          "tbl_name": "staff_operations_access_state"
+        },
+        {
+          "type": "trigger",
+          "name": "staff_operations_access_state_update",
+          "tbl_name": "staff_operations_access_state"
+        },
+        {
+          "type": "view",
+          "name": "staff_operations_access_native_hires",
+          "tbl_name": "staff_operations_access_native_hires"
+        },
+        {
+          "type": "view",
+          "name": "staff_operations_access_targets",
+          "tbl_name": "staff_operations_access_targets"
+        }
+      ],
+      "expectedAddedObjectCount": 19,
+      "expectedAddedSchemaSha256": "b1b7e253731a17fc4877789e7144780c9370866f3ef53e8daa651343a7571056",
+      "expectedNewTableRows": {
+        "staff_operations_access_catalog": 15,
+        "staff_operations_access_commands": 0,
+        "staff_operations_access_state": 0
+      },
+      "statements": [
+        "CREATE TABLE staff_operations_access_catalog (\n  permission TEXT NOT NULL PRIMARY KEY REFERENCES permissions(key) ON DELETE RESTRICT,\n  requires_explicit_actor_allow INTEGER NOT NULL CHECK(requires_explicit_actor_allow IN (0,1))\n)",
+        "INSERT INTO staff_operations_access_catalog(permission,requires_explicit_actor_allow) VALUES\n  ('operations.view_all',1),\n  ('sops.assign',0),\n  ('delivery.browse',0),\n  ('delivery.share.create',0),\n  ('delivery.share.revoke',0),\n  ('delivery.share.audit',0),\n  ('team.view',0),\n  ('administration.view',0),\n  ('viewer.view',0),\n  ('viewer.datasets.manage',0),\n  ('viewer.processing.manage',0),\n  ('viewer.publish',0),\n  ('viewer.share.create',0),\n  ('viewer.share.revoke',0),\n  ('viewer.manage',0)",
+        "CREATE TRIGGER staff_operations_access_catalog_no_insert\nBEFORE INSERT ON staff_operations_access_catalog\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_catalog_frozen'); END",
+        "CREATE TRIGGER staff_operations_access_catalog_no_update\nBEFORE UPDATE ON staff_operations_access_catalog\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_catalog_frozen'); END",
+        "CREATE TRIGGER staff_operations_access_catalog_no_delete\nBEFORE DELETE ON staff_operations_access_catalog\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_catalog_frozen'); END",
+        "CREATE VIEW staff_operations_access_native_hires AS\nSELECT onboarding.proposed_staff_id staff_id, receipt.actor_staff_id approved_by\nFROM native_staff_pending_onboarding onboarding\nJOIN native_staff_management_commands receipt ON receipt.command_id=onboarding.approval_command_id\nWHERE onboarding.state='approved'\n  AND receipt.capability='staff.onboarding.approve'\n  AND receipt.target_kind='onboarding'\n  AND receipt.target_onboarding_id=onboarding.onboarding_id\n  AND receipt.target_proposed_staff_id=onboarding.proposed_staff_id",
+        "CREATE VIEW staff_operations_access_targets AS\nSELECT hire.staff_id staff_id,\n  admission.version admission_version,\n  admission.active admission_active,\n  CASE WHEN staff.status=CASE admission.active WHEN 1 THEN 'active' ELSE 'inactive' END\n    AND staff.email=profile.login_email COLLATE BINARY\n    AND staff.access_subject=admission.bound_access_subject\n  THEN 1 ELSE 0 END identity_current,\n  CASE WHEN staff.id='staff-beau-koltz'\n    OR EXISTS(SELECT 1 FROM staff_role_assignments owner_role WHERE owner_role.staff_id=staff.id\n      AND owner_role.role_id='role-owner' AND owner_role.scope='global')\n    OR EXISTS(SELECT 1 FROM local_staff_role_assignments owner_role WHERE owner_role.staff_id=staff.id\n      AND owner_role.role_id='role-owner' AND owner_role.scope='global')\n  THEN 1 ELSE 0 END protected_owner\nFROM staff_operations_access_native_hires hire\nJOIN staff_users staff ON staff.id=hire.staff_id\nJOIN native_staff_admissions admission ON admission.staff_id=hire.staff_id\nJOIN native_staff_profiles profile ON profile.staff_id=hire.staff_id\nWHERE staff.provisioning_source='local' AND staff.sync_protected=1\n  AND staff.project_alpha_user_id IS NULL\n  AND admission.admitted_by=hire.approved_by",
+        "CREATE TABLE staff_operations_access_commands (\n  command_id TEXT NOT NULL PRIMARY KEY\n    CHECK(length(command_id)=36 AND command_id GLOB '????????-????-4???-[89ab]???-????????????'\n      AND command_id NOT GLOB '*[^0-9a-f-]*'),\n  request_sha256 TEXT NOT NULL\n    CHECK(length(request_sha256)=64 AND request_sha256 NOT GLOB '*[^0-9a-f]*'),\n  actor_staff_id TEXT NOT NULL REFERENCES native_staff_admissions(staff_id) ON DELETE RESTRICT,\n  actor_subject TEXT NOT NULL CHECK(length(actor_subject) BETWEEN 1 AND 191 AND instr(actor_subject,char(0))=0),\n  actor_email TEXT NOT NULL COLLATE BINARY\n    CHECK(length(actor_email) BETWEEN 3 AND 254 AND actor_email=lower(actor_email) COLLATE BINARY\n      AND actor_email=trim(actor_email) AND instr(actor_email,'@')>1 AND instr(actor_email,char(0))=0),\n  actor_admission_version INTEGER NOT NULL\n    CHECK(typeof(actor_admission_version)='integer' AND actor_admission_version BETWEEN 1 AND 9007199254740991),\n  actor_profile_version INTEGER NOT NULL\n    CHECK(typeof(actor_profile_version)='integer' AND actor_profile_version BETWEEN 1 AND 9007199254740991),\n  actor_verified_until_ms INTEGER NOT NULL\n    CHECK(typeof(actor_verified_until_ms)='integer' AND actor_verified_until_ms BETWEEN 1 AND 253402300799000),\n  actor_login_json TEXT\n    CHECK(actor_login_json IS NULL OR (typeof(actor_login_json)='text' AND length(actor_login_json)<=4096 AND json_valid(actor_login_json))),\n  target_staff_id TEXT NOT NULL REFERENCES native_staff_admissions(staff_id) ON DELETE RESTRICT,\n  target_admission_version INTEGER NOT NULL\n    CHECK(typeof(target_admission_version)='integer' AND target_admission_version BETWEEN 1 AND 9007199254740991),\n  permission TEXT NOT NULL REFERENCES staff_operations_access_catalog(permission) ON DELETE RESTRICT,\n  operation TEXT NOT NULL CHECK(operation IN ('grant','revoke')),\n  override_id TEXT NOT NULL\n    CHECK(override_id='native-ops-access:'||target_staff_id||':'||permission),\n  expected_revision INTEGER NOT NULL\n    CHECK(typeof(expected_revision)='integer' AND expected_revision BETWEEN 0 AND 9007199254740990),\n  result_revision INTEGER NOT NULL\n    CHECK(typeof(result_revision)='integer' AND result_revision BETWEEN 1 AND 9007199254740991\n      AND result_revision=expected_revision+1),\n  reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 500 AND length(trim(reason))>0 AND instr(reason,char(0))=0),\n  created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))\n    CHECK(julianday(created_at) IS NOT NULL),\n  UNIQUE(target_staff_id,result_revision)\n)",
+        "CREATE INDEX staff_operations_access_commands_override\n  ON staff_operations_access_commands(override_id,result_revision)",
+        "CREATE TABLE staff_operations_access_state (\n  staff_id TEXT NOT NULL PRIMARY KEY REFERENCES native_staff_admissions(staff_id) ON DELETE RESTRICT,\n  revision INTEGER NOT NULL\n    CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9007199254740991),\n  command_id TEXT NOT NULL UNIQUE\n    REFERENCES staff_operations_access_commands(command_id) ON DELETE RESTRICT\n)",
+        "CREATE TRIGGER staff_operations_access_command_authorize\nBEFORE INSERT ON staff_operations_access_commands\nWHEN EXISTS(SELECT 1 FROM staff_operations_access_commands prior WHERE prior.command_id=NEW.command_id)\n  OR NEW.actor_verified_until_ms<=CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)\n  OR NEW.result_revision<>NEW.expected_revision+1\n  OR NEW.override_id<>'native-ops-access:'||NEW.target_staff_id||':'||NEW.permission\n  OR NEW.expected_revision<>coalesce((SELECT current.revision FROM staff_operations_access_state current\n      WHERE current.staff_id=NEW.target_staff_id),0)\n  \n  OR NOT EXISTS(\n    SELECT 1 FROM native_staff_admissions actor\n    JOIN native_staff_profiles actor_profile ON actor_profile.staff_id=actor.staff_id\n    JOIN staff_users actor_user ON actor_user.id=actor.staff_id\n    WHERE actor.staff_id=NEW.actor_staff_id AND actor.active=1\n      AND actor.bound_access_subject=NEW.actor_subject\n      AND actor.version=NEW.actor_admission_version\n      AND actor_profile.version=NEW.actor_profile_version\n      AND actor_profile.login_email=NEW.actor_email COLLATE BINARY\n      AND actor_user.email=actor_profile.login_email COLLATE BINARY\n      AND actor_user.access_subject=actor.bound_access_subject\n      AND actor_user.status='active'\n  )\n  \n  OR NOT EXISTS(SELECT 1 FROM staff_role_assignments gate\n    WHERE gate.staff_id=NEW.actor_staff_id AND gate.role_id IN ('role-owner','role-admin') AND gate.scope='global')\n  \n  OR NOT (\n    EXISTS(SELECT 1 FROM staff_role_assignments role\n      JOIN role_permissions permission ON permission.role_id=role.role_id\n      WHERE role.staff_id=NEW.actor_staff_id AND role.scope='global'\n        AND permission.permission_key='roles.manage')\n    OR EXISTS(SELECT 1 FROM local_staff_role_assignments role\n      JOIN role_permissions permission ON permission.role_id=role.role_id\n      WHERE role.staff_id=NEW.actor_staff_id AND role.scope='global'\n        AND permission.permission_key='roles.manage')\n    OR EXISTS(SELECT 1 FROM staff_permission_overrides permission\n      WHERE permission.staff_id=NEW.actor_staff_id AND permission.permission_key='roles.manage'\n        AND permission.effect='allow' AND permission.scope='global')\n  )\n  OR EXISTS(SELECT 1 FROM staff_permission_overrides permission\n    WHERE permission.staff_id=NEW.actor_staff_id AND permission.permission_key='roles.manage'\n      AND permission.effect='deny')\n  \n  \n  \n  OR NOT EXISTS(SELECT 1 FROM staff_operations_access_catalog catalog\n    WHERE catalog.permission=NEW.permission AND (\n      EXISTS(SELECT 1 FROM staff_permission_overrides own WHERE own.staff_id=NEW.actor_staff_id\n        AND own.permission_key=NEW.permission AND own.effect='allow' AND own.scope='global')\n      OR (catalog.requires_explicit_actor_allow=0 AND (\n        EXISTS(SELECT 1 FROM staff_role_assignments role\n          JOIN role_permissions permission ON permission.role_id=role.role_id\n          WHERE role.staff_id=NEW.actor_staff_id AND role.scope='global'\n            AND permission.permission_key=NEW.permission)\n        OR EXISTS(SELECT 1 FROM local_staff_role_assignments role\n          JOIN role_permissions permission ON permission.role_id=role.role_id\n          WHERE role.staff_id=NEW.actor_staff_id AND role.scope='global'\n            AND permission.permission_key=NEW.permission)))))\n  OR EXISTS(SELECT 1 FROM staff_permission_overrides deny WHERE deny.staff_id=NEW.actor_staff_id\n    AND deny.permission_key=NEW.permission AND deny.effect='deny')\n  \n  OR NEW.target_staff_id=NEW.actor_staff_id\n  OR NOT EXISTS(SELECT 1 FROM staff_operations_access_targets target\n    WHERE target.staff_id=NEW.target_staff_id AND target.identity_current=1 AND target.protected_owner=0\n      AND target.admission_version=NEW.target_admission_version\n      AND (NEW.operation='revoke' OR target.admission_active=1))\n  \n  OR EXISTS(SELECT 1 FROM staff_permission_overrides deny WHERE deny.staff_id=NEW.target_staff_id\n    AND deny.permission_key=NEW.permission AND deny.effect='deny')\n  OR (NEW.operation='grant' AND (\n    EXISTS(SELECT 1 FROM staff_permission_overrides allowed WHERE allowed.staff_id=NEW.target_staff_id\n      AND allowed.permission_key=NEW.permission AND allowed.effect='allow' AND allowed.scope='global')\n    OR EXISTS(SELECT 1 FROM staff_role_assignments role\n      JOIN role_permissions permission ON permission.role_id=role.role_id\n      WHERE role.staff_id=NEW.target_staff_id AND role.scope='global' AND permission.permission_key=NEW.permission)\n    OR EXISTS(SELECT 1 FROM local_staff_role_assignments role\n      JOIN role_permissions permission ON permission.role_id=role.role_id\n      WHERE role.staff_id=NEW.target_staff_id AND role.scope='global' AND permission.permission_key=NEW.permission)))\n  \n  \n  OR (NEW.operation='revoke' AND NOT EXISTS(SELECT 1 FROM staff_permission_overrides managed\n    WHERE managed.id=NEW.override_id AND managed.staff_id=NEW.target_staff_id\n      AND managed.permission_key=NEW.permission AND managed.effect='allow' AND managed.scope='global'\n      AND (SELECT latest.operation||':'||latest.actor_staff_id FROM staff_operations_access_commands latest\n        WHERE latest.override_id=managed.id\n        ORDER BY latest.result_revision DESC LIMIT 1)='grant:'||managed.created_by))\n  \n  OR (NEW.actor_login_json IS NOT NULL AND NOT (\n    json_type(NEW.actor_login_json)='object'\n    AND (SELECT count(*) FROM json_each(NEW.actor_login_json))=11\n    AND (SELECT count(DISTINCT key) FROM json_each(NEW.actor_login_json))=11\n    AND NOT EXISTS(SELECT 1 FROM json_each(NEW.actor_login_json) field\n      WHERE field.key NOT IN ('kind','staffId','canonicalEmail','canonicalSubject','issuer','email','subject',\n        'expiresAt','bindingId','bindingVersion','generation'))\n    AND json_type(NEW.actor_login_json,'$.kind')='text'\n    AND json_extract(NEW.actor_login_json,'$.kind')='alternate'\n    AND json_type(NEW.actor_login_json,'$.staffId')='text'\n    AND json_extract(NEW.actor_login_json,'$.staffId')=NEW.actor_staff_id\n    AND json_type(NEW.actor_login_json,'$.canonicalEmail')='text'\n    AND json_extract(NEW.actor_login_json,'$.canonicalEmail')=NEW.actor_email COLLATE BINARY\n    AND json_type(NEW.actor_login_json,'$.canonicalSubject')='text'\n    AND json_extract(NEW.actor_login_json,'$.canonicalSubject')=NEW.actor_subject COLLATE BINARY\n    AND json_type(NEW.actor_login_json,'$.issuer')='text'\n    AND json_type(NEW.actor_login_json,'$.email')='text'\n    AND json_type(NEW.actor_login_json,'$.subject')='text'\n    AND json_type(NEW.actor_login_json,'$.expiresAt')='integer'\n    AND json_extract(NEW.actor_login_json,'$.expiresAt') BETWEEN 1 AND 253402300799\n    AND json_extract(NEW.actor_login_json,'$.expiresAt')*1000=NEW.actor_verified_until_ms\n    AND json_type(NEW.actor_login_json,'$.bindingId')='text'\n    AND length(json_extract(NEW.actor_login_json,'$.bindingId'))=36\n    AND json_extract(NEW.actor_login_json,'$.bindingId') GLOB '????????-????-4???-[89ab]???-????????????'\n    AND json_extract(NEW.actor_login_json,'$.bindingId') NOT GLOB '*[^0-9a-f-]*'\n    AND json_type(NEW.actor_login_json,'$.bindingVersion')='integer'\n    AND json_extract(NEW.actor_login_json,'$.bindingVersion') BETWEEN 1 AND 9007199254740990\n    AND json_type(NEW.actor_login_json,'$.generation')='integer'\n    AND json_extract(NEW.actor_login_json,'$.generation') BETWEEN 1 AND 9007199254740990\n    AND json_extract(NEW.actor_login_json,'$.expiresAt')>CAST((julianday('now')-2440587.5)*86400 AS INTEGER)\n    AND EXISTS(\n      SELECT 1 FROM staff_login_generations generation\n      JOIN staff_login_bindings binding ON binding.staff_id=generation.staff_id\n      JOIN staff_login_binding_intents intent ON intent.id=binding.intent_id\n      JOIN native_staff_admissions canonical ON canonical.staff_id=binding.staff_id\n      JOIN native_staff_profiles canonical_profile ON canonical_profile.staff_id=canonical.staff_id\n      JOIN staff_users canonical_user ON canonical_user.id=canonical.staff_id\n      WHERE generation.staff_id=NEW.actor_staff_id\n        AND generation.generation=json_extract(NEW.actor_login_json,'$.generation')\n        AND binding.id=json_extract(NEW.actor_login_json,'$.bindingId')\n        AND binding.staff_id=NEW.actor_staff_id\n        AND binding.version=json_extract(NEW.actor_login_json,'$.bindingVersion')\n        AND binding.status='active'\n        AND binding.issuer=json_extract(NEW.actor_login_json,'$.issuer') COLLATE BINARY\n        AND binding.login_email=json_extract(NEW.actor_login_json,'$.email') COLLATE BINARY\n        AND binding.access_subject=json_extract(NEW.actor_login_json,'$.subject') COLLATE BINARY\n        AND binding.login_email<>NEW.actor_email COLLATE NOCASE\n        AND intent.status='claimed' AND intent.binding_id=binding.id\n        AND intent.staff_id=NEW.actor_staff_id AND intent.issuer=binding.issuer COLLATE BINARY\n        AND intent.alternate_email=binding.login_email COLLATE BINARY\n        AND intent.canonical_email=canonical_profile.login_email COLLATE BINARY\n        AND intent.canonical_subject=canonical.bound_access_subject COLLATE BINARY\n        AND canonical.active=1 AND canonical.version=NEW.actor_admission_version\n        AND canonical.bound_access_subject=NEW.actor_subject COLLATE BINARY\n        AND canonical_profile.version=NEW.actor_profile_version\n        AND canonical_profile.login_email=NEW.actor_email COLLATE BINARY\n        AND canonical_user.email=canonical_profile.login_email COLLATE BINARY\n        AND canonical_user.access_subject=canonical.bound_access_subject COLLATE BINARY\n        AND canonical_user.status='active'\n    )\n  ))\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_denied'); END",
+        "CREATE TRIGGER staff_operations_access_command_apply\nAFTER INSERT ON staff_operations_access_commands\nBEGIN\n  INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,division_id,scope_key,created_by)\n    SELECT NEW.override_id,NEW.target_staff_id,NEW.permission,'allow','global',NULL,'global',NEW.actor_staff_id\n    WHERE NEW.operation='grant';\n  DELETE FROM staff_permission_overrides\n    WHERE NEW.operation='revoke' AND id=NEW.override_id AND staff_id=NEW.target_staff_id\n      AND permission_key=NEW.permission AND effect='allow' AND scope='global';\n  INSERT INTO staff_operations_access_state(staff_id,revision,command_id)\n    SELECT NEW.target_staff_id,NEW.result_revision,NEW.command_id WHERE NEW.expected_revision=0;\n  UPDATE staff_operations_access_state SET revision=NEW.result_revision,command_id=NEW.command_id\n    WHERE staff_id=NEW.target_staff_id AND revision=NEW.expected_revision AND NEW.expected_revision>0;\n  SELECT RAISE(ABORT,'staff_operations_access_not_applied')\n    WHERE NOT EXISTS(SELECT 1 FROM staff_operations_access_state current\n        WHERE current.staff_id=NEW.target_staff_id AND current.revision=NEW.result_revision\n          AND current.command_id=NEW.command_id)\n      OR (NEW.operation='grant' AND NOT EXISTS(SELECT 1 FROM staff_permission_overrides granted\n        WHERE granted.id=NEW.override_id AND granted.staff_id=NEW.target_staff_id\n          AND granted.permission_key=NEW.permission AND granted.effect='allow' AND granted.scope='global'\n          AND granted.created_by=NEW.actor_staff_id))\n      OR (NEW.operation='revoke' AND EXISTS(SELECT 1 FROM staff_permission_overrides remaining\n        WHERE remaining.id=NEW.override_id));\nEND",
+        "CREATE TRIGGER staff_operations_access_commands_no_update\nBEFORE UPDATE ON staff_operations_access_commands\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_commands_immutable'); END",
+        "CREATE TRIGGER staff_operations_access_commands_no_delete\nBEFORE DELETE ON staff_operations_access_commands\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_commands_durable'); END",
+        "CREATE TRIGGER staff_operations_access_state_insert\nBEFORE INSERT ON staff_operations_access_state\nWHEN NEW.revision<>1\n  OR EXISTS(SELECT 1 FROM staff_operations_access_state prior WHERE prior.staff_id=NEW.staff_id)\n  OR NOT EXISTS(SELECT 1 FROM staff_operations_access_commands command\n    WHERE command.command_id=NEW.command_id AND command.target_staff_id=NEW.staff_id\n      AND command.expected_revision=0 AND command.result_revision=NEW.revision)\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_state_requires_command'); END",
+        "CREATE TRIGGER staff_operations_access_state_update\nBEFORE UPDATE ON staff_operations_access_state\nWHEN NEW.staff_id IS NOT OLD.staff_id OR NEW.revision<>OLD.revision+1\n  OR NOT EXISTS(SELECT 1 FROM staff_operations_access_commands command\n    WHERE command.command_id=NEW.command_id AND command.target_staff_id=NEW.staff_id\n      AND command.expected_revision=OLD.revision AND command.result_revision=NEW.revision)\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_state_requires_command'); END",
+        "CREATE TRIGGER staff_operations_access_state_no_delete\nBEFORE DELETE ON staff_operations_access_state\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_state_durable'); END",
+        "CREATE TRIGGER staff_operations_access_override_insert_guard\nBEFORE INSERT ON staff_permission_overrides\nWHEN EXISTS(SELECT 1 FROM staff_operations_access_native_hires hire WHERE hire.staff_id=NEW.staff_id)\n  AND NOT EXISTS(SELECT 1 FROM staff_operations_access_commands command\n    WHERE command.target_staff_id=NEW.staff_id AND command.override_id=NEW.id\n      AND command.permission=NEW.permission_key AND command.operation='grant'\n      AND command.actor_staff_id=NEW.created_by\n      AND NEW.effect='allow' AND NEW.scope='global' AND NEW.division_id IS NULL AND NEW.scope_key='global'\n      AND command.expected_revision=coalesce((SELECT current.revision FROM staff_operations_access_state current\n        WHERE current.staff_id=NEW.staff_id),0)\n      AND command.result_revision=command.expected_revision+1)\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_override_requires_command'); END",
+        "CREATE TRIGGER staff_operations_access_override_delete_guard\nBEFORE DELETE ON staff_permission_overrides\nWHEN EXISTS(SELECT 1 FROM staff_operations_access_native_hires hire WHERE hire.staff_id=OLD.staff_id)\n  AND NOT EXISTS(SELECT 1 FROM staff_operations_access_commands command\n    WHERE command.target_staff_id=OLD.staff_id AND command.override_id=OLD.id\n      AND command.permission=OLD.permission_key AND command.operation='revoke'\n      AND OLD.effect='allow' AND OLD.scope='global'\n      AND command.expected_revision=coalesce((SELECT current.revision FROM staff_operations_access_state current\n        WHERE current.staff_id=OLD.staff_id),0)\n      AND command.result_revision=command.expected_revision+1\n      AND (SELECT latest.operation||':'||latest.actor_staff_id FROM staff_operations_access_commands latest\n        WHERE latest.override_id=OLD.id AND latest.result_revision<=command.expected_revision\n        ORDER BY latest.result_revision DESC LIMIT 1)='grant:'||OLD.created_by)\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_override_requires_command'); END",
+        "CREATE TRIGGER staff_operations_access_override_update_guard\nBEFORE UPDATE ON staff_permission_overrides\nWHEN EXISTS(SELECT 1 FROM staff_operations_access_native_hires hire WHERE hire.staff_id IN (OLD.staff_id,NEW.staff_id))\nBEGIN SELECT RAISE(ABORT,'staff_operations_access_override_immutable'); END"
+      ]
+    }
+  ]
+}

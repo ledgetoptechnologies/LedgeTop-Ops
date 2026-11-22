@@ -27,6 +27,7 @@ import {
   canAccessDataPage,
   canonicalClientPath,
   deliverySectionPath,
+  CLIENT_ONBOARDING_PATH,
   operationsLandingPath,
   operationsSectionPath,
   pathDeliverySection,
@@ -54,6 +55,8 @@ import { SopLibrary } from "./SopLibrary";
 import { OperationsNotifications } from "./OperationsNotifications";
 import { OperationsFeedback } from "./OperationsFeedback";
 import { InvitationApprovals } from "./InvitationApprovals";
+import { ClientOnboardingStaff } from "./ClientOnboardingStaff";
+import { endpoint as onboardingStaffEndpoint, json as onboardingStaffJson, validSession as validOnboardingStaffSession } from "./onboarding-staff-api";
 import "./StaffInbox.css";
 import { loadInvitationAdministrationAccess, type InvitationAdministrationAccess } from "./invitation-administration-api";
 import { WorkContextSops } from "./WorkContextSops";
@@ -287,7 +290,10 @@ const destinationRequest = (action: string, count: number, prefix: string): Text
   confirmLabel: action === "move" ? "Move" : "Copy",
 });
 
+const ONBOARDING_ACCESS_UNAVAILABLE = "Client onboarding access could not be verified.";
+
 export function OperationsApp() {
+  const [onboardingReview, setOnboardingReview] = useState(() => location.pathname === CLIENT_ONBOARDING_PATH);
   const [viewerRoute, setViewerRoute] = useState(() => parseOperationsViewerShellRoute(location.pathname, location.search));
   const [session, setSession] = useState<Session | null>(null),
     [error, setError] = useState<StartupFailure | null>(null),
@@ -295,6 +301,7 @@ export function OperationsApp() {
     [mobileNavOpen, setMobileNavOpen] = useState(false),
     [manageOpen, setManageOpen] = useState(false),
     [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
+  const onboardingHeading = useRef<HTMLHeadingElement>(null);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null),
     mobileNavPanel = useRef<HTMLDivElement>(null),
     manageMenu = useRef<HTMLDivElement>(null),
@@ -313,6 +320,12 @@ export function OperationsApp() {
   };
   const normalizeLocation = (value: Session) => {
     setViewerRoute(parseOperationsViewerShellRoute(location.pathname, location.search));
+    const reviewing = location.pathname === CLIENT_ONBOARDING_PATH;
+    setOnboardingReview(reviewing);
+    if (reviewing) {
+      setPage("clients");
+      return;
+    }
     const requested = pathPage(location.pathname);
     const feedbackEnabled = value.capabilities?.clientFeedback?.enabled === true;
     const invitationReview = value.invitationAdministration?.enabled === true && value.invitationAdministration.canReview;
@@ -347,7 +360,22 @@ export function OperationsApp() {
   };
   useEffect(() => {
     const controller = new AbortController();
-    withStartupDeadline(signal => api<Session>("/api/session", {signal}), controller.signal)
+    const onboardingDeepLink = location.pathname === CLIENT_ONBOARDING_PATH;
+    withStartupDeadline(async signal => {
+      if (onboardingDeepLink) {
+        // Preserve the native onboarding gate before the general shell session,
+        // which may still perform first-login binding in legacy environments.
+        try {
+          const staff = await onboardingStaffJson(`${onboardingStaffEndpoint}/session`, {
+            method: "GET", signal, headers: { "X-Native-Staff-Request": "1" },
+          });
+          if (!validOnboardingStaffSession(staff)) throw Error();
+        } catch {
+          throw Error(ONBOARDING_ACCESS_UNAVAILABLE);
+        }
+      }
+      return api<Session>("/api/session", {signal});
+    }, controller.signal)
       .then(async (value) => {
         setCsrf(value.csrfToken);
         setSessionActor(value.user.id);
@@ -375,6 +403,9 @@ export function OperationsApp() {
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
   }, [session]);
+  useEffect(() => {
+    if (onboardingReview && session) onboardingHeading.current?.focus();
+  }, [onboardingReview, session]);
   useEffect(() => {
     if (!mobileNavOpen) return;
     const previousOverflow = document.body.style.overflow;
@@ -417,6 +448,7 @@ export function OperationsApp() {
     setViewerRoute(null);
     setPage(next);
     const target = href || (next === "dashboard" ? "/" : `/${next}`);
+    setOnboardingReview(target === CLIENT_ONBOARDING_PATH);
     // Choosing the page you are already on keeps its filters and scope in the address.
     if (location.pathname !== target) history.pushState(null, "", target);
     if (next === "operations" || next === "delivery" || next === "clients" || next === "notifications")
@@ -425,6 +457,12 @@ export function OperationsApp() {
     setManageOpen(false);
     window.scrollTo(0, 0);
   }
+  if (error?.message === ONBOARDING_ACCESS_UNAVAILABLE)
+    return <main className="onboarding-staff-gate"><Card>
+      <h1>Client onboarding unavailable</h1>
+      <p role="alert">{ONBOARDING_ACCESS_UNAVAILABLE}</p>
+      <a className="button button-ghost onboarding-staff-action" href="/">Return to Operations</a>
+    </Card></main>;
   if (error) return <SignInProblem failure={error} />;
   if (!session)
     return (
@@ -504,10 +542,12 @@ export function OperationsApp() {
       </div>}
       <main className={`ops-main${viewerRoute && page === "viewer" ? " ops-viewer-main" : ""}`}>
         <OperationsBreadcrumb groups={sidebarGroups} page={page} onNavigate={navigate} />
-        {!(viewerRoute && page === "viewer") && <PageHeading page={page} displayName={session.user.displayName} />}
+        {onboardingReview ? <h1 ref={onboardingHeading} tabIndex={-1}>Review submissions</h1>
+          : !(viewerRoute && page === "viewer") && <PageHeading page={page} displayName={session.user.displayName} />}
         {page === "dashboard" && <Dashboard {...props} onNavigate={navigate} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
-        {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage") || session.capabilities?.clientFeedback?.enabled === true || invitationReview) && (
+        {onboardingReview && <ClientOnboardingStaff />}
+        {!onboardingReview && page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage") || session.capabilities?.clientFeedback?.enabled === true || invitationReview) && (
           <ClientHubSurface session={session} />
         )}{" "}
         {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}

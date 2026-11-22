@@ -1,4 +1,8 @@
 .onboarding-staff-gate { width: min(100% - 2rem, 720px); margin: 4rem auto; }
+.onboarding-dialog { box-sizing: border-box; width: min(920px, calc(100% - 2rem)); max-height: min(90vh, 900px); overflow: auto; padding: 1.25rem; border: 1px solid var(--line, #cbd2d8); border-radius: 12px; background: var(--paper, #f5f7f8); color: var(--ink, #151a20); }
+.onboarding-dialog::backdrop { background: rgb(17 24 32 / 65%); }
+.onboarding-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+.onboarding-dialog-header h2 { margin: 0; }
 .onboarding-staff-shell { min-height: 100vh; background: var(--paper, #f5f7f8); color: var(--ink, #151a20); }
 .onboarding-staff-shell > header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 72px; padding: 0 max(1rem, calc((100% - 1120px) / 2)); background: #111820; color: #fff; }
 .onboarding-staff-shell > header a { color: #fff; font-weight: 750; }
@@ -71,3 +75,7 @@
   .onboarding-company-search button { width: 100%; }
   .onboarding-secret-actions > button { flex: 1 1 100%; }
 }
+.onboarding-staff-action,
+.onboarding-dialog :is(button, input:not([type="checkbox"], [type="radio"]), select, .button),
+.onboarding-review-surface :is(button, input:not([type="checkbox"], [type="radio"]), select, .button) { min-height: 44px; }
+.onboarding-review-surface { display: grid; gap: 1rem; }
