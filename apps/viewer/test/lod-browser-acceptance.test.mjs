@@ -14,6 +14,7 @@ import { writeArrayBuffer } from 'geotiff';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 import { makeB3dm, makeGlb } from './helpers/lod-fixture.mjs';
 import { workspaceConnectSources } from '../server/workspaceConnectPolicy.js';
+import { createUtmProjection } from '../utm-conversion.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureId = 'lod-browser-fixture';
@@ -602,12 +603,25 @@ async function startFixture(tileRoot, {
   return { server, vite, requests, origin: `http://127.0.0.1:${server.address().port}` };
 }
 
-async function startStreamingOnlyFixture(assetOverrides = {}) {
+// Stubbed property lines for the streaming-only fixture: an offered state
+// source and one parcel inside the orthophoto. No live parcel service.
+function propertyLinesFixture() {
+  const projection = createUtmProjection({ zoneLon0Deg: -87, hemisphere: 'N' });
+  const ring = [[367245, 4759965], [367275, 4759965], [367275, 4759995], [367245, 4759995], [367245, 4759965]]
+    .map(([e, n]) => { const [lat, lon] = projection.utmToLatLon(e, n); return [Number(lon.toFixed(7)), Number(lat.toFixed(7))]; });
+  return {
+    offer: { offered: true, source: { name: 'Fixture parcel map', release: 'T1', credit: 'Fixture.', disclaimer: 'Not a survey.' } },
+    parcels: { status: 'ok', parcels: [{ id: 1, rings: [ring] }] },
+  };
+}
+
+async function startStreamingOnlyFixture(assetOverrides = {}, { propertyLines = null } = {}) {
   const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
   const requests = [];
   const config = fixtureConfig();
   config.assets.tiles = null;
   Object.assign(config.assets, assetOverrides);
+  if (propertyLines) config.georef.hemisphere = 'N';
   const orthophoto = Buffer.from(writeArrayBuffer(new Uint8Array([
     238,80,7, 255,150,48, 34,97,74, 109,190,140,
   ]), { width:2, height:2, SamplesPerPixel:3, BitsPerSample:[8,8,8],
@@ -634,6 +648,11 @@ async function startStreamingOnlyFixture(assetOverrides = {}) {
     if (url.pathname === config.assets.glb) {
       reply.writeHead(200, { 'Content-Type': 'model/gltf-binary', 'Content-Length': 4 });
       reply.end('GLB!');
+      return;
+    }
+    if (propertyLines && (url.pathname === '/api/v1/property-lines' || url.pathname === '/api/v1/property-lines/parcels')) {
+      reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      reply.end(JSON.stringify(url.pathname.endsWith('/parcels') ? propertyLines.parcels : propertyLines.offer));
       return;
     }
     if (url.pathname === config.assets.ortho) {
@@ -4010,7 +4029,13 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
     const fixture = await startStreamingOnlyFixture({
       ortho: '/fixtures/orthophoto.tif',
       ept: '/fixtures/ept/ept.json',
-    });
+    }, { propertyLines: propertyLinesFixture() });
+    // Parcel lines are drawn into the Leaflet canvas of their own pane; ink there means lines on the map.
+    const parcelInk = `(() => { const c = document.querySelector('.leaflet-propertyLines-pane canvas'); if (!c || !c.width || !c.height) return false; const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; for (let i = 3; i < d.length; i += 4) if (d[i]) return true; return false; })()`;
+    const parcelsDrawn = `document.getElementById('property-lines-status')?.dataset.state === 'ready'
+      && ${parcelInk}
+      && document.getElementById('property-lines-notice')?.hidden === false`;
+    const parcelRequests = () => fixture.requests.filter((requestPath) => requestPath === '/api/v1/property-lines/parcels').length;
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-view-mode-browser-'));
     const devToolsPort = await reserveDevToolsPort();
@@ -4028,16 +4053,61 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
     await stage('orthophoto raster rendered', `(() => {const image=document.querySelector('.leaflet-image-layer');
       return image?.complete && image.naturalWidth>0 && getComputedStyle(document.querySelector('#error-panel')).display==='none';})()`);
     assert.ok(fixture.requests.includes('/fixtures/orthophoto.tif'), 'raster fixture was not requested');
+    await stage('property lines shown by default on the orthophoto', parcelsDrawn);
+    // The Property lines card sits directly below Camera Positions; its one toggle reads Hide while lines show.
+    assert.deepEqual(await client.evaluate(`(() => { const card = document.getElementById('panel-property-lines'), button = document.getElementById('layer-property-lines');
+      const r = id => document.getElementById(id).getBoundingClientRect(), at = r('panel-property-lines');
+      return { hidden: card.hidden, previous: card.previousElementSibling?.id, next: card.nextElementSibling?.id, label: button.textContent, pressed: button.getAttribute('aria-pressed'),
+        laidOutBetween: r('panel-camera-positions').bottom <= at.top && at.bottom <= r('panel-measure').top }; })()`),
+    { hidden: false, previous: 'panel-camera-positions', next: 'panel-measure', label: 'Hide', pressed: 'true', laidOutBetween: true });
+    const capturePanel = async (name) => {
+      if (!process.env.LTDS_PHOTO_QA_ARTIFACT_DIR) return;
+      await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+      // The narrow default test window starts with the tools sidebar collapsed; open it for the picture only.
+      const opened = await client.evaluate(`document.getElementById('sidebar').classList.contains('collapsed') && (document.getElementById('sidebar-toggle').click(), true)`);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await waitFor(client, `(() => { const st = window.__ltds.propertyLines(); return st.status === 'ready' || st.hidden; })()`, 'property lines settled for the picture', 10_000);
+      // Camera Positions, Property lines and Measurements cards with a little margin.
+      const box = await client.evaluate(`(() => { const rects = ['panel-camera-positions', 'panel-property-lines', 'panel-measure'].map(id => document.getElementById(id).getBoundingClientRect()).filter(r => r.width && r.height);
+        const x = Math.min(...rects.map(r => r.left)) - 8, y = Math.min(...rects.map(r => r.top)) - 8;
+        return { x: Math.max(0, x), y: Math.max(0, y), width: Math.max(...rects.map(r => r.right)) - x + 8, height: Math.max(...rects.map(r => r.bottom)) - y + 8 }; })()`);
+      const shot = await client.command('Page.captureScreenshot', { format: 'png', clip: { ...box, scale: 1 } });
+      writeFileSync(path.join(process.env.LTDS_PHOTO_QA_ARTIFACT_DIR, name), Buffer.from(shot.data, 'base64'));
+      if (opened) await client.evaluate(`document.getElementById('sidebar-toggle').click()`);
+      await client.command('Emulation.clearDeviceMetricsOverride');
+    };
+    await capturePanel('property-lines-panel-shown-qa.png');
 
     await client.evaluate(`document.querySelector('#tab-cloud').click()`);
     await stage('point-cloud iframe start', `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))`);
+    assert.equal(await client.evaluate('window.__ltds.propertyLines().drawn.map'), false, 'map parcels removed on the point cloud');
     await client.evaluate(`document.querySelector('#tab-ortho').click()`);
     await stage('point-cloud iframe teardown', `location.search.includes('view=ortho') && !document.querySelector('#pc-iframe')`);
+    await stage('property lines redrawn on the orthophoto', parcelsDrawn);
+
+    // Hide is kept through point-cloud navigation, history and a reload.
+    await client.evaluate(`document.getElementById('layer-property-lines').click()`);
+    await stage('property lines hidden', `document.getElementById('layer-property-lines').getAttribute('aria-pressed') === 'false'
+      && !window.__ltds.propertyLines().drawn.map && document.getElementById('property-lines-notice').hidden`);
+    assert.equal(await client.evaluate(`document.getElementById('layer-property-lines').textContent`), 'Show');
+    await capturePanel('property-lines-panel-hidden-qa.png');
+    const parcelRequestsAtHide = parcelRequests();
+    await client.evaluate(`document.querySelector('#tab-cloud').click()`);
+    await stage('point-cloud iframe while hidden', `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))
+      && document.getElementById('layer-property-lines').getAttribute('aria-pressed') === 'false'`);
+    await client.evaluate(`document.querySelector('#tab-ortho').click()`);
+    await stage('orthophoto after hidden cloud visit', `location.search.includes('view=ortho') && !document.querySelector('#pc-iframe')
+      && document.getElementById('layer-property-lines').getAttribute('aria-pressed') === 'false'`);
+    assert.equal(await client.evaluate('window.__ltds.propertyLines().drawn.map'), false, 'still hidden after the cloud visit');
 
     await client.evaluate('history.back()');
     await stage('history restores point cloud', `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))`);
     await client.command('Page.reload');
     await stage('refresh preserves point cloud', `location.search.includes('view=cloud') && document.querySelector('#tab-cloud')?.classList.contains('active') && Boolean(document.querySelector('#pc-iframe'))`);
+    await stage('Hide remembered after reload', `document.getElementById('panel-property-lines')?.hidden === false
+      && document.getElementById('layer-property-lines').getAttribute('aria-pressed') === 'false'
+      && document.getElementById('property-lines-notice').hidden`);
+    assert.equal(parcelRequests(), parcelRequestsAtHide, 'no parcels fetched while hidden');
 
     assert.equal(fixture.requests.filter((requestPath) => requestPath === fixture.glbPath).length, 0, 'view lifecycle fetched the original GLB');
   } finally {

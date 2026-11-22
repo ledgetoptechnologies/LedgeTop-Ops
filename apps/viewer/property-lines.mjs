@@ -209,7 +209,7 @@ export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-li
   setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
   const cache = new Map();
-  let timer = null, waiting = null, controller = null, generation = 0, stats = { requests: 0, aborted: 0, cacheHits: 0 };
+  let timer = null, waiting = null, controller = null, generation = 0, epoch = 0, stats = { requests: 0, aborted: 0, cacheHits: 0 };
   const ABORTED = () => ({ status: 'aborted', parcels: [] });
   // A debounced call that never ran is settled as superseded, never left hanging.
   function settleWaiting() {
@@ -224,7 +224,7 @@ export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-li
   }
 
   async function load(bounds) {
-    const box = boundsKey(bounds), modelId = String(model() || '');
+    const box = boundsKey(bounds), modelId = String(model() || ''), ownEpoch = epoch;
     const key = `${modelId}|${box}`;
     if (cache.has(key)) {
       stats.cacheHits++;
@@ -243,7 +243,8 @@ export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-li
       if (!response.ok) return { status: 'unavailable', parcels: [] };
       const body = await response.json();
       const result = normalizeParcelResponse(body);
-      if (result.status !== 'unavailable') remember(key, result);
+      // A response from before clear() is never admitted to the new cache.
+      if (result.status !== 'unavailable' && ownEpoch === epoch) remember(key, result);
       return result;
     } catch (error) {
       if (own.signal.aborted || error?.name === 'AbortError') { stats.aborted++; return { status: 'aborted', parcels: [] }; }
@@ -251,6 +252,12 @@ export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-li
     } finally {
       if (controller === own) controller = null;
     }
+  }
+
+  function cancel() {
+    generation++;
+    settleWaiting();
+    if (controller) { controller.abort(); controller = null; }
   }
 
   return {
@@ -270,11 +277,10 @@ export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-li
         else { waiting = resolve; timer = setTimer(run, debounceMs); }
       });
     },
-    cancel() {
-      generation++;
-      settleWaiting();
-      if (controller) { controller.abort(); controller = null; }
-    },
+    cancel,
+    // New project, model version or access lifecycle: forget every cached
+    // result and drop anything still in flight.
+    clear() { epoch++; cache.clear(); cancel(); },
     stats: () => ({ ...stats, cached: cache.size }),
   };
 }

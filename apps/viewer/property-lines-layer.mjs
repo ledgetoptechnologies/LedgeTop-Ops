@@ -59,26 +59,106 @@ export function drapePolylines(lines, { grid = null, minAlt, maxAlt, lift = PROP
     lines: lines.map(line => line.map(([e, n]) => [e, n, flat + lift])) };
 }
 
+// A viewer's explicit Hide, remembered per project in this browser with the
+// same plain localStorage pattern as the Viewer's other display preferences.
+// Only project ids are stored. Storage that is missing or blocked (private
+// windows, sandboxed embeds) simply means nothing is remembered after reload.
+export const PROPERTY_LINES_HIDDEN_KEY = 'ltds-viewer:property-lines-hidden';
+export const PROPERTY_LINES_HIDDEN_LIMIT = 100;
+
+export function createPropertyLinesPreferences(storage) {
+  const store = () => { try { return storage === undefined ? globalThis.localStorage ?? null : storage; } catch { return null; } };
+  const list = () => {
+    try {
+      const value = JSON.parse(store()?.getItem(PROPERTY_LINES_HIDDEN_KEY) || '[]');
+      return Array.isArray(value) ? value.filter(id => typeof id === 'string' && id).slice(-PROPERTY_LINES_HIDDEN_LIMIT) : [];
+    } catch { return []; }
+  };
+  return {
+    hidden(projectId) { return Boolean(projectId) && list().includes(String(projectId)); },
+    setHidden(projectId, hidden) {
+      if (!projectId) return;
+      const id = String(projectId);
+      const next = list().filter(entry => entry !== id);
+      if (hidden) next.push(id);
+      try {
+        if (next.length) store()?.setItem(PROPERTY_LINES_HIDDEN_KEY, JSON.stringify(next.slice(-PROPERTY_LINES_HIDDEN_LIMIT)));
+        else store()?.removeItem(PROPERTY_LINES_HIDDEN_KEY);
+      } catch { /* The choice still holds for this page. */ }
+    },
+  };
+}
+
+// The layer is shown by default wherever it is offered and available; an
+// explicit Hide is kept per project. Everything fetched belongs to one
+// lifecycle (project + model version + access); a result from an older
+// lifecycle is dropped without drawing or rendering anything.
 export function createPropertyLinesController(deps) {
   const { L, THREE, LineSegments2, LineSegmentsGeometry, LineMaterial, dom } = deps;
   const fetcher = createParcelFetcher({ fetchImpl: deps.fetchImpl, headers: deps.headers, model: () => deps.projectId(), ...(deps.fetcherOptions || {}) });
-  let offered = false, source = null, on = false, status = 'off', count = 0;
-  let siteBounds = null, siteProject = null, retryTimer = null, retries = 0, seq = 0;
+  const preferences = deps.preferences || createPropertyLinesPreferences(deps.storage);
+  const hiddenByProject = new Map();
+  let offered = false, source = null, hidden = false, suspended = false, status = 'off', count = 0;
+  let life = 0, lifeKey = null, lifeProject = null, offerSeq = 0;
+  let siteBounds = null, retryTimer = null, retries = 0, seq = 0;
   // One canvas renderer per Leaflet map, reused for every redraw.
   let mapRenderer = null, rendererMap = null, drawnMapKey = null;
-  let current = null, mapLayers = null, threeGroup = null, threeKey = null, potreeKey = null, heightNote = '', groundAbort = null;
+  let current = null, mapLayers = null, threeGroup = null, threeKey = null, potreeKey = null, potreeShown = false, heightNote = '', groundAbort = null;
   const draped = new Map();
 
   function kind() { return propertyLinesModeKind(deps.getMode(), deps.getCloudMode()); }
+  function isOn() { return offered && !hidden && !suspended; }
 
-  function resetForProject() {
-    const id = deps.projectId();
-    if (siteProject === id) return;
-    siteProject = id; siteBounds = null; current = null; draped.clear(); clearDrawings();
+  function hiddenFor(projectId) {
+    if (!projectId) return false;
+    if (hiddenByProject.has(projectId)) return hiddenByProject.get(projectId);
+    try { return preferences.hidden(projectId) === true; } catch { return false; }
+  }
+
+  function rememberHidden(projectId, value) {
+    if (!projectId) return;
+    hiddenByProject.set(projectId, value);
+    try { preferences.setHidden(projectId, value); } catch { /* kept for this page */ }
+  }
+
+  function lifecycleKey() {
+    const id = deps.projectId() || null;
+    if (!id) return { id, key: null };
+    const version = deps.projectVersion?.() ?? '';
+    return { id, key: `${id}|${version}` };
+  }
+
+  function stopWork() {
+    seq++;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    fetcher.cancel();
+    groundAbort?.abort();
+    groundAbort = null;
+  }
+
+  // Forget everything fetched or drawn for the old lifecycle.
+  function invalidate() {
+    life++;
+    stopWork();
+    retries = 0;
+    fetcher.clear();
+    siteBounds = null; current = null; count = 0; heightNote = ''; draped.clear();
+    clearDrawings();
+  }
+
+  // True when the project or model version changed since the last call.
+  // The Hide choice follows the project only, never the version or view.
+  function syncLifecycle() {
+    const { id, key } = lifecycleKey();
+    if (key === lifeKey) return false;
+    invalidate();
+    lifeKey = key;
+    offered = false; source = null; status = 'off';
+    if (id !== lifeProject) { lifeProject = id; hidden = hiddenFor(id); }
+    return true;
   }
 
   function ensureSiteBounds() {
-    resetForProject();
     if (siteBounds || !deps.georefVerified()) return;
     const extent = deps.getSceneExtentUtm();
     if (extent) siteBounds = utmExtentToLonLatBounds(extent, deps.utmToLatLon);
@@ -90,28 +170,36 @@ export function createPropertyLinesController(deps) {
 
   function render() {
     if (!dom.panel) return;
-    dom.panel.hidden = !offered;
-    if (!offered) { if (dom.notice) dom.notice.hidden = true; return; }
+    const panelShown = offered && !suspended;
+    dom.panel.hidden = !panelShown;
+    if (!panelShown) {
+      if (dom.notice) dom.notice.hidden = true;
+      if (dom.about) dom.about.hidden = true;
+      return;
+    }
+    const on = isOn();
     const av = availability();
     const disabled = !av.available;
-    dom.button.disabled = disabled;
-    dom.button.classList.toggle('active', on && !disabled);
-    dom.button.textContent = on && !disabled ? 'Hide' : 'Show';
-    dom.button.setAttribute('aria-pressed', String(on && !disabled));
-    dom.button.setAttribute('aria-label', on && !disabled ? 'Hide property lines' : 'Show property lines');
     const shown = on && !disabled;
+    // The source note and the "not a survey" notice belong to drawn lines only.
+    const drawn = shown && status === 'ready';
+    dom.button.disabled = disabled;
+    dom.button.classList.toggle('active', shown);
+    dom.button.textContent = shown ? 'Hide' : 'Show';
+    dom.button.setAttribute('aria-pressed', String(shown));
+    dom.button.setAttribute('aria-label', shown ? 'Hide property lines' : 'Show property lines');
     let message = disabled ? propertyLinesMessage(av.reason) : (on ? propertyLinesMessage(status, { count, threeD: kind() !== 'map' }) : '');
-    if (shown && status === 'ready' && kind() !== 'map' && heightNote) message += ` ${heightNote}`;
+    if (drawn && kind() !== 'map' && heightNote) message += ` ${heightNote}`;
     if (dom.status.textContent !== message) dom.status.textContent = message;
     dom.status.dataset.state = disabled ? av.reason : (on ? status : 'off');
-    if (dom.about) dom.about.hidden = !shown;
-    if (shown && source && dom.about) {
+    if (dom.about) dom.about.hidden = !drawn;
+    if (drawn && source && dom.about) {
       dom.about.querySelector('[data-pl="source"]').textContent = source.kind === 'upload' ? `${source.name}, ${source.release}. ${source.credit}` : `${source.name}, release ${source.release}. ${source.credit}`;
       dom.about.querySelector('[data-pl="disclaimer"]').textContent = [source.disclaimer, propertyLinesDatumNote(deps.modelDatum?.(), source.datum) || source.datumNote].filter(Boolean).join(' ');
     }
     if (dom.notice) {
-      dom.notice.hidden = !shown;
-      if (shown && source) dom.notice.textContent = `Property lines are approximate, not a survey. Source: ${source.name} ${source.release}.`;
+      dom.notice.hidden = !drawn;
+      if (drawn && source) dom.notice.textContent = `Property lines are approximate, not a survey. Source: ${source.name} ${source.release}.`;
     }
   }
 
@@ -130,18 +218,24 @@ export function createPropertyLinesController(deps) {
   }
 
   function clearPotree() {
+    potreeKey = null;
+    if (!potreeShown) return;
+    potreeShown = false;
     const api = deps.getPotreeApi();
     try { api?.setParcelVisibility?.(false); api?.setParcelLines?.([]); } catch { /* iframe unloading */ }
-    potreeKey = null;
   }
 
   function clearDrawings() { clearMap(); clearThree(); clearPotree(); }
 
+  // Pending states retry on a timer with one bounded budget. Only a real
+  // readiness signal (wake), a new lifecycle or an explicit Show refills it.
   function scheduleRetry() {
-    if (retryTimer || !on || retries >= MAX_RETRIES) return;
+    if (retryTimer || !isOn() || retries >= MAX_RETRIES) return;
     retries++;
     retryTimer = setTimeout(() => { retryTimer = null; refresh(); }, RETRY_MS);
   }
+
+  function settle(next) { retries = 0; status = next; render(); }
 
   function mapViewBounds() {
     const map = deps.getMap();
@@ -241,73 +335,112 @@ export function createPropertyLinesController(deps) {
       potreeKey = result.key;
     }
     api.setParcelVisibility(true);
+    potreeShown = true;
     return true;
   }
 
   function syncVisibility(active) {
-    if (threeGroup) threeGroup.visible = on && active === 'three';
+    if (threeGroup) threeGroup.visible = isOn() && active === 'three';
     if (mapLayers && active !== 'map') clearMap();
-    if (active !== 'potree') potreeKey = null;
+    if (active !== 'potree') clearPotree();
   }
 
   async function refresh({ immediate = false } = {}) {
+    // A new project or model version first needs its own offer.
+    if (syncLifecycle()) { render(); void loadOffer(); return; }
     ensureSiteBounds();
     const active = kind();
     syncVisibility(active);
-    if (!on) { render(); return; }
+    if (!isOn()) { stopWork(); clearDrawings(); status = 'off'; render(); return; }
     const av = availability();
-    if (!av.available) { fetcher.cancel(); clearDrawings(); status = av.reason; render(); return; }
-    if (av.reason === 'pending' || !active) { status = 'pending'; render(); scheduleRetry(); return; }
-    retries = 0;
+    if (!av.available) { stopWork(); clearDrawings(); settle(av.reason); return; }
+    // A view without a drawing surface shows nothing and waits for the next view change.
+    if (!active) { stopWork(); clearDrawings(); settle('idle'); return; }
+    if (av.reason === 'pending') { status = 'pending'; render(); scheduleRetry(); return; }
+    const myLife = life;
     const request = propertyLinesRequestBounds({ modelBounds: siteBounds, viewBounds: active === 'map' ? mapViewBounds() : null });
     const mySeq = ++seq;
     if (request.status !== 'ok') {
-      fetcher.cancel(); clearDrawings(); status = request.status === 'unknown' ? 'pending' : request.status; render();
-      if (request.status === 'unknown') scheduleRetry();
+      fetcher.cancel(); clearDrawings();
+      if (request.status === 'unknown') { status = 'pending'; render(); scheduleRetry(); } else settle(request.status);
       return;
     }
     const key = boundsKey(request.bounds);
     if (!(current && current.key === key)) { status = 'loading'; render(); }
     const result = current && current.key === key ? { status: 'ok', parcels: current.parcels } : await fetcher.request(request.bounds, { immediate });
-    if (result.status === 'aborted' || mySeq !== seq || !on) return;
-    if (result.status !== 'ok') { clearDrawings(); current = null; count = 0; status = result.status; render(); return; }
+    if (result.status === 'aborted' || mySeq !== seq || myLife !== life || !isOn()) return;
+    if (result.status !== 'ok') { clearDrawings(); current = null; count = 0; settle(result.status); return; }
     current = { key, parcels: result.parcels };
     count = result.parcels.length;
-    if (active === 'map') { drawMap(); status = 'ready'; render(); return; }
+    if (active === 'map') { drawMap(); settle('ready'); return; }
     status = 'loading'; render();
     const lines = await drapedLines(mySeq);
-    if (mySeq !== seq || !on) return;
+    if (mySeq !== seq || myLife !== life || !isOn()) return;
     if (!lines) { status = 'pending'; render(); scheduleRetry(); return; }
-    if (lines.tooMany) { clearDrawings(); status = 'too_many'; render(); return; }
+    if (lines.tooMany) { clearDrawings(); settle('too_many'); return; }
     heightNote = lines.note;
     if (active === 'three') drawThree(lines);
     else if (!drawPotree(lines)) { status = 'pending'; render(); scheduleRetry(); return; }
-    status = 'ready';
-    render();
+    settle('ready');
   }
 
   function toggle() {
-    if (!availability().available) return;
-    on = !on;
+    syncLifecycle();
+    if (!offered || suspended || !availability().available) return;
+    hidden = !hidden;
+    rememberHidden(lifeProject, hidden);
     retries = 0;
-    if (!on) { seq++; fetcher.cancel(); groundAbort?.abort(); clearDrawings(); status = 'off'; render(); return; }
+    if (hidden) { stopWork(); clearDrawings(); status = 'off'; render(); return; }
     refresh({ immediate: true });
   }
 
   // Ask whether the layer is offered only when it can matter: a model with a
   // verified UTM georeference. Otherwise no request is made and the panel
-  // stays hidden. Any failure degrades silently to "no layer".
+  // stays hidden. Any failure degrades silently to "no layer". An answer that
+  // arrives after the project, version or access changed is dropped unseen.
   async function loadOffer() {
-    if (!deps.projectId() || !deps.georefVerified()) { offered = false; source = null; refresh(); return; }
+    syncLifecycle();
+    const mine = ++offerSeq, myLife = life, myKey = lifeKey;
+    const stale = () => mine !== offerSeq || myLife !== life || myKey !== lifecycleKey().key;
+    if (suspended || !deps.projectId() || !deps.georefVerified()) { offered = false; source = null; refresh(); return; }
+    let nextOffered = false, nextSource = null;
     try {
       const response = await deps.fetchImpl(`/api/v1/property-lines?model=${encodeURIComponent(deps.projectId() || '')}`, { headers: deps.headers(), credentials: 'same-origin', cache: 'no-store' });
+      if (stale()) return;
       const body = response.ok ? await response.json() : null;
-      offered = body?.offered === true && Boolean(body.source);
+      nextOffered = body?.offered === true && Boolean(body.source);
       // Plain strings only; they are shown with textContent, never as HTML.
-      source = offered ? Object.fromEntries(['kind', 'name', 'release', 'credit', 'disclaimer', 'datumNote', 'datum', 'region']
+      nextSource = nextOffered ? Object.fromEntries(['kind', 'name', 'release', 'credit', 'disclaimer', 'datumNote', 'datum', 'region']
         .filter(key => typeof body.source[key] === 'string').map(key => [key, body.source[key].slice(0, 600)])) : null;
-    } catch { offered = false; source = null; }
+    } catch { nextOffered = false; nextSource = null; }
+    if (stale()) return;
+    offered = nextOffered; source = nextSource;
+    retries = 0;
     refresh();
+  }
+
+  // Access lost (session expired or revoked): drop the offer, the cache and
+  // everything drawn. The Hide choice is kept.
+  function suspend() {
+    if (suspended) return;
+    suspended = true;
+    invalidate();
+    offered = false; source = null; status = 'off';
+    render();
+  }
+
+  // Access restored: ask for the offer again under the new access.
+  function resume() {
+    if (!suspended) return Promise.resolve();
+    suspended = false;
+    return loadOffer();
+  }
+
+  // The current view became ready (tiles, point cloud or raster loaded):
+  // refill the pending retry budget and try again. Never changes Hide.
+  function wake() {
+    retries = 0;
+    return refresh();
   }
 
   dom.button?.addEventListener('click', toggle);
@@ -316,7 +449,13 @@ export function createPropertyLinesController(deps) {
     loadOffer,
     refresh,
     toggle,
-    get state() { return { offered, on, status, count, siteBounds, heightNote }; },
+    wake,
+    suspend,
+    resume,
+    get state() {
+      return { offered, on: isOn(), hidden, suspended, status, count, siteBounds, heightNote, retries,
+        drawn: { map: Boolean(mapLayers), three: Boolean(threeGroup?.visible), potree: potreeShown } };
+    },
     stats: () => fetcher.stats(),
   };
 }

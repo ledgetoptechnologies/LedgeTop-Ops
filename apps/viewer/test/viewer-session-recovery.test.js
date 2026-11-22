@@ -14,7 +14,7 @@ const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 function fixture({ controller = true } = {}) {
-  const timers = new Map(), posts = [], resets = [], measurements = {sliceResets:0,invalidations:0,installs:0,invalidated:false,displayAborts:0,records:new Map([['private','geometry']])};
+  const timers = new Map(), posts = [], resets = [], propertyLines = [], measurements = {sliceResets:0,invalidations:0,installs:0,invalidated:false,displayAborts:0,records:new Map([['private','geometry']])};
   let timerId = 0;
   const window = {};
   const reportNodes = Object.fromEntries(['panel-model-report', 'measurement-report-actions', 'btn-capture-float'].map(id => [id, { hidden: false }]));
@@ -32,6 +32,7 @@ function fixture({ controller = true } = {}) {
     // covered together in viewer-header-browser.test.mjs.
     installStaffNavigationGuard() {},
     viewerSlice:{reset:()=>measurements.sliceResets++},
+    propertyLines:{suspend:()=>propertyLines.push('suspend'),resume:async()=>{propertyLines.push('resume');}},
     window, document: { getElementById: id => reportNodes[id] || null }, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,
     reviewControllerCandidate: REQUEST,
@@ -78,7 +79,7 @@ function fixture({ controller = true } = {}) {
     ${invalidateSource}
     return invalidate;
   })()`,context);
-  return { context, timers, posts, resets, measurements, reportNodes };
+  return { context, timers, posts, resets, measurements, reportNodes, propertyLines };
 }
 
 function drawWorkspaceWithCurrentPermission(f) {
@@ -304,6 +305,7 @@ test('unavailable access immediately hides personal records and same-person rene
   await f.context.handleSessionRenewalMessage({version:1,type:'ltds-viewer:renew-session',requestId:REQUEST,grant:'11111111-2222-4333-8444-555555555555'},{reviewChannel:true});
   assert.equal(f.context.sessionAccessState,'active');assert.equal(f.measurements.installs,1);assert.equal(f.measurements.invalidated,false);
   assert.equal(f.measurements.records.size,0,'a fresh private store reloads rather than restoring stale records');
+  assert.deepEqual([f.propertyLines[0],f.propertyLines.at(-1)],['suspend','resume'],'property lines drop with access and are offered again after renewal');
 });
 
 test('same-person proactive renewal preserves the existing personal workspace',async()=>{
@@ -321,6 +323,7 @@ test('renewal changing person, audience or immutable version fails closed before
     assert.equal(f.context.sessionAccessState,'unavailable',scope);assert.equal(f.context.sessionRenewalBlocked,true,scope);
     assert.equal(f.measurements.records.size,0,scope);assert.equal(f.measurements.installs,0,scope);assert.deepEqual(f.resets,['unavailable'],scope);
     assert.equal(f.context.activeViewerSession,current,scope);assert.equal(f.context.sessionAccessGeneration,0,scope);
+    assert.deepEqual(f.propertyLines,['suspend'],scope);
   }
 });
 
