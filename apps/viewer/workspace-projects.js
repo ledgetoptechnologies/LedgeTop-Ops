@@ -1038,6 +1038,8 @@ function moveTaskFolderModal(taskId,{projectId:initialProjectId=null}={}){
   const current=()=>authorized()&&form.isConnected&&state.tasks.some(value=>value.id===taskId&&value.projectId===task.projectId&&value.status!=='archived')&&state.projects.some(project=>project.id===task.projectId&&project.status==='active');
   const showProject=async projectId=>{
     const request=++folderRequest,other=projectId!==task.projectId;
+    // A sharing confirmation covers one destination only; changing the project asks again.
+    if(form.elements.confirmSharingChange)form.elements.confirmSharingChange.checked=false;
     note.hidden=!other;status.hidden=true;
     if(folderCache.has(projectId)){folderSelect.innerHTML=folderPickerOptions(folderCache.get(projectId),other?null:task.folderId);folderSelect.disabled=false;submit.disabled=false;return;}
     folderSelect.disabled=true;submit.disabled=true;folderSelect.innerHTML='<option value="">Loading folders…</option>';

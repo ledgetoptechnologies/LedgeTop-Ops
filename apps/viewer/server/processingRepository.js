@@ -512,7 +512,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   }); }
   /**
    * Moves a task, its source dataset and every output/import row that names its project to another active project.
-   * Rules (all checked inside one write transaction, so the move is all-or-nothing):
+   * Rules (all checked inside one write transaction with the data changes and audit row; the HTTP idempotency receipt is
+   * completed after this commits, so the request as a whole is not crash-atomic):
    * - the caller must present the task's current project, folder and placement revision (optimistic concurrency);
    * - nothing for the task may be processing, ingesting, building derivatives or mid storage mutation (task_busy);
    * - the source dataset must belong to this task alone, and its name must be free in the target (dataset_shared/_name_conflict);

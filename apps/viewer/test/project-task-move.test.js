@@ -211,7 +211,8 @@ test('project move API checks permissions, idempotency, concurrency and reports 
     processing.createAdminSession({tokenHash:auth.hashToken(tokens[name]),subject:`staff:${name}`,permissions,displayUnits:'metric',expiresAt:new Date(Date.now()+60000).toISOString()});
   const f={database:db,processing,repository},source=processing.createProject({displayName:'Source'}),target=processing.createProject({displayName:'Target'});
   const draft=draftTask(f,source,'Draft'),{task:published}=publishedTask(f,source,'Published');
-  const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));
+  // Same parser as server/index.js: idempotency hashes the exact request octets kept in req.rawBody.
+  const app=express();app.use(express.json({verify(req,_res,buffer){req.rawBody=Buffer.from(buffer);}}));app.use(createProcessingApi({repository,processing,storage:{}}));
   const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(root,{recursive:true,force:true});});
   const call=(task,body,credential=tokens.full,key=crypto.randomUUID())=>fetch(`http://127.0.0.1:${server.address().port}/api/v1/tasks/${task.id}/project`,{method:'PATCH',headers:{authorization:`Bearer ${credential}`,'content-type':'application/json','idempotency-key':key},body:JSON.stringify(body)});
@@ -231,6 +232,14 @@ test('project move API checks permissions, idempotency, concurrency and reports 
   const replay=await call(draft,body(draft),tokens.noPublish,key);
   assert.equal(replay.status,200);assert.equal(replay.headers.get('idempotency-replayed'),'true');
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='processing_task.project_changed' AND entity_id=?").get(draft.id).n,1,'a replay is not a second move');
+  // Reusing the key for a different destination or confirmation is a conflict, never a replay or a second move.
+  const third=processing.createProject({displayName:'Third'});
+  for(const changed of [{...body(draft),projectId:third.id},{...body(draft),confirmSharingChange:true}]){
+    const reused=await call(draft,changed,tokens.noPublish,key);
+    assert.equal(reused.status,409);assert.equal((await reused.json()).code,'idempotency_conflict');
+  }
+  assert.equal(processing.getTask(draft.id).projectId,target.id);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='processing_task.project_changed' AND entity_id=?").get(draft.id).n,1,'a conflicting key makes no second move');
   const undo=await call(draft,{projectId:source.id,folderId:null,expectedProjectId:target.id,expectedFolderId:null,expectedFolderRevision:result.task.folderRevision,undo:true},tokens.noPublish);
   assert.equal(undo.status,200);assert.equal((await undo.json()).task.projectId,source.id);
   // Published work needs publish permission and an explicit confirmation; the refusal explains the sharing change.

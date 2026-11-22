@@ -1162,6 +1162,10 @@ test('Move to… picks a project, then a folder, and drag offers other projects 
     await waitFor(client,`(()=>{const f=document.querySelector('#folder-move-form');return !f.elements.folderId.disabled&&[...f.elements.folderId.options].some(option=>option.value==='${quarryFolder.id}')})()`,'destination project folders unavailable');
     assert.deepEqual(await client.evaluate(`[...document.querySelector('#folder-move-form').elements.folderId.options].map(option=>option.textContent)`),['Project root','2026 reprocess']);
     assert.equal(await client.evaluate(`document.querySelector('[data-move-project-note]').hidden`),false,'the cross-project note is shown');
+    // A confirmation given for one destination is cleared when the destination project changes.
+    await client.evaluate(`(()=>{const f=document.querySelector('#folder-move-form');f.elements.confirmSharingChange.checked=true;f.elements.projectId.value='project-johnson';f.elements.projectId.dispatchEvent(new Event('change',{bubbles:true}));f.elements.projectId.value='project-quarry';f.elements.projectId.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(client,`!document.querySelector('#folder-move-form').elements.folderId.disabled`,'destination folders did not reload');
+    assert.equal(await client.evaluate(`document.querySelector('#folder-move-form').elements.confirmSharingChange.checked`),false,'switching projects clears the sharing confirmation');
     await client.evaluate(`document.querySelector('#folder-move-form').elements.folderId.value='${quarryFolder.id}'`);
     if(process.env.LTDS_MOVE_PICKER_SCREENSHOT){const shot=await client.command('Page.captureScreenshot',{format:'png'});writeFileSync(process.env.LTDS_MOVE_PICKER_SCREENSHOT,Buffer.from(shot.data,'base64'));}
     // The fixture output is published, so the picker requires the sharing confirmation before any request.
