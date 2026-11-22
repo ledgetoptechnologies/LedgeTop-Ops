@@ -8,6 +8,7 @@ import { readOperationsPortalNativeDeliveryAuthorizationEntrypoint,
   type OperationsPortalNativeDeliveryAuthorizationReaderEnv }
   from "./operations-portal-native-delivery-authority-reader";
 import type { Env } from "./types";
+import {readDirectClientFolderAuthorization} from './client-direct-folder-read-authority';
 
 /** Named private service-binding entrypoint. It is never mounted as HTTP and
  * returns only a primitive JSON string so no RPC disposal metadata crosses the
@@ -15,6 +16,9 @@ import type { Env } from "./types";
 export class OperationsPortalNativeDeliveryAuthorizationReader extends WorkerEntrypoint<Env>
   implements OperationsPortalNativeDeliveryAuthorizationReaderBinding, OperationsPortalNativeDeliverySuccessorReaderBinding,
     OperationsPortalNativeCatalogSuccessorReaderBinding {
+  readDirectFolderAuthorization(input:unknown):Promise<string>{
+    return readDirectClientFolderAuthorization(this.env,input);
+  }
   readNativeDeliveryAuthorization(input: OperationsPortalNativeDeliveryAuthorizationReadRequest): Promise<string> {
     return readOperationsPortalNativeDeliveryAuthorizationEntrypoint(
       this.env as Env & OperationsPortalNativeDeliveryAuthorizationReaderEnv,

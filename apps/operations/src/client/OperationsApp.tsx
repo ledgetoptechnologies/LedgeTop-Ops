@@ -49,6 +49,7 @@ import { DeliveryChangeRecoveryStatus } from "./DeliveryChangeRecoveryStatus";
 import { AdminAuditHistory } from "./AdminAuditHistory";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { NativeDeliveryGrantPanel } from "./NativeDeliveryGrantPanel";
+import { ClientRecipientSharePanel } from "./ClientRecipientSharePanel";
 import { deliveryViewCountText } from "./delivery-view-count";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
@@ -1847,6 +1848,7 @@ function Delivery({ session }: { session: Session }) {
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           authenticatedGrantCapability={session.capabilities?.authenticatedDeliveryGrants}
           canManageAuthenticatedGrants={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
+          canCreatePublicLink={allowed(session.user, "delivery.share.create")}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => setShareRevision((value) => value + 1)}
@@ -2482,7 +2484,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
       session.capabilities?.directDeliveryUploads?.enabled === true,
     canDelete =
       session.user.isAdministrator || allowed(session.user, "delivery.delete"),
-    canShare = allowed(session.user, "delivery.share.create");
+    canShare = allowed(session.user, "delivery.share.create") || allowed(session.user, "delivery.share.revoke");
   useEffect(() => setSelected([]), [prefix]);
   const crumbs = useMemo(() => {
     const parts = prefix.split("/").filter(Boolean);
@@ -2786,6 +2788,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           authenticatedGrantCapability={session.capabilities?.authenticatedDeliveryGrants}
           canManageAuthenticatedGrants={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
+          canCreatePublicLink={allowed(session.user, "delivery.share.create")}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => {}}
@@ -3094,7 +3097,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   const canCopy = admin && allowed(session.user, "delivery.files.copy"),
     canMove = admin && allowed(session.user, "delivery.files.move");
   const canDelete = admin && allowed(session.user, "delivery.delete"),
-    canShare = allowed(session.user, "delivery.share.create");
+    canShare = allowed(session.user, "delivery.share.create") || allowed(session.user, "delivery.share.revoke");
   useEffect(() => {
     if (!admin || !allowed(session.user, "delivery.browse")) return;
     let cancelled = false;
@@ -3777,6 +3780,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           authenticatedGrantCapability={session.capabilities?.authenticatedDeliveryGrants}
           canManageAuthenticatedGrants={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
+          canCreatePublicLink={allowed(session.user, "delivery.share.create")}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           close={() => setPreview(null)}
           changed={() => {
@@ -4982,17 +4986,50 @@ type AuthenticatedGrant = {
   updatedAt: string;
 };
 
-function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, embedded = false, onBusyChange }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; embedded?: boolean; onBusyChange?: (busy: boolean) => void }) {
+type DirectClientSharingCapability = {protocolVersion: 1; enabled: boolean; canCreate: boolean; canRevoke: boolean};
+
+function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, directCapability, canManageLegacy, legacyEnabled, embedded = false, onBusyChange }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; directCapability: DirectClientSharingCapability | null; canManageLegacy: boolean; legacyEnabled: boolean; embedded?: boolean; onBusyChange?: (busy: boolean) => void }) {
   const [expanded, setExpanded] = useState(embedded);
   const [mode, setMode] = useState<"primary" | "native">("primary");
-  const [nativeBusy, setNativeBusy] = useState(false);
+  const [clientShareBusy, setClientShareBusy] = useState(false), [legacyShareBusy, setLegacyShareBusy] = useState(false);
+  const nativeBusy = clientShareBusy || legacyShareBusy;
+  const [legacyHistoryOpen, setLegacyHistoryOpen] = useState(false);
+  // One client list when the server offers it; the older per-connection panels only until then.
+  const unified = directCapability?.enabled === true;
+  const [directUnavailable, setDirectUnavailable] = useState(false);
+  const failDirect = useCallback(() => setDirectUnavailable(true), []);
+  useEffect(() => {
+    setExpanded(embedded); setMode("primary"); setClientShareBusy(false); setLegacyShareBusy(false);
+    setLegacyHistoryOpen(false); setDirectUnavailable(false);
+  }, [folder.id, embedded]);
   // The containing Share dialog must not close over an in-flight grant or link.
   useEffect(() => { onBusyChange?.(nativeBusy); return () => onBusyChange?.(false); }, [nativeBusy, onBusyChange]);
   return <section className="client-workspace-grant authenticated-grant-panel">
     {!embedded && <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>}
-    {expanded && <div className="client-workspace-grant-panel">
+    {expanded && unified && <div className="client-workspace-grant-panel">
+      <ClientRecipientSharePanel key={folder.id} folder={folder} creationEnabled={directCapability?.canCreate === true} onUnavailable={failDirect} onBusyChange={setClientShareBusy} />
+      {directUnavailable && <p role="alert">Client sharing is unavailable for this folder. Close and reopen Share to check current access.</p>}
+      {canManageLegacy && legacyEnabled && <section className="existing-portal-grant-history" aria-label="Existing Client Portal grant history">
+        <button type="button" className="button-ghost button-small" aria-expanded={legacyHistoryOpen} disabled={nativeBusy}
+          onClick={() => setLegacyHistoryOpen(value => !value)}>
+          {legacyHistoryOpen ? "Hide existing Client Portal grant history" : "Review existing Client Portal grant history"}
+        </button>
+        {legacyHistoryOpen && <div className="client-workspace-grant-panel">
+          <p>Grants issued through the earlier per-connection flow are separate from the unified client shares above. Review or revoke those grants here.</p>
+          <div className="form-grid native-grant-connection"><label className="full">Portal connection<select value={mode} disabled={nativeBusy}
+            onChange={event => setMode(event.target.value as "primary" | "native")}>
+            <option value="primary">{projectAlphaSourceName("project-alpha:primary")} portal</option>
+            <option value="native">Connected workspace</option>
+          </select></label></div>
+          {mode === "native"
+            ? <NativeDeliveryGrantPanel key={`legacy-native:${folder.id}`} folder={folder} creationEnabled={creationEnabled} onBusyChange={setLegacyShareBusy} />
+            : <PrimaryAuthenticatedDeliveryGrantPanel key={`legacy-primary:${folder.id}`} folder={folder} canRevoke={canRevoke} creationEnabled={creationEnabled} onBusyChange={setLegacyShareBusy} />}
+        </div>}
+      </section>}
+    </div>}
+    {expanded && !unified && canManageLegacy && legacyEnabled && <div className="client-workspace-grant-panel">
       <div className="form-grid native-grant-connection"><label className="full">Portal connection<select value={mode} disabled={nativeBusy} onChange={event => setMode(event.target.value as "primary" | "native")}><option value="primary">{projectAlphaSourceName("project-alpha:primary")} portal</option><option value="native">Connected workspace</option></select></label></div>
-      {mode === "native" ? <NativeDeliveryGrantPanel key={folder.id} folder={folder} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} /> : <PrimaryAuthenticatedDeliveryGrantPanel key={folder.id} folder={folder} canRevoke={canRevoke} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} />}
+      {mode === "native" ? <NativeDeliveryGrantPanel key={folder.id} folder={folder} creationEnabled={creationEnabled} onBusyChange={setLegacyShareBusy} /> : <PrimaryAuthenticatedDeliveryGrantPanel key={folder.id} folder={folder} canRevoke={canRevoke} creationEnabled={creationEnabled} onBusyChange={setLegacyShareBusy} />}
     </div>}
   </section>;
 }
@@ -5479,6 +5516,7 @@ function ShareDialog({
   directoryRecipientsEnabled,
   authenticatedGrantCapability,
   canManageAuthenticatedGrants,
+  canCreatePublicLink,
   close,
   changed,
 }: {
@@ -5488,6 +5526,7 @@ function ShareDialog({
   directoryRecipientsEnabled: boolean;
   authenticatedGrantCapability?: AuthenticatedDeliveryCapability;
   canManageAuthenticatedGrants: boolean;
+  canCreatePublicLink: boolean;
   close: () => void;
   changed: () => void;
 }) {
@@ -5506,6 +5545,28 @@ function ShareDialog({
           : "Client Workspace sharing is not enabled for this deployment.";
   const fileTarget = folder.kind !== "folder" && !folder.prefix;
   const targetLabel = fileTarget ? "file" : "folder";
+  const [directCapability, setDirectCapability] = useState<DirectClientSharingCapability | null>(null);
+  const [directCapabilityError, setDirectCapabilityError] = useState("");
+  const [directCapabilityAttempt, setDirectCapabilityAttempt] = useState(0);
+  useEffect(() => {
+    if (fileTarget) return;
+    const controller = new AbortController(); setDirectCapability(null); setDirectCapabilityError("");
+    void api<DirectClientSharingCapability>(`/api/delivery/client-recipients/capability?folderRef=${encodeURIComponent(folder.id)}`, {signal: controller.signal})
+      .then(value => {
+        if (controller.signal.aborted) return;
+        if (!value || Object.keys(value).length !== 4 || value.protocolVersion !== 1 || typeof value.enabled !== "boolean"
+          || typeof value.canCreate !== "boolean" || typeof value.canRevoke !== "boolean"
+          || !value.enabled && (value.canCreate || value.canRevoke)) throw new Error("Client sharing readiness could not be verified.");
+        setDirectCapability(value);
+      }).catch(caught => {
+        if (controller.signal.aborted) return;
+        if (caught instanceof ApiError && caught.status === 404) setDirectCapability({protocolVersion: 1, enabled: false, canCreate: false, canRevoke: false});
+        else setDirectCapabilityError("Client sharing readiness could not be verified. Try again.");
+      });
+    return () => controller.abort();
+  }, [folder.id, fileTarget, directCapabilityAttempt]);
+  const workspaceSharingEnabled = authenticatedGrantsEnabled || directCapability?.enabled === true || !!directCapabilityError;
+
   const targetPrefix = folder.prefix || String(folder.physicalKey || "").slice(0, String(folder.physicalKey || "").lastIndexOf("/") + 1);
   const [active, setActive] = useState<ActiveDeliveryShare | null | undefined>(
     undefined,
@@ -5573,7 +5634,7 @@ function ShareDialog({
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     if (busyRef.current) return;
-    const tabs = authenticatedGrantsEnabled
+    const tabs = workspaceSharingEnabled
       ? [{ mode: "public" as const, ref: publicShareTab }, { mode: "workspace" as const, ref: workspaceShareTab }]
       : [{ mode: "public" as const, ref: publicShareTab }];
     const current = Math.max(0, tabs.findIndex(tab => tab.mode === shareMode));
@@ -5741,20 +5802,24 @@ function ShareDialog({
             className={shareMode === "workspace" ? "active" : "button-ghost"}
             onClick={() => setShareMode("workspace")}
             onKeyDown={handleShareModeKeyDown}
-            disabled={locked || !authenticatedGrantsEnabled}
-            title={!authenticatedGrantsEnabled ? authenticatedGrantReadinessMessage : undefined}
+            disabled={locked || !workspaceSharingEnabled}
+            title={!workspaceSharingEnabled ? authenticatedGrantReadinessMessage : undefined}
           >Client Workspace</button>
         </div>}
-        {!fileTarget && !authenticatedGrantsEnabled && <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
+        {!fileTarget && !workspaceSharingEnabled && <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
         {!fileTarget && shareMode === "workspace" ? (
           <section id="share-mode-panel-workspace" className="share-mode-panel" role="tabpanel" aria-labelledby="share-mode-tab-workspace">
             <header>
               <strong>Authenticated Client Workspace access</strong>
-              <small>Choose an exact individual, a department, or an organization. Access covers this folder and every nested folder and file. This does not create a public link.</small>
+              <small>{directCapability?.enabled ? "Choose a client or a whole organization. Access covers this folder and everything in it. This does not create a public link." : "Choose an exact individual, a department, or an organization. Access covers this folder and every nested folder and file. This does not create a public link."}</small>
             </header>
-            {authenticatedGrantsEnabled
-              ? canManageAuthenticatedGrants
-                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} creationEnabled={authenticatedGrantCreationEnabled} embedded onBusyChange={setGrantBusy} />
+            {directCapability === null && !directCapabilityError
+              ? <Loading />
+              : directCapabilityError
+              ? <div role="alert">{directCapabilityError}<button type="button" className="button-ghost" onClick={() => setDirectCapabilityAttempt(value => value + 1)}>Retry client sharing readiness</button></div>
+              : workspaceSharingEnabled
+              ? directCapability?.enabled === true || canManageAuthenticatedGrants
+                ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} creationEnabled={authenticatedGrantCreationEnabled} directCapability={directCapability} canManageLegacy={canManageAuthenticatedGrants} legacyEnabled={authenticatedGrantsEnabled} embedded onBusyChange={setGrantBusy} />
                 : <div className="notice" role="status">Administrator access is required to manage Client Workspace grants. Existing public-link sharing remains available.</div>
               : <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
             {canProvisionDelegated && <details className="workspace-sharing-advanced">
@@ -5818,6 +5883,7 @@ function ShareDialog({
               className="form-grid"
               onSubmit={async (event) => {
                 event.preventDefault();
+                if (!canCreatePublicLink) return;
                 if (busy) return;
                 setBusy(true);
                 setError("");
@@ -6036,7 +6102,7 @@ function ShareDialog({
               )}
               <ErrorLine error={error} />
               <div className="full actions">
-                <button className="button-orange" disabled={busy}>
+                <button className="button-orange" disabled={busy || !canCreatePublicLink}>
                   {busy ? "Saving…" : shown ? "Save changes" : "Create link"}
                 </button>
                 {shown && canRevoke && (

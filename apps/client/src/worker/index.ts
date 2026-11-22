@@ -39,6 +39,7 @@ import { listPublicShareLocations, resolvePublicShareLocation } from "./public-l
 import { createClientPortalRouter } from "./client-portal/routes";
 import { createOperationsHomeRouter } from "./client-portal/operations-home-routes";
 import { createOperationsNativeDeliveryRouter } from "./client-portal/operations-native-delivery-routes";
+import { createOperationsDirectFolderRouter } from "./client-portal/operations-direct-folder-routes";
 import { handleRecipientEnrollmentHttp } from "./client-portal/recipient-enrollment-http";
 import { handleOperationsNativeRecipientEnrollmentHttp } from "./client-portal/operations-native-recipient-enrollment-http";
 import { acceptRequestAttachmentScanReceipt, cleanupExpiredRequestAttachments, readRequestAttachmentScanReceipt } from "./client-portal/request-attachments";
@@ -1184,6 +1185,7 @@ app.route("/api/client/v2/operations", createOperationsHomeRouter());
 // Native file access verifies the individual Access identity and current
 // authority in both Workers; historical PA admission is not its authority.
 app.route("/api/client/operations/data", createOperationsNativeDeliveryRouter());
+app.route("/api/client/operations/direct-folders", createOperationsDirectFolderRouter());
 app.all("/api/client/v2/recipient-enrollment/*", c => handleRecipientEnrollmentHttp(c.req.raw, {
   env: c.env,
   enabled: c.env.CLIENT_PORTAL_ENABLED === "true" && c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED === "true",
