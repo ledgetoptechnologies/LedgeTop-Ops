@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
@@ -1044,7 +1044,7 @@ test('browser camera-centered focal owner reacquires A across A -> B -> A views'
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-focus-owner-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -1158,7 +1158,7 @@ test('browser camera-centered focal owner reacquires A across A -> B -> A views'
     }
     if (browser) {
       const exited = new Promise(resolve => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise(resolve => server.close(resolve));
@@ -1185,7 +1185,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     ));
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-lod-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -1689,7 +1689,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     }
     if (browser) {
       const exited = new Promise((resolve) => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -1717,7 +1717,7 @@ test('browser close view refines at the default Detail and small motion retains 
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-lod-retention-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -1845,7 +1845,7 @@ test('browser close view refines at the default Detail and small motion retains 
     }
     if (browser) {
       const exited = new Promise((resolve) => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -1870,7 +1870,7 @@ test('browser camera layer preserves all in-view source markers and map anchors 
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-camera-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -2035,7 +2035,7 @@ test('browser camera layer preserves all in-view source markers and map anchors 
     }
     if (browser) {
       const exited = new Promise((resolve) => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -2063,7 +2063,7 @@ test('browser hides the coarse root when every visible branch meets the active D
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-foreground-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -2251,7 +2251,7 @@ test('browser hides the coarse root when every visible branch meets the active D
     }
     if (browser) {
       const exited = new Promise((resolve) => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -2275,7 +2275,7 @@ test('browser never requests the original GLB when verified streaming tiles are 
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-streaming-only-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -2309,7 +2309,7 @@ test('browser never requests the original GLB when verified streaming tiles are 
     }
     if (browser) {
       const exited = new Promise((resolve) => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -2352,7 +2352,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-session-lod-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -2745,7 +2745,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     }
     if (browser) {
       const exited = new Promise((resolve) => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -2827,7 +2827,7 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-weighted-lod-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -3284,7 +3284,7 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
     }
     if (browser) {
       const exited = new Promise(resolve => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise(resolve => server.close(resolve));
@@ -3479,7 +3479,7 @@ for (const { sameOwner, twoNear } of [{ sameOwner: false }, { sameOwner: true },
       ({ server, vite } = fixture);
       profile = mkdtempSync(path.join(tmpdir(), 'ltds-depth-stacked-browser-'));
       const devToolsPort = await reserveDevToolsPort();
-      browser = spawn(executable, [
+      browser = spawnBrowser(executable, [
         '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
         '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
       ], { stdio: 'ignore' });
@@ -3688,7 +3688,7 @@ for (const { sameOwner, twoNear } of [{ sameOwner: false }, { sameOwner: true },
       }
       if (browser) {
         const exited = new Promise(resolve => browser.once('exit', resolve));
-        browser.kill();
+        stopBrowser(browser);
         await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
       }
       if (server) await new Promise(resolve => server.close(resolve));
@@ -3716,7 +3716,7 @@ test('browser camera photo fills the window and preserves source pixels through 
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-photo-window-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -3863,7 +3863,7 @@ test('browser camera photo fills the window and preserves source pixels through 
   } finally {
     if (client) { await client.command('Page.close', {}, 2_000).catch(() => {}); client.close(); }
     if (browser) {
-      const exited = new Promise(resolve => browser.once('exit', resolve)); browser.kill();
+      const exited = new Promise(resolve => browser.once('exit', resolve)); stopBrowser(browser);
       await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise(resolve => server.close(resolve));
@@ -3918,7 +3918,7 @@ test('browser distance-demand switches at developer Detail 20 protect nearby sur
     ({ server,vite } = fixture);
     profile=mkdtempSync(path.join(tmpdir(),'ltds-evaluation-switches-'));
     const port=await reserveDevToolsPort();
-    browser=spawn(executable,[ '--headless=new','--disable-gpu','--disable-dev-shm-usage','--no-first-run','--no-default-browser-check','--no-sandbox',
+    browser=spawnBrowser(executable,[ '--headless=new','--disable-gpu','--disable-dev-shm-usage','--no-first-run','--no-default-browser-check','--no-sandbox',
       '--remote-debugging-address=127.0.0.1',`--remote-debugging-port=${port}`,`--user-data-dir=${profile}`,'about:blank' ],{stdio:'ignore'});
     const devTools=await waitForDevTools(port,browser);
     const target=await (await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json();
@@ -4000,7 +4000,7 @@ test('browser distance-demand switches at developer Detail 20 protect nearby sur
     assert.equal(results[1].limits.workers,2);
   } finally {
     if(client){await client.command('Page.close',{},2_000).catch(()=>{});client.close();}
-    if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5_000))]);}
+    if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));stopBrowser(browser);await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5_000))]);}
     if(server)await new Promise(resolve=>server.close(resolve));
     if(vite)await vite.close();
     releaseLock();await removeBrowserProfile(profile);
@@ -4036,7 +4036,7 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-view-mode-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -4114,7 +4114,7 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
     }
     if (browser) {
       const exited = new Promise((resolve) => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -4145,7 +4145,7 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures under the production CSP with
     assert.equal((await fetch(fixture.origin)).headers.get('content-security-policy'), csp);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-ktx2-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -4222,7 +4222,7 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures under the production CSP with
     }
     if (browser) {
       const exited = new Promise((resolve) => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -4253,7 +4253,7 @@ test('built routes load the same-origin brand mark and the basemap tiles under t
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-brand-csp-browser-'));
     const devToolsPort = await reserveDevToolsPort();
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
@@ -4311,7 +4311,7 @@ test('built routes load the same-origin brand mark and the basemap tiles under t
     }
     if (browser) {
       const exited = new Promise((resolve) => browser.once('exit', resolve));
-      browser.kill();
+      stopBrowser(browser);
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
