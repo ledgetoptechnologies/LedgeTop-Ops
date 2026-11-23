@@ -41,8 +41,15 @@ function chunksOf(body) {
 
 test('verified delivery reproduces res.sendFile statuses, headers and bodies', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-delivery-parity-'));
-  const files = { 'tile.b3dm': crypto.randomBytes(200_000), 'ortho.tif': crypto.randomBytes(300_000), 'tileset.json': Buffer.from('{"asset":{"version":"1.1"}}'), 'empty.laz': Buffer.alloc(0) };
+  const files = { 'tile.b3dm': crypto.randomBytes(200_000), 'ortho.tif': crypto.randomBytes(300_000), 'tileset.json': Buffer.from('{"asset":{"version":"1.1"}}'), 'empty.laz': Buffer.alloc(0),
+    'submilli-low.b3dm': crypto.randomBytes(1000), 'submilli-high.b3dm': crypto.randomBytes(1000), 'submilli-second.b3dm': crypto.randomBytes(1000) };
   for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(root, name), body);
+  // Sub-millisecond mtimes: fs.Stats rounds to the nearest millisecond for its
+  // Date; ETag and Last-Modified must follow exactly (…0.6 ms rounds up; …999.6
+  // ms rounds into the next second).
+  fs.utimesSync(path.join(root, 'submilli-low.b3dm'), 1_700_000_000.0004, 1_700_000_000.0004);
+  fs.utimesSync(path.join(root, 'submilli-high.b3dm'), 1_700_000_000.0006, 1_700_000_000.0006);
+  fs.utimesSync(path.join(root, 'submilli-second.b3dm'), 1_700_000_000.9996, 1_700_000_000.9996);
   const app = express();
   const onError = (res) => (err) => { if (err && !res.headersSent) res.status(err.status || 404).json({ error: 'asset not found' }); };
   app.get('/send/:mode/:name', (req, res) => {
@@ -71,8 +78,14 @@ test('verified delivery reproduces res.sendFile statuses, headers and bodies', a
     ['GET', 'tile.b3dm', { 'if-unmodified-since': new Date(0).toUTCString() }],
     ['GET', 'tile.b3dm', { range: 'bytes=0-99', 'if-range': '"stale"' }], ['GET', 'tile.b3dm', { range: 'bytes=0-99', 'if-range': tileEtag }],
     ['GET', 'empty.laz', { range: 'bytes=0-10' }],
+    ['GET', 'submilli-low.b3dm', {}], ['GET', 'submilli-high.b3dm', {}], ['GET', 'submilli-second.b3dm', {}], ['HEAD', 'submilli-second.b3dm', {}],
+    ['GET', 'submilli-high.b3dm', { 'if-modified-since': 'Tue, 14 Nov 2023 22:13:20 GMT' }],
+    ['GET', 'submilli-second.b3dm', { 'if-modified-since': 'Tue, 14 Nov 2023 22:13:20 GMT' }],
   ];
   const ignored = new Set(['date', 'connection', 'keep-alive', 'x-powered-by']);
+  const highEtag = (await fetch(`${origin}/send/plain/submilli-high.b3dm`)).headers.get('etag');
+  const ourHighEtag = (await fetch(`${origin}/verified/plain/submilli-high.b3dm`)).headers.get('etag');
+  assert.equal(ourHighEtag, highEtag, 'sub-millisecond mtime ETag matches send exactly');
   for (const mode of ['plain', 'nostore']) {
     for (const [method, name, headers] of cases) {
       const label = `${mode} ${method} ${name} ${JSON.stringify(headers)}`;
@@ -96,8 +109,10 @@ async function managedFixture(t, { aged = true } = {}) {
   const write = (rel, body) => { const file = path.join(modelsMount, ...rel.split('/')); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, body); return file; };
   const ortho = crypto.randomBytes(3 * CHUNK + 123_456);
   const tile = crypto.randomBytes(300_000);
+  // A legacy raster: whole-file SHA-256 only, too large to buffer.
+  const dsm = crypto.randomBytes(5 * MiB + 321);
   const tileset = Buffer.from('{"asset":{"version":"1.1"},"root":{}}');
-  const files = { ortho: write('task/ortho.tif', ortho), tile: write('task/tiles/0/tile.b3dm', tile) };
+  const files = { ortho: write('task/ortho.tif', ortho), tile: write('task/tiles/0/tile.b3dm', tile), dsm: write('task/dsm.tif', dsm) };
   write('task/tiles/tileset.json', tileset);
   const manifest = [{ relativePath: 'tileset.json', byteSize: tileset.length, sha256: sha256(tileset) }, { relativePath: '0/tile.b3dm', byteSize: tile.length, sha256: sha256(tile) }];
   const database = openDatabase(path.join(root, 'viewer.sqlite'));
@@ -107,6 +122,7 @@ async function managedFixture(t, { aged = true } = {}) {
     modelId, versionId, provider: 'ltds-processing', providerModelId: 'delivery', providerVersionId: sha256('delivery'),
     displayName: 'Delivery model', status: 'ready', sourceLocator: {}, versionMetadata: {},
     assets: [
+      { kind: 'dsm', rootKey: 'models', relativePath: 'task/dsm.tif', format: 'tif', byteSize: dsm.length, sha256: sha256(dsm), storageMode: 'managed', published: true },
       { kind: 'ortho', rootKey: 'models', relativePath: 'task/ortho.tif', format: 'tif', byteSize: ortho.length, sha256: sha256(ortho), chunks: chunksOf(ortho), storageMode: 'managed', published: true },
       { kind: 'tiles', rootKey: 'models', relativePath: 'task/tiles/tileset.json', format: '3dtiles', byteSize: tileset.length, sha256: sha256(tileset), manifestSha256: sha256(JSON.stringify(manifest)), manifestFiles: manifest, storageMode: 'managed', published: true },
     ],
@@ -138,7 +154,7 @@ async function managedFixture(t, { aged = true } = {}) {
     fs.rmSync(root, { recursive: true, force: true });
   });
   const base = `http://127.0.0.1:${server.address().port}/session-assets/${token}/${modelId}/models/task`;
-  return { base, files, bodies: { ortho, tile }, integrity, root };
+  return { base, files, bodies: { ortho, tile, dsm }, integrity, root };
 }
 
 async function attempt(url, headers = {}) {
@@ -191,21 +207,36 @@ test('an asset replaced between verification and delivery never serves the repla
   }
 });
 
-test('a file rewritten while its body is streaming aborts the response instead of completing', async (t) => {
+test('a file rewritten mid-body never completes with unverified bytes', async (t) => {
   const f = await managedFixture(t);
-  for (const range of [null, [MiB, 3 * CHUNK]]) {
-    fs.writeFileSync(f.files.ortho, f.bodies.ortho);
+  const cases = [
+    // Registered chunks: the body is the hashed bytes, so it either completes
+    // with exactly the verified original or aborts.
+    ['ortho', 'ortho.tif', null, 'verified-or-abort'],
+    ['ortho', 'ortho.tif', [MiB, 3 * CHUNK], 'verified-or-abort'],
+    // Large whole file without chunk records: streamed; the closing fstat
+    // sees the change and the response is aborted.
+    ['dsm', 'dsm.tif', null, 'abort'],
+    ['dsm', 'dsm.tif', [1000, 5 * MiB], 'abort'],
+  ];
+  for (const [key, rel, range, expectation] of cases) {
+    const original = f.bodies[key];
+    fs.writeFileSync(f.files[key], original);
     await sleep(2_200);
     f.integrity.clear();
-    const response = await fetch(`${f.base}/ortho.tif`, range ? { headers: { range: `bytes=${range[0]}-${range[1]}` } } : {});
+    const response = await fetch(`${f.base}/${rel}`, range ? { headers: { range: `bytes=${range[0]}-${range[1]}` } } : {});
     assert.equal(response.status, range ? 206 : 200);
     const reader = response.body.getReader();
-    await reader.read(); // the server is now mid-body
-    const handle = fs.openSync(f.files.ortho, 'r+');
-    try { fs.writeSync(handle, Buffer.from('tampered'), 0, 8, f.bodies.ortho.length - 4096); } finally { fs.closeSync(handle); }
+    const parts = [];
+    const first = await reader.read(); // the server is now mid-body
+    if (!first.done) parts.push(Buffer.from(first.value));
+    const handle = fs.openSync(f.files[key], 'r+');
+    try { fs.writeSync(handle, Buffer.from('tampered'), 0, 8, original.length - 4096); } finally { fs.closeSync(handle); }
     let completed = false;
-    try { for (;;) { const { done } = await reader.read(); if (done) { completed = true; break; } } } catch { /* expected: aborted */ }
-    assert.equal(completed, false, `response ${range ? 'range' : 'full'} must not complete after a mid-stream change`);
+    try { for (;;) { const { done, value } = await reader.read(); if (done) { completed = true; break; } parts.push(Buffer.from(value)); } } catch { /* aborted */ }
+    const label = `${rel} ${range ? 'range' : 'full'}`;
+    if (expectation === 'abort') assert.equal(completed, false, `${label}: must not complete after a mid-stream change`);
+    else if (completed) assert.deepEqual(Buffer.concat(parts), range ? original.subarray(range[0], range[1] + 1) : original, `${label}: a completed body is exactly the verified bytes`);
   }
 });
 
@@ -279,3 +310,102 @@ test('session asset requests get a fast 503 when the queue is full and leave it 
   assert.equal(ok.status, 200);
   assert.deepEqual(ok.body, f.bodies.tile);
 });
+
+// A file handle whose bytes can be switched while its fstat identity stays
+// constant. It models the worst case: a change the identity checks cannot see.
+function shiftyHandle(contents, size) {
+  const mtimeNs = 1_700_000_000_000_000_000n;
+  const big = { dev: 7n, ino: 99n, size: BigInt(size), mtimeNs, ctimeNs: mtimeNs, isFile: () => true };
+  const handle = {
+    reads: 0,
+    async stat(options) { return options?.bigint ? big : { size, mtime: new Date(Number(mtimeNs / 1_000_000n)), isFile: () => true }; },
+    async read(buffer, offset, length, position) {
+      handle.reads += 1;
+      const source = contents.current;
+      const n = Math.max(0, Math.min(length, source.length - position));
+      source.copy(buffer, offset, position, position + n);
+      return { bytesRead: n, buffer };
+    },
+    async close() {},
+  };
+  return { handle, stat: big };
+}
+
+async function serveShifty(t, { eligible, chunkSize, range, bytesCacheMaxBytes }) {
+  const good = crypto.randomBytes(4 * 64 * 1024 + 777);
+  const tampered = Buffer.from(good); for (let i = 0; i < tampered.length; i += 512) tampered[i] ^= 0xff;
+  const contents = { current: good };
+  const chunks = chunkSize ? Array.from({ length: Math.ceil(good.length / chunkSize) }, (_, i) => {
+    const slice = good.subarray(i * chunkSize, Math.min(good.length, (i + 1) * chunkSize));
+    return { byteOffset: i * chunkSize, byteSize: slice.length, sha256: sha256(slice) };
+  }) : [];
+  const cache = new AssetIntegrityCache({ platform: eligible ? 'linux' : 'win32', statfs: async () => ({ type: 0x2fc12fc1 }), wallNow: () => Date.now() + 60_000,
+    ...(bytesCacheMaxBytes === undefined ? {} : { bytesCacheMaxBytes }) });
+  const hashed = [];
+  const hashRegion = cache.hashRegion.bind(cache);
+  cache.hashRegion = async (...args) => { const result = await hashRegion(...args); if (result?.buffer) hashed.push({ offset: args[2], bytes: Buffer.from(result.buffer), digest: result.digest }); return result; };
+  const filePath = '/virtual/asset.bin';
+  const app = express();
+  app.get('/asset', async (req, res) => {
+    const opened = shiftyHandle(contents, good.length);
+    await deliverVerified(req, res, {
+      ...opened, filePath, cache,
+      verify: async (r, signal) => {
+        if (!chunkSize) return cache.verifyWholeFile(filePath, opened.stat, sha256(good), { handle: opened.handle, signal });
+        const selected = r ? chunks.filter((c) => c.byteOffset <= r.end && c.byteOffset + c.byteSize - 1 >= r.start) : chunks;
+        for (const chunk of selected) if (!await cache.verifyChunk(filePath, opened.stat, chunk, { handle: opened.handle, signal })) return false;
+        return true;
+      },
+      regions: (start, end) => (chunkSize
+        ? chunks.filter((c) => c.byteOffset <= end && c.byteOffset + c.byteSize - 1 >= start).map((c) => ({ kind: 'chunk', offset: c.byteOffset, size: c.byteSize, sha256: c.sha256 }))
+        : [{ kind: 'file', offset: 0, size: good.length, sha256: sha256(good), toEof: true }]),
+      onFailure: () => res.sendStatus(404),
+      onError: (error) => res.sendStatus(error.status || 500),
+    });
+  });
+  const server = await listen(app);
+  t.after(async () => { hooks.afterVerify = null; await close(server); });
+  // Switch the bytes the moment verification has passed.
+  hooks.afterVerify = async () => { contents.current = tampered; };
+  let body = null, aborted = false, status = null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/asset`, range ? { headers: { range: `bytes=${range[0]}-${range[1]}` } } : {});
+    status = response.status;
+    body = Buffer.from(await response.arrayBuffer());
+  } catch { aborted = true; }
+  hooks.afterVerify = null;
+  const [from, to] = range || [0, good.length - 1];
+  return { status, body, aborted, expected: good.subarray(from, to + 1), tampered: tampered.subarray(from, to + 1), hashed, from, to };
+}
+
+// Reassembles [from, to] from the buffers that were actually hashed.
+function fromHashed(hashed, from, to) {
+  const out = Buffer.alloc(to - from + 1);
+  for (const { offset, bytes, digest } of hashed) {
+    assert.equal(sha256(bytes), digest);
+    const a = Math.max(from, offset), b = Math.min(to + 1, offset + bytes.length);
+    if (a < b) bytes.copy(out, a - from, a - offset, b - offset);
+  }
+  return out;
+}
+
+for (const [label, chunkSize, range] of [
+  ['registered chunks, range across chunks', 64 * 1024, [10_000, 150_000]],
+  ['registered chunks, whole file', 64 * 1024, null],
+  ['small whole file', 0, null],
+  ['small whole file, range', 0, [100, 5_000]],
+]) {
+  test(`${label}: the bytes sent are the bytes that were hashed`, async (t) => {
+    const result = await serveShifty(t, { eligible: true, chunkSize, range });
+    assert.equal(result.aborted, false);
+    assert.equal(result.status, range ? 206 : 200);
+    assert.deepEqual(result.body, result.expected, 'sent bytes are the verified bytes, not the switched ones on disk');
+    assert.deepEqual(result.body, fromHashed(result.hashed, result.from, result.to), 'sent bytes equal the hashed buffers');
+  });
+  test(`${label}: with nothing kept in memory, switched bytes are re-hashed and the response aborts`, async (t) => {
+    for (const options of [{ eligible: false }, { eligible: true, bytesCacheMaxBytes: 0 }]) {
+      const result = await serveShifty(t, { ...options, chunkSize, range });
+      assert.equal(result.aborted, true, `${JSON.stringify(options)}: a response whose bytes fail their hash never completes`);
+    }
+  });
+}

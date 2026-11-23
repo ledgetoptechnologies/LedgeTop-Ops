@@ -167,9 +167,18 @@ function requestedRange(header,size){const match=/^bytes=(\d*)-(\d*)$/.exec(Stri
 // remembered per exact file identity (assetIntegrityCache.js). A range must be
 // fully covered by registered chunks; a gap in the chunk table fails closed.
 async function verifyChunks(filePath,stat,chunks,range,totalSize,options={}){const selected=range?chunks.filter((chunk)=>chunk.byteOffset<=range.end&&chunk.byteOffset+chunk.byteSize-1>=range.start):chunks;if(!selected.length)return false;if(range){let covered=range.start;for(const chunk of [...selected].sort((x,y)=>x.byteOffset-y.byteOffset)){if(chunk.byteOffset>covered)return false;covered=Math.max(covered,chunk.byteOffset+chunk.byteSize);}if(covered<=range.end)return false;}else{let offset=0;for(const chunk of chunks){if(chunk.byteOffset!==offset)return false;offset+=chunk.byteSize;}if(offset!==totalSize)return false;}for(const chunk of selected){if(!await assetIntegrityCache.verifyChunk(filePath,stat,chunk,options))return false;}return true;}
+// The registered integrity record for one requested file: whole-file SHA-256
+// and, when registered, its 4 MiB chunk hashes. null = no valid record.
+function integrityPlan(repository,project,publishedAsset,requested){const integrityRequired=project.provider==='ltds-processing'||Boolean(publishedAsset.sha256)||Boolean(publishedAsset.manifestSha256);if(!integrityRequired)return {required:false};const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null,chunkPath='';if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return null;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return null;expected=repository.getModelAssetFile(publishedAsset.id,child);chunkPath=child;}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return null;return {required:true,expected,chunks:repository.getModelAssetChunks?.(publishedAsset.id,chunkPath)||[]};}
+async function verifyIntegrityPlan(plan,abs,stat,range,options){if(!plan)return false;if(!plan.required)return true;const size=Number(stat.size);if(size!==plan.expected.byteSize)return false;if(plan.chunks.length)return verifyChunks(abs,stat,plan.chunks,range,size,options);return assetIntegrityCache.verifyWholeFile(abs,stat,plan.expected.sha256,options);}
+// Regions whose exactly-hashed bytes are sent for [start,end]; null streams
+// (no integrity record, or a whole file too large to buffer).
+function integrityRegions(plan,size,start,end){if(!plan?.required)return null;if(plan.chunks.length)return plan.chunks.filter((chunk)=>chunk.byteOffset<=end&&chunk.byteOffset+chunk.byteSize-1>=start).sort((a,b)=>a.byteOffset-b.byteOffset).map((chunk)=>({kind:'chunk',offset:chunk.byteOffset,size:chunk.byteSize,sha256:chunk.sha256}));return assetIntegrityCache.canBuffer(size+1)?[{kind:'file',offset:0,size,sha256:plan.expected.sha256,toEof:true}]:null;}
 // `opened` = { handle, stat, range, signal } verifies the exact byte range that
 // will be served, through the descriptor it will be served from.
-async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null,opened=null){const integrityRequired=project.provider==='ltds-processing'||Boolean(publishedAsset.sha256)||Boolean(publishedAsset.manifestSha256);if(!integrityRequired)return true;const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null,chunkPath='';if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return false;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return false;expected=repository.getModelAssetFile(publishedAsset.id,child);chunkPath=child;}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return false;const stat=opened?opened.stat:await fs.promises.stat(abs,{bigint:true}),size=Number(stat.size);if(size!==expected.byteSize)return false;const options={handle:opened?.handle||null,signal:opened?.signal||null},range=opened?opened.range:requestedRange(rangeHeader,size);const chunks=repository.getModelAssetChunks?.(publishedAsset.id,chunkPath)||[];if(chunks.length)return verifyChunks(abs,stat,chunks,range,size,options);return assetIntegrityCache.verifyWholeFile(abs,stat,expected.sha256,options);}
+async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null,opened=null){const plan=integrityPlan(repository,project,publishedAsset,requested);if(!plan)return false;if(!plan.required)return true;const stat=opened?opened.stat:await fs.promises.stat(abs,{bigint:true});return verifyIntegrityPlan(plan,abs,stat,opened?opened.range:requestedRange(rangeHeader,Number(stat.size)),{handle:opened?.handle||null,signal:opened?.signal||null});}
+// deliverVerified options for one opened managed asset.
+function integrityDelivery(repository,project,publishedAsset,requested,abs,opened){const plan=integrityPlan(repository,project,publishedAsset,requested);return {verify:(range,signal)=>verifyIntegrityPlan(plan,abs,opened.stat,range,{handle:opened.handle,signal}),regions:(start,end)=>integrityRegions(plan,Number(opened.stat.size),start,end)};}
 
 async function pathTokenAuthorization(req, projectId) {
   if (!canonicalRepository) return false;
@@ -289,7 +298,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
     ...opened,
     filePath: abs,
     headers: { 'Cache-Control': 'private, no-store' },
-    verify: (range, signal) => publishedAssetIntegrityAllows(canonicalRepository, project, publishedAsset, requested, abs, null, { ...opened, range, signal }),
+    ...integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened),
     onFailure: () => res.status(404).json({ error: 'asset not found' }),
     beforeSend: () => { if (shareStillAllows()) return true; res.status(403).json({ error: 'not authorized' }); return false; },
     onError: (err) => { if (!res.headersSent) res.status(err.status || 404).json({ error: 'asset not found' }); },
@@ -347,6 +356,7 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
       filePath: absolute,
       headers,
       verify: (_range, signal) => assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle, signal }),
+      regions: () => (assetIntegrityCache.canBuffer(photo.byteSize + 1) ? [{ kind: 'file', offset: 0, size: photo.byteSize, sha256: photo.sha256, toEof: true }] : null),
       onFailure: () => res.status(404).json({ error: 'photo not found' }),
       beforeSend: shareStillAllows,
       onError: (error) => { if (!res.headersSent) res.status(error.status || 404).json({ error: 'photo not found' }); },
@@ -401,7 +411,7 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
     let opened;try{opened=await openForDelivery(absolute);}catch{return res.sendStatus(404);}
     return deliverVerified(req,res,{...opened,filePath:absolute,
       headers:{'Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${product.fileName}"`},
-      verify:(range,signal)=>publishedAssetIntegrityAllows(canonicalRepository,model,asset,asset.relativePath,absolute,null,{...opened,range,signal}),
+      ...integrityDelivery(canonicalRepository,model,asset,asset.relativePath,absolute,opened),
       onFailure:()=>res.sendStatus(409),
       // Integrity verification may be slow: honor revocation that happened while it ran.
       beforeSend:async()=>{if(await admitted.revalidate())return true;res.sendStatus(403);return false;},
@@ -419,4 +429,5 @@ module.exports.xAccelLocation = xAccelLocation;
 module.exports.publishedAssetAllows = publishedAssetAllows;
 module.exports.publishedAssetMatch = publishedAssetMatch;
 module.exports.publishedAssetIntegrityAllows = publishedAssetIntegrityAllows;
+module.exports.integrityDelivery = integrityDelivery;
 module.exports.assetIntegrityCache = assetIntegrityCache;

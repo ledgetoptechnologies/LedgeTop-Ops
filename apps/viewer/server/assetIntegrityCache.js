@@ -52,7 +52,11 @@ const INLINE_HASH_MAX_BYTES = 1024 * 1024;
 const RACY_WINDOW_MS = 2_000;
 const MAX_CONCURRENT_STREAMS = 8;
 // Streamed checks waiting for a slot; beyond this, requests get a fast 503.
+// The same bound applies to requests waiting for buffer budget.
 const MAX_QUEUED_STREAMS = 64;
+// Verified region bytes (4 MiB chunks, small whole files) kept so responses
+// can send exactly the bytes that were hashed without re-reading them.
+const VERIFIED_BYTES_CACHE_MAX_BYTES = 256 * 1024 * 1024;
 // Linux statfs f_type magic numbers of local filesystems where ctime is
 // kernel-maintained and attributes are not cached remotely.
 const CACHEABLE_FILESYSTEMS = new Map([
@@ -102,6 +106,7 @@ class AssetIntegrityCache {
     platform = process.platform,
     maxConcurrentStreams = MAX_CONCURRENT_STREAMS,
     maxQueuedStreams = MAX_QUEUED_STREAMS,
+    bytesCacheMaxBytes = VERIFIED_BYTES_CACHE_MAX_BYTES,
   } = {}) {
     this.ttlMs = Math.max(0, Number(ttlMs) || 0);
     this.maxEntries = Math.max(1, Number(maxEntries) || 1);
@@ -122,13 +127,118 @@ class AssetIntegrityCache {
     this.pending = new Map();
     this.generation = 0;
     this.bufferedBytes = 0;
-    this.stats = { hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0, busy: 0, cancelled: 0 };
+    this.bufferWaiters = [];
+    this.bytesCacheMaxBytes = Math.max(0, Number(bytesCacheMaxBytes) || 0);
+    this.bytes = new Map(); // region key -> { buffer, until }
+    this.bytesTotal = 0;
+    this.stats = { bytesHits: 0, bytesMisses: 0, hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0, busy: 0, cancelled: 0 };
   }
 
   clear() {
     this.generation += 1;
     this.verified.clear();
     this.pending.clear();
+    this.bytes.clear();
+    this.bytesTotal = 0;
+  }
+
+  regionKey(filePath, identity, region) {
+    return region.kind === 'file'
+      ? `file\0${filePath}\0${identity}\0${region.sha256}`
+      : `chunk\0${filePath}\0${identity}\0${region.offset}\0${region.size}\0${region.sha256}`;
+  }
+
+  canBuffer(size) { return size <= this.bufferedHashMaxBytes; }
+
+  storeBytes(key, buffer) {
+    if (!buffer || buffer.length > this.bytesCacheMaxBytes || this.ttlMs <= 0) return;
+    const previous = this.bytes.get(key);
+    if (previous) { this.bytes.delete(key); this.bytesTotal -= previous.buffer.length; }
+    this.bytes.set(key, { buffer, until: this.now() + this.ttlMs });
+    this.bytesTotal += buffer.length;
+    while (this.bytesTotal > this.bytesCacheMaxBytes) {
+      const [oldest, entry] = this.bytes.entries().next().value;
+      this.bytes.delete(oldest);
+      this.bytesTotal -= entry.buffer.length;
+    }
+  }
+
+  // Waits (FIFO, bounded) until `size` bytes fit in the global buffer budget.
+  reserve(size, signal = null) {
+    if (signal?.aborted) return Promise.reject(abortError());
+    if (size > this.bufferedBudgetBytes) { this.stats.busy += 1; return Promise.reject(busyError()); }
+    if (!this.bufferWaiters.length && this.bufferedBytes + size <= this.bufferedBudgetBytes) {
+      this.bufferedBytes += size;
+      this.stats.peakBufferedBytes = Math.max(this.stats.peakBufferedBytes, this.bufferedBytes);
+      return Promise.resolve();
+    }
+    if (this.bufferWaiters.length >= this.maxQueuedStreams) { this.stats.busy += 1; return Promise.reject(busyError()); }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const index = this.bufferWaiters.indexOf(waiter);
+        if (index >= 0) this.bufferWaiters.splice(index, 1);
+        this.stats.cancelled += 1;
+        reject(abortError());
+        this.unreserve(0);
+      };
+      const waiter = { size, grant: () => { signal?.removeEventListener('abort', onAbort); resolve(); } };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.bufferWaiters.push(waiter);
+    });
+  }
+
+  unreserve(size) {
+    this.bufferedBytes -= size;
+    while (this.bufferWaiters.length && this.bufferedBytes + this.bufferWaiters[0].size <= this.bufferedBudgetBytes) {
+      const waiter = this.bufferWaiters.shift();
+      this.bufferedBytes += waiter.size;
+      this.stats.peakBufferedBytes = Math.max(this.stats.peakBufferedBytes, this.bufferedBytes);
+      waiter.grant();
+    }
+  }
+
+  // Returns exactly-verified bytes [start, endExclusive) of one registered
+  // region (a chunk, or a whole small file), for sending. The bytes are either
+  // a copy of bytes hashed earlier for this exact identity (kept in memory) or
+  // read now through `handle` and hashed before being returned. The caller
+  // must call release() once the bytes have been written. null = mismatch.
+  async verifiedSlice(filePath, stat, region, start, endExclusive, { handle = null, signal = null } = {}) {
+    const identity = fileIdentity(stat);
+    const key = this.regionKey(filePath, identity, region);
+    const eligible = await this.filesystemCacheable(filePath, stat.dev);
+    const entry = eligible ? this.bytes.get(key) : undefined;
+    if (entry && entry.until > this.now()) {
+      // Most of the region: hand out a view and account for the whole buffer
+      // it keeps alive. A small slice: copy it so eviction can free the rest.
+      const length = endExclusive - start, view = length * 2 >= entry.buffer.length;
+      const accounted = view ? entry.buffer.length : length;
+      await this.reserve(accounted, signal);
+      this.stats.bytesHits += 1;
+      const slice = entry.buffer.subarray(start - region.offset, endExclusive - region.offset);
+      const bytes = view ? slice : Buffer.from(slice);
+      let released = false;
+      return { bytes, release: () => { if (!released) { released = true; this.unreserve(accounted); } } };
+    }
+    if (entry) { this.bytes.delete(key); this.bytesTotal -= entry.buffer.length; }
+    this.stats.bytesMisses += 1;
+    const capacity = region.toEof ? region.size + 1 : region.size;
+    await this.reserve(capacity, signal);
+    let handedOut = false;
+    try {
+      const generation = this.generation;
+      const result = await this.hashRegion(filePath, identity, region.offset, region.size, { toEof: Boolean(region.toEof), handle, signal, preReserved: true });
+      if (!result?.buffer || result.digest !== region.sha256) return null;
+      if (eligible && result.cacheable && generation === this.generation) {
+        this.storeBytes(key, result.buffer);
+        this.verified.set(key, this.now() + this.ttlMs);
+        while (this.verified.size > this.maxEntries) this.verified.delete(this.verified.keys().next().value);
+      }
+      handedOut = true;
+      let released = false;
+      return { bytes: result.buffer.subarray(start - region.offset, endExclusive - region.offset), release: () => { if (!released) { released = true; this.unreserve(capacity); } } };
+    } finally {
+      if (!handedOut) this.unreserve(capacity);
+    }
   }
 
   // Whether results for files on this device may be remembered (see the
@@ -220,6 +330,7 @@ class AssetIntegrityCache {
       if (this.ttlMs > 0 && generation === this.generation) {
         this.verified.set(key, this.now() + this.ttlMs);
         while (this.verified.size > this.maxEntries) this.verified.delete(this.verified.keys().next().value);
+        if (result.buffer) this.storeBytes(key, result.buffer);
       }
       return true;
     })().finally(() => { if (this.pending.get(key) === promise) this.pending.delete(key); });
@@ -229,7 +340,7 @@ class AssetIntegrityCache {
 
 
   reserveBuffer(size) {
-    if (size > this.bufferedHashMaxBytes || this.bufferedBytes + size > this.bufferedBudgetBytes) return false;
+    if (size > this.bufferedHashMaxBytes || this.bufferWaiters.length || this.bufferedBytes + size > this.bufferedBudgetBytes) return false;
     this.bufferedBytes += size;
     this.stats.peakBufferedBytes = Math.max(this.stats.peakBufferedBytes, this.bufferedBytes);
     return true;
@@ -238,11 +349,13 @@ class AssetIntegrityCache {
   // Hashes `size` bytes at `offset` of the exact file whose identity the caller
   // recorded, from one descriptor that must keep that identity before and after
   // the read. With `toEof`, the file must also end exactly at offset + size.
-  async hashRegion(filePath, identity, offset, size, { toEof = false, handle: openHandle = null, signal = null } = {}) {
+  // With `preReserved`, the caller already holds buffer budget for the read.
+  // Buffered reads return the hashed bytes as `buffer`.
+  async hashRegion(filePath, identity, offset, size, { toEof = false, handle: openHandle = null, signal = null, preReserved = false } = {}) {
     if (signal?.aborted) throw abortError();
     // One extra byte proves end-of-file in the same read when required.
     const capacity = toEof ? size + 1 : size;
-    const buffered = this.reserveBuffer(capacity);
+    const buffered = preReserved || this.reserveBuffer(capacity);
     if (!buffered) await this.acquireStream(signal);
     try {
       const readStartedAt = this.wallNow();
@@ -252,6 +365,7 @@ class AssetIntegrityCache {
         if (fileIdentity(before) !== identity) return null;
         if (signal?.aborted) throw abortError();
         let digest;
+        let kept = null;
         let atEof = !toEof;
         if (buffered) {
           const buffer = Buffer.allocUnsafe(capacity);
@@ -263,7 +377,8 @@ class AssetIntegrityCache {
           }
           if (filled !== size) return null;
           atEof = true;
-          digest = await sha256Hex(buffer.subarray(0, size));
+          kept = buffer.subarray(0, size);
+          digest = await sha256Hex(kept);
         } else {
           this.stats.streamed += 1;
           const hash = crypto.createHash('sha256');
@@ -283,13 +398,13 @@ class AssetIntegrityCache {
           if ((await handle.read(probe, 0, 1, offset + size)).bytesRead !== 0) return null;
         }
         if (fileIdentity(await handle.stat({ bigint: true })) !== identity) return null;
-        return { digest, cacheable: readStartedAt - newestTimestampMs(before) > this.racyWindowMs };
+        return { digest, buffer: kept, cacheable: readStartedAt - newestTimestampMs(before) > this.racyWindowMs };
       } finally {
         if (!openHandle) await handle.close();
       }
     } finally {
-      if (buffered) this.bufferedBytes -= capacity;
-      else this.releaseStream();
+      if (!buffered) this.releaseStream();
+      else if (!preReserved) this.unreserve(capacity);
     }
   }
 
@@ -300,20 +415,20 @@ class AssetIntegrityCache {
   // is `stat`); `signal` cancels a queued or running check.
   async verifyWholeFile(filePath, stat, expectedSha256, { handle = null, signal = null } = {}) {
     const identity = fileIdentity(stat);
-    const key = `file\0${filePath}\0${identity}\0${expectedSha256}`;
+    const key = this.regionKey(filePath, identity, { kind: 'file', sha256: expectedSha256 });
     return this.check(filePath, stat, key, async (activeSignal) => {
       const result = await this.hashRegion(filePath, identity, 0, Number(stat.size), { toEof: true, handle, signal: activeSignal });
-      return { ok: Boolean(result) && result.digest === expectedSha256, cacheable: Boolean(result?.cacheable) };
+      return { ok: Boolean(result) && result.digest === expectedSha256, cacheable: Boolean(result?.cacheable), buffer: result?.buffer || null };
     }, signal);
   }
 
   // Exact registered-chunk check for one 4 MiB (or shorter tail) region.
   async verifyChunk(filePath, stat, chunk, { handle = null, signal = null } = {}) {
     const identity = fileIdentity(stat);
-    const key = `chunk\0${filePath}\0${identity}\0${chunk.byteOffset}\0${chunk.byteSize}\0${chunk.sha256}`;
+    const key = this.regionKey(filePath, identity, { kind: 'chunk', offset: chunk.byteOffset, size: chunk.byteSize, sha256: chunk.sha256 });
     return this.check(filePath, stat, key, async (activeSignal) => {
       const result = await this.hashRegion(filePath, identity, chunk.byteOffset, chunk.byteSize, { handle, signal: activeSignal });
-      return { ok: Boolean(result) && result.digest === chunk.sha256, cacheable: Boolean(result?.cacheable) };
+      return { ok: Boolean(result) && result.digest === chunk.sha256, cacheable: Boolean(result?.cacheable), buffer: result?.buffer || null };
     }, signal);
   }
 }
@@ -323,5 +438,5 @@ const assetIntegrityCache = new AssetIntegrityCache();
 module.exports = {
   AssetIntegrityCache, assetIntegrityCache, fileIdentity, sha256Hex,
   BUFFERED_HASH_MAX_BYTES, BUFFERED_HASH_BUDGET_BYTES, DEFAULT_TTL_MS, RACY_WINDOW_MS,
-  CACHEABLE_FILESYSTEMS, MAX_CONCURRENT_STREAMS, MAX_QUEUED_STREAMS, busyError, abortError,
+  CACHEABLE_FILESYSTEMS, MAX_CONCURRENT_STREAMS, MAX_QUEUED_STREAMS, VERIFIED_BYTES_CACHE_MAX_BYTES, busyError, abortError,
 };

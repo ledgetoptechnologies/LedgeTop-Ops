@@ -7,11 +7,20 @@
 // res.sendFile() reopened the path, so a file replaced or rewritten between
 // the check and the send could be served unverified. Here the file is opened
 // once; the exact byte range that will be sent is verified through that
-// descriptor (assetIntegrityCache keys on its fstat identity); the descriptor
-// identity is re-checked before the first byte; the body is read from the same
-// descriptor; and the final chunk is withheld until a last fstat proves the
-// file did not change while it was read. If it changed, the socket is destroyed
-// so a truncated body can never complete as a valid response.
+// descriptor (assetIntegrityCache keys on its fstat identity) and the
+// descriptor identity is re-checked before the first byte. Then:
+//
+// - Assets with registered regions (4 MiB chunks, or a whole file small enough
+//   to buffer: tiles, EPT nodes, small photos) send exactly the bytes that were
+//   hashed: each region is read once into memory through the descriptor,
+//   hashed, and that buffer (sliced to the range) is what gets written. A
+//   region whose bytes no longer match aborts the response.
+// - Large whole-file assets with no chunk records (legacy rasters) cannot be
+//   held in memory. They are verified through the descriptor, streamed from it,
+//   and the final piece is withheld until a last fstat proves the file did not
+//   change; otherwise the socket is destroyed. This is no weaker than before
+//   (verify by path, then sendFile reopening the path); the real fix is to
+//   backfill chunk records for those assets so they take the first path.
 //
 // Response headers and statuses mirror send@0.19 (what res.sendFile uses):
 // Accept-Ranges, Cache-Control default, Last-Modified, weak ETag, Content-Type
@@ -21,7 +30,7 @@
 
 const fs = require('node:fs');
 const express = require('express');
-const { fileIdentity } = require('./assetIntegrityCache');
+const { fileIdentity, assetIntegrityCache } = require('./assetIntegrityCache');
 
 const mime = express.static.mime;
 const BYTES_RANGE_REGEXP = /^ *bytes=/;
@@ -129,6 +138,29 @@ async function pump(res, handle, identity, start, len, signal) {
   res.end(held || undefined);
 }
 
+// Writes [start, end] from registered regions, each one exactly-verified
+// bytes (see assetIntegrityCache.verifiedSlice). Throws on mismatch or gap.
+async function sendRegions(res, cache, filePath, stat, handle, regions, start, end, signal) {
+  let position = start;
+  for (const region of regions) {
+    if (signal.aborted) return;
+    if (region.offset > position || region.offset + region.size <= position) throw new Error('asset region table does not cover the response');
+    const sliceEnd = Math.min(end + 1, region.offset + region.size);
+    const piece = await cache.verifiedSlice(filePath, stat, region, position, sliceEnd, { handle, signal });
+    if (!piece) throw new Error('asset bytes failed verification during delivery');
+    try {
+      if (!res.write(piece.bytes)) await waitForDrain(res);
+    } finally {
+      piece.release();
+    }
+    position = sliceEnd;
+    if (position > end) break;
+  }
+  if (signal.aborted) return;
+  if (position !== end + 1) throw new Error('asset region table does not cover the response');
+  res.end();
+}
+
 function busyError(error) { return error?.code === 'integrity_busy'; }
 function abortError(error) { return error?.name === 'AbortError'; }
 
@@ -140,7 +172,9 @@ function abortError(error) { return error?.name === 'AbortError'; }
 //                       slow) verification; returns false after responding.
 //   onError(error)   -> route response for 412/416, like a sendFile callback.
 //   headers          -> route headers applied once verification has passed.
-async function deliverVerified(req, res, { handle, stat, filePath, verify, onFailure, onError, beforeSend = null, headers = {} }) {
+//   regions(start,end) -> registered regions covering the body, in order, to
+//                       send exactly-hashed bytes; null to stream (see top).
+async function deliverVerified(req, res, { handle, stat, filePath, verify, onFailure, onError, beforeSend = null, headers = {}, regions = null, cache = assetIntegrityCache }) {
   const identity = fileIdentity(stat);
   const size = Number(stat.size);
   const controller = new AbortController();
@@ -148,14 +182,17 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
   res.once('close', onClose);
   try {
     if (res.headersSent) return;
+    // Last-Modified and ETag come from a regular (non-bigint) fstat so they use
+    // the exact Date conversion send@0.19/etag apply to fs.Stats.
+    const plain = await handle.stat();
     const routeHeaders = new Map(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), [name, value]]));
     const has = (name) => res.getHeader(name) !== undefined || routeHeaders.has(name.toLowerCase());
     const get = (name) => (routeHeaders.get(name.toLowerCase()) || [])[1] ?? res.getHeader(name);
     const defaults = [];
     if (!has('Accept-Ranges')) defaults.push(['Accept-Ranges', 'bytes']);
     if (!has('Cache-Control')) defaults.push(['Cache-Control', 'public, max-age=0']);
-    if (!has('Last-Modified')) defaults.push(['Last-Modified', new Date(Number(stat.mtimeNs / 1_000_000n)).toUTCString()]);
-    if (!has('ETag')) defaults.push(['ETag', `W/"${stat.size.toString(16)}-${(stat.mtimeNs / 1_000_000n).toString(16)}"`]);
+    if (!has('Last-Modified')) defaults.push(['Last-Modified', plain.mtime.toUTCString()]);
+    if (!has('ETag')) defaults.push(['ETag', `W/"${plain.size.toString(16)}-${plain.mtime.getTime().toString(16)}"`]);
     if (!has('Content-Type')) {
       const type = mime.lookup(filePath);
       if (type) { const charset = mime.charsets.lookup(type); defaults.push(['Content-Type', type + (charset ? `; charset=${charset}` : '')]); }
@@ -216,7 +253,9 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
     res.setHeader('Content-Length', len);
     if (req.method === 'HEAD') return res.end();
     try {
-      await pump(res, handle, identity, start, len, controller.signal);
+      const plan = len > 0 && typeof regions === 'function' ? regions(start, start + len - 1) : null;
+      if (plan) await sendRegions(res, cache, filePath, stat, handle, plan, start, start + len - 1, controller.signal);
+      else await pump(res, handle, identity, start, len, controller.signal);
     } catch (error) {
       res.destroy(error);
     }
