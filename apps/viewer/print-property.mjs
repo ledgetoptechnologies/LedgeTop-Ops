@@ -25,6 +25,7 @@ export const PRINT_PROPERTY_MESSAGES = Object.freeze({
   upload: 'An uploaded boundary file cannot be used to choose a property.',
   unavailable: 'Property lines are not available.',
   uncaptured: 'None of this property was captured.',
+  choose: 'Choose a property first.',
   stale: 'Choose the property again.',
   georef: 'This model has no verified map position.',
 });

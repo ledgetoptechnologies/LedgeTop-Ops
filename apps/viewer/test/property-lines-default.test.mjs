@@ -163,8 +163,12 @@ test('prints: the source and credit of the drawn lines, and nothing once access 
   const ctx = await open(page());
   assert.equal(ctx.controller.attribution(), 'Source: Wisconsin Statewide Parcel Map V12. C');
   assert.equal(ctx.dom.notice.textContent, 'Property lines are approximate, not a survey. Source: Wisconsin Statewide Parcel Map V12.');
+  assert.equal(ctx.controller.datumNote(), '', 'no model datum known');
+  const dated = await open(page({ offer: () => reply({ offered: true, source: { ...OFFER.source, vintage: 'V12, 2025 tax roll' } }) }));
+  assert.equal(dated.controller.attribution(), 'Source: Wisconsin Statewide Parcel Map V12. V12, 2025 tax roll. C');
   ctx.controller.suspend();
   assert.equal(ctx.controller.attribution(), '');
+  assert.equal(ctx.controller.datumNote(), '');
 });
 
 test('default on: one page moving through every view keeps the lines without refetching the offer', async () => {

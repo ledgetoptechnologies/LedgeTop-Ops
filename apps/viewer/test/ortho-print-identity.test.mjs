@@ -10,8 +10,11 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { CONTOUR_COLORS } from '../contours.mjs';
 import * as printProperty from '../print-property.mjs';
-import { formatParcelArea } from '../property-lines-owners.mjs';
-import { assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge } from '../ortho-print-export.mjs';
+import { dissolveParcelsByOwner, formatParcelArea } from '../property-lines-owners.mjs';
+import { tilesCoverBounds } from '../property-lines.mjs';
+import { captureDates } from '../print-page.mjs';
+import { IOS_MAX_PIXELS } from '../print-sheet.mjs';
+import { assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, isIosLike, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, verifyOrthoCrs } from '../ortho-print-export.mjs';
 
 const source = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 function extract(signature) {
@@ -26,7 +29,7 @@ function region(from, to) {
 }
 // viewerAccessAvailable, orthoPrintPermissions and the export fence (the in-flight set, identity and cancel hook).
 const SHIPPED = [region('function viewerAccessAvailable()', 'function syncMeasurementActionVisibility()'),
-  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()', 'async function choosePrintProperty(', 'function propertyClipper(',
+  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()', 'async function choosePrintProperty(', 'function propertyClipper(', 'async function openPrintPage(',
     'async function exportOrthoPrintFromViewer('].map(extract)].join('\n');
 
 const tick = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve)); };
@@ -408,4 +411,90 @@ test('dialog: My property needs a choice, shows it, sends it, and drops it when 
   assert.deepEqual([controls.exportButton.disabled, controls.format.disabled], [false, false]);
   await controls.exportButton.fire('click');
   assert.equal('selection' in runs[1], false);
+});
+
+// ── The Print map page ───────────────────────────────────────────────────
+
+function printPageOf({ permissions = WITH_DOWNLOAD, holdOpen = false } = {}) {
+  const p = page({ holdOpen, permissions });
+  const seen = { shut: 0, parcels: [] };
+  Object.assign(p.context, {
+    isIosLike: () => false, IOS_MAX_PIXELS, verifyOrthoCrs, tilesCoverBounds, dissolveParcelsByOwner, captureDates, camFeatures: [], utmToLatLon: (e, n) => [n, e],
+    createSheetMeasure: () => () => 0, createPrintModel: deps => { seen.deps = deps; return { deps }; }, printPageJob: null,
+    printPage: { shut() { seen.shut++; p.context.printPageJob?.end(); } },
+    readCaptureMask: async () => ({ captured: () => true, inside: () => 100 }),
+    propertyLines: { state: { merge: false }, attribution: () => 'Source: Synthetic Parcel Map R1.', datumNote: () => '', sync() {}, suspend() {}, resume() {},
+      loadPrintParcels: async bounds => { seen.parcels.push(bounds); return { status: 'ok', parcels: [{ id: 1, owner: 'EXAMPLE OWNER', rings: [[[0, 0], [0, 1], [1, 1], [0, 0]]] }], loaded: new Set(['14/1/1']), failed: false, partial: false }; } },
+  });
+  const dataset = p.context.getDataset;
+  p.context.getDataset = async (...args) => { const ds = await dataset(...args); ds.llBounds = [[44, -90], [44.1, -89.9]]; return ds; };
+  return { p, seen };
+}
+
+test('print page: opens for this viewer with the orthophoto’s parcels, and is released when it closes', async () => {
+  const { p, seen } = printPageOf();
+  await p.context.openPrintPage();
+  assert.equal(p.inFlight(), 1);
+  assert.deepEqual({ ...seen.parcels[0] }, { west: -90, south: 44, east: -89.9, north: 44.1 });
+  assert.equal(seen.deps.outlines.length, 1);
+  assert.equal(seen.deps.attribution, 'Source: Synthetic Parcel Map R1.');
+  assert.equal(seen.deps.merge, false);
+  assert.equal(seen.deps.orthoGsd, 2);
+  assert.deepEqual([seen.deps.meta.title, seen.deps.meta.captured, seen.deps.maxPixels], ['Model', null, Infinity]);
+  seen.deps.checkpoint();
+  p.context.printPageJob.end();
+  assert.equal(p.inFlight(), 0);
+  assert.throws(() => seen.deps.checkpoint(), { name: 'AbortError' });
+});
+
+test('print page: needs measure permission, an orthophoto and a matching verified position', async () => {
+  for (const [change, code] of [[c => { c.SHARE_PERMISSIONS = { view: true, measure: false }; }, 'print_not_permitted'], [c => { c.ORTHO_URL = null; }, 'print_no_ortho'],
+    [c => { c.measurementCoordinateReference = () => ({ crs: 'local' }); }, 'print_property'], [c => { c.measurementCoordinateReference = () => ({ crs: 'EPSG:32617' }); }, 'print_crs']]) {
+    const { p, seen } = printPageOf();
+    change(p.context);
+    await rejects(p.context.openPrintPage(), 'code', code);
+    assert.equal(seen.deps, undefined);
+    assert.equal(p.inFlight(), 0);
+  }
+});
+
+test('print page: a viewer, version or access change closes it, while opening or later', async () => {
+  const changes = [c => c.applyViewerSession(session({ subject: 'person-two', permissions: WITH_DOWNLOAD })), c => c.setSessionAccessState('unavailable', 'session-expired')];
+  for (const change of changes) {
+    const { p, seen } = printPageOf({ holdOpen: true });
+    const opening = p.context.openPrintPage();
+    await tick();
+    change(p.context);
+    assert.equal(p.log.opens[0].signal.aborted, true);
+    assert.ok(seen.shut >= 1);
+    p.log.opens[0].resolve();
+    await rejects(opening, 'name', 'AbortError');
+    assert.equal(seen.deps, undefined);
+    const later = printPageOf();
+    await later.p.context.openPrintPage();
+    change(later.p.context);
+    assert.equal(later.seen.shut, 1, 'the open page is closed at once');
+    assert.equal(later.p.inFlight(), 0);
+    assert.throws(() => later.seen.deps.checkpoint(), { name: 'AbortError' });
+  }
+  // A version change with no session event is caught at the next step.
+  const quiet = printPageOf();
+  await quiet.p.context.openPrintPage();
+  quiet.p.context.PROJECT = model('v2');
+  assert.throws(() => quiet.seen.deps.checkpoint(), { name: 'AbortError' });
+});
+
+test('print page: losing download closes a page opened with it; a plain renewal keeps it; without download it stays open', async () => {
+  const kept = printPageOf();
+  await kept.p.context.openPrintPage();
+  kept.p.context.applyViewerSession(session({ permissions: WITH_DOWNLOAD, expiresIn: 900_000 }));
+  assert.equal(kept.seen.shut, 0);
+  kept.seen.deps.checkpoint();
+  kept.p.context.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD }));
+  assert.equal(kept.seen.shut, 1);
+  const low = printPageOf({ permissions: WITHOUT_DOWNLOAD });
+  await low.p.context.openPrintPage();
+  low.p.context.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD, expiresIn: 900_000 }));
+  assert.equal(low.seen.shut, 0);
+  assert.equal(low.seen.deps.policy().whole, false);
 });

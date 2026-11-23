@@ -625,6 +625,16 @@ WGS84 UTM 16N
 
 ## Feature notes
 
+- **Print map:** "Print map" beside "Export image" draws one sheet (Letter,
+  Legal, Tabloid, ARCH D) for Print and Save PDF from one renderer
+  (`print-sheet.mjs`; the PDF is one JPEG page with no coordinates). "Whole
+  captured area" or "My property": the parcel shape plus 25 ft by default,
+  with 25 ft of the capture's edge trimmed from everything but the property.
+  A property the server clipped, or whose parcels did not all load, is
+  refused. Same permission as Export image; without download the imagery is
+  held to the screen's pixels, at most 2048. A clip is what to print, not
+  access control. Sheets with parcel data always carry the "not a survey"
+  note and the parcel source.
 - **Property lines** (Wisconsin only): a "Property lines" card below Camera
   Positions, with one Show/Hide toggle for the map,
   model and point cloud views draws parcel outlines from the Wisconsin
