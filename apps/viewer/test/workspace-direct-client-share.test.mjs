@@ -141,14 +141,36 @@ test('new client shares start with measurements on and camera positions and down
 });
 
 test('Share project opens on the whole project with later models unticked; a task Share opens on that task',()=>{
-  assert.equal(directShareDefaultScope({taskId:null,tasks}),'project');
-  assert.equal(directShareDefaultScope({taskId:'task-2',tasks}),'tasks');
-  assert.equal(directShareDefaultScope({taskId:'gone',tasks}),'project');
+  assert.equal(directShareDefaultScope({taskId:null}),'project');
+  assert.equal(directShareDefaultScope({taskId:'task-2'}),'tasks');
   const project=directShareForm({projectName:'Site',tasks});
   assert.match(project,/name="scope" value="project" checked/);assert.match(project,/name="includeLater" >/);
   assert.match(project,/Also share models published later/);assert.match(project,/data-direct-review hidden/);assert.match(project,/Review share<\/button>/);
   const task=directShareForm({projectName:'Site',tasks,taskId:'task-2'});
   assert.match(task,/name="scope" value="tasks" checked/);assert.match(task,/name="includeLater" disabled>/);assert.match(task,/value="task-2" checked/);
+});
+
+test('a Share opened from a task that is not published never starts on the whole project',()=>{
+  for(const list of [tasks,[]]){
+    const html=directShareForm({projectName:'Site',tasks:list,taskId:'draft',taskName:'<b>East</b> wall'});
+    assert.match(html,/name="scope" value="tasks" checked >/);assert.doesNotMatch(html,/value="project" checked/);
+    assert.match(html,/name="includeLater" disabled>/);assert.doesNotMatch(html,/name="taskId"[^>]*checked/);
+    assert.match(html,/“&lt;b&gt;East&lt;\/b&gt; wall” is not published yet/);
+    assert.throws(()=>readDirectShareForm(form({client:key,scope:'tasks'}),{projectId:'project',projectName:'Site',tasks:list,clients}).bodies(),/at least one task/);
+  }
+  assert.doesNotMatch(directShareForm({projectName:'Site',tasks,taskId:'task-1',taskName:'North wall'}),/not published yet/);
+  assert.doesNotMatch(directShareForm({projectName:'Site',tasks}),/not published yet/);
+});
+
+test('the shared-with list says what a client can do and shows an expired share as expired',()=>{
+  const now=Date.parse('2026-06-01T00:00:00Z'),base={viewerProjectId:'project',scopeType:'project',taskId:null,revokedAt:null,clientDisplayName:'Acme'};
+  const rows=grant=>directGrantRows({clients:[],grants:[{grantId:'g',...base,...grant}]},{projectId:'project',tasks,now});
+  const live=rows({expiresAt:'2026-06-02T00:00:00Z',permissions:{measure:true,cameras:false,download:true}});
+  assert.match(live,/Can view, measure and download · Expires 2026-06-02T00:00:00Z/);assert.match(live,/status active">active</);
+  const over=rows({expiresAt:'2026-06-01T00:00:00Z',permissions:{measure:false,cameras:true,download:false}});
+  assert.match(over,/Can view and see camera positions · Expired 2026-06-01T00:00:00Z; revoke it to share this again/);
+  assert.match(over,/status expired">expired</);assert.match(over,/data-action="revoke-direct-client-grant"/);
+  assert.match(rows({expiresAt:null,permissions:{measure:false,cameras:false,download:false}}),/Can view · No expiry/);
 });
 
 test('the review step repeats who, what, permissions and expiry',()=>{

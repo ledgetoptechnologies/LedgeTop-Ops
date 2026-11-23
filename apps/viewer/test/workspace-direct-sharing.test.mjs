@@ -90,6 +90,20 @@ test('dedicated ready sharing offers explicit link creation without publish UX o
   assert.equal(f.calls.every(call=>!call.options.method||call.options.method==='GET'),true);
 });
 
+test('creating a link for a private model says clients with the whole project get it too, and a task Share never offers the project first',async()=>{
+  const f=fixture();f.state.tasks[0].displayName='North wall';f.respondDirect(async()=>({clients:[],grants:[],clientsNextCursor:null}));
+  await f.context.openShareModal('project','output');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.html()+f.clientPanel.innerHTML;
+  assert.match(html,/This model is private\. Create public link publishes it, which also shows this task to every client who has the whole project\./);
+  assert.match(html,/“North wall” is not published yet/);assert.doesNotMatch(html,/name="scope" value="project" checked/);
+  f.state.sharePreflight.output={existingAccessUpdateRequired:true,eligibleAssetKinds:['glb']};f.context.shareModal('project','output');
+  assert.match(f.html(),/shows this task to every client who has the whole project\. Confirmation is required/);
+  let asked='';f.context.dialogs.confirm=async text=>{asked=text;return false};await f.context.confirmSharedVersionUpdate();
+  assert.match(asked,/clients who have the whole project also get newly activated tasks/);
+  Object.assign(f.output,{status:'published',activePublished:true});f.state.sharePreflight={};f.context.shareModal('project','output');
+  assert.match(f.html(),/Links follow this model’s latest published version\./);assert.doesNotMatch(f.html(),/not published yet/);
+});
+
 test('public preflight settles while optional Operations client lookup remains pending',async()=>{
   const f=fixture();f.respond(path=>path.endsWith('/client-grants')?new Promise(()=>{}):Promise.resolve({shares:[],publicationRequired:true}));
   await f.context.openShareModal('project','output');

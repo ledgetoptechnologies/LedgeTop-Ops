@@ -64,20 +64,24 @@ export function directShareErrorText(error){
   return ERRORS[error?.code]||error?.message||'Sharing failed. Nothing was changed.';
 }
 
-// A Share opened from the project starts on the whole project; one opened from a task starts on that task.
+// A Share opened from the project starts on the whole project; one opened from a task starts on that task,
+// and never on the whole project, even when that task cannot be shared yet.
 // "Also share models published later" always starts unticked: whole-project access needs that explicit choice.
-export function directShareDefaultScope({taskId=null,tasks=[]}={}){return taskId&&tasks.some(task=>task.id===taskId)?'tasks':'project'}
+export function directShareDefaultScope({taskId=null}={}){return taskId?'tasks':'project'}
+const permissionList=permissions=>{
+  const can=['view',permissions?.measure&&'measure',permissions?.cameras&&'see camera positions',permissions?.download&&'download'].filter(Boolean);
+  return can.length>1?`${can.slice(0,-1).join(', ')} and ${can.at(-1)}`:can[0];
+};
 // The review step repeats exactly what will be sent, in plain words.
 export function directShareReviewText({summary,permissions,expiresAt,dateTime=value=>value}){
-  const can=['view',permissions?.measure&&'measure',permissions?.cameras&&'see camera positions',permissions?.download&&'download'].filter(Boolean);
-  const list=can.length>1?`${can.slice(0,-1).join(', ')} and ${can.at(-1)}`:can[0];
-  return `${summary} They can ${list}. ${expiresAt?`Access ends ${dateTime(expiresAt)}.`:'Access does not expire until you revoke it.'}`;
+  return `${summary} They can ${permissionList(permissions)}. ${expiresAt?`Access ends ${dateTime(expiresAt)}.`:'Access does not expire until you revoke it.'}`;
 }
 
-export function directShareForm({projectName,tasks,taskId=null}){
-  const scope=directShareDefaultScope({taskId,tasks});
+export function directShareForm({projectName,tasks,taskId=null,taskName=''}){
+  const scope=directShareDefaultScope({taskId}),unpublished=taskId&&!tasks.some(task=>task.id===taskId);
   const taskList=tasks.length?tasks.map(task=>`<label class="check"><input type="checkbox" name="taskId" value="${esc(task.id)}" ${task.id===taskId?'checked':''}> ${esc(task.name)}</label>`).join('')
     :'<p class="form-note">No tasks in this project have a published model yet.</p>';
+  const notice=unpublished?`<p class="form-note" role="status">${taskName?`“${esc(taskName)}”`:'This task'} is not published yet, so a client cannot be given it on its own. Publish it first.</p>`:'';
   return `<form id="direct-client-grant-form" class="manage-form direct-share-form">
 <fieldset><legend>Client</legend>
 ${clientPickerMarkup()}
@@ -86,8 +90,8 @@ ${clientPickerMarkup()}
 <fieldset><legend>What to share</legend>
 <label class="check"><input type="radio" name="scope" value="project" ${scope==='project'?'checked':''}> The whole project</label>
 <label class="check direct-share-later"><input type="checkbox" name="includeLater" ${scope==='project'?'':'disabled'}> Also share models published later</label>
-<label class="check"><input type="radio" name="scope" value="tasks" ${scope==='tasks'?'checked':''} ${tasks.length?'':'disabled'}> Only the tasks I choose</label>
-<div class="direct-share-tasks" data-direct-task-list>${taskList}</div>
+<label class="check"><input type="radio" name="scope" value="tasks" ${scope==='tasks'?'checked':''} ${tasks.length||unpublished?'':'disabled'}> Only the tasks I choose</label>
+${notice}<div class="direct-share-tasks" data-direct-task-list>${taskList}</div>
 </fieldset>
 <label><span>Expiry (optional)</span><input name="expiresAt" type="datetime-local"></label>
 ${PERMISSIONS.map(([name,label,checked])=>`<label class="check"><input type="checkbox" name="${name}" ${checked?'checked':''}> ${label}</label>`).join('')}
@@ -121,13 +125,17 @@ export function readDirectShareForm(form,{projectId,projectName,tasks,clients}){
     }};
 }
 
-export function directGrantRows(access,{projectId,tasks,taskId=null,dateTime=value=>value}){
+export function directGrantRows(access,{projectId,tasks,taskId=null,dateTime=value=>value,now=Date.now()}){
   const grants=access.grants.filter(grant=>!grant.revokedAt&&grant.viewerProjectId===projectId&&(!taskId||grant.scopeType==='project'||grant.taskId===taskId));
   const incomplete=access.grantsIncomplete?'<p class="form-note" role="status">Some shares could not be listed. Close and reopen Share to load the rest.</p>':'';
   if(!grants.length)return incomplete||'<div class="empty-state">No clients have access yet.</div>';
   return `${incomplete}<div class="data-list top-gap">${grants.map(grant=>{
     const what=grant.scopeType==='project'?'Whole project, including tasks published later':`Task: ${tasks.find(task=>task.id===grant.taskId)?.name||'Unavailable task'}`;
-    const details=[what,grant.expiresAt?`Expires ${dateTime(grant.expiresAt)}`:'No expiry',grant.createdAt?`Shared ${dateTime(grant.createdAt)}`:null].filter(Boolean).join(' · ');
-    return `<div class="manage-row"><div><strong>${esc(grant.clientDisplayName||'Client')}</strong><small>${esc(details)}</small></div><span class="status active">active</span><div><button class="secondary-button" data-action="revoke-direct-client-grant" data-id="${esc(grant.grantId)}">Revoke</button></div></div>`;
+    // An expired share gives no access, but it still holds its place until it is revoked.
+    const expired=Boolean(grant.expiresAt)&&!(Date.parse(grant.expiresAt)>now);
+    const details=[what,grant.permissions?`Can ${permissionList(grant.permissions)}`:null,
+      expired?`Expired ${dateTime(grant.expiresAt)}; revoke it to share this again`:grant.expiresAt?`Expires ${dateTime(grant.expiresAt)}`:'No expiry',
+      grant.createdAt?`Shared ${dateTime(grant.createdAt)}`:null].filter(Boolean).join(' · ');
+    return `<div class="manage-row"><div><strong>${esc(grant.clientDisplayName||'Client')}</strong><small>${esc(details)}</small></div><span class="status ${expired?'expired':'active'}">${expired?'expired':'active'}</span><div><button class="secondary-button" data-action="revoke-direct-client-grant" data-id="${esc(grant.grantId)}">Revoke</button></div></div>`;
   }).join('')}</div>`;
 }

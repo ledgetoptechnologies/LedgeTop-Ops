@@ -1747,8 +1747,9 @@ function legacyClientSharePanel(output,onlyOutputId){
 }
 function directShareContext(onlyOutputId){
   const projectId=state.shareContext.projectId,project=state.projects.find(item=>item.id===projectId);
+  const taskId=onlyOutputId?state.outputs.find(output=>output.id===onlyOutputId)?.taskId||null:null;
   return {projectId,projectName:project?.displayName||'this project',tasks:shareableTasks(projectId,state.tasks,state.outputs),
-    taskId:onlyOutputId?state.outputs.find(output=>output.id===onlyOutputId)?.taskId||null:null};
+    taskId,taskName:state.tasks.find(task=>task.id===taskId)?.displayName||''};
 }
 function directClientShareCard(onlyOutputId){
   const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
@@ -1892,7 +1893,7 @@ function shareModal(projectId,onlyOutputId=null){
   let publicCards='';
   if(selected){
     const output=selected,preflight=state.sharePreflight[output.id],ready=!output.activePublished,mayCreate=can('viewer.shares.create')&&(!ready||can('viewer.processing.publish'));
-    const blocked=Boolean(preflight?.error),views=availableShareViews(output),warning=preflight?.existingAccessUpdateRequired?'Activating this version can update existing model/client access and project links. Confirmation is required before creating the link.':ready?'This model is private. Create public link activates its verified public derivatives and creates a revocable link.':'Links follow this model’s latest published version.';
+    const blocked=Boolean(preflight?.error),views=availableShareViews(output),warning=preflight?.existingAccessUpdateRequired?'Activating this version can update existing model/client access and project links, and shows this task to every client who has the whole project. Confirmation is required before creating the link.':ready?'This model is private. Create public link publishes it, which also shows this task to every client who has the whole project.':'Links follow this model’s latest published version.';
     const form=checking?empty('Checking share eligibility…'):mayCreate&&!blocked&&views.length?
       `<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt','type="datetime-local"')}${shareViewControls(output)}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`:
       blocked?empty('Sharing eligibility could not be verified. Close and reopen Share to retry.'):empty(mayCreate?'No verified views are available for this link.':'Creating a link requires share permission and, for private ready models, activation permission.');
@@ -1951,7 +1952,7 @@ async function retrieveShareLink(element){
   }catch(error){popup?.close();const unavailable=error.status===409&&/share_link_unavailable|original link cannot be recovered/i.test(error.message);toast(unavailable?'The original URL is not recoverable. The existing link has not been changed or revoked; create a separate link if needed.':error.message,true)}finally{element.disabled=false}
 }
 async function confirmSharedVersionUpdate(){
-  return dialogs.confirm('Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links include newly activated tasks. Continue and create the public link?',
+  return dialogs.confirm('Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links and clients who have the whole project also get newly activated tasks. Continue and create the public link?',
     {title:'Update existing shared access?',submitLabel:'Activate and create link'});
 }
 async function createOutputShare(form,projectId,onlyOutputId){
