@@ -164,6 +164,14 @@ An administrator with `viewer.processing.publish` may inspect an unpublished `re
 
 Adopted catalog moves are journaled before filesystem mutation. If a same-filesystem Terra rename succeeds but later catalog registration fails, maintenance restores the deterministic destination to its original import path (or removes a duplicate copy) before clearing the intent. This reconciliation survives restart and prevents unaccounted dataset bytes even when the failed operation is never manually retried.
 
+## Moving tasks between folders and projects
+
+Staff use **Move to…** on a task (or drag its **Move** handle) to choose a project and then a folder in it. Moves inside a project use `PATCH /api/v1/tasks/:id/folder`. Moves to another project use `PATCH /api/v1/tasks/:id/project` with `{projectId, folderId, expectedProjectId, expectedFolderId, expectedFolderRevision, confirmSharingChange?, undo?}` and an `Idempotency-Key`. Both share one placement revision, so a stale folder or project guard returns `409 task_move_conflict`/`folder_conflict`.
+
+A project move needs `viewer.processing.write`, `viewer.projects.write` and `viewer.datasets.write`, plus `viewer.processing.publish` when the task has a published output. In one transaction it moves the task, its source dataset, every `model_outputs` row and WebODM import record of the task; files on disk do not move. It is refused while the task is queued or processing, an attempt is live, a processing or derivative job is pending or leased, a dataset operation or output storage mutation is open, or an LOD recovery uses an output (`task_busy`); when another task uses the same dataset (`dataset_shared`); when an earlier attempt or import of the task used a different dataset (`task_has_historical_datasets`); when an attempt or import of another task uses this dataset (`dataset_referenced_by_other_task`); and when the destination already has a dataset with the same name (`dataset_name_conflict`). The data changes and the audit row commit together, but the Idempotency-Key receipt is completed afterwards, so the request as a whole is not crash-atomic: if the server stops between the two, the move stays applied and a retry with the same key returns `409 idempotency_in_progress`, so the client must re-read the task. Reusing a key with a different body returns `409 idempotency_conflict`. The move is audited as `processing_task.project_changed` with the old and new project and folder, output count and sharing counts. The mover can undo it for 10 seconds.
+
+Sharing: no grant is edited. Project shares and project-scoped client grants find tasks by project on every request, so the task stops being visible through the old project's shares and becomes visible through the new project's shares. Task-scoped client grants recorded against the old project stop resolving (they fail closed and must be re-granted on the new project). Model-level public links are not project-scoped and keep working. Because of this, moving a published task requires `confirmSharingChange: true`; without it the route returns `409 sharing_change_unconfirmed` with the published-output and live-share counts. Undo is authorized again when it runs: if the task is published at that moment, it needs the caller's current publish permission and a fresh `confirmSharingChange: true`, exactly like a forward move (the workspace asks the same question before sending it). An unpublished Undo needs neither.
+
 ## Existing-model catalog migration
 
 Durable mounted-tree scans discover WebODM outputs without API credentials and
@@ -358,7 +366,7 @@ source.
 
 Before maintenance:
 
-1. Stop new processing admission in Ops and keep it paused for the entire update; wait for active operations or attempts to settle. The updater pulls the fixed official `latest` image first (`latest` changes only when a verified candidate is promoted; see [RELEASING.md](RELEASING.md)), then rechecks durable work immediately before replacement, but the paused admission boundary is what prevents new work from entering that final interval.
+1. Stop new processing admission in Ops and keep it paused for the entire update; wait for active operations or attempts to settle. The updater pulls the fixed official `latest` image first (`latest` changes when a verified `main` build passes, or by a manual rollback promotion; see [RELEASING.md](RELEASING.md)), then rechecks durable work immediately before replacement, but the paused admission boundary is what prevents new work from entering that final interval.
 2. Stop the worker, then the API.
 3. Run `PRAGMA wal_checkpoint(TRUNCATE)` through a SQLite client, then back up
    the complete `/mnt/Plugins/App_Data/Model-Viewer/Storage` dataset before

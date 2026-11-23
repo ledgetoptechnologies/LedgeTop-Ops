@@ -48,7 +48,7 @@ The 3D Viewer API, processing worker, and browser application live in
 image, `ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest`; they are not
 Cloudflare Workers. See the [Viewer migration runbook](apps/viewer/docs/OPERATIONS_MONOREPO_MIGRATION.md)
 before changing an existing stack, and [Releasing the Viewer image](apps/viewer/docs/RELEASING.md):
-merges to `main` publish immutable candidates, and `latest` moves only by a separate approved promotion. Its services, storage, database, and settings
+each merge to `main` publishes an immutable candidate and, once every check has passed, moves `latest` to it in the same run (never back to an older commit); the separate approved promotion is for rollback. Its services, storage, database, and settings
 stay in place when switching the image name.
 
 TrueNAS proxy generation for DaVinci Resolve lives in

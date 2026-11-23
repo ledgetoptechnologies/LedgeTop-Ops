@@ -30,11 +30,14 @@ Both run as UID 568, on the base image pinned by digest in the Dockerfile. Build
 On the NAS, nothing is built: `compose.service.yaml` runs the image published by the main-only publisher, pinned by
 digest (`pull_policy: missing`). `compose.dev.yaml` is a development/pilot build example only.
 
-Tags: every qualifying merge to main publishes immutable tags only: `sha-<commit>-<target>` and
-`candidate-<commit>-<run>-<attempt>-<target>`, plus a deployment receipt. `latest` (what the server stack in
-`apps/media-generation` pulls) moves **only** by the hand-run `promote-logs-local.yml`, to one verified full candidate,
-with a rollback receipt recorded first (Beau's decision, the same rule as the Viewer). The first promotion sets
-`initialize_latest`, because `latest` does not exist yet. Rollback is a promotion of an older candidate.
+Tags: every qualifying merge to main publishes immutable tags, `sha-<commit>-<target>` and
+`candidate-<commit>-<run>-<attempt>-<target>`, plus a deployment receipt. Then, only after the full job and its smoke
+passed, a `promote-latest` job moves `latest` (what the server stack in `apps/media-generation` pulls) to that exact full
+digest, never back to an older main commit (the same rule as the Viewer and the other images). The keyless image never
+becomes `latest`. The hand-run `promote-logs-local.yml` is the approved rollback and re-promotion path; both share the
+`latest-writer-logs-local` concurrency group. A rollback lasts until the next automatic write;
+to keep one, follow the ordered rollback steps in `apps/viewer/docs/RELEASING.md` (pause, settle in-flight publisher runs,
+then roll back), or revert on main.
 The full native parser image requires an **amd64 NAS**. Verify the NAS architecture before activation; the service
 declares `platform: linux/amd64`, and emulated execution has not been qualified.
 

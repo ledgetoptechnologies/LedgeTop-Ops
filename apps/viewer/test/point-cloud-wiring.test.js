@@ -44,7 +44,7 @@ test('Potree controls preserve panel state and match mesh navigation feedback', 
   assert.doesNotMatch(pointCloudShell, /PointSizeType\.ADAPTIVE/);
   assert.doesNotMatch(pointCloudShell, /PointSizeType\.ATTENUATED/);
   assert.match(pointCloudShell, /PointSizeType\.FIXED/);
-  assert.match(pointCloudShell, /ctx\.strokeStyle = '#EE5007'/);
+  assert.match(pointCloudShell, /ctx\.strokeStyle = getComputedStyle\(document\.documentElement\)\.getPropertyValue\('--brand-orange'\)\.trim\(\)/);
   assert.match(pointCloudShell, /ctx\.fillStyle = '#ffffff'/);
   assert.match(pointCloudShell, /orbitRadiansForPixels\(dx, h, gainScale\)/);
   assert.match(pointCloudShell, /viewer\.earthControls\?\.pivotIndicator/);

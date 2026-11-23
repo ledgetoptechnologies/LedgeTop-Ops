@@ -57,7 +57,7 @@ test('temporary collection label survives accessible count and scroll updates',(
 test('native scroll behavior, orange thumb, keyboard focus and high-contrast fallback are preserved', () => {
   const css=readFileSync(new URL('../measurement-workspace.css',import.meta.url),'utf8');
   assert.match(css,/\[data-scrollable=true\]\{[^}]*overflow-y:auto/);
-  assert.match(css,/scrollbar-width:thin;scrollbar-color:#ee5007 transparent/);
+  assert.match(css,/scrollbar-width:thin;scrollbar-color:var\(--brand-orange,#ee5007\) transparent/);
   assert.match(css,/\[data-m-list\]:focus-visible\{outline:2px solid/);
   assert.match(css,/@media\(forced-colors:active\)/);
   assert.doesNotMatch(css,/\[data-m-list\][^{]*\{[^}]*(?:height:420px|height:380px|resize:vertical)/);

@@ -12,12 +12,16 @@ import { fileURLToPath } from 'node:url';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import { BoundedTestCdp as Cdp } from './bounded-test-cdp.mjs';
+import { FINE_POINTER_SWITCH, assertFinePointer } from './fine-pointer.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const executable = () => [process.env.CHROME_PATH, process.env.EDGE_PATH,
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].filter(Boolean).find(existsSync) || null;
+
+// Serve exactly the stylesheets workspace.html links (density sheet included), in its order.
+const shippedStylesheets = [...readFileSync(path.join(root, 'workspace.html'), 'utf8').matchAll(/<link rel="stylesheet" href="(\/[a-z-]+\.css)">/g)].map(match => match[1]);
 
 function page() {
   const html = readFileSync(path.join(root, 'workspace.html'), 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
@@ -43,14 +47,14 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
     server = createServer((req, res) => {
       const url = new URL(req.url, 'http://fixture.invalid');
       if (url.pathname === '/') { res.setHeader('Content-Type', 'text/html'); res.end(page()); return; }
-      const allowed = new Set(['/workspace.css', '/workspace-management.css', '/workspace-project-list.css', '/workspace-transfers.css', '/workspace-sidebar.css', '/workspace-sidebar.mjs']);
+      const allowed = new Set([...shippedStylesheets, '/workspace-sidebar.mjs']);
       if (!allowed.has(url.pathname)) { res.statusCode = 404; res.end(); return; }
       res.setHeader('Content-Type', url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript');
       res.end(readFileSync(path.join(root, url.pathname.slice(1))));
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-workspace-sidebar-'));
-    browser = spawn(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+    browser = spawn(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', FINE_POINTER_SWITCH, `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
     const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     client = await Cdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
@@ -67,8 +71,16 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
       await client.command('Input.dispatchKeyEvent', { type: 'keyUp', ...code });
     };
     await client.command('Page.enable');
+    // Reduced motion turns the rail's column transition off (workspace-sidebar.css), so widths are final.
+    await client.command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     await size(1280, 760);
     await load();
+    assert.ok(shippedStylesheets.includes('/workspace-density.css'), 'workspace.html links the density sheet');
+    assert.deepEqual(await client.evaluate("[...document.styleSheets].map(sheet => new URL(sheet.href).pathname)"), shippedStylesheets, 'every shipped stylesheet loaded');
+    await assertFinePointer(expression => client.evaluate(expression), 'desktop sidebar');
+    // Compact header on a desktop fine pointer: every header button is 32px, Background badge included.
+    const headerButtons = "[...document.querySelectorAll('.workspace-header button')].filter(button => button.getClientRects().length).map(button => [button.id, button.getBoundingClientRect().height])";
+    assert.deepEqual(await client.evaluate(headerButtons), [['background-work-button', 32], ['refresh-button', 32], ['new-project-button', 32]]);
 
     // Expanded: grouped sections, one current section.
     assert.deepEqual(await client.evaluate("[...document.querySelectorAll('.nav-group-label')].map(el => el.textContent)"), ['Workspace', 'Processing']);
@@ -76,7 +88,9 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
 
     // Collapse: names and platform status remain available to assistive technology, with tooltips.
     await client.evaluate("document.querySelector('#nav-collapse').click()");
-    await delay(400); // let the column transition finish
+    assert.equal(await client.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches"), true, 'reduced motion emulated');
+    // Bounded wait for the collapsed rail width instead of a fixed delay.
+    for (const until = Date.now() + 3000; Date.now() < until && await client.evaluate("Math.round(document.querySelector('.workspace-nav').getBoundingClientRect().width)") !== 64;) await delay(25);
     const collapsed = await client.evaluate(`(() => {
       const links = [...document.querySelectorAll('.nav-link')], status = document.querySelector('#nav-health-label');
       return {
@@ -104,6 +118,9 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
     // Phone: the rail toggle is hidden; the drawer reports its state, takes focus and closes on Escape.
     await size(390, 760, true);
     await load();
+    for (const [id, height] of await client.evaluate(headerButtons)) assert.ok(height >= 44, `phone: ${id} is ${height}px`);
+    const toggle = await client.evaluate("(() => { const r = document.querySelector('#nav-toggle').getBoundingClientRect(); return { width: r.width, height: r.height }; })()");
+    assert.ok(toggle.width >= 44 && toggle.height >= 44, `phone: menu toggle is ${toggle.width}x${toggle.height}px, below 44x44`);
     assert.equal(await client.evaluate("getComputedStyle(document.querySelector('#nav-collapse')).display"), 'none');
     assert.equal(await client.evaluate("document.querySelector('#nav-toggle').getAttribute('aria-expanded')"), 'false');
     await client.evaluate("document.querySelector('#nav-toggle').focus(); document.querySelector('#nav-toggle').click()");

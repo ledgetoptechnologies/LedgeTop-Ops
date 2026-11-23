@@ -55,7 +55,7 @@ const controller = createPropertyLinesController({
   fetcherOptions: { debounceMs: 50 },
   dom: { panel: document.getElementById('panel-property-lines'), button: document.getElementById('layer-property-lines'),
     status: document.getElementById('property-lines-status'), about: document.getElementById('property-lines-about'), notice: document.getElementById('property-lines-notice') },
-  projectId: () => 'model-1', getMode: () => 'ortho', getCloudMode: () => 'none', getMap: () => map, getScene: () => null, getPotreeApi: () => null,
+  projectId: () => 'model-1', getMode: () => window.viewMode || 'ortho', getCloudMode: () => window.cloudMode || 'none', getMap: () => map, getScene: () => null, getPotreeApi: () => null,
   georefVerified: () => true, getSceneExtentUtm: () => ({ minE: e - 120, minN: n - 90, maxE: e + 120, maxN: n + 90 }), getGroundGrid: async () => null,
   utmToLatLon: projection.utmToLatLon, latLonToUtm: projection.latLonToUtm, utmToWorld: () => null,
 });
@@ -70,12 +70,12 @@ const PARCELS = { status: 'ok', parcels: [
   { id: 2, rings: [[[-89.4005, 43.0740], [-89.3995, 43.0740], [-89.3995, 43.0752], [-89.4005, 43.0752], [-89.4005, 43.0740]]] },
 ] };
 
-test('property lines: toggle draws stubbed parcels with notice, states and no foreign requests', { timeout: 90000 }, async t => {
+test('property lines: shown by default with notice, states, Hide kept over reload and no foreign requests', { timeout: 90000 }, async t => {
   const binary = executable();
   if (!binary) { t.skip('Chromium is required for the isolated property lines check.'); return; }
   if (!existsSync(path.join(root, 'node_modules', 'leaflet', 'dist', 'leaflet-src.esm.js'))) { t.skip('npm ci is required.'); return; }
   const unlock = await acquireBrowserHarnessLock({ root });
-  let browser, client, server, profile, mode = 'ok';
+  let browser, client, server, profile, mode = 'ok', offered = true;
   const hits = [];
   try {
     server = createServer((req, res) => {
@@ -85,7 +85,7 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
       if (url.pathname === '/') { res.setHeader('Content-Type', 'text/html'); res.end(page()); return; }
       if (url.pathname === '/api/v1/property-lines' && url.searchParams.get('model') === 'model-1') {
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ offered: req.headers.authorization === 'Bearer test-session-token-xx', source: { id: 'wi-statewide-parcels', name: 'Wisconsin Statewide Parcel Map', release: 'V12 (2026)', credit: 'Credit line.', disclaimer: 'Property lines are approximate and for reference only. They are not a survey.' } }));
+        res.end(JSON.stringify({ offered: offered && req.headers.authorization === 'Bearer test-session-token-xx', source: { id: 'wi-statewide-parcels', name: 'Wisconsin Statewide Parcel Map', release: 'V12 (2026)', credit: 'Credit line.', disclaimer: 'Property lines are approximate and for reference only. They are not a survey.' } }));
         return;
       }
       if (url.pathname === '/api/v1/property-lines/parcels') {
@@ -125,15 +125,10 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
 
     await size(1280, 760);
     await load();
+    // Default on (changed deliberately): an authorized offer draws the lines with no click.
+    await waitFor("document.getElementById('property-lines-status').dataset.state === 'ready'", 'parcels drawn by default');
     let state = await ui();
     assert.equal(state.panelHidden, false);
-    assert.equal(state.pressed, 'false');
-    assert.equal(state.noticeHidden, true, 'off by default');
-    assert.equal(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length, 0, 'nothing fetched while off');
-
-    await client.evaluate("document.getElementById('layer-property-lines').click()");
-    await waitFor("document.getElementById('property-lines-status').dataset.state === 'ready'", 'parcels drawn');
-    state = await ui();
     assert.equal(state.pressed, 'true');
     assert.equal(state.label, 'Hide');
     assert.equal(state.status, '2 parcels shown.');
@@ -174,20 +169,48 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
     }
     mode = 'ok';
 
-    // Off: lines and notice go away.
+    // Hide: lines and notice go away.
     await client.evaluate("document.getElementById('layer-property-lines').click()");
     state = await ui();
     assert.equal(state.pressed, 'false');
     assert.equal(state.noticeHidden, true);
     assert.equal(await client.evaluate('Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && typeof l.getLatLngs === "function").length'), 0);
 
-    // Phone width: still clear of the controls.
+    // Hide holds across view changes in the same project (map, 3D model, point cloud and back).
+    const hiddenHits = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length;
+    for (const [view, cloud] of [['dsm', 'none'], ['model', 'potree'], ['cloud', 'potree'], ['dtm', 'none'], ['ortho', 'none']]) {
+      await client.evaluate(`window.viewMode = '${view}'; window.cloudMode = '${cloud}'; controller.refresh(); 0`);
+      await delay(50);
+      state = await ui();
+      assert.deepEqual([state.label, state.pressed, state.noticeHidden], ['Show', 'false', true], view);
+    }
+    assert.equal(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length, hiddenHits, 'nothing fetched while hidden');
+
+    // Phone width, after a reload: the Hide is remembered, nothing is fetched or drawn until Show.
     await size(375, 740, true);
+    const parcelHits = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length;
     await load();
+    state = await ui();
+    assert.equal(state.panelHidden, false);
+    assert.equal(state.pressed, 'false', 'Hide survives the reload');
+    assert.equal(state.noticeHidden, true);
+    assert.equal(state.canvas, false);
+    assert.equal(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length, parcelHits, 'nothing fetched while hidden');
     await client.evaluate("document.getElementById('layer-property-lines').click()");
     await waitFor("document.getElementById('property-lines-status').dataset.state === 'ready'", 'phone ready');
     layout = await overlaps();
     assert.deepEqual([layout.zoom, layout.floating, layout.attribution, layout.inside], [false, false, false, true], JSON.stringify(layout));
+
+    // Without an offer the card is absent and nothing is fetched or drawn.
+    offered = false;
+    await size(1280, 760);
+    const hitsWithoutOffer = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length;
+    await load();
+    state = await ui();
+    assert.equal(state.panelHidden, true, 'no card without an offer');
+    assert.equal(state.noticeHidden, true);
+    assert.equal(state.canvas, false);
+    assert.equal(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length, hitsWithoutOffer);
 
     assert.ok(hits.every(h => !/^https?:/.test(h)), 'only same-origin requests');
     assert.ok(hits.every(h => !/arcgis|services3/.test(h)), 'never the live service');

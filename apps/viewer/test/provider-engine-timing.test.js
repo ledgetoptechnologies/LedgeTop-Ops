@@ -128,10 +128,13 @@ test('migration 83 preserves populated schema 42 and refuses incompatible ledger
   let db=new DatabaseSync(databasePath);
   t.after(()=>{db?.close();rmSync(root,{recursive:true,force:true});});
   db.exec('PRAGMA foreign_keys=ON');
-  const migration=MIGRATIONS.pop();
-  assert.equal(migration.version,83);
+  const laterStart=MIGRATIONS.findIndex(entry=>entry.version>42);
+  assert.ok(laterStart>=0);
+  const laterMigrations=MIGRATIONS.splice(laterStart);
   try{applyMigrations(db);}
-  finally{MIGRATIONS.push(migration);}
+  finally{MIGRATIONS.push(...laterMigrations);}
+  assert.deepEqual(laterMigrations.map(entry=>entry.version),[48,83]);
+  const [folderMigration,migration]=laterMigrations;
   assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,42);
   const c={db,processing:new ProcessingRepository(db)};
   const project=c.processing.createProject({displayName:'Upgrade fixture'}),data=dataset(c,project);
@@ -148,7 +151,9 @@ test('migration 83 preserves populated schema 42 and refuses incompatible ledger
   db=null;
   db=openDatabase(databasePath);
   const upgraded=new ProcessingRepository(db);
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=48').get().name,folderMigration.name);
   assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=83').get().name,migration.name);
+  assert.equal(upgraded.getTask(task.id).folderId,null);
   assert.deepEqual(upgraded.getAttempt(attempt.id),attempt);
   assert.equal(upgraded.engineProcessingDurations([attempt.id]).size,0);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);

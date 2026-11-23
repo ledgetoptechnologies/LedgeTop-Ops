@@ -28,7 +28,8 @@ const context = (id: string) => ({workspace: workspace(id), contextVersion: `con
 const hierarchy = (id: string) => ({workspaceId: id, sourceId: workspace(id).sourceId, contextVersion: `context-${id}`, page: {nextCursor: null}, entries: [
   {type: "project", publicId: `project-${id}`, parentType: null, parentPublicId: null, displayName: `Directory project ${id}`, sourceVersion: "1"},
 ]});
-type Item = {grantId: string; taskId: string; scopeType: "project" | "task"; title: string; projectName: string; businessName: string; updatedAt: string; expiresAt?: string | null};
+type Item = {grantId: string; taskId: string; scopeType: "project" | "task"; title: string; projectName: string; businessName: string; updatedAt: string; expiresAt?: string | null;
+  folderPath?: Array<{id: string; name: string}>};
 const viewerItem = (workspaceId: string, item: Item) => ({workspaceId, sharedAt: "2026-08-01T12:00:00Z", expiresAt: null,
   permissions: {measure: item.scopeType === "task", cameras: false, download: false}, ...item});
 const viewerPage = (workspaceId: string, items: Item[], nextCursor: string | null = null) => ({workspaceId, contextVersion: `viewer-${workspaceId}`, items: items.map(item => viewerItem(workspaceId, item)), nextCursor});
@@ -90,6 +91,35 @@ test("a project and an exact task grant for the same task show one row that open
   await expect(open).toHaveCSS("min-height", "44px");
   await noHorizontalOverflow(page);
   expect(calls.filter(call => call.path.endsWith("/viewer")).map(call => call.path)).toEqual(["/api/client/v2/workspaces/workspace-b/viewer"]);
+});
+
+test("a shared project shows the staff folder grouping, regrouped as more pages load", async ({page}) => {
+  const outer = {id: "folder-outer", name: "Site visits"}, inner = {id: "folder-inner", name: "<b>March</b>"};
+  await mock(page, [allWorkspaces[0]!], (route, call, id) => {
+    if (!call.path.endsWith("/viewer")) return undefined;
+    if (!call.query.get("cursor")) return route.fulfill({json: viewerPage(id, [
+      {grantId: "grant-project", taskId: "task-root", scopeType: "project", title: "Overview scan", projectName: "Harbor bridge", businessName: "Harbor Engineering", updatedAt: "2026-08-22T12:00:00Z", folderPath: []},
+      {grantId: "grant-project", taskId: "task-outer", scopeType: "project", title: "Deck survey", projectName: "Harbor bridge", businessName: "Harbor Engineering", updatedAt: "2026-08-21T12:00:00Z", folderPath: [outer]},
+    ], "cursor-1")});
+    return route.fulfill({json: viewerPage(id, [
+      {grantId: "grant-project", taskId: "task-inner", scopeType: "project", title: "Pier inspection", projectName: "Harbor bridge", businessName: "Harbor Engineering", updatedAt: "2026-08-20T12:00:00Z", folderPath: [outer, inner]},
+    ])});
+  });
+  await page.goto("/portal/dashboard?workspace=workspace-b");
+  const project = card(page).getByRole("region", {name: "Harbor bridge"});
+  await expect(project.getByRole("heading", {level: 3, name: "Harbor bridge"})).toBeVisible();
+  const outerFolder = project.locator(".shared-viewer-work-folder").filter({has: page.getByRole("heading", {level: 4, name: "Site visits"})});
+  await expect(outerFolder.getByRole("link", {name: /Deck survey$/})).toBeVisible();
+  // Root-level tasks come after the folders, as in the staff workspace.
+  await expect(project.locator(":scope > .shared-viewer-work-list li")).toContainText("Overview scan");
+  await card(page).getByRole("button", {name: "Load more 3D work"}).click();
+  // The folder name is text, never markup.
+  const innerHeading = outerFolder.getByRole("heading", {level: 5, name: "<b>March</b>"});
+  await expect(innerHeading).toBeVisible();
+  await expect(card(page).locator("b")).toHaveCount(0);
+  await expect(outerFolder.locator(".shared-viewer-work-folder").getByRole("link", {name: /Pier inspection$/})).toBeVisible();
+  await expect(card(page).getByRole("heading", {name: "Site visits"})).toHaveCount(1);
+  await noHorizontalOverflow(page);
 });
 
 test("work from two accounts is one flat list without business names, and one failing account does not hide the other", async ({page}) => {

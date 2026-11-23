@@ -42,7 +42,7 @@ test('Potree shell is public but EPT assets stay authorized and byte-range capab
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(distDir, { recursive: true });
   fs.mkdirSync(path.join(eptDir, 'ept-data'), { recursive: true });
-  fs.writeFileSync(path.join(distDir, 'pointcloud.html'), '<!doctype html><title>LTDS Point Cloud</title>Potree shell');
+  fs.writeFileSync(path.join(distDir, 'pointcloud.html'), '<!doctype html><title>Point cloud · Viewer · Ledge Top</title>Potree shell');
   fs.writeFileSync(path.join(distDir, 'admin-login.html'), '<!doctype html>Admin login');
   fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html>Viewer');
   fs.writeFileSync(path.join(eptDir, 'ept.json'), JSON.stringify({ schema: [], dataType: 'laszip' }));

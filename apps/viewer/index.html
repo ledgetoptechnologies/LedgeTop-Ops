@@ -5,11 +5,14 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Ledge Top — 3D Viewer</title>
+  <title>Viewer · Ledge Top</title>
   <style>
     :root {
-      --brand-orange: #EE5007;
-      --brand-gold: #F8CB2E;
+      /* Brand values come from packages/ui/src/brand.ts; scripts/viewer-brand.test.mjs keeps them equal. */
+      --brand-orange: #ee5007;
+      --brand-orange-action: #cc4706;
+      --brand-orange-dark: #a83a05;
+      --highlight-gold: #f8cb2e;
       --brand-dark: #0a0a0c;
       --brand-panel: rgba(14,14,18,0.96);
       --brand-text: #f5f5f5;
@@ -20,7 +23,6 @@
       --shadow: 0 8px 32px rgba(0,0,0,0.5);
       /* Matches the Operations and client portal tokens in packages/ui. */
       --font: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      --accent-hover: #ff6a23;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: var(--brand-dark); color: #f5f5f5; font-family: var(--font); }
@@ -138,7 +140,7 @@
     }
     #measure-output:empty { display: none; }
     #measure-output .sub { color: var(--brand-muted); font-size: 11px; }
-    #measure-output b { color: var(--brand-gold); }
+    #measure-output b { color: var(--highlight-gold); }
 
     .navhelp { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 11px; color: #c8c8c8; }
     .navhelp .k { color: var(--brand-orange); font-weight: 700; white-space: nowrap; }
@@ -254,7 +256,8 @@
     #error-panel p { color: #ddd; font-size: 13px; line-height: 1.5; }
     #error-actions { display: none; justify-content: center; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
     #error-actions button { min-height: 40px; padding: 8px 14px; border-radius: 7px; border: 1px solid #ff8a65; cursor: pointer; }
-    #error-retry { background: #ee5007; color: #fff; }
+    #error-retry { background: var(--brand-orange-action); color: #fff; }
+    #error-retry:hover { background: var(--brand-orange-dark); }
     #error-lod { background: #25252b; color: #fff; }
 
     .leaflet-control-zoom a { background: var(--brand-panel) !important; color: #fff !important; border-color: var(--panel-border) !important; }
@@ -418,6 +421,44 @@
       border-radius: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer;
     }
 
+    /* Compact density, matching the Viewer workspace, Operations and Client Hub:
+       tighter side panel cards everywhere; the shorter top bar and 32px controls
+       only for a desktop fine pointer. Narrow viewports and coarse pointers get
+       44px controls. */
+    #sidebar-custom { padding: 10px; gap: 10px; }
+    .panel { padding: 11px 12px; }
+    .panel h3 { margin-bottom: 8px; }
+    /* The one tool grid gap, measurement tools included: measurement-workspace.css
+       sets only their three columns, so this rule is not overridden there. */
+    .tool-grid { gap: 6px; }
+    .slider-row { margin-top: 8px; }
+    #measure-output { margin-top: 8px; padding: 8px 10px; }
+    #share-modal-box { padding: 16px; }
+    #share-modal-box h2 { margin-bottom: 10px; }
+    #share-modal-box .panel { margin-bottom: 10px; }
+    .share-link-row { padding: 7px 10px; }
+    @media (min-width: 1025px) and (pointer: fine) {
+      #topbar { height: 52px; min-height: 52px; padding: 0 14px; }
+      #brand { gap: 11px; }
+      #brand .lt-mark { height: 32px; width: 32px; }
+      #brand-info .company { font-size: 15px; }
+      .tab-btn { padding: 6px 14px; }
+      #photo-modal.docked #photo-frame { top: 58px; max-height: calc(100vh - 100px); }
+    }
+    @media (min-width: 768px) and (pointer: fine) {
+      .tab-btn { min-height: 32px; }
+      .tool-btn, .layer-btn { min-height: 32px; padding: 6px 9px; }
+      #sidebar #panel-measure > .tool-grid .tool-btn { padding: 6px 4px; }
+    }
+    @media (max-width: 767px), (pointer: coarse) {
+      .tab-btn, .tool-btn, .layer-btn { min-height: 44px; }
+    }
+    /* Room for 44px tabs in the stacked tablet and phone top bar. */
+    @media (max-width: 767px), (max-width: 1024px) and (pointer: coarse) {
+      body #topbar { padding-top: 6px; padding-bottom: 6px; row-gap: 6px; }
+      body #view-tabs { padding: 2px; }
+    }
+
     @media (max-width: 1024px) {
       /* Keep title and navigation in explicit rows before the full tabs squeeze
          the brand into a tall stack. Truncation preserves the complete text. */
@@ -454,7 +495,7 @@
 <div id="app">
   <header id="topbar">
     <div id="brand">
-      <a id="staff-logo"><svg class="lt-mark" viewBox="238.5 226 776 776" role="img" aria-label="Ledge Top logo" focusable="false"><g fill="none" stroke-width="56"><path stroke="#f5f3ef" d="M273.5 655V370.5a99 99 0 0 1 99-99H605M979.5 583v274.5a99 99 0 0 1-99 99H650M605 956.5H372.5a99 99 0 0 1-99-99V703"/><path stroke="#ee5007" d="M650 271.5h230.5a99 99 0 0 1 99 99V538"/></g><path fill="#f5f3ef" d="M365 370l93 92v244h135l66 94H418l-53-54zM503 453h349l54 88H780v332l-96-100V541H563z"/></svg></a>
+      <a id="staff-logo"><img class="lt-mark" src="/lt-mark.svg" alt="Ledge Top logo"></a>
       <div id="brand-info">
         <span class="company" id="brand-company">Ledge Top</span>
         <nav id="staff-navigation" aria-label="Operations navigation" hidden>
@@ -545,6 +586,15 @@
           </div>
         </div>
 
+        <div class="panel" id="panel-property-lines" hidden>
+          <h3><svg viewBox="0 0 24 24"><path d="M3 4h8v7H3zM11 4h10v10H11zM3 11h8v9H3zM11 14h10v6H11z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Property lines</h3>
+          <div class="tool-grid">
+            <button class="layer-btn full" id="layer-property-lines" aria-pressed="false" aria-label="Show property lines" aria-describedby="property-lines-status">Show</button>
+          </div>
+          <p class="hint" id="property-lines-status" role="status" aria-live="polite"></p>
+          <div class="hint" id="property-lines-about" hidden><p data-pl="disclaimer"></p><p>Source: <span data-pl="source"></span></p></div>
+        </div>
+
         <div class="panel" id="panel-measure">
           <h3><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg> Measurements</h3>
           <div class="tool-grid">
@@ -562,15 +612,6 @@
             <label class="slider-row" id="map-volume-custom-row" style="display:none;"><span>Elevation</span><input id="map-volume-custom" type="number" step="0.1"><span class="val" id="map-volume-custom-unit">ft</span></label>
             <div class="hint">Volume integrates DSM/DTM cells inside the polygon against the selected horizontal reference plane.</div>
           </div>
-        </div>
-
-        <div class="panel" id="panel-property-lines" hidden>
-          <h3><svg viewBox="0 0 24 24"><path d="M3 4h8v7H3zM11 4h10v10H11zM3 11h8v9H3zM11 14h10v6H11z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Property lines</h3>
-          <div class="tool-grid">
-            <button class="layer-btn full" id="layer-property-lines" aria-pressed="false" aria-label="Show property lines" aria-describedby="property-lines-status">Show</button>
-          </div>
-          <p class="hint" id="property-lines-status" role="status" aria-live="polite"></p>
-          <div class="hint" id="property-lines-about" hidden><p data-pl="disclaimer"></p><p>Source: <span data-pl="source"></span></p></div>
         </div>
 
         <div class="panel" id="panel-slice" style="display:none;">

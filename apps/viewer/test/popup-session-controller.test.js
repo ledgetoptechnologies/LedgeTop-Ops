@@ -94,7 +94,7 @@ test('the first redeemed session establishes popup routing before initialization
     sessionCapabilities: createViewerSessionCapabilityStore({ storage: () => ({ setItem: (...args) => writes.push(args) }) }), SHARE_PERMISSIONS: {},
     setDisplayUnits() {}, applyProjectConfig() {},
     init: () => initialized.push(f.context.activeViewerSession),
-    state: { meshSource: 'none' }, tilesRenderer: null, viewerProductDownloads: null,
+    state: { meshSource: 'none' }, tilesRenderer: null, viewerProductDownloads: null, propertyLines: null,
     scheduleLodAvailabilityRefresh() {}, stopLodAvailabilityRefresh() {},
     scheduleSessionRenewal: session => { scheduled.push(session); f.context.activeViewerSession = session; },
     recoverFailedLodTiles() {},

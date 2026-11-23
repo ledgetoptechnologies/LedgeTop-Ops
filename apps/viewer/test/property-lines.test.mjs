@@ -256,8 +256,8 @@ test('map redraws reuse one canvas renderer and never pile up layers', async () 
     georefVerified: () => true, getSceneExtentUtm: () => ({ minE: e - 100, minN: n - 80, maxE: e + 100, maxN: n + 80 }), getGroundGrid: async () => null,
     utmToLatLon: projection.utmToLatLon, latLonToUtm: projection.latLonToUtm, utmToWorld: () => null,
   });
+  // Shown by default once offered; no click needed.
   await controller.loadOffer();
-  controller.toggle();
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(controller.state.status, 'ready');
   const views = [view, { ...view }, { west: -89.4013, south: 43.0742, east: -89.4003, north: 43.0750 }, view, { west: -89.4020, south: 43.0738, east: -89.3995, north: 43.0752 }];

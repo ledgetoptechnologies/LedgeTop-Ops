@@ -73,6 +73,8 @@ function startup({ renderableRoot = false, reduced = false } = {}) {
     detailToErrorTarget,
     tilesetWorldBounds: () => null,
     emitLodDebugSnapshot() {},
+    propertyLinesWakes: 0,
+    propertyLines: { wake() { context.propertyLinesWakes++; } },
   };
   vm.runInNewContext(listenerSource, context);
   listener({ tileset: { root } });
@@ -96,6 +98,7 @@ test('renderable root keeps bounded bootstrap and explicitly requests its overvi
   assert.equal(f.renderer.maxDepth, LOD_PREFETCH_MAX_DEPTH);
   assert.equal(f.renderer.errorTarget, 4096);
   assert.deepEqual([...f.requested], [f.root]);
+  assert.equal(f.context.propertyLinesWakes, 1, 'the loaded root tileset wakes a waiting property-lines layer');
 });
 
 test('non-renderable reduced-memory root releases depth without bypassing the detail cap', () => {
