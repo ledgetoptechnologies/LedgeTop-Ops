@@ -320,6 +320,25 @@ function clientAccessDiagnostic(error){
 function validOpsOrigin(value){try{const parsed=new URL(value);return parsed.protocol==='https:'&&parsed.origin===value&&parsed.pathname==='/'&&!parsed.search&&!parsed.hash?value:null}catch{return null}}
 function beginWorkspaceReauthorization(){if(!state.adminSession||!state.token||!validOpsOrigin(sessionStorage.getItem(OPS_ORIGIN_KEY)))return false;void workspaceRecovery.pause();return true}
 function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidateFolderAuthorization();const expired=reason==='expired'||reason==='signed-out'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
+// Guarded reads and writes belong to one exact session, so they are not queued
+// across a sign-in like workspaceFetch. They still wait for silent renewal: an
+// ordinary poll landing on expiry must not be what asks someone to sign in.
+async function guardedFetch(path,init,assertRequestCurrent){
+  if(!workspaceRenewal)return fetch(path,init);
+  if(workspaceRenewal.expiresAtMs<=Date.now()){
+    await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
+    if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
+    assertRequestCurrent();
+  }
+  const response=await fetch(path,init);
+  if(response.status!==401||!workspaceRenewal)return response;
+  const renewed=await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
+  if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
+  assertRequestCurrent();
+  if(!renewed)return response;
+  if(init.method!=='GET')throw responseError('Access changed while this request was running. Please retry.',409);
+  return fetch(path,init);
+}
 async function workspaceFetch(path,init={}){
   await workspaceRecovery.wait(init.signal);
   if(workspaceRenewal&&workspaceRenewal.expiresAtMs<=Date.now()){
@@ -353,25 +372,6 @@ async function workspaceFetch(path,init={}){
     clearWorkspaceAuthorization('revoked');
   }
   return response;
-}
-// Guarded reads and writes belong to one exact session, so they are not queued
-// across a sign-in like workspaceFetch. They still wait for silent renewal: an
-// ordinary poll landing on expiry must not be what asks someone to sign in.
-async function guardedFetch(path,init,assertRequestCurrent){
-  if(!workspaceRenewal)return fetch(path,init);
-  if(workspaceRenewal.expiresAtMs<=Date.now()){
-    await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
-    if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
-    assertRequestCurrent();
-  }
-  const response=await fetch(path,init);
-  if(response.status!==401||!workspaceRenewal)return response;
-  const renewed=await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
-  if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
-  assertRequestCurrent();
-  if(!renewed)return response;
-  if(init.method!=='GET')throw responseError('Access changed while this request was running. Please retry.',409);
-  return fetch(path,init);
 }
 async function api(path,{method='GET',body,headers={},signal,recoveryGuard}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const assertRequestCurrent=()=>{if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});};let response;if(recoveryGuard){assertRequestCurrent();response=await guardedFetch(path,init,assertRequestCurrent);assertRequestCurrent()}else response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}assertRequestCurrent();if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return payload}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}

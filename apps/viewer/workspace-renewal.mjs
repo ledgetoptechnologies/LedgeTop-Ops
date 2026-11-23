@@ -256,8 +256,9 @@ export class WorkspaceSessionRenewal {
     const attempt={requestId,abortController:new AbortController()};this.transportAttempt=attempt;
     this.responseTimer=this.setTimer(()=>{
       if(this.disposed||this.transportAttempt!==attempt)return;
-      attempt.abortController.abort();this.transportAttempt=null;this.finishRequest(requestId);this.fallbackToOpener(requestId);
+      attempt.abortController.abort();this.transportAttempt=null;this.lastFailureReadable=false;this.finishRequest(requestId);this.fallbackToOpener(requestId);
     },RESPONSE_TIMEOUT_MS);
+    const startedWith=this.expiresAtMs;
     const current=()=>!this.disposed&&this.transportAttempt===attempt&&this.pendingRequestId===requestId;
     const renew=async()=>{
       const grant=await this.requestGrant(requestId,attempt.abortController.signal);
@@ -275,7 +276,8 @@ export class WorkspaceSessionRenewal {
       if(held||!current())return;
       await locks.request(name,{signal:attempt.abortController.signal},async()=>{
         if(!current())return;
-        if(await this.adoptServerSession()){this.settleRequest(requestId,attempt);return;}
+        if(this.expiresAtMs<=startedWith)await this.adoptServerSession();
+        if(this.expiresAtMs>startedWith){this.settleRequest(requestId,attempt);return;}
         if(current())await renew();
       });
     }catch(error){
@@ -400,6 +402,7 @@ export class WorkspaceSessionRenewal {
   }
 
   async redeemGrant(grant,requestId,transport){
+    this.lastFailureReadable=true; // Operations just authorized this identity.
     if (this.responseTimer) this.clearTimer(this.responseTimer);
     const attempt = { requestId, abortController: new AbortController() };
     this.redemptionAttempt = attempt;

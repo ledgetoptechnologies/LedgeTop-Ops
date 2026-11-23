@@ -203,15 +203,15 @@ test('scoped refresh ignores a move-racing response and reconciles only its own 
 });
 
 test('a late guarded 401 cannot clear renewed workspace authorization', async () => {
-  const start = source.indexOf('async function api('), end = source.indexOf('\nasync function authenticatedDownload', start);
+  const start = source.indexOf('async function guardedFetch('), end = source.indexOf('\nasync function authenticatedDownload', start);
   let resolveBody, clearCount = 0, captured;
   const context = {
-    state: { token: 'old' }, clearWorkspaceAuthorization: () => { clearCount++; },
+    workspaceRenewal: null, state: { token: 'old' }, clearWorkspaceAuthorization: () => { clearCount++; },
     fetch: (_path, request) => { captured = request.headers.Authorization; return { status: 401, ok: false, json: () => new Promise(resolve => { resolveBody = resolve; }) }; }
   };
   vm.createContext(context); vm.runInContext(source.slice(start, end), context);
   const pending = context.api('/api/v1/tasks?projectId=p', { recoveryGuard: () => context.state.token === 'old' });
-  await Promise.resolve();
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(captured, 'Bearer old');
   context.state.token = 'new';
   resolveBody({ code: 'unauthorized' });

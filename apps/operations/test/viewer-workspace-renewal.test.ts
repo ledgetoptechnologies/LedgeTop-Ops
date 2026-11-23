@@ -157,6 +157,35 @@ describe("Viewer no-opener workspace renewal transport", () => {
     expect(mocks.serviceCreate).not.toHaveBeenCalled();
   });
 
+  it("signs a legacy-host renewal for the canonical controller only, and nothing a caller can choose", async () => {
+    const viewer = "https://viewer.ledgetopdroneservices.com", canonical = "https://ops.ledgetop.app";
+    const legacy = "https://ops.ledgetopdroneservices.com", path = "/api/viewer/workspace/session-renewal";
+    const production = { ...env, ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetop.app", OPERATIONS_ORIGINS: canonical, VIEWER_BASE_URL: viewer } as Env;
+    const send = async (host: string, controllerOrigin?: string, target: Env = production) => {
+      const origin = target === production ? viewer : viewerOrigin;
+      const challenged = await dispatchViewerWorkspaceRenewal(new Request(`${host}${path}/challenge`, { headers: { Origin: origin } }), target);
+      const { challenge } = await challenged.json() as { challenge: string };
+      const requestId = crypto.randomUUID();
+      return dispatchViewerWorkspaceRenewal(new Request(`${host}${path}`, { method: "POST",
+        headers: { Origin: origin, "Content-Type": "application/json", "Idempotency-Key": requestId, "X-CSRF-Token": challenge },
+        body: JSON.stringify({ protocolVersion: 1, requestId, sessionId: "viewer-session-correlation-01", subject: `ops:${principal.id}`,
+          ...(controllerOrigin === undefined ? {} : { controllerOrigin }) }) }), target);
+    };
+    for (const [host, requested, signed] of [[legacy, canonical, canonical], [legacy, undefined, legacy], [legacy, legacy, legacy],
+      [canonical, undefined, canonical], [canonical, canonical, canonical]] as const) {
+      mocks.serviceCreate.mockClear();
+      expect((await send(host, requested)).status).toBe(201);
+      expect(mocks.serviceCreate.mock.calls[0]![0].controllerOrigin).toBe(signed);
+      expect(mocks.serviceCreate.mock.calls[0]![0].targetSessionId).toBe("viewer-session-correlation-01");
+    }
+    mocks.serviceCreate.mockClear();
+    for (const [host, requested] of [[canonical, legacy], [legacy, "https://ops.ledgetoptechnologies.com"],
+      [legacy, "https://attacker.example"], [legacy, `${canonical}/`], [legacy, viewer]] as const)
+      expect((await send(host, requested)).status).toBe(403);
+    expect((await send(opsOrigin, canonical, env)).status).toBe(403);
+    expect(mocks.serviceCreate).not.toHaveBeenCalled();
+  });
+
   it("keeps the route absent by default and fails closed when the durable limiter is unavailable", async () => {
     const disabledEnv = { ...env, VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED: undefined } as Env;
     expect((await dispatchViewerWorkspaceRenewal(request("/api/viewer/workspace/session-renewal/challenge"), disabledEnv)).status).toBe(404);

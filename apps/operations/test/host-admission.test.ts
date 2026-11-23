@@ -5,7 +5,7 @@ vi.mock("cloudflare:workers", () => ({
   WorkerEntrypoint: class {},
   WorkflowEntrypoint: class {},
 }));
-import { admittedOperationsRequestOrigin, legacyViewerControllerCompatibilityAllowed, requestHostAllowed } from "../src/worker/host-admission";
+import { admittedOperationsRequestOrigin, legacyViewerControllerCompatibilityAllowed, requestHostAllowed, staffShellResponse } from "../src/worker/host-admission";
 
 describe("Operations deployed host admission", () => {
   it.each(["production", "staging"] as const)("requires the exact configured host in %s", (ENVIRONMENT) => {
@@ -94,6 +94,21 @@ describe("Operations deployed host admission", () => {
       [`${old}/api/viewer/admin-grant?next=1`, "POST"],
       [`https://user@ops.ledgetopdroneservices.com/api/viewer/admin-grant`, "POST"],
     ] as const) expect(legacyViewerControllerCompatibilityAllowed(url, method, env)).toBe(false);
+  });
+
+  it("lets only the staff app's own HTML shell keep the tabs it opens", () => {
+    const env = { ENVIRONMENT: "production" as const, EXPECTED_HOST: "ops.ledgetop.app", OPERATIONS_ORIGINS: "https://ops.ledgetop.app" };
+    const html = (status = 200, type = "text/html; charset=utf-8") => new Response(null, { status, headers: { "Content-Type": type } });
+    const shell = (url: string, response = html(), method = "GET") => staffShellResponse({ url, method }, env, response);
+    for (const path of ["/", "/viewer", "/viewer/processing", "/operations/processing", "/clients/one"])
+      expect(shell(`https://ops.ledgetop.app${path}`)).toBe(true);
+    for (const path of ["/api/session", "/r/share", "/health", "/assets/app.html", "/_ui/release.html"])
+      expect(shell(`https://ops.ledgetop.app${path}`)).toBe(false);
+    for (const url of ["https://incoming.ledgetopdroneservices.com/", "https://ops.ledgetopdroneservices.com/viewer"])
+      expect(shell(url)).toBe(false);
+    expect(shell("https://ops.ledgetop.app/viewer", html(403))).toBe(false);
+    expect(shell("https://ops.ledgetop.app/viewer", html(200, "application/json"))).toBe(false);
+    expect(shell("https://ops.ledgetop.app/viewer", html(), "POST")).toBe(false);
   });
 
   it("keeps privileged API origin resolution canonical-only in development", () => {
