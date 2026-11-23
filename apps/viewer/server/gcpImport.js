@@ -23,6 +23,10 @@ function text(value, maximum, field, { required = false } = {}) {
 }
 
 function number(value, field, minimum, maximum) {
+  // Number('') and Number([]) are zero; neither is a supplied coordinate.
+  if ((typeof value !== 'number' && typeof value !== 'string') ||
+      (typeof value === 'string' && !value.trim()))
+    throw invalid(`${field} must contain a number`);
   const parsed = typeof value === 'number' ? value : Number(String(value).trim());
   if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum)
     throw invalid(`${field} is outside its accepted range`);
