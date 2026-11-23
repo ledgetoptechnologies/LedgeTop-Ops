@@ -2224,6 +2224,33 @@ const MIGRATIONS = [
   `,verify(database){
     return database.prepare('PRAGMA table_info(storage_trash)').all().some(column=>column.name==='purge_started_at'&&column.type==='TEXT'&&column.notnull===0);
   }},
+  // 1 MiB chunk hashes keyed by a recorded whole-file SHA-256: digest i is bytes
+  // 32*i..32*i+31 and covers file bytes from i MiB. See contentChunkBackfill.js.
+  {version:87,name:'content_chunk_sets',sql:`
+    CREATE TABLE content_chunk_sets (
+      content_sha256 TEXT PRIMARY KEY NOT NULL CHECK(length(content_sha256)=64 AND content_sha256 NOT GLOB '*[^0-9a-f]*'),
+      byte_size INTEGER NOT NULL CHECK(typeof(byte_size)='integer' AND byte_size BETWEEN 1 AND 9007199254740991),
+      chunk_size INTEGER NOT NULL CHECK(chunk_size=1048576),
+      digests BLOB NOT NULL CHECK(typeof(digests)='blob' AND length(digests)=32*((byte_size+chunk_size-1)/chunk_size)),
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER content_chunk_sets_no_update BEFORE UPDATE ON content_chunk_sets
+      BEGIN SELECT RAISE(ABORT,'content chunk sets are immutable'); END;
+    CREATE TABLE content_chunk_failures (
+      content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+      byte_size INTEGER NOT NULL CHECK(byte_size>0),
+      reason TEXT NOT NULL CHECK(reason IN ('unavailable','unsafe_path','read_error','manifest_mismatch','size_mismatch','digest_mismatch')),
+      attempts INTEGER NOT NULL CHECK(attempts>0),
+      next_attempt_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(content_sha256,byte_size)
+    );
+  `,verify(database){
+    const columns = table => database.prepare(`PRAGMA table_info(${table})`).all().map(({name,type,notnull,pk})=>`${name}:${type}:${notnull}:${pk}`).join();
+    return columns('content_chunk_sets')==='content_sha256:TEXT:1:1,byte_size:INTEGER:1:0,chunk_size:INTEGER:1:0,digests:BLOB:1:0,created_at:TEXT:1:0'
+      && columns('content_chunk_failures')==='content_sha256:TEXT:1:1,byte_size:INTEGER:1:2,reason:TEXT:1:0,attempts:INTEGER:1:0,next_attempt_at:TEXT:1:0,updated_at:TEXT:1:0'
+      && Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='content_chunk_sets_no_update' AND tbl_name='content_chunk_sets'").get());
+  }},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;
