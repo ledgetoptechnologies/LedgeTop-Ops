@@ -271,7 +271,7 @@ function loadFixture({section='dashboard',share=undefined}={}){
     validateWorkspaceView(){},syncWorkspaceView(){},setWorkspaceHealth(){},document:{querySelector:()=>null},hydrateExpandedTask(){},scheduleOperationRefresh(){},scheduleProjectRefresh(){},
     access(){throw new Error('signed out')},render:()=>renders.push(1),patchProjectTree:id=>{painted.push(id);return false},console:{warn(){}}});
   delete f.context.refreshProjectOutputs;
-  vm.runInContext(['fencedOutputs','refreshProjectOutputs','load'].map(declaration).join('\n'),f.context);
+  vm.runInContext(['fencedOutputs','currentShares','refreshProjectOutputs','load'].map(declaration).join('\n'),f.context);
   const settle=()=>new Promise(resolve=>setImmediate(resolve));
   const answerLoad=overrides=>{for(const path of [...held.keys()]){if(path.includes('?projectId=')||path.endsWith('/shares'))continue;answer(path,overrides[path]||{})}};
   return {...f,row,held,painted,renders,answer,answerLoad,settle,published:row('output','project',{taskId:'task',attemptId:'attempt',modelId:'model',status:'published',activePublished:true,viewSessionUrl:'/server/view',reportUrl:'/server/report'})};
@@ -301,15 +301,46 @@ test(`a full load already in flight keeps its fresh data and cannot undo the sha
   assert.deepEqual(f.painted,['project']);
   assert.equal(rowActions(f)[0],'View:view-output');
 });
-test('a share made while the load reads links keeps the new link in the list',async()=>{
-  const f=loadFixture();Object.assign(f.output,{status:'published',activePublished:true,viewSessionUrl:'/view'});
-  f.state.outputs.push(f.row('ready','project',{status:'ready',attemptId:'ready-attempt',assetKinds:['glb']}));
+// A full load that has committed its outputs and now waits for the link list of every published output.
+async function loadReadingLinks(f){
+  Object.assign(f.output,{status:'published',activePublished:true,viewSessionUrl:'/view'});
+  const ready=f.row('ready','project',{modelId:'ready-model',status:'ready',activePublished:false,attemptId:'ready-attempt',assetKinds:['glb']});
+  f.state.outputs.push(ready);
   const loading=f.context.load();
-  f.answerLoad({'/api/v1/processing/outputs':{outputs:f.state.outputs.slice()},'/api/v1/projects':{projects:f.state.projects},'/api/v1/processing/ready':{ok:true}});await f.settle();
+  f.answerLoad({'/api/v1/processing/outputs':{outputs:[{...f.output},{...ready}]},'/api/v1/projects':{projects:f.state.projects},'/api/v1/processing/ready':{ok:true}});await f.settle();
+  assert.deepEqual([...f.held.keys()],['/api/v1/processing/outputs/output/shares']);
+  return {loading};
+}
+const shareIds=(f,id)=>f.state.shares[id]&&[...f.state.shares[id]].map(item=>item.id);
+for(const projectRead of ['answered first','still pending'])
+test(`a link that publishes another model while the load reads links is still listed: project read ${projectRead}`,async()=>{
+  const f=loadFixture(),{loading}=await loadReadingLinks(f);
   f.form.dataset.outputId='ready';await f.context.createOutputShare(f.form,'project','ready');
-  f.state.shares.output=[{id:'new-link'}];
+  assert.deepEqual(shareIds(f,'ready'),['share']);
+  const project='/api/v1/processing/outputs?projectId=project',answer=()=>f.answer(project,{outputs:[{...f.output},f.row('ready','project',{status:'published',activePublished:true,viewSessionUrl:'/server/view'})]});
+  if(projectRead==='answered first'){answer();await f.settle()}
+  f.answer('/api/v1/processing/outputs/output/shares',{shares:[{id:'older'}]});await loading;
+  assert.deepEqual(shareIds(f,'ready'),['share'],'the new link survived the older read');
+  assert.deepEqual(shareIds(f,'output'),['older'],'the unrelated list committed');
+  if(projectRead!=='answered first'){answer();await f.settle();assert.deepEqual(shareIds(f,'ready'),['share'])}
+});
+test('a new link on an already published model is kept, although it moves no output fence',async()=>{
+  const f=loadFixture(),{loading}=await loadReadingLinks(f);
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.context.outputFences.size,0);assert.deepEqual(shareIds(f,'output'),['share']);
   f.answer('/api/v1/processing/outputs/output/shares',{shares:[]});await loading;
-  assert.deepEqual(f.state.shares.output,[{id:'new-link'}]);
+  assert.deepEqual(shareIds(f,'output'),['share']);
+});
+test('link settings saved while the load reads links are kept, and an untouched list is replaced',async()=>{
+  const f=loadFixture();f.state.shares={output:[{id:'mine',label:'old'}]};
+  const {loading}=await loadReadingLinks(f);
+  // The same replacement editShareModal makes with the PATCH answer.
+  f.state.shares.output=f.state.shares.output.map(item=>({...item,label:'new'}));
+  f.answer('/api/v1/processing/outputs/output/shares',{shares:[{id:'mine',label:'old'}]});await loading;
+  assert.equal(f.state.shares.output[0].label,'new');
+  const g=loadFixture();g.state.shares={output:[{id:'stale'}],gone:[{id:'removed'}]};
+  const {loading:second}=await loadReadingLinks(g);g.answer('/api/v1/processing/outputs/output/shares',{shares:[{id:'fresh'}]});await second;
+  assert.deepEqual(shareIds(g,'output'),['fresh']);assert.equal(g.state.shares.gone,undefined);
 });
 test('outside the dashboard with no project open, the outputs are still read again and nothing is painted',async()=>{
   const f=loadFixture({section:'storage'});
