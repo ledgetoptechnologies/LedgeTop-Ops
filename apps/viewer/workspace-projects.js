@@ -1497,12 +1497,15 @@ function captureUndoFocus(){
   return{mode:'other',element,locate:focusLocator(element)};
 }
 function settleUndoFocus(focus,key){
-  // Re-checked when the restore lands: a control the user went to meanwhile keeps focus.
+  // Re-checked when the restore lands. Only lost focus (nothing, the page body or a removed node)
+  // is restored; a live element the user went to meanwhile keeps focus, a tree row included. When
+  // the Undo control or the tree had focus, the restored row also takes over focus still in the tree.
   const active=document.activeElement;
-  if(active&&active!==document.body&&active.isConnected&&!active.closest?.('#project-list')&&active!==focus.element)return;
-  if(focus.mode==='tree'){focusTreeRow(key);return;}
+  const lost=!active||active===document.body||!active.isConnected;
+  if(focus.mode==='tree'){if(lost||active.closest?.('#project-list'))focusTreeRow(key);return;}
+  if(!lost)return;
   const target=focus.element.isConnected?focus.element:focus.locate?.();
-  if(target&&document.activeElement!==target)target.focus({preventScroll:true});
+  if(target)target.focus({preventScroll:true});
 }
 async function deleteTaskWithUndo(taskId){
   const task=state.tasks.find(item=>item.id===taskId);

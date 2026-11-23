@@ -374,3 +374,28 @@ test('an Undo that lands late leaves focus where the user went meanwhile', () =>
   assert.equal(context.document.activeElement, chosen);
   assert.deepEqual(focused, ['t:one', 't:two']);
 });
+
+test('an Undo that lands late leaves focus on a tree row the user went to after an outside control was captured', () => {
+  const start = source.indexOf('function captureUndoFocus('), end = source.indexOf('\nasync function deleteTaskWithUndo(', start);
+  const focused = [];
+  const element = (name, inTree = false) => ({ name, isConnected: true, closest: () => (inTree ? {} : null), focus() { context.document.activeElement = this; } });
+  const body = { name: 'body', isConnected: true, closest: () => null };
+  const context = { document: { body, activeElement: body }, focusTreeRow: key => focused.push(key), focusLocator: () => null };
+  vm.createContext(context); vm.runInContext(source.slice(start, end), context);
+  // A control outside the tree had focus when Undo ran (Ctrl+Z), so it is captured ...
+  const chosen = element('filter');
+  context.document.activeElement = chosen;
+  const focus = context.captureUndoFocus();
+  assert.equal(focus.mode, 'other');
+  // ... but the user then focuses a live, connected tree row while the restore and reload run.
+  const row = element('row', true);
+  context.document.activeElement = row;
+  context.settleUndoFocus(focus, 't:one');
+  assert.equal(context.document.activeElement, row);
+  assert.deepEqual(focused, []);
+  // Focus lost to a removed node is still given back to the captured control.
+  context.document.activeElement = { name: 'gone', isConnected: false, closest: () => null };
+  context.settleUndoFocus(focus, 't:one');
+  assert.equal(context.document.activeElement, chosen);
+  assert.deepEqual(focused, []);
+});
