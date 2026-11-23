@@ -155,6 +155,9 @@ function decodeCursor(cursor) {
     return typeof value?.createdAt === 'string' && typeof value?.id === 'string' ? value : null;
   } catch { return null; }
 }
+// A task (alias t) is in the Recycle Bin while its trash item is open. Its status alone does not say so: archiving its
+// active output while it is being deleted sets the status back to draft.
+const TASK_NOT_IN_RECYCLE_BIN = "NOT EXISTS(SELECT 1 FROM storage_trash s WHERE s.entity_type='task' AND s.entity_id=t.id AND s.permanently_deleted_at IS NULL)";
 function encodeCursor(row) {
   return Buffer.from(JSON.stringify({ createdAt: row.created_at, id: row.id })).toString('base64url');
 }
@@ -900,13 +903,13 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   modelOutput(row){if(!row)return null;const model=this.database.prepare('SELECT display_name FROM models WHERE id=?').get(row.model_id);return{id:row.id,modelId:row.model_id,taskId:row.task_id,attemptId:row.attempt_id,projectId:row.project_id,displayName:model?.display_name||'',rootKey:row.root_key,relativePath:row.relative_path,storageMode:row.storage_mode||'managed',status:row.status,byteSize:Number(row.byte_size||0),assetCount:Number(row.asset_count||0),createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,trashedAt:row.trashed_at};}
   getModelOutput(id){return this.modelOutput(this.database.prepare('SELECT * FROM model_outputs WHERE id=?').get(id));}
   activePublishedProjectTask(row){return row&&{projectId:row.project_id,projectDisplayName:row.project_display_name,projectDefaultUnits:row.project_default_units,taskId:row.task_id,taskDisplayName:row.task_display_name,taskCreatedAt:row.task_created_at,modelId:row.model_id,modelDisplayName:row.model_display_name,modelVersionId:row.model_version_id,attemptId:row.attempt_id,publishedAt:row.published_at};}
-  getActivePublishedProjectTask(projectId,taskId,{strictPublished=false}={}){return this.activePublishedProjectTask(this.database.prepare(`SELECT
+  getActivePublishedProjectTask(projectId,taskId,{strictPublished=true}={}){return this.activePublishedProjectTask(this.database.prepare(`SELECT
       p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
       t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
       m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
       o.attempt_id,o.updated_at AS published_at
       FROM projects p
-      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL
+      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL AND ${TASK_NOT_IN_RECYCLE_BIN}
       JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
       JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
         AND o.project_id=p.id AND o.status='published'
@@ -936,13 +939,13 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     }
     return paths;
   }
-  listActivePublishedProjectTasksPage(projectId,{limit=50,cursor=null,strictPublished=false}={}){const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[projectId],after=c?' AND (t.created_at<? OR (t.created_at=? AND t.id<?))':'';if(c)args.push(c.createdAt,c.createdAt,c.id);const rows=this.database.prepare(`SELECT
+  listActivePublishedProjectTasksPage(projectId,{limit=50,cursor=null,strictPublished=true}={}){const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[projectId],after=c?' AND (t.created_at<? OR (t.created_at=? AND t.id<?))':'';if(c)args.push(c.createdAt,c.createdAt,c.id);const rows=this.database.prepare(`SELECT
       p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
       t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
       m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
       o.attempt_id,o.updated_at AS published_at
       FROM projects p
-      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL
+      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL AND ${TASK_NOT_IN_RECYCLE_BIN}
       JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
       JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
         AND o.project_id=p.id AND o.status='published'
@@ -956,7 +959,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
           AND o.project_id=p.id AND o.status='published'
         JOIN model_versions mv ON mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready'
-        WHERE t.project_id=p.id AND t.published_model_id IS NOT NULL AND t.status<>'archived' AND t.purged_at IS NULL)`];
+        WHERE t.project_id=p.id AND t.published_model_id IS NOT NULL AND ${TASK_NOT_IN_RECYCLE_BIN} AND t.status<>'archived' AND t.purged_at IS NULL)`];
     if(q){where.push(`p.display_name LIKE ? ESCAPE '\\'`);args.push(`%${q.replace(/[\\%_]/g,'\\$&')}%`);}
     if(c){where.push('(p.created_at<? OR (p.created_at=? AND p.id<?))');args.push(c.createdAt,c.createdAt,c.id);}
     const rows=this.database.prepare(`SELECT p.id,p.display_name,p.created_at FROM projects p
