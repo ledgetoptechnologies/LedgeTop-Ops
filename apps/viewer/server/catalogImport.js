@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { hashFile, hashFileChunks, hashTree } = require('./storageManager');
+const { needsChunkRows } = require('./assetIntegrityRecords');
 const { lodDerivativeSpecs } = require('./lodDerivativePolicy');
 const { CUTLINE_PATTERN, validateCutlineFile } = require('./orthophotoCutline');
 const { recordImportedSourceUnits } = require('./importSourceUnitEvidence');
@@ -152,7 +153,13 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   const assetRootKey=request.storageMode==='external_reference'?(candidate.provider==='webodm'?'webodm':'terra'):'datasets';
   const assetPrefix=sourceRelativePath;
   const originalRoot=request.storageMode==='external_reference'?storage.resolve(candidate.sourceRootKey,candidate.sourceRelativePath,{mustExist:true}):storage.resolve('datasets',dataset.relativePath,{mustExist:true}),assets=[];
-  for(const asset of candidate.assets){const relativePath=[assetPrefix,asset.relativePath].filter(Boolean).join('/'),entry={kind:asset.kind,rootKey:assetRootKey,relativePath,format:asset.format,contentType:asset.contentType||null,byteSize:asset.byteSize,sha256:asset.sha256,chunks:asset.chunks||[],storageMode:request.storageMode,published:false,sourceAttemptId:attempt.id};if(['ept','tiles'].includes(asset.kind)){const tree=await hashTree(path.dirname(path.join(originalRoot,...asset.relativePath.split('/'))));entry.manifestSha256=tree.manifestSha256;entry.manifestFiles=tree.files;}assets.push(entry);}
+  for(const asset of candidate.assets){
+    const relativePath=[assetPrefix,asset.relativePath].filter(Boolean).join('/'),entry={kind:asset.kind,rootKey:assetRootKey,relativePath,format:asset.format,contentType:asset.contentType||null,byteSize:asset.byteSize,sha256:asset.sha256,chunks:asset.chunks||[],storageMode:request.storageMode,published:false,sourceAttemptId:attempt.id};if(['ept','tiles'].includes(asset.kind)){const tree=await hashTree(path.dirname(path.join(originalRoot,...asset.relativePath.split('/'))));entry.manifestSha256=tree.manifestSha256;entry.manifestFiles=tree.files;}
+    // A candidate scanned before chunk hashes existed gets them now, only if
+    // the same read reproduces the hash its approved scan recorded.
+    else if(needsChunkRows(entry)){const integrity=await hashFileChunks(path.join(originalRoot,...asset.relativePath.split('/')),{signal});if(integrity.sha256!==asset.sha256)throw Object.assign(new Error('catalog source changed after mapping approval'),{code:'catalog_source_changed'});entry.chunks=integrity.chunks;}
+    assets.push(entry);
+  }
   const registeredAssets=assets.filter((asset)=>asset.kind!=='tiles');
   const model=repository.upsertModelVersion({modelId:ids.modelId,versionId:ids.versionId,provider:candidate.provider,providerModelId:`catalog:${candidate.id}`,providerVersionId:approvedFingerprint,displayName:request.taskDisplayName,status:'importing',metadata:{projectName:project.displayName,taskName:task.displayName,catalogCandidateId:candidate.id,catalogImportOperationId:operation.id},versionMetadata:{catalogImport:true,storageMode:request.storageMode,catalogImportOperationId:operation.id},sourceLocator:{catalogImport:true,projectId:candidate.externalProjectId,taskId:candidate.externalTaskId,sourceRootKey,sourceRelativePath},assets:registeredAssets,makeActive:false});
   await recordImportedSourceUnits(operation, { processing, repository, storage }, model.id, ids.versionId, { signal });

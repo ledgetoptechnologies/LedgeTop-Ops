@@ -5,6 +5,8 @@ const path=require('node:path');
 const {buildMeshRecoveryManifest,MAX_FILES}=require('./retainedManifest');
 const {copyRetainedClosure}=require('./webodmTaskImport');
 const {fsyncDirectory,fsyncDirectoryTree}=require('./durableFs');
+const {needsChunkRows}=require('./assetIntegrityRecords');
+const {hashFileChunks}=require('./storageManager');
 const {LOD_DERIVATIVE_RECOVERY_REVISION}=require('./lodRecoveryPolicy');
 const {collectRecoveryCompanions,companionCopyManifests,ownedRecoveryCompanions,verifyRecoveryCompanionDestination,verifyRecoveryCompanionPlan}=require('./lodRecoveryCompanions');
 
@@ -75,6 +77,14 @@ async function processLodRecovery(operation,{processing,repository,storage,confi
   if(!task||!project||!dataset||dataset.status!=='finalized')throw Object.assign(new Error('the recovery task source is unavailable'),{code:'lod_recovery_source_changed'});
   const attempt=processing.createImportedAttempt({id:ids.attemptId,taskId:task.id,datasetId:dataset.id,providerTaskId:`lod-recovery:${operation.id}`,createdBy:operation.subject,displayName:task.displayName,metadata:{lodRecoveryOperationId:operation.id,lodRecoverySourceVersionId:payload.sourceVersionId},staged:true,expectedActiveAttemptId:payload.sourceAttemptId});
   const manifestByRole=new Map(inspected.publicManifest.files.map(file=>[file.role,file])),glb=manifestByRole.get('mesh_glb'),obj=manifestByRole.get('mesh_obj'),assets=[{kind:'glb',rootKey:'models',relativePath:`${payload.targetRelativePath}/${glb.relativePath}`,format:'glb',contentType:'model/gltf-binary',byteSize:glb.byteSize,sha256:glb.sha256,storageMode:'managed',published:false,sourceAttemptId:attempt.id},{kind:'obj',rootKey:'models',relativePath:`${payload.targetRelativePath}/${obj.relativePath}`,format:'obj',contentType:'text/plain',byteSize:obj.byteSize,sha256:obj.sha256,storageMode:'managed',published:false,sourceAttemptId:attempt.id}];
+  // The mesh pair has no companion plan, so nothing compares its chunk rows:
+  // hash them from the copy, which must still be the authorized source bytes.
+  for(const asset of assets){
+    if(!needsChunkRows(asset))continue;
+    const integrity=await hashFileChunks(storage.resolve('models',asset.relativePath),{signal});
+    if(integrity.sha256!==asset.sha256)throw Object.assign(new Error('the recovery destination conflicts with its authorized source manifest'),{code:'lod_recovery_destination_conflict'});
+    asset.chunks=integrity.chunks;
+  }
   const owned=ownedRecoveryCompanions(companions,payload.targetRelativePath,attempt.id);assets.push(...owned.assets);
   const versionMetadata={...(source.metadata||{}),lodRecovery:{schemaVersion:1,recoveryRevision:payload.recoveryRevision,operationId:operation.id,sourceOutputId:payload.sourceOutputId,sourceVersionId:payload.sourceVersionId,sourceManifestSha256:payload.sourceManifestSha256,companionManifestSha256:companions.manifestSha256,companionBytes:companions.byteSize}};
   const model=repository.upsertModelVersion({modelId:ids.modelId,versionId:ids.versionId,provider:sourceModel.provider,providerModelId:sourceModel.providerModelId,providerVersionId:`lod-recovery:${operation.id}`,displayName:task.displayName,status:'importing',metadata:sourceModel.metadata||{},versionMetadata,georef:source.georef||{},pointCount:source.pointCount??null,sourceLocator:{lodRecovery:true,operationId:operation.id,sourceVersionId:payload.sourceVersionId},assets,cameraPhotos:owned.cameraPhotos,makeActive:false});

@@ -144,10 +144,12 @@ async function main() {
         { kind: 'ept', rootKey: 'models', relativePath: `${eptDir}/ept.json`, format: 'ept', byteSize: eptJson.length, sha256: sha256(eptJson), manifestSha256: sha256(JSON.stringify(eptManifest)), manifestFiles: eptManifest, storageMode: 'managed', published: true },
         { kind: 'ortho', rootKey: 'models', relativePath: 'task-1/attempt-1/odm_orthophoto.tif', format: 'tif', byteSize: ortho.length, sha256: sha256(ortho), chunks: chunksOf(ortho), storageMode: 'managed', published: true },
         // Legacy shape: whole-file SHA-256 only, no chunk rows.
-        { kind: 'dsm', rootKey: 'models', relativePath: 'task-1/attempt-1/dsm.tif', format: 'tif', byteSize: dsm.length, sha256: sha256(dsm), storageMode: 'managed', published: true },
+        { kind: 'dsm', rootKey: 'models', relativePath: 'task-1/attempt-1/dsm.tif', format: 'tif', byteSize: dsm.length, sha256: sha256(dsm), chunks: chunksOf(dsm), storageMode: 'managed', published: true },
       ],
       makeActive: true,
     });
+    // Registered before chunk rows existed; new files can no longer look like this.
+    database.prepare("DELETE FROM model_asset_chunks WHERE asset_id IN (SELECT id FROM model_assets WHERE kind='dsm')").run();
     repository.createViewerSession({
       tokenHash: auth.hashToken(token), modelId, modelVersionId: versionId, subject: 'ops:bench', audience: 'ops',
       permissions: { view: true, measure: true, cameras: true }, expiresAt: new Date(Date.now() + 3_600_000).toISOString(),

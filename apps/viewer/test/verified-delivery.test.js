@@ -122,12 +122,14 @@ async function managedFixture(t, { aged = true } = {}) {
     modelId, versionId, provider: 'ltds-processing', providerModelId: 'delivery', providerVersionId: sha256('delivery'),
     displayName: 'Delivery model', status: 'ready', sourceLocator: {}, versionMetadata: {},
     assets: [
-      { kind: 'dsm', rootKey: 'models', relativePath: 'task/dsm.tif', format: 'tif', byteSize: dsm.length, sha256: sha256(dsm), storageMode: 'managed', published: true },
+      { kind: 'dsm', rootKey: 'models', relativePath: 'task/dsm.tif', format: 'tif', byteSize: dsm.length, sha256: sha256(dsm), chunks: chunksOf(dsm), storageMode: 'managed', published: true },
       { kind: 'ortho', rootKey: 'models', relativePath: 'task/ortho.tif', format: 'tif', byteSize: ortho.length, sha256: sha256(ortho), chunks: chunksOf(ortho), storageMode: 'managed', published: true },
       { kind: 'tiles', rootKey: 'models', relativePath: 'task/tiles/tileset.json', format: '3dtiles', byteSize: tileset.length, sha256: sha256(tileset), manifestSha256: sha256(JSON.stringify(manifest)), manifestFiles: manifest, storageMode: 'managed', published: true },
     ],
     makeActive: true,
   });
+  // Registered before chunk rows existed; new files can no longer look like this.
+  database.prepare("DELETE FROM model_asset_chunks WHERE asset_id IN (SELECT id FROM model_assets WHERE kind='dsm')").run();
   repository.createViewerSession({ tokenHash: auth.hashToken(token), modelId, modelVersionId: versionId, subject: 'ops:test', audience: 'ops', permissions: { view: true }, expiresAt: new Date(Date.now() + 120_000).toISOString() });
   // Real published assets are long settled; let the fixture age past the
   // racily-clean window so in-place rewrites always change ctime.
