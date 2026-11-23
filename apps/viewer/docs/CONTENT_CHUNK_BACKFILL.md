@@ -12,8 +12,10 @@ have none yet: rasters, camera photos, point clouds, meshes and large EPT or
   buffer. A set is stored only if that pass reproduces the recorded hash and
   size exactly, so a changed file never gets one.
 - Recorded paths are used exactly as stored. An absolute path, an empty, `.` or
-  `..` segment, a backslash or a NUL is refused before anything is opened; a tree
-  entry and its child are checked separately before they are combined.
+  `..` segment, a backslash, a NUL or a segment that starts with a drive
+  designator (`C:`, `C:x`) is refused before anything is opened; a tree entry and
+  its child are checked separately before they are combined. Other colons are
+  allowed on Linux and refused on Windows.
 - The file is hashed through one descriptor whose path is the registered path
   inside its root, that ends exactly at the recorded size, and that did not change
   (device, inode, size, mtime, ctime) during the read.

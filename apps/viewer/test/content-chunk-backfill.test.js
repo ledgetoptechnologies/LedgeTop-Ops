@@ -528,7 +528,9 @@ test('unsafe registered paths are refused without opening anything', async t => 
 });
 
 const INVALID_PATHS = { 'a parent segment': 'sub/../safe', 'a leading parent': '../models/safe', 'a dot segment': './safe', 'an inner dot segment': 'sub/./safe', 'an empty segment': 'sub//safe', 'a trailing slash': 'safe/',
-  'an absolute path': '/safe', 'a drive path': 'C:/safe', 'a backslash': 'sub\\safe', 'a backslash parent': '..\\safe', 'a NUL': 'safe\0x', 'an empty path': '' };
+  'an absolute path': '/safe', 'a drive path': 'C:/safe', 'a drive path with a backslash': 'C:\\safe', 'a drive-relative path': 'C:safe', 'a lower-case drive-relative path': 'c:safe', 'a bare drive': 'C:',
+  'a drive-relative parent': 'C:../safe', 'a drive-relative dot': 'C:./safe', 'a drive-relative folder': 'C:sub/safe', 'a drive in an inner segment': 'sub/C:safe', 'a bare drive in an inner segment': 'sub/Z:/safe',
+  'a backslash': 'sub\\safe', 'a backslash parent': '..\\safe', 'a NUL': 'safe\0x', 'an empty path': '' };
 function registerTree(c, entry, child, big) {
   const files = [{ relativePath: child, byteSize: big.length, sha256: sha(big) }];
   c.register([{ kind: 'ept', rootKey: 'models', relativePath: entry, byteSize: 2, sha256: sha('{}'), manifestSha256: sha(JSON.stringify(files)), manifestFiles: files }]);
@@ -559,6 +561,13 @@ for (const [place, register] of Object.entries(PLACES)) for (const [label, bad] 
     assert.equal(calls, 0);
     assertNothingBlessed(c, { sha256: sha(big) }, 'unsafe_path');
   });
+
+test('a colon that is not a drive designator is an ordinary name on Linux', linux, async t => {
+  const c = fixture(t), big = crypto.randomBytes(4 * MIB);
+  for (const [index, name] of ['flight 12:30/ortho.tif', 'AB:c.tif', '1:2.tif'].entries()) c.register([{ kind: 'ortho', ...c.write(name, Buffer.concat([big, Buffer.from([index])])) }]);
+  assert.equal(await c.run(), 3);
+  assert.equal(c.sets().length, 3);
+});
 
 test('a tree whose entry is at the root of its storage still resolves its children', async t => {
   const c = fixture(t), big = crypto.randomBytes(4 * MIB);

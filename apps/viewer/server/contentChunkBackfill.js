@@ -185,11 +185,14 @@ function reasonFor(error) {
 }
 
 // Persisted paths are used exactly as recorded and never normalized, so a path
-// that could mean another place is refused instead of being resolved.
+// that could mean another place is refused instead of being resolved. A drive
+// designator (C:, also drive-relative C:x) is refused in every segment on every
+// platform. Any other colon is an ordinary file name on Linux, but names an
+// alternate data stream on Windows, so it is refused there only.
 function exactSegments(recorded) {
   const segments = typeof recorded === 'string' ? recorded.split('/') : [];
-  if (!segments.length || recorded.includes('\0') || recorded.includes('\\') || path.win32.isAbsolute(recorded)
-    || segments.some((segment) => !segment || segment === '.' || segment === '..')) throw failure('unsafe_path');
+  if (!segments.length || recorded.includes('\0') || recorded.includes('\\') || (process.platform === 'win32' && recorded.includes(':'))
+    || segments.some((segment) => !segment || segment === '.' || segment === '..' || /^[A-Za-z]:/.test(segment))) throw failure('unsafe_path');
   return segments;
 }
 
