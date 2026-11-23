@@ -16,11 +16,13 @@ const { VIEWER_COOKIE } = require('../server/apiV1');
 const { config } = require('../server/config');
 const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
-const { sourceAuthorizationValidator } = require('../server/sourceAuthorization');
+const { SourceAuthorizationValidator, sourceAuthorizationValidator } = require('../server/sourceAuthorization');
 
 const CHUNK = 4 * 1024 * 1024;
 const NO_STORE = 'private, no-store';
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
+// 5 minutes from the authorization decision, so a little less at the send.
+const fullTime = (response, label) => assert.ok(maxAge(response) >= 290 && maxAge(response) <= 300, `${label}: ${response.status} ${response.headers['cache-control']}`);
 const maxAge = (response) => Number(/^private, max-age=(\d+), must-revalidate$/.exec(response.headers['cache-control'])?.[1] ?? NaN);
 
 function chunksOf(body) {
@@ -126,7 +128,7 @@ test('map and model assets on capability URLs are kept by the browser for 5 minu
     };
     for (const [label, [status, response]] of Object.entries(responses)) {
       assert.equal(response.status, status, `${name} ${label}`);
-      assert.equal(response.headers['cache-control'], 'private, max-age=300, must-revalidate', `${name} ${label}`);
+      fullTime(response, `${name} ${label}`);
       assert.equal(response.headers.etag, etag, `${name} ${label}`);
       // Nothing but the URL (which carries the capability) selects the content.
       assert.equal(response.headers.vary, undefined, `${name} ${label}`);
@@ -212,7 +214,7 @@ test('errors and denials on a cacheable asset are never cacheable', async (t) =>
   fs.rmSync(f.files.glb);
   await denied('missing', 404, glb, { 'if-none-match': etag });
   fs.writeFileSync(f.files.glb, f.bodies.glb);
-  assert.equal(maxAge(await f.request(glb)), 300, 'and it serves again');
+  fullTime(await f.request(glb), 'and it serves again');
   f.repository.rateLimited = () => true;
   await denied('429', 429, glb);
   delete f.repository.rateLimited;
@@ -233,7 +235,7 @@ test('a kept copy never outlives the session, share or grant', async (t) => {
   };
   const etag = `"sha256-${sha256(f.bodies.glb)}"`;
   const expire = (at) => f.database.prepare('UPDATE viewer_sessions SET expires_at=? WHERE id=?').run(at, f.session.id);
-  expire(inSeconds(310)); assert.equal(maxAge(await f.request(f.url('model.glb'))), 300);
+  expire(inSeconds(3000)); fullTime(await f.request(f.url('model.glb')), 'session');
   expire(inSeconds(40)); within(await f.request(f.url('model.glb')), 40, 'session');
   within(await f.request(f.url('model.glb'), { range: 'bytes=0-1' }), 40, 'session, range');
   within(await f.request(f.url('model.glb'), { 'if-none-match': etag }), 40, 'session, 304');
@@ -251,7 +253,7 @@ test('a kept copy never outlives the session, share or grant', async (t) => {
   const share = { id: 'share', modelId: f.modelId, versionPolicy: 'active', authorizationRevision: 0, allowedViews: null, permissions: {}, expiresAt: null, shareClass: 'staff', sourceAuthorization: null };
   f.repository.getPublicShare = () => share;
   const shareUrl = (seconds) => f.url('model.glb', auth.sign({ kind: 'share-asset', shareId: 'share', shareRevision: 0, modelId: f.modelId }, seconds * 1000));
-  assert.equal(maxAge(await f.request(shareUrl(3600))), 300);
+  fullTime(await f.request(shareUrl(3600)), 'share');
   within(await f.request(shareUrl(50)), 50, 'share token');
   share.expiresAt = inSeconds(60); within(await f.request(shareUrl(3600)), 60, 'share expiry');
   Object.assign(share, { expiresAt: inSeconds(90), shareClass: 'client', sourceAuthorization: { type: 'client_grant', id: 'g', version: 1, subject: 's', expiresAt: inSeconds(20) } });
@@ -305,4 +307,110 @@ test('If-Range needs the exact strong ETag, and replaced content gets a new one'
   assert.deepEqual(response.body, replacement);
   const resumed = await f.request(f.url('model.glb'), { range: 'bytes=10-', 'if-range': before });
   assert.deepEqual([resumed.status, resumed.body.equals(replacement)], [200, true], 'never mixes old and new bytes');
+});
+
+test('the 5 minutes start at the authorization decision, not at the response', async (t) => {
+  const f = await fixture(t);
+  const { verifyWholeFile } = f.integrity;
+  t.after(() => { delete f.integrity.verifyWholeFile; });
+  const during = (action) => { f.integrity.verifyWholeFile = async (...args) => { await action(); return verifyWholeFile.apply(f.integrity, args); }; };
+  const slow = () => new Promise((resolve) => setTimeout(resolve, 3100));
+  during(slow);
+  // Viewer session, public share and project share: none is extended by a slow check.
+  f.repository.getPublicShare = () => ({ id: 'share', modelId: f.modelId, versionPolicy: 'active', authorizationRevision: 0, allowedViews: null, permissions: {}, expiresAt: null, shareClass: 'staff' });
+  f.repository.getProjectShare = () => ({ id: 'ps', projectId: 'p', permissions: {}, expiresAt: null, revokedAt: null });
+  assets.setProcessingRepository({ getActivePublishedProjectTask: () => ({ modelId: f.modelId, modelVersionId: f.versionId }) });
+  const urls = {
+    session: f.url('model.glb'),
+    share: f.url('model.glb', auth.sign({ kind: 'share-asset', shareId: 'share', shareRevision: 0, modelId: f.modelId }, 3_600_000)),
+    'project share': f.url('model.glb', auth.sign({ kind: 'project-share-asset', shareId: 'ps', projectId: 'p', taskId: 't', modelId: f.modelId, modelVersionId: f.versionId }, 3_600_000)),
+  };
+  const responses = await Promise.all(Object.entries(urls).map(async ([name, url]) => [name, await f.request(url)]));
+  for (const [name, response] of responses) {
+    assert.equal(response.status, 200, name);
+    assert.ok(maxAge(response) <= 296, `${name}: ${response.headers['cache-control']}`);
+    assert.ok(maxAge(response) >= 290, `${name}: ${response.headers['cache-control']}`);
+  }
+  // A wall clock set back during the check lengthens neither limit.
+  const realNow = Date.now;
+  t.after(() => { Date.now = realNow; });
+  during(async () => { await slow(); Date.now = () => realNow() - 120_000; });
+  assert.ok(maxAge(await f.request(urls.session)) <= 296);
+  Date.now = realNow;
+  f.database.prepare('UPDATE viewer_sessions SET expires_at=? WHERE id=?').run(new Date(realNow() + 20_000).toISOString(), f.session.id);
+  during(async () => { await slow(); Date.now = () => realNow() - 120_000; });
+  assert.ok(maxAge(await f.request(urls.session)) <= 16);
+  Date.now = realNow;
+  // A check longer than the whole window (seen as a jump of the wall clock).
+  f.database.prepare('UPDATE viewer_sessions SET expires_at=? WHERE id=?').run(new Date(realNow() + 3_600_000).toISOString(), f.session.id);
+  during(() => { Date.now = () => realNow() + 301_000; });
+  assert.equal((await f.request(urls.session)).headers['cache-control'], NO_STORE);
+  Date.now = realNow;
+});
+
+test('an already known source decision shortens the copy by its greatest possible age', async (t) => {
+  const f = await fixture(t);
+  const source = { type: 'client_grant', id: 'grant', version: 1, subject: 'client', expiresAt: null };
+  f.repository.getPublicShare = () => ({ id: 'share', modelId: f.modelId, versionPolicy: 'active', authorizationRevision: 0, allowedViews: null, permissions: {}, expiresAt: null, shareClass: 'client', sourceAuthorization: source });
+  let active = true, decisions = 0, decidedAt = 0;
+  const validator = new SourceAuthorizationValidator({ enabled: true, baseUrl: 'https://ops.test', keyId: 'key', secret: 's'.repeat(32),
+    fetchImpl: async () => { decisions += 1; decidedAt = performance.now(); return Response.json({ active, authorizationId: source.id, authorizationVersion: 1, subject: source.subject, modelId: f.modelId, expiresAt: null }); } });
+  assert.ok(validator.positiveMs <= 5000 && validator.timeoutMs <= 5000, 'the age limit assets.js relies on');
+  const limits = new SourceAuthorizationValidator({ positiveMs: 600_000, timeoutMs: 600_000 });
+  assert.deepEqual([limits.positiveMs, limits.timeoutMs], [5000, 5000], 'and no setting can raise it');
+  assets.setSourceAuthorizationValidator(validator);
+  const url = f.url('model.glb', auth.sign({ kind: 'share-asset', shareId: 'share', shareRevision: 0, modelId: f.modelId }, 3_600_000));
+  const first = await f.request(url);
+  assert.equal(first.status, 200);
+  assert.ok(maxAge(first) <= 295 && maxAge(first) >= 285, first.headers['cache-control']);
+  active = false; // access is removed in Operations right after its decision
+  await new Promise((resolve) => setTimeout(resolve, 2500)); // still within every refresh time
+  for (const headers of [{}, { range: 'bytes=0-9' }, { 'if-none-match': `"sha256-${sha256(f.bodies.glb)}"` }]) {
+    const stale = await f.request(url, headers);
+    assert.equal(decisions, 1, 'served on the known decision');
+    const sinceDecision = (performance.now() - decidedAt) / 1000;
+    assert.ok(sinceDecision >= 2.4, 'the decision is old');
+    assert.ok(sinceDecision + maxAge(stale) <= 300, `${sinceDecision.toFixed(1)} s old + ${stale.headers['cache-control']}`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 2800));
+  const refused = await f.request(url, { 'if-none-match': `"sha256-${sha256(f.bodies.glb)}"` });
+  assert.deepEqual([refused.status, refused.headers['cache-control'], decisions], [403, NO_STORE, 2]);
+});
+
+test('a failure while the strong ETag is looked up closes the file and is not cacheable', async (t) => {
+  const f = await fixture(t);
+  const handles = [];
+  const { open } = fs.promises;
+  t.mock.method(fs.promises, 'open', async (...args) => { const handle = await open(...args); handles.push(handle); return handle; });
+  const { getModelAssetChunks } = f.repository;
+  for (const [label, options] of Object.entries({ GET: [], range: [{ range: 'bytes=0-9' }], HEAD: [{}, 'HEAD'], conditional: [{ 'if-none-match': '"x"' }] })) {
+    let calls = 0;
+    f.repository.getModelAssetChunks = (...args) => { calls += 1; if (calls === 1) throw new Error('database failed'); return getModelAssetChunks.apply(f.repository, args); };
+    handles.length = 0;
+    const response = await f.request(f.url('ortho.tif'), ...options);
+    assert.equal(response.status, 500, label);
+    assert.ok(!String(response.headers['cache-control']).includes('max-age'), label);
+    assert.ok(!String(response.headers.etag).includes('sha256'), label);
+    assert.equal(calls, 1, `${label}: the ETag lookup failed`);
+    assert.equal(handles.length, 1, label);
+    for (let i = 0; i < 100 && handles[0].fd !== -1; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(handles[0].fd, -1, `${label}: the descriptor is closed`);
+  }
+  delete f.repository.getModelAssetChunks;
+  fullTime(await f.request(f.url('ortho.tif')), 'and it serves again');
+});
+
+test('If-Match compares strongly: a weak tag never matches the strong one', async (t) => {
+  const f = await fixture(t);
+  const etag = `"sha256-${sha256(f.bodies.glb)}"`;
+  const status = async (ifMatch, method) => { const response = await f.request(f.url('model.glb'), { 'if-match': ifMatch }, method); if (response.status === 412) assert.equal(response.headers['cache-control'], NO_STORE); return response.status; };
+  for (const method of ['GET', 'HEAD']) {
+    for (const matching of [etag, '*', `"other", ${etag}`, `W/"other", ${etag}`]) assert.equal(await status(matching, method), 200, `${method} ${matching}`);
+    for (const other of [`W/${etag}`, `"other", W/${etag}`, '"other"', 'W/"other"', etag.slice(1, -1)]) assert.equal(await status(other, method), 412, `${method} ${other}`);
+  }
+  // Files without a strong tag keep send's comparison.
+  const legacy = (await f.request(f.url('dsm.tif'), {}, 'HEAD')).headers.etag;
+  assert.match(legacy, /^W\//);
+  assert.equal((await f.request(f.url('dsm.tif'), { 'if-match': legacy }, 'HEAD')).status, 200);
+  assert.equal((await f.request(f.url('dsm.tif'), { 'if-match': etag }, 'HEAD')).status, 412);
 });
