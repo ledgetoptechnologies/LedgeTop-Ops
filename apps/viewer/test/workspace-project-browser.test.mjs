@@ -441,6 +441,7 @@ function startFixtureServer() {
         }
         if (manualFixture && request.method !== 'GET') console.log(`Synthetic mutation: ${request.method} ${url.pathname}`);
         if(runtime.folderBackend&&(/^\/api\/v1\/projects\/[^/]+\/folders(?:\/[^/]+)?$/.test(url.pathname)||/^\/api\/v1\/tasks\/[^/]+\/(?:folder|project)$/.test(url.pathname))){
+          if(runtime.taskMoveResponseGate&&/^\/api\/v1\/tasks\/[^/]+\/(?:folder|project)$/.test(url.pathname))await runtime.taskMoveResponseGate;
           const upstream=await fetch(`${runtime.folderBackend}${url.pathname}`,{method:request.method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':request.headers['idempotency-key']||'folder-browser-fixture-key'},...(raw?{body:raw}:{})});
           result={status:upstream.status,type:'application/json',body:Buffer.from(await upstream.arrayBuffer())};
         }else result = url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.failOrthophotoResponse
@@ -1285,6 +1286,111 @@ test('a moved task leaves its list at once even while its row has focus in a rea
     assert.equal(await client.evaluate(`document.activeElement===document.querySelector('[data-project-folder-view] > .task-list')`),true,'focus stays in the source list');
     assert.deepEqual(client.events.filter(event=>event.method==='Runtime.exceptionThrown'),[]);
   }finally{
+    if(client)client.close();
+    if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}
+    if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}if(folderServer){folderServer.closeAllConnections?.();await new Promise(resolve=>folderServer.close(resolve));}folderDb?.close();if(folderRoot)rmSync(folderRoot,{recursive:true,force:true});try{await removeBrowserProfile(profile,t);}finally{release();}
+  }
+});
+
+// While a move or Undo is in flight the user may focus something else; the landing move must leave it there.
+test('a delayed move or Undo keeps focus on the control the user chose meanwhile in a real browser', {timeout:60000,skip:manualFixture}, async t=>{
+  const executable=browserPath();if(!executable)return t.skip('Chromium-family browser required');
+  const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client,folderServer,folderDb,folderRoot,openGate=null;
+  try{
+    const express=require('express'),auth=require('../server/auth'),{openDatabase}=require('../server/database'),{ViewerRepository}=require('../server/repository'),{ProcessingRepository}=require('../server/processingRepository'),{createProcessingApi}=require('../server/processingApi');
+    folderRoot=mkdtempSync(path.join(tmpdir(),'viewer-move-held-api-'));folderDb=openDatabase(path.join(folderRoot,'viewer.sqlite'));
+    const repository=new ViewerRepository(folderDb),processing=new ProcessingRepository(folderDb);
+    processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:browser-audit',permissions:['viewer.projects.read','viewer.projects.write','viewer.datasets.write','viewer.processing.read','viewer.processing.write','viewer.processing.publish'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+    processing.createProject({id:'project-johnson',displayName:'Johnson Road Survey'});processing.createProject({id:'project-quarry',displayName:'Alpha Quarry'});
+    const dataset=processing.createDataset({id:'dataset-johnson',projectId:'project-johnson',displayName:'Source',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});processing.finalizeDataset(dataset.id,[],'a'.repeat(64));
+    processing.createTask({id:'task-johnson',projectId:'project-johnson',datasetId:dataset.id,displayName:'Johnson reconstruction'});
+    // A second task in the same list gives the user another task control to move to.
+    const otherDataset=processing.createDataset({id:'dataset-quarry',projectId:'project-johnson',displayName:'Other source',rootKey:'datasets',relativePath:'synthetic-other',storageMode:'managed'});processing.finalizeDataset(otherDataset.id,[],'b'.repeat(64));
+    processing.createTask({id:'task-quarry',projectId:'project-johnson',datasetId:otherDataset.id,displayName:'Quarry reconstruction'});
+    const folder=processing.createProjectFolder('project-johnson',{displayName:'Client folder'},'staff');
+    const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));folderServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
+    ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    // Unpublished, so moves across projects and their Undo need no sharing confirmation.
+    runtime.outputs=runtime.outputs.filter(output=>output.taskId!=='task-johnson');
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
+    await client.command('Emulation.setDeviceMetricsOverride',{width:1280,height:860,deviceScaleFactor:1,mobile:false});
+    await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+    const moved='[data-project-folder-view] [data-project-task="task-johnson"]',otherTask='[data-action="toggle-task"][data-id="task-quarry"]',filter='#project-filter';
+    await waitFor(client,`Boolean(document.querySelector('${moved}'))&&Boolean(document.querySelector('${otherTask}'))&&Boolean(document.querySelector('[data-action="folder-open"][data-id="${folder.id}"]'))`,'tasks and folder unavailable');
+    const hold=()=>{let open;runtime.taskMoveResponseGate=new Promise(resolve=>{open=resolve;});openGate=()=>{runtime.taskMoveResponseGate=null;openGate=null;open();};};
+    const focusOn=async selector=>assert.equal(await client.evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.focus();return document.activeElement===element})()`),true,`could not focus ${selector}`);
+    const focusedOn=selector=>client.evaluate(`document.activeElement===document.querySelector(${JSON.stringify(selector)})`);
+    const land=async(label,rowPresent)=>{
+      openGate();
+      await waitFor(client,`!document.querySelector('#workspace').hasAttribute('aria-busy')`,`${label}: move did not settle`);
+      await waitFor(client,`${rowPresent?'':'!'}document.querySelector('${moved}')`,`${label}: task list did not update`,300);
+    };
+    const dragTaskTo=folderId=>client.evaluate(`(()=>{
+      const transfer=new DataTransfer(),handle=document.querySelector('[data-folder-drag][data-id="task-johnson"]');
+      handle.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+      const target=document.querySelector(${JSON.stringify(`[data-folder-drop-destinations] [data-task-drop-folder="${folder.id}"]`)});
+      target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+      target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+    })()`);
+
+    // 1. Folder move: the user moves to another task's control before the response.
+    hold();let start=runtime.requests.length;
+    await dragTaskTo(folder.id);
+    await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/folder');
+    await focusOn(otherTask);
+    await land('folder move',false);
+    assert.equal(processing.getTask('task-johnson').folderId,folder.id);
+    assert.equal(await focusedOn(otherTask),true,'folder move kept focus on the other task');
+
+    // 2. Folder Undo: the user moves to the project filter before the response.
+    await waitFor(client,`Boolean(document.querySelector('#workspace-folder-undo button'))`,'folder Undo unavailable');
+    hold();start=runtime.requests.length;
+    await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
+    await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/folder');
+    await focusOn(filter);
+    await land('folder Undo',true);
+    assert.equal(processing.getTask('task-johnson').folderId,null);
+    assert.equal(await focusedOn(filter),true,'folder Undo kept focus on the filter');
+
+    // 3. Move to another project: the user closes the dialog and moves to the filter before the response.
+    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… unavailable');
+    await client.evaluate(`(()=>{const menu=document.querySelector('${moved} .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
+    await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
+    await client.evaluate(`(()=>{const select=document.querySelector('#folder-move-form').elements.projectId;select.value='project-quarry';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(client,`!document.querySelector('#folder-move-form').elements.folderId.disabled`,'destination folders unavailable');
+    hold();start=runtime.requests.length;
+    await client.evaluate(`document.querySelector('#folder-move-form').requestSubmit()`);
+    await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/project');
+    await client.evaluate(`document.querySelector('#workspace-modal').close()`);
+    await focusOn(filter);
+    await client.evaluate(`(()=>{const input=document.querySelector('${filter}');input.value='Jo';input.dispatchEvent(new Event('input',{bubbles:true}));input.setSelectionRange(1,1);})()`);
+    await land('project move',false);
+    assert.equal(processing.getTask('task-johnson').projectId,'project-quarry');
+    assert.deepEqual(await client.evaluate(`[document.activeElement.id,document.activeElement.value,document.activeElement.selectionStart]`),['project-filter','Jo',1],'project move kept focus, text and caret in the filter');
+    await client.evaluate(`(()=>{const input=document.querySelector('${filter}');input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+
+    // 4. Undo of the project move: the user moves to another task's control before the response.
+    await waitFor(client,`document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Alpha Quarry')`,'project Undo unavailable');
+    hold();start=runtime.requests.length;
+    await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
+    await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/project');
+    await focusOn(otherTask);
+    await land('project Undo',true);
+    assert.equal(processing.getTask('task-johnson').projectId,'project-johnson');
+    assert.equal(await focusedOn(otherTask),true,'project Undo kept focus on the other task');
+
+    // 5. Nothing held focus and the move removed no focused control: focus stays where it was.
+    await client.evaluate(`document.activeElement.blur()`);
+    hold();start=runtime.requests.length;
+    await dragTaskTo(folder.id);
+    await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/folder');
+    await land('unfocused move',false);
+    assert.equal(await client.evaluate(`document.activeElement===document.body`),true,'an unfocused move does not take focus');
+    assert.deepEqual(client.events.filter(event=>event.method==='Runtime.exceptionThrown'),[]);
+  }finally{
+    openGate?.();
     if(client)client.close();
     if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}
     if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}if(folderServer){folderServer.closeAllConnections?.();await new Promise(resolve=>folderServer.close(resolve));}folderDb?.close();if(folderRoot)rmSync(folderRoot,{recursive:true,force:true});try{await removeBrowserProfile(profile,t);}finally{release();}

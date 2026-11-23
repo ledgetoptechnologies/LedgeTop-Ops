@@ -914,13 +914,34 @@ function canDragFolderTask(task){
     folderAuthorizationGuard(task.projectId,'viewer.processing.write')();
 }
 
-// Where focus can go once a moved row leaves the list: the row's neighbour, read before the repaint.
-function taskMoveNeighbour(taskId){
+// Read when the move lands, before any repaint: does the move own focus (the moved row or
+// the move dialog), does nothing hold it, or has the user moved on to another control?
+function captureTaskMoveFocus(taskId){
   const row=content.querySelector(`[data-project-folder-view] > .task-list > [data-project-task="${CSS.escape(taskId)}"]`);
   const sibling=[row?.nextElementSibling,row?.previousElementSibling].find(item=>item?.hasAttribute('data-project-task'));
-  return sibling?.dataset.projectTask||null;
+  const neighbourId=sibling?.dataset.projectTask||null,element=document.activeElement;
+  if(!element||element===document.body||!element.isConnected)return{mode:'none'};
+  if(row?.contains(element)||modal.open&&modal.contains(element))return{mode:'moved',neighbourId};
+  // Enough to find the same control again if a full render replaces it.
+  const selector=[element.localName,element.id?`#${CSS.escape(element.id)}`:'',
+    ...['data-action','data-id','data-folder-drag','name'].filter(name=>element.hasAttribute(name)).map(name=>`[${name}="${CSS.escape(element.getAttribute(name))}"]`)].join('');
+  let selection=null;
+  try{if(typeof element.selectionStart==='number')selection=[element.selectionStart,element.selectionEnd];}catch{}
+  return{mode:'other',element,selector,rowId:element.closest('[data-project-task]')?.dataset.projectTask||null,selection};
 }
-// Only focus that the move dropped (a removed row, a closed dialog, a cleared Undo) is placed again.
+// A move moves focus only when it took focus away; a control the user chose keeps it.
+function settleTaskMoveFocus(taskId,focus,folderId){
+  if(focus.mode==='moved')return placeTaskMoveFocus(taskId,{folderId,neighbourId:focus.neighbourId});
+  if(focus.mode!=='other')return;
+  let target=focus.element;
+  if(!target.isConnected){
+    const scope=focus.rowId?content.querySelector(`[data-project-task="${CSS.escape(focus.rowId)}"]`):document;
+    target=scope?.querySelector(focus.selector);
+  }
+  if(!target||document.activeElement===target)return;
+  target.focus({preventScroll:true});
+  if(focus.selection)try{target.setSelectionRange(...focus.selection);}catch{}
+}
 // folderId is the destination in the viewed project; undefined when the task left the project.
 function placeTaskMoveFocus(taskId,{folderId,neighbourId=null}={}){
   const active=document.activeElement;
@@ -979,12 +1000,12 @@ async function moveFolderTask(task,folderId,receipt,{undo=false,originActive=()=
         throw Error('Task move could not be confirmed. Check the current folder.');
       }
       projectDataGeneration++;
-      const neighbourId=taskMoveNeighbour(task.id);
+      const focus=captureTaskMoveFocus(task.id);
       state.tasks=state.tasks.map(value=>value.id===updated.id?{...value,...updated}:value);
       syncSelectedTaskFolder(task.projectId);
       projectPaintPending=patchProjectFolderView({movedTaskId:task.id});
       onSuccess?.();
-      placeTaskMoveFocus(task.id,{folderId,neighbourId});
+      settleTaskMoveFocus(task.id,focus,folderId);
       if(!undo)offerFolderUndo(updated,body.expectedFolderId,undoExpiresAt,serverTime);
     },false);
   // Conflicts and lost responses also require a fresh server read.
@@ -1104,14 +1125,14 @@ async function moveProjectTask(task,projectId,folderId,receipt,{undo=false,confi
   const current=()=>authorized()&&originActive()&&canMoveTaskAcrossProjects()&&state.tasks.some(value=>value.id===task.id&&value.projectId===task.projectId&&value.status!=='archived');
   const body={projectId,folderId,expectedProjectId:task.projectId,expectedFolderId:task.folderId??null,expectedFolderRevision:task.folderRevision,...(undo?{undo:true}:{}),confirmSharingChange};
   const destination=state.projects.find(project=>project.id===projectId)?.displayName||'the other project';
-  let moved=null,neighbourId=null;
+  let moved=null,focus={mode:'none'};
   const result=await mutateFolder(viewProjectId,`/api/v1/tasks/${encodeURIComponent(task.id)}/project`,folderRequestOptions('PATCH',body,receipt),
     undo?'Task moved back':null,current,({task:updated,undoExpiresAt,serverTime}={})=>{
       if(updated?.id!==task.id||updated.projectId!==projectId||(updated.folderId??null)!==folderId||updated.folderRevision!==task.folderRevision+1){
         throw Error('Task move could not be confirmed. Check which project the task is in.');
       }
       projectDataGeneration++;
-      neighbourId=taskMoveNeighbour(task.id);
+      focus=captureTaskMoveFocus(task.id);
       state.tasks=state.tasks.map(value=>value.id===updated.id?{...value,...updated}:value);
       state.outputs=state.outputs.map(output=>output.taskId===updated.id?{...output,projectId}:output);
       state.datasets=state.datasets.map(dataset=>dataset.id===updated.datasetId?{...dataset,projectId}:dataset);
@@ -1121,7 +1142,7 @@ async function moveProjectTask(task,projectId,folderId,receipt,{undo=false,confi
     },false);
   if(moved){
     render();
-    placeTaskMoveFocus(task.id,{folderId:projectId===state.selectedProjectId?folderId:undefined,neighbourId});
+    settleTaskMoveFocus(task.id,focus,projectId===state.selectedProjectId?folderId:undefined);
     if(!undo){
       const previousProjectId=task.projectId,previousFolderId=task.folderId??null,updated=moved.updated;
       offerMoveUndo(`Task moved to ${destination}`,moved.undoExpiresAt,moved.serverTime,
