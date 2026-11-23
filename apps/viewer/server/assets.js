@@ -5,7 +5,6 @@
 
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const express = require('express');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const store = require('./store');
@@ -21,6 +20,8 @@ const { scopedStorageRootKey } = require('./storageManager');
 const { validCameraFilename } = require('./cameraPhotos');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
+const { assetIntegrityCache } = require('./assetIntegrityCache');
+const { deliverVerified, openForDelivery } = require('./verifiedDelivery');
 
 const router = trackedRouter();
 const productTickets = createDownloadCapabilities();
@@ -161,10 +162,23 @@ function publishedAssetMatch(model, rootKey, relPath, { review = false, publicOn
 }
 function publishedAssetAllows(model, rootKey, relPath) { return Boolean(publishedAssetMatch(model,rootKey,relPath)); }
 
-function sha256File(filePath) { return new Promise((resolve,reject)=>{const hash=crypto.createHash('sha256'),stream=fs.createReadStream(filePath);stream.on('data',(chunk)=>hash.update(chunk));stream.on('error',reject);stream.on('end',()=>resolve(hash.digest('hex')));}); }
 function requestedRange(header,size){const match=/^bytes=(\d*)-(\d*)$/.exec(String(header||''));if(!match)return null;let start=match[1]?Number(match[1]):null,end=match[2]?Number(match[2]):null;if(start===null&&end!==null){start=Math.max(0,size-end);end=size-1;}else{if(start===null)return null;if(end===null||end>=size)end=size-1;}return Number.isSafeInteger(start)&&Number.isSafeInteger(end)&&start>=0&&start<=end&&start<size?{start,end}:null;}
-async function verifyChunks(filePath,chunks,range,totalSize){const selected=range?chunks.filter((chunk)=>chunk.byteOffset<=range.end&&chunk.byteOffset+chunk.byteSize-1>=range.start):chunks;if(!selected.length)return false;if(!range){let offset=0;for(const chunk of chunks){if(chunk.byteOffset!==offset)return false;offset+=chunk.byteSize;}if(offset!==totalSize)return false;}const handle=await fs.promises.open(filePath,'r');try{for(const chunk of selected){const buffer=Buffer.allocUnsafe(chunk.byteSize),{bytesRead}=await handle.read(buffer,0,chunk.byteSize,chunk.byteOffset);if(bytesRead!==chunk.byteSize||crypto.createHash('sha256').update(buffer.subarray(0,bytesRead)).digest('hex')!==chunk.sha256)return false;}return true;}finally{await handle.close();}}
-async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null){const integrityRequired=project.provider==='ltds-processing'||Boolean(publishedAsset.sha256)||Boolean(publishedAsset.manifestSha256);if(!integrityRequired)return true;const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null,chunkPath='';if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return false;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return false;expected=repository.getModelAssetFile(publishedAsset.id,child);chunkPath=child;}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return false;const stat=fs.statSync(abs);if(stat.size!==expected.byteSize)return false;const chunks=repository.getModelAssetChunks?.(publishedAsset.id,chunkPath)||[];if(chunks.length)return verifyChunks(abs,chunks,requestedRange(rangeHeader,stat.size),stat.size);return await sha256File(abs)===expected.sha256;}
+// Registered chunk hashes are proven per 4 MiB region; positive results are
+// remembered per exact file identity (assetIntegrityCache.js). A range must be
+// fully covered by registered chunks; a gap in the chunk table fails closed.
+async function verifyChunks(filePath,stat,chunks,range,totalSize,options={}){const selected=range?chunks.filter((chunk)=>chunk.byteOffset<=range.end&&chunk.byteOffset+chunk.byteSize-1>=range.start):chunks;if(!selected.length)return false;if(range){let covered=range.start;for(const chunk of [...selected].sort((x,y)=>x.byteOffset-y.byteOffset)){if(chunk.byteOffset>covered)return false;covered=Math.max(covered,chunk.byteOffset+chunk.byteSize);}if(covered<=range.end)return false;}else{let offset=0;for(const chunk of chunks){if(chunk.byteOffset!==offset)return false;offset+=chunk.byteSize;}if(offset!==totalSize)return false;}for(const chunk of selected){if(!await assetIntegrityCache.verifyChunk(filePath,stat,chunk,options))return false;}return true;}
+// The registered integrity record for one requested file: whole-file SHA-256
+// and, when registered, its 4 MiB chunk hashes. null = no valid record.
+function integrityPlan(repository,project,publishedAsset,requested){const integrityRequired=project.provider==='ltds-processing'||Boolean(publishedAsset.sha256)||Boolean(publishedAsset.manifestSha256);if(!integrityRequired)return {required:false};const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null,chunkPath='';if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return null;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return null;expected=repository.getModelAssetFile(publishedAsset.id,child);chunkPath=child;}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return null;return {required:true,expected,chunks:repository.getModelAssetChunks?.(publishedAsset.id,chunkPath)||[]};}
+async function verifyIntegrityPlan(plan,abs,stat,range,options){if(!plan)return false;if(!plan.required)return true;const size=Number(stat.size);if(size!==plan.expected.byteSize)return false;if(plan.chunks.length)return verifyChunks(abs,stat,plan.chunks,range,size,options);return assetIntegrityCache.verifyWholeFile(abs,stat,plan.expected.sha256,options);}
+// Regions whose exactly-hashed bytes are sent for [start,end]; null streams
+// (no integrity record, or a whole file too large to buffer).
+function integrityRegions(plan,size,start,end){if(!plan?.required)return null;if(plan.chunks.length)return plan.chunks.filter((chunk)=>chunk.byteOffset<=end&&chunk.byteOffset+chunk.byteSize-1>=start).sort((a,b)=>a.byteOffset-b.byteOffset).map((chunk)=>({kind:'chunk',offset:chunk.byteOffset,size:chunk.byteSize,sha256:chunk.sha256}));return assetIntegrityCache.canBuffer(size+1)?[{kind:'file',offset:0,size,sha256:plan.expected.sha256,toEof:true}]:null;}
+// `opened` = { handle, stat, range, signal } verifies the exact byte range that
+// will be served, through the descriptor it will be served from.
+async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null,opened=null){const plan=integrityPlan(repository,project,publishedAsset,requested);if(!plan)return false;if(!plan.required)return true;const stat=opened?opened.stat:await fs.promises.stat(abs,{bigint:true});return verifyIntegrityPlan(plan,abs,stat,opened?opened.range:requestedRange(rangeHeader,Number(stat.size)),{handle:opened?.handle||null,signal:opened?.signal||null});}
+// deliverVerified options for one opened managed asset.
+function integrityDelivery(repository,project,publishedAsset,requested,abs,opened){const plan=integrityPlan(repository,project,publishedAsset,requested);return {verify:(range,signal,carry)=>verifyIntegrityPlan(plan,abs,opened.stat,range,{handle:opened.handle,signal,carry}),regions:(start,end)=>integrityRegions(plan,Number(opened.stat.size),start,end)};}
 
 async function pathTokenAuthorization(req, projectId) {
   if (!canonicalRepository) return false;
@@ -253,26 +267,41 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   if (share && (!publishedAsset || !assetAllowed(share,publishedAsset.kind)))return res.status(403).json({error:'not authorized'});
   const abs = safeExistingFile(rootPath, rel);
   if (!abs) return res.status(404).json({ error: 'asset not found' });
-  if (project.activeVersion) {
-    const requested=String(rel).replaceAll('\\','/'),published=String(publishedAsset.relativePath).replaceAll('\\','/');
-    if (!await publishedAssetIntegrityAllows(canonicalRepository,project,publishedAsset,requested,abs,req.get('range')))return res.status(404).json({ error: 'asset not found' });
-  }
 
-  // Authorization/revocation is evaluated for every request. Prevent an
-  // intermediary or browser cache from serving a previously authorized URL
-  // after its session/share has expired or been revoked.
-  if(share){const current=canonicalRepository.getPublicShare(share.id);if(!canonicalRepository.publicShareLive(current)||!revisionMatches(current,{shareRevision:share.authorizationRevision})||!assetAllowed(current,publishedAsset?.kind))return res.status(403).json({error:'not authorized'});}
-  res.setHeader('Cache-Control', 'private, no-store');
-
+  // Authorization/revocation is evaluated for every request, and again after
+  // the (possibly slow) integrity check, right before any byte is sent.
+  // Responses are never stored by browsers or intermediaries, so a URL stops
+  // working as soon as its session/share expires or is revoked.
+  const shareStillAllows=()=>{if(!share)return true;const current=canonicalRepository.getPublicShare(share.id);return canonicalRepository.publicShareLive(current)&&revisionMatches(current,{shareRevision:share.authorizationRevision})&&assetAllowed(current,publishedAsset?.kind);};
+  const requested = String(rel).replaceAll('\\', '/');
   const accelerated = xAccelLocation(abs);
-  if (accelerated) {
-    res.setHeader('X-Accel-Redirect', accelerated);
-    return res.end();
-  }
-  return res.sendFile(abs, (err) => {
-    if (err && !res.headersSent) {
-      res.status(err.status || 404).json({ error: 'asset not found' });
+  if (!project.activeVersion || accelerated) {
+    // Legacy unmanaged projects carry no integrity metadata. X-Accel-Redirect
+    // (only with X_ACCEL_REDIRECT_PREFIX, empty in the shipped compose file)
+    // hands the path to the proxy, which reopens it after this check.
+    if (project.activeVersion && !await publishedAssetIntegrityAllows(canonicalRepository,project,publishedAsset,requested,abs,req.get('range')))return res.status(404).json({ error: 'asset not found' });
+    if (!shareStillAllows()) return res.status(403).json({ error: 'not authorized' });
+    res.setHeader('Cache-Control', 'private, no-store');
+    if (accelerated) {
+      res.setHeader('X-Accel-Redirect', accelerated);
+      return res.end();
     }
+    return res.sendFile(abs, (err) => {
+      if (err && !res.headersSent) {
+        res.status(err.status || 404).json({ error: 'asset not found' });
+      }
+    });
+  }
+  let opened;
+  try { opened = await openForDelivery(abs); } catch { return res.status(404).json({ error: 'asset not found' }); }
+  return deliverVerified(req, res, {
+    ...opened,
+    filePath: abs,
+    headers: { 'Cache-Control': 'private, no-store' },
+    ...integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened),
+    onFailure: () => res.status(404).json({ error: 'asset not found' }),
+    beforeSend: () => { if (shareStillAllows()) return true; res.status(403).json({ error: 'not authorized' }); return false; },
+    onError: (err) => { if (!res.headersSent) res.status(err.status || 404).json({ error: 'asset not found' }); },
   });
 }
 
@@ -308,15 +337,30 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     if (!photo) return res.status(404).json({ error: 'photo not found' });
     const rootPath = canonicalAssetRoot(model, photo.rootKey), absolute = rootPath && safeExistingFile(rootPath, photo.relativePath);
     if (!absolute) return res.status(404).json({ error: 'photo not found' });
-    const stat = fs.statSync(absolute);
-    if (stat.size !== photo.byteSize || await sha256File(absolute) !== photo.sha256) return res.status(404).json({ error: 'photo not found' });
-    if(authorization.share){const current=await pathTokenAuthorization(req,req.params.id);if(!current?.cameras)return res.status(403).json({error:'not authorized'});}
-    res.setHeader('Cache-Control', 'private, no-store');
-    res.setHeader('Content-Type', photo.contentType);
-    res.setHeader('X-Content-Type-Options', 'nosniff');
+    let opened;
+    try { opened = await openForDelivery(absolute); } catch { return res.status(404).json({ error: 'photo not found' }); }
+    if (Number(opened.stat.size) !== photo.byteSize) { await opened.handle.close(); return res.status(404).json({ error: 'photo not found' }); }
+    const headers = { 'Cache-Control': 'private, no-store', 'Content-Type': photo.contentType, 'X-Content-Type-Options': 'nosniff' };
+    // Share access is re-checked after the (possibly slow) integrity check.
+    const shareStillAllows = async () => { if (!authorization.share) return true; const current = await pathTokenAuthorization(req, req.params.id); if (current?.cameras) return true; res.status(403).json({ error: 'not authorized' }); return false; };
     const accelerated = xAccelLocation(absolute);
-    if (accelerated) { res.setHeader('X-Accel-Redirect', accelerated); return res.end(); }
-    return res.sendFile(absolute, (error) => { if (error && !res.headersSent) res.status(error.status || 404).json({ error: 'photo not found' }); });
+    if (accelerated) {
+      try { if (!await assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle })) return res.status(404).json({ error: 'photo not found' }); } finally { await opened.handle.close(); }
+      if (!await shareStillAllows()) return undefined;
+      res.set(headers);
+      res.setHeader('X-Accel-Redirect', accelerated);
+      return res.end();
+    }
+    return deliverVerified(req, res, {
+      ...opened,
+      filePath: absolute,
+      headers,
+      verify: (_range, signal, carry) => assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle, signal, carry }),
+      regions: () => (assetIntegrityCache.canBuffer(photo.byteSize + 1) ? [{ kind: 'file', offset: 0, size: photo.byteSize, sha256: photo.sha256, toEof: true }] : null),
+      onFailure: () => res.status(404).json({ error: 'photo not found' }),
+      beforeSend: shareStillAllows,
+      onError: (error) => { if (!res.headersSent) res.status(error.status || 404).json({ error: 'photo not found' }); },
+    });
   } catch (error) { return next(error); }
 });
 
@@ -364,11 +408,14 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
     if(!selected)return res.status(403).json({error:'Download expired or access revoked. Open Downloads to try again.'});
     const {model,asset,product}=selected,root=canonicalAssetRoot(model,asset.rootKey),absolute=root&&safeExistingFile(root,asset.relativePath);
     if(!absolute)return res.sendStatus(404);
-    if(!await publishedAssetIntegrityAllows(canonicalRepository,model,asset,asset.relativePath,absolute,req.get('range')))return res.sendStatus(409);
-    if(!await admitted.revalidate())return res.sendStatus(403);
-    res.setHeader('Cache-Control','private, no-store');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Content-Type-Options','nosniff');
-    res.setHeader('Content-Type','application/octet-stream');res.setHeader('Content-Disposition',`attachment; filename="${product.fileName}"`);
-    return res.sendFile(absolute,{acceptRanges:true},error=>{if(error&&!res.headersSent)next(error);});
+    let opened;try{opened=await openForDelivery(absolute);}catch{return res.sendStatus(404);}
+    return deliverVerified(req,res,{...opened,filePath:absolute,
+      headers:{'Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${product.fileName}"`},
+      ...integrityDelivery(canonicalRepository,model,asset,asset.relativePath,absolute,opened),
+      onFailure:()=>res.sendStatus(409),
+      // Integrity verification may be slow: honor revocation that happened while it ran.
+      beforeSend:async()=>{if(await admitted.revalidate())return true;res.sendStatus(403);return false;},
+      onError:(error)=>{if(!res.headersSent)next(error);}});
   }catch(error){next(error);}
 });
 
@@ -382,3 +429,5 @@ module.exports.xAccelLocation = xAccelLocation;
 module.exports.publishedAssetAllows = publishedAssetAllows;
 module.exports.publishedAssetMatch = publishedAssetMatch;
 module.exports.publishedAssetIntegrityAllows = publishedAssetIntegrityAllows;
+module.exports.integrityDelivery = integrityDelivery;
+module.exports.assetIntegrityCache = assetIntegrityCache;
