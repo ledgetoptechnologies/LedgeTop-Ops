@@ -52,21 +52,18 @@ TrueNAS thumbnail renderer images** GitHub workflow builds the `decoder`,
 `broker`, and `queue-worker` targets for `linux/amd64` on relevant changes pushed
 to `main`. It publishes immutable commit (`sha-<commit>`) and candidate
 (`candidate-<commit>-<run>-<attempt>`) tags without overwriting them and records
-a digest receipt. It never moves `:latest` (or `:stable`).
+a digest receipt. After every image's checks passed (for the queue worker, the media
+canary too), a `promote-latest` job moves each image's `:latest` to the exact verified
+digest, never back to an older `main` commit. It never moves `:stable`.
 
-**Until the protected promotion workflow lands (a separate PR), nothing moves these
-images' `:latest`.** The stack keeps the `:latest` it already has: with `pull_policy:
-always` a redeploy pulls that same digest again.
-
-To run a specific newer build before promotion exists, all four steps are required:
-1. confirm the exact `main` publish run for that commit **succeeded end to end** (every job green,
-   including the digest read-back and, for the queue worker, the media canary). A `sha-<commit>` tag can
-   exist even when a later check in that run failed, so the tag alone proves nothing;
-2. download that run's deployment receipt for the image and take its verified `digest`;
-3. pin by that **immutable digest**, `image: ghcr.io/ledgetoptechnologies/<package>@sha256:<digest from the receipt>`,
-   never by the `sha-<commit>` tag;
-4. production use still needs **Beau's separate approval**.
-Change the image back to `:latest` once promotion exists. A plain container restart does not pull images; this configuration
+With `pull_policy: always`, the next redeploy pulls the new `:latest`. The hand-run
+`promote-thumbnail-renderer.yml` is the approved rollback and re-promotion path; both share the per-image
+`latest-writer-thumbnail-<target>` concurrency group. A rollback lasts until the next automatic write; to keep
+one, follow the ordered rollback steps in `apps/viewer/docs/RELEASING.md` (pause, settle in-flight publisher runs,
+then roll back), or revert on `main`. To hold a
+service on one build, pin its **immutable digest** from the run's deployment receipt,
+`image: ghcr.io/ledgetoptechnologies/<package>@sha256:<digest from the receipt>`, never the
+`sha-<commit>` tag. A plain container restart does not pull images; this configuration
 does not install a live automatic updater. Image references are already in the
 YAML, with no digest/image environment values required. Configure a private
 registry credential in the TrueNAS Apps UI if the packages are not anonymously readable.

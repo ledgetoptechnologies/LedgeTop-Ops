@@ -1,6 +1,9 @@
 // Repository-wide inventory of registry writes that name a mutable tag (latest, stable, full, keyless). Each image's
-// latest has exactly one reviewed writer: its hand-run promotion. Main publishers write immutable sha/candidate tags
-// only. A new mutable-tag writer anywhere fails here until it is reviewed. Static: nothing is published.
+// latest has exactly two reviewed writers, sharing one concurrency group: its hand-run, gated promotion (rollback and
+// re-promotion) and its main publisher's promote-latest job, which moves latest forward to the build that run just
+// verified (see auto-promote-latest.test.mjs).
+// Everything else writes immutable sha/candidate tags only. A new mutable-tag writer anywhere fails here until it is
+// reviewed. Static: nothing is published.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -26,14 +29,17 @@ function mutableWriters() {
   return writers;
 }
 
-test('mutable tags are written only by the four reviewed promotions', () => {
+test('mutable tags are written only by the four reviewed promotions and the four publishers\' promote-latest jobs', () => {
   assert.deepEqual(mutableWriters(), ['promote-logs-local.yml#promote', 'promote-proxy-generator.yml#promote',
-    'promote-thumbnail-renderer.yml#promote', 'promote-viewer.yml#promote']);
+    'promote-thumbnail-renderer.yml#promote', 'promote-viewer.yml#promote', 'publish-logs-local.yml#promote-latest',
+    'publish-proxy-generator.yml#promote-latest', 'publish-thumbnail-renderer.yml#promote-latest', 'publish-viewer.yml#promote-latest']);
 });
 
-test('the thumbnail and proxy publishers write only immutable sha and candidate tags', () => {
+test('before promote-latest, the thumbnail and proxy publishers write only immutable sha and candidate tags', () => {
   for (const name of ['publish-thumbnail-renderer.yml', 'publish-proxy-generator.yml']) {
-    const code = read(name).replace(/^\s*#.*$/gm, '');
+    const text = read(name);
+    const code = text.slice(0, text.indexOf('- name: Move latest to this verified main build (never to an older commit)')).replace(/^\s*#.*$/gm, '');
+    assert.ok(code.length > 0 && code.length < text.length, `${name}: the move step is present`);
     assert.ok(!/:(?:latest|stable)\b/.test(code.replace(/echo[^\n]*/g, '')), `${name}: no mutable tag`);
     assert.match(code, /candidate-\$\{GITHUB_SHA\}-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}/, `${name}: candidate tag`);
     for (const line of code.match(/imagetools create[^\n]*/g) ?? []) assert.match(line, /--prefer-index=false/, `${name}: digest kept`);
