@@ -490,38 +490,65 @@ class ReceiptWriteFailure extends Error {
 }
 
 /**
- * Exclusive receipt file. It is rewritten in full after every step, so a stop leaves a complete partial receipt.
- * A write returns only after every byte is written, flushed and read back equal from the same path. Anything else is
- * `receipt_write_failed`, and the file is never written again by this process.
+ * Windows refuses to replace, and sometimes to read, a file that another process holds open, such as a virus scanner.
+ * No request is in flight while this waits, for at most 15 seconds. Only local file operations are tried again.
+ */
+function whileHeldByOthers(operation) {
+  for (let attempt = 0; ; attempt++) {
+    try { return operation(); } catch (error) {
+      if (process.platform !== 'win32' || attempt >= 150 || !['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+}
+
+/**
+ * Exclusive receipt file. Every write replaces the whole file atomically: the new content goes to `<file>.next`, every
+ * byte is written and flushed, the closed file is read back and compared, and only then does it replace the receipt,
+ * which is read back once more. The last complete receipt therefore stays in place until a newer one is proven. Any
+ * failure is `receipt_write_failed`; the file is then never written again by this process, and `<file>.next` is left
+ * as it is. `keep` saves one value, once, as `<file>.pre-apply.json`.
  */
 export function openOps0227To0244Receipt(filename) {
   if (typeof filename !== 'string' || !path.isAbsolute(filename)) fail('receipt_path_invalid');
-  let fd;
-  try { fd = fs.openSync(filename, 'wx', 0o600); } catch (error) {
+  try { fs.closeSync(fs.openSync(filename, 'wx', 0o600)); } catch (error) {
     if (error?.code === 'EEXIST') fail('receipt_exists_no_replay');
     fail('receipt_create_failed');
   }
-  let broken = false;
+  const next = `${filename}.next`;
+  let current = Buffer.alloc(0), broken = false;
+  const same = (file, bytes) => { if (!whileHeldByOthers(() => fs.readFileSync(file)).equals(bytes)) throw new Error(`${path.basename(file)} differs`); };
   return {
     write(receipt) {
       if (broken) fail('receipt_write_failed');
       broken = true;
       try {
         const bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
-        fs.ftruncateSync(fd, 0);
-        for (let offset = 0; offset < bytes.length;) {
-          const written = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
-          if (!Number.isSafeInteger(written) || written < 1 || written > bytes.length - offset) throw new Error('short write');
-          offset += written;
+        JSON.parse(bytes.toString('utf8'));
+        const fd = fs.openSync(next, 'wx', 0o600);
+        try {
+          for (let offset = 0; offset < bytes.length;) {
+            const written = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
+            if (!Number.isSafeInteger(written) || written < 1 || written > bytes.length - offset) throw new Error('short write');
+            offset += written;
+          }
+          fs.fsyncSync(fd);
+        } catch (error) {
+          try { fs.closeSync(fd); } catch {}
+          throw error;
         }
-        fs.fsyncSync(fd);
-        const stored = fs.readFileSync(filename);
-        if (!stored.equals(bytes)) throw new Error('read back differs');
-        JSON.parse(stored.toString('utf8'));
+        fs.closeSync(fd);
+        same(next, bytes);
+        // Only this process's own last receipt is replaced.
+        same(filename, current);
+        whileHeldByOthers(() => fs.renameSync(next, filename));
+        same(filename, bytes);
+        current = bytes;
       } catch (cause) { throw new Error(RECEIPT_WRITE_FAILED, { cause }); }
       broken = false;
     },
-    close() { fs.closeSync(fd); },
+    keep(receipt) { openOps0227To0244Receipt(`${filename}.pre-apply.json`).write(receipt); },
+    close() {},
   };
 }
 
@@ -594,6 +621,13 @@ async function runOrdered({ plan, provider, mode = 'dry-run', target, receipt = 
       state.notes.push(`Snapshot at ${where} is ${snapshot.snapshotBytes} bytes, near the D1 per-value limit.`);
   };
   const persist = () => { if (receipt) try { receipt.write(state); } catch (cause) { throw new ReceiptWriteFailure(state, cause); } };
+  // Saved once, before the first file is sent: the proven starting point of this run, whatever happens later.
+  let kept = false;
+  const keepPreApply = ledger => {
+    if (kept || !receipt?.keep) return;
+    try { receipt.keep({ ...state, status: 'pre-apply', finalLedger: ledgerSummary(ledger) }); } catch (cause) { throw new ReceiptWriteFailure(state, cause); }
+    kept = true;
+  };
   const stop = (step, phase, code, detail = null) => {
     state.status = code.startsWith('reconciliation_required') ? 'reconciliation-required' : 'stopped';
     state.stop = { step, phase, code, ...(detail ? { detail } : {}) };
@@ -662,6 +696,7 @@ async function runOrdered({ plan, provider, mode = 'dry-run', target, receipt = 
     if (bad) { stop(file.name, 'preflight', `preflight_failed:${bad.name}`); persist(); break; }
     log(`${mode === 'execute' ? 'preflight ok' : 'dry-run ok'}: ${file.name}`);
     if (mode === 'dry-run') { persist(); continue; }
+    keepPreApply(current.ledger);
     step.apply = { startedAt: stamp(), finishedAt: null, statements: file.statementCount + 1, outcome: 'sending' };
     persist();
     try {
@@ -795,7 +830,8 @@ export async function mainOps0227To0244(args, dependencies = {}) {
   let receipt = null, receiptTouched = false;
   if (options.receiptPath) {
     const opened = (dependencies.openReceipt ?? openOps0227To0244Receipt)(options.receiptPath);
-    receipt = { write(value) { receiptTouched = true; opened.write(value); }, close() { opened.close(); } };
+    receipt = { write(value) { receiptTouched = true; opened.write(value); }, close() { opened.close(); },
+      ...(opened.keep ? { keep(value) { opened.keep(value); } } : {}) };
   }
   // A settled result keeps its own code when its receipt cannot be written; the receipt failure is reported beside it.
   const record = result => {

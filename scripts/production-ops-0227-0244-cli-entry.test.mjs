@@ -161,26 +161,26 @@ test('a missing token, a bad argument and an existing receipt stop before any re
 
 test('a failed refusal receipt keeps the original error, adds its own line, and is never retried', () => {
   const missing = file('write-fails-no-token.json');
-  const noToken = run([...PRODUCTION, '--receipt', missing], { token: null, extraEnv: { OPS_TEST_RECEIPT_FAILS: 'write' } });
+  const noToken = run([...PRODUCTION, '--receipt', missing], { token: null, extraEnv: { OPS_TEST_RECEIPT_FAILS: 'open' } });
   assert.deepEqual([noToken.status, noToken.stderr], [1, 'ops_0227_0244:cloudflare_token_missing\nops_0227_0244:refusal_receipt_write_failed\n']);
-  assert.deepEqual(noToken.network, [{ kind: 'receipt-write' }], 'one receipt attempt, no request');
+  assert.deepEqual(noToken.network, [{ kind: 'receipt-open' }], 'one receipt attempt, no request');
   assert.equal(fs.statSync(missing).size, 0);
 
-  const blocked = run([...PRODUCTION, '--receipt', file('write-fails-network.json')], { extraEnv: { OPS_TEST_RECEIPT_FAILS: 'write' } });
+  const blocked = run([...PRODUCTION, '--receipt', file('write-fails-network.json')], { extraEnv: { OPS_TEST_RECEIPT_FAILS: 'open' } });
   assert.deepEqual([blocked.status, blocked.stderr], [1, `${BLOCKED}\nops_0227_0244:refusal_receipt_write_failed\n`]);
-  assert.deepEqual(blocked.network.map(entry => entry.kind), ['fetch', 'receipt-write']);
+  assert.deepEqual(blocked.network.map(entry => entry.kind), ['fetch', 'receipt-open']);
 
   const closing = file('close-fails.json');
   const closeFails = run([...PRODUCTION, '--receipt', closing], { token: null, extraEnv: { OPS_TEST_RECEIPT_FAILS: 'close' } });
-  assert.deepEqual([closeFails.status, closeFails.stderr], [1, 'ops_0227_0244:cloudflare_token_missing\nops_0227_0244:receipt_close_failed\n']);
+  assert.deepEqual([closeFails.status, closeFails.stderr], [1, 'ops_0227_0244:cloudflare_token_missing\nops_0227_0244:refusal_receipt_write_failed\n']);
   assert.deepEqual(closeFails.network, [{ kind: 'receipt-close' }]);
-  assertRefusedReceipt(closing, 'dry-run', 'ops_0227_0244:cloudflare_token_missing');
+  assert.equal(fs.statSync(closing).size, 0);
 });
 
 test('a settled refusal keeps its code when its receipt cannot be written', () => {
   const root = copyTree(file('not-a-repository'));
   const code = 'ops_0227_0244:source_check_failed:production_ops_0226_runner_git_source_unavailable';
-  for (const fails of ['write', 'enospc:100', 'edquot:100', 'zero:100', 'fsync', 'readback']) {
+  for (const fails of ['open', 'enospc:100', 'edquot:100', 'zero:100', 'fsync', 'close', 'readback', 'rename', 'reread']) {
     const result = run(executeArgs(file('refused.json')), { root, extraEnv: { GIT_CEILING_DIRECTORIES: tmp, OPS_TEST_RECEIPT_FAILS: fails } });
     assert.deepEqual([result.status, result.stderr], [1, 'ops_0227_0244:refusal_receipt_write_failed\n'], fails);
     assert.equal(JSON.parse(result.stdout.trim().split('\n').at(-1)).stop.code, code, fails);

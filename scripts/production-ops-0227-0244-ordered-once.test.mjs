@@ -1178,55 +1178,174 @@ test('a run that cannot save its receipt stops at once and is never reported as 
   }
 });
 
-test('the receipt writer proves every byte, and never writes again after a failure', () => {
-  const real = { writeSync: fs.writeSync, fsyncSync: fs.fsyncSync, readFileSync: fs.readFileSync, ftruncateSync: fs.ftruncateSync };
-  const value = { text: 'x'.repeat(5000) }, bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
-  const disk = code => Object.assign(new Error('synthetic'), { code });
-  const limited = (limit, end) => (fd, buffer, offset, length, position) => {
-    const room = limit - position;
-    return room > 0 ? real.writeSync(fd, buffer, offset, Math.min(length, room), position) : end();
-  };
-  const attempt = (patch, next = {}) => {
+const realFs = Object.fromEntries(['openSync', 'writeSync', 'fsyncSync', 'closeSync', 'readFileSync', 'renameSync'].map(name => [name, fs[name]]));
+const diskError = code => Object.assign(new Error('synthetic'), { code });
+const isNext = file => typeof file === 'string' && file.endsWith('.next');
+/** A file that takes only `limit` bytes; afterwards `end` decides what a write does. Applies to receipt writes only. */
+const limitedWrites = (limit, end) => (fd, bytes, offset, length, position) => {
+  if (!Buffer.isBuffer(bytes)) return realFs.writeSync(fd, bytes, offset, length, position);
+  return limit - position > 0 ? realFs.writeSync(fd, bytes, offset, Math.min(length, limit - position), position) : end();
+};
+const restoreFs = () => Object.assign(fs, realFs);
+
+test('the receipt writer replaces the receipt only when the new one is proven, and never writes again after a failure', () => {
+  const first = { phase: 'first', text: 'y'.repeat(300) }, value = { phase: 'second', text: 'x'.repeat(5000) };
+  const encode = item => Buffer.from(`${JSON.stringify(item, null, 2)}\n`);
+  const attempt = patch => {
     const name = receiptPath(), receipt = openOps0227To0244Receipt(name);
     try {
-      Object.assign(fs, patch(name));
+      assert.equal(fs.statSync(name).size, 0);
+      receipt.write(first);
+      assert.ok(fs.readFileSync(name).equals(encode(first)));
+      assert.ok(!fs.existsSync(`${name}.next`), 'nothing is left beside a proven receipt');
       let error = null;
+      Object.assign(fs, patch(name));
       try { receipt.write(value); } catch (caught) { error = caught; }
-      Object.assign(fs, real);
-      const after = fs.readFileSync(name);
+      restoreFs();
+      const stored = fs.readFileSync(name), left = fs.existsSync(`${name}.next`);
       let again = null;
-      try { receipt.write({ ...value, again: true }); } catch (caught) { again = caught; }
-      if (error) assert.ok(fs.readFileSync(name).equals(after), 'a failed receipt is never written again');
-      return { error, again, after };
-    } finally { Object.assign(fs, real); receipt.close(); }
+      try { receipt.write({ phase: 'third' }); } catch (caught) { again = caught; }
+      if (error) {
+        assert.ok(fs.readFileSync(name).equals(stored), 'a failed receipt is never written again');
+        assert.equal(fs.existsSync(`${name}.next`), left);
+      }
+      return { error, again, stored };
+    } finally { restoreFs(); receipt.close(); }
   };
   // Short writes that make progress end with the whole receipt.
-  for (const patch of [() => ({}), () => ({ writeSync: (fd, b, o, n, p) => real.writeSync(fd, b, o, Math.min(n, 7), p) })]) {
-    const { error, again, after } = attempt(patch);
+  for (const patch of [() => ({}), () => ({ writeSync: (fd, b, o, n, p) => realFs.writeSync(fd, b, o, Buffer.isBuffer(b) ? Math.min(n, 7) : n, p) })]) {
+    const { error, again, stored } = attempt(patch);
     assert.deepEqual([error, again], [null, null]);
-    assert.ok(after.equals(bytes));
+    assert.ok(stored.equals(encode(value)));
   }
+  const old = encode(first);
   const failures = {
-    ENOSPC: () => ({ writeSync: limited(4096, () => { throw disk('ENOSPC'); }) }),
-    EDQUOT: () => ({ writeSync: limited(4096, () => { throw disk('EDQUOT'); }) }),
-    EFBIG: () => ({ writeSync: limited(0, () => { throw disk('EFBIG'); }) }),
-    zero: () => ({ writeSync: limited(4096, () => 0) }),
+    ENOSPC: () => ({ writeSync: limitedWrites(4096, () => { throw diskError('ENOSPC'); }) }),
+    EDQUOT: () => ({ writeSync: limitedWrites(4096, () => { throw diskError('EDQUOT'); }) }),
+    EFBIG: () => ({ writeSync: limitedWrites(0, () => { throw diskError('EFBIG'); }) }),
+    zero: () => ({ writeSync: limitedWrites(4096, () => 0) }),
     negative: () => ({ writeSync: () => -1 }),
     tooMany: () => ({ writeSync: (fd, b, o, n) => n + 1 }),
     notANumber: () => ({ writeSync: () => undefined }),
     lying: () => ({ writeSync: (fd, b, o, n) => n }),
-    EIO: () => ({ fsyncSync: () => { throw disk('EIO'); } }),
-    truncate: () => ({ ftruncateSync: () => { throw disk('EROFS'); } }),
-    cutOff: name => ({ readFileSync: (file, ...rest) => (file === name ? real.readFileSync(file).subarray(0, 100) : real.readFileSync(file, ...rest)) }),
-    changed: name => ({ readFileSync: (file, ...rest) => { const b = real.readFileSync(file, ...rest); if (file === name) b[20] ^= 1; return b; } }),
-    unreadable: name => ({ readFileSync: (file, ...rest) => { if (file === name) throw disk('EACCES'); return real.readFileSync(file, ...rest); } }),
+    EIO: () => ({ fsyncSync: () => { throw diskError('EIO'); } }),
+    EACCES: () => ({ openSync: (file, ...rest) => { if (isNext(file)) throw diskError('EACCES'); return realFs.openSync(file, ...rest); } }),
+    ECLOSE: () => ({ closeSync: fd => { realFs.closeSync(fd); throw diskError('ECLOSE'); } }),
+    EROFS: () => ({ renameSync: () => { throw diskError('EROFS'); } }),
+    cutOff: () => ({ readFileSync: (file, ...rest) => (isNext(file) ? realFs.readFileSync(file).subarray(0, 100) : realFs.readFileSync(file, ...rest)) }),
+    changed: () => ({ readFileSync: (file, ...rest) => { const b = realFs.readFileSync(file, ...rest); if (isNext(file)) b[20] ^= 1; return b; } }),
+    unreadable: () => ({ readFileSync: (file, ...rest) => { if (isNext(file)) throw diskError('EACCES'); return realFs.readFileSync(file, ...rest); } }),
+    changedByOthers: name => { fs.writeFileSync(name, 'not ours'); return {}; },
+    removed: name => { fs.rmSync(name); fs.writeFileSync(name, ''); return {}; },
+    leftover: name => { fs.writeFileSync(`${name}.next`, 'from elsewhere'); return {}; },
   };
   for (const [name, patch] of Object.entries(failures)) {
-    const { error, again } = attempt(patch);
+    const { error, again, stored } = attempt(patch);
     assert.equal(error?.message, 'ops_0227_0244:receipt_write_failed', name);
     assert.ok(error.cause instanceof Error, name);
     if (/^E[A-Z]+$/u.test(name)) assert.equal(error.cause.code, name);
     assert.equal(again?.message, 'ops_0227_0244:receipt_write_failed', name);
+    const expected = { changedByOthers: Buffer.from('not ours'), removed: Buffer.alloc(0) }[name] ?? old;
+    assert.ok(stored.equals(expected), `${name}: the last complete receipt stays in place`);
+  }
+  // Only the check after the replacement fails: the newer receipt is in place, and it is still a failure.
+  const reread = attempt(name => {
+    let renamed = false;
+    return { renameSync: (from, to) => { realFs.renameSync(from, to); renamed = true; },
+      readFileSync: (file, ...rest) => (renamed && file === name ? Buffer.from('{}') : realFs.readFileSync(file, ...rest)) };
+  });
+  assert.equal(reread.error?.message, 'ops_0227_0244:receipt_write_failed');
+  assert.ok(reread.stored.equals(encode(value)));
+
+  // Windows only: a file held by another process is tried again for a while; one that stays held fails.
+  const wait = Atomics.wait;
+  let waits = 0;
+  Atomics.wait = (array, index, expected, ms) => { waits++; assert.equal(ms, 100); return 'timed-out'; };
+  try {
+    const windows = process.platform === 'win32';
+    for (const code of ['EPERM', 'EACCES', 'EBUSY']) for (const [refusals, ok] of [[3, windows], [1000, false]]) {
+      const rename = { count: 0 }, read = { count: 0 };
+      waits = 0;
+      const renamed = attempt(() => ({ renameSync: (from, to) => { if (++rename.count <= refusals) throw diskError(code); realFs.renameSync(from, to); } }));
+      assert.equal(renamed.error === null, ok, code);
+      assert.deepEqual([rename.count, waits], ok ? [4, 3] : windows ? [151, 150] : [1, 0], code);
+      assert.ok(renamed.stored.equals(ok ? encode(value) : old), code);
+      waits = 0;
+      const reading = attempt(() => ({ readFileSync: (file, ...rest) => { if (isNext(file) && ++read.count <= refusals) throw diskError(code); return realFs.readFileSync(file, ...rest); } }));
+      assert.equal(reading.error === null, ok, code);
+      assert.deepEqual([read.count, waits], ok ? [4, 3] : windows ? [151, 150] : [1, 0], code);
+    }
+    waits = 0;
+    assert.equal(attempt(() => ({ renameSync: () => { throw diskError('ENOSPC'); } })).error?.cause?.code, 'ENOSPC');
+    assert.equal(waits, 0, 'only a held file is tried again');
+  } finally { Atomics.wait = wait; }
+  // The pre-apply receipt is exclusive, proven the same way, and independent of the main receipt.
+  const name = receiptPath(), receipt = openOps0227To0244Receipt(name);
+  receipt.write(first);
+  receipt.keep(value);
+  assert.ok(fs.readFileSync(`${name}.pre-apply.json`).equals(encode(value)));
+  assert.ok(fs.readFileSync(name).equals(old));
+  assert.throws(() => receipt.keep(first), /receipt_exists_no_replay/u);
+  assert.ok(fs.readFileSync(`${name}.pre-apply.json`).equals(encode(value)));
+});
+
+test('every unsaved receipt of a real-file run leaves the last complete receipt and a usable pre-apply receipt', async () => {
+  const plan = loadVerifiedOps0227To0244Plan(), target = { environment: 'non-production', ...REHEARSAL };
+  const attempt = async failAt => {
+    const file = freshDb(), provider = sqliteProvider(file), receiptFile = receiptPath();
+    let renames = 0;
+    fs.renameSync = (from, to) => { if (++renames === failAt) throw diskError('EROFS'); realFs.renameSync(from, to); };
+    try {
+      const result = await mainOps0227To0244(execArgs(receiptFile), { env: TOKEN_ENV, out: () => {}, providerFactory: () => provider, confirm: async () => true });
+      return { result, renames, receiptFile, file, sent: provider.calls.writes };
+    } finally { restoreFs(); provider.close(); }
+  };
+  const reconcile = async (file, baselineFile) => {
+    const provider = sqliteProvider(file);
+    try { return await mainOps0227To0244(['--reconcile', '--baseline-receipt', baselineFile, ...rehearsalArgs], { env: TOKEN_ENV, out: () => {}, providerFactory: () => provider }); }
+    finally { provider.close(); }
+  };
+  const clean = await attempt(0);
+  assert.equal(clean.result.status, 'complete');
+  assert.equal(clean.renames, 24, '23 receipts and one pre-apply receipt');
+  const preApply = readReceipt(`${clean.receiptFile}.pre-apply.json`);
+  assert.deepEqual([preApply.status, preApply.finalLedger, preApply.writesPerformed, preApply.steps.length, preApply.steps[0].apply],
+    ['pre-apply', { ...OPS_0227_0244_PRIOR_LEDGER }, 0, 1, null]);
+  // Failure 3 is the pre-apply receipt itself: nothing is sent without it.
+  for (let failAt = 1; failAt <= clean.renames; failAt++) {
+    const { result, receiptFile, file, sent } = await attempt(failAt);
+    assert.equal(result.receiptFailure, 'ops_0227_0244:receipt_write_failed');
+    assert.equal(result.status, sent > 0 ? 'reconciliation-required' : 'stopped');
+    assert.equal(result.writesPerformed, sent);
+    if (failAt === 1) { assert.equal(fs.statSync(receiptFile).size, 0); continue; }
+    const saved = readReceipt(receiptFile);
+    assert.equal(saved.status, 'running', 'the last complete receipt, never a success');
+    assert.throws(() => loadOps0227To0244BaselineReceipt(receiptFile, { plan, target }), /baseline_receipt_invalid/u);
+    if (failAt <= 3) { assert.equal(sent, 0); continue; }
+    const kept = `${receiptFile}.pre-apply.json`;
+    assert.deepEqual(loadOps0227To0244BaselineReceipt(kept, { plan, target }).startCounts, preApply.rowCounts.start);
+    const rec = await reconcile(file, kept);
+    if (sent === 0) assert.deepEqual([rec.status, rec.reconcile.nextStep], ['reconciled', OPS_0227_0244_ORDERED_NAMES[0]]);
+    else assert.deepEqual([rec.status, rec.stop.code], ['reconciliation-required', 'reconciliation_required:baseline_receipt_not_latest']);
+    const landed = saved.steps.filter(step => step.apply?.outcome === 'acknowledged').length;
+    assert.ok(landed === sent || landed === sent - 1, 'the saved receipt is at most one file behind');
+  }
+});
+
+test('regression: a 4096-byte file limit stops a full apply before anything is sent; a larger one stops it mid-run', async () => {
+  for (const end of [() => 0, () => { throw diskError('EFBIG'); }]) for (const [limit, expectedSent] of [[4096, 0], [40000, 3]]) {
+    const file = freshDb(), provider = sqliteProvider(file), receiptFile = receiptPath();
+    fs.writeSync = limitedWrites(limit, end);
+    let result;
+    try { result = await mainOps0227To0244(execArgs(receiptFile), { env: TOKEN_ENV, out: () => {}, providerFactory: () => provider, confirm: async () => true }); }
+    finally { restoreFs(); provider.close(); }
+    assert.equal(provider.calls.writes, expectedSent);
+    assert.equal(ledgerOf(file).length, 226 + expectedSent);
+    assert.deepEqual([result.status, result.stop.code, result.receiptFailure, result.writesPerformed], [
+      ...(expectedSent ? ['reconciliation-required', 'reconciliation_required:receipt_write_failed'] : ['stopped', 'receipt_write_failed']),
+      'ops_0227_0244:receipt_write_failed', expectedSent]);
+    assert.equal(fs.statSync(`${receiptFile}.next`).size, limit);
+    if (expectedSent) assert.equal(readReceipt(receiptFile).status, 'running');
   }
 });
 
@@ -1274,24 +1393,26 @@ test('a settled refusal or cancelled run keeps its own code when its receipt can
   });
 });
 
-test('real command: a receipt that cannot be saved or closed is exit 1 with its own line, even when the run passed', () => {
+test('real command: a receipt that cannot be saved is exit 1 with its own line, even when the run passed', () => {
   const file = freshDb(), before = fs.readFileSync(file);
-  const dry = fails => {
+  const dry = (fails, after = 0) => {
     const receiptFile = receiptPath();
-    return { receiptFile, ...realCommand(file, [...rehearsalArgs, '--receipt', receiptFile], REHEARSAL.databaseName, { OPS_TEST_RECEIPT_FAILS: fails }) };
+    return { receiptFile, ...realCommand(file, [...rehearsalArgs, '--receipt', receiptFile], REHEARSAL.databaseName, { OPS_TEST_RECEIPT_FAILS: fails, OPS_TEST_RECEIPT_FAILS_AFTER: String(after) }) };
   };
-  for (const fails of ['enospc:4096', 'edquot:4096', 'zero:4096', 'fsync', 'readback', 'write']) {
+  for (const fails of ['enospc:4096', 'edquot:4096', 'zero:4096', 'open', 'fsync', 'close', 'readback', 'rename', 'reread']) {
     const run = dry(fails);
     assert.deepEqual([run.status, run.stderr], [1, 'ops_0227_0244:receipt_write_failed\n'], fails);
     const summary = JSON.parse(run.last);
     assert.deepEqual([summary.status, summary.stop.phase, summary.stop.code, summary.writesPerformed], ['stopped', 'receipt', 'receipt_write_failed', 0], fails);
-    if (/:/u.test(fails)) assert.ok(fs.statSync(run.receiptFile).size <= 4096, fails);
+    if (/:/u.test(fails)) assert.equal(fs.statSync(`${run.receiptFile}.next`).size, 4096, fails);
+    if (fails !== 'reread') assert.equal(fs.statSync(run.receiptFile).size, 0, fails);
   }
   const short = dry('short');
   assert.deepEqual([short.status, short.stderr, JSON.parse(short.last).status, readReceipt(short.receiptFile).status], [0, '', 'dry-run-passed', 'dry-run-passed']);
-  const closing = dry('close');
-  assert.deepEqual([closing.status, closing.stderr, JSON.parse(closing.last).status, readReceipt(closing.receiptFile).status],
-    [1, 'ops_0227_0244:receipt_close_failed\n', 'dry-run-passed', 'dry-run-passed']);
+  // A later failure keeps the earlier complete receipt, and the result is still not a success.
+  const later = dry('enospc:100', 1);
+  assert.deepEqual([later.status, later.stderr, JSON.parse(later.last).status], [1, 'ops_0227_0244:receipt_write_failed\n', 'stopped']);
+  assert.equal(readReceipt(later.receiptFile).status, 'running');
   assert.ok(fs.readFileSync(file).equals(before), 'database bytes unchanged');
 });
 
@@ -1301,7 +1422,8 @@ test('real command: an operating system file-size limit is a failed receipt, not
   // dash counts 512-byte blocks: 4096 bytes. The receipt of a dry run is larger.
   const run = realCommand(freshDb(), [...rehearsalArgs, '--receipt', receiptFile], REHEARSAL.databaseName, {}, 8);
   assert.deepEqual([run.status, run.stderr, JSON.parse(run.last).stop.code], [1, 'ops_0227_0244:receipt_write_failed\n', 'receipt_write_failed']);
-  assert.ok(fs.statSync(receiptFile).size <= 4096);
+  assert.equal(fs.statSync(receiptFile).size, 0);
+  assert.equal(fs.statSync(`${receiptFile}.next`).size, 4096);
 });
 
 test('an unexpected error after the run has written its receipt leaves that receipt as it is', async () => {

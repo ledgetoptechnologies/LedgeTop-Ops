@@ -221,11 +221,16 @@ Exit codes:
 ## Receipt and stop behaviour
 
 The receipt is a JSON file. The tool creates it exclusively and rewrites it in
-full after every phase, so a stop always leaves a complete partial receipt. An
+full after every phase, so a stop always leaves a complete partial receipt. Each
+rewrite goes to `<receipt>.next` first and replaces the receipt only when it is
+proven, so the last complete receipt stays in place. Before the first file is
+sent, an execute run also saves `<receipt>.pre-apply.json` once: the proven
+starting point, with the start counts, the schema digest and the ledger. An
 error before the ordered run starts (for example a missing token, or a failed
 target check) is recorded as `refused`, phase `command-line`, with zero writes.
-A process that is killed, or ends without settling, can leave an empty or
-unfinished file. The receipt contains:
+A process that is killed, or ends without settling, leaves its last saved receipt
+(empty if there was none yet), perhaps with a `.next` file beside it. The receipt
+contains:
 
 - the plan hash and the fixture hash;
 - the target ids and the approval reference;
@@ -261,10 +266,15 @@ tool never retries a batch, and it never sends a file twice in one process.
 
 ## When the receipt cannot be saved
 
-A receipt write counts only after every byte is written, flushed and read back
-equal. After a failure the process never writes that file again, so it may be
-empty or cut off. A receipt that was not saved is never reported as a success:
-the exit code is 1, whatever the run reached, and stderr has its own line.
+A receipt write counts only after every byte is written to `<receipt>.next`,
+flushed, closed and read back equal, the file has replaced the receipt, and the
+receipt has been read back equal. After a failure the process never writes that
+receipt again. On Windows a file held open by another program is tried again for
+up to 15 seconds, so do not open the receipt during a run. The previous complete
+receipt normally stays in place, and
+`.next` holds whatever was written. A receipt that was not saved is never
+reported as a success: the exit code is 1, whatever the run reached, and stderr
+has its own line.
 
 | What failed | stdout summary | stderr | Exit |
 |---|---|---|---|
@@ -273,17 +283,23 @@ the exit code is 1, whatever the run reached, and stderr has its own line.
 | A receipt write after the run had already stopped | the stop's own status and code | `ops_0227_0244:receipt_write_failed` | 1 |
 | The receipt of a refusal or a cancelled run | the refusal's own status and code | `ops_0227_0244:refusal_receipt_write_failed` | 1 |
 | The receipt of an error | none | the error, then `ops_0227_0244:refusal_receipt_write_failed` | 1 |
-| Closing the receipt after a result | the result's own status | `ops_0227_0244:receipt_close_failed` | 1 |
-| Closing the receipt after an error | none | the error, then `ops_0227_0244:receipt_close_failed` | 1 |
+
+A result or an error whose receipt cannot be closed would add
+`ops_0227_0244:receipt_close_failed` in the same way. The file receipt holds
+nothing open between writes, so it does not raise it.
 
 The run stops at the failure: no later file is read or sent. After a file was
-sent, the database holds at least the confirmed files (`writesPerformed`) and the
-saved receipt may not say so. That includes a failure on the last write of a run
-that reached 236. Do not retry. The exit code and stderr
-decide, not the file: a receipt that failed its check can still be readable, even
-with status `complete`. An unreadable or unfinished receipt is not accepted as a
-baseline, so reconcile and resume refuse it. This needs a reviewed
-manual reconciliation from a read-only look at the ledger and schema.
+sent, the database holds at least the confirmed files (`writesPerformed`), and the
+saved receipt is the one from before the failed write: it may still say
+`sending` for a file that landed. That includes a failure on the last write of a
+run that reached 236. Do not retry. The exit code and stderr decide, not the
+file. If only the last check after the replacement failed, the receipt can be
+newer, even `complete`.
+
+An unfinished receipt (status `running`) is not accepted as a baseline. The
+pre-apply receipt is accepted only while the ledger is still where it was before
+the first file. Any later state needs a reviewed manual reconciliation from a
+read-only look at the ledger and schema.
 
 ## Reconcile and resume
 

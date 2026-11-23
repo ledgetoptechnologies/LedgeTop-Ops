@@ -2,9 +2,10 @@
 // Every network attempt is recorded in OPS_TEST_NETWORK_LOG (method and kind only, never headers) and refused.
 // With OPS_TEST_D1_SQLITE, requests to the Cloudflare D1 API are answered from that local SQLite file instead, and
 // batches are applied only with OPS_TEST_D1_WRITES=1. OPS_TEST_FETCH_HANGS=1 makes a request that never settles.
-// OPS_TEST_RECEIPT_FAILS makes receipt operations fail and records each failure: write (truncate), fsync, readback,
-// close, enospc:<bytes>, edquot:<bytes> and zero:<bytes> (a file that takes only that many bytes), or short (writes
-// of at most 100 bytes, which must still succeed).
+// OPS_TEST_RECEIPT_FAILS makes one kind of receipt operation fail and records each failure: open, fsync, close,
+// readback, rename, reread, enospc:<bytes>, edquot:<bytes>, zero:<bytes> (a file that takes only that many bytes), or
+// short (writes of at most 100 bytes, which must still succeed). OPS_TEST_RECEIPT_FAILS_AFTER=<n> lets the first n
+// receipt writes succeed.
 import fs from 'node:fs';
 import net from 'node:net';
 import dns from 'node:dns';
@@ -22,24 +23,44 @@ for (const target of [dns, dns.promises]) for (const name of Object.keys(target)
   if (/^(?:lookup|resolve|reverse)/u.test(name) && typeof target[name] === 'function') target[name] = refuse('dns');
 const [failing, limit] = (process.env.OPS_TEST_RECEIPT_FAILS ?? '').split(':');
 if (failing) {
-  const { openSync, writeSync, readFileSync } = fs, receipts = new Set(), paths = new Set();
+  const real = { ...fs }, after = Number(process.env.OPS_TEST_RECEIPT_FAILS_AFTER ?? 0), open = new Set(), renamed = new Set();
+  let writes = 0;
+  const now = () => writes > after;
   const broken = code => { record({ kind: `receipt-${failing}` }); throw Object.assign(new Error('synthetic disk failure'), { code }); };
-  fs.openSync = (...args) => { const fd = openSync(...args); if (args[1] === 'wx') { receipts.add(fd); paths.add(args[0]); } return fd; };
-  const name = { write: 'ftruncateSync', close: 'closeSync', fsync: 'fsyncSync' }[failing];
-  if (name) { const real = fs[name]; fs[name] = (fd, ...rest) => (receipts.has(fd) ? broken('EIO') : real(fd, ...rest)); }
-  if (failing === 'readback') fs.readFileSync = (file, ...rest) => {
-    const bytes = readFileSync(file, ...rest);
-    if (!paths.has(file)) return bytes;
-    record({ kind: 'receipt-readback' });
-    return bytes.subarray(0, -1);
+  const isNext = file => typeof file === 'string' && file.endsWith('.next');
+  fs.openSync = (file, ...rest) => {
+    // Reading a file back also opens it; only the exclusive creation is a receipt write.
+    if (!isNext(file) || rest[0] !== 'wx') return real.openSync(file, ...rest);
+    writes++;
+    if (failing === 'open' && now()) broken('EACCES');
+    const fd = real.openSync(file, ...rest);
+    open.add(fd);
+    return fd;
   };
-  if (['short', 'zero', 'enospc', 'edquot'].includes(failing)) fs.writeSync = (fd, bytes, offset, length, position) => {
-    if (!receipts.has(fd)) return writeSync(fd, bytes, offset, length, position);
-    if (failing === 'short') return writeSync(fd, bytes, offset, Math.min(length, 100), position);
+  fs.writeSync = (fd, bytes, offset, length, position) => {
+    if (!open.has(fd) || !now() || !['short', 'zero', 'enospc', 'edquot'].includes(failing)) return real.writeSync(fd, bytes, offset, length, position);
+    if (failing === 'short') return real.writeSync(fd, bytes, offset, Math.min(length, 100), position);
     const room = Number(limit) - position;
-    if (room > 0) return writeSync(fd, bytes, offset, Math.min(length, room), position);
+    if (room > 0) return real.writeSync(fd, bytes, offset, Math.min(length, room), position);
     if (failing === 'zero') { record({ kind: 'receipt-zero' }); return 0; }
     return broken(failing.toUpperCase());
+  };
+  fs.fsyncSync = fd => (failing === 'fsync' && open.has(fd) && now() ? broken('EIO') : real.fsyncSync(fd));
+  fs.closeSync = fd => {
+    const mine = open.delete(fd);
+    real.closeSync(fd);
+    if (failing === 'close' && mine && now()) broken('EIO');
+  };
+  fs.readFileSync = (file, ...rest) => {
+    const bytes = real.readFileSync(file, ...rest);
+    if (!now() || !((failing === 'readback' && isNext(file)) || (failing === 'reread' && renamed.has(file)))) return bytes;
+    record({ kind: `receipt-${failing}` });
+    return bytes.subarray(0, -1);
+  };
+  fs.renameSync = (from, to) => {
+    if (failing === 'rename' && isNext(from) && now()) broken('EROFS');
+    real.renameSync(from, to);
+    if (isNext(from) && now()) renamed.add(to);
   };
 }
 syncBuiltinESMExports();
