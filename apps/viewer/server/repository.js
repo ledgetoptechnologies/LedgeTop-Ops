@@ -295,7 +295,14 @@ class ViewerRepository {
     const row = this.database.prepare('SELECT relative_path,byte_size,sha256 FROM model_asset_files WHERE asset_id=? AND relative_path=?').get(assetId, relativePath);
     return row ? { relativePath: row.relative_path, byteSize: row.byte_size, sha256: row.sha256 } : null;
   }
-  getModelAssetChunks(assetId,relativePath=''){return this.database.prepare('SELECT chunk_index,byte_offset,byte_size,sha256 FROM model_asset_chunks WHERE asset_id=? AND relative_path=? ORDER BY chunk_index').all(assetId,relativePath).map((row)=>({chunkIndex:row.chunk_index,byteOffset:row.byte_offset,byteSize:row.byte_size,sha256:row.sha256}));}
+  // With a {start,end} byte range, only the rows from the chunk that starts at
+  // or before `start` through `end` (chunk tables are contiguous); callers still
+  // check that the rows cover the range.
+  getModelAssetChunks(assetId,relativePath='',range=null){const rows=range
+    ?this.database.prepare(`SELECT chunk_index,byte_offset,byte_size,sha256 FROM model_asset_chunks WHERE asset_id=? AND relative_path=? AND byte_offset<=?
+      AND byte_offset>=COALESCE((SELECT MAX(byte_offset) FROM model_asset_chunks WHERE asset_id=? AND relative_path=? AND byte_offset<=?),0) ORDER BY chunk_index`).all(assetId,relativePath,range.end,assetId,relativePath,range.start)
+    :this.database.prepare('SELECT chunk_index,byte_offset,byte_size,sha256 FROM model_asset_chunks WHERE asset_id=? AND relative_path=? ORDER BY chunk_index').all(assetId,relativePath);
+    return rows.map((row)=>({chunkIndex:row.chunk_index,byteOffset:row.byte_offset,byteSize:row.byte_size,sha256:row.sha256}));}
 
   getCameraPhoto(versionId, filename) {
     const safe = validCameraFilename(filename);
