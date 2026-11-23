@@ -13,10 +13,10 @@ const settle = async () => { for (let index = 0; index < 4; index += 1) await tu
 
 // Operations on a fake clock: a call is decided when it arrives (the least
 // favourable moment for revocation lag) and answered latency later.
-function simulation({ latency = 0, decide = () => true, value = share() } = {}) {
+function simulation({ latency = 0, decide = () => true, value = share(), timeoutMs } = {}) {
   const sim = { at: START, calls: [], inFlight: 0, maxInFlight: 0 };
   sim.validator = new SourceAuthorizationValidator({
-    enabled: true, baseUrl: 'https://incoming.example.com', keyId: 'viewer-v1', secret: SECRET,
+    enabled: true, baseUrl: 'https://incoming.example.com', keyId: 'viewer-v1', secret: SECRET, timeoutMs, monotonic: () => sim.at - START,
     fetchImpl: () => {
       const call = { at: sim.at, due: sim.at + (typeof latency === 'function' ? latency(sim) : latency), decision: decide(sim.at, sim.calls.length) };
       sim.calls.push(call);
@@ -177,6 +177,49 @@ test('concurrent requests share one refresh and one expiry check', async () => {
     assert.equal(sim.maxInFlight, 1);
     assert.equal(sim.validator.pending.size, 0);
   }
+});
+
+test('an answer that arrives at or after its own five-second limit is no allow, for the caller and for every joiner', async () => {
+  // The fetch timeout does not protect this case: the reply is already there,
+  // but the process only gets to it late.
+  for (const [latency, expected] of [[4999, true], [5000, false], [5400, false]]) {
+    const sim = simulation({ latency });
+    const caller = await sim.request();
+    sim.at = START + 1000;
+    const joiner = await sim.request();
+    assert.equal(caller.waited && joiner.waited, true);
+    sim.at = START + latency; await sim.answerDue();
+    assert.equal(caller.allowed, expected, `caller at ${latency} ms`);
+    assert.equal(joiner.allowed, expected, `joiner at ${latency} ms`);
+    const next = await sim.request();
+    if (expected) assert.equal(next.allowed, true);
+    else assert.equal(next.waited, true, 'a late allow is not cached: the next request waits for a new check');
+  }
+});
+
+test('a late background answer is no allow and is not cached', async () => {
+  const sim = simulation({ latency: (current) => (current.calls.length ? 5200 : 0) });
+  await sim.request(); await sim.answerDue();
+  sim.at = START + 3000;
+  assert.equal((await sim.request()).allowed, true, 'served while the refresh runs');
+  sim.at = START + 5100;
+  const joiner = await sim.request();
+  assert.equal(joiner.waited, true);
+  sim.at = START + 8200; await sim.answerDue();
+  assert.equal(joiner.allowed, false, 'the joined check outlived its own limit');
+  const next = await sim.request();
+  assert.equal(next.waited, true);
+  assert.equal(sim.maxInFlight, 1);
+});
+
+test('an allow published in time but picked up after its limit is no allow', async () => {
+  let clock = 0;
+  const value = share(), validator = new SourceAuthorizationValidator({ enabled: true, baseUrl: 'https://incoming.example.com', keyId: 'viewer-v1', secret: SECRET, monotonic: () => clock, fetchImpl: async () => json(value, true) });
+  const start = validator.start.bind(validator);
+  validator.start = (...args) => start(...args).then((lease) => { clock += 5000; return lease; });
+  assert.equal(await validator.allows(value, START), false);
+  validator.start = start;
+  assert.equal(await validator.allows(value, START + 5000), true);
 });
 
 test('the source expiry still ends access, also for an allow from a background check', async () => {
