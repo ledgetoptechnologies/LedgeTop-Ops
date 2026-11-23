@@ -145,6 +145,21 @@ test('staff capability binds output state and exact registered asset without rev
   c.output.status='ready';const grant2=await(await fetch(endpoint,{method:'POST',headers,body:'{}'})).json();c.staff.revokedAt=new Date().toISOString();assert.equal((await fetch(c.base+grant2.url)).status,403);
 });
 
+test('staff output downloads close the file when integrity setup throws',async(t)=>{
+  const c=await fixture(t),headers={authorization:`Bearer ${c.adminToken}`,'content-type':'application/json'};
+  const grant=await(await fetch(`${c.base}/api/v1/processing/outputs/version/products/ortho/download-grants`,{method:'POST',headers,body:'{}'})).json();
+  const handles=[],open=fs.promises.open;
+  t.mock.method(fs.promises,'open',async(...args)=>{const handle=await open(...args);handles.push(handle);return handle;});
+  c.repository.getModelAssetChunks=()=>{throw new Error('database failed');};
+  for(const [url,options] of [[grant.url,{}],['/api/v1/processing/outputs/version/assets/ortho',{headers}]]){
+    handles.length=0;
+    assert.equal((await fetch(c.base+url,options)).status,500,url);
+    assert.equal(handles.length,1,url);
+    for(let i=0;i<100&&handles[0].fd!==-1;i+=1)await new Promise(resolve=>setTimeout(resolve,5));
+    assert.equal(handles[0].fd,-1,`${url}: the descriptor is closed`);
+  }
+});
+
 test('public-share products retain task/version permissions and stop on share revocation',async(t)=>{
   const c=await fixture(t),share={id:'share',modelId:'model',permissions:{view:true,download:true},versionPolicy:'active'};
   c.repository.getPublicShare=id=>id==='share'?share:null;c.repository.publicShareLive=value=>!!value&&!value.revokedAt;

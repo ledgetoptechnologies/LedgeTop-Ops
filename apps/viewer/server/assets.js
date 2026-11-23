@@ -22,7 +22,7 @@ const { productDescriptor, registeredProducts, createDownloadCapabilities } = re
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 const { assetIntegrityCache } = require('./assetIntegrityCache');
 const { deliverVerified } = require('./verifiedDelivery');
-const { safeResolve, safeExistingFile, openAssetFile } = require('./assetPath');
+const { safeResolve, safeExistingFile, openAssetFile, closeOnThrow } = require('./assetPath');
 
 const router = trackedRouter();
 const productTickets = createDownloadCapabilities();
@@ -249,7 +249,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   // working as soon as its session/share expires or is revoked.
   const shareStillAllows=()=>{if(!share)return true;const current=canonicalRepository.getPublicShare(share.id);return canonicalRepository.publicShareLive(current)&&revisionMatches(current,{shareRevision:share.authorizationRevision})&&assetAllowed(current,publishedAsset?.kind);};
   const requested = String(rel).replaceAll('\\', '/');
-  const accelerated = xAccelLocation(abs);
+  const accelerated = closeOnThrow(opened, () => xAccelLocation(abs));
   if (!project.activeVersion || accelerated) {
     await opened.handle.close();
     // Legacy unmanaged projects carry no integrity metadata. X-Accel-Redirect
@@ -271,7 +271,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   return deliverVerified(req, res, {
     ...opened,
     headers: { 'Cache-Control': 'private, no-store' },
-    ...integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened),
+    ...closeOnThrow(opened, () => integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened)),
     onFailure: () => res.status(404).json({ error: 'asset not found' }),
     beforeSend: () => { if (shareStillAllows()) return true; res.status(403).json({ error: 'not authorized' }); return false; },
     onError: (err) => { if (!res.headersSent) res.status(err.status || 404).json({ error: 'asset not found' }); },
@@ -315,7 +315,7 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     const headers = { 'Cache-Control': 'private, no-store', 'Content-Type': photo.contentType, 'X-Content-Type-Options': 'nosniff' };
     // Share access is re-checked after the (possibly slow) integrity check.
     const shareStillAllows = async () => { if (!authorization.share) return true; const current = await pathTokenAuthorization(req, req.params.id); if (current?.cameras) return true; res.status(403).json({ error: 'not authorized' }); return false; };
-    const accelerated = xAccelLocation(absolute);
+    const accelerated = closeOnThrow(opened, () => xAccelLocation(absolute));
     if (accelerated) {
       try { if (!await assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle })) return res.status(404).json({ error: 'photo not found' }); } finally { await opened.handle.close(); }
       if (!await shareStillAllows()) return undefined;
@@ -381,7 +381,7 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
     if(!opened)return res.sendStatus(404);
     return deliverVerified(req,res,{...opened,
       headers:{'Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${product.fileName}"`},
-      ...integrityDelivery(canonicalRepository,model,asset,asset.relativePath,opened.filePath,opened),
+      ...closeOnThrow(opened,()=>integrityDelivery(canonicalRepository,model,asset,asset.relativePath,opened.filePath,opened)),
       onFailure:()=>res.sendStatus(409),
       // Integrity verification may be slow: honor revocation that happened while it ran.
       beforeSend:async()=>{if(await admitted.revalidate())return true;res.sendStatus(403);return false;},

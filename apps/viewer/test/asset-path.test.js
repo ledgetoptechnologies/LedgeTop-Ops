@@ -17,7 +17,7 @@ const assets = require('../server/assets');
 const { config } = require('../server/config');
 const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
-const { openAssetFile, safeExistingFile } = require('../server/assetPath');
+const { closeOnThrow, openAssetFile, safeExistingFile } = require('../server/assetPath');
 
 const linux = process.platform === 'linux';
 const onLinux = { skip: linux ? false : 'Linux only' };
@@ -154,7 +154,8 @@ test('a renamed, replaced or deleted file during the open never serves another l
   assert.equal(await during(() => fs.unlinkSync(file)), null, 'deleted');
   fs.writeFileSync(file, 'top');
   const replaced = await during(() => { fs.writeFileSync(`${file}.new`, 'new'); fs.renameSync(`${file}.new`, file); });
-  assert.equal(replaced.body, 'new', 'an atomically replaced file is opened again, never the unlinked one');
+  assert.equal(replaced, null, 'replaced: the unlinked file is refused, nothing is opened twice');
+  assert.equal((await read(root, 'top.tif')).body, 'new', 'the next request serves the new one');
   // A directory swapped for a link to outside after the open.
   const swapped = await during(() => { fs.renameSync(path.join(root, 'task'), path.join(root, 'task-old')); fs.symlinkSync(outside, path.join(root, 'task')); }, 'task/tiles/a b#%.b3dm');
   assert.equal(swapped, null);
@@ -190,33 +191,114 @@ test('a directory flipping between a real one and a link out never leaks outside
   assert.ok(seen.inside > 0, 'the real file was served');
 });
 
-test('when the kernel cannot confirm the path, the full check decides', onLinux, async (t) => {
+const codeError = (code) => Object.assign(new Error(code), { code });
+// Records every open: its flags and whether its handle was closed.
+function recordOpens(t, { before = () => {}, onHandle = () => {} } = {}) {
+  const opens = [];
+  const { open } = fs.promises;
+  const mocked = t.mock.method(fs.promises, 'open', async (file, flags, ...rest) => {
+    const entry = { flags, handle: null };
+    opens.push(entry);
+    await before(opens.length, file, flags);
+    entry.handle = await open(file, flags, ...rest);
+    await onHandle(entry.handle, opens.length);
+    return entry.handle;
+  });
+  return { opens, restore: () => mocked.mock.restore(), open: () => opens.filter(({ handle }) => handle && handle.fd !== -1).length };
+}
+
+test('when the kernel cannot confirm the path, the full check decides about the same open file', onLinux, async (t) => {
   const { root, outside } = fixture(t);
   fs.symlinkSync(outside, path.join(root, 'task', 'dir-out'));
-  const calls = countSync(t);
+  fs.symlinkSync(path.join(root, 'top.tif'), path.join(root, 'link-in.tif'));
+  execFileSync('mkfifo', [path.join(root, 'pipe.tif')]);
   const cases = {
-    'no /proc': () => t.mock.method(fs.promises, 'readlink', async () => { throw Object.assign(new Error('no'), { code: 'ENOENT' }); }),
+    'no /proc': () => t.mock.method(fs.promises, 'readlink', async () => { throw codeError('ENOENT'); }),
     'another spelling': () => t.mock.method(fs.promises, 'readlink', async () => path.join(root, 'TOP.TIF')),
-    'file lease': () => { const open = fs.promises.open; return t.mock.method(fs.promises, 'open', async (file, flags) => { if (flags & fs.constants.O_NONBLOCK) throw Object.assign(new Error('lease'), { code: 'EAGAIN' }); return open(file, flags); }); },
+    'realpath failed': () => t.mock.method(fs.promises, 'realpath', async () => { throw codeError('EIO'); }),
   };
+  const { O_NOFOLLOW, O_NONBLOCK } = fs.constants;
   for (const [label, setup] of Object.entries(cases)) {
     const mocked = setup();
-    calls.length = 0;
+    const calls = countSync(t), record = recordOpens(t);
     assert.equal((await read(root, 'top.tif')).body, 'top', label);
     assert.ok(calls.includes('lstatSync'), `${label}: full check ran`);
-    for (const rel of ['task/dir-out/secret.tif', '../outside/secret.tif', 'task']) assert.equal(await read(root, rel), null, `${label} ${rel}`);
+    for (const rel of ['task/dir-out/secret.tif', 'link-in.tif', 'pipe.tif', '../outside/secret.tif', 'task', 'missing.tif']) assert.equal(await read(root, rel), null, `${label} ${rel}`);
+    assert.ok(record.opens.length >= 6, label);
+    for (const { flags } of record.opens) assert.equal(flags & (O_NOFOLLOW | O_NONBLOCK), O_NOFOLLOW | O_NONBLOCK, `${label}: every open is no-follow and nonblocking`);
+    assert.equal(record.open(), 0, `${label}: every handle is closed`);
+    const before = record.opens.length;
+    assert.equal((await read(root, 'top.tif')).body, 'top');
+    assert.equal(record.opens.length, before + 1, `${label}: the file is opened once`);
+    record.restore();
     mocked.mock.restore();
+    t.mock.restoreAll();
   }
-  // The full check passes, then the directory becomes a link before the open.
-  const open = fs.promises.open;
-  t.mock.method(fs.promises, 'open', async (file, flags) => {
-    if (flags & fs.constants.O_NONBLOCK) throw Object.assign(new Error('lease'), { code: 'EAGAIN' });
-    fs.renameSync(path.join(root, 'task'), path.join(root, 'task-old'));
-    fs.symlinkSync(outside, path.join(root, 'task'));
-    return open(file, flags);
-  });
+  // The directory becomes a link after the open, then the full check runs.
   fs.writeFileSync(path.join(root, 'task', 'secret.tif'), 'inside');
+  const swap = () => { fs.renameSync(path.join(root, 'task'), path.join(root, 'task-old')); fs.symlinkSync(outside, path.join(root, 'task')); };
+  t.mock.method(fs.promises, 'readlink', async () => { swap(); throw codeError('ENOENT'); });
+  const record = recordOpens(t);
   assert.equal(await read(root, 'task/secret.tif'), null);
+  assert.equal(record.open(), 0);
+  t.mock.restoreAll();
+  // The directory was a link during the open and is real again for the check.
+  t.mock.method(fs.promises, 'readlink', async () => { fs.unlinkSync(path.join(root, 'task')); fs.renameSync(path.join(root, 'task-old'), path.join(root, 'task')); throw codeError('ENOENT'); });
+  const second = recordOpens(t);
+  assert.equal(await read(root, 'task/secret.tif'), null, 'the opened outside file is not the checked one');
+  assert.equal(second.open(), 0);
+});
+
+test('a leased file is retried without blocking, then refused; other open errors refuse at once', onLinux, async (t) => {
+  const { root } = fixture(t);
+  const { O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+  for (const [label, failures, expected, opens] of [['released in time', 2, 'top', 3], ['never released', Infinity, null, 5]]) {
+    const record = recordOpens(t, { before: (count) => { if (count <= failures) throw codeError('EAGAIN'); } });
+    assert.equal((await read(root, 'top.tif'))?.body ?? null, expected, label);
+    assert.equal(record.opens.length, opens, label);
+    for (const { flags } of record.opens) assert.equal(flags & (O_NOFOLLOW | O_NONBLOCK), O_NOFOLLOW | O_NONBLOCK, `${label}: never a blocking open`);
+    record.restore();
+  }
+  for (const code of ['EACCES', 'EMFILE', 'ENFILE', 'ENXIO', 'EIO', 'ESTALE']) {
+    const record = recordOpens(t, { before: () => { throw codeError(code); } });
+    assert.equal(await read(root, 'top.tif'), null, code);
+    assert.equal(record.opens.length, 1, code);
+    record.restore();
+  }
+});
+
+test('every early exit closes the opened file', onLinux, async (t) => {
+  const { root, outside } = fixture(t);
+  fs.symlinkSync(outside, path.join(root, 'task', 'dir-out'));
+  const failing = (target, name, code) => () => t.mock.method(target, name, () => { throw codeError(code); });
+  const cases = {
+    'fstat fails': [(handle) => { handle.stat = async () => { throw codeError('EIO'); }; }, () => {}],
+    'not a file': [(handle) => { handle.stat = async () => ({ isFile: () => false }); }, () => {}],
+    'a directory': [() => {}, () => {}, 'task'],
+    'outside through a link': [() => {}, () => {}, 'task/dir-out/secret.tif'],
+    'full check throws': [() => {}, () => { failing(fs.promises, 'readlink', 'ENOENT')(); failing(fs, 'lstatSync', 'EIO')(); }],
+    'full check finds nothing': [() => {}, () => { failing(fs.promises, 'readlink', 'ENOENT')(); failing(fs, 'realpathSync', 'EIO')(); }],
+    'another inode': [(handle) => { const stat = handle.stat.bind(handle); handle.stat = async (options) => Object.assign(await stat(options), { ino: 1n }); }, failing(fs.promises, 'readlink', 'ENOENT')],
+    'another device': [(handle) => { const stat = handle.stat.bind(handle); handle.stat = async (options) => Object.assign(await stat(options), { dev: 1n }); }, failing(fs.promises, 'readlink', 'ENOENT')],
+  };
+  for (const [label, [onHandle, setup, rel = 'top.tif']] of Object.entries(cases)) {
+    const record = recordOpens(t, { onHandle });
+    setup();
+    assert.equal(await openAssetFile(root, rel), null, label);
+    t.mock.restoreAll();
+    assert.equal(record.opens.length, 1, label);
+    assert.equal(record.opens[0].handle.fd, -1, `${label}: closed`);
+  }
+});
+
+test('closeOnThrow closes the handle only when the work throws', async (t) => {
+  const { root } = fixture(t);
+  const opened = await openAssetFile(root, 'top.tif');
+  assert.equal(closeOnThrow(opened, () => 7), 7);
+  assert.notEqual(opened.handle.fd, -1);
+  assert.throws(() => closeOnThrow(opened, () => { throw codeError('boom'); }), { code: 'boom' });
+  for (let i = 0; i < 100 && opened.handle.fd !== -1; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(opened.handle.fd, -1);
 });
 
 test('handles never leak, whatever the outcome', onLinux, async (t) => {
@@ -285,4 +367,26 @@ test('asset, photo and download routes refuse links and serve through the checke
     assert.equal((await get(`/session-camera-photos/${token}/${modelId}/linked.jpg`))[0], 404);
     assert.equal((await get(await products('dsm')))[0], 404);
   }
+
+  // Integrity setup or the X-Accel location throws after the file is open.
+  const record = recordOpens(t);
+  const closed = async (label, status) => {
+    const opens = record.opens.filter(({ handle }) => handle);
+    assert.equal(opens.length, 1, `${label}: one open`);
+    for (let i = 0; i < 100 && opens[0].handle.fd !== -1; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(opens[0].handle.fd, -1, `${label}: the descriptor is closed`);
+    assert.equal(status, 500, label);
+    record.opens.length = 0;
+  };
+  const dbDown = () => { throw new Error('database failed'); };
+  const downloadUrl = await products('ortho');
+  Object.assign(repository, { getModelAssetChunks: dbDown, getModelAssetFile: dbDown });
+  await closed('asset', (await asset('task/ortho.tif'))[0]);
+  await closed('product download', (await get(downloadUrl))[0]);
+  delete repository.getModelAssetChunks; delete repository.getModelAssetFile;
+  Object.defineProperty(config, 'xAccelRedirectPrefix', { configurable: true, get: dbDown });
+  await closed('asset X-Accel', (await asset('task/ortho.tif'))[0]);
+  await closed('photo X-Accel', (await get(`/session-camera-photos/${token}/${modelId}/photo.jpg`))[0]);
+  Object.defineProperty(config, 'xAccelRedirectPrefix', { configurable: true, enumerable: true, writable: true, value: '' });
+  assert.deepEqual(await asset('task/ortho.tif'), [200, 'ortho']);
 });
