@@ -242,7 +242,7 @@ function injectProjectShareCard(projectId){
   const target=modalContent.querySelector('[data-legacy-project-shares]');if(!target)return;
   const shares=state.projectShares[projectId]||[],tab=modalContent.querySelector('#share-tab-public');
   if(tab)tab.textContent=publicTabLabel(shares);
-  target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project access is shared through Operations clients only. Existing public project links remain active until you revoke them.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views</small></div>${badge(share.revokedAt?'revoked':'active')}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
+  target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project links cannot be created. A link marked active opens the project until it expires or you revoke it.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views · ${publicLinkState(share)==='expired'?`Expired ${esc(dateTime(share.expiresAt))}`:share.expiresAt?`Expires ${esc(dateTime(share.expiresAt))}`:'No expiry'}</small></div>${badge(publicLinkState(share))}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
   bindProjectShareCard(projectId);
 }
 function bindProjectShareCard(projectId){
@@ -1885,9 +1885,14 @@ function shareSettingsSummary(share){
   const labels=shareViewLabels(),views=share.allowedViews===null||share.allowedViews===undefined?'All available views':share.allowedViews.map(view=>labels[view]||view).join(', ');
   return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.hasPassword?'Password protected':'No password'} · ${share.expiresAt?`Expires ${dateTime(share.expiresAt)}`:'No expiry'}`;
 }
+// One rule for a public link everywhere in the dialog, the server's own (publicShareLive, projectShareLive):
+// an unreadable expiry is expired.
+function publicLinkState(share,now=Date.now()){
+  return share.revokedAt?'revoked':share.expiresAt&&!(Date.parse(share.expiresAt)>now)?'expired':'active';
+}
 // Links that still open count on the tab, so a live link is never hidden behind it.
 function publicTabLabel(shares){
-  const live=(shares||[]).filter(share=>!share.revokedAt&&!(share.expiresAt&&Date.parse(share.expiresAt)<=Date.now())).length;
+  const live=(shares||[]).filter(share=>publicLinkState(share)==='active').length;
   return live?`Public link (${live})`:'Public link';
 }
 function shareModal(projectId,onlyOutputId=null){
@@ -1902,7 +1907,7 @@ function shareModal(projectId,onlyOutputId=null){
     const form=checking?empty('Checking share eligibility…'):mayCreate&&!blocked&&views.length?
       `<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt','type="datetime-local"')}${shareViewControls(output)}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`:
       blocked?empty('Sharing eligibility could not be verified. Close and reopen Share to retry.'):empty(mayCreate?'No verified views are available for this link.':'Creating a link requires share permission and, for private ready models, activation permission.');
-    const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(share.revokedAt?'revoked':share.expiresAt&&Date.parse(share.expiresAt)<=Date.now()?'expired':'active')}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
+    const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(publicLinkState(share))}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
     publicCards=card(output.displayName||'Model',form+list);
   }
   // A project and a task open the same dialog: the same two tabs, in the Data page's order, starting on Client Workspace.
@@ -1910,7 +1915,10 @@ function shareModal(projectId,onlyOutputId=null){
   const publicPanel=onlyOutputId
     ?`<p class="form-note">No Operations account or client workspace is required. Anyone with the link can access its allowed content.</p>${result}${publicCards}`
     :'<p class="form-note">A public link opens one task. Use Share on that task to create one.</p><div data-legacy-project-shares></div>';
+  // A refresh of an open dialog replaces its content: keyboard focus on a tab or Close goes back to the same control.
+  const active=document.activeElement,focusKey=!active||!modal.open||!modalContent.contains(active)?null:/^share-tab-/.test(active.id)?`#${active.id}`:active.classList.contains('modal-close')?'.modal-close':null;
   openModal(onlyOutputId?`Share task: ${task?.displayName||selected?.displayName||'Model'}`:`Share project: ${project?.displayName||'Project'}`,`<div class="row-actions" role="tablist" aria-label="Sharing audience">${tab('public',publicTabLabel(selected?state.shares[selected.id]:null))}${tab('internal','Client Workspace')}</div><div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" role="tabpanel" id="share-panel-internal" aria-labelledby="share-tab-internal" ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div><div data-share-mode-panel="public" role="tabpanel" id="share-panel-public" aria-labelledby="share-tab-public" ${mode==='public'?'':'hidden'}>${publicPanel}</div></div>`,'wide-modal');
+  if(focusKey)modalContent.querySelector(focusKey)?.focus();
   bindShareModal(projectId,onlyOutputId);
 }
 function shareExpiryInput(value){

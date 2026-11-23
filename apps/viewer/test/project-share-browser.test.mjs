@@ -304,7 +304,7 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     assert.equal(typeof runtime.releaseClientRead, 'function', 'Optional Operations lookup should be pending');
     assert.match(await client.evaluate(`document.querySelector('[data-client-share-panel]').textContent`), /Checking Operations/);
     assert.equal(await client.evaluate(`document.querySelector('.project-share-form,.share-form') === null`), true, 'Project dialog must not expose public creation or per-task public forms');
-    assert.match(await client.evaluate(`document.querySelector('[data-legacy-project-shares]').textContent`), /remain active until you revoke/);
+    assert.match(await client.evaluate(`document.querySelector('[data-legacy-project-shares]').textContent`), /until it expires or you revoke it/);
     await client.evaluate(`window.__legacyRow=document.querySelector('[data-action="revoke-project-share"]')`);
     assert.equal(runtime.requests.slice(start).some(item => item.method !== 'GET'), false, 'Opening Share must remain read-only');
     runtime.holdClientRead = false;
