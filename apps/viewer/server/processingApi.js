@@ -6,7 +6,7 @@ const express = require('express');
 const { trackedRouter, httpRequestLifecycle } = require('./httpRequestLifecycle');
 const { config } = require('./config');
 const auth = require('./auth');
-const {controllerOriginAllowed}=require('./controllerOrigins');
+const {controllerOriginAllowed,sameSiteRenewal}=require('./controllerOrigins');
 const { verifyServiceRequest, sha256Hex } = require('./serviceAuth');
 const { idempotent } = require('./serviceIdempotency');
 const { NodeOdmProvider } = require('./nodeOdmProvider');
@@ -42,7 +42,7 @@ const shareVault=require('./shareTokenVault');
 const {VIEW_KINDS}=require('./publicSharePolicy');
 function adminShareView(share){return{id:share.id,modelId:share.modelId,label:share.label,permissions:share.permissions,allowedViews:share.allowedViews,linkRecoverable:Boolean(share.tokenCiphertext),hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
 function adminProjectShareView(share){return{id:share.id,projectId:share.projectId,label:share.label,permissions:share.permissions,hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,versionPolicy:share.versionPolicy,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
-function workspaceSessionView(session,accessToken){return{...(accessToken?{accessToken}:{}),session:{id:session.id,subject:session.subject,permissions:session.permissions,displayUnits:session.displayUnits,expiresAt:session.expiresAt},units:{default:config.defaultUnits,resolved:session.displayUnits},controllerOrigin:session.controllerOrigin};}
+function workspaceSessionView(session,accessToken){return{...(accessToken?{accessToken}:{}),session:{id:session.id,subject:session.subject,permissions:session.permissions,displayUnits:session.displayUnits,expiresAt:session.expiresAt},units:{default:config.defaultUnits,resolved:session.displayUnits},controllerOrigin:session.controllerOrigin,...sameSiteRenewal(session.controllerOrigin,config)};}
 function onlyKeys(value,allowed){return value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every((key)=>allowed.includes(key));}
 function requireIdempotencyKey(req,res,next){const key=req.get('Idempotency-Key');if(!key)return error(res,428,'idempotency_key_required','Idempotency-Key is required');if(!/^[A-Za-z0-9._:-]{8,128}$/.test(key))return error(res,400,'invalid_idempotency_key');next();}
 function optionDomain(spec){if(Array.isArray(spec.domain))return spec.domain;if(spec.domain&&typeof spec.domain==='object')return spec.domain;if(typeof spec.domain==='string'){try{return JSON.parse(spec.domain);}catch{return null;}}return null;}

@@ -29,4 +29,20 @@ function controllerOrigins(primary, configured, allowLoopback = false) {
 function controllerOriginAllowed(origin, allowed, allowLoopback = false) {
   return Boolean(exactControllerOrigin(origin, allowLoopback) && allowed.includes(origin));
 }
-module.exports = { exactControllerOrigin, controllerOrigins, controllerOriginAllowed };
+
+// The last two labels, for this operator-configured list of exact Operations
+// hosts only. It never admits an origin; it only orders ones already admitted.
+function site(origin) {
+  try { return new URL(origin).hostname.split(".").slice(-2).join("."); } catch { return null; }
+}
+
+// When the pinned controller is on another site, its Access cookie is third-party
+// to Viewer and the browser may withhold it. Another approved Operations host on
+// Viewer's own site can renew the same pinned session without that limit.
+function sameSiteRenewal(controllerOrigin, { publicBaseUrl, opsControllerOrigins }) {
+  const viewerSite = publicBaseUrl ? site(publicBaseUrl) : null;
+  if (!viewerSite || site(controllerOrigin) === viewerSite) return {};
+  const renewalOrigin = opsControllerOrigins.find(origin => origin.startsWith("https://") && site(origin) === viewerSite);
+  return renewalOrigin ? { renewalOrigin } : {};
+}
+module.exports = { exactControllerOrigin, controllerOrigins, controllerOriginAllowed, sameSiteRenewal };

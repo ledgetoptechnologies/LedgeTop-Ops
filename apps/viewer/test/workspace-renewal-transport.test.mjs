@@ -57,7 +57,7 @@ test('signed-out recovery preserves work and unavailable endpoint retries withou
   for(const signedOut of [false,true]){
     const context=harness(async url=>response(url,{error:signedOut?'Cloudflare Access authentication required':'Not found'},signedOut?401:404));
     context.renewal.requestRenewal('timer');await tick();
-    assert.deepEqual(context.expired,signedOut?['revoked']:[]);assert.equal(context.sessions.length,0);assert.equal(context.renewal.accessToken,TOKEN);
+    assert.deepEqual(context.expired,signedOut?['signed-out']:[]);assert.equal(context.sessions.length,0);assert.equal(context.renewal.accessToken,TOKEN);
     if(!signedOut)assert.ok(context.timers.some(timer=>timer.delay===2000&&!timer.cleared));context.renewal.dispose();
   }
 });

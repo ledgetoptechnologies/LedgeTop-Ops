@@ -91,13 +91,27 @@ export function createWorkspaceRecovery({windowRef=window,documentRef=document,f
     // pending writes. Browser cancellation leaves the paused workspace usable.
     return beginCurrentTabWorkspaceRecovery({windowRef,previous:record.previous,view:getView(),now});
   }
+  // Access came back without this dialog (silent renewal). A sign-in already
+  // being redeemed finishes on its own.
+  function resume(){
+    const record=pending;if(!record||record.busy)return false;
+    pending=null;
+    if(record.nonce){
+      const complete={version:1,type:'ltds-viewer:workspace-recovery-complete',nonce:record.nonce};
+      try{record.popup?.postMessage(complete,windowRef.location.origin);}catch{}
+      try{record.channel?.postMessage(complete);}catch{}
+    }
+    resetLaunch(record);closeDialog(record);
+    try{onResumed();}finally{record.resolve();}
+    return true;
+  }
   function wait(signal){
     if(signal?.aborted)return Promise.reject(new DOMException('Cancelled','AbortError'));
     if(!pending)return Promise.resolve();
     if(!signal)return pending.promise;
     return new Promise((resolve,reject)=>{const abort=()=>{cleanup();reject(new DOMException('Cancelled','AbortError'));},cleanup=()=>signal.removeEventListener('abort',abort);signal.addEventListener('abort',abort,{once:true});pending.promise.then(()=>{cleanup();resolve();},error=>{cleanup();reject(error);});});
   }
-  return{pause,wait,continueInCurrentTab,navigationState:()=>({paused:Boolean(pending),...getNavigationState()}),isPaused:()=>Boolean(pending),dispose(){windowRef.removeEventListener('message',message);if(pending){const record=pending;pending=null;resetLaunch(record);closeDialog(record);record.reject(new Error('Workspace closed'));}}};
+  return{pause,wait,resume,continueInCurrentTab,navigationState:()=>({paused:Boolean(pending),...getNavigationState()}),isPaused:()=>Boolean(pending),dispose(){windowRef.removeEventListener('message',message);if(pending){const record=pending;pending=null;resetLaunch(record);closeDialog(record);record.reject(new Error('Workspace closed'));}}};
 }
 
 export function relayWorkspaceRecoveryGrant({windowRef=window,documentRef=document,now=()=>Date.now()}={}){

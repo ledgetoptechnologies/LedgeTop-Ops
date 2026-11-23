@@ -3,7 +3,10 @@ const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]
 const TOKEN=/^[A-Za-z0-9_-]{32,128}$/;
 const keys=(value,names)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join('|')===[...names].sort().join('|');
 export function exactRenewalOrigin(value){try{const url=new URL(value);return url.protocol==='https:'&&url.origin===value?value:null;}catch{return null;}}
-const failure=(terminal=false)=>Object.assign(new Error('Workspace renewal transport unavailable'),{renewalAuthenticationRequired:terminal});
+// `renewalStatus` is set only when Operations itself answered with readable JSON.
+// A blocked cookie, an Access sign-in redirect and an outage all reject the fetch
+// and stay indistinguishable here, so they never carry one.
+const failure=(terminal=false,status=null)=>Object.assign(new Error('Workspace renewal transport unavailable'),{renewalAuthenticationRequired:terminal,renewalStatus:status});
 const terminalErrors=new Map([
   [401,new Set(['Cloudflare Access authentication required','Invalid Cloudflare Access authentication','A current human Cloudflare Access identity is required','Operations authorization is too close to expiry to renew'])],
   [403,new Set(['This Operations staff account is not bound to the current Access identity','Renewal subject does not match the authenticated Operations identity','Global viewer.view permission required'])],
@@ -15,21 +18,24 @@ async function readJson(response,url,signal){
   try{for(;;){const {done,value}=await reader.read();if(signal?.aborted)throw failure();if(done)break;size+=value.byteLength;if(size>16384)throw failure();text+=decoder.decode(value,{stream:true});}text+=decoder.decode();}
   catch(error){await reader.cancel().catch(()=>{});throw error;}finally{reader.releaseLock();}
   let body;try{body=JSON.parse(text);}catch{throw failure();}
-  if(!response.ok)throw failure(keys(body,['error'])&&terminalErrors.get(response.status)?.has(body.error));
+  if(!response.ok)throw failure(Boolean(keys(body,['error'])&&terminalErrors.get(response.status)?.has(body.error)),response.status);
   return body;
 }
 
 // Only the server-issued controller origin and the current Viewer origin are
 // accepted. The session ID is a correlation hint, never authentication.
 // No bearer, target URL, permissions, or expiry is sent to Operations.
-export async function requestWorkspaceRenewalGrant({controllerOrigin,viewerOrigin,subject,sessionId,requestId,signal,fetchImpl=fetch,now=()=>Date.now()}){
-  if(signal?.aborted||!exactRenewalOrigin(controllerOrigin)||!exactRenewalOrigin(viewerOrigin)||!UUID.test(requestId)||typeof sessionId!=='string'||!/^[A-Za-z0-9_-]{16,128}$/.test(sessionId)||typeof subject!=='string'||!/^ops:[A-Za-z0-9._:@-]{1,196}$/.test(subject))throw failure();
-  const endpoint=controllerOrigin+PATH,challengeUrl=endpoint+'/challenge';
+// `endpointOrigin` may be the Viewer's same-site Operations host. The grant must
+// still carry the session's pinned controller, which Operations checks against
+// its own configuration and Viewer checks again at redemption.
+export async function requestWorkspaceRenewalGrant({controllerOrigin,endpointOrigin=controllerOrigin,viewerOrigin,subject,sessionId,requestId,signal,fetchImpl=fetch,now=()=>Date.now()}){
+  if(signal?.aborted||!exactRenewalOrigin(controllerOrigin)||!exactRenewalOrigin(endpointOrigin)||!exactRenewalOrigin(viewerOrigin)||!UUID.test(requestId)||typeof sessionId!=='string'||!/^[A-Za-z0-9_-]{16,128}$/.test(sessionId)||typeof subject!=='string'||!/^ops:[A-Za-z0-9._:@-]{1,196}$/.test(subject))throw failure();
+  const endpoint=endpointOrigin+PATH,challengeUrl=endpoint+'/challenge';
   const common={mode:'cors',credentials:'include',redirect:'error',cache:'no-store',referrerPolicy:'no-referrer',signal};
   const challenge=await readJson(await fetchImpl(challengeUrl,{...common,method:'GET'}),challengeUrl,signal);
   if(!keys(challenge,['protocolVersion','challenge','expiresAt'])||challenge.protocolVersion!==1||!TOKEN.test(challenge.challenge)||!Number.isSafeInteger(challenge.expiresAt)||challenge.expiresAt*1000<=now())throw failure();
   if(signal?.aborted)throw failure();
-  const grant=await readJson(await fetchImpl(endpoint,{...common,method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':challenge.challenge,'Idempotency-Key':requestId},body:JSON.stringify({protocolVersion:1,requestId,sessionId,subject})}),endpoint,signal);
+  const grant=await readJson(await fetchImpl(endpoint,{...common,method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':challenge.challenge,'Idempotency-Key':requestId},body:JSON.stringify({protocolVersion:1,requestId,sessionId,subject,...(endpointOrigin===controllerOrigin?{}:{controllerOrigin})})}),endpoint,signal);
   if(!keys(grant,['protocolVersion','requestId','sessionId','grant','grantExpiresAt','sessionTtlSeconds','redeemUrl'])||grant.protocolVersion!==1||grant.requestId!==requestId||grant.sessionId!==sessionId||!TOKEN.test(grant.grant)||!Number.isSafeInteger(grant.sessionTtlSeconds)||grant.sessionTtlSeconds<=0||!Number.isFinite(Date.parse(grant.grantExpiresAt))||Date.parse(grant.grantExpiresAt)<=now()||grant.redeemUrl!==viewerOrigin+'/api/v1/admin-sessions/redeem')throw failure();
   return grant.grant;
 }

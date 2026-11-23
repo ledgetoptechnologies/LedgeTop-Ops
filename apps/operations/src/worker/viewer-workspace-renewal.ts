@@ -24,6 +24,9 @@ const requestSchema = z.object({
   // after its in-memory workspace session has changed.
   sessionId: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
   subject: z.string().min(1).max(200),
+  // Sent only to a host that shares Viewer's site. Names the controller the
+  // Viewer session is pinned to; admitted below only for this deployment.
+  controllerOrigin: z.string().max(200).optional(),
 }).strict();
 
 function configuredOrigin(env: Env): string | null {
@@ -54,6 +57,18 @@ function json(origin: string | null, value: unknown, status = 200, headers?: Hea
 
 function disabled(): Response {
   return json(null, { error: "Not found" }, 404);
+}
+
+/**
+ * The controller a grant is signed for: the admitted request origin, or, on a
+ * retained legacy host, the one canonical Operations origin of this deployment.
+ * A caller can never name anything else.
+ */
+function grantControllerOrigin(request: Request, env: Env, requested: string | undefined): string | null {
+  const own = new URL(request.url).origin;
+  if (requested === undefined || requested === own) return own;
+  return legacyViewerControllerCompatibilityAllowed(request.url, request.method, env)
+    && requested === `https://${env.EXPECTED_HOST}` ? requested : null;
 }
 
 function requestOrigin(request: Request, env: Env): string | null {
@@ -148,6 +163,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
       return json(origin, { error: "Renewal correlation and idempotency keys must match" }, 400);
     if (parsed.data.subject !== `ops:${verified.principal.id}`)
       return json(origin, { error: "Renewal subject does not match the authenticated Operations identity" }, 403);
+    const controllerOrigin = grantControllerOrigin(request, env, parsed.data.controllerOrigin);
+    if (!controllerOrigin) return json(origin, { error: "Renewal controller was rejected" }, 403);
     const csrf = request.headers.get("X-CSRF-Token") || "";
     const bucket = Math.floor(Date.now() / (CHALLENGE_WINDOW_SECONDS * 1000));
     const candidateBuckets = Array.from({ length: CHALLENGE_ACCEPTED_BUCKETS }, (_value, index) => bucket - index);
@@ -171,7 +188,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const units = await resolveViewerUnits(env, verified.principal.id);
     if (verified.principal.verifiedLogin) await requireCurrentStaffLogin(env, verified.principal);
     const grant = await viewerServiceClient(env).createAdminGrant({
-      controllerOrigin: new URL(request.url).origin,
+      controllerOrigin,
       targetSessionId: parsed.data.sessionId,
       subject: `ops:${verified.principal.id}`.slice(0, 200),
       permissions,
