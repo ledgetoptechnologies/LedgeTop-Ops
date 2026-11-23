@@ -89,7 +89,7 @@ test('credits: the note and source are whole on every page that shows property l
   }
   const long = CREDITS[0] + ' More words of credit.'.repeat(30);
   assert.equal(layoutOf({ content: { credits: [long] } }).items.filter(i => i.size === 8).map(i => i.text).join(' '), `${PROPERTY_LINES_NOTE} ${long}`);
-  for (const credits of [[], [''], ['  '], ['​'], undefined]) assert.throws(() => layoutOf({ content: { credits } }), { code: 'print_note' });
+  for (const credits of [[], [''], ['  '], ['\u200b'], undefined]) assert.throws(() => layoutOf({ content: { credits } }), { code: 'print_note' });
   assert.throws(() => layoutOf({ content: { credits: ['word '.repeat(6000)] } }), { code: 'print_note' });
   assert.throws(() => layoutOf({ content: { credits: ['x'.repeat(2000)] } }), { code: 'print_note' });
   assert.ok(!texts(layoutOf({ content: { property: false, lineColor: null, credits: ['Imagery: Example.'] } })).join(' ').includes('survey'), 'no note without property lines');
