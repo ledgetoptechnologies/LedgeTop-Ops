@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,6 +31,7 @@ async function removeBrowserProfile(profile, t) {
   const resolved = path.resolve(profile);
   const expectedPrefix = path.resolve(tmpdir(), 'ltds-project-share-browser-');
   if (!resolved.startsWith(expectedPrefix)) throw new Error(`refusing to remove unexpected browser profile: ${resolved}`);
+  stopBrowser(resolved, { removeProfile: false });
   let lastError;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
@@ -295,7 +296,7 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     ` });
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, `document.querySelector('[data-action="open-project"]') !== null`, `${viewport.name}: workspace did not load`);
-    await client.evaluate(`document.querySelector('[data-action="open-project"]').click()`);
+    await client.evaluate(`(() => { const project = document.querySelector('[data-action="open-project"]'); if (project.getAttribute('aria-expanded') !== 'true') project.click(); })()`);
     await waitFor(client, `document.querySelector('[data-action="project-share"]') !== null`, `${viewport.name}: project did not open`);
     runtime.holdClientRead = true;
     await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
@@ -372,7 +373,7 @@ async function verifyRevokeOnlyStaff(devTools, origin, runtime) {
     ` });
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, `document.querySelector('[data-action="open-project"]') !== null`, 'revoke-only: workspace did not load');
-    await client.evaluate(`document.querySelector('[data-action="open-project"]').click()`);
+    await client.evaluate(`(() => { const project = document.querySelector('[data-action="open-project"]'); if (project.getAttribute('aria-expanded') !== 'true') project.click(); })()`);
     await waitFor(client, `document.querySelector('[data-action="project-share"]') !== null`, 'revoke-only: Share button was hidden');
     await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
     await waitFor(client, `document.querySelector('[data-action="revoke-project-share"][data-id="share-existing"]') !== null`, 'revoke-only: project link row was not listed');
@@ -399,7 +400,7 @@ test('project sharing is internal-only while legacy public links remain viewable
   try {
     ({ server, runtime } = await startFixtureServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-project-share-browser-'));
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
     ], { windowsHide: true, stdio: 'ignore' });

@@ -51,7 +51,7 @@ test('quiet output refresh preserves scroll and focus without rebuilding the wor
  const panel={querySelector:selector=>({'.subsection-heading p':heading,'.task-output-status':status,'.form-note':null,'.log-tail':tail})[selector],replaceWith:()=>assert.fail('quiet poll must not replace the output panel')};
  f.context.content={querySelector:()=>panel};
  f.context.document={activeElement:tail,createElement:tag=>{assert.equal(tag,'template');const template={content:{firstElementChild:null}};Object.defineProperty(template,'innerHTML',{set:html=>template.content.firstElementChild=parsed(html)});return template}};
- f.context.patchProjectFolderView=()=>{folderPatches++;return false};
+ f.context.patchProjectTree=()=>{folderPatches++;return false};
  f.context.render=()=>assert.fail('quiet poll must not rerender the whole workspace');
  await f.context.refreshTaskDetails('task',true);
  assert.match(tail.textContent,/fresh 1$/);assert.match(status.innerHTML,/42% reported by processing node/);assert.match(heading.innerHTML,/Latest 100 recorded lines/);

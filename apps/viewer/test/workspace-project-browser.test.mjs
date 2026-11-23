@@ -2,7 +2,7 @@ import { waitForDevToolsPort } from './devtools-port.mjs';
 import { BoundedTestCdp as CdpClient } from './bounded-test-cdp.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { writeArrayBuffer } from 'geotiff';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
+import { FINE_POINTER_SWITCH, assertFinePointer } from './fine-pointer.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -134,6 +136,8 @@ async function removeBrowserProfile(profile, t) {
   const resolved = path.resolve(profile);
   const expectedPrefix = path.resolve(tmpdir(), 'ltds-viewer-browser-');
   if (!resolved.startsWith(expectedPrefix)) throw new Error(`refusing to remove unexpected browser profile: ${resolved}`);
+  // Kills any browser still on this run's own profile (Edge relaunches itself on Windows).
+  stopBrowser(resolved, { removeProfile: false });
   let lastError;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
@@ -244,7 +248,10 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/outputs/output-johnson' && method === 'DELETE') return json({ output: fixtures.outputs[0], trash: { id: 'trash-output-live' } });
   if (pathname === '/api/v1/processing/outputs/output-johnson-archived' && method === 'DELETE') return json({ output: fixtures.outputs[1], trash: { id: 'trash-output' } });
   if (pathname === '/api/v1/projects/project-quarry' && method === 'DELETE') { runtime.archivedProjects.add('project-quarry'); runtime.failNextStorage = true; return json({ trash: { id: 'trash-project', entityType: 'project' } }); }
-  if (pathname === '/api/v1/tasks/task-quarry' && method === 'DELETE') { runtime.archivedTasks.add('task-quarry'); return json({ trash: { id: 'trash-task', entityType: 'task' } }); }
+  const taskDelete = pathname.match(/^\/api\/v1\/tasks\/([^/]+)$/);
+  if (taskDelete && method === 'DELETE') { runtime.archivedTasks.add(taskDelete[1]); return json({ trash: { id: `trash-task-${taskDelete[1]}`, entityType: 'task' } }); }
+  const taskRestore = pathname.match(/^\/api\/v1\/storage\/trash\/trash-task-([^/]+)\/restore$/);
+  if (taskRestore && method === 'POST' && runtime.archivedTasks.delete(taskRestore[1])) return json({ task: { id: taskRestore[1] } });
   if (pathname === '/api/v1/datasets/dataset-johnson' && method === 'DELETE') return json({ trash: { id: 'trash-dataset' } });
   if (pathname === '/api/v1/storage') {
     if (runtime.failNextStorage) { runtime.failNextStorage = false; return json({ error: 'storage_inventory_unavailable', message: 'Storage inventory is temporarily unavailable.' }, 503); }
@@ -700,6 +707,12 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     });
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 2", `${viewport.name}: workspace did not load`);
+    // Viewports share one browser profile; start each with every project closed in the tree.
+    if (await client.evaluate(`Boolean(localStorage.getItem('ltds-viewer-tree:v1:ops:browser-audit'))`)) {
+      await client.evaluate(`localStorage.removeItem('ltds-viewer-tree:v1:ops:browser-audit')`);
+      await client.command('Page.reload');
+      await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 2 && !document.querySelector('.project-row.selected')", `${viewport.name}: workspace did not reload with closed projects`);
+    }
     await verifyProjectRowColumns(client, viewport);
 
     await waitFor(client, "document.querySelector('#background-work-count')?.textContent === '4'", `${viewport.name}: background work count did not include active processing, imports, and derivatives`);
@@ -745,7 +758,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
           await client.evaluate(`(() => { const shell=document.querySelector('#workspace'); if (shell.classList.contains('nav-collapsed') !== ${collapsed}) document.querySelector('#nav-collapse').click(); })()`);
           await new Promise(resolve => setTimeout(resolve, 400)); // sidebar width transition
           const layout = await client.evaluate(`(() => {
-            const list=document.querySelector('.task-list'), panel=list.querySelector('.task-panel'), toggle=panel.querySelector('.task-summary-toggle'), status=toggle.querySelector('.status'), actions=panel.querySelector('.task-quick-actions');
+            const list=document.querySelector('.tree-body'), panel=list.querySelector('.task-panel'), toggle=panel.querySelector('.task-summary-toggle'), status=toggle.querySelector('.status'), actions=panel.querySelector('.task-quick-actions');
             const bounds=panel.getBoundingClientRect(), fits=el=>{const r=el.getBoundingClientRect();return r.width>0 && r.left>=bounds.left-1 && r.right<=bounds.right+1};
             const controls=actions ? [...actions.querySelectorAll(':scope > button, :scope > details > summary')] : [];
             return { listWidth:list.getBoundingClientRect().width, overflow:panel.scrollWidth>panel.clientWidth+1, status:!!status && fits(status), labels:controls.map(el=>el.getAttribute('aria-label') || el.textContent.trim()), actions:controls.length===4 && controls.every(fits) };
@@ -778,7 +791,8 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['View', 'Model report', 'Share'], `${viewport.name}: published task shortcuts must remain focused on viewing and sharing`);
     await client.evaluate(`document.querySelector('.task-more-actions > summary').click()`);
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Move to…','Details & processing','Files & versions','Processing history','Ground control points']);
+    // "⋯" holds the rest: Rename (F2), Move to…, Duplicate (a disabled follow-up), the task pages, then Delete.
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>[button.firstChild.textContent,button.getAttribute('aria-disabled')==='true'])`),[['Rename',false],['Move to…',false],['Duplicate',true],['Download model files',false],['Details & processing',false],['Files & versions',false],['Processing history',false],['Ground control points',false],['Delete',true]]);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
@@ -846,7 +860,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
         const refreshStart = runtime.requests.length;
         await waitForRequest(runtime, refreshStart, 'GET', '/api/v1/attempts/attempt-johnson');
         assert.ok(runtime.logSequence > firstLog, `${viewport.name}: running-task log data did not refresh`);
-        await waitFor(client, `document.querySelector('.task-live-output .log-tail')?.textContent.endsWith('browser refresh ${runtime.logSequence}')`, `${viewport.name}: refreshed task output did not reach the visible panel`);
+        await waitFor(client, `document.querySelector('.task-live-output .log-tail')?.textContent.endsWith('browser refresh ${runtime.logSequence}')`, `${viewport.name}: refreshed task output did not reach the visible panel (${selector})`);
         assert.equal(await client.evaluate(`document.activeElement === window.__taskOutputFocus && document.querySelector(${JSON.stringify(selector)}) === window.__taskOutputFocus`), true, `${viewport.name}: task output refresh replaced or blurred ${selector}`);
         if (selector === tailSelector) assert.equal(await client.evaluate('window.__taskOutputFocus.scrollTop'), 24, 'Refresh moved the scrolled log tail');
       }
@@ -913,12 +927,13 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project filter did not clear`);
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
-    await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Alpha Quarry tasks and actions'", `${viewport.name}: terminal project selection failed`);
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions > button')].map(button=>button.textContent)`),
+    // Johnson stays open too: several projects can be open at once.
+    await waitFor(client, "document.querySelector('#project-detail-project-quarry')?.getAttribute('aria-label') === 'Alpha Quarry tasks and actions' && document.querySelectorAll('.project-row.selected').length === 2", `${viewport.name}: terminal project selection failed`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('#project-detail-project-quarry .task-quick-actions > button')].map(button=>button.textContent)`),
       ['View', 'Model report', 'Share'], `${viewport.name}: ready output did not expose focused View, report, and Share shortcuts`);
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
-    await waitFor(client, "document.querySelector('[data-action=\"task-settings\"]') !== null", `${viewport.name}: ready task tools did not load`);
-    await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"task-settings\"][data-id=\"task-quarry\"]') !== null", `${viewport.name}: ready task tools did not load`);
+    await client.evaluate(`document.querySelector('[data-action="task-settings"][data-id="task-quarry"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"generate-tiles\"]') !== null", `${viewport.name}: Task settings did not expose tile generation`);
     await client.evaluate(`document.querySelector('[data-action="generate-tiles"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles');
@@ -941,10 +956,13 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       const grantsAfterBlockedPopup = runtime.requests.filter(item => item.method === 'POST' && item.path === '/api/v1/attempts/attempt-quarry/review-sessions').length;
       assert.equal(grantsAfterBlockedPopup, grantsBeforeBlockedPopup, `${viewport.name}: blocked popup minted a review grant before readiness`);
     }
-    await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);
+    await client.evaluate(`document.querySelector('[data-action="task-settings"][data-id="task-quarry"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"trash-task\"][data-id=\"task-quarry\"]') !== null", `${viewport.name}: terminal task Delete was not reachable`);
-    await confirmAppAction(client, runtime, '[data-action="trash-task"][data-id="task-quarry"]', { title: 'Move to Recycle Bin', cancelFirst: true });
+    // An unpublished task goes to the Recycle Bin at once, with Undo instead of a confirmation.
+    await client.evaluate(`document.querySelector('[data-action="trash-task"][data-id="task-quarry"]').click()`);
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/tasks/task-quarry');
+    assert.equal(await client.evaluate(`Boolean(document.querySelector('.workspace-decision'))`), false, `${viewport.name}: task Delete asked for a confirmation`);
+    await waitFor(client, "document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Recycle Bin')", `${viewport.name}: task Delete did not offer Undo`);
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: task Delete did not settle`);
     assert.equal(runtime.archivedTasks.has('task-quarry'), true, `${viewport.name}: fixture did not archive the deleted task`);
     const remainingTasks = JSON.parse(apiResponse(new URL('/api/v1/tasks', origin), runtime).body).tasks;
@@ -1080,94 +1098,360 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
   }
 }
 
-test('project folders navigate and survive browser history in a real browser', {timeout:60000,skip:manualFixture}, async t=>{
+// ---- Folder drill-down tree, in a real browser against the real folder and move API ----
+const TREE_PERMISSIONS=['viewer.projects.read','viewer.projects.write','viewer.datasets.write','viewer.processing.read','viewer.processing.write','viewer.processing.publish'];
+const KEY_CODES={ArrowDown:40,ArrowUp:38,ArrowLeft:37,ArrowRight:39,Home:36,End:35,Enter:13,Escape:27,F2:113,F10:121,Delete:46};
+async function pressKey(client,name,{shift=false}={}){
+  for(const type of ['keyDown','keyUp'])await client.command('Input.dispatchKeyEvent',{type,key:name,code:name,windowsVirtualKeyCode:KEY_CODES[name],nativeVirtualKeyCode:KEY_CODES[name],modifiers:shift?8:0,...(type==='keyDown'&&name==='Enter'?{text:'\r'}:{})});
+}
+async function until(read,message,timeout=10_000){
+  for(const deadline=Date.now()+timeout;Date.now()<deadline;){const value=read();if(value)return value;await new Promise(resolve=>setTimeout(resolve,50));}
+  throw new Error(message);
+}
+const treeRow=key=>`[data-tree-key="${key}"]`;
+const focusedTreeKey=client=>client.evaluate(`document.activeElement?.closest('[data-tree-key]')?.dataset.treeKey||null`);
+const centreOf=(client,selector)=>client.evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.scrollIntoView({block:'center'});const box=element.getBoundingClientRect();return{x:Math.round(box.left+box.width/2),y:Math.round(box.top+box.height/2)}})()`);
+async function treeScreenshot(client,name){
+  const directory=process.env.LTDS_FOLDER_TREE_SCREENSHOTS;
+  if(!directory)return;
+  mkdirSync(directory,{recursive:true});
+  await new Promise(resolve=>setTimeout(resolve,300)); // let menu and row transitions finish
+  const shot=await client.command('Page.captureScreenshot',{format:'png'});
+  writeFileSync(path.join(directory,name),Buffer.from(shot.data,'base64'));
+}
+// Two projects on the real processing API; task-johnson (published in the fixture outputs) in
+// Johnson Road Survey, task-quarry in Alpha Quarry unless the test puts it beside task-johnson.
+async function withTreeBrowser(t,{name,width=1280,height=860,mobile=false,fine=!mobile,quarryInJohnson=false,seed,configure},run){
   const executable=browserPath();if(!executable)return t.skip('Chromium-family browser required');
   const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client,folderServer,folderDb,folderRoot;
   try{
     const express=require('express'),auth=require('../server/auth'),{openDatabase}=require('../server/database'),{ViewerRepository}=require('../server/repository'),{ProcessingRepository}=require('../server/processingRepository'),{createProcessingApi}=require('../server/processingApi');
-    folderRoot=mkdtempSync(path.join(tmpdir(),'viewer-folder-api-'));folderDb=openDatabase(path.join(folderRoot,'viewer.sqlite'));
-    const repository=new ViewerRepository(folderDb),processing=new ProcessingRepository(folderDb);processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:browser-audit',permissions:['viewer.projects.read','viewer.projects.write','viewer.processing.read','viewer.processing.write'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
-    processing.createProject({id:'project-johnson',displayName:'Synthetic'});const dataset=processing.createDataset({id:'dataset-johnson',projectId:'project-johnson',displayName:'Source',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});processing.finalizeDataset(dataset.id,[],'a'.repeat(64));processing.createTask({id:'task-johnson',projectId:'project-johnson',datasetId:dataset.id,displayName:'Johnson reconstruction'});
-    const now=new Date().toISOString();folderDb.prepare('INSERT INTO project_folders(id,project_id,parent_id,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('folder-client','project-johnson',null,'Client folder',now,now);folderDb.prepare('INSERT INTO project_folders(id,project_id,parent_id,display_name,created_at,updated_at) VALUES (?,?,?,?,?,?)').run('folder-site','project-johnson','folder-client','Site folder',now,now);processing.moveTaskToFolder('task-johnson','folder-site','staff');
+    folderRoot=mkdtempSync(path.join(tmpdir(),`viewer-${name}-api-`));folderDb=openDatabase(path.join(folderRoot,'viewer.sqlite'));
+    const repository=new ViewerRepository(folderDb),processing=new ProcessingRepository(folderDb);
+    processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:browser-audit',permissions:TREE_PERMISSIONS,displayUnits:'imperial',expiresAt:new Date(Date.now()+180000).toISOString()});
+    processing.createProject({id:'project-johnson',displayName:'Johnson Road Survey'});processing.createProject({id:'project-quarry',displayName:'Alpha Quarry'});
+    const johnson=processing.createDataset({id:'dataset-johnson',projectId:'project-johnson',displayName:'Source',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});processing.finalizeDataset(johnson.id,[],'a'.repeat(64));
+    processing.createTask({id:'task-johnson',projectId:'project-johnson',datasetId:johnson.id,displayName:'Johnson reconstruction'});
+    const quarryProject=quarryInJohnson?'project-johnson':'project-quarry';
+    const quarry=processing.createDataset({id:'dataset-quarry',projectId:quarryProject,displayName:'Quarry source',rootKey:'datasets',relativePath:'synthetic-quarry',storageMode:'managed'});processing.finalizeDataset(quarry.id,[],'b'.repeat(64));
+    processing.createTask({id:'task-quarry',projectId:quarryProject,datasetId:quarry.id,displayName:'Quarry reconstruction'});
+    const seeded=(await seed?.(processing))||{};
     const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));folderServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
-    ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;
+    configure?.(runtime);
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    browser=spawnBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox',...(fine?[FINE_POINTER_SWITCH]:[]),'--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
-    await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
-    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-open"][data-id="folder-client"]'))`,'client folder unavailable');
-    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="folder-client"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-open"][data-id="folder-site"]')) && new URL(location.href).searchParams.get('folder')==='folder-client'`,'nested folder unavailable');
-    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="folder-site"]').click()`);
-    await waitFor(client,`document.querySelector('#workspace-content').textContent.includes('Johnson reconstruction') && new URL(location.href).searchParams.get('folder')==='folder-site'`,'nested task unavailable');
-    await client.evaluate('history.back()');
-    await waitFor(client,`new URL(location.href).searchParams.get('folder')==='folder-client' && Boolean(document.querySelector('[data-action="folder-open"][data-id="folder-site"]'))`,'folder history did not restore');
-    await client.command('Page.reload');
-    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-open"][data-id="folder-site"]')) && new URL(location.href).searchParams.get('folder')==='folder-client'`,'folder reload did not restore');
-    await client.evaluate(`document.querySelector('[data-action="folder-create"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('#folder-create-form'))`,'folder create form unavailable');
-    await client.evaluate(`(()=>{const f=document.querySelector('#folder-create-form');f.elements.displayName.value='Temporary folder';f.requestSubmit()})()`);
-    await waitFor(client,`Array.from(document.querySelectorAll('[data-action="folder-open"]')).some(button=>button.textContent.includes('Temporary folder'))`,'new folder unavailable');
-    const createdId=processing.projectFolders('project-johnson').find(folder=>folder.displayName==='Temporary folder').id;
-    await client.evaluate(`document.querySelector('[data-action="folder-rename"][data-id="${createdId}"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('#folder-rename-form'))`,'rename form unavailable');
-    await client.evaluate(`(()=>{const f=document.querySelector('#folder-rename-form');f.elements.displayName.value='Renamed folder';f.requestSubmit()})()`);
-    await waitFor(client,`document.querySelector('[data-action="folder-open"][data-id="${createdId}"]')?.textContent.includes('Renamed folder')`,'renamed folder unavailable');
-    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="folder-site"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-move-task"][data-id="task-johnson"]'))`,'move task action unavailable');
-    await client.evaluate(`document.querySelector('[data-action="folder-move-task"][data-id="task-johnson"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('#folder-move-form'))`,'move form unavailable');
-    await client.evaluate(`(()=>{const f=document.querySelector('#folder-move-form');f.elements.folderId.value='${createdId}';f.requestSubmit()})()`);
-    await waitFor(client,`!document.querySelector('#workspace-modal').open && !document.querySelector('#workspace').hasAttribute('aria-busy')`,'task move did not settle');
-    assert.equal(processing.getTask('task-johnson').folderId,createdId);
-    await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
-    await waitFor(client,`Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'Undo did not restore the task');
-    assert.equal(processing.getTask('task-johnson').folderId,'folder-site');
-    const dragTaskTo = (folderId, expectedLabel = null) => client.evaluate(`(()=>{
-      const transfer=new DataTransfer(), handle=document.querySelector('[data-folder-drag][data-id="task-johnson"]');
-      handle.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));
-      const target=document.querySelector(${JSON.stringify(`[data-folder-drop-destinations] [data-task-drop-folder="${folderId}"]`)});
-      const expectedLabel=${JSON.stringify(expectedLabel)};
-      if(!target?.getClientRects().length||(expectedLabel&&target.textContent.trim()!==expectedLabel))throw Error('Visible drop destination unavailable');
-      target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
-      if(!target.classList.contains('folder-drop-active'))throw Error('Destination did not highlight');
-      target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
-    })()`);
-    const beforeRootDrop=processing.getTask('task-johnson');
-    const requestsBeforeRootDrop=runtime.requests.length;
-    await dragTaskTo('','Project root');
-    await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'root drop did not remove the task from its former folder');
-    const rootMoves=runtime.requests.slice(requestsBeforeRootDrop).filter(request=>request.method==='PATCH'&&request.path==='/api/v1/tasks/task-johnson/folder');
-    assert.deepEqual(rootMoves.map(request=>request.body),[{folderId:null,expectedFolderId:'folder-site',expectedFolderRevision:beforeRootDrop.folderRevision}]);
-    const rootTask=processing.getTask('task-johnson');
-    assert.equal(rootTask.folderId,null);
-    assert.equal(rootTask.folderRevision,beforeRootDrop.folderRevision+1);
-    await client.evaluate(`document.querySelector('[data-action="folder-root"]').click()`);
-    await waitFor(client,`!new URL(location.href).searchParams.has('folder')&&Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'dropped task did not appear at Project root');
-    await dragTaskTo(createdId);
-    await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'drag move did not settle');
-    assert.equal(processing.getTask('task-johnson').folderId,createdId);
-    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="folder-client"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('[data-action="folder-delete"][data-id="folder-site"]'))`,'empty folder unavailable');
-    await confirmAppAction(client,runtime,'[data-action="folder-delete"][data-id="folder-site"]',{title:'Delete folder'});
-    await waitFor(client,`!document.querySelector('[data-action="folder-open"][data-id="folder-site"]')`,'empty folder remained visible');
-    assert.equal(processing.getTask('task-johnson').folderId,createdId);
-    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="${createdId}"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('[data-project-task="task-johnson"]'))`,'moved task not visible');
-    await client.evaluate(`(()=>{const filter=document.querySelector('#project-filter');window.folderTestFilter=filter;
-      filter.value='Johnson';filter.dispatchEvent(new Event('input',{bubbles:true}));filter.focus();
-    })()`);
-    processing.moveTaskToFolder('task-johnson',null,'another-staff-actor');
-    await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')`,'background move never appeared',12000);
-    assert.equal(await client.evaluate(`document.activeElement===window.folderTestFilter&&document.querySelector('#project-filter')===window.folderTestFilter&&window.folderTestFilter.value==='Johnson'`),true);
+    await client.command('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile,screenWidth:width,screenHeight:height});
+    if(mobile)await client.command('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:5});
+    if(fine)await assertFinePointer(expression=>client.evaluate(expression),name);
+    await run({client,runtime,origin,processing,...seeded});
+    assert.deepEqual(client.events.filter(event=>event.method==='Runtime.exceptionThrown').map(event=>event.params?.exceptionDetails?.exception?.description),[]);
   }finally{
     if(client)client.close();
-    if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}
+    if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);}
     if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}if(folderServer){folderServer.closeAllConnections?.();await new Promise(resolve=>folderServer.close(resolve));}folderDb?.close();if(folderRoot)rmSync(folderRoot,{recursive:true,force:true});try{await removeBrowserProfile(profile,t);}finally{release();}
   }
-});
+}
+const nestedFolders=processing=>{
+  const top=processing.createProjectFolder('project-johnson',{displayName:'Client folder'},'staff');
+  const site=processing.createProjectFolder('project-johnson',{displayName:'Site folder',parentId:top.id},'staff');
+  return{top,site};
+};
 
-test('Move to… picks a project, then a folder, and drag offers other projects in a real browser', {timeout:60000,skip:manualFixture}, async t=>{
+test('folder tree opens folders in place, keeps them per user, and is one keyboard tab stop with arrow keys', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-keys',seed:processing=>{const folders=nestedFolders(processing);processing.moveTaskToFolder('task-johnson',folders.site.id,'staff');return folders;}},async({client,origin,top,site})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`document.querySelector('${treeRow(`f:${top.id}`)}')?.getAttribute('aria-expanded')==='false'`,'top folder unavailable');
+  assert.equal(await client.evaluate(`document.querySelector('#project-list').getAttribute('role')`),'treegrid');
+  assert.equal(await client.evaluate(`Boolean(document.querySelector('${treeRow('t:task-johnson')}'))`),false,'a task in a closed folder is hidden');
+  assert.equal(await client.evaluate(`document.querySelectorAll('#project-list [tabindex="0"]').length`),1,'the tree is one tab stop');
+  assert.match(await client.evaluate(`document.querySelector('${treeRow(`f:${top.id}`)}').textContent`),/Client folder1 task/,'name on the left with a muted count');
+  await client.evaluate(`document.querySelector('${treeRow('p:project-johnson')} [data-tree-focus]').focus()`);
+  await pressKey(client,'ArrowDown');assert.equal(await focusedTreeKey(client),`f:${top.id}`);
+  await pressKey(client,'ArrowRight');
+  await waitFor(client,`document.querySelector('${treeRow(`f:${site.id}`)}')?.getAttribute('aria-level')==='3'`,'Right did not open the folder in place');
+  assert.equal(await focusedTreeKey(client),`f:${top.id}`,'focus stays on the folder it opened');
+  await pressKey(client,'ArrowRight');assert.equal(await focusedTreeKey(client),`f:${site.id}`,'Right enters the first child');
+  await pressKey(client,'ArrowRight');
+  await waitFor(client,`document.querySelector('${treeRow('t:task-johnson')}')?.getAttribute('aria-level')==='4'`,'the nested task did not appear');
+  await pressKey(client,'ArrowDown');assert.equal(await focusedTreeKey(client),'t:task-johnson');
+  await pressKey(client,'ArrowRight');
+  assert.equal(await client.evaluate(`document.activeElement.closest('.task-quick-actions')!==null&&document.activeElement.textContent==='View'`),true,'Right on a task steps into its buttons');
+  await pressKey(client,'ArrowRight');assert.equal(await client.evaluate(`document.activeElement.textContent`),'Model report');
+  await pressKey(client,'Escape');assert.equal(await client.evaluate(`document.activeElement.matches('[data-tree-focus]')`),true,'Escape returns to the row');
+  await pressKey(client,'ArrowLeft');assert.equal(await focusedTreeKey(client),`f:${site.id}`,'Left goes to the parent');
+  await pressKey(client,'ArrowLeft');
+  await waitFor(client,`!document.querySelector('${treeRow('t:task-johnson')}')&&document.querySelector('${treeRow(`f:${site.id}`)}').getAttribute('aria-expanded')==='false'`,'Left did not close the folder');
+  await pressKey(client,'Home');assert.equal(await focusedTreeKey(client),'p:project-johnson');
+  await pressKey(client,'End');assert.equal(await focusedTreeKey(client),'p:project-quarry');
+  assert.equal(await client.evaluate(`document.activeElement.tabIndex===0&&document.querySelectorAll('#project-list [tabindex="0"]').length===1`),true,'the tab stop follows focus');
+  // Expanded state is saved per user and survives a reload.
+  await client.command('Page.reload');
+  await waitFor(client,`document.querySelector('${treeRow(`f:${top.id}`)}')?.getAttribute('aria-expanded')==='true'&&document.querySelector('${treeRow(`f:${site.id}`)}')?.getAttribute('aria-expanded')==='false'`,'expanded folders were not restored');
+  assert.deepEqual(await client.evaluate(`JSON.parse(localStorage.getItem('ltds-viewer-tree:v1:ops:browser-audit')).folders`),[top.id]);
+  // An old ?folder= link still opens that folder.
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson&folder=${site.id}`});
+  await waitFor(client,`document.querySelector('${treeRow(`f:${site.id}`)}')?.getAttribute('aria-expanded')==='true'&&Boolean(document.querySelector('${treeRow('t:task-johnson')}'))&&!new URL(location.href).searchParams.has('folder')`,'an old folder link did not open its folder');
+}));
+
+test('New folder and Rename happen inline, and an empty folder deletes with Undo', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-inline',seed:processing=>{const folders=nestedFolders(processing);processing.moveTaskToFolder('task-johnson',folders.site.id,'staff');return folders;}},async({client,runtime,origin,processing,top})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow(`f:${top.id}`)} [data-tree-focus]'))`,'top folder unavailable');
+  // New subfolder from the folder's "⋯", opened with Shift+F10, named inline.
+  await client.evaluate(`document.querySelector('${treeRow(`f:${top.id}`)} [data-tree-focus]').focus()`);
+  await pressKey(client,'F10',{shift:true});
+  await waitFor(client,`document.activeElement?.dataset.action==='folder-new'`,'Shift+F10 did not open the folder menu');
+  await pressKey(client,'Enter');
+  await waitFor(client,`document.activeElement?.matches('.tree-inline-name[data-tree-new-folder="${top.id}"]')&&document.activeElement.value==='New folder'&&document.activeElement.selectionEnd===10`,'the inline New folder row did not take focus');
+  let start=runtime.requests.length;
+  await client.command('Input.insertText',{text:'Flights'});
+  await pressKey(client,'Enter');
+  await waitForRequest(runtime,start,'POST','/api/v1/projects/project-johnson/folders');
+  const flights=await until(()=>processing.projectFolders('project-johnson').find(folder=>folder.displayName==='Flights'),'the folder was not created');
+  assert.equal(flights.parentId,top.id);
+  await waitFor(client,`document.activeElement?.closest('[data-tree-key]')?.dataset.treeKey==='f:${flights.id}'`,'focus did not move to the new folder');
+  await waitFor(client,`document.querySelector('#workspace-tree-live').textContent.includes('Created folder Flights')`,'the new folder was not announced');
+  // F2 renames in place; Escape cancels without a request.
+  await pressKey(client,'F2');
+  await waitFor(client,`document.activeElement?.matches('.tree-inline-name[data-tree-rename="${flights.id}"]')`,'F2 did not start renaming');
+  start=runtime.requests.length;
+  await client.command('Input.insertText',{text:'Ignored'});
+  await pressKey(client,'Escape');
+  await waitFor(client,`!document.querySelector('.tree-inline-name')&&document.activeElement?.closest('[data-tree-key]')?.dataset.treeKey==='f:${flights.id}'`,'Escape did not cancel the rename');
+  assert.equal(runtime.requests.slice(start).some(request=>request.method==='PATCH'),false);
+  await pressKey(client,'F2');
+  await waitFor(client,`document.activeElement?.matches('.tree-inline-name[data-tree-rename="${flights.id}"]')`,'F2 did not start renaming again');
+  await client.command('Input.insertText',{text:'Drone flights'});
+  await pressKey(client,'Enter');
+  await waitFor(client,`document.querySelector('${treeRow(`f:${flights.id}`)} strong')?.textContent==='Drone flights'&&document.activeElement?.closest('[data-tree-key]')?.dataset.treeKey==='f:${flights.id}'`,'the rename did not land on the row');
+  assert.equal(processing.projectFolders('project-johnson').find(folder=>folder.id===flights.id).displayName,'Drone flights');
+  // Leaving the name for another control saves it there and leaves focus where the user went.
+  await pressKey(client,'F2');
+  await waitFor(client,`document.activeElement?.matches('.tree-inline-name[data-tree-rename="${flights.id}"]')`,'F2 did not start renaming a third time');
+  await client.command('Input.insertText',{text:'Survey flights'});
+  start=runtime.requests.length;
+  await client.evaluate(`document.querySelector('#project-filter').focus()`);
+  await waitForRequest(runtime,start,'PATCH',`/api/v1/projects/project-johnson/folders/${flights.id}`);
+  await waitFor(client,`document.querySelector('${treeRow(`f:${flights.id}`)} strong')?.textContent==='Survey flights'&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'the blur rename did not land');
+  assert.equal(await client.evaluate(`document.activeElement?.id`),'project-filter','saving on blur pulled focus back into the tree');
+  await client.evaluate(`document.querySelector('${treeRow(`f:${flights.id}`)} [data-tree-focus]').focus()`);
+  // An empty folder deletes without a confirmation and comes back with Undo; a folder with tasks cannot be deleted.
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow(`f:${top.id}`)} [data-action="folder-delete"]').getAttribute('aria-disabled')`),'true');
+  start=runtime.requests.length;
+  await client.evaluate(`(()=>{const menu=document.querySelector('${treeRow(`f:${flights.id}`)} details');menu.open=true;menu.querySelector('[data-action="folder-delete"]').click();})()`);
+  await waitForRequest(runtime,start,'DELETE',`/api/v1/projects/project-johnson/folders/${flights.id}`);
+  assert.equal(await client.evaluate(`Boolean(document.querySelector('.workspace-decision'))`),false,'folder Delete asked for a confirmation');
+  await waitFor(client,`!document.querySelector('${treeRow(`f:${flights.id}`)}')&&document.querySelector('#workspace-folder-undo')?.textContent.includes('Folder deleted')`,'folder Delete did not offer Undo');
+  await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
+  await waitFor(client,`[...document.querySelectorAll('.folder-tree-row[aria-level="3"] strong')].some(name=>name.textContent==='Survey flights')`,'Undo did not restore the folder');
+  assert.ok(processing.projectFolders('project-johnson').some(folder=>folder.displayName==='Survey flights'&&folder.parentId===top.id));
+  // The project's "⋯" adds a top-level folder.
+  await client.evaluate(`(()=>{const menu=document.querySelector('${treeRow('p:project-johnson')} details');menu.open=true;menu.querySelector('[data-action="folder-create"]').click();})()`);
+  await waitFor(client,`document.activeElement?.matches('.tree-inline-name[data-tree-new-folder=""]')`,'project New folder did not open an inline row');
+  await client.command('Input.insertText',{text:'Archive'});
+  await pressKey(client,'Enter');
+  await waitFor(client,`[...document.querySelectorAll('.folder-tree-row[aria-level="2"] strong')].some(name=>name.textContent==='Archive')`,'the top-level folder was not created');
+  assert.equal(processing.projectFolders('project-johnson').find(folder=>folder.displayName==='Archive').parentId,null);
+}));
+
+test('a real mouse drag of the whole task row: blocked drops, a closed folder opens on hover, auto-scroll, moves with Undo', {timeout:120000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-drag',width:1440,height:640,seed:nestedFolders,configure:runtime=>{runtime.outputs=runtime.outputs.filter(output=>output.taskId!=='task-johnson');}},async({client,runtime,origin,processing,top,site})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  const task='t:task-johnson',atRoot=`${treeRow(task)}[data-tree-parent="p:project-johnson"]`;
+  await waitFor(client,`Boolean(document.querySelector('${atRoot} .task-summary[draggable="true"]'))&&Boolean(document.querySelector('${treeRow(`f:${top.id}`)}'))`,'task and folder unavailable');
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow(task)} [data-action="folder-move-task"]')?.closest('.task-quick-actions > button')??null`),null,'no separate Move button on the row');
+  await treeScreenshot(client,'desktop-1440-drag-ready.png');
+  const startDrag=async selector=>{
+    await client.command('Input.setInterceptDrags',{enabled:true});
+    const from=await centreOf(client,selector);
+    await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:from.x,y:from.y});
+    await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:from.x,y:from.y,button:'left',buttons:1,clickCount:1});
+    const eventsBefore=client.events.length;
+    for(let step=1;step<=6;step++)await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:from.x+step*6,y:from.y+step*4,button:'left',buttons:1});
+    let intercepted=null;
+    for(const deadline=Date.now()+5000;!intercepted&&Date.now()<deadline;){intercepted=client.events.slice(eventsBefore).find(event=>event.method==='Input.dragIntercepted');if(!intercepted)await new Promise(resolve=>setTimeout(resolve,25));}
+    assert.ok(intercepted,`the browser started a real drag from ${selector}`);
+    return intercepted.params.data;
+  };
+  const over=async(data,selector)=>{const to=await centreOf(client,selector);for(const type of ['dragEnter','dragOver'])await client.command('Input.dispatchDragEvent',{type,x:to.x,y:to.y,data});return to;};
+  const finish=async(data,to)=>{
+    await client.command('Input.dispatchDragEvent',{type:'drop',x:to.x,y:to.y,data});
+    await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:to.x,y:to.y,button:'left',buttons:0,clickCount:1});
+    await client.command('Input.setInterceptDrags',{enabled:false});
+  };
+  // 1. Drag from the row's image count: no handle needed, the whole row moves.
+  let data=await startDrag(`${atRoot} .task-summary-stat`);
+  await waitFor(client,`document.body.classList.contains('tree-dragging')`,'the row did not enter the dragging state');
+  // The task's current place (its own project's top level) is not a drop target.
+  await over(data,treeRow('p:project-johnson'));
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow('p:project-johnson')}').classList.contains('folder-drop-active')`),false,'the current location must not accept the drop');
+  // Near the bottom edge the page scrolls.
+  await client.evaluate(`(()=>{const spacer=document.createElement('div');spacer.id='drag-scroll-spacer';spacer.style.height='1600px';document.querySelector('#workspace-content').append(spacer);window.scrollTo(0,0);})()`);
+  for(let step=0;step<6;step++)await client.command('Input.dispatchDragEvent',{type:'dragOver',x:400,y:636,data});
+  assert.ok(await client.evaluate('window.scrollY')>0,'a drag near the bottom edge did not scroll');
+  // Hovering a closed folder highlights it and opens it after about 700 ms.
+  let to=await over(data,treeRow(`f:${top.id}`));
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow(`f:${top.id}`)}').classList.contains('folder-drop-active')`),true,'the target folder did not highlight');
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow(`f:${top.id}`)}').getAttribute('aria-expanded')`),'false');
+  const hoverStart=Date.now();
+  for(let ticks=0;ticks<12;ticks++){await client.command('Input.dispatchDragEvent',{type:'dragOver',x:to.x,y:to.y,data});await new Promise(resolve=>setTimeout(resolve,100));}
+  await waitFor(client,`document.querySelector('${treeRow(`f:${top.id}`)}').getAttribute('aria-expanded')==='true'&&Boolean(document.querySelector('${treeRow(`f:${site.id}`)}'))`,'hovering did not open the closed folder');
+  assert.ok(Date.now()-hoverStart>=600,'the folder opened before the hover delay');
+  to=await over(data,treeRow(`f:${site.id}`));
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow(`f:${site.id}`)}').classList.contains('folder-drop-active')&&!document.querySelector('${treeRow(`f:${top.id}`)}').classList.contains('folder-drop-active')`),true,'the highlight did not follow the pointer');
+  await treeScreenshot(client,'desktop-1440-drag-hover.png');
+  let start=runtime.requests.length;
+  await armRowChange(client,atRoot,false);
+  await finish(data,to);
+  await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/folder');
+  await waitFor(client,`!document.querySelector('#workspace').hasAttribute('aria-busy')&&!document.querySelector('${atRoot}')`,'the moved row stayed at the top level');
+  await assertRowChangeWithin(client,'/api/v1/tasks/task-johnson/folder','drag');
+  assert.equal(processing.getTask('task-johnson').folderId,site.id);
+  await waitFor(client,`document.querySelector('${treeRow(task)}')?.dataset.treeParent==='f:${site.id}'&&document.querySelector('${treeRow(task)}').getAttribute('aria-level')==='4'`,'the moved row did not appear in its folder');
+  assert.equal(await focusedTreeKey(client),task,'focus followed the moved row');
+  await waitFor(client,`document.querySelector('#workspace-tree-live').textContent.includes('Moved Johnson reconstruction to Johnson Road Survey / Client folder / Site folder')`,'the move was not announced');
+  await waitFor(client,`document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Johnson Road Survey / Client folder / Site folder')`,'the move did not offer Undo');
+  await client.evaluate(`document.getElementById('drag-scroll-spacer')?.remove()`);
+  await treeScreenshot(client,'desktop-1440-moved-undo.png');
+  start=runtime.requests.length;
+  await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
+  await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/folder');
+  await waitFor(client,`Boolean(document.querySelector('${atRoot}'))&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'Undo did not return the task to the top level');
+  assert.equal(processing.getTask('task-johnson').folderId,null);
+  // 2. Another project: hover its closed row to open it, drop on its folder; unpublished, so no confirmation.
+  const quarryFolder=processing.createProjectFolder('project-quarry',{displayName:'2026 reprocess'},'staff');
+  data=await startDrag(`${atRoot} .task-summary-stat`);
+  to=await over(data,treeRow('p:project-quarry'));
+  for(let ticks=0;ticks<12;ticks++){await client.command('Input.dispatchDragEvent',{type:'dragOver',x:to.x,y:to.y,data});await new Promise(resolve=>setTimeout(resolve,100));}
+  await waitFor(client,`document.querySelector('${treeRow('p:project-quarry')}').getAttribute('aria-expanded')==='true'&&Boolean(document.querySelector('${treeRow(`f:${quarryFolder.id}`)}'))`,'hovering did not open the other project and load its folders');
+  to=await over(data,treeRow(`f:${quarryFolder.id}`));
+  start=runtime.requests.length;
+  await finish(data,to);
+  await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/project');
+  assert.equal(await client.evaluate(`Boolean(document.querySelector('.workspace-decision'))`),false,'an unpublished task moves without a confirmation');
+  assert.deepEqual(runtime.requests.slice(start).filter(request=>request.path==='/api/v1/tasks/task-johnson/project').map(request=>request.body),[{projectId:'project-quarry',folderId:quarryFolder.id,expectedProjectId:'project-johnson',expectedFolderId:null,expectedFolderRevision:2,confirmSharingChange:false}]);
+  await waitFor(client,`document.querySelector('${treeRow(task)}')?.dataset.treeParent==='f:${quarryFolder.id}'&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'the task did not appear in the other project');
+  assert.equal(processing.getTask('task-johnson').projectId,'project-quarry');
+  await waitFor(client,`document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Alpha Quarry')`,'the project move did not offer Undo');
+  start=runtime.requests.length;
+  await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
+  await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/project');
+  await waitFor(client,`Boolean(document.querySelector('${atRoot}'))`,'Undo did not bring the task back');
+  assert.equal(processing.getTask('task-johnson').projectId,'project-johnson');
+}));
+
+test('a published task confirms before a cross-project drop, and Undo asks again', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-published'},async({client,runtime,origin,processing})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'task unavailable');
+  const drop=()=>client.evaluate(`(()=>{
+    const transfer=new DataTransfer(),row=document.querySelector('[data-folder-drag][data-id="task-johnson"]');
+    row.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+    const target=document.querySelector('${treeRow('p:project-quarry')}');
+    target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+    if(!target.classList.contains('folder-drop-active'))throw Error('another project row did not accept the drop');
+    target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+  })()`);
+  let start=runtime.requests.length;
+  await drop();
+  await waitFor(client,'Boolean(document.querySelector("dialog.workspace-decision[open]"))','the published move did not ask first');
+  assert.equal(await client.evaluate('document.querySelector(".workspace-decision h2").textContent'),'Move published task');
+  await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+  await waitFor(client,'!document.querySelector(".workspace-decision")','Cancel did not close the confirmation');
+  assert.equal(runtime.requests.slice(start).some(request=>request.method!=='GET'),false,'cancelling must not move the task');
+  await drop();
+  await waitFor(client,'Boolean(document.querySelector("dialog.workspace-decision[open]"))','the published move did not ask again');
+  await client.evaluate(`document.querySelector('.workspace-decision form button[type="submit"]').click()`);
+  await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/project');
+  assert.deepEqual(runtime.requests.slice(start).filter(request=>request.path==='/api/v1/tasks/task-johnson/project').map(request=>request.body.confirmSharingChange),[true]);
+  await waitFor(client,`document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Alpha Quarry')`,'the move did not offer Undo');
+  assert.equal(processing.getTask('task-johnson').projectId,'project-quarry');
+  start=runtime.requests.length;
+  await confirmAppAction(client,runtime,'#workspace-folder-undo button',{title:'Move published task back'});
+  await waitForRequest(runtime,start,'PATCH','/api/v1/tasks/task-johnson/project');
+  await until(()=>processing.getTask('task-johnson').projectId==='project-johnson','Undo did not move the task back');
+}));
+
+test('several projects stay open together and load their folders only when opened', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-projects',width:1440,height:900,seed:processing=>{const folders=nestedFolders(processing);processing.createProjectFolder('project-quarry',{displayName:'2026 reprocess'},'staff');return folders;}},async({client,runtime,origin,top})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard`});
+  await waitFor(client,`document.querySelectorAll('[data-project-name]').length===2`,'projects unavailable');
+  const folderReads=project=>runtime.requests.filter(request=>request.method==='GET'&&request.path===`/api/v1/projects/${project}/folders`).length;
+  assert.equal(folderReads('project-johnson')+folderReads('project-quarry'),0,'closed projects load no folders');
+  await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
+  await waitFor(client,`Boolean(document.querySelector('${treeRow(`f:${top.id}`)}'))`,'the first project did not open');
+  assert.equal(folderReads('project-quarry'),0);
+  await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
+  await waitFor(client,`document.querySelectorAll('.project-row.selected').length===2&&Boolean(document.querySelector('#project-detail-project-quarry .folder-tree-row'))&&Boolean(document.querySelector('${treeRow(`f:${top.id}`)}'))`,'the second project did not open beside the first');
+  assert.equal(folderReads('project-quarry'),1);
+  assert.equal(await client.evaluate(`new URL(location.href).searchParams.get('project')`),'project-quarry');
+  await client.evaluate(`document.querySelector('[data-action="folder-toggle"][data-id="${top.id}"]').click()`);
+  await waitFor(client,`Boolean(document.querySelector('[data-tree-parent="f:${top.id}"]'))`,'the folder did not open');
+  await client.command('Page.reload');
+  await waitFor(client,`document.querySelectorAll('.project-row.selected').length===2&&Boolean(document.querySelector('[data-tree-parent="f:${top.id}"]'))`,'open projects and folders were not restored');
+  await client.evaluate(`window.scrollTo(0,document.querySelector('#project-list').getBoundingClientRect().top+scrollY-80)`);
+  await treeScreenshot(client,'desktop-1440-tree.png');
+  // Closing one project leaves the other open.
+  await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
+  await waitFor(client,`!document.querySelector('#project-detail-project-johnson')&&Boolean(document.querySelector('#project-detail-project-quarry'))`,'closing one project closed the other');
+  await client.evaluate(`(()=>{const menu=document.querySelector('${treeRow('p:project-quarry')} details');menu.open=true;})()`);
+  await treeScreenshot(client,'desktop-1440-project-menu.png');
+}));
+
+test('Delete moves a task to the Recycle Bin with Undo and no confirmation', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-delete',width:1440,height:900,quarryInJohnson:true},async({client,runtime,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))&&Boolean(document.querySelector('${treeRow('t:task-johnson')}'))`,'tasks unavailable');
+  // Live processing disables Delete; the menu shows Duplicate as a disabled follow-up.
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-johnson')} [data-action="delete-task"]').getAttribute('aria-disabled')`),'true');
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="duplicate-task"]').title`),'Coming soon');
+  await client.evaluate(`(()=>{const menu=document.querySelector('${treeRow('t:task-quarry')} details.task-more-actions');menu.open=true;menu.querySelector('[data-action="delete-task"]').focus();})()`);
+  await treeScreenshot(client,'desktop-1440-task-menu.png');
+  let start=runtime.requests.length;
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="delete-task"]').click()`);
+  await waitForRequest(runtime,start,'DELETE','/api/v1/tasks/task-quarry');
+  assert.equal(await client.evaluate(`Boolean(document.querySelector('.workspace-decision'))`),false,'Delete asked for a confirmation');
+  await waitFor(client,`!document.querySelector('${treeRow('t:task-quarry')}')&&document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Recycle Bin')`,'the deleted row stayed or Undo was not offered');
+  assert.equal(await focusedTreeKey(client),'t:task-johnson','focus moved to the neighbouring row');
+  await waitFor(client,`document.querySelector('#workspace-tree-live').textContent.includes('Moved Quarry reconstruction to the Recycle Bin')`,'the delete was not announced');
+  start=runtime.requests.length;
+  await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
+  await waitForRequest(runtime,start,'POST','/api/v1/storage/trash/trash-task-task-quarry/restore');
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))`,'Undo did not restore the task');
+  assert.equal(runtime.archivedTasks.has('task-quarry'),false);
+  // The Delete key on a focused row does the same.
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-tree-focus]').focus()`);
+  start=runtime.requests.length;
+  await pressKey(client,'Delete');
+  await waitForRequest(runtime,start,'DELETE','/api/v1/tasks/task-quarry');
+  await waitFor(client,`!document.querySelector('${treeRow('t:task-quarry')}')`,'the Delete key did not delete the task');
+}));
+
+test('on a phone, rows are 44px touch targets, drag is not offered and Move to… opens as a bottom sheet', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-phone',width:390,height:844,mobile:true,seed:processing=>{const folders=nestedFolders(processing);processing.moveTaskToFolder('task-quarry',folders.site.id,'staff');return folders;},quarryInJohnson:true},async({client,origin,top,site})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-johnson')}'))&&Boolean(document.querySelector('${treeRow(`f:${top.id}`)}'))`,'tree unavailable');
+  assert.equal(await client.evaluate(`matchMedia('(pointer: coarse)').matches`),true);
+  assert.equal(await client.evaluate(`document.querySelectorAll('[draggable="true"],[data-folder-drag]').length`),0,'drag is not offered on a phone');
+  await client.evaluate(`document.querySelector('[data-action="folder-toggle"][data-id="${top.id}"]').click()`);
+  await waitFor(client,`Boolean(document.querySelector('${treeRow(`f:${site.id}`)}'))`,'the folder did not open');
+  await client.evaluate(`document.querySelector('[data-action="folder-toggle"][data-id="${site.id}"]').click()`);
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))`,'the nested folder did not open');
+  const small=await client.evaluate(`[...document.querySelectorAll('#project-list [data-tree-focus], #project-list .row-actions > button, #project-list .row-actions > details > summary, #project-list .task-quick-actions > button')].filter(element=>element.getClientRects().length).map(element=>[element.dataset.action||element.getAttribute('aria-label')||element.textContent.trim(),Math.round(element.getBoundingClientRect().height),Math.round(element.getBoundingClientRect().width)]).filter(([,height,width])=>height<44||width<44)`);
+  assert.deepEqual(small,[],'every row target is at least 44px');
+  assert.equal(await client.evaluate(`Math.max(document.documentElement.scrollWidth,document.body.scrollWidth)<=innerWidth`),true,'the tree overflows the phone width');
+  await client.evaluate(`window.scrollTo(0,document.querySelector('#project-list').getBoundingClientRect().top+scrollY-120)`);
+  await treeScreenshot(client,'phone-390-tree.png');
+  // Row menus and Move to… open as bottom sheets.
+  await client.evaluate(`(()=>{const menu=document.querySelector('${treeRow('t:task-johnson')} details.task-more-actions');menu.open=true;})()`);
+  const menuBox=await client.evaluate(`(()=>{const box=document.querySelector('${treeRow('t:task-johnson')} .project-more-menu').getBoundingClientRect();return{left:Math.round(box.left),right:Math.round(box.right),bottom:Math.round(box.bottom),width:innerWidth,height:innerHeight}})()`);
+  assert.ok(menuBox.left<=8&&menuBox.right>=menuBox.width-8&&menuBox.bottom>=menuBox.height-16,`the row menu is not a bottom sheet: ${JSON.stringify(menuBox)}`);
+  await treeScreenshot(client,'phone-390-menu.png');
+  await client.evaluate(`document.querySelector('${treeRow('t:task-johnson')} [data-action="folder-move-task"]').click()`);
+  await waitFor(client,`document.querySelector('#workspace-modal')?.open&&Boolean(document.querySelector('#folder-move-form'))`,'Move to… did not open');
+  const sheet=await client.evaluate(`(()=>{const modal=document.querySelector('#workspace-modal'),box=modal.getBoundingClientRect();return{sheet:modal.classList.contains('sheet-modal'),left:Math.round(box.left),width:Math.round(box.width),bottom:Math.round(box.bottom),viewport:innerWidth,height:innerHeight}})()`);
+  assert.equal(sheet.sheet,true);
+  assert.ok(sheet.left===0&&sheet.width===sheet.viewport&&Math.abs(sheet.bottom-sheet.height)<=1,`Move to… is not a bottom sheet: ${JSON.stringify(sheet)}`);
+  await treeScreenshot(client,'phone-390-move-sheet.png');
+}));
+
+test('Move to… picks a project, then a folder, and asks before moving a published task in a real browser', {timeout:60000,skip:manualFixture}, async t=>{
   const executable=browserPath();if(!executable)return t.skip('Chromium-family browser required');
   const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client,folderServer,folderDb,folderRoot;
   try{
@@ -1182,12 +1466,12 @@ test('Move to… picks a project, then a folder, and drag offers other projects 
     const quarryFolder=processing.createProjectFolder('project-quarry',{displayName:'2026 reprocess'},'staff');
     const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));folderServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
     ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
     await client.command('Emulation.setDeviceMetricsOverride',{width:1280,height:860,deviceScaleFactor:1,mobile:false});
     await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
-    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… menu action unavailable');
+    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([aria-disabled="true"])'))`,'Move to… menu action unavailable');
     assert.equal(await client.evaluate(`document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]').textContent`),'Move to…');
     await client.evaluate(`(()=>{const menu=document.querySelector('[data-project-task="task-johnson"] .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
     await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
@@ -1209,7 +1493,7 @@ test('Move to… picks a project, then a folder, and drag offers other projects 
     await waitFor(client,`!document.querySelector('[data-move-folder-status]').hidden`,'sharing confirmation was not requested');
     assert.equal(runtime.requests.slice(beforeUnconfirmed).some(request=>request.path==='/api/v1/tasks/task-johnson/project'),false);
     await client.evaluate(`(()=>{const f=document.querySelector('#folder-move-form');f.elements.confirmSharingChange.checked=true;f.requestSubmit();})()`);
-    await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')&&document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Alpha Quarry')`,'task did not leave the source project');
+    await waitFor(client,`!document.querySelector('#project-detail-project-johnson [data-project-task="task-johnson"]')&&document.querySelector('[data-tree-key="t:task-johnson"]')?.dataset.treeParent?.startsWith('f:')&&document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Alpha Quarry')`,'task did not leave the source project');
     const before=processing.getTask('task-johnson');
     assert.equal(before.projectId,'project-quarry');assert.equal(before.folderId,quarryFolder.id);assert.equal(processing.getDataset('dataset-johnson').projectId,'project-quarry');
     const moves=runtime.requests.filter(request=>request.path==='/api/v1/tasks/task-johnson/project');
@@ -1217,110 +1501,10 @@ test('Move to… picks a project, then a folder, and drag offers other projects 
     // The fixture output is published, so Undo asks the same sharing question before it sends a confirmed request.
     const beforeUndo=runtime.requests.length;
     await confirmAppAction(client,runtime,'#workspace-folder-undo button',{title:'Move published task back'});
-    await waitFor(client,`Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'Undo did not bring the task back');
+    await waitFor(client,`Boolean(document.querySelector('[data-tree-key="t:task-johnson"][data-tree-parent="p:project-johnson"]'))`,'Undo did not bring the task back');
     assert.deepEqual(runtime.requests.slice(beforeUndo).filter(request=>request.path==='/api/v1/tasks/task-johnson/project').map(request=>request.body),
       [{projectId:'project-johnson',folderId:null,expectedProjectId:'project-quarry',expectedFolderId:quarryFolder.id,expectedFolderRevision:1,undo:true,confirmSharingChange:true}]);
     assert.equal(processing.getTask('task-johnson').projectId,'project-johnson');assert.equal(processing.getTask('task-johnson').folderId,null);
-    // Dragging offers other projects; dropping on one opens the picker on that project.
-    await waitFor(client,`!document.querySelector('#workspace').hasAttribute('aria-busy')`,'workspace stayed busy');
-    await client.evaluate(`(()=>{
-      const transfer=new DataTransfer(),handle=document.querySelector('[data-folder-drag][data-id="task-johnson"]');
-      handle.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));
-      const target=document.querySelector('[data-folder-drop-destinations] [data-task-drop-project="project-quarry"]');
-      if(!target?.getClientRects().length||target.textContent!=='Alpha Quarry')throw Error('Project drop destination unavailable');
-      target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
-      if(!target.classList.contains('folder-drop-active'))throw Error('Project destination did not highlight');
-      target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
-    })()`);
-    await waitFor(client,`document.querySelector('#folder-move-form')?.elements.projectId.value==='project-quarry'&&!document.querySelector('#folder-move-form').elements.folderId.disabled`,'project drop did not open the picker on that project');
-    assert.equal(processing.getTask('task-johnson').projectId,'project-johnson','a drop alone never moves across projects');
-  }finally{
-    if(client)client.close();
-    if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}
-    if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}if(folderServer){folderServer.closeAllConnections?.();await new Promise(resolve=>folderServer.close(resolve));}folderDb?.close();if(folderRoot)rmSync(folderRoot,{recursive:true,force:true});try{await removeBrowserProfile(profile,t);}finally{release();}
-  }
-});
-
-// A real mouse drag focuses the Move handle; repaints keep focused rows, so a move must release its own row.
-test('a moved task leaves its list at once even while its row has focus in a real browser', {timeout:60000,skip:manualFixture}, async t=>{
-  const executable=browserPath();if(!executable)return t.skip('Chromium-family browser required');
-  const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client,folderServer,folderDb,folderRoot;
-  try{
-    const express=require('express'),auth=require('../server/auth'),{openDatabase}=require('../server/database'),{ViewerRepository}=require('../server/repository'),{ProcessingRepository}=require('../server/processingRepository'),{createProcessingApi}=require('../server/processingApi');
-    folderRoot=mkdtempSync(path.join(tmpdir(),'viewer-move-focus-api-'));folderDb=openDatabase(path.join(folderRoot,'viewer.sqlite'));
-    const repository=new ViewerRepository(folderDb),processing=new ProcessingRepository(folderDb);
-    processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:browser-audit',permissions:['viewer.projects.read','viewer.projects.write','viewer.datasets.write','viewer.processing.read','viewer.processing.write','viewer.processing.publish'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
-    processing.createProject({id:'project-johnson',displayName:'Johnson Road Survey'});processing.createProject({id:'project-quarry',displayName:'Alpha Quarry'});
-    const dataset=processing.createDataset({id:'dataset-johnson',projectId:'project-johnson',displayName:'Source',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});processing.finalizeDataset(dataset.id,[],'a'.repeat(64));
-    processing.createTask({id:'task-johnson',projectId:'project-johnson',datasetId:dataset.id,displayName:'Johnson reconstruction'});
-    const folder=processing.createProjectFolder('project-johnson',{displayName:'Client folder'},'staff');
-    const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));folderServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
-    ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
-    const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
-    await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
-    await client.command('Emulation.setDeviceMetricsOverride',{width:1280,height:860,deviceScaleFactor:1,mobile:false});
-    await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
-    const handle='[data-folder-drag][data-id="task-johnson"]',row='[data-project-task="task-johnson"]';
-    const centre=selector=>client.evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.scrollIntoView({block:'center'});const box=element.getBoundingClientRect();return{x:box.left+box.width/2,y:box.top+box.height/2}})()`);
-    const settled=async(start,pathname,message)=>{
-      await waitForRequest(runtime,start,'PATCH',pathname);
-      await waitFor(client,`!document.querySelector('#workspace').hasAttribute('aria-busy')`,`${message}: move did not settle`);
-      await waitFor(client,`!document.querySelector('[data-project-folder-view] ${row}')`,`${message}: moved row stayed in its old list`);
-      // One repaint, not the next refresh or a blur: the row left within 300 ms of the response.
-      await assertRowChangeWithin(client,pathname,message);
-    };
-    await waitFor(client,`Boolean(document.querySelector('${handle}'))&&Boolean(document.querySelector('[data-action="folder-open"][data-id="${folder.id}"]'))`,'task and folder unavailable');
-
-    // 1. A real mouse drag from the Move handle into a folder.
-    await client.command('Input.setInterceptDrags',{enabled:true});
-    const from=await centre(handle);
-    await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:from.x,y:from.y});
-    await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:from.x,y:from.y,button:'left',buttons:1,clickCount:1});
-    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('${handle}')`),true,'the mouse press focuses the Move handle');
-    const eventsBefore=client.events.length;
-    for(let step=1;step<=6;step++)await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:from.x+step*8,y:from.y+step*8,button:'left',buttons:1});
-    let intercepted=null;
-    for(const deadline=Date.now()+5000;!intercepted&&Date.now()<deadline;){intercepted=client.events.slice(eventsBefore).find(event=>event.method==='Input.dragIntercepted');if(!intercepted)await new Promise(resolve=>setTimeout(resolve,25));}
-    assert.ok(intercepted,'the browser started a real drag');
-    const dropSelector=`[data-folder-drop-destinations] [data-task-drop-folder="${folder.id}"]`;
-    await waitFor(client,`Boolean(document.querySelector('${dropSelector}')?.getClientRects().length)`,'drop destinations did not appear');
-    const to=await centre(dropSelector),data=intercepted.params.data,beforeDrag=runtime.requests.length;
-    await armRowChange(client,`[data-project-folder-view] ${row}`,false);
-    for(const type of ['dragEnter','dragOver'])await client.command('Input.dispatchDragEvent',{type,x:to.x,y:to.y,data});
-    await client.command('Input.dispatchDragEvent',{type:'drop',x:to.x,y:to.y,data});
-    await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:to.x,y:to.y,button:'left',buttons:0,clickCount:1});
-    await client.command('Input.setInterceptDrags',{enabled:false});
-    await settled(beforeDrag,'/api/v1/tasks/task-johnson/folder','drag');
-    assert.equal(processing.getTask('task-johnson').folderId,folder.id);
-    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('.data-list [data-action="folder-open"][data-id="${folder.id}"]')`),true,'focus moves to the destination folder');
-
-    // 2. Undo while the moved row, now in the destination folder, holds focus.
-    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="${folder.id}"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('${handle}'))&&Boolean(document.querySelector('#workspace-folder-undo button'))`,'moved task or Undo unavailable');
-    await client.evaluate(`document.querySelector('${handle}').focus()`);
-    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('${handle}')`),true);
-    const beforeUndo=runtime.requests.length;
-    await armRowChange(client,`[data-project-folder-view] ${row}`,false);
-    await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
-    await settled(beforeUndo,'/api/v1/tasks/task-johnson/folder','undo');
-    assert.equal(processing.getTask('task-johnson').folderId,null);
-    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('.import-breadcrumb [data-action="folder-root"]')`),true,'focus moves to the destination (root) breadcrumb');
-
-    // 3. Move to… another project from a focused row: the source list keeps focus.
-    await client.evaluate(`document.querySelector('[data-action="folder-root"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… unavailable at the project root');
-    await client.evaluate(`(()=>{document.querySelector('${handle}').focus();const menu=document.querySelector('${row} .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
-    await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
-    await client.evaluate(`(()=>{const select=document.querySelector('#folder-move-form').elements.projectId;select.value='project-quarry';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-    await waitFor(client,`!document.querySelector('#folder-move-form').elements.folderId.disabled`,'destination folders unavailable');
-    const beforeProject=runtime.requests.length;
-    await armRowChange(client,`[data-project-folder-view] ${row}`,false);
-    await client.evaluate(`(()=>{const f=document.querySelector('#folder-move-form');if(f.elements.confirmSharingChange)f.elements.confirmSharingChange.checked=true;f.requestSubmit();})()`);
-    await settled(beforeProject,'/api/v1/tasks/task-johnson/project','project move');
-    assert.equal(processing.getTask('task-johnson').projectId,'project-quarry');
-    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('[data-project-folder-view] > .task-list')`),true,'focus stays in the source list');
-    assert.deepEqual(client.events.filter(event=>event.method==='Runtime.exceptionThrown'),[]);
   }finally{
     if(client)client.close();
     if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}
@@ -1348,13 +1532,14 @@ test('a delayed move or Undo keeps focus on the control the user chose meanwhile
     ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
     // Unpublished, so moves across projects and their Undo need no sharing confirmation.
     runtime.outputs=runtime.outputs.filter(output=>output.taskId!=='task-johnson');
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox',FINE_POINTER_SWITCH,'--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
     await client.command('Emulation.setDeviceMetricsOverride',{width:1280,height:860,deviceScaleFactor:1,mobile:false});
     await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
-    const moved='[data-project-folder-view] [data-project-task="task-johnson"]',otherTask='[data-action="toggle-task"][data-id="task-quarry"]',filter='#project-filter';
-    await waitFor(client,`Boolean(document.querySelector('${moved}'))&&Boolean(document.querySelector('${otherTask}'))&&Boolean(document.querySelector('[data-action="folder-open"][data-id="${folder.id}"]'))`,'tasks and folder unavailable');
+    // The moved row at the project's top level; a move into the folder takes it out of that list.
+    const moved='[data-tree-key="t:task-johnson"][data-tree-parent="p:project-johnson"]',otherTask='[data-action="toggle-task"][data-id="task-quarry"]',filter='#project-filter';
+    await waitFor(client,`Boolean(document.querySelector('${moved}'))&&Boolean(document.querySelector('${otherTask}'))&&Boolean(document.querySelector('[data-tree-key="f:${folder.id}"]'))`,'tasks and folder unavailable');
     const hold=()=>{let open;runtime.taskMoveResponseGate=new Promise(resolve=>{open=resolve;});openGate=()=>{runtime.taskMoveResponseGate=null;openGate=null;open();};};
     const focusOn=async selector=>assert.equal(await client.evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.focus();return document.activeElement===element})()`),true,`could not focus ${selector}`);
     const focusedOn=selector=>client.evaluate(`document.activeElement===document.querySelector(${JSON.stringify(selector)})`);
@@ -1369,7 +1554,7 @@ test('a delayed move or Undo keeps focus on the control the user chose meanwhile
     const dragTaskTo=folderId=>client.evaluate(`(()=>{
       const transfer=new DataTransfer(),handle=document.querySelector('[data-folder-drag][data-id="task-johnson"]');
       handle.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));
-      const target=document.querySelector(${JSON.stringify(`[data-folder-drop-destinations] [data-task-drop-folder="${folder.id}"]`)});
+      const target=document.querySelector(${JSON.stringify(`[data-tree-key="f:${folder.id}"]`)});
       target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
       target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
     })()`);
@@ -1394,7 +1579,7 @@ test('a delayed move or Undo keeps focus on the control the user chose meanwhile
     assert.equal(await focusedOn(filter),true,'folder Undo kept focus on the filter');
 
     // 3. Move to another project: the user closes the dialog and moves to the filter before the response.
-    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… unavailable');
+    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([aria-disabled="true"])'))`,'Move to… unavailable');
     await client.evaluate(`(()=>{const menu=document.querySelector('${moved} .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
     await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
     await client.evaluate(`(()=>{const select=document.querySelector('#folder-move-form').elements.projectId;select.value='project-quarry';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
@@ -1429,16 +1614,15 @@ test('a delayed move or Undo keeps focus on the control the user chose meanwhile
     assert.equal(await client.evaluate(`document.activeElement===document.body`),true,'an unfocused move does not take focus');
 
     // 6. Undo of a project move while another, expanded task's menu has focus: the render replaces it.
-    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="${folder.id}"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… unavailable in the folder');
-    await client.evaluate(`(()=>{const menu=document.querySelector('${moved} .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
+    // The move opened the folder, so the task is visible inside it.
+    await waitFor(client,`document.querySelector('[data-tree-key="t:task-johnson"]')?.dataset.treeParent==='f:${folder.id}'&&Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([aria-disabled="true"])'))`,'Move to… unavailable in the folder');
+    await client.evaluate(`(()=>{const menu=document.querySelector('[data-tree-key="t:task-johnson"] .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
     await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
     await client.evaluate(`(()=>{const select=document.querySelector('#folder-move-form').elements.projectId;select.value='project-quarry';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
     await waitFor(client,`!document.querySelector('#folder-move-form').elements.folderId.disabled`,'destination folders unavailable');
     await client.evaluate(`document.querySelector('#folder-move-form').requestSubmit()`);
     await waitFor(client,`document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Alpha Quarry')&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'second project move did not settle');
-    await client.evaluate(`document.querySelector('[data-action="folder-root"]').click()`);
-    await waitFor(client,`Boolean(document.querySelector('${otherTask}'))`,'other task unavailable at the root');
+    await waitFor(client,`Boolean(document.querySelector('${otherTask}'))`,'other task unavailable at the top level');
     await client.evaluate(`document.querySelector('${otherTask}').click()`);
     const otherMenu='[data-project-task="task-quarry"] .task-more-actions > summary';
     // Expanding loads the task, repaints and focuses its toggle; let that finish before the user moves on.
@@ -1494,7 +1678,7 @@ test('project-first workspace is interactive and overflow-free in real desktop a
   try {
     ({ server, runtime, origin } = await startFixtureServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
     ], { windowsHide: true, stdio: 'ignore' });
@@ -1507,9 +1691,11 @@ test('project-first workspace is interactive and overflow-free in real desktop a
     ].filter(viewport => !requestedViewport || viewport.name === requestedViewport)) await t.test(viewport.name, () => verifyViewport(devTools, origin, viewport, runtime));
   } finally {
     try {
-      if (browser) {
+      if (browser && browser.exitCode === null && browser.signalCode === null) {
         const exited = new Promise(resolve => browser.once('exit', resolve));
-        browser.kill();
+        // The whole process tree: a plain kill leaves Edge's browser process running on Windows.
+        if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(browser.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10_000 });
+        else browser.kill();
         await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
       }
     } finally {
@@ -1528,7 +1714,7 @@ test('orthophoto preview settles on the mounted task after navigation during dec
   try {
     ({ server, runtime, origin } = await startFixtureServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
     ], { windowsHide: true, stdio: 'ignore' });
@@ -1568,9 +1754,10 @@ test('orthophoto preview settles on the mounted task after navigation during dec
     });
   } finally {
     releaseResponse?.();
-    if (browser) {
+    if (browser && browser.exitCode === null && browser.signalCode === null) {
       const exited = new Promise(resolve => browser.once('exit', resolve));
-      browser.kill();
+      if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(browser.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10_000 });
+      else browser.kill();
       await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
     }
     releaseBrowserLock();
@@ -1587,7 +1774,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
   try {
     ({ server, runtime, origin } = await startFixtureServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
     ], { windowsHide: true, stdio: 'ignore' });
@@ -1708,9 +1895,11 @@ test('companion product restore is explicit, immutable-version scoped, and permi
     });
   } finally {
     try {
-      if (browser) {
+      if (browser && browser.exitCode === null && browser.signalCode === null) {
         const exited = new Promise(resolve => browser.once('exit', resolve));
-        browser.kill();
+        // The whole process tree: a plain kill leaves Edge's browser process running on Windows.
+        if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(browser.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10_000 });
+        else browser.kill();
         await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
       }
     } finally { releaseBrowserLock(); }
@@ -1724,7 +1913,7 @@ test('recovery UI keeps one request identity across an uncertain response in a r
  const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client;
  try{
   ({server,runtime,origin}=await startFixtureServer());runtime.testIngestRecovery=true;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
-  browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+  browser=spawnBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
   const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
   await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
   await client.command('Page.navigate',{url:`${origin}/workspace?section=diagnostics`});

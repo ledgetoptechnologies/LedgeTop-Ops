@@ -63,11 +63,13 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
   assert.match(source,/confirmationToken:preview\.confirmationToken/);
   assert.doesNotMatch(source,/NAD83 \/ Wisconsin Central|value="NAVD88"/);
   assert.doesNotMatch(source,/card\('Project datasets'/);
-  const projectRows=source.slice(source.indexOf('function projectRows()'),source.indexOf('function selectedProject()'));
-  const projectDetail=source.slice(source.indexOf('function selectedProject()'),source.indexOf('\nfunction ',source.indexOf('function selectedProject()')+1));
-  assert.match(projectRows,/\$\{selected\?selectedProject\(\):''\}<\/article>/);
-  assert.match(projectDetail,/class="project-detail"/);
-  assert.match(projectDetail,/class="task-list"/);
+  const projectRows=source.slice(source.indexOf('function projectRows()'),source.indexOf('\nfunction taskLodNotice('));
+  const projectDetail=source.slice(source.indexOf('function projectTree(project)'),source.indexOf('\nfunction ',source.indexOf('function projectTree(project)')+1));
+  // Each open project shows its folders and tasks inline as one drill-down tree.
+  assert.match(projectRows,/\$\{projectHead\(project\)\}\$\{open\?projectTree\(project\):''\}<\/article>/);
+  assert.match(projectDetail,/class="project-detail tree-body"/);
+  assert.match(projectDetail,/role="rowgroup"/);
+  assert.match(projectDetail,/taskPanel\(row\.task,row\)/);
   assert.doesNotMatch(projectDetail,/All projects|project-columns|<h1|project\.description/);
 });
 
@@ -76,7 +78,7 @@ test('coordinator-queued tasks are distinct from active processing in summaries'
   assert.match(source,/const VIEWER_FINALIZATION_STATUSES=new Set\(\['ingesting','derivatives'\]\)/);
   assert.match(source,/const VIEWER_SUBMISSION_STATUSES=new Set\(\['pending','admitted','initializing','uploading','committed'\]\)/);
   const dashboard=source.slice(source.indexOf('function dashboard()'),source.indexOf('\nfunction projectRows()'));
-  const projectRows=source.slice(source.indexOf('function projectRows()'),source.indexOf('\nfunction taskLodNotice'));
+  const projectRows=source.slice(source.indexOf('function projectHead(project)'),source.indexOf('\nfunction taskLodNotice'));
   assert.match(dashboard,/metric\('Submitting',work\.submitting,'Viewer upload or node-admission work'\)/);
   assert.match(dashboard,/metric\('Processing now',work\.processing,`\$\{work\.queued\} queued · \$\{work\.finalizing\} finalizing in Viewer`\)/);
   assert.match(projectRows,/work\.submitting[\s\S]*work\.queued[\s\S]*work\.processing[\s\S]*work\.finalizing/);
@@ -91,10 +93,10 @@ test('coordinator-queued tasks are distinct from active processing in summaries'
 test('dashboard and project rows render separate submitting, queued, engine, and finalizing counts',()=>{
   const taskPhaseCounts=new Function('NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','VIEWER_SUBMISSION_STATUSES',`${workspaceFunction('taskPhaseCounts','readWorkspaceView')};return taskPhaseCounts`)(new Set(['running']),new Set(['ingesting','derivatives']),new Set(['pending','admitted','initializing','uploading','committed']));
   const states=['uploading','queued_upstream','running','ingesting','derivatives'],tasks=states.map((status,index)=>({id:`task-${index}`,projectId:'project-1',latestAttempt:{status}})),state={tasks,projects:[{id:'project-1',displayName:'Status fixture',description:'Phase rendering'}],datasets:[],outputs:[],providers:[{enabled:true,runtimeHealth:'healthy'}],projectQuery:'',selectedProjectId:null};
-  const metric=(label,value,description)=>`<article><strong>${label}</strong><b>${value}</b><small>${description}</small></article>`,esc=value=>String(value),badge=()=>'<span>active</span>',selectedProject=()=>'',empty=()=>'';
-  const dashboard=new Function('state','metric','projectRows','esc','taskPhaseCounts',`${workspaceFunction('dashboard','projectRows')};return dashboard`) (state,metric,()=>'<div>projects</div>',esc,taskPhaseCounts)();
+  const metric=(label,value,description)=>`<article><strong>${label}</strong><b>${value}</b><small>${description}</small></article>`,esc=value=>String(value),badge=()=>'<span>active</span>',projectTree=()=>'',empty=()=>'',can=()=>false,treeIcon=()=>'',isProjectOpen=()=>false,projectActions=()=>'';
+  const dashboard=new Function('state','metric','projectRows','esc','taskPhaseCounts','can','treeIcon',`${workspaceFunction('dashboard','projectRows')};return dashboard`) (state,metric,()=>'<div>projects</div>',esc,taskPhaseCounts,can,treeIcon)();
   const helpers=['countLabel','activityChip','taskNeedsAttention'].map(name=>{const at=source.indexOf(`function ${name}(`);return source.slice(at,source.indexOf('\n',at))}).join('\n');
-  const projectRows=new Function('state','taskPhaseCounts','badge','selectedProject','empty','esc',`${helpers}\n${workspaceFunction('projectRows','taskLodNotice')};return projectRows`) (state,taskPhaseCounts,badge,selectedProject,empty,esc)();
+  const projectRows=new Function('state','taskPhaseCounts','badge','projectTree','empty','esc','isProjectOpen','projectActions',`${helpers}\n${workspaceFunction('projectHead','taskLodNotice')};return projectRows`) (state,taskPhaseCounts,badge,projectTree,empty,esc,isProjectOpen,projectActions)();
   assert.match(dashboard,/<strong>Submitting<\/strong><b>1<\/b><small>Viewer upload or node-admission work<\/small>/);
   assert.match(dashboard,/<strong>Processing now<\/strong><b>1<\/b><small>1 queued · 2 finalizing in Viewer<\/small>/);
   for(const [label,count] of [['submitting',1],['queued',1],['processing',1],['finalizing',2]])assert.match(projectRows,new RegExp(`<span class="activity-chip ${label}">${count} ${label}<\\/span>`));
@@ -135,7 +137,7 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(source,/function taskQuickActions\(task\)/);
   assert.match(source,/activePublished&&item\.status==='published'\)\|\|outputs\.find\(item=>item\.status==='ready'&&item\.attemptId\)/);
   assert.match(source,/output\.status==='ready'&&output\.attemptId&&can\('viewer\.processing\.publish'\)/);
-  assert.match(source,/button\('open-review',output\.attemptId,'View',true\)/);
+  assert.match(source,/button\('open-review',output\.attemptId,'View',true,'tabindex="-1"'\)/);
   assert.match(source,/if\(!readOnly&&canShareOutput\(output\)\)/);
   for(const label of ["'View'","'Download'","'Model report'","'Share'"])assert.ok(source.includes(label),label);
   assert.match(source,/class="task-quick-actions row-actions"/);
