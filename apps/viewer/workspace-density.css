@@ -139,6 +139,9 @@ body{font-size:14px;line-height:1.45}
 /* Compact targets: desktop fine pointer only. */
 @media (min-width:768px) and (pointer:fine){
   .primary-button,.secondary-button,.icon-button{min-height:32px;padding:6px 12px}
+  /* The Background count badge fits a 32px button (it was 23px tall, which made
+     the button and its stretched header neighbours 37px). Same 12px count. */
+  .background-work-indicator strong{height:18px;min-width:18px;padding:0 5px}
   .workspace-nav .nav-link{min-height:34px;padding:.35rem .6rem}
   .nav-collapse{min-height:34px}
   .task-quick-actions .primary-button,.task-quick-actions .secondary-button{min-height:32px}
@@ -163,5 +166,5 @@ body{font-size:14px;line-height:1.45}
   .share-legacy>summary,.quick-action,.task-disclosure>summary,.import-tab,.gcp-import-disclosure summary,
   .project-open,.task-summary-toggle,.provider-list-item,.project-search input,
   .manage-form input:not([type=checkbox]):not([type=radio]),.manage-form select{min-height:44px}
-  .project-more-actions>summary,.modal-heading .icon-button{min-width:44px}
+  .project-more-actions>summary,.icon-button{min-width:44px}
 }
