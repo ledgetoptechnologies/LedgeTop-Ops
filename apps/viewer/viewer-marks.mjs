@@ -1,6 +1,6 @@
 import { createMarksStore } from './viewer-marks-store.mjs';
 import { createMarkMapLayer, geometryFrom, markPositions } from './viewer-mark-map-layer.mjs';
-import { DEFAULT_STYLE, ICON_CHOICES, MARK_SWATCHES, categoryBadge, categoryStyle, iconMarkup, keepIcon, markBadge, markIconName, safeColor } from './viewer-mark-style.mjs';
+import { DEFAULT_STYLE, ICONS_BY_GROUP, ICON_CHOICES, MARK_COLORS, categoryBadge, categoryStyle, colorName, iconMarkup, keepIcon, markBadge, markIconName, safeColor } from './viewer-mark-style.mjs';
 import { elevationForDisplay, elevationToMetres, elevationUnit, formatDecimal, formatDms, formatUtm, parseCoordinateInput } from './viewer-mark-coordinates.mjs';
 import { geoJsonToMarks, marksToGeoJson } from './viewer-mark-geojson.mjs';
 import { NO_CATEGORY, categoryOf, createMarkVisibility } from './viewer-mark-visibility.mjs';
@@ -50,7 +50,9 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
 
   const store = createMarksStore({ request, newId, onChange: () => render() });
   const layer = createMarkMapLayer({ L, getMap,
-    onSelect: id => select(id, { focus: false }),
+    // The open mark keeps what is being typed.
+    onSelect: id => { if (draft && draft.id === id) nameInput.focus?.(); else select(id, { focus: false }); },
+    describe: mark => [mark.name, categoryById(mark.categoryId)?.name, colorName(mark.color)].filter(Boolean).join(', '),
     onDraftMove: geometry => { if (draft) { draft.geometry = geometry; writeCoords(); render(); } },
   });
 
@@ -77,13 +79,15 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const nameInput = h(document, 'input', { name: 'name', maxlength: '100', required: true, autocomplete: 'off' });
   const categorySelect = h(document, 'select', { name: 'categoryId' });
   const colorInput = h(document, 'input', { name: 'color', type: 'color', 'aria-label': 'Custom colour' });
-  const swatches = MARK_SWATCHES.map(color => h(document, 'button', { type: 'button', class: 'viewer-mark-swatch', 'data-color': color, 'aria-label': 'Colour ' + color, style: `background:${color}` }));
+  const swatches = MARK_COLORS.map(({ name, color }) => h(document, 'button', { type: 'button', class: 'viewer-mark-swatch', 'data-color': color, 'aria-label': name, title: name, style: `background:${color}` }));
   const iconButtons = ICON_CHOICES.map(({ name, label }) => {
     const button = h(document, 'button', { type: 'button', class: 'viewer-mark-icon', 'data-icon': name, 'aria-label': label, title: label });
     button.innerHTML = iconMarkup(name, '#555555', 22);
     return button;
   });
-  const iconField = h(document, 'fieldset', { class: 'viewer-mark-icons' }, h(document, 'legend', { text: 'Icon' }), ...iconButtons);
+  const iconField = h(document, 'fieldset', { class: 'viewer-mark-icons' }, h(document, 'legend', { text: 'Icon' }),
+    ...ICONS_BY_GROUP.flatMap(({ group, icons }) => [h(document, 'span', { class: 'hint viewer-mark-icon-group', text: group }),
+      ...iconButtons.filter(button => icons.some(icon => icon.name === button.dataset.icon))]));
   const pointCoords = h(document, 'input', { name: 'pointCoordinates', autocomplete: 'off', spellcheck: 'false' });
   const pointCoordsField = field('Coordinates', pointCoords);
   const coordReadout = h(document, 'p', { class: 'hint viewer-mark-readout' });

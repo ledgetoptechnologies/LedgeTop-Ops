@@ -46,7 +46,7 @@ test('storage is bounded, and blocked or broken storage only forgets', () => {
 });
 
 const names = panel => panel.panel.querySelectorAll('.viewer-mark-list-item').filter(node => !node.getAttribute('data-only')).map(node => node.textContent);
-const pins = panel => panel.leaflet.pins().map(layer => layer.options.title).filter(Boolean).sort();
+const pins = panel => panel.leaflet.pins().map(layer => layer.label.text).sort();
 const eye = (panel, id) => panel.q(`[data-eye="${id}"]`);
 async function start(t, localStorage = memoryStorage()) {
   const setup = await openMarksPanel(t);

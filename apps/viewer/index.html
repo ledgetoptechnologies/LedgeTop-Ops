@@ -178,9 +178,12 @@
     .viewer-mark-category-form input[name=categoryName] { flex:1 1 110px; width:auto; }
     .viewer-mark-category-form input[type=color] { width:32px; height:30px; padding:0; border:0; background:none; }
     .viewer-mark-section summary { cursor:pointer; font-size:12px; font-weight:600; color:#e0e0e0; padding:4px 0; }
-    .viewer-map-mark { background:none; border:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,.8)); }
-    .viewer-map-mark.selected svg circle { stroke:#fff; stroke-width:4; }
-    .viewer-map-mark.draft { opacity:.85; }
+    .viewer-map-mark, .viewer-map-area { background:none; border:0; }
+    .viewer-map-mark svg, .viewer-map-area svg { display:block; overflow:visible; }
+    /* At least 44 x 44 to touch, around the body of the pin. */
+    .viewer-map-mark::before { content:''; position:absolute; left:50%; top:calc(50% - 4px); width:44px; height:44px; transform:translate(-50%,-50%); }
+    .viewer-map-mark:focus-visible { outline:3px solid #fff; outline-offset:2px; box-shadow:0 0 0 8px #000; border-radius:6px; }
+    .viewer-mark-icon-group { flex:1 0 100%; }
     .viewer-mark-vertex { background:#fff; border:2px solid #212121; border-radius:50%; }
     .leaflet-tooltip.viewer-mark-label { background:rgba(10,10,12,.78); color:#fff; border:0; box-shadow:none; font:600 11px var(--font); padding:2px 6px; }
     .leaflet-tooltip.viewer-mark-label::before { display:none; }

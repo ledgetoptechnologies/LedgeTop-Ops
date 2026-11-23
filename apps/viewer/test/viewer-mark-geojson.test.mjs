@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { geoJsonToMarks, marksToGeoJson, IMPORT_LIMIT } from '../viewer-mark-geojson.mjs';
-import { glyphColor, markIconSvg } from '../viewer-mark-icons.mjs';
+import { DEFAULT_COLOR, glyphColor, glyphSvg, pinSvg } from '../viewer-mark-icons.mjs';
 
 let next = 0;
 const newId = () => `00000000-0000-4000-8000-${String(++next).padStart(12, '0')}`;
@@ -60,9 +60,10 @@ test('import splits multi-geometries, adds unknown categories and skips what it 
 });
 
 test('icon markup only uses the fixed table and a validated colour', () => {
-  const svg = markIconSvg('"><script>', 'red" onload="x');
-  assert.doesNotMatch(svg, /script|onload/);
-  assert.match(svg, /fill="#212121"/);
+  for (const svg of [pinSvg('"><script>', 'red" onload="x', 32, { selected: true, draft: true }), glyphSvg('"><script>', 'red" onload="x', 22), pinSvg('__proto__', 'x', 32)]) {
+    assert.doesNotMatch(svg, /script|onload|undefined/);
+    assert.match(svg, new RegExp(`fill="${DEFAULT_COLOR}"`));
+  }
   assert.equal(glyphColor('#ffffff'), '#111111');
   assert.equal(glyphColor('#212121'), '#ffffff');
 });
