@@ -2,12 +2,13 @@
 // local node:sqlite file built from this repository's own migrations 0001..0226;
 // no Cloudflare resource is contacted.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after, before } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import {
   LEDGER_INSERT_SQL, OPS_0227_0244_AUTHORITY_NOTE, OPS_0227_0244_FILES, OPS_0227_0244_FINAL_LEDGER,
@@ -1066,6 +1067,72 @@ test('reconcile and resume re-prove the approved schema, and a receipt cannot in
 });
 
 // The exact production-shaped store holds raw production definitions, so it is never committed.
+// --- The real command and the real provider, answered from a local SQLite file -------
+
+/** Starts the real command as a child process. Cloudflare requests are answered from `file`; writes are refused there. */
+function realCommand(file, args, databaseName) {
+  const log = path.join(tmp, `network-${++counter}.log`);
+  fs.writeFileSync(log, '');
+  const env = { ...TOKEN_ENV, OPS_TEST_NETWORK_LOG: log, OPS_TEST_D1_SQLITE: file, OPS_TEST_D1_NAME: databaseName };
+  for (const key of ['PATH', 'Path', 'SystemRoot', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE']) if (process.env[key]) env[key] = process.env[key];
+  const child = spawnSync(process.execPath, ['--import', pathToFileURL(path.join(ROOT, 'scripts/production-ops-0227-0244-cli-test-preload.mjs')).href,
+    path.join(ROOT, 'scripts/production-ops-0227-0244-ordered-once.mjs'), ...args],
+    { cwd: ROOT, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
+  assert.equal(child.error, undefined);
+  const network = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  assert.ok(network.every(entry => ['fetch', 'read'].includes(entry.kind)), 'only answered reads: no socket and no write batch');
+  return { status: child.status, stdout: child.stdout, stderr: child.stderr, reads: network.filter(entry => entry.kind === 'read').length,
+    last: child.stdout.trim().split('\n').at(-1) };
+}
+
+test('real command: dry run and reconcile complete through the real provider; execute refuses without a terminal', () => {
+  const file = freshDb(), before = fs.readFileSync(file);
+  const dryReceipt = receiptPath();
+  const dry = realCommand(file, [...rehearsalArgs, '--receipt', dryReceipt], REHEARSAL.databaseName);
+  assert.deepEqual([dry.status, dry.stderr, dry.reads], [0, '', 1]);
+  assert.equal(dry.stdout.split('\n').filter(line => line.startsWith('dry-run ok: ')).length, 10);
+  assert.deepEqual(JSON.parse(dry.last), { status: 'dry-run-passed', mode: 'dry-run', stop: null, nextStep: OPS_0227_0244_ORDERED_NAMES[0],
+    finalLedger: { ...OPS_0227_0244_PRIOR_LEDGER }, writesPerformed: 0 });
+  assert.equal(readReceipt(dryReceipt).status, 'dry-run-passed');
+
+  const reconciled = realCommand(file, ['--reconcile', ...rehearsalArgs], REHEARSAL.databaseName);
+  assert.deepEqual([reconciled.status, reconciled.stderr, JSON.parse(reconciled.last).status], [0, '', 'reconciled']);
+
+  const execReceipt = receiptPath();
+  const executed = realCommand(file, execArgs(execReceipt), REHEARSAL.databaseName);
+  assert.deepEqual([executed.status, executed.stderr], [1, 'ops_0227_0244:interactive_confirmation_required\n']);
+  assert.deepEqual([readReceipt(execReceipt).status, readReceipt(execReceipt).stop.code, readReceipt(execReceipt).writesPerformed],
+    ['refused', 'ops_0227_0244:interactive_confirmation_required', 0]);
+  assert.ok(fs.readFileSync(file).equals(before), 'database bytes unchanged');
+});
+
+test('real command on the production ids: a source-built schema is refused with a written receipt and exit 1', () => {
+  const file = freshDb();
+  for (const mode of [[], ['--reconcile']]) {
+    const receiptFile = receiptPath();
+    const run = realCommand(file, [...mode, ...PRODUCTION_ARGS, '--receipt', receiptFile], OPS_PRODUCTION_DATABASE.databaseName);
+    assert.deepEqual([run.status, run.stderr, run.reads], [1, '', 1]);
+    const receipt = readReceipt(receiptFile);
+    assert.match(receipt.stop.code, /approved_existing_schema_mismatch$/u);
+    assert.equal(receipt.approvedExistingSchema.ok, false);
+    assert.equal(receipt.writesPerformed, 0);
+  }
+  const wrongName = realCommand(file, PRODUCTION_ARGS, 'another-name');
+  assert.deepEqual([wrongName.status, wrongName.stderr, wrongName.reads], [1, 'ops_0227_0244_provider:target_mismatch\n', 0]);
+});
+
+test('an error after the ordered run has written the receipt never replaces it with a refusal', async () => {
+  const file = freshDb();
+  const written = [];
+  const provider = sqliteProvider(file);
+  const opened = { write(value) { written.push(structuredClone(value)); if (written.length === 3) throw new Error('synthetic disk failure'); }, close() {} };
+  await assert.rejects(mainOps0227To0244(execArgs(path.join(tmp, 'not-used.json')), { env: TOKEN_ENV, out: () => {},
+    openReceipt: () => opened, providerFactory: () => provider, confirm: async () => true }), /synthetic disk failure/u);
+  provider.close();
+  assert.equal(written.length, 3);
+  assert.ok(written.every(value => value.stop?.phase !== 'command-line'));
+});
+
 const PRODUCTION_SHAPED = process.env.OPS_0227_0244_PRODUCTION_SHAPED_SQLITE;
 test('the exact production-shaped store passes as production: clean, interrupted and resumed; one missing object is refused', {
   skip: !PRODUCTION_SHAPED && 'set OPS_0227_0244_PRODUCTION_SHAPED_SQLITE to the private production-shaped 226 store' }, async () => {
@@ -1084,6 +1151,9 @@ test('the exact production-shaped store passes as production: clean, interrupted
   assert.equal(dry.result.status, 'dry-run-passed');
   assert.equal(dry.provider.calls.writes, 0);
   assert.equal(dry.result.approvedExistingSchema.ok, true);
+
+  const real = realCommand(copy(), PRODUCTION_ARGS, OPS_PRODUCTION_DATABASE.databaseName);
+  assert.deepEqual([real.status, real.stderr, JSON.parse(real.last).status, real.reads], [0, '', 'dry-run-passed', 1]);
 
   const clean = copy();
   const applied = await cli(clean, productionExec(receiptPath()), { extra: SOURCE_OK });

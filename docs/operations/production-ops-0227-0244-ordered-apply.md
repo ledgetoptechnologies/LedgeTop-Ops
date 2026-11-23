@@ -214,14 +214,18 @@ Execute mode works as follows:
 Exit codes:
 
 - 0: complete, dry run passed, or reconciled.
-- 1: stopped, refused, or reconciliation required.
+- 1: stopped, refused, or reconciliation required. Also a run that ends without
+  settling, which prints `ops_0227_0244:command_line_unsettled`.
 - 2: cancelled.
 
 ## Receipt and stop behaviour
 
 The receipt is a JSON file. The tool creates it exclusively and rewrites it in
-full after every phase, so a stop always leaves a complete partial receipt. It
-contains:
+full after every phase, so a stop always leaves a complete partial receipt. An
+error before the ordered run starts (for example a missing token, or a failed
+target check) is recorded as `refused`, phase `command-line`, with zero writes.
+Only a process that ends without settling or is killed before its first receipt
+write leaves an empty file. The receipt contains:
 
 - the plan hash and the fixture hash;
 - the target ids and the approval reference;
@@ -487,8 +491,17 @@ node --test scripts/production-ops-0227-0244-ordered-once.test.mjs
 ```
 
 ```powershell
+node --test scripts/production-ops-0227-0244-cli-entry.test.mjs
+```
+
+```powershell
 node --test scripts/production-ops-0227-0244-copied-226-fixture.test.mjs
 ```
+
+The command-line tests start the real command as a child process with the real
+provider and a fake token. A preload records and refuses every network attempt,
+or answers Cloudflare requests from a local SQLite file. They need no npm
+dependencies, except the cases inside the ordered-once test file.
 
 The tests are offline. One test is skipped unless
 `OPS_0227_0244_PRODUCTION_SHAPED_SQLITE` names a private production-shaped 226

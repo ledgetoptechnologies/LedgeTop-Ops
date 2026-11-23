@@ -746,8 +746,11 @@ export async function mainOps0227To0244(args, dependencies = {}) {
   const options = parseOps0227To0244Args(args, env);
   const target = { environment: options.environment, accountId: options.accountId, databaseId: options.databaseId,
     databaseName: options.databaseName };
-  let receipt = null;
-  if (options.receiptPath) receipt = (dependencies.openReceipt ?? openOps0227To0244Receipt)(options.receiptPath);
+  let receipt = null, receiptTouched = false;
+  if (options.receiptPath) {
+    const opened = (dependencies.openReceipt ?? openOps0227To0244Receipt)(options.receiptPath);
+    receipt = { write(value) { receiptTouched = true; opened.write(value); }, close() { opened.close(); } };
+  }
   try {
     let plan;
     try { plan = loadVerifiedOps0227To0244Plan({ root: dependencies.root ?? ROOT }); }
@@ -821,6 +824,14 @@ export async function mainOps0227To0244(args, dependencies = {}) {
       return cancelled;
     }
     return await runOps0227To0244Ordered({ ...common, provider, mode: 'execute', receipt, startIndex });
+  } catch (error) {
+    // The ordered run writes the receipt before its first request. An untouched receipt therefore means that no
+    // write was attempted, so the refusal can be recorded instead of leaving an empty file.
+    if (receipt && !receiptTouched) {
+      receipt.write({ schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
+        status: 'refused', stop: { step: null, phase: 'command-line', code: errorCode(error) }, writesPerformed: 0, at: new Date().toISOString() });
+    }
+    throw error;
   } finally { receipt?.close(); }
 }
 
@@ -829,9 +840,9 @@ async function defaultSourceCheck() {
   return currentMainSource();
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+async function runCommandLine(args) {
   try {
-    const result = await mainOps0227To0244(process.argv.slice(2));
+    const result = await mainOps0227To0244(args);
     process.stdout.write(`${JSON.stringify({ status: result.status, mode: result.mode, stop: result.stop ?? null,
       nextStep: result.reconcile?.nextStep ?? null, finalLedger: result.finalLedger ?? null, writesPerformed: result.writesPerformed ?? 0 })}\n`);
     process.exitCode = ['complete', 'dry-run-passed', 'reconciled'].includes(result.status) ? 0 : result.status === 'cancelled' ? 2 : 1;
@@ -840,4 +851,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.stderr.write(`${code === 'unexpected_error' ? 'ops_0227_0244:unexpected_error' : code}\n${code === 'ops_0227_0244:usage' ? `${USAGE}\n` : ''}`);
     process.exitCode = 1;
   }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // Never a top-level await here. The provider imports this module, so it cannot load until this module has finished
+  // evaluating: awaiting the run at the top level deadlocks (exit 13) before the first request.
+  // The exit code is 1 until the run settles, so a run that never settles is not reported as a success.
+  process.exitCode = 1;
+  let settled = false;
+  process.once('exit', () => { if (!settled) try { fs.writeSync(2, 'ops_0227_0244:command_line_unsettled\n'); } catch {} });
+  runCommandLine(process.argv.slice(2)).then(() => { settled = true; });
 }
