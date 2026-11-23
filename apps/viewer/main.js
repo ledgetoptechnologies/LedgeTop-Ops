@@ -1442,6 +1442,21 @@ function orthoPrintPermissions() {
   return orthoPrintPolicy({ accessAvailable: viewerAccessAvailable(), measure: SHARE_PERMISSIONS.measure !== false, download: SHARE_PERMISSIONS.download === true });
 }
 
+// Image exports in flight. Each belongs to the viewer (audience and subject),
+// model and version it started for. Every session state change cancels the
+// ones that no longer match or have lost access; the dialog's Close is its
+// own abort.
+const orthoPrintExports = new Set();
+function orthoPrintIdentity() {
+  return JSON.stringify([activeViewerSession?.audience ?? null, activeViewerSession?.subject ?? null,
+    PROJECT?.id ?? null, PROJECT?.activeVersion?.id ?? null]);
+}
+function cancelStaleOrthoPrintExports() {
+  if (!orthoPrintExports.size) return;
+  const identity = orthoPrintIdentity(), available = viewerAccessAvailable();
+  for (const job of orthoPrintExports) if (!available || job.identity !== identity) job.cancel();
+}
+
 function syncMeasurementActionVisibility() {
   const accessAvailable = sessionAccessState !== 'unavailable'
     && (VIEW_MODE !== 'session' || (activeViewerSession && Date.parse(activeViewerSession.expiresAt) > Date.now()));
@@ -1492,6 +1507,8 @@ function setSessionAccessState(next, reason = null) {
   if (label && tilesRenderer) dom.lodStatus.textContent = label;
   if (label && state.activeMode === 'cloud') dom.cloudStatus.textContent = sessionAccessLabel('Cloud');
   else if (next === 'active' && previous !== 'active' && state.activeMode === 'cloud') dom.cloudStatus.textContent = 'Cloud: access renewed';
+  // Every accepted session (applyViewerSession ends here) and every loss of access.
+  cancelStaleOrthoPrintExports();
 }
 
 function recordSessionAccessFailure(source, status = null) {
@@ -4200,43 +4217,66 @@ function propertyLinesForPrint() {
   return { lines, color: typeof line.options.color === 'string' ? line.options.color : null };
 }
 
-async function exportOrthoPrintFromViewer({ area, size, format, contours, property }, signal) {
+async function exportOrthoPrintFromViewer({ area, size, format, contours, property }, dialogSignal) {
   // Re-check here, not only when the dialog opened: the session may have
   // expired or permissions changed since.
   assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
   if (!ORTHO_URL) throw Object.assign(new Error('This model has no orthophoto.'), { code: 'print_no_ortho' });
   if (area === 'view' && !(map && isMapMode(state.activeMode))) throw Object.assign(new Error('Open a map view to export the current view.'), { code: 'print_no_view' });
-  const ortho = await getDataset(ORTHO_URL, false, { signal });
-  let extent = { minE: ortho.minE, maxE: ortho.maxE, minN: ortho.minN, maxN: ortho.maxN };
-  if (area === 'view') {
-    // Ortho, DSM and DTM share the map, so the current view is the same area in each.
-    const b = map.getBounds();
-    const corners = [b.getNorthWest(), b.getNorthEast(), b.getSouthWest(), b.getSouthEast()].map((c) => latLonToUtm(c.lat, c.lng));
-    extent = { minE: Math.min(...corners.map((c) => c[0])), maxE: Math.max(...corners.map((c) => c[0])), minN: Math.min(...corners.map((c) => c[1])), maxN: Math.max(...corners.map((c) => c[1])) };
+  // The export belongs to the viewer, model and version it started for. A
+  // session change cancels it (cancelStaleOrthoPrintExports), closing the
+  // dialog cancels it, and after every await `current()` checks both the
+  // identity and the print policy. Any mismatch ends it as a cancel: no file.
+  const controller = new AbortController(), signal = controller.signal;
+  const job = { identity: orthoPrintIdentity(), cancel: () => controller.abort() };
+  const fromDialog = () => controller.abort();
+  if (dialogSignal?.aborted) controller.abort(); else dialogSignal?.addEventListener('abort', fromDialog, { once: true });
+  const current = () => {
+    if (orthoPrintIdentity() !== job.identity) controller.abort();
+    if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+    assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
+  };
+  orthoPrintExports.add(job);
+  try {
+    const ortho = await getDataset(ORTHO_URL, false, { signal });
+    current();
+    let extent = { minE: ortho.minE, maxE: ortho.maxE, minN: ortho.minN, maxN: ortho.maxN };
+    if (area === 'view') {
+      // Ortho, DSM and DTM share the map, so the current view is the same area in each.
+      const b = map.getBounds();
+      const corners = [b.getNorthWest(), b.getNorthEast(), b.getSouthWest(), b.getSouthEast()].map((c) => latLonToUtm(c.lat, c.lng));
+      extent = { minE: Math.min(...corners.map((c) => c[0])), maxE: Math.max(...corners.map((c) => c[0])), minN: Math.min(...corners.map((c) => c[1])), maxN: Math.max(...corners.map((c) => c[1])) };
+    }
+    const drawnLines = property ? propertyLinesForPrint() : { lines: [], color: null };
+    const policy = orthoPrintPermissions();
+    // Screen pixels the exported area actually covers: the view clipped to the
+    // orthophoto, not the whole map viewport.
+    let viewPixels = NaN;
+    if (area === 'view') {
+      const mapSize = map.getSize(), dpr = window.devicePixelRatio || 1, clipped = clampExtent(extent, ortho);
+      if (clipped) viewPixels = dpr * Math.max(mapSize.x * (clipped.maxE - clipped.minE) / (extent.maxE - extent.minE), mapSize.y * (clipped.maxN - clipped.minN) / (extent.maxN - extent.minN));
+    }
+    const longEdge = printLongEdge({ area, requested: size, policy, viewPixels });
+    // `checkpoint` runs after the contours are traced, after the pixels are
+    // rendered and after the file is encoded.
+    const result = await exportOrthoPrint({
+      ortho, extent, longEdge, format, epsg: printEpsg(),
+      traceContours: contours && DTM_URL ? (printExtent, targetCell) => contourLines.computeForExtent(printExtent, targetCell, { signal }) : null,
+      colors: contourLines?.colors(), propertyLines: drawnLines.lines.length ? drawnLines.lines : null,
+      propertyStyle: drawnLines.color ? { color: drawnLines.color } : null, units: DISPLAY_UNITS,
+      createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal, checkpoint: current,
+    });
+    // Rendering takes a while: the session may have expired or changed
+    // meanwhile. Check again before the dialog saves anything.
+    current();
+    if (result.width < size && result.height < size && longEdge < size) result.note = `Saved at ${Math.max(result.width, result.height)} px (limited by your access).`;
+    // The dialog asks once more right before it saves the file.
+    result.stillCurrent = () => { try { current(); return true; } catch { return false; } };
+    return result;
+  } finally {
+    orthoPrintExports.delete(job);
+    dialogSignal?.removeEventListener('abort', fromDialog);
   }
-  const drawnLines = property ? propertyLinesForPrint() : { lines: [], color: null };
-  const policy = orthoPrintPermissions();
-  assertOrthoPrintAllowed(policy, { area, format });
-  // Screen pixels the exported area actually covers: the view clipped to the
-  // orthophoto, not the whole map viewport.
-  let viewPixels = NaN;
-  if (area === 'view') {
-    const mapSize = map.getSize(), dpr = window.devicePixelRatio || 1, clipped = clampExtent(extent, ortho);
-    if (clipped) viewPixels = dpr * Math.max(mapSize.x * (clipped.maxE - clipped.minE) / (extent.maxE - extent.minE), mapSize.y * (clipped.maxN - clipped.minN) / (extent.maxN - extent.minN));
-  }
-  const longEdge = printLongEdge({ area, requested: size, policy, viewPixels });
-  const result = await exportOrthoPrint({
-    ortho, extent, longEdge, format, epsg: printEpsg(),
-    traceContours: contours && DTM_URL ? (printExtent, targetCell) => contourLines.computeForExtent(printExtent, targetCell, { signal }) : null,
-    colors: contourLines?.colors(), propertyLines: drawnLines.lines.length ? drawnLines.lines : null,
-    propertyStyle: drawnLines.color ? { color: drawnLines.color } : null, units: DISPLAY_UNITS,
-    createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal,
-  });
-  // Rendering takes a while: the session may have expired meanwhile. Check
-  // again before the dialog saves anything.
-  assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
-  if (result.width < size && result.height < size && longEdge < size) result.note = `Saved at ${Math.max(result.width, result.height)} px (limited by your access).`;
-  return result;
 }
 
 function pcApi() {

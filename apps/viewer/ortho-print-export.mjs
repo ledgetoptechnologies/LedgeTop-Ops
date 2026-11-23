@@ -256,11 +256,12 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
     canvas.width = width; canvas.height = height;
     ctx = canvas.getContext('2d');
   } catch { throw tooLarge(); }
-  if (!ctx || canvas.width !== width || canvas.height !== height) throw tooLarge();
+  const release = () => { canvas.width = 0; canvas.height = 0; };
+  if (!ctx || canvas.width !== width || canvas.height !== height) { release(); throw tooLarge(); }
   try {
     const { rgba } = await renderOrthoPixels({ ds: ortho, extent, width, height, signal, pool, maxStripPixels, background: print ? [255, 255, 255] : null });
     putPixels(ctx, rgba, width, height);
-  } catch (error) { if (error instanceof RangeError) throw tooLarge(); throw error; }
+  } catch (error) { release(); if (error instanceof RangeError) throw tooLarge(); throw error; }
   const scale = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
   const project = (e, n) => [(e - extent.minE) / gsdE, (extent.maxN - n) / gsdN];
   let drawn = null;
@@ -284,7 +285,7 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
     // A canvas the browser could not back reads as blank: the print's
     // corner is always opaque (white or imagery).
     const corner = ctx.getImageData(width - 1, height - 1, 1, 1).data;
-    if (corner[3] !== 255) throw tooLarge();
+    if (corner[3] !== 255) { release(); throw tooLarge(); }
   }
   return { canvas, ctx, width, height, extent, gsdE, gsdN, contours: drawn, propertyLines: propertyCount };
 }
@@ -338,7 +339,12 @@ export function encodePrintGeoTiff({ rgba, width, height, extent, epsg }) {
   return out.buffer;
 }
 
-export async function exportOrthoPrint({ format = 'png', epsg = null, traceContours = null, ...opts }) {
+/**
+ * `checkpoint()` (optional) runs after each await: after the contours are
+ * traced, after the pixels are rendered and after the file is encoded. If it
+ * throws, the export stops there, the canvas is released and nothing is returned.
+ */
+export async function exportOrthoPrint({ format = 'png', epsg = null, traceContours = null, checkpoint = null, ...opts }) {
   const extent = clampExtent(opts.extent, opts.ortho);
   if (!extent) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
   if (format === 'tif' && !(Number.isInteger(epsg) && epsg > 0)) throw Object.assign(new Error('GeoTIFF needs a verified coordinate reference. Export PNG instead.'), { code: 'print_crs' });
@@ -346,10 +352,12 @@ export async function exportOrthoPrint({ format = 'png', epsg = null, traceConto
   const { width, gsdE } = printLayout(extent, opts.longEdge ?? 4096);
   // Trace about one DTM cell per 2.5 output pixels: smooth at print size.
   const contours = traceContours ? await traceContours(extent, gsdE * 2.5) : null;
+  checkpoint?.();
   const result = await renderOrthoPrint({ ...opts, extent, format, contours });
   let blob;
   const release = () => { result.canvas.width = 0; result.canvas.height = 0; };
   try {
+    checkpoint?.();
     if (format === 'tif') {
       let rgba;
       try { rgba = result.ctx.getImageData(0, 0, result.width, result.height).data; } catch { throw tooLarge(); }
@@ -361,6 +369,7 @@ export async function exportOrthoPrint({ format = 'png', epsg = null, traceConto
     } else {
       blob = await new Promise((resolve, reject) => result.canvas.toBlob(b => b ? resolve(b) : reject(tooLarge()), 'image/png'));
     }
+    checkpoint?.();
   } finally { release(); }
   return { blob, width: result.width, height: result.height, extent: result.extent, contours: result.contours, propertyLines: result.propertyLines,
     filename: `orthophoto${contours?.features?.length ? '-contours' : ''}-${result.width}px.${format === 'tif' ? 'tif' : 'png'}`, gsd: width ? gsdE : null };
@@ -421,13 +430,16 @@ export function mountOrthoPrintDialog({ documentRef = document, openButton, defa
     try {
       const result = await run({ area: area.value, size: Number(size.value), format: format.value, contours: contours.checked, property: property.checked }, signal);
       if (signal.aborted) return;
+      // The viewer may have switched to another model, version or viewer since `run` resolved.
+      if (result.stillCurrent?.() === false) { status.textContent = ''; return; }
       const url = URL.createObjectURL(result.blob);
       const a = el('a', { href: url, download: result.filename });
       documentRef.body.append(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
       status.textContent = result.note || `Saved ${result.filename}.`;
     } catch (error) {
-      if (error?.name === 'AbortError') return;
+      // Cancelled: by Close (the dialog is gone) or by a viewer change (no file, no error).
+      if (error?.name === 'AbortError') { if (!signal.aborted) status.textContent = ''; return; }
       status.textContent = error?.code ? error.message : 'Could not export the image. Try a smaller size.';
     } finally { if (!signal.aborted) exportButton.disabled = false; }
   });

@@ -179,7 +179,15 @@ test('viewer wiring: Contours panel sits with the map layer panels; mode switche
   assert.match(exporter, /printLongEdge\(\{ area, requested: size, policy, viewPixels \}\)/, 'view exports capped without download');
   assert.match(exporter, /clampExtent\(extent, ortho\)/, 'cap measured on the view clipped to the orthophoto');
   assert.match(exporter, /limited by your access/);
-  assert.match(exporter, /await exportOrthoPrint\([\s\S]*assertOrthoPrintAllowed\(orthoPrintPermissions\(\), \{ area, format \}\);(?:(?!await)[\s\S])*return result;\s*\}\s*$/, 'permission re-checked after rendering, with nothing awaited before the file is saved');
+  // Identity continuity: `current()` checks the subject/model/version and the policy after every await.
+  assert.match(exporter, /const current = \(\) => \{\s*if \(orthoPrintIdentity\(\) !== job\.identity\) controller\.abort\(\);\s*if \(signal\.aborted\) throw [^\n]*\s*assertOrthoPrintAllowed\(orthoPrintPermissions\(\), \{ area, format \}\);\s*\};/, 'identity and policy checked together');
+  assert.match(exporter, /await getDataset\([^\n]*\);\s*current\(\);/, 'checked after opening the orthophoto');
+  assert.match(exporter, /checkpoint: current,/, 'checked after tracing, rendering and encoding');
+  assert.match(exporter, /await exportOrthoPrint\([\s\S]*?\}\);\s*(\/\/[^\n]*\s*)*current\(\);(?:(?!await)[\s\S])*return result;\s*\} finally \{\s*orthoPrintExports\.delete\(job\);/, 'checked after rendering, with nothing awaited before the file is saved');
+  const code = exporter.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.equal(code.match(/\bawait /g).length, 2, 'every await is covered above');
+  const access = main.slice(main.indexOf('function setSessionAccessState('), main.indexOf('function recordSessionAccessFailure('));
+  assert.match(access, /cancelStaleOrthoPrintExports\(\);\s*\}\s*$/, 'every session state change cancels stale exports');
   assert.match(main, /v \* toMeters > -1000 && v \* toMeters < 10000/, 'DEM range checked in metres');
   assert.doesNotMatch(main, /#FFD60A/, 'property lines found by pane, not colour');
 });
