@@ -247,7 +247,7 @@ test('an output restored on its own does not bring back a task that is still in 
   assert.equal((await deleteTask(f, item)).status, 200);
   const output = f.processing.activeTrashForEntity('output', item.versionId);
   assert.equal((await f.staff('POST', `/api/v1/storage/trash/${output.id}/restore`)).status, 200);
-  assert.equal(f.processing.getTask(item.task.id).status, 'ready_for_review');
+  assert.equal(f.processing.getTask(item.task.id).status, 'archived');
   await f.refused(page, 'output restored');
   // Even if that output is then published again (the state publishing writes).
   f.database.prepare("UPDATE models SET status='ready',active_version_id=? WHERE id=?").run(item.versionId, item.modelId);
