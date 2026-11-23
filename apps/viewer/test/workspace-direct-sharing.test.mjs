@@ -23,7 +23,7 @@ function declaration(name){
 }
 const names=['clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
   'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
-  'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
+  'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','publicTabLabel','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
   const state={token:'signed-in',projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
@@ -308,9 +308,38 @@ test('whole-project client scope requires current and future publications',()=>{
 test('project sharing has no public creation form or public task forms',async()=>{
   const f=fixture();f.context.shareModal('project');f.context.bindProjectShareCard('project');
   assert.doesNotMatch(f.html(),/project-share-form|class="manage-form share-form"|Create public link|Create whole-project link/);
-  assert.match(f.html(),/whole project or only chosen tasks with a client’s portal account/);
+  assert.match(f.html(),/A public link opens one task\. Use Share on that task to create one\./);
   assert.match(f.html(),/data-legacy-project-shares/);assert.equal(f.calls.length,0);
   await f.context.createOutputShare(f.form,'project',null);assert.equal(f.calls.length,0);
+});
+
+test('a project and a task open the same Share dialog: same tabs, same order, starting on Client Workspace',()=>{
+  const frame=f=>({title:f.rendered.at(-1).title,
+    tabs:[...f.html().matchAll(/data-share-mode="([^"]+)" role="tab" id="([^"]+)" aria-controls="([^"]+)" tabindex="([^"]+)" aria-selected="([^"]+)">([^<]+)</g)].map(match=>match.slice(1)),
+    panels:[...f.html().matchAll(/data-share-mode-panel="([^"]+)" role="tabpanel" id="([^"]+)" aria-labelledby="([^"]+)" (hidden)?/g)].map(match=>match.slice(1))});
+  const f=fixture();f.state.tasks[0].displayName='North wall';f.output.displayName='odm_textured_model.glb';
+  f.context.shareModal('project');const project=frame(f);
+  f.context.shareModal('project','output');const task=frame(f);
+  assert.equal(project.title,'Share project: Site');assert.equal(task.title,'Share task: North wall');
+  assert.deepEqual(task.tabs,project.tabs);assert.deepEqual(task.panels,project.panels);
+  assert.deepEqual(project.tabs.map(item=>[item[5],item[4]]),[['Public link','false'],['Client Workspace','true']]);
+  assert.deepEqual(project.panels.map(item=>[item[0],item[3]]),[['internal',undefined],['public','hidden']]);
+  // Both dialogs switch tabs, and a refresh of the dialog keeps the chosen tab.
+  const tabs=['public','internal'].map(mode=>({dataset:{shareMode:mode},tabIndex:0,setAttribute(){},focus(){},click(){this.onclick()}}));
+  const panels=['public','internal'].map(mode=>({dataset:{shareModePanel:mode},hidden:false}));
+  f.modalContent.querySelectorAll=selector=>selector==='[data-share-mode]'?tabs:selector==='[data-share-mode-panel]'?panels:[];
+  f.context.bindShareModal('project',null);tabs[0].onclick();
+  assert.deepEqual(panels.map(panel=>panel.hidden),[false,true]);
+  f.context.shareModal('project');assert.deepEqual(frame(f).panels.map(item=>[item[0],item[3]]),[['internal','hidden'],['public',undefined]]);
+});
+
+test('the Public link tab counts only links that still open',()=>{
+  const f=fixture(),past='2020-01-01T00:00:00Z';
+  assert.equal(f.context.publicTabLabel(null),'Public link');
+  assert.equal(f.context.publicTabLabel([{revokedAt:past},{expiresAt:past}]),'Public link');
+  assert.equal(f.context.publicTabLabel([{},{expiresAt:'2999-01-01T00:00:00Z'},{revokedAt:past}]),'Public link (2)');
+  f.state.shares.output=[{id:'one',permissions:{}}];f.context.shareModal('project','output');
+  assert.match(f.html(),/data-share-mode="public"[^>]*>Public link \(1\)</);
 });
 
 test('new link result is bound to its project, output and share identity',async()=>{

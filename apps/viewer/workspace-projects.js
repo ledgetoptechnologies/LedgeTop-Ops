@@ -240,7 +240,8 @@ async function openShareModal(projectId,onlyOutputId=null){
 }
 function injectProjectShareCard(projectId){
   const target=modalContent.querySelector('[data-legacy-project-shares]');if(!target)return;
-  const shares=state.projectShares[projectId]||[];
+  const shares=state.projectShares[projectId]||[],tab=modalContent.querySelector('#share-tab-public');
+  if(tab)tab.textContent=publicTabLabel(shares);
   target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project access is shared through Operations clients only. Existing public project links remain active until you revoke them.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views</small></div>${badge(share.revokedAt?'revoked':'active')}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
   bindProjectShareCard(projectId);
 }
@@ -1884,9 +1885,14 @@ function shareSettingsSummary(share){
   const labels=shareViewLabels(),views=share.allowedViews===null||share.allowedViews===undefined?'All available views':share.allowedViews.map(view=>labels[view]||view).join(', ');
   return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.hasPassword?'Password protected':'No password'} · ${share.expiresAt?`Expires ${dateTime(share.expiresAt)}`:'No expiry'}`;
 }
+// Links that still open count on the tab, so a live link is never hidden behind it.
+function publicTabLabel(shares){
+  const live=(shares||[]).filter(share=>!share.revokedAt&&!(share.expiresAt&&Date.parse(share.expiresAt)<=Date.now())).length;
+  return live?`Public link (${live})`:'Public link';
+}
 function shareModal(projectId,onlyOutputId=null){
   const project=state.projects.find(item=>item.id===projectId),selected=state.outputs.find(output=>output.id===onlyOutputId),checking=state.shareContext?.loading===true;
-  const mode=onlyOutputId&&state.shareContext?.mode==='public'?'public':'internal';
+  const mode=state.shareContext?.mode==='public'?'public':'internal',task=state.tasks.find(item=>item.id===selected?.taskId);
   if(!onlyOutputId)visibleShareResult(projectId,onlyOutputId);
   const result=onlyOutputId&&visibleShareResult(projectId,onlyOutputId)?card('Public link',`<div class="share-result"><input readonly aria-label="New public link" value="${esc(state.lastShareUrl)}"><button class="primary-button" data-action="copy-share" data-url="${esc(state.lastShareUrl)}">Copy</button></div><p class="form-note">Link created successfully. You can copy this link again from its saved entry.</p>`):'';
   let publicCards='';
@@ -1899,7 +1905,12 @@ function shareModal(projectId,onlyOutputId=null){
     const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(share.revokedAt?'revoked':share.expiresAt&&Date.parse(share.expiresAt)<=Date.now()?'expired':'active')}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
     publicCards=card(output.displayName||'Model',form+list);
   }
-  openModal(`Share ${selected?.displayName||project?.displayName||'model'}`,`${onlyOutputId?`<div class="row-actions" role="tablist" aria-label="Sharing audience"><button class="secondary-button" data-share-mode="public" role="tab" id="share-tab-public" aria-controls="share-panel-public" tabindex="${mode==='public'?0:-1}" aria-selected="${mode==='public'}">Public link</button><button class="secondary-button" data-share-mode="internal" role="tab" id="share-tab-internal" aria-controls="share-panel-internal" tabindex="${mode==='internal'?0:-1}" aria-selected="${mode==='internal'}">Client Workspace</button></div>`:'<p class="form-note">Share this whole project or only chosen tasks with a client’s portal account. Public links are separate: create one from a task’s Share button.</p>'}<div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" ${onlyOutputId?'role="tabpanel" id="share-panel-internal" aria-labelledby="share-tab-internal"':''} ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div>${onlyOutputId?`<div data-share-mode-panel="public" role="tabpanel" id="share-panel-public" aria-labelledby="share-tab-public" ${mode==='public'?'':'hidden'}><p class="form-note">No Operations account or client workspace is required. Anyone with the link can access its allowed content.</p>${result}${publicCards}</div>`:'<div data-legacy-project-shares></div>'}</div>`,'wide-modal');
+  // A project and a task open the same dialog: the same two tabs, in the Data page's order, starting on Client Workspace.
+  const tab=(name,label)=>`<button class="secondary-button" data-share-mode="${name}" role="tab" id="share-tab-${name}" aria-controls="share-panel-${name}" tabindex="${mode===name?0:-1}" aria-selected="${mode===name}">${label}</button>`;
+  const publicPanel=onlyOutputId
+    ?`<p class="form-note">No Operations account or client workspace is required. Anyone with the link can access its allowed content.</p>${result}${publicCards}`
+    :'<p class="form-note">A public link opens one task. Use Share on that task to create one.</p><div data-legacy-project-shares></div>';
+  openModal(onlyOutputId?`Share task: ${task?.displayName||selected?.displayName||'Model'}`:`Share project: ${project?.displayName||'Project'}`,`<div class="row-actions" role="tablist" aria-label="Sharing audience">${tab('public',publicTabLabel(selected?state.shares[selected.id]:null))}${tab('internal','Client Workspace')}</div><div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" role="tabpanel" id="share-panel-internal" aria-labelledby="share-tab-internal" ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div><div data-share-mode-panel="public" role="tabpanel" id="share-panel-public" aria-labelledby="share-tab-public" ${mode==='public'?'':'hidden'}>${publicPanel}</div></div>`,'wide-modal');
   bindShareModal(projectId,onlyOutputId);
 }
 function shareExpiryInput(value){
@@ -2017,7 +2028,7 @@ function clientGrantRevocationMessage(result,native){
 }
 function bindShareModal(projectId,onlyOutputId,{preserveDirectForm=false}={}){
   modalContent.querySelectorAll('[data-share-mode]').forEach(element=>element.onclick=()=>{
-    if(!onlyOutputId||!state.shareContext)return;
+    if(!state.shareContext)return;
     const mode=element.dataset.shareMode==='public'?'public':'internal';state.shareContext.mode=mode;
     modalContent.querySelectorAll('[data-share-mode]').forEach(button=>{button.setAttribute('aria-selected',String(button.dataset.shareMode===mode));button.tabIndex=button.dataset.shareMode===mode?0:-1});
     modalContent.querySelectorAll('[data-share-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.shareModePanel!==mode);
