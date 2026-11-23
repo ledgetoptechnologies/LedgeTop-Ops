@@ -239,8 +239,10 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
     });
   } finally {
     // The endpoint was discovered only from this run's fresh private profile.
-    // Close that browser through its own protocol, never enumerate/kill a
-    // shared profile or retry cleanup of historical retained profiles.
+    // Close that browser through its own protocol first, then stopBrowser
+    // kills any process still on this run's own temporary profile (Edge
+    // relaunches itself on Windows). Never touch a shared profile or retry
+    // cleanup of historical retained profiles.
     if (control) {
       let timer;
       try { await Promise.race([control.command('Browser.close'), new Promise(resolve => { timer=setTimeout(resolve,1_000); })]); }

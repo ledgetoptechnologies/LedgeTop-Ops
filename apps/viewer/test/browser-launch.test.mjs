@@ -2,15 +2,39 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findProfileProcesses, launchBrowser, stopBrowser } from './browser-launch.mjs';
+import { assertOwnedProfile, findProfileProcesses, launchBrowser, spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { waitForDevToolsPort } from './devtools-port.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const binary = () => [process.env.CHROME_PATH, process.env.EDGE_PATH, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].filter(Boolean).find(existsSync);
 const flags = (profile) => ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'];
+
+test('refuses any profile that is not its own ltds- temp dir', () => {
+  const root = path.resolve(tmpdir());
+  const refused = [
+    path.parse(root).root, // a drive or filesystem root: would match nearly every process
+    '', // empty resolves to the cwd
+    root, // the temp dir itself
+    path.join(root, 'other-profile'),
+    path.join(root, 'nested', 'ltds-profile'),
+    path.join(root, '..', 'ltds-profile'),
+    path.join(here, 'ltds-profile'), // outside the temp dir
+  ];
+  for (const profile of refused) {
+    assert.throws(() => assertOwnedProfile(profile), /Refusing browser profile/, `assertOwnedProfile(${JSON.stringify(profile)})`);
+    // Refused before anything is spawned or registered.
+    assert.throws(() => spawnBrowser(process.execPath, ['-e', '0', `--user-data-dir=${profile}`]), /Refusing browser profile/, `spawnBrowser(${JSON.stringify(profile)})`);
+  }
+  assert.throws(() => spawnBrowser(process.execPath, ['-e', '0']), /needs a --user-data-dir/);
+  assert.throws(() => launchBrowser(process.execPath, ['-e', '0'], { prefix: 'other-' }), /must start with ltds-/);
+  assert.throws(() => launchBrowser(process.execPath, ['-e', '0'], { prefix: '../ltds-' }), /must start with ltds-/);
+  assert.equal(assertOwnedProfile(path.join(root, 'ltds-x-abc123')), path.join(root, 'ltds-x-abc123'));
+  assert.equal(assertOwnedProfile(path.join(root, 'ltds-x-abc123', 'profile')), path.join(root, 'ltds-x-abc123', 'profile'));
+});
 
 test('cleanup stops every browser process on the profile after the spawned process is killed', { timeout: 90_000 }, async (t) => {
   const executable = binary();
@@ -42,7 +66,11 @@ for (const [mode, label] of [['exit', 'exit'], ['throw', 'crash'], ['signal', 'S
     if (!executable) { t.skip('Chromium-family browser required'); return; }
     // Windows has no catchable SIGTERM: child.kill() there is TerminateProcess.
     if (mode === 'signal' && process.platform === 'win32') { t.skip('POSIX signals only'); return; }
-    const child = spawn(process.execPath, [path.join(here, 'helpers', 'browser-launch-child.mjs'), executable, mode], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    // A plain script, not a node:test child: the helper must not start the
+    // test harness there.
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(process.execPath, [path.join(here, 'helpers', 'browser-launch-child.mjs'), executable, mode], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env });
     let stdout = '', stderr = '';
     child.stdout.on('data', (chunk) => {
       stdout += chunk;
@@ -53,6 +81,7 @@ for (const [mode, label] of [['exit', 'exit'], ['throw', 'crash'], ['signal', 'S
     const profile = /^PROFILE=(.+)$/m.exec(stdout)?.[1]?.trim();
     assert.ok(profile, `child reported its profile (exit ${code}): ${stdout}${stderr}`);
     if (mode !== 'exit') assert.notEqual(code, 0, 'the process still fails or terminates as before');
+    assert.doesNotMatch(stdout, /ℹ tests \d|# tests \d/, 'importing the helper did not start the node:test harness');
     const leftovers = findProfileProcesses(profile);
     if (leftovers.length) stopBrowser(profile);
     assert.deepEqual(leftovers, [], 'the exit hooks stopped the browser');
@@ -70,7 +99,7 @@ test('cleanup also holds on Linux (container)', { timeout: 180_000 }, (t) => {
   { encoding: 'utf8', timeout: 170_000, windowsHide: true });
   t.diagnostic((result.stdout || '').split('\n').filter((line) => /[✔✖﹣]|# |processes still/.test(line)).join('\n'));
   assert.equal(result.status, 0, `container run failed: ${result.error?.message || ''}${result.stdout}${result.stderr}`);
-  for (const name of ['cleanup stops every browser process', 'process exit without cleanup', 'process crash without cleanup', 'process SIGTERM without cleanup']) {
+  for (const name of ['cleanup stops every browser process', 'process exit without cleanup', 'process crash without cleanup', 'process SIGTERM without cleanup', 'refuses any profile']) {
     assert.match(result.stdout, new RegExp(`✔ ${name}`), `${name} ran and passed in the container`);
   }
 });

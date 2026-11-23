@@ -19,6 +19,7 @@ import { after } from 'node:test';
 const registry = new Map(); // resolved profile dir -> { child, removeProfile }
 const profileOf = new WeakMap(); // ChildProcess -> resolved profile dir
 const USER_DATA_DIR = '--user-data-dir=';
+const PROFILE_PREFIX = 'ltds-';
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -26,6 +27,7 @@ const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),
 // argument list, or a function of the profile dir that returns it (so callers
 // keep their exact flag order). Returns { child, profile, cleanup }.
 export function launchBrowser(executable, args, { prefix = 'ltds-browser-', spawnOptions = { windowsHide: true, stdio: 'ignore' }, removeProfile = true } = {}) {
+  if (!/^ltds-[A-Za-z0-9_-]*$/.test(prefix)) throw new Error(`launchBrowser profile prefix must start with ${PROFILE_PREFIX} and be a plain name: ${prefix}`);
   const profile = mkdtempSync(path.join(tmpdir(), prefix));
   let list = typeof args === 'function' ? args(profile) : [...args];
   if (!list.includes(`${USER_DATA_DIR}${profile}`)) {
@@ -37,13 +39,28 @@ export function launchBrowser(executable, args, { prefix = 'ltds-browser-', spaw
   return { child, profile, cleanup: (options) => stopBrowser(child, options) };
 }
 
+// The kill matches every process naming the profile dir or anything under it,
+// so only accept a dir that is safely this harness's own: strictly inside the
+// OS temp dir, under a top-level folder named ltds-*. A root, the temp dir
+// itself, an empty value (the cwd) or any other path is refused.
+export function assertOwnedProfile(profile) {
+  const root = path.resolve(tmpdir());
+  const resolved = path.resolve(String(profile ?? ''));
+  const relative = path.relative(root, resolved);
+  const top = relative.split(/[\\/]/)[0];
+  if (!profile || !relative || relative.startsWith('..') || path.isAbsolute(relative) || !top.startsWith(PROFILE_PREFIX)) {
+    throw new Error(`Refusing browser profile outside ${path.join(root, `${PROFILE_PREFIX}*`)}: ${profile}`);
+  }
+  return resolved;
+}
+
 // Drop-in for child_process.spawn() on a browser command line that already
 // carries --user-data-dir=<dir>. Registers that dir for cleanup before the
 // browser starts, so even a failed launch is swept.
 export function spawnBrowser(executable, args, spawnOptions = { windowsHide: true, stdio: 'ignore' }, { removeProfile = true } = {}) {
   const flag = args.find((arg) => String(arg).startsWith(USER_DATA_DIR));
   if (!flag) throw new Error('spawnBrowser needs a --user-data-dir=<temporary profile> argument');
-  const profile = path.resolve(flag.slice(USER_DATA_DIR.length).replace(/^"(.*)"$/, '$1'));
+  const profile = assertOwnedProfile(flag.slice(USER_DATA_DIR.length).replace(/^"(.*)"$/, '$1'));
   installHooks();
   const entry = { child: null, removeProfile };
   registry.set(profile, entry);
@@ -87,8 +104,7 @@ function killChild(child) {
 }
 
 function removeProfileDir(profile) {
-  const root = path.resolve(tmpdir());
-  if (!profile.startsWith(root + path.sep)) return; // only ever delete our own temp dirs
+  try { assertOwnedProfile(profile); } catch { return; } // only ever delete our own temp dirs
   try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch {}
 }
 
@@ -107,9 +123,11 @@ for ($pass = 0; $pass -lt 4; $pass++) {
     $line -and ($skip -notcontains [int]$_.ProcessId) -and @($patterns | Where-Object { $line -match $_ }).Count
   } | ForEach-Object { [int]$_.ProcessId })
   if ($ids.Count -eq 0) { break }
-  # One taskkill for every match (each with /T), then wait for them to be gone
-  # so their handles on the profile are released before it is deleted.
-  & taskkill.exe /F /T @($ids | ForEach-Object { '/PID'; $_ }) *> $null
+  # Every Edge process (browser, renderers, GPU, crashpad) names the profile
+  # itself, so kill exactly the matches: no /T, which could reach the
+  # runner's own ancestors. Then wait for them to be gone so their handles on
+  # the profile are released before it is deleted.
+  & taskkill.exe /F @($ids | ForEach-Object { '/PID'; $_ }) *> $null
   Wait-Process -Id $ids -Timeout 5
 }
 `;
@@ -191,6 +209,8 @@ function installHooks() {
   }
 }
 
-// Registered when a test file imports this module, so it runs after the
-// file's tests even when one timed out before reaching its finally block.
-after(stopAllBrowsers);
+// Registered when a test file imports this module under node:test, so it runs
+// after the file's tests even when one timed out before reaching its finally
+// block. A plain script importing the helper must not start the test harness;
+// it still has the exit and signal hooks.
+if (process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test')) after(stopAllBrowsers);

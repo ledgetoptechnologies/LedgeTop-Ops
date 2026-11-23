@@ -133,7 +133,7 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
       res.end(readFileSync(path.join(root, url.pathname.slice(1))));
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    profile = mkdtempSync(path.join(tmpdir(), 'parcel3-browser-'));
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-parcel3-browser-'));
     browser = spawnBrowser(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
     const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
