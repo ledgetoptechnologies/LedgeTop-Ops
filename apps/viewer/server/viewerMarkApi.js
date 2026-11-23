@@ -24,7 +24,7 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
     if (!principal) return res.status(403).json({ code: 'marks_unavailable' });
     if (!principal.personalPersistence) {
       if (req.method === 'GET' && req.path === '/') {
-        return res.json({ marks: [], categories: [], capabilities: { write: false, staff: false, visibility: ['private'] } });
+        return res.json({ marks: [], categories: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] } });
       }
       return res.status(403).json({ code: 'mark_identity_required' });
     }
@@ -44,7 +44,7 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
   router.get('/', (req, res) => {
     const principal = req.markPrincipal;
     res.json({
-      marks: marks.list(principal), categories: marks.categories(principal),
+      marks: marks.list(principal), categories: marks.categories(principal), starters: marks.starters(principal),
       capabilities: { write: true, staff: principal.audience === 'ops',
         visibility: marks.visibility[principal.audience], recoveryDays: RECOVERY_DAYS,
         shared: marks.readableChoices(principal).length > 0, maxRequestBytes },
@@ -69,6 +69,10 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
   });
   router.post('/categories', (req, res) => {
     const result = marks.createCategory(req.markPrincipal, req.body);
+    res.status(result.replayed ? 200 : 201).json(result);
+  });
+  router.post('/categories/starter', (req, res) => {
+    const result = marks.createStarter(req.markPrincipal, req.body);
     res.status(result.replayed ? 200 : 201).json(result);
   });
   router.put('/categories/:id', (req, res) => res.json({ category: marks.updateCategory(req.markPrincipal, req.params.id, req.body) }));

@@ -133,6 +133,12 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   }
   const categorySave = h(document, 'button', { type: 'submit', text: 'Add' });
   const categoryCancel = h(document, 'button', { type: 'button', text: 'Cancel', hidden: true });
+  // Suggested categories: only for someone without their own, and only made when used.
+  const starterList = h(document, 'ul', { class: 'viewer-mark-list viewer-mark-starters', 'aria-label': 'Suggested categories' });
+  const starterAll = h(document, 'button', { type: 'button', text: 'Add all' });
+  const starterHide = h(document, 'button', { type: 'button' });
+  const starterSection = h(document, 'div', { class: 'viewer-mark-suggested' },
+    h(document, 'div', { class: 'viewer-mark-row' }, h(document, 'span', { class: 'hint', text: 'Suggested' }), starterAll, starterHide), starterList);
   const categoryForm = h(document, 'form', { class: 'viewer-mark-row viewer-mark-category-form' }, categoryName, categoryColor, categoryIcon, categorySave, categoryCancel);
   const showAllButton = h(document, 'button', { type: 'button', text: 'Show all' });
   const hideAllButton = h(document, 'button', { type: 'button', text: 'Hide all' });
@@ -151,7 +157,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
 
   // One panel: Categories, List, Deleted.
   const sections = {
-    categories: h(document, 'div', { id: 'viewer-marks-categories', role: 'tabpanel' }, categoryTools, categoryList, categoryForm),
+    categories: h(document, 'div', { id: 'viewer-marks-categories', role: 'tabpanel' }, categoryTools, categoryList, starterSection, categoryForm),
     list: h(document, 'div', { id: 'viewer-marks-list', role: 'tabpanel' }, searchInput, list),
     deleted: h(document, 'div', { id: 'viewer-marks-deleted', role: 'tabpanel' }, deletedList),
   };
@@ -166,6 +172,8 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const categoryById = id => store.state.categories.find(category => category.id === id) || null;
   const visibleMarks = () => store.state.marks.filter(visibility.shows);
   const searched = mark => !search || [mark.name, mark.note, categoryById(mark.categoryId)?.name].some(value => value?.toLowerCase().includes(search));
+  // Picked in the editor but not made yet: 'starter:gate'.
+  const chosenStarter = () => store.starters().find(starter => 'starter:' + starter.key === categorySelect.value) || null;
   const categoryIds = () => [...store.state.categories.map(category => category.id), NO_CATEGORY];
   // Placing or saving into a hidden category shows it again.
   // After a change to what is hidden: nothing hidden at all is Show all, and a
@@ -238,7 +246,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     if (drawing) return drawing.positions.length ? { kind: 'drawing', type: drawing.type, positions: structuredClone(drawing.positions) } : null;
     if (!draft || (draft.id && !store.find(draft.id)?.editable)) return null;
     return { kind: 'editor', id: draft.id, newId: draft.newId || null, revision: draft.id ? draft.revision : null, geometry: structuredClone(draft.geometry),
-      name: nameInput.value, note: noteInput.value, categoryId: categorySelect.value || null, color: safeColor(colorInput.value), icon: keepIcon(draft.icon),
+      name: nameInput.value, note: noteInput.value, categoryId: chosenStarter() ? null : categorySelect.value || null, starter: chosenStarter()?.key || null, color: safeColor(colorInput.value), icon: keepIcon(draft.icon),
       elevation: elevationInput.value, units: units() === 'metric' ? 'metric' : 'imperial', visibility: visibilitySelect.value,
       coordinates: draft.geometry.type === 'Point' && pointCoords.value !== writtenCoords ? pointCoords.value : null };
   }
@@ -263,7 +271,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       message('Your unfinished drawing was restored.');
       return;
     }
-    const { kind, units: savedUnits, elevation, coordinates, changedElsewhere, ...fields } = reconcileMarkDraft(saved, store.find, newId);
+    const { kind, units: savedUnits, elevation, coordinates, changedElsewhere, starter, ...fields } = reconcileMarkDraft(saved, store.find, newId);
     const metres = elevationToMetres(elevation, savedUnits);
     const current = fields.id ? store.find(fields.id) : null;
     draft = { ...(current || {}), ...fields, color: safeColor(fields.color), elevationNavd88M: Number.isFinite(metres) ? metres : null };
@@ -271,6 +279,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     draftBaseline = null;
     writeEditor();
     if (savedUnits === (units() === 'metric' ? 'metric' : 'imperial') || Number.isNaN(metres)) elevationInput.value = elevation;
+    if (starter && store.starters().some(item => item.key === starter)) categorySelect.value = 'starter:' + starter;
     if (coordinates !== null && draft.geometry.type === 'Point') pointCoords.value = coordinates;
     message(changedElsewhere ? 'That mark changed elsewhere. Your unsaved edit opened as a new mark.' : 'Your unsaved mark was restored.');
   }
@@ -290,6 +299,9 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     if (!draft) return;
     nameInput.value = draft.name;
     fillCategoryOptions(categorySelect, draft.categoryId, 'None', category => usableCategory(category, draft.categoryId));
+    if (store.canWrite() && !visibility.startersHidden()) {
+      categorySelect.append(...store.starters().map(starter => h(document, 'option', { value: 'starter:' + starter.key, text: starter.name })));
+    }
     colorInput.value = safeColor(draft.color);
     noteInput.value = draft.note || '';
     elevationInput.value = elevationForDisplay(draft.elevationNavd88M, units());
@@ -317,7 +329,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
 
   function readEditor() {
     const elevation = elevationToMetres(elevationInput.value, units());
-    return { name: nameInput.value.trim(), categoryId: categorySelect.value || null, color: safeColor(colorInput.value),
+    return { name: nameInput.value.trim(), categoryId: chosenStarter() ? null : categorySelect.value || null, color: safeColor(colorInput.value),
       note: noteInput.value.trim(), elevationNavd88M: elevation, visibility: visibilitySelect.value,
       ...(visibilitySelect.value === 'client' ? { shareAccount: accountSelect.value || null } : {}) };
   }
@@ -465,6 +477,19 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       return row;
     });
     categoryList.replaceChildren(...rowsByCategory, categoryRow(NO_CATEGORY, 'No category', null));
+    const starters = writable ? store.starters() : [], startersHidden = visibility.startersHidden();
+    starterSection.hidden = !starters.length;
+    starterAll.hidden = starterList.hidden = startersHidden;
+    starterAll.disabled = state.busy;
+    starterHide.textContent = startersHidden ? 'Show' : 'Hide';
+    starterHide.setAttribute('aria-label', startersHidden ? 'Show suggested categories' : 'Hide suggested categories');
+    starterList.replaceChildren(...starters.map(starter => {
+      const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
+      icon.innerHTML = categoryBadge(starter);
+      const addOne = h(document, 'button', { type: 'button', text: 'Add', 'aria-label': 'Add ' + starter.name, disabled: state.busy });
+      on(addOne, 'click', () => store.addStarter(starter));
+      return h(document, 'li', {}, icon, h(document, 'span', { class: 'viewer-mark-list-name', text: starter.name }), addOne);
+    }));
     deletedList.replaceChildren(...(state.deleted.length ? state.deleted.map(mark => {
       const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
       icon.innerHTML = markBadge(mark);
@@ -546,7 +571,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     if (applyPointCoordinates()) { store.clearMessage(); render(); }
   });
   on(categorySelect, 'change', () => {
-    const category = categoryById(categorySelect.value);
+    const category = chosenStarter() || categoryById(categorySelect.value);
     if (!draft) return;
     draft.categoryId = category?.id || null;
     if (category) {
@@ -576,6 +601,10 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     next.focus();
     next.click();
   });
+  on(starterHide, 'click', () => { visibility.toggleStarters(); shownChanged(); });
+  on(starterAll, 'click', async () => {
+    for (const starter of store.starters()) if (!await store.addStarter(starter)) return;
+  });
   on(hiddenButton, 'click', () => { tab = 'categories'; render(); });
   on(showAllButton, 'click', () => { visibility.showAll(); shownChanged(); });
   on(hideAllButton, 'click', () => { visibility.hideAll(); shownChanged(); });
@@ -604,6 +633,13 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     if (Number.isNaN(values.elevationNavd88M)) { message('NAVD88 Elevation must be a number.'); return; }
     if (values.visibility === 'client' && !values.shareAccount) { message('Choose a client account to share with.'); return; }
     const changes = { ...values, icon: keepIcon(draft.icon), geometry: draft.geometry };
+    const starter = chosenStarter();
+    if (starter) {
+      const open = draft, made = await store.addStarter(starter);
+      if (!made || draft !== open) return;
+      open.categoryId = changes.categoryId = made.id;
+      fillCategoryOptions(categorySelect, made.id, 'None', category => usableCategory(category, made.id));
+    }
     // A new mark keeps one id, so saving again after a lost answer updates it instead of adding a copy.
     const current = store.find(draft.id || draft.newId);
     if (draft.id && !current) { message('That mark is no longer there.'); return; }

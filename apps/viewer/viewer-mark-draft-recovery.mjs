@@ -26,7 +26,7 @@ export function validMarkDraft(draft) {
     && (draft.id === null || (Number.isSafeInteger(draft.revision) && draft.revision > 0)) && validGeometry(draft.geometry)
     && text(draft.name, 100) && text(draft.note, 2000) && idOrNull(draft.categoryId) && text(draft.color, 7) && text(draft.icon, 32)
     && text(draft.elevation, 40) && ['imperial', 'metric'].includes(draft.units) && (draft.coordinates === null || text(draft.coordinates, 120))
-    && text(draft.visibility, 16);
+    && text(draft.visibility, 16) && (draft.starter === undefined || draft.starter === null || text(draft.starter, 32));
 }
 
 // What an editor draft becomes when it is restored. It is never written over a

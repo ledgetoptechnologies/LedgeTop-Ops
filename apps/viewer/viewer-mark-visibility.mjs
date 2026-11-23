@@ -24,11 +24,13 @@ function scopeLabel(key) {
 export function createMarkVisibility({ storage = () => globalThis.localStorage } = {}) {
   // all: everything is hidden except `except`; otherwise everything is shown except it.
   let all = false, except = new Set(), label = null, kept = true;
+  // Whether the suggested categories are put away. Show all and the like leave it.
+  let starters = false;
   const readAll = () => {
     try {
       const entries = JSON.parse(storage()?.getItem(KEY) || '[]');
-      return Array.isArray(entries) ? entries.filter(entry => Array.isArray(entry) && entry.length === 3 && typeof entry[0] === 'string'
-        && typeof entry[1] === 'boolean' && Array.isArray(entry[2])) : [];
+      return Array.isArray(entries) ? entries.filter(entry => Array.isArray(entry) && entry.length === 4 && typeof entry[0] === 'string'
+        && typeof entry[1] === 'boolean' && Array.isArray(entry[2]) && typeof entry[3] === 'boolean') : [];
     } catch { return []; }
   };
   // Most recent scope first. When there is no room, older scopes give way; this
@@ -37,7 +39,7 @@ export function createMarkVisibility({ storage = () => globalThis.localStorage }
     kept = true;
     if (!label) return;
     const others = readAll().filter(([name]) => name !== label).slice(0, MAX_SCOPES - 1);
-    const entries = all || except.size ? [[label, all, [...except]], ...others] : others;
+    const entries = all || except.size || starters ? [[label, all, [...except], starters], ...others] : others;
     for (;;) {
       try { storage().setItem(KEY, JSON.stringify(entries)); return; }
       catch {
@@ -54,6 +56,7 @@ export function createMarkVisibility({ storage = () => globalThis.localStorage }
       label = key ? scopeLabel(key) : null;
       const saved = label && readAll().find(([name]) => name === label);
       all = Boolean(saved?.[1]);
+      starters = Boolean(saved?.[3]);
       except = new Set(saved ? saved[2].filter(id => typeof id === 'string') : []);
       kept = true;
     },
@@ -69,6 +72,8 @@ export function createMarkVisibility({ storage = () => globalThis.localStorage }
     // Only this one: every other category is hidden.
     only(id) { set(true, [id]); },
     isOnly: (id, ids) => ids.length > 1 && !isHidden(id) && ids.every(item => item === id || isHidden(item)),
+    startersHidden: () => starters,
+    toggleStarters() { starters = !starters; write(); },
     remembered: () => kept,
   };
 }

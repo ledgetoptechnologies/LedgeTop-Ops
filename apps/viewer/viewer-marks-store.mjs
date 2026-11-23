@@ -1,3 +1,5 @@
+import { STARTER_CATEGORIES } from './viewer-mark-style.mjs';
+
 // Marks state for one model: loading, saving, categories, import and a
 // session undo stack. No DOM here; viewer-marks.mjs draws it.
 //
@@ -40,7 +42,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   let context = null, controller = null;
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
-    marks: [], categories: [], audiences: [], deleted: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
+    marks: [], categories: [], audiences: [], deleted: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
     // Why the last change failed, for the panel to offer what is possible instead.
     failure: '',
   };
@@ -98,7 +100,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     scope.check();
     if (!data.capabilities.write) Object.assign(state, { undo: [], deleted: [] });
     const first = !state.ready;
-    if (first || !data.capabilities.shared) Object.assign(state, { marks: data.marks, categories: data.categories, capabilities: data.capabilities, audiences, ready: true });
+    if (first || !data.capabilities.shared) Object.assign(state, { marks: data.marks, categories: data.categories, starters: data.starters || [], capabilities: data.capabilities, audiences, ready: true });
     if (!data.capabilities.shared) return;
     // The first time, marks appear as they arrive. Later what is on screen stays
     // until everything new is here.
@@ -129,7 +131,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     if (!first) {
       // If part of a reload failed, what is shown is the person's own and what this
       // reload read. Anything older may have been withdrawn by its owner meanwhile.
-      Object.assign(state, { marks, categories: byName(categories), capabilities: data.capabilities, audiences, ready: true });
+      Object.assign(state, { marks, categories: byName(categories), starters: data.starters || [], capabilities: data.capabilities, audiences, ready: true });
     }
   }
 
@@ -152,6 +154,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         state.marks = [];
         state.categories = [];
         state.deleted = [];
+        state.starters = [];
         state.ready = false;
         state.undo = [];
       } else {
@@ -168,6 +171,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   }
 
   const byName = list => [...list].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  // Someone who begins with their own category is not offered the starters.
+  const beganOwn = () => { if (state.starters.length === STARTER_CATEGORIES.length) state.starters = []; };
   const remember = entry => { state.undo = [...state.undo, entry].slice(-UNDO_LIMIT); };
 
   async function createRaw(mark, scope) {
@@ -225,6 +230,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       context = next;
       const scope = currentScope();
       Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], undo: [],
+        starters: next?.mode === 'temporary' ? STARTER_CATEGORIES.map(starter => starter.key) : [],
         ready: next?.mode === 'temporary', loading: next?.mode === 'session',
         capabilities: { write: next?.mode === 'temporary', staff: false, visibility: ['private'] } });
       emit();
@@ -345,6 +351,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           emit();
           return null;
         }
+        if (!existing) beganOwn();
         const category = { id, name: input.name.trim(), color: input.color, icon: input.icon, revision: (existing?.revision || 0) + 1, mine: true, editable: true };
         state.categories = existing ? state.categories.map(row => (row.id === id ? category : row)) : [...state.categories, category];
         state.message = '';
@@ -358,6 +365,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           ? (await scope.api('/categories/' + encodeURIComponent(input.id), 'PUT', { ...payload, revision: input.revision })).category
           : (await scope.api('/categories', 'POST', payload)).category;
         scope.check();
+        if (!input.id) beganOwn();
         state.categories = [...state.categories.filter(row => row.id !== saved.id), saved]
           .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
       });
@@ -378,6 +386,23 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       return true;
     },
 
+    starters: () => STARTER_CATEGORIES.filter(starter => state.starters.includes(starter.key)),
+    // Makes a starter category (or finds the one this person already has) and returns it.
+    async addStarter(starter) {
+      if (!store.starters().includes(starter)) return null;
+      const { key, name, color, icon } = starter;
+      let saved = null;
+      const ok = await run(async scope => {
+        saved = scope.temporary ? { id: newId(), name, color, icon, revision: 1, mine: true, editable: true }
+          : (await scope.api('/categories/starter', 'POST', { key, name, color, icon })).category;
+        scope.check();
+        state.categories = [...state.categories.filter(row => row.id !== saved.id), saved]
+          .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+        state.starters = state.starters.filter(item => item !== key);
+      });
+      return ok ? saved : null;
+    },
+
     // categories: new ones the file names; marks reference their ids.
     async importMarks({ marks, categories = [] }) {
       if (!marks.length) return 0;
@@ -385,6 +410,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       const ok = await run(async scope => {
         let imported;
         if (scope.temporary) {
+          if (categories.length) beganOwn();
           state.categories = [...state.categories, ...categories.map(category => ({ ...category, revision: 1, mine: true, editable: true }))];
           const local = marks.map(mark => localMark(mark));
           state.marks = [...state.marks, ...local];
@@ -397,6 +423,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           const saved = await scope.api('/batch', 'POST', payload);
           scope.check();
           state.marks = [...state.marks, ...saved.marks];
+          if (saved.categories.length) beganOwn();
           state.categories = byName([...state.categories, ...saved.categories.filter(row => !state.categories.some(item => item.id === row.id))]);
           imported = saved.marks;
         }

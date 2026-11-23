@@ -16,6 +16,8 @@ const LIMITS = Object.freeze({ perOwner: 1000, ownerBytes: 4_000_000, categories
 const RECOVERY_DAYS = 30;
 const recoveryCutoff = now => new Date(now - RECOVERY_DAYS * 86_400_000).toISOString();
 const OWN_LIVE = 'model_id=? AND owner_audience=? AND owner_subject=? AND deleted_at IS NULL';
+// Starter categories the client offers; their names and looks are the client's.
+const STARTERS = Object.freeze(['poi', 'building', 'access', 'road', 'utility', 'water', 'vegetation', 'hazard', 'boundary', 'equipment', 'photo', 'other']);
 const OWN_DELETED = 'model_id=? AND owner_audience=? AND owner_subject=? AND deleted_at IS NOT NULL';
 // The sharing choices each audience may use. The first entry is the default when
 // a request omits visibility. What is not listed cannot be written, and a row
@@ -125,6 +127,11 @@ function validateCategory(input, { update = false } = {}) {
 
 const isOwner = (principal, row) => row.owner_audience === principal.audience && row.owner_subject === principal.subject;
 const staff = principal => principal.audience === 'ops';
+// One fixed id per person, model and starter, so two devices never make two of it.
+function starterId(principal, key) {
+  const hex = createHash('sha256').update(JSON.stringify(['viewer-mark-starter', principal.modelId, principal.audience, principal.subject, key])).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 const categoryKey = (row, id) => JSON.stringify(row.owner_audience === 'ops' ? ['ops', id] : [row.owner_audience, row.owner_subject, id]);
 
 class ViewerMarkRepository {
@@ -463,6 +470,34 @@ class ViewerMarkRepository {
     return { category: this.categoryView(principal, this.categoryRow(principal, category.id)), replayed: false };
   }
 
+  // Starters still to offer: to a person with no categories of their own, or who
+  // began from starters. One they used or deleted is not offered again. Reading
+  // this writes nothing.
+  starters(principal) {
+    const rows = this.database.prepare('SELECT id, deleted_at FROM viewer_mark_categories WHERE model_id=? AND owner_audience=? AND owner_subject=?')
+      .all(...this.owner(principal));
+    const ids = new Map(STARTERS.map(key => [starterId(principal, key), key]));
+    const used = new Set(rows.map(row => ids.get(row.id)).filter(Boolean));
+    if (!used.size && rows.some(row => !row.deleted_at)) return [];
+    return STARTERS.filter(key => !used.has(key));
+  }
+
+  // Makes the starter the person chose, or hands back the one they already have
+  // (renamed, or made on another device, or their own with that name).
+  createStarter(principal, input) {
+    const { key, ...fields } = plainObject(input) ? input : {};
+    if (!STARTERS.includes(key) || 'id' in fields) throw markError('invalid_mark_category');
+    const category = validateCategory({ ...fields, id: starterId(principal, key) });
+    return this.transaction(() => {
+      const existing = this.categoryRow(principal, category.id);
+      if (existing && (existing.deleted_at || !isOwner(principal, existing))) throw markError('mark_category_id_conflict', 409);
+      const own = existing || this.database.prepare(`SELECT * FROM viewer_mark_categories WHERE model_id=? AND owner_audience=? AND owner_subject=?
+        AND deleted_at IS NULL AND name=? COLLATE NOCASE`).get(...this.owner(principal), category.name);
+      if (own) return { category: this.categoryView(principal, own), replayed: true };
+      return this.insertCategory(principal, category);
+    });
+  }
+
   editableCategory(principal, id, revision) {
     const row = this.categoryRow(principal, id);
     // Others see a category only with a mark that uses it, and never change it.
@@ -496,4 +531,4 @@ class ViewerMarkRepository {
   }
 }
 
-module.exports = { ViewerMarkRepository, SERVED_SHARING, HELD_SHARING, RECOVERY_DAYS, markError, validateMark, validateCategory, principalAccount, LIMITS };
+module.exports = { ViewerMarkRepository, SERVED_SHARING, HELD_SHARING, RECOVERY_DAYS, STARTERS, markError, validateMark, validateCategory, principalAccount, LIMITS };

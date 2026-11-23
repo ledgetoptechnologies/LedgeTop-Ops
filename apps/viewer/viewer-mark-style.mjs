@@ -27,6 +27,16 @@ export function markBadge(mark) {
     + `<path d="${path}" fill="${area ? color + '55' : 'none'}" stroke="${color}" stroke-width="2"/></svg>`;
 }
 
+// Offered to someone with no categories yet; nothing is made until one is used.
+// Generic on purpose. Keys match the server's list; names and looks are here.
+const named = name => MARK_COLORS.find(item => item.name === name).color;
+export const STARTER_CATEGORIES = Object.freeze([
+  ['poi', 'Point of interest', 'flag', 'Blue'], ['building', 'Building', 'home', 'Brown'], ['access', 'Gate or access', 'gate', 'Charcoal'],
+  ['road', 'Road or trail', 'trail', 'Yellow'], ['utility', 'Utility', 'tower', 'Purple'], ['water', 'Water', 'water', 'Teal'],
+  ['vegetation', 'Vegetation', 'tree', 'Green'], ['hazard', 'Hazard', 'warning', 'Red'], ['boundary', 'Boundary or corner', 'corner', 'White'],
+  ['equipment', 'Equipment', 'vehicle', 'Orange'], ['photo', 'Photo spot', 'camera', 'Blue'], ['other', 'Other', 'pin', 'Charcoal'],
+].map(([key, name, icon, color]) => Object.freeze({ key, name, icon, color: named(color) })));
+
 // ---- on the map -----------------------------------------------------------
 export const FAR_OUT_ZOOM = 16;
 const PIN_WIDTH = { normal: 32, far: 25, selected: 40 };
