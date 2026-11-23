@@ -511,3 +511,48 @@ test('a container purge does not start while a restore of one of its members is 
   assert.equal((await purge(context, trash, task.id)).status, 204);
   assert.equal(fs.existsSync(path.join(context.config.datasetsMount, shared.relativePath, 'photo.jpg')), true);
 });
+
+// Failed journals: a retry is admitted only if the journal would be admitted now.
+const failJournal = (context, id) => context.database.prepare("UPDATE storage_mutations SET status='failed',error_code='synthetic_failure',completed_at=? WHERE id=?").run(new Date().toISOString(), id);
+const retryJournal = (context, id) => context.request('POST', `/api/v1/storage/mutations/${id}/retry`, {});
+
+test('a failed restore blocks a container purge from starting, and cannot be retried out of a purging container', async t => {
+  const context = await fixture(t), { shared, tasks: [task] } = await sharedTasks(context, ['Only task']);
+  const trash = await deleteTask(context, task), datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
+  const restore = context.processing.beginRestoreMutation(datasetTrash.id, 'ops:lifecycle'); failJournal(context, restore.id);
+  // The failed, retryable restore keeps the container from being marked purging.
+  assert.equal(context.processing.beginContainerPurge(trash.id, 'ops:lifecycle'), null);
+  assert.equal((await purge(context, trash, task.id)).status, 409); assert.equal(context.processing.getTrash(trash.id).purgeStartedAt, null);
+  // A container already marked (for example by an older build) refuses the retry in the same transaction.
+  context.database.prepare('UPDATE storage_trash SET purge_started_at=? WHERE id=?').run(new Date().toISOString(), trash.id);
+  let response = await retryJournal(context, restore.id); assert.equal(response.status, 409); assert.equal((await response.json()).code, 'lifecycle_not_retryable');
+  assert.equal(context.processing.getStorageMutation(restore.id).status, 'failed'); assert.equal(context.processing.getDataset(shared.id).status, 'trashed');
+  assert.equal(context.database.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='storage.lifecycle_retry_requested'").get().n, 0);
+  // Without the marker the same retry is admitted and completes the restore.
+  context.database.prepare('UPDATE storage_trash SET purge_started_at=NULL WHERE id=?').run(trash.id);
+  response = await retryJournal(context, restore.id); assert.equal(response.status, 200);
+  assert.equal(context.processing.getDataset(shared.id).status, 'finalized'); assert.ok(context.processing.getTrash(datasetTrash.id).permanentlyDeletedAt);
+});
+
+test('a failed dataset purge is retried only when no active or restorable task needs the set', async t => {
+  const context = await fixture(t), { shared, tasks: [first, second] } = await sharedTasks(context, ['First', 'Second']);
+  const firstTrash = await deleteTask(context, first), secondTrash = await deleteTask(context, second), datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
+  // A synthetic failed purge journal for the set, as left by an older purge that failed part-way.
+  const id = crypto.randomUUID(), at = new Date().toISOString();
+  context.database.prepare("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,status,actor,created_at,updated_at) VALUES (?,'purge','dataset',?,?,'trash',?,'failed','ops:lifecycle',?,?)").run(id, shared.id, datasetTrash.id, datasetTrash.relativePath, at, at);
+  // Both deleted tasks can still be restored: refused.
+  assert.equal((await retryJournal(context, id)).status, 409);
+  // Its own container purging does not excuse the other, outside deleted task.
+  assert.ok(context.processing.beginContainerPurge(secondTrash.id, 'ops:lifecycle'));
+  assert.equal((await retryJournal(context, id)).status, 409);
+  assert.ok(photosInTrash(context)); assert.equal(context.processing.getStorageMutation(id).status, 'failed');
+  // An active task blocks it too.
+  context.database.prepare("UPDATE processing_tasks SET status='draft',archived_at=NULL WHERE id=?").run(first.id);
+  assert.equal((await retryJournal(context, id)).status, 409);
+  context.database.prepare("UPDATE processing_tasks SET status='archived',archived_at=? WHERE id=?").run(new Date().toISOString(), first.id);
+  // Once no task outside the purging container needs it, the retry is admitted and the purge completes.
+  assert.equal((await purge(context, firstTrash, first.id)).status, 204);
+  const response = await retryJournal(context, id); assert.equal(response.status, 200);
+  assert.equal(context.processing.getStorageMutation(id).status, 'complete'); assert.equal(photosInTrash(context), false);
+  assert.deepEqual(purgeExpiredTrash(context.processing, context.storage).map(item => [item.trashId, item.status]), [[secondTrash.id, 'complete']]);
+});
