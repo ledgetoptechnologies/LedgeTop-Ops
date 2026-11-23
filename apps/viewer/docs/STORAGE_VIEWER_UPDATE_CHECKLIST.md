@@ -1,6 +1,6 @@
 # Storage and Viewer consistency update
 
-This is an integration checklist, not a release-completion claim. Production has not been changed by this worktree. Protect the active Greenwood import; do not restart services or run unproven cleanup against it.
+This is an integration checklist, not a release-completion claim. Production has not been changed by this worktree. Protect the active client import; do not restart services or run unproven cleanup against it.
 
 ## Release scope decision and final task-row audit
 
@@ -66,7 +66,7 @@ The user approved this expansion after supplying three references: the native ta
 - [x] Audit ground-control backend scope: existing import, image matching and NodeODM control-file serialization/submission tests pass. No replacement backend is needed for this UI reorganization; real surveyed-data validation remains useful.
 - [x] Add task-dialog, compact-layout, status-selection, sharing permission/revocation, and GCP-navigation regression tests plus selected synthetic in-app browser QA. Actual site acceptance remains separate.
 
-No actual public links, client grants, production publications, or production deletions are authorized merely by this UI implementation request. Existing Greenwood processing remains protected.
+No actual public links, client grants, production publications, or production deletions are authorized merely by this UI implementation request. Existing client processing remains protected.
 
 ## Evidence and limits
 

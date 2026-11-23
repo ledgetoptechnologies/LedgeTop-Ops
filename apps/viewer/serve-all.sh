@@ -5,7 +5,7 @@ set -u
 
 VIEWER_DIR="$HOME/ltds-3d-viewer"
 SMB_EXTRACTED="/mnt/Share/Ai_Storage/Hermes/temp/WebODM/extracted"
-PHOTOS_DIR="/mnt/drone_jobs/Jobs/Clients/Randy Cadens LLC/Dump/8-4-26 Map/Map All"
+PHOTOS_DIR="${PHOTOS_DIR:?set PHOTOS_DIR to the original photo folder}"
 
 start_if_free() {
   local port="$1"; shift
