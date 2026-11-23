@@ -1,79 +1,214 @@
 import { canonical, hash } from './production-deploy.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
-const CONTRACT = 'team-663-held-ops-sync-companion-v1';
-const TEAM_SOURCE = '52d5a57d74814c821d8de39854b6a2a86b25ecab';
-const OPS_BASELINE = '844a999f-eb29-4a67-9166-5b272893c8a5';
-const OPS_DEPLOYMENT = 'c85dd11b-429e-4237-863e-ac1e06bb53e0';
-const SYNC_DEPLOYMENT = 'd16949c4-d637-4b9b-8f6d-e21cc303e795';
-const SYNC_ACTIVE = '6f8e224c-4202-4904-9de5-b78886b52e74';
-const SYNC_LATEST = 'bc65f489-e8dd-4ef8-8411-abca3b3ef464';
-const HELD_JOURNAL = '908d9c4d500f4754eb2879deb3669cc48a8d0eaf4a35d39eb4e9d38edd999b1c';
-const IMMUTABLE_MAP_EVIDENCE = 'd08b93d2ef15f830dd07dec15055e153ff636f9a51235d785ae7144f6b2d916c';
-const IMMUTABLE_MAP_PROJECTION = '813f84d704b3a6fbc7f2cf5db7142326959780089951f807b302407f7bf1903b';
-const COMPANION = Object.freeze({
-  deployment:'e3321a449696ea892042e87370dd8022e4449195f0ef4ff3e594a49e90a26ff3',
-  settings:'0eb83ed621f7b2db8efc1b978e3da439eced9db888c2f3b3ae0f0fe6365beb65',
-  schedules:'6649d9ca192b1e8e0f994860d0ff48375b84bcbc954511f8d3fe82a9f94b80d8',
-  version:'acfe3a82434228074a49fe0c5dc37338b526bdfe5069b8855d43db65799086f0',
-  modern:'a2203112a5c39e7ca47569fbd375a74ac8286966f218e29bd7d73578806a1970',
-  latestVersion:'0f44b987e51fd532f50f61438a5e1dd265dcbc4c1b29429418b3993569871309',
-  latestModern:'0992bc30b931bad81642c0b24584c5dcb269880e8254c19fae16acb1d12b6a7e',
-});
-const issued = new WeakMap();
-const refuse = () => { throw Error('Exact held Ops Sync companion evidence refused'); };
+/** Sole-active Operations release witness.
+ *
+ * #663 (executor 802f74e4) released Operations from a sole 100% version while
+ * Ops Sync held an inactive API-uploaded version. That witness hard-coded the
+ * #663 versions. This revision takes the same facts as explicit inputs instead:
+ *
+ * 1. A read-only capture at release time is turned into a reviewed inputs file
+ *    (`describeOpsSoleActiveReleaseInputs`).
+ * 2. An independent reviewer checks that file against the capture and the
+ *    release packet, then approves its exact SHA-256.
+ * 3. `createOpsSoleActiveReleaseWitness` accepts only those exact bytes and only
+ *    while the supplied live capture still matches them. The executor repeats
+ *    the Sync check at every fence and refuses on any difference.
+ *
+ * The module never relaxes a check by itself: without a witness every caller
+ * keeps main's original 0/100 and sole-active rules. The exported names keep the
+ * #663 spelling so this revision diffs cleanly against 802f74e4. */
+
+export const OPS_SOLE_ACTIVE_RELEASE_INPUTS_CONTRACT = 'ops-sole-active-release-inputs-v1';
+const RECEIPT_CONTRACT = 'ops-sole-active-release-witness-v1';
+const WITNESS_TTL_MS = 15 * 60_000;
 const MAX_EVIDENCE = 32 * 1024 * 1024;
+const MAX_INPUTS = 64 * 1024;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const HEX40 = /^[a-f0-9]{40}$/u;
+const HEX64 = /^[a-f0-9]{64}$/u;
+const DEPLOYED_FROM = /^[a-z][a-z0-9_-]{0,31}$/u;
+const ACTIVE_STATE_KEYS = Object.freeze(['deployment', 'modern', 'schedules', 'settings', 'version']);
+const HELD_STATE_KEYS = Object.freeze([...ACTIVE_STATE_KEYS, 'latestModern', 'latestVersion'].sort());
+const issued = new WeakMap();
 
-function exactEvidence(bytes, pin) {
-  if (typeof pin !== 'string' || !Buffer.isBuffer(bytes) || bytes.length === 0
-    || bytes.length > MAX_EVIDENCE || hash(bytes) !== pin) refuse();
+const refuse = reason => { throw Error(`Exact held Ops Sync companion evidence refused: ${reason}`); };
+const sha = value => hash(canonical(value));
+const sorted = value => [...value].sort();
+const sameKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && Object.getPrototypeOf(value) === Object.prototype
+  && canonical(sorted(Object.keys(value))) === canonical(sorted(keys))
+  && Object.keys(value).every(key => Object.getOwnPropertyDescriptor(value, key)?.get === undefined);
+const isUuid = value => typeof value === 'string' && UUID.test(value);
+const isHex64 = value => typeof value === 'string' && HEX64.test(value);
+
+function exactEvidence(bytes, pin, name) {
+  if (!isHex64(pin) || !Buffer.isBuffer(bytes) || bytes.length === 0
+    || bytes.length > MAX_EVIDENCE || hash(bytes) !== pin) refuse(`${name} bytes differ from the reviewed inputs`);
 }
 
-function assertCompanion(snapshot) {
-  const state = snapshot?.['ops-sync'];
-  if (!state || Object.keys(state).length !== Object.keys(COMPANION).length + 1
-    || state.deployment?.id !== SYNC_DEPLOYMENT || state.deployment.versions?.length !== 1
-    || state.deployment.versions[0]?.version_id !== SYNC_ACTIVE || state.deployment.versions[0]?.percentage !== 100
-    || state.version?.id !== SYNC_ACTIVE || state.modern?.id !== SYNC_ACTIVE || state.latest !== SYNC_LATEST
-    || state.latestVersion?.id !== SYNC_LATEST || state.latestModern?.id !== SYNC_LATEST
-    || state.version.resources?.script?.last_deployed_from !== 'wrangler'
-    || state.latestVersion.resources?.script?.last_deployed_from !== 'api'
-    || Object.entries(COMPANION).some(([key, digest]) => !Object.hasOwn(state,key)
-      || hash(canonical(state[key])) !== digest)) refuse();
+/** Strictly parse and shape-check reviewed inputs. Returns a frozen copy. */
+export function parseOpsSoleActiveReleaseInputs(inputsBytes, reviewedInputsSHA256) {
+  if (!Buffer.isBuffer(inputsBytes) || inputsBytes.length === 0 || inputsBytes.length > MAX_INPUTS)
+    refuse('inputs must be the reviewed file bytes');
+  if (!isHex64(reviewedInputsSHA256) || hash(inputsBytes) !== reviewedInputsSHA256)
+    refuse('inputs bytes differ from the independently reviewed SHA-256');
+  let inputs;
+  try { inputs = JSON.parse(inputsBytes.toString('utf8')); } catch { refuse('inputs are not JSON'); }
+  if (!sameKeys(inputs, ['contract', 'accountId', 'sourceCommit', 'operations', 'opsSync'])
+    || inputs.contract !== OPS_SOLE_ACTIVE_RELEASE_INPUTS_CONTRACT) refuse('unknown inputs contract or fields');
+  if (inputs.accountId !== NATIVE_STAFF_PRODUCTION_TARGET.accountId) refuse('inputs name another account');
+  if (typeof inputs.sourceCommit !== 'string' || !HEX40.test(inputs.sourceCommit)) refuse('inputs source commit malformed');
+  const ops = inputs.operations;
+  if (!sameKeys(ops, ['deploymentId', 'versionId']) || !isUuid(ops.deploymentId) || !isUuid(ops.versionId))
+    refuse('Operations inputs malformed');
+  const sync = inputs.opsSync;
+  if (!sameKeys(sync, ['deploymentId', 'activeVersionId', 'latestVersionId', 'activeLastDeployedFrom',
+    'latestLastDeployedFrom', 'stateSHA256', 'held'])
+    || !isUuid(sync.deploymentId) || !isUuid(sync.activeVersionId) || !isUuid(sync.latestVersionId)
+    || typeof sync.activeLastDeployedFrom !== 'string' || !DEPLOYED_FROM.test(sync.activeLastDeployedFrom))
+    refuse('Ops Sync inputs malformed');
+  const held = sync.latestVersionId !== sync.activeVersionId;
+  if (!sameKeys(sync.stateSHA256, held ? HELD_STATE_KEYS : ACTIVE_STATE_KEYS)
+    || !Object.values(sync.stateSHA256).every(isHex64)) refuse('Ops Sync state digests malformed');
+  if (held) {
+    if (typeof sync.latestLastDeployedFrom !== 'string' || !DEPLOYED_FROM.test(sync.latestLastDeployedFrom)
+      || !sameKeys(sync.held, ['journalSHA256', 'immutableMapEvidenceSHA256', 'immutableMapProjectionSHA256'])
+      || !Object.values(sync.held).every(isHex64)) refuse('held Ops Sync version needs its reviewed evidence digests');
+  } else if (sync.latestLastDeployedFrom !== null || sync.held !== null) {
+    refuse('Ops Sync without an inactive latest version must not name held evidence');
+  }
+  return Object.freeze(structuredClone(inputs));
 }
 
-export function createHeldOpsSyncCompanionWitness({ accountId, sourceCommit, snapshot, heldJournalBytes,
+function assertOperations(snapshot, inputs) {
+  const ops = snapshot?.operations, id = inputs.operations.versionId;
+  const rows = ops?.deployment?.versions;
+  if (!Array.isArray(rows) || rows.length !== 1) refuse('live Operations is not a single active version');
+  if (rows[0]?.version_id !== id || rows[0]?.percentage !== 100) refuse('live Operations active version differs from inputs');
+  if (ops.deployment.id !== inputs.operations.deploymentId) refuse('live Operations deployment differs from inputs');
+  if (ops.version?.id !== id || ops.modern?.id !== id || ops.latest !== id)
+    refuse('live Operations version, runtime or latest differs from inputs');
+}
+
+function assertSync(snapshot, inputs) {
+  const state = snapshot?.['ops-sync'], sync = inputs.opsSync;
+  const held = sync.latestVersionId !== sync.activeVersionId;
+  const expectedKeys = ['latest', ...Object.keys(sync.stateSHA256)];
+  if (!state || !sameKeys(state, expectedKeys)) refuse('live Ops Sync capture shape differs from inputs');
+  const rows = state.deployment?.versions;
+  if (state.deployment?.id !== sync.deploymentId) refuse('live Ops Sync deployment differs from inputs');
+  if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.version_id !== sync.activeVersionId
+    || rows[0]?.percentage !== 100) refuse('live Ops Sync active version differs from inputs');
+  if (state.version?.id !== sync.activeVersionId || state.modern?.id !== sync.activeVersionId
+    || state.latest !== sync.latestVersionId) refuse('live Ops Sync version or latest differs from inputs');
+  if (state.version.resources?.script?.last_deployed_from !== sync.activeLastDeployedFrom)
+    refuse('live Ops Sync active upload source differs from inputs');
+  if (held && (state.latestVersion?.id !== sync.latestVersionId || state.latestModern?.id !== sync.latestVersionId
+    || state.latestVersion.resources?.script?.last_deployed_from !== sync.latestLastDeployedFrom))
+    refuse('live held Ops Sync version differs from inputs');
+  for (const [key, digest] of Object.entries(sync.stateSHA256))
+    if (sha(state[key]) !== digest) refuse(`live Ops Sync ${key} differs from inputs`);
+}
+
+/** Offline helper: describe a fresh read-only capture as an inputs object for
+ * independent review. It authorizes nothing; the reviewer must still compare it
+ * with the release packet (for example the expected Operations version). */
+export function describeOpsSoleActiveReleaseInputs(snapshot, { sourceCommit, heldJournalBytes,
   immutableMapEvidenceBytes } = {}) {
-  // These are independently reviewed exact evidence bytes, never a generic
-  // acknowledgment supplied by a caller or a way to rewrite metadata.
-  exactEvidence(heldJournalBytes, HELD_JOURNAL);
-  exactEvidence(immutableMapEvidenceBytes, IMMUTABLE_MAP_EVIDENCE);
-  if (accountId !== NATIVE_STAFF_PRODUCTION_TARGET.accountId || sourceCommit !== TEAM_SOURCE) refuse();
-  const ops = snapshot?.operations;
-  if (ops?.version?.id !== OPS_BASELINE || ops.modern?.id !== OPS_BASELINE
-    || ops.deployment?.id !== OPS_DEPLOYMENT) refuse();
-  assertCompanion(snapshot);
-  const receipt = Object.freeze({ contract:CONTRACT, sourceCommit, accountId, opsBaselineVersionId:OPS_BASELINE,
-    opsDeploymentId:OPS_DEPLOYMENT,
-    syncDeploymentId:SYNC_DEPLOYMENT, syncActiveVersionId:SYNC_ACTIVE, syncHeldVersionId:SYNC_LATEST,
-    evidenceSHA256:hash(canonical({COMPANION,HELD_JOURNAL,IMMUTABLE_MAP_EVIDENCE,IMMUTABLE_MAP_PROJECTION})) });
+  const ops = snapshot?.operations, state = snapshot?.['ops-sync'];
+  const id = ops?.deployment?.versions?.length === 1 ? ops.deployment.versions[0].version_id : undefined;
+  if (!isUuid(id) || ops.deployment.versions[0].percentage !== 100) refuse('capture is not a single active Operations version');
+  const syncRows = state?.deployment?.versions;
+  if (!Array.isArray(syncRows) || syncRows.length !== 1 || syncRows[0]?.percentage !== 100)
+    refuse('capture is not a single active Ops Sync version');
+  const held = state.latest !== state.version?.id;
+  const keys = held ? HELD_STATE_KEYS : ACTIVE_STATE_KEYS;
+  let heldEvidence = null;
+  if (held) {
+    if (!Buffer.isBuffer(heldJournalBytes) || !Buffer.isBuffer(immutableMapEvidenceBytes))
+      refuse('held Ops Sync version needs its journal and immutable map evidence bytes');
+    let projection;
+    try { projection = JSON.parse(immutableMapEvidenceBytes.toString('utf8')); } catch { refuse('immutable map evidence is not JSON'); }
+    heldEvidence = { journalSHA256: hash(heldJournalBytes), immutableMapEvidenceSHA256: hash(immutableMapEvidenceBytes),
+      immutableMapProjectionSHA256: sha(projection) };
+  }
+  return {
+    contract: OPS_SOLE_ACTIVE_RELEASE_INPUTS_CONTRACT,
+    accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+    sourceCommit,
+    operations: { deploymentId: ops.deployment.id, versionId: id },
+    opsSync: {
+      deploymentId: state.deployment.id,
+      activeVersionId: state.version.id,
+      latestVersionId: state.latest,
+      activeLastDeployedFrom: state.version.resources?.script?.last_deployed_from,
+      latestLastDeployedFrom: held ? state.latestVersion?.resources?.script?.last_deployed_from ?? null : null,
+      stateSHA256: Object.fromEntries(keys.map(key => [key, sha(state[key])])),
+      held: heldEvidence,
+    },
+  };
+}
+
+/** Bytes to write for review: canonical JSON plus a trailing newline. */
+export function opsSoleActiveReleaseInputsBytes(inputs) {
+  return Buffer.from(`${canonical(inputs)}\n`, 'utf8');
+}
+
+export function createOpsSoleActiveReleaseWitness({ accountId, sourceCommit, snapshot, inputsBytes, reviewedInputsSHA256,
+  heldJournalBytes, immutableMapEvidenceBytes } = {}) {
+  const inputs = parseOpsSoleActiveReleaseInputs(inputsBytes, reviewedInputsSHA256);
+  if (accountId !== inputs.accountId || sourceCommit !== inputs.sourceCommit)
+    refuse('account or release source differs from inputs');
+  const held = inputs.opsSync.held;
+  if (held) {
+    // Independently reviewed evidence bytes, never a caller acknowledgment.
+    exactEvidence(heldJournalBytes, held.journalSHA256, 'held Sync journal');
+    exactEvidence(immutableMapEvidenceBytes, held.immutableMapEvidenceSHA256, 'immutable Sync map evidence');
+    let projection;
+    try { projection = JSON.parse(immutableMapEvidenceBytes.toString('utf8')); } catch { refuse('immutable map evidence is not JSON'); }
+    if (projection?.id !== inputs.opsSync.latestVersionId || sha(projection) !== held.immutableMapProjectionSHA256)
+      refuse('immutable map evidence does not project to the reviewed held Sync version');
+  } else if (heldJournalBytes !== undefined || immutableMapEvidenceBytes !== undefined) {
+    refuse('held evidence was supplied for an Ops Sync without a held version');
+  }
+  assertOperations(snapshot, inputs);
+  assertSync(snapshot, inputs);
+  const receipt = Object.freeze({ contract: RECEIPT_CONTRACT, sourceCommit, accountId,
+    inputsSHA256: reviewedInputsSHA256,
+    opsBaselineVersionId: inputs.operations.versionId, opsDeploymentId: inputs.operations.deploymentId,
+    syncDeploymentId: inputs.opsSync.deploymentId, syncActiveVersionId: inputs.opsSync.activeVersionId,
+    syncHeldVersionId: held ? inputs.opsSync.latestVersionId : null,
+    evidenceSHA256: sha({ stateSHA256: inputs.opsSync.stateSHA256, held }) });
+  const issuedAt = Date.now();
+  if (!Number.isFinite(issuedAt)) refuse('clock unavailable');
   const witness = Object.freeze({});
-  issued.set(witness, {receipt, expiresAt:Date.now() + 15 * 60_000});
+  issued.set(witness, { receipt, inputs, expiresAt: issuedAt + WITNESS_TTL_MS });
   return witness;
 }
 
-export function heldOpsSyncCompanionReceipt(witness, sourceCommit) {
+function proofOf(witness) {
   const proof = issued.get(witness);
-  if (!proof || proof.receipt.sourceCommit !== sourceCommit || Date.now() >= proof.expiresAt) refuse();
+  if (!proof) refuse('witness was not issued from reviewed inputs');
+  if (!(Date.now() < proof.expiresAt)) refuse('witness expired; capture and review again');
+  return proof;
+}
+
+export function heldOpsSyncCompanionReceipt(witness, sourceCommit) {
+  const proof = proofOf(witness);
+  if (proof.receipt.sourceCommit !== sourceCommit) refuse('witness belongs to another release source');
   return proof.receipt;
 }
 
+/** Re-check a fresh capture against the reviewed Sync inputs (every fence). */
 export function assertHeldOpsSyncCompanion(witness, snapshot) {
-  heldOpsSyncCompanionReceipt(witness, TEAM_SOURCE);
-  assertCompanion(snapshot);
+  assertSync(snapshot, proofOf(witness).inputs);
 }
 
+/** Re-check the held Sync version's modules and source maps, when there is one. */
 export function assertHeldOpsSyncCompanionMap(witness, projection) {
-  heldOpsSyncCompanionReceipt(witness, TEAM_SOURCE);
-  if (projection?.id !== SYNC_LATEST || hash(canonical(projection)) !== IMMUTABLE_MAP_PROJECTION) refuse();
+  const { inputs } = proofOf(witness), held = inputs.opsSync.held;
+  if (!held) refuse('no held Ops Sync version to compare');
+  if (projection?.id !== inputs.opsSync.latestVersionId || sha(projection) !== held.immutableMapProjectionSHA256)
+    refuse('live held Ops Sync modules or source maps differ from inputs');
 }

@@ -1,0 +1,778 @@
+{
+ "_comment": "Synthetic captures for the sole-active Operations release witness. No production identifiers or values.",
+ "sourceCommit": "5017e0c1ab1e5017e0c1ab1e5017e0c1ab1e5017",
+ "ids": {
+  "OPS": "0a5e0001-0000-4000-8000-000000000001",
+  "OPS_DEP": "0a5ed001-0000-4000-8000-000000000001",
+  "OPS_OLD": "0a5e0000-0000-4000-8000-000000000000",
+  "SYNC": "5c0e0001-0000-4000-8000-000000000001",
+  "SYNC_HELD": "5c0e0002-0000-4000-8000-000000000002",
+  "SYNC_DEP": "5c0ed001-0000-4000-8000-000000000001"
+ },
+ "heldSyncJournal": "{\"synthetic\":\"held Ops Sync journal\",\"uploadReplayed\":false}\n",
+ "heldSyncMapProjection": {
+  "id": "5c0e0002-0000-4000-8000-000000000002",
+  "modules": [
+   {
+    "name": "index.js",
+    "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gaGVsZA=="
+   },
+   {
+    "name": "index.js.map",
+    "content_base64": "eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbXSwic291cmNlc0NvbnRlbnQiOltdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiIn0="
+   }
+  ]
+ },
+ "captures": {
+  "singleActiveHeldSync": {
+   "operations": {
+    "deployment": {
+     "id": "0a5ed001-0000-4000-8000-000000000001",
+     "created_on": "2026-11-20T15:00:00.000000Z",
+     "source": "wrangler",
+     "strategy": "percentage",
+     "versions": [
+      {
+       "version_id": "0a5e0001-0000-4000-8000-000000000001",
+       "percentage": 100
+      }
+     ]
+    },
+    "latest": "0a5e0001-0000-4000-8000-000000000001",
+    "version": {
+     "id": "0a5e0001-0000-4000-8000-000000000001",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-0a5e0001",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "wrangler"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "modern": {
+     "id": "0a5e0001-0000-4000-8000-000000000001",
+     "assets": {
+      "config": {
+       "base_path": "/",
+       "html_handling": "auto-trailing-slash",
+       "not_found_handling": "single-page-application"
+      }
+     },
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gMGE1ZTAwMDEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      }
+     ]
+    },
+    "settings": {
+     "compatibility_date": "2026-01-01",
+     "usage_model": "standard",
+     "bindings": [
+      {
+       "name": "DB",
+       "type": "d1",
+       "id": "synthetic-db"
+      }
+     ],
+     "annotations": {
+      "workers/message": "synthetic"
+     }
+    },
+    "schedules": {
+     "schedules": [
+      {
+       "cron": "*/5 * * * *"
+      }
+     ]
+    }
+   },
+   "client": {
+    "deployment": {
+     "id": "c1e0d001-0000-4000-8000-000000000001",
+     "created_on": "2026-11-20T15:00:00.000000Z",
+     "source": "wrangler",
+     "strategy": "percentage",
+     "versions": [
+      {
+       "version_id": "c1e00001-0000-4000-8000-000000000001",
+       "percentage": 100
+      }
+     ]
+    },
+    "latest": "c1e00001-0000-4000-8000-000000000001",
+    "version": {
+     "id": "c1e00001-0000-4000-8000-000000000001",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-c1e00001",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "wrangler"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "modern": {
+     "id": "c1e00001-0000-4000-8000-000000000001",
+     "assets": {
+      "config": {
+       "base_path": "/",
+       "html_handling": "auto-trailing-slash",
+       "not_found_handling": "single-page-application"
+      }
+     },
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gYzFlMDAwMDEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      }
+     ]
+    },
+    "settings": {
+     "compatibility_date": "2026-01-01",
+     "usage_model": "standard",
+     "bindings": [
+      {
+       "name": "DB",
+       "type": "d1",
+       "id": "synthetic-db"
+      }
+     ],
+     "annotations": {
+      "workers/message": "synthetic"
+     }
+    },
+    "schedules": {
+     "schedules": [
+      {
+       "cron": "*/5 * * * *"
+      }
+     ]
+    }
+   },
+   "ops-sync": {
+    "deployment": {
+     "id": "5c0ed001-0000-4000-8000-000000000001",
+     "created_on": "2026-11-20T15:00:00.000000Z",
+     "source": "wrangler",
+     "strategy": "percentage",
+     "versions": [
+      {
+       "version_id": "5c0e0001-0000-4000-8000-000000000001",
+       "percentage": 100
+      }
+     ]
+    },
+    "latest": "5c0e0002-0000-4000-8000-000000000002",
+    "version": {
+     "id": "5c0e0001-0000-4000-8000-000000000001",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-5c0e0001",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "wrangler"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "modern": {
+     "id": "5c0e0001-0000-4000-8000-000000000001",
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gNWMwZTAwMDEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      }
+     ]
+    },
+    "settings": {
+     "compatibility_date": "2026-01-01",
+     "usage_model": "standard",
+     "bindings": [
+      {
+       "name": "DB",
+       "type": "d1",
+       "id": "synthetic-db"
+      }
+     ],
+     "annotations": {
+      "workers/message": "synthetic"
+     }
+    },
+    "schedules": {
+     "schedules": [
+      {
+       "cron": "*/5 * * * *"
+      }
+     ]
+    },
+    "latestVersion": {
+     "id": "5c0e0002-0000-4000-8000-000000000002",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-5c0e0002",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "api"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "latestModern": {
+     "id": "5c0e0002-0000-4000-8000-000000000002",
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gNWMwZTAwMDItMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAy"
+      }
+     ]
+    }
+   }
+  },
+  "singleActivePlainSync": {
+   "operations": {
+    "deployment": {
+     "id": "0a5ed001-0000-4000-8000-000000000001",
+     "created_on": "2026-11-20T15:00:00.000000Z",
+     "source": "wrangler",
+     "strategy": "percentage",
+     "versions": [
+      {
+       "version_id": "0a5e0001-0000-4000-8000-000000000001",
+       "percentage": 100
+      }
+     ]
+    },
+    "latest": "0a5e0001-0000-4000-8000-000000000001",
+    "version": {
+     "id": "0a5e0001-0000-4000-8000-000000000001",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-0a5e0001",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "wrangler"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "modern": {
+     "id": "0a5e0001-0000-4000-8000-000000000001",
+     "assets": {
+      "config": {
+       "base_path": "/",
+       "html_handling": "auto-trailing-slash",
+       "not_found_handling": "single-page-application"
+      }
+     },
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gMGE1ZTAwMDEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      }
+     ]
+    },
+    "settings": {
+     "compatibility_date": "2026-01-01",
+     "usage_model": "standard",
+     "bindings": [
+      {
+       "name": "DB",
+       "type": "d1",
+       "id": "synthetic-db"
+      }
+     ],
+     "annotations": {
+      "workers/message": "synthetic"
+     }
+    },
+    "schedules": {
+     "schedules": [
+      {
+       "cron": "*/5 * * * *"
+      }
+     ]
+    }
+   },
+   "client": {
+    "deployment": {
+     "id": "c1e0d001-0000-4000-8000-000000000001",
+     "created_on": "2026-11-20T15:00:00.000000Z",
+     "source": "wrangler",
+     "strategy": "percentage",
+     "versions": [
+      {
+       "version_id": "c1e00001-0000-4000-8000-000000000001",
+       "percentage": 100
+      }
+     ]
+    },
+    "latest": "c1e00001-0000-4000-8000-000000000001",
+    "version": {
+     "id": "c1e00001-0000-4000-8000-000000000001",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-c1e00001",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "wrangler"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "modern": {
+     "id": "c1e00001-0000-4000-8000-000000000001",
+     "assets": {
+      "config": {
+       "base_path": "/",
+       "html_handling": "auto-trailing-slash",
+       "not_found_handling": "single-page-application"
+      }
+     },
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gYzFlMDAwMDEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      }
+     ]
+    },
+    "settings": {
+     "compatibility_date": "2026-01-01",
+     "usage_model": "standard",
+     "bindings": [
+      {
+       "name": "DB",
+       "type": "d1",
+       "id": "synthetic-db"
+      }
+     ],
+     "annotations": {
+      "workers/message": "synthetic"
+     }
+    },
+    "schedules": {
+     "schedules": [
+      {
+       "cron": "*/5 * * * *"
+      }
+     ]
+    }
+   },
+   "ops-sync": {
+    "deployment": {
+     "id": "5c0ed001-0000-4000-8000-000000000001",
+     "created_on": "2026-11-20T15:00:00.000000Z",
+     "source": "wrangler",
+     "strategy": "percentage",
+     "versions": [
+      {
+       "version_id": "5c0e0001-0000-4000-8000-000000000001",
+       "percentage": 100
+      }
+     ]
+    },
+    "latest": "5c0e0001-0000-4000-8000-000000000001",
+    "version": {
+     "id": "5c0e0001-0000-4000-8000-000000000001",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-5c0e0001",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "wrangler"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "modern": {
+     "id": "5c0e0001-0000-4000-8000-000000000001",
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gNWMwZTAwMDEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      }
+     ]
+    },
+    "settings": {
+     "compatibility_date": "2026-01-01",
+     "usage_model": "standard",
+     "bindings": [
+      {
+       "name": "DB",
+       "type": "d1",
+       "id": "synthetic-db"
+      }
+     ],
+     "annotations": {
+      "workers/message": "synthetic"
+     }
+    },
+    "schedules": {
+     "schedules": [
+      {
+       "cron": "*/5 * * * *"
+      }
+     ]
+    }
+   }
+  },
+  "opsSplit0100": {
+   "operations": {
+    "deployment": {
+     "id": "0a5ed001-0000-4000-8000-000000000001",
+     "created_on": "2026-11-20T15:00:00.000000Z",
+     "source": "wrangler",
+     "strategy": "percentage",
+     "versions": [
+      {
+       "version_id": "0a5e0000-0000-4000-8000-000000000000",
+       "percentage": 0
+      },
+      {
+       "version_id": "0a5e0001-0000-4000-8000-000000000001",
+       "percentage": 100
+      }
+     ]
+    },
+    "latest": "0a5e0001-0000-4000-8000-000000000001",
+    "version": {
+     "id": "0a5e0001-0000-4000-8000-000000000001",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-0a5e0001",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "wrangler"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "modern": {
+     "id": "0a5e0001-0000-4000-8000-000000000001",
+     "assets": {
+      "config": {
+       "base_path": "/",
+       "html_handling": "auto-trailing-slash",
+       "not_found_handling": "single-page-application"
+      }
+     },
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gMGE1ZTAwMDEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      }
+     ]
+    },
+    "settings": {
+     "compatibility_date": "2026-01-01",
+     "usage_model": "standard",
+     "bindings": [
+      {
+       "name": "DB",
+       "type": "d1",
+       "id": "synthetic-db"
+      }
+     ],
+     "annotations": {
+      "workers/message": "synthetic"
+     }
+    },
+    "schedules": {
+     "schedules": [
+      {
+       "cron": "*/5 * * * *"
+      }
+     ]
+    }
+   },
+   "client": {
+    "deployment": {
+     "id": "c1e0d001-0000-4000-8000-000000000001",
+     "created_on": "2026-11-20T15:00:00.000000Z",
+     "source": "wrangler",
+     "strategy": "percentage",
+     "versions": [
+      {
+       "version_id": "c1e00001-0000-4000-8000-000000000001",
+       "percentage": 100
+      }
+     ]
+    },
+    "latest": "c1e00001-0000-4000-8000-000000000001",
+    "version": {
+     "id": "c1e00001-0000-4000-8000-000000000001",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-c1e00001",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "wrangler"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "modern": {
+     "id": "c1e00001-0000-4000-8000-000000000001",
+     "assets": {
+      "config": {
+       "base_path": "/",
+       "html_handling": "auto-trailing-slash",
+       "not_found_handling": "single-page-application"
+      }
+     },
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gYzFlMDAwMDEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      }
+     ]
+    },
+    "settings": {
+     "compatibility_date": "2026-01-01",
+     "usage_model": "standard",
+     "bindings": [
+      {
+       "name": "DB",
+       "type": "d1",
+       "id": "synthetic-db"
+      }
+     ],
+     "annotations": {
+      "workers/message": "synthetic"
+     }
+    },
+    "schedules": {
+     "schedules": [
+      {
+       "cron": "*/5 * * * *"
+      }
+     ]
+    }
+   },
+   "ops-sync": {
+    "deployment": {
+     "id": "5c0ed001-0000-4000-8000-000000000001",
+     "created_on": "2026-11-20T15:00:00.000000Z",
+     "source": "wrangler",
+     "strategy": "percentage",
+     "versions": [
+      {
+       "version_id": "5c0e0001-0000-4000-8000-000000000001",
+       "percentage": 100
+      }
+     ]
+    },
+    "latest": "5c0e0002-0000-4000-8000-000000000002",
+    "version": {
+     "id": "5c0e0001-0000-4000-8000-000000000001",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-5c0e0001",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "wrangler"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "modern": {
+     "id": "5c0e0001-0000-4000-8000-000000000001",
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gNWMwZTAwMDEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      }
+     ]
+    },
+    "settings": {
+     "compatibility_date": "2026-01-01",
+     "usage_model": "standard",
+     "bindings": [
+      {
+       "name": "DB",
+       "type": "d1",
+       "id": "synthetic-db"
+      }
+     ],
+     "annotations": {
+      "workers/message": "synthetic"
+     }
+    },
+    "schedules": {
+     "schedules": [
+      {
+       "cron": "*/5 * * * *"
+      }
+     ]
+    },
+    "latestVersion": {
+     "id": "5c0e0002-0000-4000-8000-000000000002",
+     "number": 1,
+     "resources": {
+      "script": {
+       "etag": "synthetic-5c0e0002",
+       "handlers": [
+        "fetch",
+        "scheduled"
+       ],
+       "last_deployed_from": "api"
+      },
+      "script_runtime": {
+       "compatibility_date": "2026-01-01",
+       "usage_model": "standard"
+      },
+      "bindings": [
+       {
+        "name": "DB",
+        "type": "d1",
+        "id": "synthetic-db"
+       }
+      ]
+     }
+    },
+    "latestModern": {
+     "id": "5c0e0002-0000-4000-8000-000000000002",
+     "modules": [
+      {
+       "name": "index.js",
+       "content_base64": "ZXhwb3J0IGRlZmF1bHQge30gLy8gNWMwZTAwMDItMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAy"
+      }
+     ]
+    }
+   }
+  }
+ }
+}

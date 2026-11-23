@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { hash, canonical, validateInstallation, PROFILE, ORDINARY_FRONTEND_PREFLIGHT_MODE,
   ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ordinaryFrontendPreflightDescriptor,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } from './production-deploy.mjs';
-import { createHeldOpsSyncCompanionWitness } from './ops-sync-companion-witness.mjs';
+import { createOpsSoleActiveReleaseWitness, describeOpsSoleActiveReleaseInputs, opsSoleActiveReleaseInputsBytes }
+  from './ops-sync-companion-witness.mjs';
 import { compileOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { compileOrdinaryFrontendRetainedPlan } from './ordinary-frontend-retained-plan.mjs';
 import { compileCanonicalBrowserRetirementTransition } from './ordinary-frontend-canonical-browser-retirement.mjs';
@@ -679,10 +680,12 @@ async function teamCompanionHarness(t, options = {}) {
   const fixture = {...JSON.parse(fs.readFileSync(fixturePath, 'utf8')), profile:PROFILE, artifactSourceCommit:sourceCommit};
   const snapshot = JSON.parse(fs.readFileSync(teamCompanionSnapshotPath, 'utf8'));
   const immutableMapEvidenceBytes = fs.readFileSync(teamImmutableSyncMapPath);
-  const heldOpsSyncCompanionWitness = createHeldOpsSyncCompanionWitness({
+  const heldJournalBytes = fs.readFileSync(teamHeldSyncJournalPath);
+  const inputsBytes = opsSoleActiveReleaseInputsBytes(describeOpsSoleActiveReleaseInputs(snapshot,
+    {sourceCommit, heldJournalBytes, immutableMapEvidenceBytes}));
+  const heldOpsSyncCompanionWitness = createOpsSoleActiveReleaseWitness({
     accountId:NATIVE_STAFF_PRODUCTION_TARGET.accountId, sourceCommit, snapshot,
-    heldJournalBytes:fs.readFileSync(teamHeldSyncJournalPath),
-    immutableMapEvidenceBytes,
+    inputsBytes, reviewedInputsSHA256:hash(inputsBytes), heldJournalBytes, immutableMapEvidenceBytes,
   });
   const h = await harness(t, fixture, 'operations', {teamSyncMapProjection:JSON.parse(immutableMapEvidenceBytes),
     ...options,snapshotOverride:snapshot,post0226Authority:true,heldOpsSyncCompanionWitness});

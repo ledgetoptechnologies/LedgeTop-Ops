@@ -558,7 +558,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     return receipt;
   };
   await qualifyStaff('before-prior-asset-verification');
-  if (companionReceipt) {
+  // Only a held (inactive, reviewed) Sync version has modules and maps to pin.
+  if (companionReceipt?.syncHeldVersionId) {
     const syncHeldVersion = companionReceipt.syncHeldVersionId;
     assertHeldOpsSyncCompanionMap(heldOpsSyncCompanionWitness,
       await reader.get(`/workers/workers/ledgetop-ops-sync/versions/${syncHeldVersion}?include=modules,sourcemaps`));

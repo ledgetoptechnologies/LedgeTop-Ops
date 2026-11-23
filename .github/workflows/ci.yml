@@ -41,7 +41,7 @@ jobs:
         run: node --test scripts/native-staff-bootstrap-provisioner.test.mjs scripts/native-staff-bootstrap-provisioner.windows.test.mjs
 
       - name: Verify guarded production deployment tooling without credentials
-        run: node --test scripts/production-deploy.test.mjs scripts/ordinary-frontend-release-plan.test.mjs scripts/ordinary-frontend-preserved-preflight.test.mjs scripts/ordinary-frontend-candidate-verifier.test.mjs scripts/ordinary-frontend-retained-plan.test.mjs scripts/ordinary-frontend-retained-executor.integration.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
+        run: node --test scripts/production-deploy.test.mjs scripts/ordinary-frontend-release-plan.test.mjs scripts/ordinary-frontend-preserved-preflight.test.mjs scripts/ordinary-frontend-candidate-verifier.test.mjs scripts/ordinary-frontend-retained-plan.test.mjs scripts/ordinary-frontend-retained-executor.integration.test.mjs scripts/ops-sync-companion-witness.test.mjs scripts/production-auto-verify-parallel.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
 
       - name: Verify post-0226 preservation and native local JSON output without credentials
         run: node --test scripts/ordinary-frontend-authority-post0226.test.mjs scripts/ordinary-frontend-authority-post0226-native-json.test.mjs scripts/ordinary-frontend-canonical-browser-retirement.test.mjs
