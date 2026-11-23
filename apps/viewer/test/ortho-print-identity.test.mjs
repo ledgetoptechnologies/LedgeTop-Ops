@@ -65,7 +65,7 @@ function fakeDocument() {
   return { createElement: node, body: node('body'), downloads };
 }
 
-function page({ holdOpen = false, holdTrace = false, holdBlob = false } = {}) {
+function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissions = undefined, beforeSave = null } = {}) {
   const log = { opens: [], traces: [], blobs: [], canvases: [] };
   const ortho = orthoDataset();
   const hold = (enabled, list, value, extra) => {
@@ -91,7 +91,7 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false } = {}) {
     log.canvases.push(c);
     return c;
   };
-  const first = session();
+  const first = session({ permissions });
   const map = {
     getBounds: () => ({ getNorthWest: () => ({ lat: 4700180, lng: 500020 }), getNorthEast: () => ({ lat: 4700180, lng: 500380 }),
       getSouthWest: () => ({ lat: 4700020, lng: 500020 }), getSouthEast: () => ({ lat: 4700020, lng: 500380 }) }),
@@ -124,7 +124,9 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false } = {}) {
   });
   vm.runInContext(SHIPPED, context);
   const doc = fakeDocument();
-  const dialog = mountOrthoPrintDialog({ documentRef: doc, run: (options, signal) => context.exportOrthoPrintFromViewer(options, signal) });
+  // `beforeSave` runs after the export resolves and before the dialog creates the download.
+  const run = async (options, signal) => { const result = await context.exportOrthoPrintFromViewer(options, signal); beforeSave?.(context); return result; };
+  const dialog = mountOrthoPrintDialog({ documentRef: doc, run });
   dialog.controls.contours.checked = true;
   return { context, log, doc, dialog, inFlight: () => vm.runInContext('orthoPrintExports.size', context) };
 }
@@ -230,4 +232,60 @@ test('lost access cancels at once; closing the dialog is its own abort', async (
   assert.deepEqual(closed.doc.downloads, []);
   assert.equal(objectUrls.length, 0);
   assert.equal(closed.inFlight(), 0);
+});
+
+// A same-subject renewal that drops download but keeps measure: a current-view
+// PNG planned above the no-download cap (here the 720 px screen) must not be saved.
+const WITH_DOWNLOAD = { view: true, measure: true, download: true };
+const WITHOUT_DOWNLOAD = { view: true, measure: true, download: false };
+
+test('download kept: a 2048 px current-view PNG planned with download is saved', async () => {
+  const p = page({ holdBlob: true, permissions: WITH_DOWNLOAD });
+  p.dialog.controls.size.value = '2048';
+  const done = p.dialog.controls.exportButton.fire('click');
+  await tick();
+  p.context.applyViewerSession(session({ permissions: WITH_DOWNLOAD, expiresIn: 900_000 }));
+  p.log.blobs[0].resolve();
+  await done;
+  assert.deepEqual(p.doc.downloads, ['orthophoto-2048px.png']);
+});
+
+test('download revoked by a same-subject renewal during encoding: no file', async () => {
+  const p = page({ holdBlob: true, permissions: WITH_DOWNLOAD });
+  p.dialog.controls.size.value = '2048';
+  const done = p.dialog.controls.exportButton.fire('click');
+  await tick();
+  assert.equal(p.log.blobs.length, 1, 'encoding in progress');
+  assert.equal(p.log.canvases[0].width, 2048, 'planned above the no-download cap');
+  p.context.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD }));
+  assert.equal(p.log.traces[0].signal.aborted, true, 'cancelled by the session change itself');
+  assert.equal(p.inFlight(), 1);
+  p.log.blobs[0].resolve();
+  await done;
+  assert.equal(p.log.canvases[0].width, 0, 'canvas released');
+  assertNoFile(p, 'download revoked during encoding');
+
+  // The same downgrade with no session event at all is caught after encoding.
+  const q = page({ holdBlob: true, permissions: WITH_DOWNLOAD });
+  q.dialog.controls.size.value = '2048';
+  const quiet = q.dialog.controls.exportButton.fire('click');
+  await tick();
+  q.context.SHARE_PERMISSIONS = WITHOUT_DOWNLOAD;
+  q.log.blobs[0].resolve();
+  await quiet;
+  assertNoFile(q, 'download revoked without a session event');
+});
+
+test('download revoked immediately before the dialog saves: no file', async () => {
+  const p = page({ permissions: WITH_DOWNLOAD, beforeSave: context => context.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD })) });
+  p.dialog.controls.size.value = '2048';
+  await p.dialog.controls.exportButton.fire('click');
+  assert.equal(p.log.blobs.length, 1, 'the file was encoded');
+  assertNoFile(p, 'download revoked before save');
+
+  // Control: the same renewal that keeps download saves the file.
+  const kept = page({ permissions: WITH_DOWNLOAD, beforeSave: context => context.applyViewerSession(session({ permissions: WITH_DOWNLOAD })) });
+  kept.dialog.controls.size.value = '2048';
+  await kept.dialog.controls.exportButton.fire('click');
+  assert.deepEqual(kept.doc.downloads, ['orthophoto-2048px.png']);
 });

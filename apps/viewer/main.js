@@ -1443,9 +1443,9 @@ function orthoPrintPermissions() {
 }
 
 // Image exports in flight. Each belongs to the viewer (audience and subject),
-// model and version it started for. Every session state change cancels the
-// ones that no longer match or have lost access; the dialog's Close is its
-// own abort.
+// model and version it started for, and to the permissions its area, format
+// and pixel size need. Every session state change cancels the ones that no
+// longer match or are no longer permitted; the dialog's Close is its own abort.
 const orthoPrintExports = new Set();
 function orthoPrintIdentity() {
   return JSON.stringify([activeViewerSession?.audience ?? null, activeViewerSession?.subject ?? null,
@@ -1454,7 +1454,7 @@ function orthoPrintIdentity() {
 function cancelStaleOrthoPrintExports() {
   if (!orthoPrintExports.size) return;
   const identity = orthoPrintIdentity(), available = viewerAccessAvailable();
-  for (const job of orthoPrintExports) if (!available || job.identity !== identity) job.cancel();
+  for (const job of orthoPrintExports) if (!available || job.identity !== identity || !job.permitted()) job.cancel();
 }
 
 function syncMeasurementActionVisibility() {
@@ -4223,18 +4223,25 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
   assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
   if (!ORTHO_URL) throw Object.assign(new Error('This model has no orthophoto.'), { code: 'print_no_ortho' });
   if (area === 'view' && !(map && isMapMode(state.activeMode))) throw Object.assign(new Error('Open a map view to export the current view.'), { code: 'print_no_view' });
-  // The export belongs to the viewer, model and version it started for. A
-  // session change cancels it (cancelStaleOrthoPrintExports), closing the
-  // dialog cancels it, and after every await `current()` checks both the
-  // identity and the print policy. Any mismatch ends it as a cancel: no file.
+  // The export belongs to the viewer, model and version it started for, and
+  // to the entitlement behind every choice it made: area, format and, once
+  // chosen, the pixel size (above the no-download cap only with download).
+  // A session change that breaks either cancels it (cancelStaleOrthoPrintExports),
+  // closing the dialog cancels it, and after every await `current()` checks
+  // both against the latest session. Any mismatch ends it as a cancel: no file.
   const controller = new AbortController(), signal = controller.signal;
-  const job = { identity: orthoPrintIdentity(), cancel: () => controller.abort() };
+  let planned = null; // { longEdge, viewPixels } once the size is chosen
+  const permitted = () => {
+    const now = orthoPrintPermissions();
+    try { assertOrthoPrintAllowed(now, { area, format }); } catch { return false; }
+    return !planned || planned.longEdge <= printLongEdge({ area, requested: size, policy: now, viewPixels: planned.viewPixels });
+  };
+  const job = { identity: orthoPrintIdentity(), permitted, cancel: () => controller.abort() };
   const fromDialog = () => controller.abort();
   if (dialogSignal?.aborted) controller.abort(); else dialogSignal?.addEventListener('abort', fromDialog, { once: true });
   const current = () => {
-    if (orthoPrintIdentity() !== job.identity) controller.abort();
+    if (orthoPrintIdentity() !== job.identity || !permitted()) controller.abort();
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
-    assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
   };
   orthoPrintExports.add(job);
   try {
@@ -4257,6 +4264,7 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
       if (clipped) viewPixels = dpr * Math.max(mapSize.x * (clipped.maxE - clipped.minE) / (extent.maxE - extent.minE), mapSize.y * (clipped.maxN - clipped.minN) / (extent.maxN - extent.minN));
     }
     const longEdge = printLongEdge({ area, requested: size, policy, viewPixels });
+    planned = { longEdge, viewPixels };
     // `checkpoint` runs after the contours are traced, after the pixels are
     // rendered and after the file is encoded.
     const result = await exportOrthoPrint({
