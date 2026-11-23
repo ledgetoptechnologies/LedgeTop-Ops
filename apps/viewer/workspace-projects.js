@@ -17,6 +17,7 @@ import { renderCurrentTabRecoveryOffer } from './workspace-current-tab-recovery-
 import { resumeCurrentTabWorkspaceRecovery } from './workspace-current-tab-recovery.mjs';
 import { createWorkspaceNavigationWork, workspaceNavigationState } from './workspace-navigation-state.mjs';
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
+import { folderAncestry, folderIsEmpty, folderTaskCounts, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
 import { DIRECT_CLIENT_GRANTS_PATH, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
@@ -47,27 +48,42 @@ const OPERATION_ACTIVE=new Set(['queued','leased','awaiting_derivatives']);
 function taskPhaseCounts(tasks){const counts={submitting:0,queued:0,processing:0,finalizing:0};for(const task of tasks){const status=task.latestAttempt?.status;if(VIEWER_SUBMISSION_STATUSES.has(status))counts.submitting++;else if(status==='queued_upstream')counts.queued++;else if(NODE_PROCESSING_STATUSES.has(status))counts.processing++;else if(VIEWER_FINALIZATION_STATUSES.has(status))counts.finalizing++}return counts}
 function readWorkspaceView(url=location.href){const parsed=new URL(url,location.origin),section=parsed.searchParams.get('section')||'dashboard',selectedProjectId=parsed.searchParams.get('project'),expandedTaskId=parsed.searchParams.get('task');return{section:WORKSPACE_SECTIONS.has(section)?section:'dashboard',selectedProjectId:selectedProjectId||null,selectedFolderId:parsed.searchParams.get('folder')||null,expandedTaskId:expandedTaskId||null,taskPage:['gcp','settings','files'].includes(parsed.searchParams.get('panel'))?parsed.searchParams.get('panel'):null}}
 const initialView=readWorkspaceView();
-let selectedFolderId=initialView.selectedFolderId;
 const state={section:initialView.section,token:sessionStorage.getItem(TOKEN_KEY),adminSession:null,projects:[],datasets:[],tasks:[],providers:[],presets:[],outputs:[],operations:[],derivativeJobs:[],diagnosticRuns:[],diagnosticRunsCursor:null,diagnosticRunsError:null,diagnosticRunsLoading:false,selectedDiagnosticRunId:null,diagnosticDetails:{},shares:{},sharePreflight:{},shareContext:null,projectShares:{},clientAccess:null,clientNativeAccess:null,lastShareUrl:null,storage:null,trashLoadError:null,failedMutations:[],ready:null,busy:false,operationRefreshBusy:false,projectQuery:'',backgroundQuery:'',backgroundImportLimit:3,backgroundDerivativeLimit:3,selectedProjectId:initialView.selectedProjectId,expandedTaskId:initialView.expandedTaskId,taskPage:initialView.taskPage,selectedProviderId:null,taskDetails:{},taskDisclosures:{},orthophotoPreviews:{},gcpWorkspaces:{},logTimer:null,operationTimer:null};
-// Folder navigation is per project and never changes project authorization.
-const folderState = { projectId: null, currentId: null, folders: null, error: null, loading: false, epoch: 0 };
+// Folders load per open project, on expand, and never change project authorization.
+// folderCache: projectId -> { folders, error, loading }; a newer entry object retires older requests.
+const folderCache=new Map();
+// The tree: expanded projects and folders per user (localStorage), the roving tab stop,
+// an inline "New folder" row or rename, and folder paths to reveal once their folders load.
+let treeState={projects:new Set(),folders:new Set()},treeSubject=null,treeCurrentKey=null,treePending=null,treeRenaming=null;
+const treeReveals=new Map();
+if(initialView.selectedProjectId&&initialView.selectedFolderId)treeReveals.set(initialView.selectedProjectId,initialView.selectedFolderId);
 let folderAuthorizationGeneration=0,activeFolderMutation=null;
 let projectDataGeneration=0,projectRefreshTimer=null,projectRefreshBusy=false,projectPaintPending=false,workspaceLoads=0;
 let projectArtifactsRefreshId=null;
-let draggedFolderTask=null,folderUndo=null,folderUndoTimer=null;
+let draggedFolderTask=null,folderUndo=null,folderUndoTimer=null,treeDragHover=null,treeDragExpandTimer=null;
+function isProjectOpen(projectId){return state.section==='dashboard'&&Boolean(projectId)&&(projectId===state.selectedProjectId||treeState.projects.has(projectId))}
+function openProjectIds(){return state.projects.filter(project=>isProjectOpen(project.id)).map(project=>project.id)}
+function loadTreeState(){
+  const subject=state.adminSession?.subject||null;
+  if(subject===treeSubject)return;
+  treeSubject=subject;treeState=readTreeState(globalThis.localStorage,subject);
+  if(state.selectedProjectId)treeState.projects.add(state.selectedProjectId);
+}
+// Saved only once the signed-in user is known; before that the tree lives in memory.
+function saveTreeState(){if(treeSubject)writeTreeState(globalThis.localStorage,treeSubject,treeState)}
 function invalidateFolderAuthorization(){
-  folderAuthorizationGeneration++;folderState.epoch++;folderState.projectId=null;
-  folderState.folders=null;folderState.error=null;folderState.loading=false;
+  folderAuthorizationGeneration++;folderCache.clear();
   projectDataGeneration++;
   clearFolderUndo();
-  // Keep selectedFolderId: expiry recovery restores navigation, not old data.
+  // Keep the expanded tree: expiry recovery restores navigation, not old data.
   if(activeFolderMutation){activeFolderMutation=null;state.busy=false;shell.removeAttribute('aria-busy');}
 }
-function folderAuthorizationGuard(projectId,permission='viewer.projects.read',captureFolder=true){
-  const token=state.token,session=state.adminSession,generation=folderAuthorizationGeneration,folderId=selectedFolderId;
+// open:false is for moves and their Undo, which the server checks against the task's revision
+// even after the user closed the project in this tab.
+function folderAuthorizationGuard(projectId,permission='viewer.projects.read',{open=true}={}){
+  const token=state.token,session=state.adminSession,generation=folderAuthorizationGeneration;
   return()=>Boolean(token&&session&&!workspaceAuthorizationClearing&&token===state.token&&session===state.adminSession&&
-    generation===folderAuthorizationGeneration&&state.section==='dashboard'&&state.selectedProjectId===projectId&&
-    (!captureFolder||selectedFolderId===folderId)&&can(permission));
+    generation===folderAuthorizationGeneration&&state.section==='dashboard'&&(!open||isProjectOpen(projectId))&&can(permission));
 }
 function folderRequestOptions(method,body,receipt){
   const signature=JSON.stringify([method,body]);
@@ -77,7 +93,7 @@ function folderRequestOptions(method,body,receipt){
 function repaintFolderAuthorization(){
   const token=state.token,session=state.adminSession,generation=folderAuthorizationGeneration;
   queueMicrotask(()=>{if(token&&session&&state.token===token&&state.adminSession===session&&
-    generation===folderAuthorizationGeneration&&!workspaceAuthorizationClearing&&state.section==='dashboard'&&state.selectedProjectId)render();});
+    generation===folderAuthorizationGeneration&&!workspaceAuthorizationClearing&&state.section==='dashboard'&&openProjectIds().length)render();});
 }
 async function mutateFolder(projectId,url,options,message,guard,onSuccess,reload=true){
   if(!guard()||state.busy)return;
@@ -90,29 +106,33 @@ async function mutateFolder(projectId,url,options,message,guard,onSuccess,reload
   finally{if(activeFolderMutation===owned){activeFolderMutation=null;state.busy=false;shell.removeAttribute('aria-busy');}}
 }
 async function loadProjectFolders(projectId) {
-  if (state.section !== 'dashboard' || state.selectedProjectId !== projectId) return;
-  const authorized=folderAuthorizationGuard(projectId,'viewer.projects.read',false);if(!authorized())return;
-  let requestedFolder=selectedFolderId;
-  const epoch = ++folderState.epoch;
-  const current = () => authorized() && selectedFolderId===requestedFolder && epoch === folderState.epoch && folderState.projectId === projectId;
-  folderState.projectId = projectId; folderState.folders = null; folderState.error = null; folderState.loading = true;
+  const authorized=folderAuthorizationGuard(projectId);if(!authorized())return;
+  const previous=folderCache.get(projectId),entry={folders:previous?.folders||null,error:null,loading:true};
+  folderCache.set(projectId,entry);
+  const current = () => authorized() && folderCache.get(projectId) === entry;
   try {
     const response = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,{recoveryGuard:current});
     if (!current()) return;
     if (!Array.isArray(response.folders)) throw new Error('Invalid folder response.');
-    folderState.folders = response.folders.filter(folder => folder.projectId === projectId);
-    const selectedTask = state.tasks.find(task => task.id === state.expandedTaskId && task.projectId === projectId);
-    if (selectedTask) folderState.currentId = selectedTask.folderId || null;
-    if (folderState.currentId && !folderState.folders.some(folder => folder.id === folderState.currentId)) folderState.currentId = null;
-    selectedFolderId = folderState.currentId;
-    requestedFolder=selectedFolderId;
-    syncWorkspaceView('replace');
+    entry.folders = response.folders.filter(folder => folder.projectId === projectId);
+    revealTreeFolder(projectId);
   } catch (error) {
     if (!current()) return;
-    folderState.error = error.message || 'Folders could not be loaded.';
+    entry.error = error.message || 'Folders could not be loaded.';
   } finally {
-    if (current()) { folderState.loading = false; render(); }
+    if (current()) { entry.loading = false; paintProjectTree(projectId); }
   }
+}
+// Expands the saved path to a folder (an old ?folder= link, the expanded task, or a move's
+// destination) once that project's folders are known.
+function revealTreeFolder(projectId){
+  const folders=folderCache.get(projectId)?.folders;
+  if(!treeReveals.has(projectId)||!folders)return false;
+  const folderId=treeReveals.get(projectId);treeReveals.delete(projectId);
+  const path=folderAncestry(folders,folderId);
+  if(!path.length&&folderId)return false;
+  treeState.projects.add(projectId);path.forEach(id=>treeState.folders.add(id));saveTreeState();
+  return true;
 }
 function folderPath(folders, folderId) {
   const result = [], seen = new Set();
@@ -248,26 +268,25 @@ const groupedNumber=value=>{const number=Number(value);return Number.isFinite(nu
 const purgeDate=days=>new Date(Date.now()+days*86400_000).toLocaleString();
 
 function toast(message,bad=false,action=null){const element=document.querySelector('#workspace-toast');element.replaceChildren(document.createTextNode(message));element.className=bad?'bad':'';if(action){const link=document.createElement('button');link.type='button';link.className='toast-action';link.textContent=action.label;link.onclick=()=>{element.style.display='none';action.run()};element.append(link)}element.style.display='flex';clearTimeout(toast.timer);toast.timer=setTimeout(()=>element.style.display='none',action?8000:4000)}
-function workspaceView(){return{section:state.section,selectedProjectId:state.section==='dashboard'?state.selectedProjectId:null,selectedFolderId:state.section==='dashboard'&&state.selectedProjectId?selectedFolderId:null,expandedTaskId:state.section==='dashboard'?state.expandedTaskId:null,taskPage:state.section==='dashboard'&&state.expandedTaskId?state.taskPage:null}}
-function workspaceUrl(view=workspaceView()){const params=new URLSearchParams({section:WORKSPACE_SECTIONS.has(view.section)?view.section:'dashboard'});if(view.section==='dashboard'&&view.selectedProjectId)params.set('project',view.selectedProjectId);if(view.section==='dashboard'&&view.selectedProjectId&&view.selectedFolderId)params.set('folder',view.selectedFolderId);if(view.section==='dashboard'&&view.selectedProjectId&&view.expandedTaskId)params.set('task',view.expandedTaskId);if(view.section==='dashboard'&&view.selectedProjectId&&view.expandedTaskId&&['gcp','settings','files'].includes(view.taskPage))params.set('panel',view.taskPage);return`/workspace?${params}`}
+function workspaceView(){return{section:state.section,selectedProjectId:state.section==='dashboard'?state.selectedProjectId:null,expandedTaskId:state.section==='dashboard'?state.expandedTaskId:null,taskPage:state.section==='dashboard'&&state.expandedTaskId?state.taskPage:null}}
+// Folders are expanded in place (saved per user), so the URL names the project and task only.
+function workspaceUrl(view=workspaceView()){const params=new URLSearchParams({section:WORKSPACE_SECTIONS.has(view.section)?view.section:'dashboard'});if(view.section==='dashboard'&&view.selectedProjectId)params.set('project',view.selectedProjectId);if(view.section==='dashboard'&&view.selectedProjectId&&view.expandedTaskId)params.set('task',view.expandedTaskId);if(view.section==='dashboard'&&view.selectedProjectId&&view.expandedTaskId&&['gcp','settings','files'].includes(view.taskPage))params.set('panel',view.taskPage);return`/workspace?${params}`}
 function applyWorkspaceView(view){
-  const priorFolder=selectedFolderId,nextSection=WORKSPACE_SECTIONS.has(view?.section)?view.section:'dashboard',nextProject=nextSection==='dashboard'&&view?.selectedProjectId?view.selectedProjectId:null;
-  if(state.section!==nextSection||state.selectedProjectId!==nextProject||priorFolder!==(view?.selectedFolderId||null))projectDataGeneration++;
-  if(folderState.projectId&&(nextSection!=='dashboard'||folderState.projectId!==nextProject)){folderState.epoch++;folderState.projectId=null;folderState.folders=null;folderState.loading=false;}
-  state.section=nextSection;state.selectedProjectId=nextProject;selectedFolderId=state.selectedProjectId&&view?.selectedFolderId?view.selectedFolderId:null;
-  state.expandedTaskId=state.selectedProjectId&&view?.expandedTaskId?view.expandedTaskId:null;
-  const task=state.tasks.find(item=>item.id===state.expandedTaskId&&item.projectId===state.selectedProjectId);if(task)selectedFolderId=task.folderId||null;
-  if(folderState.projectId===state.selectedProjectId){
-    if(selectedFolderId!==priorFolder&&folderState.loading){
-      folderState.epoch++;folderState.loading=false;
-      // The next normal render schedules exactly one fresh read for this view.
-      if(!folderState.folders)folderState.projectId=null;
-    }
-    if(folderState.projectId===state.selectedProjectId){if(folderState.folders&&selectedFolderId&&!folderState.folders.some(folder=>folder.id===selectedFolderId))selectedFolderId=null;folderState.currentId=selectedFolderId;}
+  const nextSection=WORKSPACE_SECTIONS.has(view?.section)?view.section:'dashboard',nextProject=nextSection==='dashboard'&&view?.selectedProjectId?view.selectedProjectId:null;
+  if(state.section!==nextSection||state.selectedProjectId!==nextProject)projectDataGeneration++;
+  state.section=nextSection;state.selectedProjectId=nextProject;
+  if(nextProject){
+    // A project in the URL is open in the tree; an old ?folder= link opens that folder's path.
+    if(!treeState.projects.has(nextProject)){treeState.projects.add(nextProject);saveTreeState();}
+    if(view?.selectedFolderId)treeReveals.set(nextProject,view.selectedFolderId);
   }
+  state.expandedTaskId=state.selectedProjectId&&view?.expandedTaskId?view.expandedTaskId:null;
+  const task=state.tasks.find(item=>item.id===state.expandedTaskId&&item.projectId===state.selectedProjectId);
+  if(task?.folderId)treeReveals.set(task.projectId,task.folderId);
+  if(state.selectedProjectId)revealTreeFolder(state.selectedProjectId);
   state.taskPage=state.expandedTaskId&&['gcp','settings','files'].includes(view?.taskPage)?view.taskPage:null;
 }
-function validateWorkspaceView(){if(state.section!=='dashboard'){state.selectedProjectId=null;selectedFolderId=null;state.expandedTaskId=null;state.taskPage=null;return}const project=state.projects.find(item=>item.id===state.selectedProjectId);if(!project){state.selectedProjectId=null;selectedFolderId=null;state.expandedTaskId=null;state.taskPage=null;return}if(!state.tasks.some(task=>task.id===state.expandedTaskId&&task.projectId===project.id)){state.expandedTaskId=null;state.taskPage=null}}
+function validateWorkspaceView(){if(state.section!=='dashboard'){state.selectedProjectId=null;state.expandedTaskId=null;state.taskPage=null;return}const project=state.projects.find(item=>item.id===state.selectedProjectId);if(!project){state.selectedProjectId=null;state.expandedTaskId=null;state.taskPage=null;return}if(!state.tasks.some(task=>task.id===state.expandedTaskId&&task.projectId===project.id)){state.expandedTaskId=null;state.taskPage=null}}
 function syncWorkspaceView(mode='replace'){history[mode==='push'?'pushState':'replaceState'](null,'',workspaceUrl())}
 function navigateWorkspace(view,mode='push'){releaseAllGcpImages();applyWorkspaceView(view);validateWorkspaceView();syncWorkspaceView(mode);shell.classList.remove('nav-open');document.querySelector('#nav-toggle')?.setAttribute('aria-expanded','false');render();hydrateExpandedTask()}
 function hydrateExpandedTask(){const taskId=state.expandedTaskId;if(!taskId||state.taskDetails[taskId])return;state.taskDetails[taskId]={loading:true};render();void refreshTaskDetails(taskId)}
@@ -389,12 +408,26 @@ function companionRepairAction(output) {
 async function refreshOperations(){if(!state.token||state.operationRefreshBusy)return false;state.operationRefreshBusy=true;try{const previous=new Map(state.operations.map(operation=>[operation.id,operation.status])),previousDerivatives=new Map(state.derivativeJobs.map(job=>[job.id,job.status])),[result,derivatives]=await Promise.all([pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives')]);state.operations=result.operations;state.derivativeJobs=derivatives.derivatives||[];if(state.section==='background')render();else renderOperationActivity();const completed=state.operations.some(operation=>operation.status==='succeeded'&&previous.has(operation.id)&&previous.get(operation.id)!=='succeeded'),derivativeCompleted=state.derivativeJobs.some(job=>['complete','failed'].includes(job.status)&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)));if(completed||derivativeCompleted){toast(completed?'Background import completed':state.derivativeJobs.some(job=>job.status==='failed'&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)))?'Background derivative failed':'Background derivative completed');if(state.section==='dashboard'&&state.selectedProjectId){await refreshProjectWorkspace(true);scheduleOperationRefresh();}else await load();return true}}catch(error){if(error.status!==401)console.warn('Background work refresh failed',error.message)}finally{state.operationRefreshBusy=false}return false}
 function scheduleOperationRefresh(delay=null){clearTimeout(state.operationTimer);if(!state.token)return;const active=state.operations.some(operation=>OPERATION_ACTIVE.has(operation.status))||state.derivativeJobs.some(job=>job.status==='pending'||job.status==='leased'),wait=delay??(active?2000:15000);state.operationTimer=setTimeout(async()=>{const reloaded=await refreshOperations();if(!reloaded)scheduleOperationRefresh()},wait)}
 
-function dashboard(){const work=taskPhaseCounts(state.tasks),healthy=state.providers.filter(provider=>provider.enabled&&['healthy','ready'].includes(provider.runtimeHealth||provider.lastHealth)).length;return`<div class="metric-grid dashboard-metrics">${metric('Projects',state.projects.length,'Viewer projects')}${metric('Ready tasks',state.tasks.filter(task=>state.outputs.some(output=>output.taskId===task.id&&(output.status==='ready'||(output.status==='published'&&output.activePublished)))).length,'Available to view and share')}${metric('Submitting',work.submitting,'Viewer upload or node-admission work')}${metric('Processing now',work.processing,`${work.queued} queued · ${work.finalizing} finalizing in Viewer`)}${metric('Provider nodes',`${healthy}/${state.providers.length}`,'Enabled and healthy')}</div><section class="project-workspace top-gap"><div class="project-toolbar"><label class="project-search"><span class="sr-only">Filter projects by name</span><input id="project-filter" type="search" value="${esc(state.projectQuery)}" placeholder="Search projects…" autocomplete="off"></label></div><div id="project-list" class="project-list">${projectRows()}</div></section>`}
+function dashboard(){const work=taskPhaseCounts(state.tasks),healthy=state.providers.filter(provider=>provider.enabled&&['healthy','ready'].includes(provider.runtimeHealth||provider.lastHealth)).length;return`<div class="metric-grid dashboard-metrics">${metric('Projects',state.projects.length,'Viewer projects')}${metric('Ready tasks',state.tasks.filter(task=>state.outputs.some(output=>output.taskId===task.id&&(output.status==='ready'||(output.status==='published'&&output.activePublished)))).length,'Available to view and share')}${metric('Submitting',work.submitting,'Viewer upload or node-admission work')}${metric('Processing now',work.processing,`${work.queued} queued · ${work.finalizing} finalizing in Viewer`)}${metric('Provider nodes',`${healthy}/${state.providers.length}`,'Enabled and healthy')}</div><section class="project-workspace top-gap"><div class="project-toolbar"><label class="project-search"><span class="sr-only">Filter projects by name</span><input id="project-filter" type="search" value="${esc(state.projectQuery)}" placeholder="Search projects…" autocomplete="off"></label>${can('viewer.projects.write')?`<button type="button" class="secondary-button tree-toolbar-new-folder" data-action="tree-new-folder" data-id="">${treeIcon('folder')}New folder</button>`:''}</div><div id="project-list" class="project-list" role="treegrid" aria-label="Projects, folders and tasks">${projectRows()}</div></section>`}
 function countLabel(count,noun){return`${count} ${noun}${count===1?'':'s'}`}
 function activityChip(count,label,tone){return count?`<span class="activity-chip ${tone}">${count} ${esc(label)}</span>`:''}
 function taskNeedsAttention(task){const status=task.latestAttempt?.status||task.status;return status==='failed'}
 function taskTimestamp(value){if(!value)return'Unavailable';const date=new Date(value);return Number.isNaN(date.getTime())?'Unavailable':date.toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}
-function projectRows(){const query=state.projectQuery.trim().toLocaleLowerCase('en-US'),projects=state.projects.filter(project=>!query||project.displayName.toLocaleLowerCase('en-US').includes(query));if(!projects.length)return empty(query?'No projects match that name.':'No projects yet.');return projects.map(project=>{const tasks=state.tasks.filter(task=>task.projectId===project.id),datasets=state.datasets.filter(dataset=>dataset.projectId===project.id&&['draft','finalized'].includes(dataset.status)),work=taskPhaseCounts(tasks),ready=tasks.filter(task=>state.outputs.some(output=>output.taskId===task.id&&(output.status==='ready'||(output.status==='published'&&output.activePublished)))).length,selected=project.id===state.selectedProjectId;const failed=tasks.filter(task=>taskNeedsAttention(task)).length;return`<article class="project-row ${selected?'selected':''}" data-project-name="${esc(project.displayName.toLocaleLowerCase('en-US'))}"><button class="project-open" data-action="open-project" data-id="${esc(project.id)}" aria-expanded="${selected}" aria-controls="project-detail-${esc(project.id)}"><span class="project-name"><strong>${esc(project.displayName)}</strong>${project.description?`<small>${esc(project.description)}</small>`:''}</span><span class="project-summary">${countLabel(tasks.length,'task')}${ready?` · ${ready} ready`:''}</span><span class="project-activity">${activityChip(work.submitting,'submitting','submitting')}${activityChip(work.queued,'queued','queued')}${activityChip(work.processing,'processing','processing')}${activityChip(work.finalizing,'finalizing','finalizing')}${activityChip(failed,'needs attention','failed')}</span>${project.status==='active'?'':badge(project.status)}<span class="project-chevron" aria-hidden="true">›</span></button>${selected?selectedProject():''}</article>`}).join('')}
+function projectActions(project){
+  const tasks=state.tasks.filter(task=>task.projectId===project.id),hasActiveTask=tasks.some(task=>LIVE_ATTEMPT_STATUSES.has(task.latestAttempt?.status)||['queued','processing'].includes(task.status)),canShare=['viewer.shares.create','viewer.shares.read','viewer.shares.revoke','viewer.client_grants.manage'].some(can);
+  if(project.status!=='active')return'';
+  const items=`${can('viewer.projects.write')?menuItem('folder-create',project.id,'New folder'):''}${can('viewer.projects.write')?menuItem('edit-project',project.id,'Rename project',{shortcut:'F2'}):''}${can('viewer.datasets.import')?menuItem('project-import',project.id,'Import existing results'):''}${can('viewer.projects.read')?menuItem('project-property-lines',project.id,'Property lines source'):''}${can('viewer.projects.write')&&!hasActiveTask?`${MENU_SEPARATOR}${menuItem('trash-project',project.id,'Delete project',{danger:true})}`:''}`;
+  return`${can('viewer.processing.write')?`<button class="primary-button" data-action="project-process" data-id="${esc(project.id)}" tabindex="-1">New task</button>`:''}${canShare?button('project-share',project.id,'Share project',false,'tabindex="-1"'):''}${items?treeMenu('More project actions',items):''}`;
+}
+// The project row is level 1 of the tree; its actions show while it is open.
+function projectHead(project){
+  const tasks=state.tasks.filter(task=>task.projectId===project.id),datasets=state.datasets.filter(dataset=>dataset.projectId===project.id&&['draft','finalized'].includes(dataset.status)),work=taskPhaseCounts(tasks),ready=tasks.filter(task=>state.outputs.some(output=>output.taskId===task.id&&(output.status==='ready'||(output.status==='published'&&output.activePublished)))).length,open=isProjectOpen(project.id),failed=tasks.filter(task=>taskNeedsAttention(task)).length,actions=open?projectActions(project):'';
+  // Source collections show once the project is open: not model versions or storage copies.
+  const sourceSets=open?`<span class="project-source-count" title="Active source collections, not model versions or storage copies. Includes unused drafts; excludes archived and recycled sources."> · ${countLabel(datasets.length,'source set')}</span>`:'';
+  const drop=project.status==='active'?` data-task-drop-project="${esc(project.id)}" data-task-drop-folder=""`:'';
+  return`<div class="project-head tree-row" role="row" aria-level="1" aria-expanded="${open}" data-tree-key="p:${esc(project.id)}" data-tree-project="${esc(project.id)}"${drop}><div class="project-open-cell" role="gridcell"><button type="button" class="project-open" data-action="open-project" data-id="${esc(project.id)}" data-tree-focus tabindex="-1" aria-expanded="${open}" aria-controls="project-detail-${esc(project.id)}"><span class="project-name"><strong>${esc(project.displayName)}</strong>${project.description?`<small>${esc(project.description)}</small>`:''}</span><span class="project-summary">${countLabel(tasks.length,'task')}${ready?` · ${ready} ready`:''}${sourceSets}</span><span class="project-activity">${activityChip(work.submitting,'submitting','submitting')}${activityChip(work.queued,'queued','queued')}${activityChip(work.processing,'processing','processing')}${activityChip(work.finalizing,'finalizing','finalizing')}${activityChip(failed,'needs attention','failed')}</span>${project.status==='active'?'':badge(project.status)}<span class="project-chevron" aria-hidden="true">›</span><span class="tree-drop-hint" aria-hidden="true">Drop for top level</span></button></div>${actions?`<div class="project-head-actions row-actions" role="gridcell" aria-label="Project actions">${actions}</div>`:''}</div>`;
+}
+function projectRows(){const query=state.projectQuery.trim().toLocaleLowerCase('en-US'),projects=state.projects.filter(project=>!query||project.displayName.toLocaleLowerCase('en-US').includes(query));if(!projects.length)return empty(query?'No projects match that name.':'No projects yet.');return projects.map(project=>{const open=isProjectOpen(project.id);return`<article class="project-row ${open?'selected':''}" role="none" data-project-name="${esc(project.displayName.toLocaleLowerCase('en-US'))}">${projectHead(project)}${open?projectTree(project):''}</article>`}).join('')}
 function taskLodNotice(task){
   const outputs=state.outputs.filter(output=>output.taskId===task.id),output=outputs.find(output=>output.activePublished&&output.status==='published')||outputs.find(output=>output.status==='ready');
   if(!output)return'';
@@ -408,9 +441,12 @@ function taskLodNotice(task){
   else if(lod.canGenerate||lod.recoveryAction?.eligible)label='Streaming available to prepare';
   return label?`<small class="task-lod-notice" title="Open Task settings for streaming status and recovery actions.">${esc(label)}</small>`:'';
 }
+// The expanded task belongs to the selected project. When a refresh shows it gone (deleted or
+// moved to another project elsewhere), the selection clears once no editor is active; a folder
+// move made elsewhere expands its new folder so the open task stays visible.
 function syncSelectedTaskFolder(projectId){
   const selected=state.tasks.find(task=>task.id===state.expandedTaskId&&task.projectId===projectId);
-  if(state.expandedTaskId&&!selected){
+  if(state.expandedTaskId&&!selected&&state.selectedProjectId===projectId){
     const oldRow=content.querySelector(`[data-project-task="${CSS.escape(state.expandedTaskId)}"]`);
     if(taskEditActive(state.taskPage?content:oldRow))return true;
     const wasTaskPage=state.taskPage;
@@ -418,12 +454,10 @@ function syncSelectedTaskFolder(projectId){
     syncWorkspaceView('replace');
     if(wasTaskPage)render();
   }
-  if(selected&&state.taskDetails[selected.id]?.task)state.taskDetails[selected.id].task={...state.taskDetails[selected.id].task,...selected};
-  const requested=selected?selected.folderId:selectedFolderId;
-  const next=requested&&folderState.folders?.some(folder=>folder.id===requested)?requested:null;
-  if(next!==selectedFolderId){
-    selectedFolderId=folderState.currentId=next;
-    syncWorkspaceView('replace');
+  const detail=selected&&state.taskDetails[selected.id];
+  if(detail?.task){
+    if((detail.task.folderId||null)!==(selected.folderId||null)&&selected.folderId){treeReveals.set(projectId,selected.folderId);revealTreeFolder(projectId);}
+    detail.task={...detail.task,...selected};
   }
   return false;
 }
@@ -478,83 +512,130 @@ function patchSelectedTaskDetail(){
   return false;
 }
 
-// movedTaskId: a task this tab just moved away. Its row leaves even when it holds focus
-// (a mouse drag focuses the Move handle); collapsed rows hold no unsaved edits.
-function patchProjectFolderView({movedTaskId=null}={}){
+// Updates one row in place from fresh markup; false when a held control (focus, an open menu
+// or an inline name) means it must wait for a later paint. A focused row target is re-focused.
+function syncTreeRow(row,fresh,focused){
+  for(const name of row.getAttributeNames())if(name!=='class'&&!fresh.hasAttribute(name))row.removeAttribute(name);
+  for(const name of fresh.getAttributeNames())if(name!=='class'&&row.getAttribute(name)!==fresh.getAttribute(name))row.setAttribute(name,fresh.getAttribute(name));
+  if(row.className!==fresh.className){const kept=['tree-just-moved','tree-drag-source','folder-drop-active'].filter(name=>row.classList.contains(name));row.className=fresh.className;row.classList.add(...kept);}
+  const target=row.querySelector('[data-tree-focus]'),freshTarget=fresh.querySelector('[data-tree-focus]');
+  if(target&&freshTarget)freshTarget.tabIndex=target.tabIndex;
+  if(row.matches('.task-panel')){
+    const summary=row.querySelector(':scope > .task-summary'),newSummary=fresh.querySelector(':scope > .task-summary');
+    if(!summary||!newSummary||summary.outerHTML===newSummary.outerHTML)return true;
+    if(summary.contains(focused)||summary.querySelector('details[open]'))return false;
+    summary.replaceWith(newSummary);return true;
+  }
+  if(row.innerHTML===fresh.innerHTML)return true;
+  if(row.querySelector('details[open],.tree-inline-name'))return false;
+  const refocus=Boolean(target)&&target===focused;
+  if(row.contains(focused)&&!refocus)return false;
+  row.replaceChildren(...fresh.childNodes);
+  if(refocus)row.querySelector('[data-tree-focus]')?.focus({preventScroll:true});
+  return true;
+}
+function syncProjectHead(project){
+  const head=content.querySelector(`.project-head[data-tree-key="p:${CSS.escape(project.id)}"]`);
+  if(!head)return true;
+  const template=document.createElement('template');template.innerHTML=projectHead(project);
+  return syncTreeRow(head,template.content.firstElementChild,document.activeElement);
+}
+
+// Patches one open project's tree in place. movedTaskId: a task this tab just moved or deleted;
+// its row leaves its old place at once even while it holds focus (a mouse drag focuses the row).
+// Other rows that hold focus, an open menu or an inline name, the row being dragged and the
+// expanded task wait; the return value says a later paint is still needed.
+function patchProjectTree(projectId,{movedTaskId=null,releasedKey=null}={}){
   if(state.taskPage)return patchSelectedTaskDetail();
-  const section=content.querySelector('.project-detail');
-  const current=section?.querySelector('[data-project-folder-view]');
-  if(!current||section.id!==`project-detail-${state.selectedProjectId}`||draggedFolderTask)return Boolean(current);
+  const section=content.querySelector(`[data-tree-body="${CSS.escape(projectId)}"]`);
+  const project=state.projects.find(item=>item.id===projectId);
+  if(!section||!project)return false;
   const template=document.createElement('template');
-  template.innerHTML=selectedProject();
-  const next=template.content.querySelector('[data-project-folder-view]');
-  const list=current.querySelector(':scope > .task-list'),newList=next?.querySelector(':scope > .task-list');
-  if(!list||!newList)return false;
-  const focused=document.activeElement, scrollTop=content.scrollTop, pageTop=window.scrollY;
-  const controls=Array.from(current.children).filter(child=>child!==list);
-  const newControls=Array.from(next.children).filter(child=>child!==newList);
+  template.innerHTML=projectTree(project);
+  const next=template.content.querySelector('[data-tree-body]');
+  if(!next)return false;
+  const focused=document.activeElement,scrollTop=content.scrollTop,pageTop=window.scrollY;
+  const dragKey=draggedFolderTask?`t:${draggedFolderTask.id}`:null,movedKey=releasedKey||(movedTaskId?`t:${movedTaskId}`:null),expandedKey=state.expandedTaskId?`t:${state.expandedTaskId}`:null;
+  const held=row=>row.contains(focused)||Boolean(row.querySelector('details[open],.tree-inline-name'));
   let pending=false;
-  if(controls.map(node=>node.outerHTML).join('')!==newControls.map(node=>node.outerHTML).join('')){
-    if(controls.some(node=>node.contains(focused)))pending=true;
-    else{
-      controls.forEach(node=>node.remove());
-      list.before(...newControls);
-    }
+  const oldRows=new Map();
+  for(const row of [...section.children]){if(row.dataset.treeKey)oldRows.set(row.dataset.treeKey,row);else row.remove();}
+  const wanted=[...next.children].filter(row=>row.dataset.treeKey);
+  const wantedKeys=new Set(wanted.map(row=>row.dataset.treeKey));
+  for(const [key,row] of oldRows){
+    if(wantedKeys.has(key))continue;
+    if(key!==movedKey&&(key===dragKey||key===expandedKey||held(row))){pending=true;continue;}
+    row.remove();oldRows.delete(key);
   }
-  const oldRows=new Map(Array.from(list.querySelectorAll(':scope > [data-project-task]')).map(row=>[row.dataset.projectTask,row]));
-  const wanted=Array.from(newList.querySelectorAll(':scope > [data-project-task]'));
-  const wantedIds=new Set(wanted.map(row=>row.dataset.projectTask));
-  for(const [id,row] of oldRows){
-    if(wantedIds.has(id))continue;
-    if(id===state.expandedTaskId||row.contains(focused)&&id!==movedTaskId)pending=true;
-    else row.remove();
-  }
-  for(const node of Array.from(list.children).filter(child=>!child.hasAttribute('data-project-task'))){
-    if(wanted.length||newList.firstElementChild?.outerHTML!==node.outerHTML)node.remove();
-  }
-  if(!wanted.length&&!list.childElementCount&&newList.firstElementChild)list.append(newList.firstElementChild.cloneNode(true));
   let following=null;
   for(const fresh of wanted.reverse()){
-    const row=oldRows.get(fresh.dataset.projectTask);
-    if(!row){list.insertBefore(fresh,following);following=fresh;continue;}
-    const summary=row.querySelector('.task-summary'),newSummary=fresh.querySelector('.task-summary');
-    if(summary&&newSummary&&summary.outerHTML!==newSummary.outerHTML){
-      if(summary.contains(focused)||summary.querySelector('details[open]'))pending=true;
-      else summary.replaceWith(newSummary);
+    const key=fresh.dataset.treeKey,row=oldRows.get(key);
+    if(!row){section.insertBefore(fresh,following);following=fresh;continue;}
+    if(key!==dragKey&&!syncTreeRow(row,fresh,focused))pending=true;
+    if(row.nextElementSibling!==following){
+      if(key===movedKey||(key!==dragKey&&!row.contains(focused)&&!row.classList.contains('expanded')))section.insertBefore(row,following);
+      else pending=true;
     }
-    if(row.nextElementSibling!==following&&!row.contains(focused)&&!row.classList.contains('expanded'))list.insertBefore(row,following);
     following=row;
   }
-  const count=section.querySelector('.project-tasks-title span'),freshCount=template.content.querySelector('.project-tasks-title span')?.textContent;
-  if(count&&freshCount!=null&&count.textContent!==freshCount)count.textContent=freshCount;
-  bindProjectActions(current);
+  if(!syncProjectHead(project))pending=true;
+  bindProjectActions(section.closest('.project-row')||section);
+  hydrateOrthophotoPreviews(section);
   if(content.scrollTop!==scrollTop)content.scrollTop=scrollTop;
   if(window.scrollY!==pageTop)window.scrollTo(window.scrollX,pageTop);
+  syncTreeTabStop();
   return patchSelectedTaskDetail()||pending;
+}
+function repaintOpenProjects(){
+  let pending=false;
+  for(const projectId of openProjectIds())pending=patchProjectTree(projectId)||pending;
+  return pending;
+}
+// Repaints a project after its folders load: in place when its tree is on the page (a drag in
+// progress keeps its row), otherwise with the next render.
+function paintProjectTree(projectId){
+  if(state.section!=='dashboard'||state.taskPage||!isProjectOpen(projectId))return;
+  if(content.querySelector(`[data-tree-body="${CSS.escape(projectId)}"]`)){projectPaintPending=patchProjectTree(projectId)||projectPaintPending;return;}
+  if(!draggedFolderTask)render();
 }
 
 function scheduleProjectRefresh(delay){
   if(delay===undefined&&projectRefreshTimer!==null)return;
   clearTimeout(projectRefreshTimer);
   projectRefreshTimer=null;
-  if(document.hidden||!state.selectedProjectId||state.section!=='dashboard'||!can('viewer.processing.read'))return;
+  if(document.hidden||!openProjectIds().length||state.section!=='dashboard'||!can('viewer.processing.read'))return;
   projectRefreshTimer=setTimeout(()=>{
     projectRefreshTimer=null;
     void refreshProjectWorkspace().finally(()=>scheduleProjectRefresh());
   },delay??8000);
 }
 
+// Refreshes every open project's tasks and folders, one project at a time.
 async function refreshProjectWorkspace(includeArtifacts=false){
-  const projectId=state.selectedProjectId;
-  if(includeArtifacts)projectArtifactsRefreshId=projectId;
-  if(!projectId||projectRefreshBusy||workspaceLoads||state.busy||folderState.loading||
-      folderState.projectId!==projectId||document.hidden||!can('viewer.processing.read'))return;
-  const artifacts=projectArtifactsRefreshId===projectId;
+  const projectIds=openProjectIds();
+  if(includeArtifacts)projectArtifactsRefreshId=new Set(projectIds);
+  if(!projectIds.length||projectRefreshBusy||workspaceLoads||state.busy||document.hidden||!can('viewer.processing.read'))return;
+  projectRefreshBusy=true;
+  try{
+    let pending=false;
+    for(const projectId of projectIds){
+      if(!isProjectOpen(projectId))continue;
+      pending=(await refreshProjectData(projectId))||pending;
+    }
+    if(projectPaintPending)pending=repaintOpenProjects()||pending;
+    projectPaintPending=pending;
+  }finally{
+    projectRefreshBusy=false;
+  }
+}
+async function refreshProjectData(projectId){
+  const entry=folderCache.get(projectId);
+  if(!entry||entry.loading)return false;
+  const artifacts=Boolean(projectArtifactsRefreshId?.has(projectId));
   const authorized=folderAuthorizationGuard(projectId);
   const generation=projectDataGeneration;
-  const current=()=>authorized()&&generation===projectDataGeneration&&!state.busy&&!workspaceLoads&&!document.hidden;
-  if(!current())return;
-  projectRefreshBusy=true;
+  const current=()=>authorized()&&generation===projectDataGeneration&&!state.busy&&!workspaceLoads&&!document.hidden&&folderCache.get(projectId)===entry;
+  if(!current())return false;
   try{
     const project=encodeURIComponent(projectId),options={recoveryGuard:current},readDatasets=artifacts&&can('viewer.datasets.read');
     const [taskResult,folderResult,datasetResult,outputResult]=await Promise.all([
@@ -563,51 +644,98 @@ async function refreshProjectWorkspace(includeArtifacts=false){
       readDatasets?pagedApi(`/api/v1/datasets?projectId=${project}`,'datasets',options):null,
       artifacts?pagedApi(`/api/v1/processing/outputs?projectId=${project}`,'outputs',options):null
     ]);
-    if(!current()||!Array.isArray(folderResult.folders))return;
+    if(!current()||!Array.isArray(folderResult.folders))return false;
     const tasks=taskResult.tasks.filter(task=>task.projectId===projectId);
     const folders=folderResult.folders.filter(folder=>folder.projectId===projectId);
     const previousTasks=state.tasks.filter(task=>task.projectId===projectId);
-    const changed=JSON.stringify(previousTasks)!==JSON.stringify(tasks)||JSON.stringify(folderState.folders)!==JSON.stringify(folders)||artifacts;
-    if(changed){
-      projectDataGeneration++;
-      state.tasks=[...state.tasks.filter(task=>task.projectId!==projectId),...tasks];
-      if(datasetResult)state.datasets=[...state.datasets.filter(item=>item.projectId!==projectId),...datasetResult.datasets];
-      if(outputResult){
-        state.outputs=[...state.outputs.filter(item=>item.projectId!==projectId),...outputResult.outputs];
-        const detail=state.taskDetails[state.expandedTaskId]?.task;
-        if(detail)detail.outputs=outputResult.outputs.filter(item=>item.taskId===detail.id);
-      }
-      folderState.folders=folders;folderState.error=null;
-      if(artifacts)projectArtifactsRefreshId=null;
+    const changed=JSON.stringify(previousTasks)!==JSON.stringify(tasks)||JSON.stringify(entry.folders)!==JSON.stringify(folders)||artifacts;
+    if(!changed)return false;
+    projectDataGeneration++;
+    state.tasks=[...state.tasks.filter(task=>task.projectId!==projectId),...tasks];
+    if(datasetResult)state.datasets=[...state.datasets.filter(item=>item.projectId!==projectId),...datasetResult.datasets];
+    if(outputResult){
+      state.outputs=[...state.outputs.filter(item=>item.projectId!==projectId),...outputResult.outputs];
+      const detail=state.taskDetails[state.expandedTaskId]?.task;
+      if(detail&&detail.projectId===projectId)detail.outputs=outputResult.outputs.filter(item=>item.taskId===detail.id);
     }
-    if(changed||projectPaintPending){
-      const selectionPending=syncSelectedTaskFolder(projectId);
-      projectPaintPending=patchProjectFolderView()||selectionPending;
-    }
+    entry.folders=folders;entry.error=null;
+    if(artifacts)projectArtifactsRefreshId.delete(projectId);
+    const selectionPending=syncSelectedTaskFolder(projectId);
+    return patchProjectTree(projectId)||selectionPending;
   }catch(error){
     if(current()&&error.status!==401)console.warn('Project refresh failed',error.message);
-  }finally{
-    projectRefreshBusy=false;
+    return false;
   }
 }
 
-function selectedProject(){
-  const project=state.projects.find(item=>item.id===state.selectedProjectId);if(!project)return'';
-  if(folderState.projectId!==project.id){folderState.projectId=project.id;folderState.currentId=selectedFolderId;folderState.folders=null;folderState.error=null;folderState.loading=true;queueMicrotask(()=>{if(state.selectedProjectId===project.id)loadProjectFolders(project.id)});}
-  const tasks=state.tasks.filter(task=>task.projectId===project.id),datasets=state.datasets.filter(dataset=>dataset.projectId===project.id),sourceSetCount=datasets.filter(dataset=>['draft','finalized'].includes(dataset.status)).length,readyDatasets=datasets.filter(dataset=>dataset.status==='finalized'),active=project.status==='active',hasActiveTask=tasks.some(task=>LIVE_ATTEMPT_STATUSES.has(task.latestAttempt?.status)||['queued','processing'].includes(task.status)),canShare=['viewer.shares.create','viewer.shares.read','viewer.shares.revoke','viewer.client_grants.manage'].some(can);
-  const moreActions=`${can('viewer.projects.write')?button('edit-project',project.id,'Rename project'):''}${can('viewer.datasets.import')?button('project-import',project.id,'Import existing results'):''}${can('viewer.projects.read')?button('project-property-lines',project.id,'Property lines source'):''}${can('viewer.projects.write')&&!hasActiveTask?dangerButton('trash-project',project.id,'Delete project'):''}`;
-  const actions=active?`${can('viewer.processing.write')?`<button class="primary-button" data-action="project-process" data-id="${esc(project.id)}">New task</button>`:''}${canShare?button('project-share',project.id,'Share project'):''}${moreActions?`<details class="project-more-actions"><summary aria-label="More project actions" title="More project actions">⋯</summary><div class="project-more-menu">${moreActions}</div></details>`:''}`:'';
-  const folders=folderState.folders||[],current=folderState.currentId,path=folderPath(folders,current),visibleFolders=folders.filter(folder=>(folder.parentId||null)===current),visibleTasks=tasks.filter(task=>(task.folderId||null)===current);
-  const crumbs=`<nav aria-label="Folder path" class="import-breadcrumb">${button('folder-root',project.id,project.displayName,false,'data-task-drop-folder=""')}${path.map(folder=>`<span aria-hidden="true">/</span>${button('folder-open',folder.id,folder.displayName,false,`data-task-drop-folder="${esc(folder.id)}"`)}`).join('')}</nav>`;
-  const folderContent=folderState.loading?`<p role="status">Loading folders…</p><div class="task-list">${visibleTasks.map(taskPanel).join('')}</div>`:folderState.error?`<p role="alert">${esc(folderState.error)} Showing all project tasks.</p>${button('folder-retry',project.id,'Retry folders')}<div class="task-list">${tasks.map(taskPanel).join('')||empty('No tasks in this project yet.')}</div>`:`${crumbs}${active&&can('viewer.projects.write')?button('folder-create',project.id,'New folder'):''}<div class="data-list" aria-label="Folders">${visibleFolders.map(folder=>`<div class="manage-row" data-task-drop-folder="${esc(folder.id)}"><span aria-hidden="true">📁</span>${button('folder-open',folder.id,folder.displayName)}${active&&can('viewer.projects.write')?`<div class="row-actions">${button('folder-rename',folder.id,'Rename',false,`aria-label="Rename ${esc(folder.displayName)}"`)}${button('folder-delete',folder.id,'Delete',false,`aria-label="Delete ${esc(folder.displayName)}"`)}</div>`:''}</div>`).join('')}</div><div class="task-list">${visibleTasks.map(taskPanel).join('')||(!visibleFolders.length?empty('No folders or tasks here yet.'):'')}</div>`;
-  return`<section class="project-detail" id="project-detail-${esc(project.id)}" aria-label="${esc(project.displayName)} tasks and actions"><div class="project-detail-heading"><h2 class="project-tasks-title">Tasks <span>${tasks.length}</span><small class="project-source-count" title="Active source collections, not model versions or storage copies. Includes unused drafts; excludes archived and recycled sources.">${countLabel(sourceSetCount,'source set')}</small></h2><div class="row-actions" aria-label="Project actions">${actions}</div></div>${active?'':'<p class="form-note">This project is archived and read-only.</p>'}<div data-project-folder-view>${folderContent}</div></section>`;
+const TREE_ICONS={
+  folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  folderOpen:'<path d="M3 17V7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1.5"/><path d="M3 17.5 5.3 11.6A1 1 0 0 1 6.2 11H21a.6.6 0 0 1 .56.8l-2.2 6a1.8 1.8 0 0 1-1.7 1.2H4.4A1.4 1.4 0 0 1 3 17.5z"/>',
+  task:'<path d="M12 3 4 7.5v9L12 21l8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/>',
+};
+function treeIcon(name){return`<svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TREE_ICONS[name]}</svg>`}
+const TREE_GRIP='<svg class="tree-drag-grip" viewBox="0 0 10 18" fill="currentColor" aria-hidden="true"><circle cx="3" cy="4" r="1.3"/><circle cx="7" cy="4" r="1.3"/><circle cx="3" cy="9" r="1.3"/><circle cx="7" cy="9" r="1.3"/><circle cx="3" cy="14" r="1.3"/><circle cx="7" cy="14" r="1.3"/></svg>';
+// Phones and touch screens move tasks with Move to…; drag is for a desktop pointer.
+function treeDragAvailable(){return typeof matchMedia!=='function'||!matchMedia('(max-width:767px),(pointer:coarse)').matches}
+function menuItem(action,id,label,{danger=false,disabled='',shortcut='',extra=''}={}){return`<button type="button" class="secondary-button${danger?' danger-button':''}" role="menuitem" tabindex="-1" data-action="${esc(action)}" data-id="${esc(id)}" ${disabled?`disabled title="${esc(disabled)}"`:''} ${extra}>${esc(label)}${shortcut?`<span class="menu-shortcut" aria-hidden="true">${esc(shortcut)}</span>`:''}</button>`}
+const MENU_SEPARATOR='<div class="menu-separator" role="separator"></div>';
+function treeMenu(label,items,className=''){return`<details class="project-more-actions tree-menu ${className}"><summary tabindex="-1" aria-label="${esc(label)}" title="${esc(label)}" aria-haspopup="menu">⋯</summary><div class="project-more-menu" role="menu" aria-label="${esc(label)}">${items}</div></details>`}
+function canWriteFolders(project){return project?.status==='active'&&can('viewer.projects.write')}
+function uniqueFolderName(folders,parentId){
+  const taken=new Set(folders.filter(folder=>(folder.parentId||null)===parentId).map(folder=>folder.displayName.toLocaleLowerCase('en-US')));
+  let name='New folder';for(let index=2;taken.has(name.toLocaleLowerCase('en-US'));index++)name=`New folder ${index}`;
+  return name;
 }
+function treeRowAttributes(row,projectId){return`role="row" aria-level="${row.level}"${row.posinset?` aria-posinset="${row.posinset}" aria-setsize="${row.setsize}"`:''} data-tree-key="${esc(row.key)}" data-tree-parent="${esc(row.parentKey)}" data-tree-project="${esc(projectId)}" style="--tree-depth:${row.level-2}"`}
+function folderTreeRow(row,project,folders,tasks,counts){
+  const folder=row.folder,writable=canWriteFolders(project),renaming=treeRenaming===row.key,emptyFolder=folderIsEmpty(folders,tasks,folder.id);
+  const tasksInside=counts.get(folder.id)||0,count=emptyFolder?'Empty':tasksInside?countLabel(tasksInside,'task'):'No tasks';
+  const drop=project.status==='active'?` data-task-drop-project="${esc(project.id)}" data-task-drop-folder="${esc(folder.id)}"`:'';
+  const name=renaming
+    ?`<span class="tree-toggle folder-toggle is-editing"><span class="tree-chevron" aria-hidden="true">›</span>${treeIcon(row.expanded?'folderOpen':'folder')}<input class="tree-inline-name" data-tree-rename="${esc(folder.id)}" data-project-id="${esc(project.id)}" value="${esc(folder.displayName)}" aria-label="Folder name" maxlength="160" autocomplete="off"></span>`
+    :`<button type="button" class="tree-toggle folder-toggle" data-action="folder-toggle" data-id="${esc(folder.id)}" data-project-id="${esc(project.id)}" data-tree-focus tabindex="-1" aria-expanded="${row.expanded}"><span class="tree-chevron" aria-hidden="true">›</span>${treeIcon(row.expanded?'folderOpen':'folder')}<span class="tree-name"><strong>${esc(folder.displayName)}</strong><span class="tree-count">${esc(count)}</span></span></button>`;
+  const menu=writable&&!renaming?treeMenu(`More actions for ${folder.displayName}`,`${menuItem('folder-new',folder.id,'New subfolder',{extra:`data-project-id="${esc(project.id)}"`})}${menuItem('folder-rename',folder.id,'Rename',{shortcut:'F2',extra:`data-project-id="${esc(project.id)}"`})}${MENU_SEPARATOR}${menuItem('folder-delete',folder.id,'Delete',{danger:true,disabled:emptyFolder?'':'Only empty folders can be deleted.',extra:`data-project-id="${esc(project.id)}"`})}`):'';
+  return`<div class="tree-row folder-tree-row" ${treeRowAttributes(row,project.id)} aria-expanded="${row.expanded}"${drop}><div class="tree-cell tree-name-cell" role="gridcell">${name}</div><div class="tree-cell row-actions" role="gridcell">${menu}</div></div>`;
+}
+function newFolderTreeRow(row,project){
+  return`<div class="tree-row folder-tree-row tree-new-row" ${treeRowAttributes(row,project.id)}><div class="tree-cell tree-name-cell" role="gridcell"><span class="tree-toggle folder-toggle is-editing"><span class="tree-chevron" aria-hidden="true">›</span>${treeIcon('folder')}<input class="tree-inline-name" data-tree-new-folder="${esc(row.parentId||'')}" data-project-id="${esc(project.id)}" value="${esc(uniqueFolderName(folderCache.get(project.id)?.folders||[],row.parentId||null))}" aria-label="New folder name" maxlength="160" autocomplete="off"></span></div></div>`;
+}
+function emptyTreeRow(key,level,parentKey,project,folderId,text){
+  const drop=project.status==='active'?` data-task-drop-project="${esc(project.id)}" data-task-drop-folder="${esc(folderId||'')}"`:'';
+  return`<div class="tree-row tree-empty-row" role="row" aria-level="${level}" data-tree-key="${esc(key)}" data-tree-parent="${esc(parentKey)}" style="--tree-depth:${level-2}"${drop}><div class="tree-cell" role="gridcell">${esc(text)}</div></div>`;
+}
+function statusTreeRow(key,body){return`<div class="tree-row tree-status-row" role="row" aria-level="2" data-tree-key="${esc(key)}" style="--tree-depth:0"><div class="tree-cell" role="gridcell">${body}</div></div>`}
+
+// One open project's rows: folders and tasks inline, children right under their open folder.
+function projectTree(project){
+  if(!folderCache.has(project.id)&&isProjectOpen(project.id)){folderCache.set(project.id,{folders:null,error:null,loading:true});queueMicrotask(()=>{if(isProjectOpen(project.id))loadProjectFolders(project.id)});}
+  const entry=folderCache.get(project.id),allTasks=state.tasks.filter(task=>task.projectId===project.id);
+  const folders=entry?.folders||[],loadingFirst=Boolean(entry?.loading&&!entry.folders);
+  // Until the first folder read lands only top-level tasks show; an error shows every task at the top.
+  const tasks=loadingFirst?allTasks.filter(task=>!task.folderId):allTasks;
+  const pending=treePending?.projectId===project.id&&canWriteFolders(project)?treePending:null;
+  const rows=projectTreeRows({projectId:project.id,folders,tasks,expanded:treeState.folders,pending});
+  const counts=folderTaskCounts(folders,allTasks);
+  let html='';
+  if(loadingFirst)html+=statusTreeRow('s:loading','<p role="status">Loading folders…</p>');
+  if(entry?.error)html+=statusTreeRow('s:error',`<p role="alert">${esc(entry.error)} Showing every task at the top level.</p>${button('folder-retry',project.id,'Retry folders')}`);
+  if(project.status!=='active')html+=statusTreeRow('s:archived','<p class="form-note">This project is archived and read-only.</p>');
+  for(const row of rows){
+    if(row.kind==='folder')html+=folderTreeRow(row,project,folders,allTasks,counts);
+    else if(row.kind==='task')html+=taskPanel(row.task,row);
+    else if(row.kind==='new')html+=newFolderTreeRow(row,project);
+    else if(row.kind==='empty')html+=emptyTreeRow(row.key,row.level,row.parentKey,project,row.folderId,treeDragAvailable()?'Empty. Drop tasks here.':'Empty folder');
+  }
+  if(!rows.length&&!loadingFirst)html+=emptyTreeRow(`e:${project.id}`,2,`p:${project.id}`,project,null,'No folders or tasks here yet.');
+  return`<section class="project-detail tree-body" id="project-detail-${esc(project.id)}" role="rowgroup" aria-label="${esc(project.displayName)} tasks and actions" data-tree-body="${esc(project.id)}">${html}</section>`;
+}
+
 function datasetActions(dataset,projectActive){if(!projectActive)return'';const items=[];if(dataset.status==='draft'&&can('viewer.datasets.write'))items.push(button('upload-dataset',dataset.id,'Upload'));if(['draft','finalized','archived'].includes(dataset.status)&&can('viewer.storage.purge'))items.push(dangerButton('trash-dataset',dataset.id,'Move source to Recycle Bin'));return items.join('')}
 function lodJobForOutput(output){return state.derivativeJobs.find(job=>job.attemptId===output.attemptId&&['mesh_tiles','lod_audit'].includes(job.type))||null}
 function recoveryOperationForOutput(outputId){return[...state.operations].filter(operation=>operation.type==='lod_recovery'&&operation.status!=='cancelled'&&(operation.sourceOutputId===outputId||operation.result?.recovery?.sourceOutputId===outputId)).sort((left,right)=>Date.parse(right.updatedAt||right.createdAt||0)-Date.parse(left.updatedAt||left.createdAt||0))[0]||null}
 function lodAction(output){if(!can('viewer.processing.write'))return'';const repair=companionRepairAction(output);if(repair)return repair;const job=lodJobForOutput(output),lod=output.lod||{},recovery=lod.recoveryAction,feedStatus=job?.status==='pending'?'queued':job?.status==='leased'?'running':job?.status,status=feedStatus||lod.status,id=job?.id||lod.jobId||output.id,retryable=Boolean(lod.canRetry||(status==='failed'&&job?.optional&&(Number(job.manualRetryCount)||0)<1));if(recovery?.kind==='new_version'&&recovery.eligible){const existing=recoveryOperationForOutput(output.id);if(existing?.status==='failed')return existing.retryable===false?button('derivative-status',existing.id,'Recovery retry exhausted',false,'disabled title="The one authorized manual recovery retry has already failed."'):button('retry-operation',existing.id,'Retry recovery',false,'title="Retry the existing recovery version without changing the current model."');if(existing){const label=existing.status==='queued'?'Recovery queued':existing.status==='leased'?'Creating recovery…':existing.status==='awaiting_derivatives'?'Generating 3D tiles…':'Recovery complete';return button('derivative-status',existing.id,label,false,'disabled')}return button('create-lod-recovery',output.id,'Create recovery version',false,`data-endpoint="${esc(recovery.endpoint)}" title="The current version remains safe while a new recovery version is built."`)}if(lod.disabledByPolicy)return button('derivative-status',id,'3D tiles disabled by server',false,`disabled title="${esc(lod.reason||'3D tile generation is disabled on this Viewer deployment.')}"`);if(['failed','fallback'].includes(status)&&retryable)return button('retry-derivative',id,'Retry 3D tiles');if(status==='queued')return button('derivative-status',id,'3D tiles queued',false,'disabled');if(status==='running')return button('derivative-status',id,'Generating 3D tiles…',false,'disabled');if(status==='available'||(status==='complete'&&job?.result?.verified))return button('derivative-status',id,'3D tiles ready',false,'disabled');if(status==='fallback')return button('derivative-status',id,'Using full mesh fallback',false,`disabled title="${esc(lod.reason||'Verified streaming tiles are unavailable.')}"`);if(lod.canGenerate)return button('generate-tiles',output.id,'Generate 3D tiles');return''}
-function taskQuickActions(task){const outputs=state.outputs.filter(item=>item.taskId===task.id),output=outputs.find(item=>item.activePublished&&item.status==='published')||outputs.find(item=>item.status==='ready'&&item.attemptId),readOnly=task.status==='archived'||state.projects.find(project=>project.id===task.projectId)?.status!=='active',items=[],more=[];if(output){const kinds=new Set(Array.isArray(output.assetKinds)?output.assetKinds:[]),published=output.activePublished&&output.status==='published';if(published&&output.viewSessionUrl)items.push(button('view-output',output.id,'View',true));else if(!readOnly&&output.status==='ready'&&output.attemptId&&can('viewer.processing.publish'))items.push(button('open-review',output.attemptId,'View',true));if(output.reportUrl&&kinds.has('report'))items.push(button('download-report',output.id,'Model report',false,`data-url="${esc(output.reportUrl)}"`));if(!readOnly&&canShareOutput(output))items.push(button('share-output',output.id,'Share'));if(output.downloadProducts?.length||output.downloadUrl&&kinds.size)more.push(button('download-output',output.id,'Download model files',false,`data-url="${esc(output.downloadUrl)}"`))}if(!readOnly&&can('viewer.processing.write')){more.unshift(button('edit-task',task.id,'Rename'));more.push(folderState.projectId===task.projectId&&Array.isArray(folderState.folders)?button('folder-move-task',task.id,'Move to…'):button('folder-move-task',task.id,'Move to…',false,'disabled title="Folders are still loading."'));}more.push(button('task-settings',task.id,'Details & processing'),button('task-files',task.id,'Files & versions'),button('task-history',task.id,'Processing history'));if(!readOnly&&can('viewer.gcp.read'))more.push(button('task-gcp',task.id,'Ground control points'));items.push(`<details class="project-more-actions task-more-actions"><summary aria-label="More task actions" title="More task actions">⋯</summary><div class="project-more-menu">${more.join('')}</div></details>`);return items.join('')}
-function taskPanel(task){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task);return`<article class="task-panel ${expanded?'expanded':''}" data-project-task="${esc(task.id)}"><div class="task-summary"><button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-chevron" aria-hidden="true">›</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${canDragFolderTask(task)? button('folder-move-task',task.id,'Move',false,'draggable="true" data-folder-drag aria-label="Move task. Drag to a folder, or choose a folder or project."'):''}${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="region" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
+function taskQuickActions(task){const outputs=state.outputs.filter(item=>item.taskId===task.id),output=outputs.find(item=>item.activePublished&&item.status==='published')||outputs.find(item=>item.status==='ready'&&item.attemptId),readOnly=task.status==='archived'||state.projects.find(project=>project.id===task.projectId)?.status!=='active',items=[],more=[];let download='';if(output){const kinds=new Set(Array.isArray(output.assetKinds)?output.assetKinds:[]),published=output.activePublished&&output.status==='published';if(published&&output.viewSessionUrl)items.push(button('view-output',output.id,'View',true,'tabindex="-1"'));else if(!readOnly&&output.status==='ready'&&output.attemptId&&can('viewer.processing.publish'))items.push(button('open-review',output.attemptId,'View',true,'tabindex="-1"'));if(output.reportUrl&&kinds.has('report'))items.push(button('download-report',output.id,'Model report',false,`tabindex="-1" data-url="${esc(output.reportUrl)}"`));if(!readOnly&&canShareOutput(output))items.push(button('share-output',output.id,'Share',false,'tabindex="-1"'));if(output.downloadProducts?.length||output.downloadUrl&&kinds.size)download=menuItem('download-output',output.id,'Download model files',{extra:`data-url="${esc(output.downloadUrl)}"`})}const writable=!readOnly&&can('viewer.processing.write');if(writable){more.push(menuItem('edit-task',task.id,'Rename',{shortcut:'F2'}),menuItem('folder-move-task',task.id,'Move to…',{disabled:Array.isArray(folderCache.get(task.projectId)?.folders)?'':'Folders are still loading.'}),menuItem('duplicate-task',task.id,'Duplicate',{disabled:'Coming soon'}));}if(download)more.push(download);more.push(menuItem('task-settings',task.id,'Details & processing'),menuItem('task-files',task.id,'Files & versions'),menuItem('task-history',task.id,'Processing history'));if(!readOnly&&can('viewer.gcp.read'))more.push(menuItem('task-gcp',task.id,'Ground control points'));if(writable)more.push(MENU_SEPARATOR,menuItem('delete-task',task.id,'Delete',{danger:true,disabled:LIVE_ATTEMPT_STATUSES.has(task.latestAttempt?.status)?'Stop processing before deleting this task.':''}));items.push(treeMenu('More task actions',more.join(''),'task-more-actions'));return items.join('')}
+function taskPanel(task,row=null){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task),drag=Boolean(row)&&canDragFolderTask(task)&&treeDragAvailable();return`<article class="task-panel tree-row ${expanded?'expanded':''}" data-project-task="${esc(task.id)}"${row?` ${treeRowAttributes(row,task.projectId)}`:''}><div class="task-summary"${drag?` draggable="true" data-folder-drag data-id="${esc(task.id)}"`:''}>${drag?TREE_GRIP:''}<button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" data-tree-focus tabindex="-1" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-lead" aria-hidden="true"><span class="task-chevron">›</span>${treeIcon('task')}</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="region" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
 function taskFact(label,value){const display=label==='Reconstructed points'&&value!==null&&value!==undefined?groupedNumber(value):value;return`<div><dt>${esc(label)}</dt><dd>${available(display)}</dd></div>`}
 function disclosureAttributes(taskId,name){return`data-task-id="${esc(taskId)}" data-task-disclosure="${esc(name)}" ${state.taskDisclosures[taskId]?.[name]?'open':''}`}
 function taskDisclosurePanel(taskId,name,label,body,meta=''){return`<details class="task-subsection task-disclosure" ${disclosureAttributes(taskId,name)}><summary><span>${esc(label)}</span>${meta?`<small>${esc(meta)}</small>`:''}</summary><div class="task-disclosure-body">${body}</div></details>`}
@@ -747,23 +875,28 @@ function globalDiagnosticRun(item){const selected=state.selectedDiagnosticRunId=
 function globalDiagnosticHistory(){if(state.diagnosticRunsError&&!state.diagnosticRuns.length)return`<section class="content-card diagnostic-run-history load-error" role="alert"><p class="eyebrow">Processing run history unavailable</p><h2>Runs could not be loaded</h2><p>${esc(state.diagnosticRunsError)}</p>${button('retry-diagnostic-runs','diagnostics','Try again',true)}</section>`;const projects=new Map();for(const run of state.diagnosticRuns){const projectKey=run.projectId||'unassigned-project',taskKey=run.taskId||'unassigned-task';if(!projects.has(projectKey))projects.set(projectKey,{name:run.projectDisplayName||'Unassigned project',tasks:new Map()});const project=projects.get(projectKey);if(!project.tasks.has(taskKey))project.tasks.set(taskKey,{name:run.taskDisplayName||'Unassigned task',runs:[]});project.tasks.get(taskKey).runs.push(run)}const groups=[...projects.entries()].map(([projectId,project])=>`<section class="diagnostic-project-group" aria-labelledby="diagnostic-project-${esc(projectId)}"><h3 id="diagnostic-project-${esc(projectId)}">${esc(project.name)}</h3>${[...project.tasks.entries()].map(([taskId,task])=>`<section class="diagnostic-task-group" aria-labelledby="diagnostic-task-${esc(taskId)}"><div class="diagnostic-task-heading"><h4 id="diagnostic-task-${esc(taskId)}">${esc(task.name)}</h4><span>${task.runs.length} run${task.runs.length===1?'':'s'}</span></div><div class="data-list">${task.runs.map(globalDiagnosticRun).join('')}</div></section>`).join('')}</section>`).join('');return`<section class="content-card diagnostic-run-history"><div class="section-heading"><div><p class="eyebrow">All projects</p><h2>Processing run history</h2><p>Inspect every retained attempt, failure stage, derivative, and sanitized log without opening each task.</p></div>${button('retry-diagnostic-runs','diagnostics','Refresh')}</div>${state.diagnosticRunsError?`<p class="load-error" role="alert">Older runs could not be loaded: ${esc(state.diagnosticRunsError)}</p>`:''}<div class="diagnostic-run-groups">${groups||(state.diagnosticRunsLoading?empty('Loading processing runs…'):empty('No processing runs have been recorded.'))}</div>${state.diagnosticRunsCursor?`<div class="history-load-more">${button('load-more-diagnostic-runs','diagnostics',state.diagnosticRunsLoading?'Loading…':'Load older runs',false,state.diagnosticRunsLoading?'disabled':'')}</div>`:''}</section>`}
 function diagnostics(){const lifecycle=state.ready?.lifecycle||[],failed=state.failedMutations||[];const failedRows=failed.map(item=>`<div class="manage-row"><div><strong>${esc(item.type)} ${esc(item.entityType)}</strong><small>${esc(item.entityId)}</small><small>${esc(item.errorCode||'lifecycle_failed')}: ${esc(item.errorMessage||'The storage operation requires operator repair.')}</small></div>${badge(item.status)}<div class="row-actions">${can('viewer.storage.purge')?button('retry-storage-mutation',item.id,'Retry'):''}</div></div>`).join('')||empty('No failed storage mutations.');const trashCount=state.storage?.trash?.items?.length||0;return`<div class="metric-grid"><div id="storage-usage-cards" style="display:contents">${storageUsageCards(state.storage?.usage)}</div>${metric('Processing worker',state.ready?.worker?.live?'Live':'Unavailable','Queue and worker health')}${metric('Platform',state.ready?.ok?'Ready':'Attention needed','Aggregated readiness')}</div><div class="diagnostic-grid top-gap">${card('Queue & provider health',`<div class="data-list">${state.providers.map(provider=>`<div class="manage-row"><div><strong>${esc(provider.displayName)}</strong><small>${esc(provider.endpoint)}</small></div>${badge(provider.runtimeHealth||provider.lastHealth||'unknown')}<div></div></div>`).join('')||empty('No providers configured.')} ${lifecycle.map(item=>`<div class="manage-row"><div><strong>${esc(item.status)}</strong><small>Storage lifecycle operations</small></div><strong>${item.count}</strong><div></div></div>`).join('')}</div>`)}${card('Failed storage mutations',`<div class="data-list">${failedRows}</div><p class="form-note">Repair the reported storage conflict before retrying. A failed row keeps processing readiness blocked.</p>`)}${card('Storage trash & recovery',`${state.trashLoadError?`<p class="load-error" role="alert">Recycle Bin load failed: ${esc(state.trashLoadError)}</p>`:`<p class="card-copy">${trashCount} deleted item${trashCount===1?'':'s'} currently remain recoverable.</p>`}${button('open-trash','trash','Open Recycle Bin',true)}`)}</div><div class="top-gap">${globalDiagnosticHistory()}</div>`}
 
-function render(){if(draggedFolderTask)clearTaskDrag();clearInterval(state.logTimer);renderNav();updateActivityIndicator();document.querySelector('#page-title').textContent=NAV.find(item=>item[0]===state.section)?.[2]||'Dashboard';if(state.taskPage)document.querySelector('#page-title').textContent={gcp:'Ground control points',settings:'Task settings',files:'Task files'}[state.taskPage];content.innerHTML=`<div id="workspace-section">${(state.section==='dashboard'&&state.taskPage?taskWorkspacePage:({dashboard,background,providers,trash,diagnostics}[state.section]||dashboard))()}</div>`;bind();if(state.section==='providers')bindModalActions(content.querySelector('.provider-workspace'));refreshOpenedProvider();bindTaskDisclosures();hydrateOrthophotoPreviews();storageUsagePoll.sync();scheduleProjectRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000)}}
+function render(){if(draggedFolderTask)clearTaskDrag();loadTreeState();const treeFocus=treeFocusKey();clearInterval(state.logTimer);renderNav();updateActivityIndicator();document.querySelector('#page-title').textContent=NAV.find(item=>item[0]===state.section)?.[2]||'Dashboard';if(state.taskPage)document.querySelector('#page-title').textContent={gcp:'Ground control points',settings:'Task settings',files:'Task files'}[state.taskPage];content.innerHTML=`<div id="workspace-section">${(state.section==='dashboard'&&state.taskPage?taskWorkspacePage:({dashboard,background,providers,trash,diagnostics}[state.section]||dashboard))()}</div>`;bind();syncTreeTabStop();restoreTreeFocus(treeFocus);if(state.section==='providers')bindModalActions(content.querySelector('.provider-workspace'));refreshOpenedProvider();bindTaskDisclosures();hydrateOrthophotoPreviews();storageUsagePoll.sync();scheduleProjectRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000)}}
 function bindProjectActions(root){root.querySelectorAll('[data-action]').forEach(element=>element.onclick=()=>action(element));}
 function bind(){content.querySelectorAll('[data-section]').forEach(element=>element.onclick=()=>navigateWorkspace({section:element.dataset.section},'push'));bindProjectActions(content);const filter=content.querySelector('#project-filter');if(filter)filter.oninput=()=>{state.projectQuery=filter.value;const query=state.projectQuery.trim().toLocaleLowerCase('en-US');content.querySelectorAll('[data-project-name]').forEach(row=>row.hidden=Boolean(query&&!row.dataset.projectName.includes(query)))};const backgroundSearch=content.querySelector('#background-search-form');if(backgroundSearch)backgroundSearch.onsubmit=event=>{event.preventDefault();state.backgroundQuery=backgroundSearch.elements.query.value.trim();state.backgroundImportLimit=3;state.backgroundDerivativeLimit=3;render()};content.querySelectorAll('.gcp-import-form').forEach(form=>form.onsubmit=importGcp);content.querySelectorAll('.gcp-set-select').forEach(select=>select.onchange=()=>changeGcpSet(select.dataset.taskId,select.value));content.querySelectorAll('.gcp-point-select').forEach(select=>select.onchange=()=>changeGcpPoint(select.dataset.taskId,select.value));content.querySelectorAll('.gcp-candidate-form').forEach(form=>{form.elements.mode.onchange=()=>{gcpWorkspace(form.dataset.taskId).mode=form.elements.mode.value;render()};form.onsubmit=event=>refreshGcpCandidates(event)});content.querySelectorAll('.gcp-mark-form').forEach(form=>{form.onsubmit=saveGcpMark;form.oninput=()=>setGcpDraft(form.dataset.taskId,Number(form.elements.pixelX.value),Number(form.elements.pixelY.value))});content.querySelectorAll('.gcp-mark-image').forEach(image=>{image.onload=()=>configureGcpImage(image);image.onclick=event=>markGcpImage(event)})}
 async function action(element){
   const action=element.dataset.action,id=element.dataset.id,taskId=element.dataset.taskId;
+  // A menu command closes its menu; focus waits on the menu button for the command to move it.
+  const menu=element.getAttribute('role')==='menuitem'?element.closest('details.tree-menu'):null;
+  if(menu){menu.open=false;menu.querySelector(':scope > summary')?.focus({preventScroll:true});}
   if(action==='new-project')return newProjectModal();
   if(['task-gcp','task-settings','task-files','task-return'].includes(action)){const task=state.tasks.find(item=>item.id===id);if(!task)return;return navigateWorkspace({section:'dashboard',selectedProjectId:task.projectId,expandedTaskId:task.id,taskPage:({'task-gcp':'gcp','task-settings':'settings','task-files':'files'})[action]||null},'push')}
   if(action==='task-history')return navigateWorkspace({section:'diagnostics'},'push');
-  if(action==='folder-open'){if(!folderState.folders?.some(folder=>folder.id===id))return;projectDataGeneration++;folderState.currentId=id;selectedFolderId=id;state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('push');render();return;}
-  if(action==='folder-root'){projectDataGeneration++;folderState.currentId=null;selectedFolderId=null;state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('push');render();return;}
+  if(action==='folder-toggle')return toggleTreeFolder(element.dataset.projectId,id);
   if(action==='folder-retry')return loadProjectFolders(id);
-  if(action==='folder-create')return createFolderModal(id);
-  if(action==='folder-rename')return renameFolderModal(id);
-  if(action==='folder-delete')return deleteFolder(id);
+  if(action==='folder-create')return startNewFolder(id,null);
+  if(action==='folder-new')return startNewFolder(element.dataset.projectId,id);
+  if(action==='tree-new-folder'){const target=treeNewFolderTarget();return target?startNewFolder(target.projectId,target.parentId):toast('Open a project to add a folder.',true);}
+  if(action==='folder-rename')return startFolderRename(element.dataset.projectId,id);
+  if(action==='folder-delete')return deleteFolder(element.dataset.projectId,id);
   if(action==='folder-move-task')return moveTaskFolderModal(id);
-  if(action==='open-project')return navigateWorkspace({section:'dashboard',selectedProjectId:state.selectedProjectId===id?null:id,expandedTaskId:null},'push');
-  if(action==='close-project')return navigateWorkspace({section:'dashboard',selectedProjectId:null,expandedTaskId:null},'push');
+  if(action==='delete-task')return deleteTaskWithUndo(id);
+  if(action==='open-project')return toggleTreeProject(id);
+  if(action==='close-project')return toggleTreeProject(id,false);
   if(action==='edit-project')return editProject(id);
   if(action==='project-property-lines')return propertyLinesSourceModal(id);
   if(action==='trash-project')return trashMutation(`Delete this project and its owned tasks, datasets, and outputs? It can be restored until ${purgeDate(30)}; after that date it will be permanently purged.`, `/api/v1/projects/${encodeURIComponent(id)}`,'Project moved to Recycle Bin');
@@ -771,12 +904,12 @@ async function action(element){
   if(action==='project-process')return processModal(id);
   if(action==='project-share')return openShareModal(id);
   if(action==='trash-dataset')return trashMutation('Delete this dataset? It will remain recoverable in the Recycle Bin for 14 days.',`/api/v1/datasets/${encodeURIComponent(id)}`,'Dataset moved to Recycle Bin');
-  if(action==='toggle-task'){if(state.expandedTaskId===id)return collapseTask(id);if(state.expandedTaskId)releaseGcpImage(gcpWorkspace(state.expandedTaskId));state.expandedTaskId=id;state.taskDetails[id]={loading:true};syncWorkspaceView('push');render();animateOpenedTask(id);return refreshTaskDetails(id)}
+  if(action==='toggle-task'){if(state.expandedTaskId===id)return collapseTask(id);if(state.expandedTaskId)releaseGcpImage(gcpWorkspace(state.expandedTaskId));const opened=state.tasks.find(item=>item.id===id);if(opened&&opened.projectId!==state.selectedProjectId){state.selectedProjectId=opened.projectId;treeState.projects.add(opened.projectId);saveTreeState();}state.expandedTaskId=id;state.taskDetails[id]={loading:true};syncWorkspaceView('push');render();animateOpenedTask(id);return refreshTaskDetails(id)}
   if(action==='gcp-open-image')return openGcpImage(taskId,id);
   if(action==='gcp-edit-mark')return editGcpMark(taskId,id);
   if(action==='gcp-delete-mark')return deleteGcpMark(taskId,id);
   if(action==='edit-task')return editTask(id);
-  if(action==='trash-task')return trashMutation(`Delete this task and its exclusively owned dataset and outputs? It can be restored until ${purgeDate(30)}; after that date it will be permanently purged.`, `/api/v1/tasks/${encodeURIComponent(id)}`,'Task moved to Recycle Bin');
+  if(action==='trash-task')return deleteTaskWithUndo(id);
   if(action==='recover-existing-result'){const diagnostic=taskId?state.taskDetails[taskId]?.attemptDiagnostics?.[id]:state.diagnosticDetails[id];return recoverExistingResult(diagnostic,can('viewer.processing.write'),id,mutate,()=>{if(taskId){const detail=state.taskDetails[taskId];if(!detail)return;if(detail.attemptDiagnostics)delete detail.attemptDiagnostics[id];if(detail.selectedAttemptId===id)return loadTaskAttemptDiagnostics(taskId,id)}else{delete state.diagnosticDetails[id];if(state.selectedDiagnosticRunId===id)return loadGlobalAttemptDiagnostics(id)}},{getSession:()=>state.adminSession,onUncertain:()=>toast('Recovery status is uncertain. Diagnostics will refresh; retry uses the same request.',true),onHold:()=>toast('The recovery request needs manual review because its session or receipt window changed.',true)})}
   if(action==='cancel-attempt')return confirmCancelAttempt(id);
   if(action==='retry-attempt')return mutate(`/api/v1/attempts/${encodeURIComponent(id)}/retry`,{method:'POST',body:{}},'Task restarted');
@@ -844,14 +977,14 @@ async function refreshTaskDetails(taskId,quiet=false){
     if(JSON.stringify(task)!==JSON.stringify(refreshedTask))generation=++projectDataGeneration;
     state.tasks=state.tasks.map(item=>item.id===taskId?refreshedTask:item);
     state.taskDetails[taskId]={task:refreshedTask,storage:results[1].value||previous?.storage||null,gcp:quiet&&previous?.gcp?previous.gcp:(results[2].value||{sets:[]}),attempts,nextAttemptCursor:quiet&&previous?.attempts?.length>freshAttempts.length?previous.nextAttemptCursor:(attemptPage.nextCursor||null),attemptDiagnostics:previous?.attemptDiagnostics||{},selectedAttemptId:previous?.selectedAttemptId||null,attempt:attemptResult?.attempt||refreshedTask.latestAttempt,logs:(attemptResult?.logs||(sameAttempt?previous?.logs:[])||[]).slice(-100),logsError};
-    if(refreshedTask.folderId!==task.folderId&&Array.isArray(folderState.folders)&&
-        folderState.projectId===task.projectId&&state.selectedProjectId===task.projectId)syncSelectedTaskFolder(task.projectId);
+    if(refreshedTask.folderId!==task.folderId&&Array.isArray(folderCache.get(task.projectId)?.folders)&&
+        state.selectedProjectId===task.projectId)syncSelectedTaskFolder(task.projectId);
     if(!quiet){try{await refreshGcpWorkspace(taskId,false)}catch(error){state.taskDetails[taskId].gcp={...(state.taskDetails[taskId].gcp||{sets:[]}),error:error.message}}}
     if(!current())return;
     if(state.expandedTaskId===taskId){
       const panel=quiet?content.querySelector(`[data-task-output="${CSS.escape(taskId)}"]`):null;
       if(panel)patchTaskOutput(panel,refreshedTask,state.taskDetails[taskId].attempt,state.taskDetails[taskId].logs);
-      if(quiet){projectPaintPending=patchProjectFolderView();}
+      if(quiet){projectPaintPending=patchProjectTree(refreshedTask.projectId);}
       else{render();document.querySelector(`[data-action="toggle-task"][data-id="${CSS.escape(taskId)}"]`)?.focus()}
     }
   }finally{taskDetailRefreshes.delete(taskId)}
@@ -877,52 +1010,175 @@ function newProjectModal(){openModal('Create project',`<form id="project-form" c
 async function propertyLinesRequest(path,{method='GET',body,raw}={}){const headers={Authorization:`Bearer ${state.token}`,Accept:'application/json'};if(method!=='GET')headers['Idempotency-Key']=crypto.randomUUID();let payload;if(raw!==undefined){headers['Content-Type']='application/octet-stream';payload=raw}else if(body!==undefined){headers['Content-Type']='application/json';payload=JSON.stringify(body)}const response=await workspaceFetch(path,{method,headers,body:payload});let json=null;try{json=await response.json()}catch{}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw responseError(json?.message||json?.error||`Request failed (${response.status})`,response.status);return json}
 function propertyLinesSourceModal(id){const project=state.projects.find(item=>item.id===id);if(!project)return;openModal('Property lines source','<div data-property-lines-source></div>');mountPropertyLinesSource({container:modalContent.querySelector('[data-property-lines-source]'),projectId:project.id,request:propertyLinesRequest,toast,confirm:message=>dialogs.confirm(message,{title:'Remove boundary file',submitLabel:'Remove',destructive:true}),canWrite:can('viewer.projects.write')&&project.status==='active'})}
 function editProject(id){const project=state.projects.find(item=>item.id===id);if(!project)return;openModal('Rename project',`<form id="project-edit-form" class="manage-form">${field('Project name','displayName',`required maxlength="240" value="${esc(project.displayName)}"`)}${field('Description','description',`maxlength="1000" value="${esc(project.description||'')}"`)}<button class="primary-button">Save project</button></form>`);modalContent.querySelector('#project-edit-form').onsubmit=event=>{event.preventDefault();modal.close();mutate(`/api/v1/projects/${encodeURIComponent(id)}`,{method:'PATCH',body:values(event.currentTarget)},'Project updated')}}
-function createFolderModal(projectId){
+// ---- Tree focus: one tab stop, roving over each row's focus target ----
+function treeRowElement(key){return key?content.querySelector(`#project-list [data-tree-key="${CSS.escape(key)}"]`):null}
+function treeFocusTarget(key){return treeRowElement(key)?.querySelector('[data-tree-focus]')||null}
+function treeFocusKey(){const element=document.activeElement;return element?.matches?.('[data-tree-focus]')&&content.contains(element)?element.closest('[data-tree-key]')?.dataset.treeKey||null:null}
+function syncTreeTabStop(){
+  const list=content.querySelector('#project-list');if(!list)return;
+  const targets=[...list.querySelectorAll('[data-tree-focus]')];if(!targets.length)return;
+  const current=targets.find(target=>target.closest('[data-tree-key]')?.dataset.treeKey===treeCurrentKey)||targets[0];
+  treeCurrentKey=current.closest('[data-tree-key]').dataset.treeKey;
+  for(const target of targets){const index=target===current?0:-1;if(target.tabIndex!==index)target.tabIndex=index;}
+}
+// After a full render, focus returns to the same row when the render took it away.
+function restoreTreeFocus(key){const active=document.activeElement;if(!key||(active&&active!==document.body&&active.isConnected))return;treeFocusTarget(key)?.focus({preventScroll:true})}
+function focusTreeRow(key,{scroll=true}={}){
+  const target=treeFocusTarget(key);if(!target)return false;
+  treeCurrentKey=key;syncTreeTabStop();target.focus({preventScroll:true});
+  if(scroll)target.scrollIntoView({block:'nearest'});
+  return true;
+}
+function announce(message){const live=document.querySelector('#workspace-tree-live');if(!live)return;live.textContent='';setTimeout(()=>{live.textContent=message},30)}
+function flashTreeRow(key){const row=treeRowElement(key);if(!row||reducedMotion())return;row.classList.remove('tree-just-moved');void row.offsetWidth;row.classList.add('tree-just-moved');setTimeout(()=>row.classList.remove('tree-just-moved'),1900)}
+// The next row at the same level, else the previous one, else the parent: where focus goes when a row leaves.
+function treeNeighbourKey(key){
+  const row=treeRowElement(key);if(!row)return null;
+  const parent=row.dataset.treeParent||null,siblings=parent?[...row.parentElement.querySelectorAll(':scope > [data-tree-parent]')].filter(item=>item.dataset.treeParent===parent&&item.querySelector('[data-tree-focus]')):[];
+  const index=siblings.indexOf(row);
+  return(siblings[index+1]||siblings[index-1])?.dataset.treeKey||parent;
+}
+function treeLocationLabel(projectId,folderId){
+  const project=state.projects.find(item=>item.id===projectId)?.displayName||'the project',folders=folderCache.get(projectId)?.folders||[];
+  const path=folderId?folderPath(folders,folderId).map(folder=>folder.displayName):[];
+  return path.length?`${project} / ${path.join(' / ')}`:`${project} (top level)`;
+}
+function closeTreeMenus(except=null){content.querySelectorAll('details.tree-menu[open]').forEach(menu=>{if(menu!==except)menu.open=false;});}
+
+// ---- Projects and folders: open, close, create, rename, delete ----
+function toggleTreeProject(projectId,open=!isProjectOpen(projectId)){
+  if(!state.projects.some(project=>project.id===projectId))return;
+  treeCurrentKey=`p:${projectId}`;
+  if(open){
+    treeState.projects.add(projectId);saveTreeState();
+    // An open task keeps the URL; otherwise the project just opened becomes the selected one.
+    if(state.expandedTaskId&&state.selectedProjectId&&state.selectedProjectId!==projectId)return render();
+    return navigateWorkspace({section:'dashboard',selectedProjectId:projectId,expandedTaskId:null},'push');
+  }
+  treeState.projects.delete(projectId);saveTreeState();
+  if(state.selectedProjectId===projectId)return navigateWorkspace({section:'dashboard',selectedProjectId:null,expandedTaskId:null},'push');
+  render();
+}
+function toggleTreeFolder(projectId,folderId){
+  const folders=folderCache.get(projectId)?.folders;
+  if(!folders?.some(folder=>folder.id===folderId))return;
+  treeCurrentKey=`f:${folderId}`;
+  if(treeState.folders.has(folderId)){
+    const task=state.tasks.find(item=>item.id===state.expandedTaskId&&item.projectId===projectId);
+    if(task&&folderAncestry(folders,task.folderId).includes(folderId)){
+      // Closing the folder that holds the open task closes the task too, unless it has unsaved work.
+      if(taskEditActive(state.taskPage?content:treeRowElement(`t:${task.id}`)))return toast('Finish or close the open task first.',true);
+      treeState.folders.delete(folderId);saveTreeState();
+      state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('replace');return render();
+    }
+    treeState.folders.delete(folderId);
+  }else treeState.folders.add(folderId);
+  saveTreeState();
+  projectPaintPending=patchProjectTree(projectId)||projectPaintPending;
+}
+// The toolbar's New folder goes into the focused project or folder (a task's own folder).
+function treeNewFolderTarget(){
+  const row=treeRowElement(treeCurrentKey),projectId=row?.dataset.treeProject||openProjectIds()[0];
+  const project=state.projects.find(item=>item.id===projectId);
+  if(!isProjectOpen(projectId)||!canWriteFolders(project))return null;
+  const key=row?.dataset.treeProject===projectId?row.dataset.treeKey:'',folders=folderCache.get(projectId)?.folders||[];
+  if(key.startsWith('f:'))return{projectId,parentId:key.slice(2)};
+  if(key.startsWith('t:')){const folderId=state.tasks.find(item=>item.id===key.slice(2))?.folderId;return{projectId,parentId:folders.some(folder=>folder.id===folderId)?folderId:null};}
+  return{projectId,parentId:null};
+}
+function focusInlineName(projectId){const input=content.querySelector(`[data-tree-body="${CSS.escape(projectId)}"] .tree-inline-name`);if(!input)return;input.focus();input.select();input.scrollIntoView({block:'nearest'})}
+function startNewFolder(projectId,parentId=null){
+  const project=state.projects.find(item=>item.id===projectId),folders=folderCache.get(projectId)?.folders;
+  if(!canWriteFolders(project)||state.busy)return;
+  if(!folders)return toast('Folders are still loading.',true);
+  if(parentId&&!folders.some(folder=>folder.id===parentId))return;
+  treeRenaming=null;treePending={projectId,parentId};
+  treeState.projects.add(projectId);if(parentId)folderAncestry(folders,parentId).forEach(id=>treeState.folders.add(id));saveTreeState();
+  if(content.querySelector(`[data-tree-body="${CSS.escape(projectId)}"]`))patchProjectTree(projectId);else render();
+  focusInlineName(projectId);
+}
+function startFolderRename(projectId,folderId){
+  const project=state.projects.find(item=>item.id===projectId);
+  if(!canWriteFolders(project)||state.busy||!folderCache.get(projectId)?.folders?.some(folder=>folder.id===folderId))return;
+  treePending=null;treeRenaming=`f:${folderId}`;
+  patchProjectTree(projectId);focusInlineName(projectId);
+}
+// Puts one row back from fresh markup (an inline name ends), or removes it when it no longer exists.
+function replaceTreeRow(projectId,key){
+  const row=treeRowElement(key),project=state.projects.find(item=>item.id===projectId);if(!row||!project)return;
+  const template=document.createElement('template');template.innerHTML=projectTree(project);
+  const fresh=template.content.querySelector(`[data-tree-key="${CSS.escape(key)}"]`);
+  if(fresh)row.replaceWith(fresh);else row.remove();
+  bindProjectActions(content.querySelector(`[data-tree-body="${CSS.escape(projectId)}"]`)||content);
+}
+async function commitTreeName(input,cancel=false){
+  if(input.dataset.committing)return;input.dataset.committing='1';
+  const projectId=input.dataset.projectId,value=input.value.trim(),row=input.closest('[data-tree-key]'),key=row?.dataset.treeKey;
+  if(input.hasAttribute('data-tree-new-folder')){
+    const parentId=input.dataset.treeNewFolder||null,parentKey=parentId?`f:${parentId}`:`p:${projectId}`;
+    treePending=null;
+    if(cancel||!value){replaceTreeRow(projectId,key);focusTreeRow(parentKey,{scroll:false});return;}
+    input.disabled=true;
+    const authorized=folderAuthorizationGuard(projectId,'viewer.projects.write');
+    const result=await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,folderRequestOptions('POST',{displayName:value,parentId},{}),null,authorized);
+    if(treeRowElement(key))replaceTreeRow(projectId,key);
+    const created=result?.folder?.id?`f:${result.folder.id}`:null;
+    if(created&&focusTreeRow(created)){flashTreeRow(created);announce(`Created folder ${value} in ${treeLocationLabel(projectId,parentId)}.`);}
+    else focusTreeRow(parentKey,{scroll:false});
+    return;
+  }
+  const folderId=input.dataset.treeRename,folder=folderCache.get(projectId)?.folders?.find(item=>item.id===folderId);
+  treeRenaming=null;
+  if(cancel||!value||!folder||value===folder.displayName){replaceTreeRow(projectId,key);focusTreeRow(key,{scroll:false});return;}
+  input.disabled=true;
   const authorized=folderAuthorizationGuard(projectId,'viewer.projects.write');
-  if(!authorized()||folderState.projectId!==projectId||!folderState.folders)return;
-  const parentId=folderState.currentId;
-  openModal('New folder',`<form id="folder-create-form" class="manage-form">${field('Folder name','displayName','required maxlength="160"')}<p class="form-note">This folder is part of the current project.</p><button class="primary-button">Create folder</button></form>`);
-  const form=modalContent.querySelector('#folder-create-form'),receipt={};
-  const current=()=>authorized()&&form.isConnected&&folderState.projectId===projectId&&folderState.currentId===parentId&&state.projects.some(project=>project.id===projectId&&project.status==='active');
-  form.onsubmit=async event=>{event.preventDefault();const displayName=event.currentTarget.elements.displayName.value.trim();if(!displayName||!current())return;
-    await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,folderRequestOptions('POST',{displayName,parentId},receipt),'Folder created',current,()=>modal.close());};
+  const result=await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders/${encodeURIComponent(folderId)}`,folderRequestOptions('PATCH',{displayName:value},{}),null,authorized);
+  replaceTreeRow(projectId,key);focusTreeRow(key,{scroll:false});
+  if(result)announce(`Renamed folder to ${value}.`);
 }
-function editableFolder(folderId){
-  const project=state.projects.find(item=>item.id===state.selectedProjectId&&item.status==='active');
-  const folder=folderState.projectId===project?.id&&folderState.folders?.find(item=>item.id===folderId&&item.projectId===project.id);
-  return can('viewer.projects.write')&&folder?{project,folder}:null;
+// Only empty folders can be deleted; Undo creates the same empty folder again in the same place.
+async function deleteFolder(projectId,folderId){
+  const project=state.projects.find(item=>item.id===projectId),entry=folderCache.get(projectId),folder=entry?.folders?.find(item=>item.id===folderId);
+  if(!folder||!canWriteFolders(project)||state.busy)return;
+  if(!folderIsEmpty(entry.folders,state.tasks.filter(task=>task.projectId===projectId),folderId))return toast('Only empty folders can be deleted.',true);
+  const authorized=folderAuthorizationGuard(projectId,'viewer.projects.write'),key=`f:${folderId}`,neighbour=treeNeighbourKey(key);
+  const result=await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders/${encodeURIComponent(folderId)}`,folderRequestOptions('DELETE',undefined,{}),null,authorized,null,false);
+  if(!result)return;
+  const hadFocus=Boolean(treeRowElement(key)?.contains(document.activeElement));
+  if(folderCache.get(projectId)===entry&&entry.folders)entry.folders=entry.folders.filter(item=>item.id!==folderId);
+  treeState.folders.delete(folderId);saveTreeState();
+  projectPaintPending=patchProjectTree(projectId,{releasedKey:key})||projectPaintPending;
+  if(hadFocus&&!(neighbour&&focusTreeRow(neighbour,{scroll:false})))focusTreeRow(`p:${projectId}`,{scroll:false});
+  announce(`Deleted folder ${folder.displayName}.`);
+  void loadProjectFolders(projectId);
+  offerUndo('Folder deleted',10_000,()=>canWriteFolders(state.projects.find(item=>item.id===projectId))&&isProjectOpen(projectId),async()=>{
+    const restored=await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,folderRequestOptions('POST',{displayName:folder.displayName,parentId:folder.parentId||null},{}),'Folder restored',folderAuthorizationGuard(projectId,'viewer.projects.write'));
+    if(restored?.folder?.id){const restoredKey=`f:${restored.folder.id}`;if(hadFocus)focusTreeRow(restoredKey);flashTreeRow(restoredKey);announce(`Restored folder ${folder.displayName}.`);}
+  });
 }
-function renameFolderModal(folderId){
-  const target=editableFolder(folderId);if(!target)return;
-  const authorized=folderAuthorizationGuard(target.project.id,'viewer.projects.write');if(!authorized())return;
-  openModal('Rename folder',`<form id="folder-rename-form" class="manage-form">${field('Folder name','displayName',`required maxlength="160" value="${esc(target.folder.displayName)}"`)}<button class="primary-button">Save name</button></form>`);
-  const form=modalContent.querySelector('#folder-rename-form'),receipt={};
-  const current=()=>authorized()&&form.isConnected&&Boolean(editableFolder(folderId));
-  form.onsubmit=async event=>{event.preventDefault();const displayName=event.currentTarget.elements.displayName.value.trim();if(!displayName||!current())return;
-    await mutateFolder(target.project.id,`/api/v1/projects/${encodeURIComponent(target.project.id)}/folders/${encodeURIComponent(folderId)}`,folderRequestOptions('PATCH',{displayName},receipt),'Folder renamed',current,()=>modal.close());};
-}
-async function deleteFolder(folderId){
-  const target=editableFolder(folderId);if(!target||state.busy)return;
-  const authorized=folderAuthorizationGuard(target.project.id,'viewer.projects.write');if(!authorized())return;
-  if(!await dialogs.confirm(`Delete the empty folder "${target.folder.displayName}"? Folders containing tasks or subfolders cannot be deleted.`,{title:'Delete folder',submitLabel:'Delete folder',destructive:true}))return;
-  const current=()=>authorized()&&Boolean(editableFolder(folderId));
-  if(state.busy||!current())return;
-  await mutateFolder(target.project.id,`/api/v1/projects/${encodeURIComponent(target.project.id)}/folders/${encodeURIComponent(folderId)}`,folderRequestOptions('DELETE',undefined,{}),'Folder deleted',current);
-}
+
+// ---- Moving tasks ----
 function canDragFolderTask(task){
-  return task.status!=='archived'&&Array.isArray(folderState.folders)&&folderState.projectId===task.projectId&&
+  return task.status!=='archived'&&Array.isArray(folderCache.get(task.projectId)?.folders)&&
     Number.isSafeInteger(task.folderRevision)&&state.projects.some(project=>project.id===task.projectId&&project.status==='active')&&
-    folderAuthorizationGuard(task.projectId,'viewer.processing.write')();
+    folderAuthorizationGuard(task.projectId,'viewer.processing.write',{open:false})();
+}
+// A move shows where the task went: its destination project and folders open.
+function revealTaskDestination(projectId,folderId){
+  treeState.projects.add(projectId);
+  const folders=folderCache.get(projectId)?.folders;
+  if(folderId&&folders)folderAncestry(folders,folderId).forEach(id=>treeState.folders.add(id));
+  else if(folderId)treeReveals.set(projectId,folderId);
+  saveTreeState();
 }
 
 // Read when the move lands, before any repaint: does the move own focus (the moved row or
 // the move dialog), does nothing hold it, or has the user moved on to another control?
 function captureTaskMoveFocus(taskId){
-  const row=content.querySelector(`[data-project-folder-view] > .task-list > [data-project-task="${CSS.escape(taskId)}"]`);
-  const sibling=[row?.nextElementSibling,row?.previousElementSibling].find(item=>item?.hasAttribute('data-project-task'));
-  const neighbourId=sibling?.dataset.projectTask||null,element=document.activeElement;
+  const key=`t:${taskId}`,row=treeRowElement(key);
+  const neighbourKey=row?treeNeighbourKey(key):null,element=document.activeElement;
   if(!element||element===document.body||!element.isConnected)return{mode:'none'};
-  if(row?.contains(element)||modal.open&&modal.contains(element))return{mode:'moved',neighbourId};
+  if(row?.contains(element)||modal.open&&modal.contains(element))return{mode:'moved',neighbourKey};
   let selection=null;
   try{if(typeof element.selectionStart==='number')selection=[element.selectionStart,element.selectionEnd];}catch{}
   return{mode:'other',element,locate:focusLocator(element),selection};
@@ -944,27 +1200,20 @@ function focusLocator(element){
   return find()===element?find:null;
 }
 // A move moves focus only when it took focus away; a control the user chose keeps it.
-function settleTaskMoveFocus(taskId,focus,folderId){
-  if(focus.mode==='moved')return placeTaskMoveFocus(taskId,{folderId,neighbourId:focus.neighbourId});
+function settleTaskMoveFocus(taskId,focus){
+  if(focus.mode==='moved')return placeTaskMoveFocus(taskId,{neighbourKey:focus.neighbourKey});
   if(focus.mode!=='other')return;
   const target=focus.element.isConnected?focus.element:focus.locate?.();
   if(!target||document.activeElement===target)return;
   target.focus({preventScroll:true});
   if(focus.selection)try{target.setSelectionRange(...focus.selection);}catch{}
 }
-// folderId is the destination in the viewed project; undefined when the task left the project.
-function placeTaskMoveFocus(taskId,{folderId,neighbourId=null}={}){
+// Focus follows the moved row to its new place; failing that, its old neighbour, then the tree.
+function placeTaskMoveFocus(taskId,{neighbourKey=null}={}){
   const active=document.activeElement;
   if(active&&active!==document.body&&active.isConnected)return;
-  const view=content.querySelector('[data-project-folder-view]');
-  if(!view)return;
-  const id=value=>CSS.escape(value);
-  const target=view.querySelector(`.task-list > [data-project-task="${id(taskId)}"] [data-action="toggle-task"]`)||
-    (folderId===undefined?null:folderId?view.querySelector(`.data-list [data-action="folder-open"][data-id="${id(folderId)}"]`)||view.querySelector(`.import-breadcrumb [data-action="folder-open"][data-id="${id(folderId)}"]`):
-      view.querySelector('.import-breadcrumb [data-action="folder-root"]'))||
-    (neighbourId?view.querySelector(`.task-list > [data-project-task="${id(neighbourId)}"] [data-action="toggle-task"]`):null);
-  if(target){target.focus({preventScroll:true});return;}
-  const list=view.querySelector(':scope > .task-list');
+  if(focusTreeRow(`t:${taskId}`)||neighbourKey&&focusTreeRow(neighbourKey,{scroll:false}))return;
+  const list=content.querySelector('#project-list');
   if(!list)return;
   list.tabIndex=-1;
   list.focus({preventScroll:true});
@@ -975,12 +1224,10 @@ function clearFolderUndo(){
   folderUndo=null;
   document.querySelector('#workspace-folder-undo')?.replaceChildren();
 }
-
-function offerMoveUndo(message,undoExpiresAt,serverTime,available,perform){
+// One Undo at a time, for remaining ms; the click re-checks the window and that Undo still applies.
+function offerUndo(message,remaining,available,perform){
   clearFolderUndo();
   const target=document.querySelector('#workspace-folder-undo');
-  const expiry=Date.parse(undoExpiresAt);
-  const remaining=Math.min(10_000,expiry-Date.parse(serverTime));
   if(!target||!Number.isFinite(remaining)||remaining<=0)return;
   const undo={deadline:performance.now()+remaining};
   const control=document.createElement('button');
@@ -995,13 +1242,16 @@ function offerMoveUndo(message,undoExpiresAt,serverTime,available,perform){
   folderUndo=undo;
   folderUndoTimer=setTimeout(clearFolderUndo,remaining);
 }
-function offerFolderUndo(task,previousFolderId,undoExpiresAt,serverTime){
-  offerMoveUndo('Task moved',undoExpiresAt,serverTime,()=>canDragFolderTask(task),()=>moveFolderTask(task,previousFolderId,{}, {undo:true}));
+// Moves follow the server's Undo window (10 s at most), measured on the server clock.
+function offerMoveUndo(message,undoExpiresAt,serverTime,available,perform){
+  return offerUndo(message,Math.min(10_000,Date.parse(undoExpiresAt)-Date.parse(serverTime)),available,perform);
 }
-
+function offerFolderUndo(task,previousFolderId,undoExpiresAt,serverTime,message='Task moved'){
+  offerMoveUndo(message,undoExpiresAt,serverTime,()=>canDragFolderTask(task),()=>moveFolderTask(task,previousFolderId,{}, {undo:true}));
+}
 async function moveFolderTask(task,folderId,receipt,{undo=false,originActive=()=>true,onSuccess}={}){
   if(!canDragFolderTask(task)||folderId===task.folderId)return;
-  const authorized=folderAuthorizationGuard(task.projectId,'viewer.processing.write');
+  const authorized=folderAuthorizationGuard(task.projectId,'viewer.processing.write',{open:false});
   const current=()=>authorized()&&originActive()&&state.tasks.some(value=>value.id===task.id&&value.projectId===task.projectId&&value.status!=='archived');
   const body={folderId,expectedFolderId:task.folderId??null,expectedFolderRevision:task.folderRevision,...(undo?{undo:true}:{})};
   const result=await mutateFolder(task.projectId,`/api/v1/tasks/${encodeURIComponent(task.id)}/folder`,folderRequestOptions('PATCH',body,receipt),
@@ -1012,65 +1262,82 @@ async function moveFolderTask(task,folderId,receipt,{undo=false,originActive=()=
       projectDataGeneration++;
       const focus=captureTaskMoveFocus(task.id);
       state.tasks=state.tasks.map(value=>value.id===updated.id?{...value,...updated}:value);
+      revealTaskDestination(task.projectId,folderId);
       syncSelectedTaskFolder(task.projectId);
-      projectPaintPending=patchProjectFolderView({movedTaskId:task.id});
+      projectPaintPending=patchProjectTree(task.projectId,{movedTaskId:task.id})||projectPaintPending;
       onSuccess?.();
-      settleTaskMoveFocus(task.id,focus,folderId);
-      if(!undo)offerFolderUndo(updated,body.expectedFolderId,undoExpiresAt,serverTime);
+      settleTaskMoveFocus(task.id,focus);
+      flashTreeRow(`t:${task.id}`);
+      const where=treeLocationLabel(task.projectId,folderId);
+      announce(`${undo?'Moved back':'Moved'} ${task.displayName||'the task'} to ${where}.`);
+      if(!undo)offerFolderUndo(updated,body.expectedFolderId,undoExpiresAt,serverTime,`Task moved to ${where}`);
     },false);
   // Conflicts and lost responses also require a fresh server read.
   scheduleProjectRefresh(0);
   return result;
 }
 
+// ---- Drag and drop (desktop pointer): the whole task row or its grip ----
 function clearTaskDrag(){
-  draggedFolderTask=null;
-  content.querySelector('[data-folder-drop-destinations]')?.remove();
+  draggedFolderTask=null;clearTimeout(treeDragExpandTimer);treeDragExpandTimer=null;treeDragHover=null;
+  document.body.classList.remove('tree-dragging');
   content.querySelectorAll('.folder-drop-active').forEach(element=>element.classList.remove('folder-drop-active'));
+  content.querySelectorAll('.tree-drag-source').forEach(element=>element.classList.remove('tree-drag-source'));
 }
-
 function beginTaskDrag(event){
-  const handle=event.target.closest('[data-folder-drag]');
+  const handle=event.target.closest?.('[data-folder-drag]');
   if(!handle)return;
+  if(event.target.closest('input,textarea,select,details[open]')){event.preventDefault();return;}
   const task=state.tasks.find(value=>value.id===handle.dataset.id);
-  const view=content.querySelector('[data-project-folder-view]');
-  if(!task||!view||!event.dataTransfer||!canDragFolderTask(task)){event.preventDefault();return;}
-  clearTaskDrag();
+  if(!task||!event.dataTransfer||!canDragFolderTask(task)||!treeDragAvailable()){event.preventDefault();return;}
+  clearTaskDrag();closeTreeMenus();
   draggedFolderTask=task;
   event.dataTransfer.effectAllowed='move';
   event.dataTransfer.setData('text/plain','Viewer task');
-  const destinations=document.createElement('div');
-  destinations.dataset.folderDropDestinations='';
-  destinations.className='folder-drop-destinations';
-  const label=document.createElement('strong');label.textContent='Drop task into';destinations.append(label);
-  for(const folder of [{id:null,displayName:'Project root'},...folderState.folders]){
-    if(folder.id===task.folderId)continue;
-    const target=document.createElement('span');
-    target.dataset.taskDropFolder=folder.id||'';
-    target.textContent=folder.id?folderPath(folderState.folders,folder.id).map(item=>item.displayName).join(' / '):folder.displayName;
-    destinations.append(target);
-  }
-  const otherProjects=canMoveTaskAcrossProjects()?state.projects.filter(project=>project.status==='active'&&project.id!==task.projectId):[];
-  if(otherProjects.length){
-    const projectLabel=document.createElement('strong');projectLabel.textContent='Or another project';destinations.append(projectLabel);
-    for(const project of otherProjects){
-      const target=document.createElement('span');
-      target.dataset.taskDropProject=project.id;
-      target.textContent=project.displayName;
-      destinations.append(target);
-    }
-  }
-  view.append(destinations);
+  const row=handle.closest('.task-panel');
+  requestAnimationFrame(()=>{if(draggedFolderTask!==task)return;document.body.classList.add('tree-dragging');row?.classList.add('tree-drag-source');});
 }
-
+// A project row (top level), a folder row or an empty folder; never the task's current place.
 function taskDropTarget(event){
-  const project=event.target.closest('[data-task-drop-project]');
-  if(project&&draggedFolderTask&&canDragFolderTask(draggedFolderTask)&&canMoveTaskAcrossProjects()&&
-    project.dataset.taskDropProject!==draggedFolderTask.projectId&&state.projects.some(item=>item.id===project.dataset.taskDropProject&&item.status==='active'))return project;
-  const dest=event.target.closest('[data-task-drop-folder]');
-  const task=draggedFolderTask,folderId=dest?.dataset.taskDropFolder||null;
-  return dest&&task&&canDragFolderTask(task)&&task.folderId!==folderId&&
-    (folderId===null||folderState.folders.some(folder=>folder.id===folderId))?dest:null;
+  const task=draggedFolderTask,element=event.target.closest?.('[data-task-drop-project]');
+  if(!task||!element||!content.contains(element)||!canDragFolderTask(task))return null;
+  const projectId=element.dataset.taskDropProject,folderId=element.dataset.taskDropFolder||null;
+  if(!state.projects.some(project=>project.id===projectId&&project.status==='active'))return null;
+  if(folderId&&!folderCache.get(projectId)?.folders?.some(folder=>folder.id===folderId))return null;
+  if(projectId===task.projectId)return(task.folderId||null)===folderId?null:{element,projectId,folderId};
+  return canMoveTaskAcrossProjects()?{element,projectId,folderId}:null;
+}
+function setTreeDragHover(element){
+  if(treeDragHover===element)return;
+  treeDragHover?.classList.remove('folder-drop-active');clearTimeout(treeDragExpandTimer);treeDragExpandTimer=null;
+  treeDragHover=element;
+  if(!element)return;
+  element.classList.add('folder-drop-active');
+  // A closed folder or project opens after a short hover, so a drop can go deeper.
+  if(element.getAttribute('aria-expanded')==='false')treeDragExpandTimer=setTimeout(()=>expandDuringDrag(element),700);
+}
+function expandDuringDrag(element){
+  treeDragExpandTimer=null;
+  if(!draggedFolderTask||!element.isConnected)return;
+  const key=element.dataset.treeKey||'',projectId=element.dataset.treeProject,project=state.projects.find(item=>item.id===projectId);
+  if(!project)return;
+  if(key.startsWith('f:')){treeState.folders.add(key.slice(2));saveTreeState();projectPaintPending=patchProjectTree(projectId)||projectPaintPending;return;}
+  const article=element.closest('.project-row');
+  treeState.projects.add(projectId);saveTreeState();
+  if(!article||article.querySelector('[data-tree-body]'))return;
+  article.classList.add('selected');
+  article.insertAdjacentHTML('beforeend',projectTree(project));
+  syncProjectHead(project);
+  bindProjectActions(article);
+}
+async function dropTaskOnProject(task,projectId,folderId){
+  let confirmSharingChange=false;
+  if(taskHasPublishedOutput(task)){
+    const from=state.projects.find(project=>project.id===task.projectId)?.displayName||'the current project',to=state.projects.find(project=>project.id===projectId)?.displayName||'the other project';
+    if(!await dialogs.confirm(`This task is published. Moving it to ${to} removes it from the shares of ${from} and shows it to clients of ${to}.`,{title:'Move published task',submitLabel:'Move and change access'}))return;
+    confirmSharingChange=true;
+  }
+  return moveProjectTask(task,projectId,folderId,{}, {confirmSharingChange});
 }
 
 function canMoveTaskAcrossProjects(){
@@ -1082,17 +1349,18 @@ function taskHasPublishedOutput(task){
 function folderPickerOptions(folders,selectedId){
   return`<option value="">Project root</option>${folders.map(folder=>`<option value="${esc(folder.id)}" ${folder.id===selectedId?'selected':''}>${esc(folderPath(folders,folder.id).map(item=>item.displayName).join(' / '))}</option>`).join('')}`;
 }
+function phoneLayout(){return typeof matchMedia==='function'&&matchMedia('(max-width:720px)').matches}
 function moveTaskFolderModal(taskId,{projectId:initialProjectId=null}={}){
-  const task=state.tasks.find(item=>item.id===taskId),folders=folderState.folders;
+  const task=state.tasks.find(item=>item.id===taskId),folders=task&&folderCache.get(task.projectId)?.folders;
   if(!task||!folders||!canDragFolderTask(task))return;
-  const authorized=folderAuthorizationGuard(task.projectId,'viewer.processing.write');if(!authorized())return;
+  const authorized=folderAuthorizationGuard(task.projectId,'viewer.processing.write',{open:false});if(!authorized())return;
   const projects=canMoveTaskAcrossProjects()?state.projects.filter(project=>project.status==='active'):state.projects.filter(project=>project.id===task.projectId);
   const startProject=projects.some(project=>project.id===initialProjectId)?initialProjectId:task.projectId,published=taskHasPublishedOutput(task);
   const projectField=projects.length>1
     ?`<label><span>Project</span><select name="projectId">${projects.map(project=>`<option value="${esc(project.id)}" ${project.id===startProject?'selected':''}>${esc(project.displayName)}${project.id===task.projectId?' (current)':''}</option>`).join('')}</select></label>`
     :`<input type="hidden" name="projectId" value="${esc(task.projectId)}">`;
-  openModal('Move task',`<form id="folder-move-form" class="manage-form task-move-form"><p>Choose where <strong>${esc(task.displayName)}</strong> should go.</p>${projectField}<label><span>Folder</span><select name="folderId">${folderPickerOptions(folders,task.folderId)}</select></label><p class="form-note" data-move-folder-status role="status" hidden></p><div class="task-move-project-note" data-move-project-note hidden><p class="form-note">Its source photos, processing history and outputs move with it.</p>${published?`<label class="task-move-confirm"><input type="checkbox" name="confirmSharingChange"><span>This task is published. Clients who see it through the current project's shares lose access, and clients of the new project gain it.</span></label>`:''}</div><button class="primary-button">Move task</button></form>`);
-  const form=modalContent.querySelector('#folder-move-form'),receipt={},folderCache=new Map([[task.projectId,folders]]);
+  openModal('Move task',`<form id="folder-move-form" class="manage-form task-move-form"><p>Choose where <strong>${esc(task.displayName)}</strong> should go.</p>${projectField}<label><span>Folder</span><select name="folderId">${folderPickerOptions(folders,task.folderId)}</select></label><p class="form-note" data-move-folder-status role="status" hidden></p><div class="task-move-project-note" data-move-project-note hidden><p class="form-note">Its source photos, processing history and outputs move with it.</p>${published?`<label class="task-move-confirm"><input type="checkbox" name="confirmSharingChange"><span>This task is published. Clients who see it through the current project's shares lose access, and clients of the new project gain it.</span></label>`:''}</div><button class="primary-button">Move task</button></form>`,phoneLayout()?'sheet-modal':'');
+  const form=modalContent.querySelector('#folder-move-form'),receipt={},pickerFolders=new Map([[task.projectId,folders]]);
   const folderSelect=form.elements.folderId,submit=form.querySelector('button.primary-button'),status=form.querySelector('[data-move-folder-status]'),note=form.querySelector('[data-move-project-note]');
   let folderRequest=0;
   const current=()=>authorized()&&form.isConnected&&state.tasks.some(value=>value.id===taskId&&value.projectId===task.projectId&&value.status!=='archived')&&state.projects.some(project=>project.id===task.projectId&&project.status==='active');
@@ -1101,14 +1369,14 @@ function moveTaskFolderModal(taskId,{projectId:initialProjectId=null}={}){
     // A sharing confirmation covers one destination only; changing the project asks again.
     if(form.elements.confirmSharingChange)form.elements.confirmSharingChange.checked=false;
     note.hidden=!other;status.hidden=true;
-    if(folderCache.has(projectId)){folderSelect.innerHTML=folderPickerOptions(folderCache.get(projectId),other?null:task.folderId);folderSelect.disabled=false;submit.disabled=false;return;}
+    if(pickerFolders.has(projectId)){folderSelect.innerHTML=folderPickerOptions(pickerFolders.get(projectId),other?null:task.folderId);folderSelect.disabled=false;submit.disabled=false;return;}
     folderSelect.disabled=true;submit.disabled=true;folderSelect.innerHTML='<option value="">Loading folders…</option>';
     try{
       const response=await api(`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,{recoveryGuard:current});
       if(request!==folderRequest||!current())return;
       if(!Array.isArray(response.folders))throw Error('Invalid folder response.');
-      folderCache.set(projectId,response.folders.filter(folder=>folder.projectId===projectId));
-      folderSelect.innerHTML=folderPickerOptions(folderCache.get(projectId),null);folderSelect.disabled=false;submit.disabled=false;
+      pickerFolders.set(projectId,response.folders.filter(folder=>folder.projectId===projectId));
+      folderSelect.innerHTML=folderPickerOptions(pickerFolders.get(projectId),null);folderSelect.disabled=false;submit.disabled=false;
     }catch(error){
       if(request!==folderRequest||!current())return;
       folderSelect.innerHTML='<option value="">Project root</option>';folderSelect.disabled=false;submit.disabled=false;
@@ -1129,14 +1397,13 @@ function moveTaskFolderModal(taskId,{projectId:initialProjectId=null}={}){
   };
 }
 async function moveProjectTask(task,projectId,folderId,receipt,{undo=false,confirmSharingChange=false,originActive=()=>true,onSuccess}={}){
-  const viewProjectId=state.selectedProjectId;
-  if(!viewProjectId||!canMoveTaskAcrossProjects()||task.status==='archived'||!Number.isSafeInteger(task.folderRevision)||projectId===task.projectId)return;
-  const authorized=folderAuthorizationGuard(viewProjectId,'viewer.processing.write',false);
+  if(!canMoveTaskAcrossProjects()||task.status==='archived'||!Number.isSafeInteger(task.folderRevision)||projectId===task.projectId)return;
+  const authorized=folderAuthorizationGuard(task.projectId,'viewer.processing.write',{open:false});
   const current=()=>authorized()&&originActive()&&canMoveTaskAcrossProjects()&&state.tasks.some(value=>value.id===task.id&&value.projectId===task.projectId&&value.status!=='archived');
   const body={projectId,folderId,expectedProjectId:task.projectId,expectedFolderId:task.folderId??null,expectedFolderRevision:task.folderRevision,...(undo?{undo:true}:{}),confirmSharingChange};
   const destination=state.projects.find(project=>project.id===projectId)?.displayName||'the other project';
   let moved=null,focus={mode:'none'};
-  const result=await mutateFolder(viewProjectId,`/api/v1/tasks/${encodeURIComponent(task.id)}/project`,folderRequestOptions('PATCH',body,receipt),
+  const result=await mutateFolder(task.projectId,`/api/v1/tasks/${encodeURIComponent(task.id)}/project`,folderRequestOptions('PATCH',body,receipt),
     undo?'Task moved back':null,current,({task:updated,undoExpiresAt,serverTime}={})=>{
       if(updated?.id!==task.id||updated.projectId!==projectId||(updated.folderId??null)!==folderId||updated.folderRevision!==task.folderRevision+1){
         throw Error('Task move could not be confirmed. Check which project the task is in.');
@@ -1147,12 +1414,17 @@ async function moveProjectTask(task,projectId,folderId,receipt,{undo=false,confi
       state.outputs=state.outputs.map(output=>output.taskId===updated.id?{...output,projectId}:output);
       state.datasets=state.datasets.map(dataset=>dataset.id===updated.datasetId?{...dataset,projectId}:dataset);
       if(state.expandedTaskId===updated.id&&state.selectedProjectId!==projectId){state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('replace');}
+      revealTaskDestination(projectId,folderId);
       moved={updated,undoExpiresAt,serverTime};
       onSuccess?.();
     },false);
   if(moved){
+    // The destination project opens with the task's folder; its folders load first when needed.
+    if(!folderCache.get(projectId)?.folders&&isProjectOpen(projectId))await loadProjectFolders(projectId);
     render();
-    settleTaskMoveFocus(task.id,focus,projectId===state.selectedProjectId?folderId:undefined);
+    settleTaskMoveFocus(task.id,focus);
+    flashTreeRow(`t:${task.id}`);
+    announce(`${undo?'Moved back':'Moved'} ${task.displayName||'the task'} to ${treeLocationLabel(projectId,folderId)}.`);
     if(!undo){
       const previousProjectId=task.projectId,previousFolderId=task.folderId??null,updated=moved.updated;
       offerMoveUndo(`Task moved to ${destination}`,moved.undoExpiresAt,moved.serverTime,
@@ -1172,6 +1444,145 @@ async function moveProjectTask(task,projectId,folderId,receipt,{undo=false,confi
   scheduleProjectRefresh(0);
   return result;
 }
+// ---- Delete a task: Recycle Bin with Undo ----
+// Without a confirmation: the task and its owned source and outputs go to the Recycle Bin and
+// Undo restores them for 10 s. A published task still asks first, because deleting it removes it
+// from client shares at once and restoring does not publish it again; so does an account that
+// cannot restore from the Recycle Bin.
+async function deleteTaskWithUndo(taskId){
+  const task=state.tasks.find(item=>item.id===taskId);
+  if(!task||state.busy||!can('viewer.processing.write'))return;
+  const path=`/api/v1/tasks/${encodeURIComponent(task.id)}`;
+  if(taskHasPublishedOutput(task))return trashMutation(`This task is published. Deleting it removes it from client shares now, and restoring it later does not publish it again. It can be restored until ${purgeDate(30)}; after that date it will be permanently purged.`,path,'Task moved to Recycle Bin');
+  if(!can('viewer.storage.purge'))return trashMutation(`Delete this task and its exclusively owned dataset and outputs? It can be restored until ${purgeDate(30)}; after that date it will be permanently purged.`,path,'Task moved to Recycle Bin');
+  const authorized=folderAuthorizationGuard(task.projectId,'viewer.processing.write',{open:false});
+  state.busy=true;shell.setAttribute('aria-busy','true');
+  let result=null;
+  try{result=await api(path,{method:'DELETE',body:{},recoveryGuard:authorized});}
+  catch(error){if(authorized())toast(error.message,true);}
+  finally{state.busy=false;shell.removeAttribute('aria-busy');}
+  if(!result||!authorized())return;
+  projectDataGeneration++;
+  const key=`t:${task.id}`,focus=captureTaskMoveFocus(task.id),wasExpanded=state.expandedTaskId===task.id;
+  state.tasks=state.tasks.filter(item=>item.id!==task.id);
+  if(wasExpanded){state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('replace');render();}
+  else projectPaintPending=patchProjectTree(task.projectId,{movedTaskId:task.id})||projectPaintPending;
+  if(focus.mode==='moved'||wasExpanded&&focus.mode==='none')placeTaskMoveFocus(task.id,{neighbourKey:focus.neighbourKey||`p:${task.projectId}`});
+  else settleTaskMoveFocus(task.id,focus);
+  announce(`Moved ${task.displayName||'the task'} to the Recycle Bin.`);
+  // The Recycle Bin view reads storage; refresh it quietly so the deleted task is listed there.
+  void pagedStorage().then(storage=>{state.storage=storage;if(state.section==='trash')render();}).catch(()=>{});
+  const trashId=result.trash?.id;
+  if(!trashId)return;
+  offerUndo('Task moved to Recycle Bin',10_000,()=>can('viewer.storage.purge'),async()=>{
+    state.busy=true;shell.setAttribute('aria-busy','true');
+    try{await api(`/api/v1/storage/trash/${encodeURIComponent(trashId)}/restore`,{method:'POST',body:{}});}
+    catch(error){toast(error.message,true);return;}
+    finally{state.busy=false;shell.removeAttribute('aria-busy');}
+    const hadFocus=focus.mode==='moved';
+    await load();
+    if(hadFocus)focusTreeRow(key);
+    flashTreeRow(key);
+    announce(`Restored ${task.displayName||'the task'}.`);
+    toast('Task restored');
+  });
+}
+
+// ---- Keyboard: treegrid with one tab stop ----
+function treeRowControls(row){
+  if(row.matches('.task-panel'))return[...row.querySelectorAll(':scope > .task-summary .task-quick-actions > button, :scope > .task-summary .task-quick-actions > details > summary')];
+  return[...row.querySelectorAll(':scope .row-actions > button, :scope .row-actions > details > summary')];
+}
+function openTreeRowMenu(row){
+  const menu=[...row.querySelectorAll('details.tree-menu')].find(item=>!item.closest('.task-detail-shell'));
+  if(!menu)return;
+  closeTreeMenus(menu);menu.open=true;
+  menu.querySelector('.project-more-menu button:not(:disabled)')?.focus();
+}
+function treeMenuKeys(event,menu){
+  const items=[...menu.querySelectorAll('.project-more-menu > button:not(:disabled)')].filter(item=>item.getClientRects().length);
+  const index=items.indexOf(document.activeElement);
+  if(event.key==='ArrowDown'){menu.open=true;items[(index+1)%items.length]?.focus();}
+  else if(event.key==='ArrowUp'){menu.open=true;items[(index-1+items.length)%items.length]?.focus();}
+  else if(event.key==='Home'&&index>-1)items[0]?.focus();
+  else if(event.key==='End'&&index>-1)items.at(-1)?.focus();
+  else if(event.key==='Escape'){menu.open=false;menu.querySelector('summary')?.focus();}
+  else if(event.key==='Tab'){menu.open=false;return false;}
+  else return false;
+  event.preventDefault();event.stopPropagation();
+  return true;
+}
+function treeKeydown(event){
+  const inline=event.target.closest?.('.tree-inline-name');
+  if(inline){
+    if(event.key==='Enter'){event.preventDefault();void commitTreeName(inline);}
+    else if(event.key==='Escape'){event.preventDefault();event.stopPropagation();void commitTreeName(inline,true);}
+    return;
+  }
+  if(!event.target.closest?.('#project-list')||event.target.closest('.task-detail-shell'))return;
+  const menu=event.target.closest('details.tree-menu');
+  if(menu&&treeMenuKeys(event,menu))return;
+  const row=event.target.closest('[data-tree-key]');if(!row)return;
+  const target=row.querySelector('[data-tree-focus]'),key=row.dataset.treeKey;
+  if(event.target!==target){
+    // On a control in the row: Left/Right step between the row's controls, Escape returns to the row.
+    const controls=treeRowControls(row),index=controls.indexOf(event.target);
+    if(event.key==='ArrowRight'&&index>-1){event.preventDefault();controls[Math.min(index+1,controls.length-1)].focus();}
+    else if(event.key==='ArrowLeft'&&index>-1){event.preventDefault();(index>0?controls[index-1]:target)?.focus();}
+    else if(event.key==='Escape'&&index>-1){event.preventDefault();target?.focus();}
+    return;
+  }
+  const targets=[...content.querySelectorAll('#project-list [data-tree-focus]')].filter(item=>item.getClientRects().length);
+  const rows=targets.map(item=>{const owner=item.closest('[data-tree-key]');return{key:owner.dataset.treeKey,level:Number(owner.getAttribute('aria-level'))||1,expandable:/^[pf]:/.test(owner.dataset.treeKey),expanded:owner.getAttribute('aria-expanded')==='true'};});
+  const index=targets.indexOf(target),move=treeKeyAction(rows,index,event.key);
+  if(move){
+    event.preventDefault();
+    if(move.focus!==undefined)focusTreeRow(rows[move.focus].key);
+    else if(move.toggle)target.click();
+    else if(move.controls)treeRowControls(row).find(item=>item.getClientRects().length)?.focus();
+    return;
+  }
+  const [kind,id]=[key.slice(0,1),key.slice(2)];
+  if(event.key==='F2'){
+    event.preventDefault();
+    if(kind==='f')startFolderRename(row.dataset.treeProject,id);
+    else if(kind==='t'&&can('viewer.processing.write'))editTask(id);
+    else if(kind==='p'&&can('viewer.projects.write'))editProject(id);
+  }else if(event.key==='ContextMenu'||event.key==='F10'&&event.shiftKey){event.preventDefault();openTreeRowMenu(row);}
+  else if(event.key==='Delete'&&kind==='t'){event.preventDefault();void deleteTaskWithUndo(id);}
+}
+content.addEventListener('keydown',treeKeydown);
+content.addEventListener('focusin',event=>{
+  const target=event.target.closest?.('#project-list [data-tree-focus]');
+  if(!target)return;
+  const key=target.closest('[data-tree-key]')?.dataset.treeKey;
+  if(key&&key!==treeCurrentKey){treeCurrentKey=key;syncTreeTabStop();}
+});
+content.addEventListener('focusout',event=>{
+  const input=event.target.closest?.('.tree-inline-name');
+  // Leaving the name saves it, like pressing Enter; switching windows does not.
+  if(input&&document.hasFocus())setTimeout(()=>{if(input.isConnected&&!input.disabled)void commitTreeName(input);},0);
+});
+// On phones a row menu opens as a bottom sheet. The project list is a size container, which would
+// hold a fixed menu inside it, so the sheet goes to the top layer as a popover.
+content.addEventListener('toggle',event=>{
+  const menu=event.target;
+  if(!(menu instanceof HTMLDetailsElement)||!menu.matches('.tree-menu'))return;
+  const panel=menu.querySelector(':scope > .project-more-menu');
+  if(menu.open){
+    closeTreeMenus(menu);
+    if(panel&&phoneLayout()&&typeof panel.showPopover==='function'){panel.popover='manual';try{panel.showPopover();}catch{panel.removeAttribute('popover');}}
+  }else if(panel?.hasAttribute('popover')){try{panel.hidePopover();}catch{}panel.removeAttribute('popover');}
+},true);
+document.addEventListener('click',event=>{if(!event.target.closest?.('details.tree-menu'))closeTreeMenus();});
+document.addEventListener('keydown',event=>{
+  if(event.key==='Escape'&&content.querySelector('details.tree-menu[open]')&&!modal.open)closeTreeMenus();
+  // Ctrl+Z (Cmd+Z) runs the offered Undo, except while typing.
+  if((event.ctrlKey||event.metaKey)&&!event.shiftKey&&event.key.toLowerCase()==='z'&&folderUndo&&!modal.open&&!event.target.closest?.('input,textarea,select,[contenteditable]')){
+    const control=document.querySelector('#workspace-folder-undo .toast-action');
+    if(control){event.preventDefault();control.click();}
+  }
+});
 function legacyImportModal(projectId,datasetId){const project=state.projects.find(item=>item.id===(projectId||state.datasets.find(dataset=>dataset.id===datasetId)?.projectId)),drafts=state.datasets.filter(dataset=>dataset.projectId===project?.id&&dataset.status==='draft');openModal(`Import into ${project?.displayName||'project'}`,`<div class="import-choice" role="tablist" aria-label="Import source"><button class="import-tab active" data-import-tab="device">This device</button><button class="import-tab" data-import-tab="server">Server import folder</button></div><section data-import-panel="device"><form id="upload-form" class="manage-form">${select('Draft dataset','datasetId',opts(drafts,'Select a draft'))}<label><span>Artifact role</span><select name="processingRole"><option value="auto">Detect automatically</option><option value="image">Source imagery</option><option value="provider_input">Model / orthophoto / point cloud</option><option value="gcp_source">GCP source</option></select></label>${field('Files','files','required type="file" multiple')}<button class="primary-button">Upload or resume</button><progress id="upload-progress" value="0" max="100"></progress></form><p class="form-note">Browser uploads are limited to 128 files, 64 MB each, and 256 MB total.</p></section><section data-import-panel="server" hidden><form id="server-import-form" class="manage-form"><input type="hidden" name="projectId" value="${esc(project?.id||'')}">${field('Task name','taskDisplayName','required maxlength="240"')}${field('Folder or backup ZIP','sourceRelativePath','required placeholder="incoming/task-folder or task.zip"')}<button class="primary-button">Queue structured task import</button></form><p class="form-note">This immediately queues a durable import from the managed server folder. The worker validates the folder or ZIP, detects supported task artifacts, and creates the task only after validation; there is no preview step.</p></section>`);modalContent.querySelectorAll('[data-import-tab]').forEach(tab=>tab.onclick=()=>{modalContent.querySelectorAll('[data-import-tab]').forEach(item=>item.classList.toggle('active',item===tab));modalContent.querySelectorAll('[data-import-panel]').forEach(panel=>panel.hidden=panel.dataset.importPanel!==tab.dataset.importTab)});const upload=modalContent.querySelector('#upload-form');if(datasetId)upload.elements.datasetId.value=datasetId;upload.onsubmit=event=>{event.preventDefault();uploadFiles(upload)};modalContent.querySelector('#server-import-form').onsubmit=event=>{event.preventDefault();modal.close();mutate('/api/v1/processing/server-task-imports',{method:'POST',body:values(event.currentTarget),headers:{'Idempotency-Key':crypto.randomUUID()}},'Server-folder import queued')}}
 async function renderServerImportBrowser(path=''){
   const browser=modalContent.querySelector('#server-import-browser'),selection=modalContent.querySelector('input[name="sourceRelativePath"]'),submit=modalContent.querySelector('#server-import-form button[type="submit"]');
@@ -1615,25 +2026,31 @@ content.addEventListener('dragstart',beginTaskDrag);
 content.addEventListener('dragover',event=>{
   if(!draggedFolderTask)return;
   const target=taskDropTarget(event);
-  content.querySelectorAll('.folder-drop-active').forEach(element=>{if(element!==target)element.classList.remove('folder-drop-active');});
-  if(!target)return;
+  setTreeDragHover(target?.element||null);
+  if(!target){if(event.dataTransfer)event.dataTransfer.dropEffect='none';return;}
   event.preventDefault();
   event.dataTransfer.dropEffect='move';
-  target.classList.add('folder-drop-active');
+});
+// Near the top or bottom edge a drag scrolls the page; outside the tree nothing is highlighted.
+document.addEventListener('dragover',event=>{
+  if(!draggedFolderTask)return;
+  if(!content.contains(event.target))setTreeDragHover(null);
+  const top=(document.querySelector('.workspace-header')?.getBoundingClientRect().bottom||0)+48;
+  if(event.clientY<top)window.scrollBy(0,-16);else if(event.clientY>innerHeight-48)window.scrollBy(0,16);
 });
 content.addEventListener('drop',event=>{
-  const target=taskDropTarget(event),task=draggedFolderTask;
-  if(!target)return;
+  const task=draggedFolderTask,target=taskDropTarget(event);
+  if(!task||!target)return;
   event.preventDefault();
   clearTaskDrag();
-  // A project drop opens the picker on that project: the folder choice and any sharing confirmation stay explicit.
-  if(target.dataset.taskDropProject)return moveTaskFolderModal(task.id,{projectId:target.dataset.taskDropProject});
-  void moveFolderTask(task,target.dataset.taskDropFolder||null,{});
+  if(target.projectId===task.projectId)return void moveFolderTask(task,target.folderId,{});
+  // Another project: straight through, unless the task is published (client access changes).
+  void dropTaskOnProject(task,target.projectId,target.folderId);
 });
 content.addEventListener('dragend',()=>{
   if(!draggedFolderTask)return;
   clearTaskDrag();
-  if(projectPaintPending)projectPaintPending=patchProjectFolderView();
+  if(projectPaintPending)projectPaintPending=repaintOpenProjects();
 });
 
 installWorkspaceSidebar({shell,toggle:document.querySelector('#nav-toggle'),collapseButton:document.querySelector('#nav-collapse'),container:document.querySelector('#workspace-navigation'),rerender:renderNav});

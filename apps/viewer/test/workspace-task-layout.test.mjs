@@ -11,11 +11,11 @@ function sourceBetween(startMarker,endMarker){
   assert.ok(start>=0&&end>start,`Missing shipped declaration boundaries: ${startMarker}`);
   return source.slice(start,end);
 }
-const names=['LIVE_ATTEMPT_STATUSES','VIEWER_SUBMISSION_STATUSES','NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','taskPhaseCounts','esc','available','empty','field','button','dangerButton','badge','duration','durationFromMs','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','countLabel','activityChip','taskNeedsAttention','taskTimestamp','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render'];
+const names=['LIVE_ATTEMPT_STATUSES','VIEWER_SUBMISSION_STATUSES','NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','taskPhaseCounts','esc','available','empty','field','button','dangerButton','badge','duration','durationFromMs','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','countLabel','activityChip','taskNeedsAttention','taskTimestamp','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render','MENU_SEPARATOR','TREE_GRIP','menuItem','treeMenu','treeIcon','treeDragAvailable','treeRowAttributes','canWriteFolders','isProjectOpen'];
 function fixture(permissions=['viewer.gcp.read','viewer.gcp.write','viewer.processing.write','viewer.processing.publish','viewer.shares.create','viewer.storage.purge']){
 const task={id:'task',projectId:'project',datasetId:'dataset',displayName:'Church <test>',createdAt:'2026-09-01',status:'ready_for_review',latestAttempt:{id:'active',status:'ready_for_review',providerId:'provider'},metrics:{sourceImageCount:20}},dataset={id:'dataset',status:'finalized',displayName:'Source'},state={section:'dashboard',selectedProjectId:'project',expandedTaskId:'task',taskPage:null,projects:[{id:'project',displayName:'Site',status:'active'}],tasks:[task],datasets:[dataset],outputs:[],providers:[{id:'provider',displayName:'Processing node'}],presets:[],taskDetails:{task:{task,gcp:{sets:[]},storage:{task:{totalBytes:4096}}}}},events=[],listeners={};
   const content={innerHTML:''},title={textContent:''},location={origin:'https://viewer.test',href:'https://viewer.test/workspace?section=dashboard&project=project&task=task'};
-const context=vm.createContext({state,selectedFolderId:null,projectDataGeneration:0,draggedFolderTask:null,scheduleProjectRefresh:()=>{},canDragFolderTask:()=>false,folderState:{projectId:task.projectId,currentId:null,folders:[],error:null,loading:false,epoch:0},URL,URLSearchParams,location,history:{pushState:(_state,_unused,url)=>{events.push(['push',url]);location.href=new URL(url,location.origin).href;},replaceState:(_state,_unused,url)=>{events.push(['replace',url]);location.href=new URL(url,location.origin).href;}},WORKSPACE_SECTIONS:new Set(['dashboard','providers','background','trash','diagnostics']),NAV:[['dashboard','x','Dashboard']],can:permission=>permissions.includes(permission),bytes:value=>`${value} B`,dateTime:value=>String(value),formatGsd:value=>`${value} GSD`,formatArea:value=>`${value} area`,groupedNumber:value=>String(value),orthophotoPreview:()=>'<figure class="orthophoto-preview">Ortho</figure>',canShareOutput:()=>false,lodAction:()=>'',taskLodNotice:()=>'',gcpWorkspace:()=>({}),gcpPointName:point=>point?.id||'',gcpImageName:image=>image?.id||'',gcpMarkerStyle:()=>'',releaseAllGcpImages:()=>events.push(['release-images']),shell:{classList:{remove:()=>{}}},refreshTaskDetails:taskId=>events.push(['hydrate',taskId]),content,document:{querySelector:selector=>selector==='#page-title'?title:null},renderNav:()=>{},updateActivityIndicator:()=>{},bind:()=>{},bindTaskDisclosures:()=>{},hydrateOrthophotoPreviews:()=>{},storageUsagePoll:{sync:()=>{}},clearInterval:()=>{},setInterval:()=>1,dashboard:()=>'<div>Dashboard</div>',background:()=>'',providers:()=>'',trash:()=>'',diagnostics:()=>'',addEventListener:(name,listener)=>{listeners[name]=listener;}});
+const context=vm.createContext({state,projectDataGeneration:0,draggedFolderTask:null,scheduleProjectRefresh:()=>{},canDragFolderTask:()=>false,folderCache:new Map([[task.projectId,{folders:[],error:null,loading:false}]]),treeState:{projects:new Set(),folders:new Set()},treeReveals:new Map(),saveTreeState:()=>{},revealTreeFolder:()=>false,loadTreeState:()=>{},treeFocusKey:()=>null,syncTreeTabStop:()=>{},restoreTreeFocus:()=>{},URL,URLSearchParams,location,history:{pushState:(_state,_unused,url)=>{events.push(['push',url]);location.href=new URL(url,location.origin).href;},replaceState:(_state,_unused,url)=>{events.push(['replace',url]);location.href=new URL(url,location.origin).href;}},WORKSPACE_SECTIONS:new Set(['dashboard','providers','background','trash','diagnostics']),NAV:[['dashboard','x','Dashboard']],can:permission=>permissions.includes(permission),bytes:value=>`${value} B`,dateTime:value=>String(value),formatGsd:value=>`${value} GSD`,formatArea:value=>`${value} area`,groupedNumber:value=>String(value),orthophotoPreview:()=>'<figure class="orthophoto-preview">Ortho</figure>',canShareOutput:()=>false,lodAction:()=>'',taskLodNotice:()=>'',gcpWorkspace:()=>({}),gcpPointName:point=>point?.id||'',gcpImageName:image=>image?.id||'',gcpMarkerStyle:()=>'',releaseAllGcpImages:()=>events.push(['release-images']),shell:{classList:{remove:()=>{}}},refreshTaskDetails:taskId=>events.push(['hydrate',taskId]),content,document:{querySelector:selector=>selector==='#page-title'?title:null},renderNav:()=>{},updateActivityIndicator:()=>{},bind:()=>{},bindTaskDisclosures:()=>{},hydrateOrthophotoPreviews:()=>{},storageUsagePoll:{sync:()=>{}},clearInterval:()=>{},setInterval:()=>1,dashboard:()=>'<div>Dashboard</div>',background:()=>'',providers:()=>'',trash:()=>'',diagnostics:()=>'',addEventListener:(name,listener)=>{listeners[name]=listener;}});
   // Keep the shipped render lifecycle hook, while forbidding node requests in
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
@@ -23,6 +23,8 @@ const context=vm.createContext({state,selectedFolderId:null,projectDataGeneratio
   vm.runInContext([...names,'taskOutputStage','logPanel'].map(declaration).concat(
     sourceBetween('function applyWorkspaceView(', '\nfunction validateWorkspaceView('),
     sourceBetween('function folderPath(', '\nconst content='),
+    sourceBetween('const TREE_ICONS={', '\nfunction treeIcon('),
+    sourceBetween('function projectActions(', '\nfunction projectRows('),
   ).join('\n'),context);
   vm.runInContext(source.slice(source.indexOf('function canShareOutput('),source.indexOf('async function openShareModal(')),context);
   vm.runInContext(lines.find(line=>line.startsWith("addEventListener('popstate'")),context);
@@ -36,7 +38,7 @@ test('expanded task has compact facts and one task menu, without duplicate tools
   assert.match(html,/compact-task-detail/);assert.match(html,/class="task-facts"/);
   assert.match(html,/orthophoto-preview/);assert.match(html,/Church &lt;test&gt;/);
   for(const action of ['task-gcp','task-settings','task-files','task-history'])assert.match(html,new RegExp(`data-action="${action}"`));
-  assert.match(html,/class="project-more-actions task-more-actions"/);
+  assert.match(html,/class="project-more-actions tree-menu task-more-actions"/);
   assert.doesNotMatch(html,/class="row-actions task-tools"|gcp-import-form|task-options|Outputs and review/);
   assert.equal((html.match(/data-action="task-settings"/g)||[]).length,1);
   assert.equal((html.match(/data-action="toggle-task"/g)||[]).length,1);
@@ -60,10 +62,17 @@ test('active expanded task exposes live output without forcing a settings detour
   f.state.taskPage='settings';assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),/Task output/);
 });
 
-test('daily task menu exposes rename but leaves destructive lifecycle actions in Details',()=>{
+test('daily task menu exposes rename and Delete with Undo; the source lifecycle stays in Details',()=>{
   const f=fixture(),overview=f.context.taskPanel(f.task);
   assert.doesNotMatch(overview,/data-action="(?:trash-task|trash-dataset)"/);
   assert.equal((overview.match(/data-action="edit-task"/g)||[]).length,1);
+  // The menu ends with a separator and Delete (Recycle Bin with Undo); live processing disables it.
+  const menu=overview.slice(overview.indexOf('<details'),overview.indexOf('</details>'));
+  assert.match(menu,/role="separator"><\/div><button[^>]*data-action="delete-task"[^>]*>Delete<\/button><\/div>$/);
+  assert.doesNotMatch(menu.match(/<button[^>]*data-action="delete-task"[^>]*>/)[0],/disabled/);
+  f.task.latestAttempt.status='running';
+  assert.match(f.context.taskQuickActions(f.task).match(/<button[^>]*data-action="delete-task"[^>]*>/)[0],/disabled title="Stop processing before deleting this task\."/);
+  f.task.latestAttempt.status='ready_for_review';
   f.state.taskPage='settings';const settings=f.context.taskWorkspaceBody(f.task,f.dataset);
   assert.equal((settings.match(/data-action="trash-task"/g)||[]).length,1);
   assert.equal((settings.match(/data-action="edit-task"/g)||[]).length,1);
@@ -83,15 +92,19 @@ test('task toolbar keeps View, Model report and Share primary with every seconda
   const f=fixture();f.state.outputs=[{id:'output',taskId:'task',status:'published',activePublished:true,viewSessionUrl:'/view',downloadUrl:'/download',reportUrl:'/report',assetKinds:['tiles','report']}];
   const html=f.context.taskQuickActions(f.task),[primary,menu]=html.split('<details');
   assert.deepEqual([...primary.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['view-output','download-report','share-output']);
-  for(const action of ['edit-task','download-output','folder-move-task','task-settings','task-files','task-history','task-gcp'])assert.match(menu,new RegExp(`data-action="${action}"`));
+  // The menu holds the rest, in this order; Duplicate is a disabled follow-up for now.
+  assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['edit-task','folder-move-task','duplicate-task','download-output','task-settings','task-files','task-history','task-gcp','delete-task']);
+  assert.match(menu,/<button[^>]*data-action="duplicate-task"[^>]*disabled title="Coming soon"[^>]*>Duplicate</);
+  assert.doesNotMatch(primary,/folder-move-task|>Move</,'no separate Move button on the row');
+  assert.match(primary,/tabindex="-1"/,'row buttons are reached with the arrow keys, not Tab');
   const move=()=>f.context.taskQuickActions(f.task).match(/<button[^>]*data-action="folder-move-task"[^>]*>/)?.[0];
   assert.doesNotMatch(move(),/disabled/,'loaded folders enable Move to folder');
-  Object.assign(f.context.folderState,{folders:null,loading:true});
+  f.context.folderCache.set('project',{folders:null,loading:true});
   assert.match(move(),/disabled/,'pending folders disable Move to folder instead of an enabled no-op');
-  Object.assign(f.context.folderState,{folders:[],loading:false});
+  f.context.folderCache.set('project',{folders:[],loading:false});
   assert.doesNotMatch(move(),/disabled/,'settled folders enable it again');
   f.state.outputs=[];assert.match(f.context.taskQuickActions(f.task),/More task actions/,'unfinished tasks retain navigation');
-  f.task.status='archived';assert.doesNotMatch(f.context.taskQuickActions(f.task),/edit-task|share-output|task-gcp|folder-move-task/);
+  f.task.status='archived';assert.doesNotMatch(f.context.taskQuickActions(f.task),/edit-task|share-output|task-gcp|folder-move-task|delete-task|duplicate-task/);
   const readOnly=fixture(['viewer.processing.read']);
   assert.doesNotMatch(readOnly.context.taskQuickActions(readOnly.task),/data-action="folder-move-task"/);
 });
@@ -116,7 +129,7 @@ test('original processing PDF is consistently labeled Model report in quick acti
 
 test('streaming notices are noninteractive and disappear when ready, while queued/error work stays visible',()=>{
   const f=fixture();f.context.lodJobForOutput=()=>null;f.context.recoveryOperationForOutput=()=>null;
-  vm.runInContext(source.slice(source.indexOf('function taskLodNotice('),source.indexOf('function selectedProject(')),f.context);
+  vm.runInContext(source.slice(source.indexOf('function taskLodNotice('),source.indexOf('function syncSelectedTaskFolder(')),f.context);
   const output={id:'o',taskId:'task',status:'ready',lod:{status:'available'}};f.state.outputs=[output];
   assert.equal(f.context.taskLodNotice(f.task),'');
   for(const status of ['failed','complete']){f.context.lodJobForOutput=()=>({status});assert.equal(f.context.taskLodNotice(f.task),'','verified available overrides retained job status');}
@@ -125,41 +138,51 @@ test('streaming notices are noninteractive and disappear when ready, while queue
   output.lod={status:'available'};f.context.recoveryOperationForOutput=()=>({status:'awaiting_derivatives'});assert.match(f.context.taskLodNotice(f.task),/Preparing streaming/);
 });
 
-test('project summary counts ready tasks once and distinguishes source collections from tasks',()=>{
-  const f=fixture();f.state.projectQuery='';f.context.selectedProject=()=>'';
+test('project summary counts ready tasks once and shows source collections only on the open project',()=>{
+  const f=fixture();f.state.projectQuery='';f.context.projectTree=()=>'';
   f.state.datasets=[{id:'dataset',projectId:'project',status:'finalized'},{id:'unused',projectId:'project',status:'draft'},{id:'old',projectId:'project',status:'trashed'},{id:'archived',projectId:'project',status:'archived'}];
   f.state.outputs=[{taskId:'task',status:'ready'},{taskId:'task',status:'published',activePublished:true}];
   vm.runInContext(declaration('projectRows'),f.context);
-  const html=f.context.projectRows();assert.match(html,/1 task · 1 ready/);assert.doesNotMatch(html,/source set/);assert.doesNotMatch(html,/published/);
-  // Source collections are counted once in the opened project's heading, never as a task count.
-  const detailStart=source.indexOf('function selectedProject('),detail=source.slice(detailStart,source.indexOf('\nfunction ',detailStart+1));assert.match(detail,/sourceSetCount=datasets\.filter\(dataset=>\['draft','finalized'\]\.includes\(dataset\.status\)\)\.length/);assert.match(detail,/countLabel\(sourceSetCount,'source set'\)/);
+  f.state.selectedProjectId=null;
+  let html=f.context.projectRows();assert.match(html,/1 task · 1 ready/);assert.doesNotMatch(html,/source set/);assert.doesNotMatch(html,/published/);
+  // Source collections are counted once in the open project's summary, never as a task count.
+  f.state.selectedProjectId='project';html=f.context.projectRows();
+  assert.equal((html.match(/2 source sets/g)||[]).length,1);assert.match(html,/1 task · 1 ready/);
 });
 
-test('project actions prioritize enabled new task for empty projects and keep secondary actions in More',()=>{
+test('project actions prioritize enabled new task for empty projects and keep secondary actions, New folder first, in More',()=>{
   const f=fixture(['viewer.processing.write','viewer.projects.write','viewer.datasets.import','viewer.shares.create']);
   f.state.tasks=[];f.state.datasets=[];f.state.providers=[];
-  vm.runInContext(source.slice(source.indexOf('function selectedProject('),source.indexOf('function datasetActions(')),f.context);
-  const html=f.context.selectedProject();
+  const html=f.context.projectActions(f.state.projects[0]);
   assert.match(html,/data-action="project-process"[^>]*>New task/);
   assert.doesNotMatch(html,/data-action="project-process"[^>]*disabled/);
   assert.ok(html.indexOf('New task')<html.indexOf('>Share project<'));
   assert.ok(html.indexOf('>Share project<')<html.indexOf('<details'));
   const menu=html.slice(html.indexOf('<details'),html.indexOf('</details>'));
-  assert.match(menu,/Rename project/);assert.match(menu,/Import existing results/);assert.match(menu,/Delete project/);
-  f.state.projects[0].status='archived';assert.doesNotMatch(f.context.selectedProject(),/data-action="project-process"/);
+  assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['folder-create','edit-project','project-import','trash-project']);
+  assert.match(menu,/New folder/);assert.match(menu,/Rename project/);assert.match(menu,/Import existing results/);assert.match(menu,/Delete project/);
+  f.state.projects[0].status='archived';assert.equal(f.context.projectActions(f.state.projects[0]),'');
 });
 
-test('expanded project is one unified card, without repeated name, description or all-projects control',()=>{
+test('open projects are level-1 tree rows with their rows inline, and more than one can be open',()=>{
   const f=fixture();f.state.projectQuery='';f.state.projects[0].description='Keep this once';
+  f.context.projectTree=project=>`<section class="project-detail" id="project-detail-${project.id}" data-tree-body="${project.id}"></section>`;
   vm.runInContext(declaration('projectRows'),f.context);
-  vm.runInContext(source.slice(source.indexOf('function selectedProject('),source.indexOf('function datasetActions(')),f.context);
-  const html=f.context.projectRows();
+  let html=f.context.projectRows();
   assert.equal((html.match(/Keep this once/g)||[]).length,1);
   assert.equal((html.match(/<strong>Site<\/strong>/g)||[]).length,1);
   assert.doesNotMatch(html,/All projects|<h2>Site|No project description|project-columns/);
   assert.ok(html.indexOf('class="project-detail"')<html.lastIndexOf('</article>'));
-  assert.match(html,/aria-expanded="true" aria-controls="project-detail-project"/);
-  f.state.selectedProjectId=null;assert.doesNotMatch(f.context.projectRows(),/class="project-detail"/);
+  assert.match(html,/role="row" aria-level="1" aria-expanded="true" data-tree-key="p:project"/);
+  assert.match(html,/data-tree-focus tabindex="-1" aria-expanded="true" aria-controls="project-detail-project"/);
+  f.state.selectedProjectId=null;html=f.context.projectRows();
+  assert.doesNotMatch(html,/class="project-detail"/);assert.match(html,/aria-expanded="false"/);
+  // Projects opened in the tree stay open together, with or without one selected in the URL.
+  f.state.projects.push({id:'second',displayName:'Second',status:'active'});
+  f.context.treeState.projects.add('project');f.context.treeState.projects.add('second');
+  html=f.context.projectRows();
+  assert.equal((html.match(/class="project-detail"/g)||[]).length,2);
+  assert.equal((html.match(/data-task-drop-project="second" data-task-drop-folder=""/g)||[]).length,1,'an open project row is the top-level drop target');
 });
 
 test('GCP action renders dedicated page, releases prior images and pushes shareable route',()=>{

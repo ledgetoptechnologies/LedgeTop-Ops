@@ -1,0 +1,106 @@
+/* Folder drill-down tree: project (level 1), folders (nested), then tasks,
+   expanding in place. Loaded last, after workspace-density.css.
+   Desktop fine pointer: compact rows, the row "⋯" shows on hover or keyboard
+   focus. Phones and coarse pointers: 44px targets, no drag, a capped indent. */
+
+:root{--tree-indent:24px;--tree-depth-cap:6}
+
+/* Project row: the name button and, while open, its actions. */
+.project-head{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;position:relative}
+.project-open-cell{min-width:0}
+.project-open{position:relative}
+.project-open:focus-visible{outline:2px solid var(--orange);outline-offset:-2px}
+.project-head-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:6px 12px 6px 0}
+.project-row:not(.selected) .project-head-actions{display:none}
+.project-summary .project-source-count{color:var(--muted)}
+@container project-list (max-width:719.98px){
+  .project-head{grid-template-columns:minmax(0,1fr)}
+  .project-head-actions{justify-content:flex-start;flex-wrap:wrap;padding:0 12px 10px}
+}
+
+/* Rows of an open project. Task rows are their own size container, so their
+   columns follow the row's width at every depth. */
+/* Every full render repaints open projects, so they appear without the old open animation. */
+.project-row>.tree-body{display:grid;gap:6px;padding:8px 12px 12px;animation:none}
+.tree-body>.tree-row{margin-left:calc(min(var(--tree-depth,0),var(--tree-depth-cap)) * var(--tree-indent));min-width:0}
+.tree-body>.task-panel{container-type:inline-size}
+.tree-status-row p{margin:4px 0}
+.tree-status-row .secondary-button{margin-top:4px}
+
+/* Folder rows: name on the left with a muted count; "⋯" on the right. */
+.folder-tree-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px;border:1px solid #25272d;border-radius:9px;background:#121317}
+.folder-tree-row>.row-actions{padding-right:6px}
+.tree-name-cell{min-width:0}
+.tree-toggle{display:flex;align-items:center;gap:8px;width:100%;min-height:38px;padding:4px 10px;border:0;border-radius:9px;background:transparent;color:var(--text);font:inherit;text-align:left;cursor:pointer}
+.tree-toggle:hover{background:#17181d}
+.tree-toggle:focus-visible{outline:2px solid var(--orange);outline-offset:-2px}
+.tree-toggle.is-editing{cursor:default}
+.tree-toggle.is-editing:hover{background:transparent}
+.tree-chevron{width:16px;flex:none;display:inline-grid;place-items:center;color:var(--orange);font-size:20px;line-height:1;transition:transform .2s ease}
+.tree-row[aria-expanded=true] .tree-chevron{transform:rotate(90deg)}
+.tree-new-row .tree-chevron{opacity:.3}
+.tree-icon{width:18px;height:18px;flex:none;color:var(--muted)}
+.folder-tree-row[aria-expanded=true] .tree-icon{color:#d7a37f}
+.tree-name{min-width:0;display:flex;align-items:baseline;flex-wrap:wrap;column-gap:8px}
+.tree-name strong{min-width:0;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tree-count{color:var(--muted);font-size:12px;font-weight:400;white-space:nowrap}
+.tree-inline-name{min-width:0;width:min(320px,100%);min-height:30px;border:1px solid var(--orange);border-radius:6px;background:#0d0e12;color:var(--text);padding:3px 8px;font:inherit;font-size:14px;font-weight:600}
+.tree-inline-name:focus{outline:2px solid rgba(238,80,7,.35)}
+.tree-empty-row{display:flex;align-items:center;min-height:34px;padding:0 12px 0 40px;border:1px dashed #33353d;border-radius:9px;color:var(--muted);font-size:12px}
+
+/* Task rows keep today's columns; a chevron and icon lead, a grip shows on hover. */
+.task-lead{display:inline-flex;align-items:center;gap:6px}
+.task-lead .tree-icon{width:16px;height:16px}
+.tree-body .task-summary{position:relative}
+.task-summary[draggable=true]{cursor:grab}
+.task-summary[draggable=true]:active{cursor:grabbing}
+.tree-drag-grip{position:absolute;left:1px;top:50%;width:10px;height:18px;margin-top:-9px;color:#6b6f7a;opacity:0;pointer-events:none}
+.task-panel:hover .tree-drag-grip,.task-panel:focus-within .tree-drag-grip{opacity:1}
+
+/* Menus. */
+.menu-separator{height:1px;margin:2px 0;background:var(--border)}
+.menu-shortcut{float:right;margin-left:12px;color:var(--muted);font-size:11px;font-weight:500}
+.project-more-menu>button:disabled{opacity:.5;cursor:not-allowed}
+.task-panel:has(.tree-menu[open]),.folder-tree-row:has(.tree-menu[open]){overflow:visible;position:relative;z-index:3}
+.tree-toolbar-new-folder{display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}
+.tree-toolbar-new-folder .tree-icon{width:16px;height:16px;color:currentColor}
+
+/* Drag and drop. */
+.tree-drop-hint{display:none}
+.tree-dragging .project-head[data-task-drop-project] .project-open{outline:1px dashed #7e8796;outline-offset:-3px}
+.tree-dragging .project-head[data-task-drop-project] .tree-drop-hint{display:inline-flex;position:absolute;right:12px;top:2px;padding:0 6px;border:1px dashed #7e8796;border-radius:999px;background:#171a20;color:var(--muted);font-size:11px}
+.tree-row.folder-drop-active,.project-head.folder-drop-active{outline:2px solid var(--orange);outline-offset:2px;background:#4b2418}
+.tree-drag-source{opacity:.45}
+@keyframes tree-moved-flash{from{background-color:rgba(238,80,7,.3)}to{background-color:transparent}}
+.tree-just-moved .task-summary,.folder-tree-row.tree-just-moved{animation:tree-moved-flash 1.8s ease-out}
+
+/* Compact desktop: the row "⋯" shows on hover or keyboard focus. */
+@media (min-width:768px) and (hover:hover) and (pointer:fine){
+  #project-list .tree-row .row-actions>.tree-menu:not([open]){opacity:0;transition:opacity .12s}
+  #project-list .tree-row:hover .row-actions>.tree-menu,#project-list .tree-row:focus-within .row-actions>.tree-menu{opacity:1}
+  .folder-tree-row .project-more-actions>summary{min-width:32px;min-height:30px;font-size:18px}
+  #project-list .project-more-menu button{min-height:32px}
+}
+
+/* Narrow viewports and coarse pointers: 44px targets, no drag, a capped indent. */
+@media (max-width:767px),(pointer:coarse){
+  :root{--tree-indent:20px;--tree-depth-cap:3}
+  .tree-drag-grip{display:none}
+  .tree-toggle{min-height:48px}
+  .folder-tree-row .project-more-actions>summary{min-width:44px;min-height:44px}
+  #project-list .project-more-menu button,.toast-action{min-height:44px}
+  .tree-empty-row{min-height:44px}
+  .tree-inline-name{min-height:40px}
+  .menu-shortcut{display:none}
+}
+@media (max-width:720px){
+  .project-row>.tree-body{padding:8px 8px 10px}
+  /* Row menus and Move to… open as bottom sheets. */
+  #project-list .project-more-menu:popover-open{position:fixed;inset:auto 8px max(8px,env(safe-area-inset-bottom)) 8px;width:calc(100vw - 16px);max-width:none;height:auto;max-height:70dvh;margin:0;overflow:auto;border-radius:14px;color:var(--text);box-shadow:0 -12px 40px #000c}
+  .workspace-modal.sheet-modal{margin:auto 0 0;width:100vw;max-width:100vw;max-height:88dvh;border-radius:16px 16px 0 0;border-bottom:0;padding:10px 16px calc(16px + env(safe-area-inset-bottom))}
+  .workspace-modal.sheet-modal::before{content:"";display:block;width:40px;height:4px;margin:0 auto 10px;border-radius:2px;background:#3b3d45}
+}
+@media (prefers-reduced-motion:reduce){
+  .tree-chevron{transition:none}
+  .tree-just-moved .task-summary,.folder-tree-row.tree-just-moved{animation:none}
+}

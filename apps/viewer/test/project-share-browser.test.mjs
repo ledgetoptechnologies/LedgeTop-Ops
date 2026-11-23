@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,6 +31,9 @@ async function removeBrowserProfile(profile, t) {
   const resolved = path.resolve(profile);
   const expectedPrefix = path.resolve(tmpdir(), 'ltds-project-share-browser-');
   if (!resolved.startsWith(expectedPrefix)) throw new Error(`refusing to remove unexpected browser profile: ${resolved}`);
+  // Edge on Windows relaunches itself, so killing the spawned process can leave the browser
+  // running; stop every browser process on this run's own temporary profile.
+  if (process.platform === 'win32') spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p='${resolved.replace(/'/g, "''")}';Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($p) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`], { stdio: 'ignore', timeout: 20_000, windowsHide: true });
   let lastError;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
@@ -295,7 +298,7 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     ` });
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, `document.querySelector('[data-action="open-project"]') !== null`, `${viewport.name}: workspace did not load`);
-    await client.evaluate(`document.querySelector('[data-action="open-project"]').click()`);
+    await client.evaluate(`(() => { const project = document.querySelector('[data-action="open-project"]'); if (project.getAttribute('aria-expanded') !== 'true') project.click(); })()`);
     await waitFor(client, `document.querySelector('[data-action="project-share"]') !== null`, `${viewport.name}: project did not open`);
     runtime.holdClientRead = true;
     await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
@@ -372,7 +375,7 @@ async function verifyRevokeOnlyStaff(devTools, origin, runtime) {
     ` });
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, `document.querySelector('[data-action="open-project"]') !== null`, 'revoke-only: workspace did not load');
-    await client.evaluate(`document.querySelector('[data-action="open-project"]').click()`);
+    await client.evaluate(`(() => { const project = document.querySelector('[data-action="open-project"]'); if (project.getAttribute('aria-expanded') !== 'true') project.click(); })()`);
     await waitFor(client, `document.querySelector('[data-action="project-share"]') !== null`, 'revoke-only: Share button was hidden');
     await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
     await waitFor(client, `document.querySelector('[data-action="revoke-project-share"][data-id="share-existing"]') !== null`, 'revoke-only: project link row was not listed');

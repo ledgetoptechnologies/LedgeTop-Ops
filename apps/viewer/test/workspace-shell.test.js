@@ -56,7 +56,7 @@ test('permission denial preserves the valid admin session',()=>{
   assert.doesNotMatch(forbidden,/removeItem|state\.token=null/);
 });
 test('workspace renders every management section instead of placeholders',()=>{
-  for(const view of ['dashboard','selectedProject','providers','diagnostics'])
+  for(const view of ['dashboard','projectTree','providers','diagnostics'])
     assert.match(source,new RegExp(`function ${view}\\(`));
   assert.doesNotMatch(source,/sectionPlaceholder/);
 });
