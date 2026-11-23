@@ -111,7 +111,9 @@ function preconditionFailed(reqHeaders, etag, lastModified) {
 function rangeFresh(reqHeaders, etag, lastModified) {
   const ifRange = reqHeaders['if-range'];
   if (!ifRange) return true;
-  if (ifRange.indexOf('"') !== -1) return Boolean(etag && ifRange.indexOf(etag) !== -1);
+  // A strong route ETag needs the strong comparison If-Range asks for; the
+  // default weak ETag keeps send's behaviour.
+  if (ifRange.indexOf('"') !== -1) return Boolean(etag && (etag.startsWith('W/') ? ifRange.indexOf(etag) !== -1 : ifRange.trim() === etag));
   return parseHttpDate(lastModified) <= parseHttpDate(ifRange);
 }
 
@@ -201,9 +203,12 @@ function abortError(error) { return error?.name === 'AbortError'; }
 //                       slow) verification; returns false after responding.
 //   onError(error)   -> route response for 412/416, like a sendFile callback.
 //   headers          -> route headers applied once verification has passed.
+//   cacheControl()   -> optional; Cache-Control for 200, 206 and 304 only,
+//                       evaluated right before they are sent. Every other
+//                       response keeps the route's own value.
 //   regions(start,end) -> registered regions covering the body, in order, to
 //                       send exactly-hashed bytes; null to stream (see top).
-async function deliverVerified(req, res, { handle, stat, filePath, verify, check = null, onFailure, onError, beforeSend = null, headers = {}, regions = null, cache = assetIntegrityCache }) {
+async function deliverVerified(req, res, { handle, stat, filePath, verify, check = null, onFailure, onError, beforeSend = null, headers = {}, cacheControl = null, regions = null, cache = assetIntegrityCache }) {
   const identity = fileIdentity(stat);
   const size = Number(stat.size);
   const controller = new AbortController();
@@ -281,10 +286,12 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, check
     if (beforeSend && !await beforeSend()) return;
     if (controller.signal.aborted || res.headersSent) return;
 
-    const setHeaderNames = [...[...routeHeaders.values()].map(([name]) => name), ...defaults.map(([name]) => name), 'Content-Range', 'Content-Length'];
+    const replaced = [...[...routeHeaders.values()].map(([name]) => name), ...defaults.map(([name]) => name), 'Cache-Control', 'Content-Range', 'Content-Length']
+      .map((name) => [name, res.getHeader(name)]);
     for (const [name, value] of routeHeaders.values()) res.setHeader(name, value);
     for (const [name, value] of defaults) res.setHeader(name, value);
     if (outcome === 412) return onError(httpError(412));
+    if (cacheControl && outcome !== 416) res.setHeader('Cache-Control', cacheControl());
     if (outcome === 304) {
       for (const name of ['Content-Encoding', 'Content-Language', 'Content-Length', 'Content-Range', 'Content-Type']) res.removeHeader(name);
       res.statusCode = 304;
@@ -309,7 +316,7 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, check
       else await pump(res, handle, identity, start, len, controller.signal);
     } catch (error) {
       if (busyError(error) && !res.headersSent && !controller.signal.aborted) {
-        for (const name of setHeaderNames) res.removeHeader(name);
+        for (const [name, value] of replaced) { if (value === undefined) res.removeHeader(name); else res.setHeader(name, value); }
         res.statusCode = 200;
         res.set('Retry-After', '1').status(503).json({ error: 'asset delivery busy', code: 'integrity_busy' });
         return;

@@ -701,10 +701,15 @@ for (const platform of ['linux', 'win32']) {
       await bodyless('tampered, mtime restored', ok);
       assert.equal((await request(url)).status, 404, `${label}: a tampered body is refused`);
       assert.equal((await request(url, { headers: { range: 'bytes=0-999' } })).status, 404);
-      // Tampering that leaves its normal mtime: validators no longer match, so
-      // revalidation becomes a body request and is refused.
+      // Tampering that leaves its normal mtime: date and weak validators no
+      // longer match, so revalidation becomes a body request and is refused. A
+      // strong ETag names the registered content, not the file: the copy the
+      // client revalidates was verified when it was sent, so it stays valid.
       fs.utimesSync(file, new Date(), new Date(Date.now() + 5000));
-      assert.equal((await request(url, { headers: { 'if-none-match': etag } })).status, 404, label);
+      const strong = etag.startsWith('"sha256-');
+      assert.equal(strong, ['ortho', 'tile'].includes(label));
+      assert.equal((await request(url, { headers: { 'if-none-match': etag } })).status, strong ? 304 : 404, label);
+      assert.equal((await request(url, { headers: { 'if-none-match': etag, 'if-modified-since': modified } })).status, 404, label);
       assert.equal((await request(url, { headers: { 'if-modified-since': modified } })).status, 404, label);
 
       // A wrong size is visible without hashing and refuses everything.
@@ -733,7 +738,7 @@ test('a response without a body still needs chunk rows that cover what it descri
   assert.equal(await status(`bytes=${CHUNK - 10}-${CHUNK + 20}`), 404, 'into the gap');
   assert.equal(await status(`bytes=${CHUNK + 10}-${2 * CHUNK + 20}`), 404, 'out of the gap');
   assert.equal(await status(`bytes=${2 * CHUNK}-${2 * CHUNK + 20}`), 206);
-  const etag = `W/"${f.bodies.ortho.length.toString(16)}-${fs.statSync(f.files.ortho).mtime.getTime().toString(16)}"`;
+  const etag = `"sha256-${sha256(f.bodies.ortho)}"`;
   assert.equal((await request(url, { headers: { 'if-none-match': etag } })).status, 404);
   assert.equal((await request(url, { headers: { 'if-none-match': etag, range: 'bytes=0-99' } })).status, 304);
   assert.equal((await request(url)).status, 404, 'a full response is refused before any byte');
@@ -829,7 +834,8 @@ test('a range loads only the chunk rows around it', async (t) => {
   const loaded = [];
   const getChunks = f.repository.getModelAssetChunks.bind(f.repository);
   f.repository.getModelAssetChunks = (...args) => { const rows = getChunks(...args); loaded.push(rows.map(({ chunkIndex }) => chunkIndex)); return rows; };
-  const rowsFor = async (options) => { loaded.length = 0; const { status } = await request(`${f.base}/ortho.tif`, options); return [status, ...loaded]; };
+  // The first lookup only decides whether the file has chunk rows (strong ETag).
+  const rowsFor = async (options) => { loaded.length = 0; const { status } = await request(`${f.base}/ortho.tif`, options); assert.deepEqual(loaded.shift(), [0]); return [status, ...loaded]; };
   const range = (start, end) => ({ headers: { range: `bytes=${start}-${end}` } });
   assert.deepEqual(await rowsFor(range(0, 9)), [206, [0]]);
   assert.deepEqual(await rowsFor(range(CHUNK, CHUNK)), [206, [1]]);

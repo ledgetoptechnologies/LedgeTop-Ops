@@ -406,7 +406,7 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
     headers: { Range: 'bytes=2-5' },
   });
   assert.equal(rangedAsset.status, 206);
-  assert.equal(rangedAsset.headers.get('cache-control'), 'private, no-store');
+  assert.equal(rangedAsset.headers.get('cache-control'), 'private, no-store', 'an asset without a registered hash is never cacheable');
   assert.equal(await rangedAsset.text(), 'cdef');
   assert.equal((await fetch(`${baseUrl}${browserSession.model.assets.glb.replace(model.id, 'unknown-model')}`)).status, 403);
 
