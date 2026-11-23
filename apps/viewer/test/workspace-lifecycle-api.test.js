@@ -470,3 +470,44 @@ test('a deleted task whose purge was interrupted no longer keeps a shared set, a
   assert.deepEqual(purgeExpiredTrash(context.processing, context.storage).map(item => [item.trashId, item.status]), [[firstTrash.id, 'complete']]);
   assert.equal(context.processing.getDataset(shared.id).status, 'finalized', 'the active second task keeps its photos');
 });
+
+// A container marked purging, before any member is deleted: no direct restore of a member may take it back out.
+test('direct dataset and managed output restores are refused once their container is purging', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Locked members' }), dataset = finalizedDataset(context, project, 'Synthetic photos');
+  const task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Locked task' });
+  const provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Synthetic ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
+  const output = readyManagedOutput(context, project, dataset, task, provider, 'Synthetic output');
+  const trash = await deleteTask(context, task);
+  const datasetTrash = context.processing.activeTrashForEntity('dataset', dataset.id), outputTrash = context.processing.activeTrashForEntity('output', output.versionId);
+  assert.ok(datasetTrash && outputTrash);
+  assert.ok(context.processing.beginContainerPurge(trash.id, 'ops:lifecycle').purgeStartedAt);
+  // Nothing is deleted yet, and neither member can leave the purging container.
+  assert.ok(photosInTrash(context));
+  for (const item of [datasetTrash, outputTrash]) {
+    assert.equal(context.processing.trashPurgeLocked(item.id), true);
+    assert.equal(context.processing.beginRestoreMutation(item.id, 'ops:lifecycle'), null);
+    assert.equal((await context.request('POST', `/api/v1/storage/trash/${item.id}/restore`, {})).status, 409);
+  }
+  assert.equal(context.processing.getDataset(dataset.id).status, 'trashed'); assert.equal(context.processing.getModelOutput(output.versionId).status, 'trashed');
+  assert.equal(context.database.prepare("SELECT COUNT(*) AS n FROM storage_mutations WHERE mutation_type='restore'").get().n, 0);
+  // The purge then completes.
+  assert.deepEqual(purgeExpiredTrash(context.processing, context.storage).map(item => [item.trashId, item.status]), [[trash.id, 'complete']]);
+  assert.equal(photosInTrash(context), false); assert.equal(fs.existsSync(output.directory), false);
+});
+
+test('a container purge does not start while a restore of one of its members is still in progress', async t => {
+  const context = await fixture(t), { applyStorageMutation } = require('../server/storageLifecycle');
+  const { shared, tasks: [task] } = await sharedTasks(context, ['Only task']);
+  const trash = await deleteTask(context, task), datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
+  // A restore journal for the set is admitted but not yet applied (an interrupted direct restore).
+  const restore = context.processing.beginRestoreMutation(datasetTrash.id, 'ops:lifecycle'); assert.ok(restore);
+  assert.equal(context.processing.beginContainerPurge(trash.id, 'ops:lifecycle'), null);
+  assert.equal((await purge(context, trash, task.id)).status, 409);
+  assert.equal(context.processing.getTrash(trash.id).purgeStartedAt, null, 'the container was not marked purging');
+  assert.ok(photosInTrash(context));
+  // Once the restore finishes, the purge goes ahead and the restored photos are kept.
+  applyStorageMutation(context.processing, context.storage, restore);
+  assert.equal(context.processing.getDataset(shared.id).status, 'finalized');
+  assert.equal((await purge(context, trash, task.id)).status, 204);
+  assert.equal(fs.existsSync(path.join(context.config.datasetsMount, shared.relativePath, 'photo.jpg')), true);
+});
