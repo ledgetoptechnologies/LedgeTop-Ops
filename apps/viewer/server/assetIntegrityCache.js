@@ -51,6 +51,8 @@ const STREAM_BUFFER_BYTES = 256 * 1024;
 const INLINE_HASH_MAX_BYTES = 1024 * 1024;
 const RACY_WINDOW_MS = 2_000;
 const MAX_CONCURRENT_STREAMS = 8;
+// Streamed checks waiting for a slot; beyond this, requests get a fast 503.
+const MAX_QUEUED_STREAMS = 64;
 // Linux statfs f_type magic numbers of local filesystems where ctime is
 // kernel-maintained and attributes are not cached remotely.
 const CACHEABLE_FILESYSTEMS = new Map([
@@ -61,6 +63,15 @@ const CACHEABLE_FILESYSTEMS = new Map([
   [0x794c7630, 'overlay'],
   [0x01021994, 'tmpfs'],
 ]);
+
+function busyError() {
+  return Object.assign(new Error('integrity verification queue is full'), { code: 'integrity_busy', status: 503 });
+}
+function abortError() {
+  return Object.assign(new Error('integrity verification cancelled'), { name: 'AbortError', code: 'ABORT_ERR' });
+}
+const isAbort = (error) => error?.name === 'AbortError';
+const isBusy = (error) => error?.code === 'integrity_busy';
 
 function fileIdentity(stat) {
   return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String).join(':');
@@ -90,6 +101,7 @@ class AssetIntegrityCache {
     statfs = (filePath) => fs.promises.statfs(filePath),
     platform = process.platform,
     maxConcurrentStreams = MAX_CONCURRENT_STREAMS,
+    maxQueuedStreams = MAX_QUEUED_STREAMS,
   } = {}) {
     this.ttlMs = Math.max(0, Number(ttlMs) || 0);
     this.maxEntries = Math.max(1, Number(maxEntries) || 1);
@@ -104,12 +116,13 @@ class AssetIntegrityCache {
     this.filesystems = new Map(); // stat.dev -> Promise<boolean>
     this.maxConcurrentStreams = Math.max(1, Number(maxConcurrentStreams) || 1);
     this.activeStreams = 0;
+    this.maxQueuedStreams = Math.max(0, Number(maxQueuedStreams) || 0);
     this.streamWaiters = [];
     this.verified = new Map();
     this.pending = new Map();
     this.generation = 0;
     this.bufferedBytes = 0;
-    this.stats = { hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0 };
+    this.stats = { hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0, busy: 0, cancelled: 0 };
   }
 
   clear() {
@@ -135,11 +148,29 @@ class AssetIntegrityCache {
     return decision;
   }
 
-  async acquireStream() {
-    if (this.activeStreams >= this.maxConcurrentStreams) await new Promise((resolve) => this.streamWaiters.push(resolve));
-    else this.activeStreams += 1;
-    this.stats.peakStreams = Math.max(this.stats.peakStreams, this.activeStreams);
+  // Admits one streamed check. Waits FIFO for a slot, rejects with a busy error
+  // when the queue is full, and leaves the queue if the request goes away.
+  acquireStream(signal = null) {
+    if (signal?.aborted) return Promise.reject(abortError());
+    if (this.activeStreams < this.maxConcurrentStreams) {
+      this.activeStreams += 1;
+      this.stats.peakStreams = Math.max(this.stats.peakStreams, this.activeStreams);
+      return Promise.resolve();
+    }
+    if (this.streamWaiters.length >= this.maxQueuedStreams) { this.stats.busy += 1; return Promise.reject(busyError()); }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        const index = this.streamWaiters.indexOf(waiter);
+        if (index >= 0) this.streamWaiters.splice(index, 1);
+        this.stats.cancelled += 1;
+        reject(abortError());
+      };
+      const waiter = () => { signal?.removeEventListener('abort', onAbort); resolve(); };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.streamWaiters.push(waiter);
+    });
   }
+
 
   releaseStream() {
     const next = this.streamWaiters.shift();
@@ -149,28 +180,40 @@ class AssetIntegrityCache {
 
   // Verifies with the cache on an eligible filesystem; elsewhere every request
   // performs its own verification with no sharing or remembering.
-  async check(filePath, stat, key, verify) {
-    if (await this.filesystemCacheable(filePath, stat.dev)) return this.remember(key, verify);
+  async check(filePath, stat, key, verify, signal = null) {
+    if (await this.filesystemCacheable(filePath, stat.dev)) return this.remember(key, verify, signal);
     this.stats.uncached += 1;
-    try { return (await verify())?.ok === true; } catch { return false; }
+    return this.verifyAlone(verify, signal);
   }
+
+  // One verification for one request, never shared or remembered.
+  async verifyAlone(verify, signal) {
+    try { return (await verify(signal))?.ok === true; } catch (error) { if (isAbort(error) || isBusy(error)) throw error; return false; }
+  }
+
 
   // Returns true only when `verify()` (or an identical in-flight/remembered
   // verification of the same identity and region) proved the bytes match.
   // `verify()` resolves to { ok, cacheable }.
-  async remember(key, verify) {
+  async remember(key, verify, signal = null) {
     const until = this.verified.get(key);
     if (until !== undefined) {
       if (until > this.now()) { this.stats.hits += 1; return true; }
       this.verified.delete(key);
     }
     const inflight = this.pending.get(key);
-    if (inflight) return inflight;
+    if (inflight) {
+      try { return await inflight; } catch (error) {
+        // The request that owned the shared check went away; check for this one.
+        if (isAbort(error) && !signal?.aborted) return this.verifyAlone(verify, signal);
+        throw error;
+      }
+    }
     this.stats.misses += 1;
     const generation = this.generation;
     const promise = (async () => {
       let result;
-      try { result = await verify(); } catch { result = null; }
+      try { result = await verify(signal); } catch (error) { if (isAbort(error) || isBusy(error)) throw error; result = null; }
       const ok = result?.ok === true;
       if (!ok) { this.stats.failures += 1; return false; }
       if (!result.cacheable) { this.stats.racy += 1; return true; }
@@ -184,6 +227,7 @@ class AssetIntegrityCache {
     return promise;
   }
 
+
   reserveBuffer(size) {
     if (size > this.bufferedHashMaxBytes || this.bufferedBytes + size > this.bufferedBudgetBytes) return false;
     this.bufferedBytes += size;
@@ -194,17 +238,19 @@ class AssetIntegrityCache {
   // Hashes `size` bytes at `offset` of the exact file whose identity the caller
   // recorded, from one descriptor that must keep that identity before and after
   // the read. With `toEof`, the file must also end exactly at offset + size.
-  async hashRegion(filePath, identity, offset, size, { toEof = false } = {}) {
+  async hashRegion(filePath, identity, offset, size, { toEof = false, handle: openHandle = null, signal = null } = {}) {
+    if (signal?.aborted) throw abortError();
     // One extra byte proves end-of-file in the same read when required.
     const capacity = toEof ? size + 1 : size;
     const buffered = this.reserveBuffer(capacity);
-    if (!buffered) await this.acquireStream();
+    if (!buffered) await this.acquireStream(signal);
     try {
       const readStartedAt = this.wallNow();
-      const handle = await this.openFile(filePath);
+      const handle = openHandle || await this.openFile(filePath);
       try {
         const before = await handle.stat({ bigint: true });
         if (fileIdentity(before) !== identity) return null;
+        if (signal?.aborted) throw abortError();
         let digest;
         let atEof = !toEof;
         if (buffered) {
@@ -224,6 +270,7 @@ class AssetIntegrityCache {
           const buffer = Buffer.allocUnsafe(Math.min(STREAM_BUFFER_BYTES, Math.max(1, size)));
           let position = 0;
           while (position < size) {
+            if (signal?.aborted) throw abortError();
             const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, size - position), offset + position);
             if (!bytesRead) return null;
             hash.update(buffer.subarray(0, bytesRead));
@@ -238,7 +285,7 @@ class AssetIntegrityCache {
         if (fileIdentity(await handle.stat({ bigint: true })) !== identity) return null;
         return { digest, cacheable: readStartedAt - newestTimestampMs(before) > this.racyWindowMs };
       } finally {
-        await handle.close();
+        if (!openHandle) await handle.close();
       }
     } finally {
       if (buffered) this.bufferedBytes -= capacity;
@@ -249,23 +296,25 @@ class AssetIntegrityCache {
 
   // Exact whole-file SHA-256 check (nested manifest files, small assets, and
   // legacy assets without chunk rows).
-  async verifyWholeFile(filePath, stat, expectedSha256) {
+  // With `handle`, the check reads that already-open descriptor (whose fstat
+  // is `stat`); `signal` cancels a queued or running check.
+  async verifyWholeFile(filePath, stat, expectedSha256, { handle = null, signal = null } = {}) {
     const identity = fileIdentity(stat);
     const key = `file\0${filePath}\0${identity}\0${expectedSha256}`;
-    return this.check(filePath, stat, key, async () => {
-      const result = await this.hashRegion(filePath, identity, 0, Number(stat.size), { toEof: true });
+    return this.check(filePath, stat, key, async (activeSignal) => {
+      const result = await this.hashRegion(filePath, identity, 0, Number(stat.size), { toEof: true, handle, signal: activeSignal });
       return { ok: Boolean(result) && result.digest === expectedSha256, cacheable: Boolean(result?.cacheable) };
-    });
+    }, signal);
   }
 
   // Exact registered-chunk check for one 4 MiB (or shorter tail) region.
-  async verifyChunk(filePath, stat, chunk) {
+  async verifyChunk(filePath, stat, chunk, { handle = null, signal = null } = {}) {
     const identity = fileIdentity(stat);
     const key = `chunk\0${filePath}\0${identity}\0${chunk.byteOffset}\0${chunk.byteSize}\0${chunk.sha256}`;
-    return this.check(filePath, stat, key, async () => {
-      const result = await this.hashRegion(filePath, identity, chunk.byteOffset, chunk.byteSize);
+    return this.check(filePath, stat, key, async (activeSignal) => {
+      const result = await this.hashRegion(filePath, identity, chunk.byteOffset, chunk.byteSize, { handle, signal: activeSignal });
       return { ok: Boolean(result) && result.digest === chunk.sha256, cacheable: Boolean(result?.cacheable) };
-    });
+    }, signal);
   }
 }
 
@@ -274,5 +323,5 @@ const assetIntegrityCache = new AssetIntegrityCache();
 module.exports = {
   AssetIntegrityCache, assetIntegrityCache, fileIdentity, sha256Hex,
   BUFFERED_HASH_MAX_BYTES, BUFFERED_HASH_BUDGET_BYTES, DEFAULT_TTL_MS, RACY_WINDOW_MS,
-  CACHEABLE_FILESYSTEMS, MAX_CONCURRENT_STREAMS,
+  CACHEABLE_FILESYSTEMS, MAX_CONCURRENT_STREAMS, MAX_QUEUED_STREAMS, busyError, abortError,
 };
