@@ -60,6 +60,7 @@ permissions:
 concurrency:
   group: latest-writer-thumbnail-${{ inputs.target }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   promote:

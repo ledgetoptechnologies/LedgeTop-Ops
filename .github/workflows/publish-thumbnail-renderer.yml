@@ -196,17 +196,40 @@ jobs:
     concurrency:
       group: latest-writer-thumbnail-${{ matrix.target }}
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
       packages: write
     steps:
+      - name: Check the automatic promotion pause
+        id: pause
+        shell: bash
+        env:
+          AUTO_PROMOTE_LATEST_PAUSED: ${{ vars.AUTO_PROMOTE_LATEST_PAUSED }}
+        run: |
+          set -euo pipefail
+          # Decided first, before any registry login, registry read or API call. The value is the one GitHub supplies
+          # when this job is prepared: the workflow token has no permission to read repository variables, so this is
+          # not a live read at lock time. A pause therefore governs publisher runs created after it was set; see the
+          # rollback steps in apps/viewer/docs/RELEASING.md for runs already in flight.
+          case "$AUTO_PROMOTE_LATEST_PAUSED" in
+            true)
+              echo "paused=true" >> "$GITHUB_OUTPUT"
+              echo "- Automatic promotion of latest is paused (AUTO_PROMOTE_LATEST_PAUSED=true); commit \`$GITHUB_SHA\` was not promoted." >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning::Automatic promotion is paused by AUTO_PROMOTE_LATEST_PAUSED; latest was not changed." ;;
+            ''|false) echo "paused=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::AUTO_PROMOTE_LATEST_PAUSED must be true, false or unset, not '$AUTO_PROMOTE_LATEST_PAUSED'. latest was not changed."; exit 1 ;;
+          esac
+
       - name: Download this image's verified receipt from this run
+        if: steps.pause.outputs.paused == 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: thumbnail-renderer-${{ matrix.target }}-${{ github.sha }}
           path: ${{ runner.temp }}/verified-receipt
 
       - name: Read the verified digest from the receipt
+        if: steps.pause.outputs.paused == 'false'
         id: verified
         shell: bash
         env:
@@ -220,6 +243,7 @@ jobs:
           { echo "image=$image"; echo "digest=$(jq -er .digest "$receipt")"; } >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to GHCR to move latest
+        if: steps.pause.outputs.paused == 'false'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -227,11 +251,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Move latest to this verified main build (never to an older commit)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.pause.outputs.paused == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          AUTO_PROMOTE_LATEST_PAUSED: ${{ vars.AUTO_PROMOTE_LATEST_PAUSED }}
           IMAGE_NAME: ${{ steps.verified.outputs.image }}
           IMMUTABLE_TAG: ${{ steps.verified.outputs.image }}:sha-${{ github.sha }}
           PROMOTE_DIGEST: ${{ steps.verified.outputs.digest }}
@@ -241,8 +264,8 @@ jobs:
           # publishing job (every verify and test step) passed, to its exact digest, and only forward from whatever latest
           # names at write time. This job and the hand-run promote workflow share one writer concurrency group for this
           # tag, so the reads, compare, write and read-back below never interleave with another writer of it. A manual
-          # rollback lasts until the next automatic write; to keep one, revert on main or set the repository variable
-          # AUTO_PROMOTE_LATEST_PAUSED to true, which this job reads once it holds the lock.
+          # rollback lasts until the next automatic write; to keep one, follow the rollback steps in RELEASING.md (pause
+          # first; the pause step above decides before any registry access) or revert on main.
           fail() { echo "::error::$1 latest was not changed."; exit 1; }
           digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"'; }
           revision_of() { docker buildx imagetools inspect "$1" --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}'; }
@@ -265,15 +288,6 @@ jobs:
           [[ "$IMMUTABLE_TAG" == "$IMAGE_NAME:sha-$COMMIT" || "$IMMUTABLE_TAG" == "$IMAGE_NAME:sha-$COMMIT-full" ]] || fail "Unexpected immutable tag $IMMUTABLE_TAG."
           [[ "$(digest_of "$IMMUTABLE_TAG")" == "$PROMOTE_DIGEST" ]] || fail "$IMMUTABLE_TAG does not name the verified $PROMOTE_DIGEST."
           [[ "$(revision_of "$IMAGE_NAME@$PROMOTE_DIGEST")" == "$COMMIT" ]] || fail "The verified digest does not carry commit $COMMIT."
-          # Hold switch, read under the lock: "true" pauses automatic promotion; unset or "false" runs; anything else stops.
-          case "$AUTO_PROMOTE_LATEST_PAUSED" in
-            true)
-              echo "- Automatic promotion of \`$IMAGE_NAME:latest\` is paused (AUTO_PROMOTE_LATEST_PAUSED=true); commit \`$COMMIT\`, digest \`$PROMOTE_DIGEST\` was not promoted." >> "$GITHUB_STEP_SUMMARY"
-              echo "::warning::Automatic promotion is paused by AUTO_PROMOTE_LATEST_PAUSED; latest was not changed."
-              exit 0 ;;
-            ''|false) ;;
-            *) fail "AUTO_PROMOTE_LATEST_PAUSED must be true, false or unset, not '$AUTO_PROMOTE_LATEST_PAUSED'." ;;
-          esac
           PREVIOUS_DIGEST="$(read_latest)" || fail "Cannot read the current latest."
           PREVIOUS_COMMIT=none
           if [[ "$PREVIOUS_DIGEST" == "$PROMOTE_DIGEST" ]]; then

@@ -50,6 +50,7 @@ permissions:
 concurrency:
   group: latest-writer-logs-local
   cancel-in-progress: false
+  queue: max
 
 jobs:
   promote:

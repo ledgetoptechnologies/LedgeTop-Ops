@@ -3,9 +3,10 @@
 // `promote-latest` job that runs after the publishing job (every verify/test step) passed, only to the exact digest that
 // job verified, and only forward from whatever latest names at write time. The automatic job and the hand-run, gated
 // promote-*.yml workflow (rollback and re-promotion) share ONE writer concurrency group per mutable tag, so their read,
-// compare, write and read-back never interleave. A manual rollback lasts until the next automatic write; the repository
-// variable AUTO_PROMOTE_LATEST_PAUSED=true, read under the lock, holds it. Static checks everywhere; the real step is also executed under bash with
-// stubbed docker and gh. Nothing is published.
+// compare, write and read-back never interleave, and every writer queues (queue: max) instead of replacing a pending
+// one. A manual rollback lasts until the next automatic write. The repository variable AUTO_PROMOTE_LATEST_PAUSED=true
+// pauses promote-latest jobs of runs created after it is set; the job decides that first, before any registry access.
+// Static checks everywhere; the real steps are also executed under bash with stubbed docker and gh. Nothing is published.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -38,6 +39,9 @@ const jobsOf = text => {
 const moveStepOf = text => { const at = text.indexOf(`\n      - name: ${MOVE_STEP}\n`); assert.ok(at > 0, 'move step present'); return text.slice(at + 1); };
 const scriptOf = step => step.slice(step.indexOf('        run: |\n') + 15).split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
 const WRITE = /imagetools\s+create[^\n]*:latest\b/;
+const GATE = "steps.pause.outputs.paused == 'false'";
+const PAUSE_STEP = 'Check the automatic promotion pause';
+const stepsOf = job => job.split(/^      - name: /m).slice(1).map(block => ({ name: block.slice(0, block.indexOf('\n')), block }));
 
 test('each publisher moves latest only in a promote-latest job after its publishing job, with the exact verified digest', () => {
   const bodies = new Set();
@@ -52,12 +56,12 @@ test('each publisher moves latest only in a promote-latest job after its publish
     const job = jobs.get('promote-latest');
     assert.ok(job.includes("    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}\n"), `${name}: main pushes only`);
     assert.ok(job.includes(`    needs: ${needs}\n`), `${name}: only after ${needs} passed`);
-    assert.ok(job.includes(`    concurrency:\n      group: ${group}\n      cancel-in-progress: false\n`), `${name}: the shared writer group`);
+    assert.ok(job.includes(`    concurrency:\n      group: ${group}\n      cancel-in-progress: false\n      queue: max\n`), `${name}: the shared writer group, queued`);
     assert.ok(job.includes('    permissions:\n      contents: read\n      packages: write\n    steps:\n'), `${name}: least privilege`);
     assert.ok(!/environment:|always\(\)|continue-on-error/.test(job), `${name}: no gated environment and no bypass`);
     const step = moveStepOf(text);
     assert.ok(!/\n      - name: /.test(step.slice(1)), `${name}: the move is the last step`);
-    assert.ok(step.startsWith(`      - name: ${MOVE_STEP}\n        if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n        shell: bash\n        env:\n          GH_TOKEN: \${{ github.token }}\n          AUTO_PROMOTE_LATEST_PAUSED: \${{ vars.AUTO_PROMOTE_LATEST_PAUSED }}\n`), name);
+    assert.ok(step.startsWith(`      - name: ${MOVE_STEP}\n        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && ${GATE}\n        shell: bash\n        env:\n          GH_TOKEN: \${{ github.token }}\n`), name);
     for (const [key, value] of Object.entries(env)) assert.ok(step.includes(`\n          ${key}: ${value}\n`), `${name}: ${key}`);
     for (const line of job.split('\n').filter(l => l.includes('uses: '))) assert.match(line, /@[0-9a-f]{40} # v/, `${name}: pinned ${line.trim()}`);
     const before = text.slice(0, text.indexOf('\n  promote-latest:\n')).replace(/^\s*#.*$/gm, '');
@@ -74,9 +78,8 @@ test('each publisher moves latest only in a promote-latest job after its publish
   assert.equal(script.split('NOW="$(read_latest)" || fail').length - 1, 1, 'the final re-read uses the same classifier and fails closed');
   assert.equal(script.split('PREVIOUS_DIGEST="$(read_latest)" || fail').length - 1, 1, 'so does the first read');
   for (const word of ['Commit:', 'Digest:', 'Previous latest:', 'Decision:']) assert.ok(script.includes(word), `summary names ${word}`);
-  // The pause switch is read in this job (under the lock), before latest is read or written.
-  const pause = script.indexOf('case "$AUTO_PROMOTE_LATEST_PAUSED" in');
-  assert.ok(pause > 0 && pause < script.indexOf('PREVIOUS_DIGEST="$(read_latest)"') && pause < script.indexOf('imagetools create'));
+  // The pause is decided by the job's first step; the move script itself never sees it.
+  assert.ok(!script.includes('AUTO_PROMOTE_LATEST_PAUSED'));
   // No suppression based on manual run history: forward-only from what latest names at write time is the whole rule.
   assert.ok(!/actions\/runs|actions\/workflows|MANUAL_WORKFLOW|kept-manual/.test(script));
   for (const call of script.match(/gh api [^\n]*/g)) assert.ok(!/(-X|--method|-f |-F |--field|--raw-field|--input)\b/.test(call), `read-only API call: ${call}`);
@@ -87,7 +90,7 @@ test('overlapping writers: the automatic and manual writers of each latest share
     const promote = read(manual);
     assert.match(promote, /\non:\n  workflow_dispatch:\n/, manual);
     assert.ok(promote.includes('    environment: image-promotion\n'), `${manual} keeps its approval gate`);
-    assert.ok(promote.includes(`\nconcurrency:\n  group: ${manualGroup}\n  cancel-in-progress: false\n`), `${manual}: ${manualGroup}`);
+    assert.ok(promote.includes(`\nconcurrency:\n  group: ${manualGroup}\n  cancel-in-progress: false\n  queue: max\n`), `${manual}: ${manualGroup}, queued`);
     assert.ok(promote.includes('rollback and re-promotion path'), `${manual} says what it is for now`);
     // The groups resolve to the same string for the same image (the thumbnail images per target).
     for (const target of ['decoder', 'broker', 'queue-worker'])
@@ -162,7 +165,7 @@ gh() {
 }
 `;
   const run = ({ event = 'push', ref = 'refs/heads/main', commit = C(2), digest = D(2), tag, latest = D(1), latestCommit = C(1), status = 'ahead',
-    seq, paused = '', built = { [D(2)]: C(2) }, immutable = D(2) } = {}) => {
+    seq, built = { [D(2)]: C(2) }, immutable = D(2) } = {}) => {
     const reg = path.join(dir, 'reg');
     fs.rmSync(reg, { recursive: true, force: true });
     fs.mkdirSync(path.join(reg, 'tags'), { recursive: true });
@@ -177,7 +180,7 @@ gh() {
     fs.writeFileSync(summary, '');
     const r = spawnSync('bash', ['-c', stub + script], { encoding: 'utf8', env: { ...process.env, GITHUB_EVENT_NAME: event, GITHUB_REF: ref, GITHUB_SHA: commit,
       GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '77', GITHUB_STEP_SUMMARY: posix(summary), RUNNER_TEMP: posix(dir), IMAGE_NAME: IMAGE, PROMOTE_DIGEST: digest,
-      IMMUTABLE_TAG: tag ?? `${IMAGE}:sha-${commit}`, AUTO_PROMOTE_LATEST_PAUSED: paused } });
+      IMMUTABLE_TAG: tag ?? `${IMAGE}:sha-${commit}` } });
     const file = f => fs.existsSync(path.join(reg, f)) ? fs.readFileSync(path.join(reg, f), 'utf8') : '';
     return { status: r.status, out: r.stdout + r.stderr, writes: file('writes'), api: file('api'), latest: file(`tags/${image}_latest`), summary: fs.readFileSync(summary, 'utf8') };
   };
@@ -201,15 +204,6 @@ gh() {
   assert.equal(afterRollback.status, 0, afterRollback.out);
   assert.equal(afterRollback.writes, `${IMAGE}:latest ${IMAGE}@${D(2)}\n`);
   assert.ok(afterRollback.api.includes(`compare/${C(0)}...${C(2)}`), 'compared with what latest names at write time');
-  // The hold switch: paused means no read of latest, no API call, no write.
-  const paused = run({ paused: 'true', latest: D(0), latestCommit: C(0) });
-  assert.equal(paused.status, 0, paused.out);
-  assert.equal(paused.writes, '', 'paused: nothing written');
-  assert.equal(paused.api, '', 'paused: nothing compared');
-  assert.match(paused.out, /paused by AUTO_PROMOTE_LATEST_PAUSED/);
-  assert.match(paused.summary, /is paused \(AUTO_PROMOTE_LATEST_PAUSED=true\)/);
-  assert.equal(run({ paused: 'false' }).writes, `${IMAGE}:latest ${IMAGE}@${D(2)}\n`, 'false runs');
-  for (const value of ['yes', 'TRUE', '1', 'paused']) refuses({ paused: value }, `an unclear pause value (${value}) stops without writing`);
   // Overlapping writers: latest changes between the first read and the final re-read.
   refuses({ seq: [D(1), D(9)] }, 'another writer moved latest between the reads');
   refuses({ seq: [D(1), 'notfound'] }, 'latest disappeared between the reads');
@@ -238,4 +232,75 @@ gh() {
   refuses({ tag: `${IMAGE}:candidate-${C(2)}` }, 'an unexpected tag');
   refuses({ latestCommit: '' }, 'latest carries no commit label');
   keeps({ latest: D(2), latestCommit: C(2) }, 'already-latest', 'already latest');
+});
+
+test('the pause is decided first: while paused no later step runs, so no login, registry read or API call', () => {
+  const bodies = new Set();
+  for (const name of Object.keys(PUBLISHERS)) {
+    const job = jobsOf(read(name)).get('promote-latest');
+    const steps = stepsOf(job);
+    assert.equal(steps[0].name, PAUSE_STEP, `${name}: the pause is the first step`);
+    assert.ok(steps[0].block.includes('        id: pause\n') && !steps[0].block.includes('uses: '), `${name}: a plain script, no action`);
+    assert.ok(steps[0].block.includes('          AUTO_PROMOTE_LATEST_PAUSED: ${{ vars.AUTO_PROMOTE_LATEST_PAUSED }}\n'));
+    assert.ok(!/docker|gh api|curl|wget|git /.test(scriptOf(steps[0].block)), `${name}: the pause step touches nothing external`);
+    bodies.add(steps[0].block.trimEnd());
+    // With paused=true every later step's if is false, so the job runs only the pause step.
+    for (const { name: step, block } of steps.slice(1)) {
+      const condition = /^        if: ([^\n]+)$/m.exec(block)?.[1] ?? '';
+      assert.ok(condition === GATE || condition.endsWith(` && ${GATE}`), `${name}: "${step}" is skipped while paused`);
+      assert.ok(!/always\(\)|failure\(\)|cancelled\(\)/.test(condition), `${name}: "${step}" cannot bypass the pause`);
+    }
+  }
+  assert.equal(bodies.size, 1, 'the pause step is identical in all four publishers');
+});
+
+test('the paused profile makes zero external calls and succeeds even with GHCR unavailable', t => {
+  if (!bashUsable()) return t.skip('bash is required');
+  const pauseStep = stepsOf(jobsOf(read('publish-viewer.yml')).get('promote-latest'))[0].block;
+  const script = scriptOf(pauseStep);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-promote-pause-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const posix = p => p.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`);
+  const calls = path.join(dir, 'calls');
+  // Every external tool records the call and fails, as if GHCR and the API were unreachable.
+  const stub = ['docker', 'gh', 'curl', 'wget', 'git', 'jq'].map(tool => `${tool}() { echo "${tool} $*" >> '${posix(calls)}'; echo "ERROR: unavailable" >&2; return 1; }`).join('\n') + '\n';
+  const runPause = value => {
+    for (const f of ['calls', 'out', 'summary']) fs.writeFileSync(path.join(dir, f), '');
+    const r = spawnSync('bash', ['-c', stub + script], { encoding: 'utf8', env: { ...process.env, AUTO_PROMOTE_LATEST_PAUSED: value, GITHUB_SHA: C(2),
+      GITHUB_OUTPUT: posix(path.join(dir, 'out')), GITHUB_STEP_SUMMARY: posix(path.join(dir, 'summary')) } });
+    const file = f => fs.readFileSync(path.join(dir, f), 'utf8');
+    return { status: r.status, out: r.stdout + r.stderr, output: file('out'), calls: file('calls'), summary: file('summary') };
+  };
+  const paused = runPause('true');
+  assert.equal(paused.status, 0, paused.out);
+  assert.equal(paused.output, 'paused=true\n');
+  assert.equal(paused.calls, '', 'zero external calls while paused');
+  assert.match(paused.out, /::warning::Automatic promotion is paused by AUTO_PROMOTE_LATEST_PAUSED/);
+  assert.match(paused.summary, /is paused \(AUTO_PROMOTE_LATEST_PAUSED=true\)/);
+  for (const value of ['', 'false']) {
+    const r = runPause(value);
+    assert.equal(r.status, 0, r.out);
+    assert.equal(r.output, 'paused=false\n', `"${value}" runs`);
+    assert.equal(r.calls, '');
+  }
+  for (const value of ['yes', 'TRUE', '1', 'paused']) {
+    const r = runPause(value);
+    assert.equal(r.status, 1, `an unclear pause value (${value}) fails the job`);
+    assert.equal(r.output, '', `${value}: no decision is recorded, so later steps are skipped`);
+    assert.equal(r.calls, '');
+  }
+});
+
+test('the runbook keeps a rollback in the documented order, and covers a full writer queue', () => {
+  const releasing = fs.readFileSync(fileURLToPath(new URL('../apps/viewer/docs/RELEASING.md', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
+  const order = ['1. Set the repository variable `AUTO_PROMOTE_LATEST_PAUSED` to `true`.', '2. Wait for, or cancel, every publisher run already in progress',
+    '3. Check that no publisher run is still queued.', '4. Then run the manual promotion to roll back.', '5. To resume, unset the variable'];
+  const at = order.map(step => releasing.indexOf(step));
+  assert.ok(at.every(i => i > 0), `every step is documented: ${at}`);
+  assert.deepEqual([...at].sort((a, b) => a - b), at, 'pause, settle in-flight runs, check the queue, then roll back');
+  assert.match(releasing, /governs publisher runs created after it\s+was set, not runs already in flight/);
+  assert.match(releasing, /up to 100 pending writers per group/);
+  assert.match(releasing, /A cancelled manual promotion must be dispatched again/);
+  for (const readme of ['../apps/logs-local/README.md', '../apps/thumbnail-renderer/README.md'])
+    assert.match(fs.readFileSync(fileURLToPath(new URL(readme, import.meta.url)), 'utf8'), /ordered rollback steps in `apps\/viewer\/docs\/RELEASING\.md`/, readme);
 });

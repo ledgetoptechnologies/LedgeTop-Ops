@@ -28,11 +28,15 @@ work). The hand-run, approved promotion below is for rollback and re-promotion.
      carries this commit's revision label;
    - it runs in the `latest-writer-viewer` concurrency group, which the manual
      `promote-viewer.yml` also uses, so the automatic and manual writers never
-     interleave their reads, compare, write and read-back;
-   - it can be paused: when the repository variable
-     `AUTO_PROMOTE_LATEST_PAUSED` is `true` (read once the job holds the lock),
-     it writes nothing and says so in the summary. Unset or `false` runs; any
-     other value fails the job without writing;
+     interleave their reads, compare, write and read-back. Every writer uses
+     `queue: max`, so a pending writer is never replaced by a newer one;
+   - it can be paused with the repository variable `AUTO_PROMOTE_LATEST_PAUSED`.
+     Its first step decides, before any registry login, registry read or API
+     call: `true` skips everything else with a warning, unset or `false` runs,
+     and any other value fails the job without writing. The value is the one
+     GitHub supplies when the job is prepared (the workflow token cannot read
+     repository variables), so a pause governs publisher runs created after it
+     was set, not runs already in flight;
    - only forward from whatever `latest` names at write time: it reads that commit and asks
      GitHub to compare it with this commit. If this commit descends from it,
      `latest` moves. If `latest` already names a newer `main` commit (an older
@@ -47,11 +51,10 @@ work). The hand-run, approved promotion below is for rollback and re-promotion.
    - the run summary records the commit, the new digest, the previous `latest`
      digest and its commit, and the decision.
 
-   GitHub keeps at most one pending job per concurrency group. A newer pending
-   writer replaces an older pending one, so if a manual promotion is still
-   waiting (for example for approval) when another build's `promote-latest`
-   queues behind it, check that the manual run completed, and dispatch it again
-   if it was cancelled.
+   With `queue: max`, GitHub keeps up to 100 pending writers per group, in
+   order (ordering is not guaranteed). Beyond that it cancels the new one. A
+   cancelled `promote-latest` leaves `latest` where it is, and the next merge
+   moves it forward. A cancelled manual promotion must be dispatched again.
 
 A failed gate stops the run before the `sha-` tag, the attestation and `latest`
 are written. The run summary shows the commit and digest.
@@ -135,13 +138,23 @@ must not write `latest` during a release.
 
 ## Rollback
 
-Run the manual promotion with an earlier commit and its digest (the previous
-digest is in the publish run's summary and in the last promotion's receipt).
-A rollback lasts until the next automatic write: any `promote-latest` job that
-runs after it, including one already queued, moves `latest` forward again. To
-keep a rollback, set the repository variable `AUTO_PROMOTE_LATEST_PAUSED` to
-`true` first (it pauses every image's automatic promotion), or revert on
-`main`. Unset it (or set `false`) to resume. Rolling back
+A rollback is the manual promotion of an earlier commit and its digest (the
+previous digest is in the publish run's summary and in the last promotion's
+receipt). It lasts until the next automatic write: any `promote-latest` job
+that runs after it moves `latest` forward again. To keep a rollback, do these
+steps in this order:
+
+1. Set the repository variable `AUTO_PROMOTE_LATEST_PAUSED` to `true`. It
+   pauses every image's automatic promotion, for publisher runs created from
+   now on.
+2. Wait for, or cancel, every publisher run already in progress (the
+   `publish-*.yml` workflows), because they may have read the old value.
+3. Check that no publisher run is still queued.
+4. Then run the manual promotion to roll back.
+5. To resume, unset the variable (or set it to `false`). The next merge to
+   `main` moves `latest` forward again.
+
+Reverting on `main` is the other way to move `latest` back for good. Rolling back
 the image does not prove the older image is compatible with a newer database
 schema; check that before rolling back. The
 attestation must still exist, so this works for 90 days after that candidate

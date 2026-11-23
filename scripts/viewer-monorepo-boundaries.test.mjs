@@ -294,12 +294,12 @@ test('Only publish-viewer writes Viewer candidate and sha tags; latest is writte
   // in the same writer concurrency group as promote-viewer.yml.
   assert.equal((workflow.match(/imagetools create --prefer-index=false --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1);
   assert.equal([...migratedSteps.keys()].at(-1), moveStep);
-  assert.match(workflow, /\n  promote-latest:\n[^]*?\n    needs: verify-and-build\n[^]*?\n    concurrency:\n      group: latest-writer-viewer\n      cancel-in-progress: false\n/);
-  assert.match(migratedSteps.get(moveStep), /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'\n/);
+  assert.match(workflow, /\n  promote-latest:\n[^]*?\n    needs: verify-and-build\n[^]*?\n    concurrency:\n      group: latest-writer-viewer\n      cancel-in-progress: false\n      queue: max\n/);
+  assert.match(migratedSteps.get(moveStep), /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' && steps\.pause\.outputs\.paused == 'false'\n/);
   const promote = read('.github/workflows/promote-viewer.yml');
   assert.equal((promote.match(/docker buildx imagetools create --prefer-index=false --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1);
   // Writers are serialized: the manual and automatic writers share one group; builds never cancel mid-run.
-  assert.match(promote, /^concurrency:\n  group: latest-writer-viewer\n  cancel-in-progress: false$/m);
+  assert.match(promote, /^concurrency:\n  group: latest-writer-viewer\n  cancel-in-progress: false\n  queue: max$/m);
   assert.match(workflow, /^concurrency:\n  group: publish-viewer-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false$/m);
 });
 

@@ -51,6 +51,7 @@ permissions:
 concurrency:
   group: latest-writer-viewer
   cancel-in-progress: false
+  queue: max
 
 jobs:
   promote:

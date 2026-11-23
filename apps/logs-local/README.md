@@ -36,7 +36,8 @@ passed, a `promote-latest` job moves `latest` (what the server stack in `apps/me
 digest, never back to an older main commit (the same rule as the Viewer and the other images). The keyless image never
 becomes `latest`. The hand-run `promote-logs-local.yml` is the approved rollback and re-promotion path; both share the
 `latest-writer-logs-local` concurrency group. A rollback lasts until the next automatic write;
-to keep one, set the repository variable `AUTO_PROMOTE_LATEST_PAUSED` to `true` first, or revert on main.
+to keep one, follow the ordered rollback steps in `apps/viewer/docs/RELEASING.md` (pause, settle in-flight publisher runs,
+then roll back), or revert on main.
 The full native parser image requires an **amd64 NAS**. Verify the NAS architecture before activation; the service
 declares `platform: linux/amd64`, and emulated execution has not been qualified.
 

@@ -49,6 +49,7 @@ permissions:
 concurrency:
   group: latest-writer-proxy-generator
   cancel-in-progress: false
+  queue: max
 
 jobs:
   promote:

@@ -59,7 +59,8 @@ digest, never back to an older `main` commit. It never moves `:stable`.
 With `pull_policy: always`, the next redeploy pulls the new `:latest`. The hand-run
 `promote-thumbnail-renderer.yml` is the approved rollback and re-promotion path; both share the per-image
 `latest-writer-thumbnail-<target>` concurrency group. A rollback lasts until the next automatic write; to keep
-one, set the repository variable `AUTO_PROMOTE_LATEST_PAUSED` to `true` first, or revert on `main`. To hold a
+one, follow the ordered rollback steps in `apps/viewer/docs/RELEASING.md` (pause, settle in-flight publisher runs,
+then roll back), or revert on `main`. To hold a
 service on one build, pin its **immutable digest** from the run's deployment receipt,
 `image: ghcr.io/ledgetoptechnologies/<package>@sha256:<digest from the receipt>`, never the
 `sha-<commit>` tag. A plain container restart does not pull images; this configuration
