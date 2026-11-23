@@ -15,6 +15,7 @@ const auth = require('./auth');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const { isAdminRequest } = require('./adminAuth');
 const { revisionMatches } = require('./publicSharePolicy');
+const { PROJECT_SHARE_COOKIE, projectShareSessionMatches, projectShareModel } = require('./projectShareAccess');
 const { createUtmProjection } = require('../utm-conversion.mjs');
 const { parcelsInBounds, uploadSourceDescription } = require('./propertyLinesBoundary');
 const { APPROVED_PARCEL_FIELDS, PARCEL_SOURCES, PARCEL_DISCLAIMER, WISCONSIN, extentTouches, selectParcelSource, validateRegistry } = require('./parcelSources');
@@ -166,10 +167,12 @@ function normalizeUpstream(body, idField = WISCONSIN.query.idField, ownerField =
 
 // Who is asking, for which model. Every path re-checks liveness on each
 // request, as asset delivery does: a live viewer session for this exact model
-// version, an emergency-admin login, or a live, same-revision public share of
-// this model. Returns { audience, model, version, caller } or null.
+// version, an emergency-admin login, a live, same-revision public share of
+// this model, or a live whole-project public link (its own unlocked cookie)
+// whose project has this model as an active published task. Returns
+// { audience, model, version, caller } or null.
 // audience: 'staff' (Ops session or emergency admin), 'client' or 'public'.
-async function resolvePropertyLinesCaller(req, repository, modelId, { validator = defaultSourceValidator() } = {}) {
+async function resolvePropertyLinesCaller(req, repository, modelId, { validator = defaultSourceValidator(), processing = null } = {}) {
   if (!repository || typeof modelId !== 'string' || !/^[A-Za-z0-9_.:-]{1,200}$/.test(modelId)) return null;
   const resolvedId = repository.resolveModelId ? repository.resolveModelId(modelId) : modelId;
   if (!resolvedId) return null;
@@ -200,7 +203,25 @@ async function resolvePropertyLinesCaller(req, repository, modelId, { validator 
       && await validator.allows(share))
       return { audience: 'public', model, version: model.activeVersion, caller: publicCallerKey(req, share.id) };
   }
-  return null;
+  return processing ? resolveProjectShareCaller(req, repository, processing, resolvedId, validator) : null;
+}
+
+// A whole-project public link: its cookie names the link and project only, and
+// the server decides whether that project covers the requested model. The link
+// is read again after the source check and must still be live.
+async function resolveProjectShareCaller(req, repository, processing, modelId, validator) {
+  const signed = req.cookies?.[PROJECT_SHARE_COOKIE];
+  const payload = signed ? auth.verify(signed) : null;
+  if (payload?.kind !== 'project-share' || typeof payload.shareId !== 'string' || typeof payload.projectId !== 'string') return null;
+  const current = () => {
+    const share = repository.getProjectShare(payload.shareId);
+    return projectShareSessionMatches(payload, share) && repository.projectShareLive(share) && share.permissions?.view !== false ? share : null;
+  };
+  const asked = current();
+  if (!asked || !await validator.allows(asked)) return null;
+  const share = current();
+  const model = share && projectShareModel(repository, processing, share, modelId);
+  return model ? { audience: 'public', model, version: model.activeVersion, caller: publicCallerKey(req, `project:${share.id}`) } : null;
 }
 
 function defaultSourceValidator() { return require('./sourceAuthorization').sourceAuthorizationValidator; }
@@ -626,7 +647,8 @@ function uploadVisible(upload, audience) {
 // fetcher, created on first use (fetchImpl: tests only).
 // approvedFields: the field allowlist every source is checked against (tests
 // pass their own for test-only sources).
-function createPropertyLinesApi({ repository, sources = PARCEL_SOURCES, source = null, fetchImpl, validator, boundaries = null, approvedFields = APPROVED_PARCEL_FIELDS } = {}) {
+// processing: the processing repository; whole-project links need it.
+function createPropertyLinesApi({ repository, processing = null, sources = PARCEL_SOURCES, source = null, fetchImpl, validator, boundaries = null, approvedFields = APPROVED_PARCEL_FIELDS } = {}) {
   validateRegistry(sources, approvedFields);
   const router = trackedRouter();
   const fetchers = new Map();
@@ -638,10 +660,10 @@ function createPropertyLinesApi({ repository, sources = PARCEL_SOURCES, source =
   // 401 when nothing was presented; 403 when a session, admin login or share
   // was presented but is revoked, stale, expired or for another model.
   const denied = (req, res) => {
-    const presented = Boolean(req.get?.('authorization') || req.cookies?.ltds_viewer || req.cookies?.ltds_share || req.cookies?.ltds_admin);
+    const presented = Boolean(req.get?.('authorization') || req.cookies?.ltds_viewer || req.cookies?.ltds_share || req.cookies?.[PROJECT_SHARE_COOKIE] || req.cookies?.ltds_admin);
     return res.status(presented ? 403 : 401).json({ error: 'viewer access to this model is required', code: presented ? 'viewer_access_denied' : 'viewer_required' });
   };
-  const resolve = (req, modelId) => resolvePropertyLinesCaller(req, repository, modelId, validator ? { validator } : undefined);
+  const resolve = (req, modelId) => resolvePropertyLinesCaller(req, repository, modelId, { processing, ...(validator ? { validator } : {}) });
 
   router.get('/api/v1/property-lines', async (req, res) => {
     res.set('Cache-Control', 'no-store');

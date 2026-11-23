@@ -172,7 +172,7 @@ app.use(createApiV1(repository));
 // per processing project (propertyLinesBoundary.js).
 const propertyLinesBoundaries = processingRepository && storageManager
   ? createBoundaryStore({ baseDir: path.join(config.modelsMount, 'property-lines'), database }) : null;
-app.use(createPropertyLinesApi({ repository, boundaries: propertyLinesBoundaries }));
+app.use(createPropertyLinesApi({ repository, processing: processingRepository, boundaries: propertyLinesBoundaries }));
 if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager, providerCredentials, propertyLinesBoundaries }));
 app.use(apiRouter);
 app.use(assetsRouter);

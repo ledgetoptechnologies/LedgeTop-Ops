@@ -1,14 +1,12 @@
 'use strict';
 
-const path = require('node:path');
 const express = require('express');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const auth = require('./auth');
 const { config } = require('./config');
 const { toViewerConfig } = require('./apiV1');
-const { publicDerivativeKind } = require('./processingSecurity');
+const { PROJECT_SHARE_COOKIE, projectShareSessionMatches, projectShareAssets, projectShareAssetsReady } = require('./projectShareAccess');
 
-const PROJECT_SHARE_COOKIE = 'ltds_project_share';
 const PROJECT_SHARE_SESSION_TTL_MS = 60 * 60 * 1000;
 
 function pageQuery(req) {
@@ -51,9 +49,7 @@ function createProjectShareApi({ repository, processing }) {
   function unlocked(req, share) {
     if (!share.passwordHash) return true;
     const signed = req.cookies?.[PROJECT_SHARE_COOKIE];
-    const payload = signed ? auth.verify(signed) : null;
-    return Boolean(payload && payload.kind === 'project-share'
-      && payload.shareId === share.id && payload.projectId === share.projectId);
+    return projectShareSessionMatches(signed ? auth.verify(signed) : null, share);
   }
 
   function issueSession(req, res, share) {
@@ -123,11 +119,7 @@ function createProjectShareApi({ repository, processing }) {
     if (!selected || !model || model.activeVersion?.id !== selected.modelVersionId) {
       return res.status(404).json({ error: 'published task not found', code: 'published_task_not_found' });
     }
-    const publicAssets = model.activeVersion.assets.filter((asset) => asset.published && publicDerivativeKind(asset.kind));
-    const integrityReady = publicAssets.length > 0 && publicAssets.every((asset) => asset.sha256
-      && (!['ept', 'tiles'].includes(asset.kind)
-        || (asset.manifestSha256 && repository.getModelAssetFile(asset.id, path.posix.basename(asset.relativePath)))));
-    if (!integrityReady) return res.status(409).json({ error: 'published assets are not ready', code: 'asset_integrity_not_ready' });
+    if (!projectShareAssetsReady(repository, model)) return res.status(409).json({ error: 'published assets are not ready', code: 'asset_integrity_not_ready' });
     const remaining = context.share.expiresAt ? Date.parse(context.share.expiresAt) - Date.now() : PROJECT_SHARE_SESSION_TTL_MS;
     const ttl = Math.max(1, Math.min(PROJECT_SHARE_SESSION_TTL_MS, remaining));
     const assetToken = auth.sign({
@@ -140,7 +132,7 @@ function createProjectShareApi({ repository, processing }) {
     }, ttl);
     const viewer = toViewerConfig(model, {
       assetToken,
-      assetFilter: (asset) => asset.published && publicDerivativeKind(asset.kind),
+      assetFilter: projectShareAssets,
     });
     issueSession(req, res, context.share);
     res.setHeader('Cache-Control', 'no-store');
