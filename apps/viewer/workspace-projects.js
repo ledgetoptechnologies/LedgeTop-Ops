@@ -20,7 +20,7 @@ import { createWorkspaceNavigationWork, workspaceNavigationState } from './works
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, publishAudience, publishAudienceText, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -1956,8 +1956,30 @@ async function retrieveShareLink(element){
     }
   }catch(error){popup?.close();const unavailable=error.status===409&&/share_link_unavailable|original link cannot be recovered/i.test(error.message);toast(unavailable?'The original URL is not recoverable. The existing link has not been changed or revoked; create a separate link if needed.':error.message,true)}finally{element.disabled=false}
 }
-async function confirmSharedVersionUpdate(){
-  return dialogs.confirm('Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links and clients who have the whole project also get newly activated tasks. Continue and create the public link?',
+// Read now, not from the open dialog: names are only as good as the list they come from.
+async function publicationAudience(output,projectId){
+  if(!can('viewer.client_grants.manage'))return publishAudienceText([],{complete:false});
+  const names=new Set();let complete=true;
+  try{
+    const access=await loadDirectClientAccess(api,projectId);
+    if(access){complete=!access.grantsIncomplete;for(const name of publishAudience(access,{projectId,taskId:output.taskId}))names.add(name);}else complete=false;
+  }catch{complete=false}
+  // Older Operations shares follow the model; without both lists they are unknown, never assumed to be none.
+  if(!state.clientAccess||!state.clientNativeAccess)complete=false;
+  const access=clientAccessSnapshot(),own=(access.associations||[]).filter(item=>output.modelId&&associationModelId(item)===output.modelId);
+  const ids=new Set(own.map(item=>item.id)),projects=new Set(own.map(associationProjectId));
+  for(const grant of access.grants||[]){
+    if((grant.status||'active')!=='active')continue;
+    if((grant.scopeType||grant.scope_type)==='task'?ids.has(grant.associationId||grant.association_id):projects.has(grant.projectId||grant.project_id))names.add(grant.clientName||grant.client_name||'a client');
+  }
+  return publishAudienceText([...names].sort((left,right)=>left.localeCompare(right)),{complete});
+}
+// One question before a public link publishes a model: which clients gain the task, and what an existing version's links gain.
+async function confirmPublication(output,projectId,existingAccess,form){
+  const audience=await publicationAudience(output,projectId);
+  if(!modal.open||!form.isConnected)return false;
+  if(!existingAccess)return !audience||dialogs.confirm(audience,{title:'Publish this task?',submitLabel:'Publish and create link'});
+  return dialogs.confirm(`${audience?`${audience} `:''}Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links and clients who have the whole project also get newly activated tasks. Continue and create the public link?`,
     {title:'Update existing shared access?',submitLabel:'Activate and create link'});
 }
 async function createOutputShare(form,projectId,onlyOutputId){
@@ -1977,10 +1999,9 @@ async function createOutputShare(form,projectId,onlyOutputId){
     if(form.shareRequest?.inputSignature===inputSignature)body={...form.shareRequest.body};
     else if(!output.activePublished){
       body.publishIfReady=true;
-      if(state.sharePreflight[output.id]?.existingAccessUpdateRequired){
-        if(!await confirmSharedVersionUpdate())return;
-        body.allowExistingAccessUpdate=true;
-      }
+      const existingAccess=Boolean(state.sharePreflight[output.id]?.existingAccessUpdateRequired);
+      if(!await confirmPublication(output,projectId,existingAccess,form))return;
+      if(existingAccess)body.allowExistingAccessUpdate=true;
     }
     if(!modal.open||!form.isConnected)return;
     const send=()=>{
@@ -1994,7 +2015,7 @@ async function createOutputShare(form,projectId,onlyOutputId){
     let result;
     try{result=await send()}catch(error){
       if(error.status!==409||error.message!=='existing_access_update_confirmation_required'||body.allowExistingAccessUpdate)throw error;
-      if(!await confirmSharedVersionUpdate()||!modal.open||!form.isConnected)return;
+      if(!await confirmPublication(output,projectId,true,form)||!modal.open||!form.isConnected)return;
       body.allowExistingAccessUpdate=true;
       result=await send();
     }

@@ -142,3 +142,23 @@ export function directGrantRows(access,{projectId,tasks,taskId=null,dateTime=val
     return `<div class="manage-row"><div><strong>${esc(grant.clientDisplayName||'Client')}</strong><small>${esc(details)}</small></div><span class="status ${expired?'expired':'active'}">${expired?'expired':'active'}</span><div><button class="secondary-button" data-action="revoke-direct-client-grant" data-id="${esc(grant.grantId)}">Revoke</button></div></div>`;
   }).join('')}</div>`;
 }
+
+// Who a publication adds: clients whose live share covers this task once it is published.
+// A task share can outlive its model, so a task being published again counts too.
+export function publishAudience(access,{projectId,taskId,now=Date.now()}){
+  const clients=new Map();
+  for(const grant of access.grants){
+    if(grant.revokedAt||grant.viewerProjectId!==projectId||grant.expiresAt&&!(Date.parse(grant.expiresAt)>now))continue;
+    if(grant.scopeType==='project'||grant.scopeType==='task'&&grant.taskId===taskId)clients.set(directClientKey(grant),grant.clientDisplayName||'a client');
+  }
+  return [...clients.values()].sort((left,right)=>left.localeCompare(right));
+}
+const NAMED_CLIENTS=5;
+// Nothing to say only when every list was read in full and no client gains the task.
+export function publishAudienceText(names,{complete}){
+  if(!names.length)return complete?'':'Client access could not be checked. Publishing this task shows it to every client who has the whole project.';
+  const shown=names.slice(0,NAMED_CLIENTS),more=names.length-shown.length;
+  const parts=more?[...shown,`${more} other client${more===1?'':'s'}`]:shown;
+  const list=parts.length>1?`${parts.slice(0,-1).join(', ')} and ${parts.at(-1)}`:parts[0];
+  return `Publishing this task shows it to ${list}.${complete?'':' Some client access could not be checked: any other client who has the whole project will see it too.'}`;
+}
