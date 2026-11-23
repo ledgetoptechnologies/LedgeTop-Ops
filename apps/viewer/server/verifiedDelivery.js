@@ -18,7 +18,9 @@
 //   not remembered (non-POSIX or network filesystems), the pre-header check
 //   hands its buffers to the same response through a per-request carry, so
 //   each region is still read and hashed once per request; regions beyond the
-//   carry are hashed right before they are sent.
+//   carry are hashed right before they are sent. The carry is reserved whole,
+//   once, before anything is read; a response never waits for buffer budget
+//   while holding some (see assetIntegrityCache.createCarry).
 // - Large whole-file assets with no chunk records (legacy rasters) are
 //   OUTSIDE the byte-integrity guarantee above, by decision: they keep the
 //   behaviour inherited from before (the whole file is hashed on every
@@ -123,11 +125,15 @@ async function openForDelivery(filePath) {
   }
 }
 
-function waitForDrain(res) {
+// Resolves on drain, on close, or on cancellation, including when the
+// response already closed before this was called (no further events come).
+function waitForDrain(res, signal) {
+  if (signal?.aborted || res.destroyed || res.closed || res.writableEnded) return Promise.resolve();
   return new Promise((resolve) => {
-    const done = () => { res.removeListener('drain', done); res.removeListener('close', done); resolve(); };
+    const done = () => { res.removeListener('drain', done); res.removeListener('close', done); signal?.removeEventListener('abort', done); resolve(); };
     res.once('drain', done);
     res.once('close', done);
+    signal?.addEventListener('abort', done, { once: true });
   });
 }
 
@@ -143,7 +149,7 @@ async function pump(res, handle, identity, start, len, signal) {
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
     if (!bytesRead) throw new Error('asset truncated during delivery');
     position += bytesRead;
-    if (held && !res.write(held)) await waitForDrain(res);
+    if (held && !res.write(held)) await waitForDrain(res, signal);
     held = buffer.subarray(0, bytesRead);
   }
   if (signal.aborted) return;
@@ -162,7 +168,7 @@ async function sendRegions(res, cache, filePath, stat, handle, regions, start, e
     const piece = await cache.verifiedSlice(filePath, stat, region, position, sliceEnd, { handle, signal, carry });
     if (!piece) throw new Error('asset bytes failed verification during delivery');
     try {
-      if (!res.write(piece.bytes)) await waitForDrain(res);
+      if (!res.write(piece.bytes)) await waitForDrain(res, signal);
     } finally {
       piece.release();
     }
@@ -191,7 +197,7 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
   const identity = fileIdentity(stat);
   const size = Number(stat.size);
   const controller = new AbortController();
-  const carry = cache.createCarry();
+  let carry = null;
   const onClose = () => { if (!res.writableFinished) controller.abort(); };
   res.once('close', onClose);
   try {
@@ -228,8 +234,18 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
       else if (ranges !== -2 && ranges !== undefined && ranges.length === 1) { outcome = 206; range = { start: ranges[0].start, end: ranges[0].end }; }
     }
 
+    // The body this response will send, and its registered regions.
+    const bodyRange = req.method === 'HEAD' ? null
+      : outcome === 206 ? range
+        : outcome === 200 && size > 0 ? { start: 0, end: size - 1 } : null;
+    const plan = bodyRange && typeof regions === 'function' ? regions(bodyRange.start, bodyRange.end) : null;
+
     let verified;
     try {
+      if (plan && !await cache.filesystemCacheable(filePath, stat.dev)) {
+        carry = cache.createCarry();
+        await cache.reserveCarry(carry, cache.carryBytesFor(plan), controller.signal);
+      }
       verified = await verify(outcome === 206 ? range : null, controller.signal, carry);
     } catch (error) {
       if (abortError(error) || controller.signal.aborted) return;
@@ -268,9 +284,8 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
     res.setHeader('Content-Length', len);
     if (req.method === 'HEAD') return res.end();
     try {
-      const plan = len > 0 && typeof regions === 'function' ? regions(start, start + len - 1) : null;
       if (plan) await sendRegions(res, cache, filePath, stat, handle, plan, start, start + len - 1, controller.signal, carry);
-      else if (carry.deferred) throw new Error('deferred region checks need a region plan');
+      else if (carry?.deferred) throw new Error('deferred region checks need a region plan');
       else await pump(res, handle, identity, start, len, controller.signal);
     } catch (error) {
       if (busyError(error) && !res.headersSent && !controller.signal.aborted) {

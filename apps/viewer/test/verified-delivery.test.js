@@ -524,3 +524,89 @@ test('uncached path (verification not remembered): each region is read and hashe
   assert.equal(f.integrity.bufferedBytes, 0, 'every carried buffer was released');
   assert.equal(f.integrity.bytes.size, 0, 'nothing remembered on the uncached path');
 });
+
+// Isolated budget regression: a global budget of two 64 KiB chunks, many
+// concurrent eight-chunk responses. Every request must finish (200 with exact
+// bytes) or fail fast (503) — never hang — and all budget must come back.
+async function budgetHarness(t, { eligible }) {
+  const CH = 64 * 1024;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-delivery-budget-'));
+  const filePath = path.join(root, 'asset.bin');
+  const body = crypto.randomBytes(8 * CH);
+  fs.writeFileSync(filePath, body);
+  const chunks = Array.from({ length: 8 }, (_, i) => ({ byteOffset: i * CH, byteSize: CH, sha256: sha256(body.subarray(i * CH, (i + 1) * CH)) }));
+  const cache = new AssetIntegrityCache({ platform: eligible ? 'linux' : 'win32', statfs: async () => ({ type: 0x2fc12fc1 }), wallNow: () => Date.now() + 60_000,
+    bufferedBudgetBytes: 2 * CH, maxQueuedStreams: 4, bytesCacheMaxBytes: eligible ? 2 * CH : 0 });
+  let inFlight = 0;
+  const app = express();
+  app.get('/asset', async (req, res) => {
+    inFlight += 1;
+    try {
+      const opened = await openForDelivery(filePath);
+      const read = opened.handle.read.bind(opened.handle);
+      opened.handle.read = async (...args) => { await sleep(1); return read(...args); }; // force interleaving
+      await deliverVerified(req, res, {
+        ...opened, filePath, cache,
+        verify: async (r, signal, carry) => {
+          const selected = r ? chunks.filter((c) => c.byteOffset <= r.end && c.byteOffset + c.byteSize - 1 >= r.start) : chunks;
+          for (const chunk of selected) if (!await cache.verifyChunk(filePath, opened.stat, chunk, { handle: opened.handle, signal, carry })) return false;
+          return true;
+        },
+        regions: (start, end) => chunks.filter((c) => c.byteOffset <= end && c.byteOffset + c.byteSize - 1 >= start).map((c) => ({ kind: 'chunk', offset: c.byteOffset, size: c.byteSize, sha256: c.sha256 })),
+        onFailure: () => res.sendStatus(404),
+        onError: (error) => res.sendStatus(error.status || 500),
+      });
+    } finally { inFlight -= 1; }
+  });
+  const server = await listen(app);
+  t.after(async () => { await close(server); fs.rmSync(root, { recursive: true, force: true }); });
+  const settled = async () => {
+    for (let i = 0; i < 400 && (inFlight || cache.bufferedBytes || cache.bufferWaiters.length || cache.activeStreams); i += 1) await sleep(25);
+    return { inFlight, bufferedBytes: cache.bufferedBytes, bufferWaiters: cache.bufferWaiters.length, activeStreams: cache.activeStreams };
+  };
+  return { cache, body, settled, url: `http://127.0.0.1:${server.address().port}/asset` };
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label}: hung for ${ms} ms`)), ms); })]).finally(() => clearTimeout(timer));
+}
+
+for (const eligible of [false, true]) {
+  const mode = eligible ? 'cached path' : 'uncached path';
+  test(`${mode}: concurrent multi-chunk responses over a two-chunk budget all finish or 503, never hang`, async (t) => {
+    const h = await budgetHarness(t, { eligible });
+    const ranges = [null, null, null, [0, 300_000], [70_000, 400_000], null, [10, 524_000], null, null, [200_000, 500_000], null, null];
+    const outcomes = await withTimeout(Promise.all(ranges.map(async (range) => {
+      const response = await fetch(h.url, range ? { headers: { range: `bytes=${range[0]}-${range[1]}` } } : {});
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (response.status === 503) { assert.equal(response.headers.get('retry-after'), '1'); return 503; }
+      assert.equal(response.status, range ? 206 : 200);
+      assert.deepEqual(bytes, range ? h.body.subarray(range[0], range[1] + 1) : h.body);
+      return response.status;
+    })), 20_000, mode);
+    assert.ok(outcomes.some((status) => status !== 503), 'some requests were served');
+    assert.deepEqual(await h.settled(), { inFlight: 0, bufferedBytes: 0, bufferWaiters: 0, activeStreams: 0 }, 'all budget returned');
+    assert.ok(h.cache.stats.peakBufferedBytes <= h.cache.bufferedBudgetBytes);
+  });
+
+  test(`${mode}: clients aborting mid-request never leak budget`, async (t) => {
+    const h = await budgetHarness(t, { eligible });
+    await withTimeout(Promise.all(Array.from({ length: 12 }, async (_, i) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 2 + (i % 6) * 4);
+      try {
+        const response = await fetch(h.url, { signal: controller.signal });
+        const reader = response.body.getReader();
+        await reader.read();
+        if (i % 2) controller.abort();
+        for (;;) { const { done } = await reader.read(); if (done) break; }
+      } catch { /* aborted by the client */ }
+    })), 20_000, `${mode} aborts`);
+    assert.deepEqual(await h.settled(), { inFlight: 0, bufferedBytes: 0, bufferWaiters: 0, activeStreams: 0 }, 'all budget returned after aborts');
+    // The pool still works afterwards.
+    const after = await fetch(h.url);
+    assert.equal(after.status, 200);
+    assert.deepEqual(Buffer.from(await after.arrayBuffer()), h.body);
+  });
+}

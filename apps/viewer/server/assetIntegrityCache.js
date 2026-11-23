@@ -157,14 +157,48 @@ class AssetIntegrityCache {
   canBuffer(size) { return size <= this.bufferedHashMaxBytes; }
 
   // Per-response hand-off of verified region bytes on the uncached path.
-  createCarry(maxBytes = this.carryMaxBytes) { return { maxBytes, held: 0, entries: new Map(), deferred: 0 }; }
+  //
+  // Budget rule (no hold-and-wait): a response either reserves its whole carry
+  // at once, before it reads anything and while it holds no other budget, or
+  // takes no carry. Regions that do not fit the carry are never reserved
+  // during the check; they are hashed when sent, one at a time, after the
+  // carry has been fully released (acquire, hash, write, release). So no
+  // response ever waits for budget while holding budget.
+  createCarry() { return { budget: 0, reserved: 0, held: 0, entries: new Map(), deferred: 0, closed: false }; }
 
+  // Bytes of the leading regions that fit one carry (capped by the global budget).
+  carryBytesFor(regions) {
+    const cap = Math.min(this.carryMaxBytes, this.bufferedBudgetBytes);
+    let total = 0;
+    for (const region of regions) {
+      const capacity = region.toEof ? region.size + 1 : region.size;
+      if (total + capacity > cap) break;
+      total += capacity;
+    }
+    return total;
+  }
+
+  // Reserves the whole carry atomically (may wait in the bounded queue or fail
+  // fast with integrity_busy). The caller holds nothing else at this point.
+  async reserveCarry(carry, bytes, signal = null) {
+    if (bytes <= 0) return;
+    await this.reserve(bytes, signal);
+    carry.budget = bytes;
+    carry.reserved = bytes;
+  }
+
+  // Returns every byte the carry still holds to the global budget. Pieces that
+  // were already released returned their own share; late releases after this
+  // are ignored.
   releaseCarry(carry) {
-    if (!carry) return;
-    for (const entry of carry.entries.values()) entry.release();
+    if (!carry || carry.closed) return;
+    carry.closed = true;
     carry.entries.clear();
+    if (carry.reserved > 0) this.unreserve(carry.reserved);
+    carry.reserved = 0;
     carry.held = 0;
   }
+
 
   // Uncached path with a carry: hash the region now and keep its buffer for
   // the same response, so it is never hashed twice. A region that would
@@ -173,21 +207,15 @@ class AssetIntegrityCache {
   async verifyIntoCarry(filePath, identity, key, region, carry, { handle, signal }) {
     const capacity = region.toEof ? region.size + 1 : region.size;
     if (carry.entries.has(key)) return true;
-    if (carry.held + capacity > carry.maxBytes) { carry.deferred += 1; return true; }
-    await this.reserve(capacity, signal);
-    let kept = false;
-    try {
-      const result = await this.hashRegion(filePath, identity, region.offset, region.size, { toEof: Boolean(region.toEof), handle, signal, preReserved: true });
-      if (!result?.buffer || result.digest !== region.sha256) { this.stats.failures += 1; return false; }
-      let released = false;
-      carry.entries.set(key, { buffer: result.buffer, capacity, release: () => { if (!released) { released = true; this.unreserve(capacity); } } });
-      carry.held += capacity;
-      kept = true;
-      return true;
-    } finally {
-      if (!kept) this.unreserve(capacity);
-    }
+    // Never reserve here: only the carry's pre-reserved budget is used.
+    if (carry.closed || carry.held + capacity > carry.budget) { carry.deferred += 1; return true; }
+    carry.held += capacity;
+    const result = await this.hashRegion(filePath, identity, region.offset, region.size, { toEof: Boolean(region.toEof), handle, signal, preReserved: true });
+    if (!result?.buffer || result.digest !== region.sha256) { this.stats.failures += 1; return false; }
+    carry.entries.set(key, { buffer: result.buffer, capacity });
+    return true;
   }
+
 
   // A whole file too large to hold in memory, i.e. a legacy asset registered
   // without chunk records. OUTSIDE THE BYTE-INTEGRITY GUARANTEE of this module:
@@ -252,13 +280,23 @@ class AssetIntegrityCache {
   async verifiedSlice(filePath, stat, region, start, endExclusive, { handle = null, signal = null, carry = null } = {}) {
     const identity = fileIdentity(stat);
     const key = this.regionKey(filePath, identity, region);
-    const carried = carry?.entries.get(key);
+    const carried = carry && !carry.closed ? carry.entries.get(key) : undefined;
     if (carried) {
       carry.entries.delete(key);
-      carry.held -= carried.capacity;
       this.stats.carried += 1;
-      return { bytes: carried.buffer.subarray(start - region.offset, endExclusive - region.offset), release: carried.release };
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        if (carry.closed) return; // releaseCarry already returned this share
+        carry.reserved -= carried.capacity;
+        this.unreserve(carried.capacity);
+      };
+      return { bytes: carried.buffer.subarray(start - region.offset, endExclusive - region.offset), release };
     }
+    // Not carried: return whatever the carry still holds before waiting for
+    // budget, so this response never waits while holding budget.
+    if (carry && !carry.closed && carry.reserved > 0) this.releaseCarry(carry);
     const eligible = await this.filesystemCacheable(filePath, stat.dev);
     const entry = eligible ? this.bytes.get(key) : undefined;
     if (entry && entry.until > this.now()) {
@@ -478,7 +516,7 @@ class AssetIntegrityCache {
       this.stats.legacy += 1;
       return this.verifyAlone(verify, signal);
     }
-    if (carry && !await this.filesystemCacheable(filePath, stat.dev)) {
+    if (carry) {
       this.stats.uncached += 1;
       return this.verifyIntoCarry(filePath, identity, key, { kind: 'file', offset: 0, size: Number(stat.size), sha256: expectedSha256, toEof: true }, carry, { handle, signal });
     }
@@ -490,7 +528,7 @@ class AssetIntegrityCache {
     const identity = fileIdentity(stat);
     const region = { kind: 'chunk', offset: chunk.byteOffset, size: chunk.byteSize, sha256: chunk.sha256 };
     const key = this.regionKey(filePath, identity, region);
-    if (carry && !await this.filesystemCacheable(filePath, stat.dev)) {
+    if (carry) {
       this.stats.uncached += 1;
       return this.verifyIntoCarry(filePath, identity, key, region, carry, { handle, signal });
     }
