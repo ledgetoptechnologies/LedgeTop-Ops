@@ -780,7 +780,9 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`history.back()`);
     await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('.task-lod-notice')?.textContent.includes('Preparing streaming tiles')", `${viewport.name}: returning from recovery activity did not restore the unobtrusive streaming status`);
     assert.equal(await client.evaluate(`document.querySelectorAll('button button').length`), 0, `${viewport.name}: task shortcuts were nested inside a button`);
-    assert.equal(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions > button,.task-more-actions > summary')].every(button=>button.getBoundingClientRect().height>=44)`), true, `${viewport.name}: task shortcuts have sub-44px targets`);
+    // Compact density: 32px shortcuts on a desktop pointer, 44px at phone widths.
+    const minimumTarget = viewport.mobile ? 44 : 32;
+    assert.equal(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions > button,.task-more-actions > summary')].every(button=>button.getBoundingClientRect().height>=${minimumTarget})`), true, `${viewport.name}: task shortcuts have sub-${minimumTarget}px targets`);
     await client.evaluate(`history.back()`);
     await waitFor(client, "new URL(location.href).searchParams.get('project')==='project-johnson' && !new URL(location.href).searchParams.has('task') && document.querySelector('[data-action=\"toggle-task\"][data-id=\"task-johnson\"]')?.getAttribute('aria-expanded')==='false'", `${viewport.name}: browser Back did not collapse the task in place`);
     await client.evaluate(`history.forward()`);
