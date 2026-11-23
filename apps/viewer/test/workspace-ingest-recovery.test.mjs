@@ -91,5 +91,5 @@ test('workspace uses server diagnostics and the ordinary authenticated API helpe
   assert.match(source,/delete state\.diagnosticDetails\[id\]/);assert.match(source,/loadGlobalAttemptDiagnostics\(id\)/);
   assert.match(source,/detail\.attemptDiagnostics\?\.\[attemptId\]!==pending/);assert.match(source,/state\.diagnosticDetails\[attemptId\]!==pending/);
   const api=source.split(/\r?\n/).find(line=>line.startsWith('async function api('));
-  assert.match(api,/Authorization:`Bearer \$\{state\.token\}`/);assert.match(api,/!init\.headers\['Idempotency-Key'\]/);assert.match(api,/if\(recoveryGuard\).*response=await fetch\(path,init\).*else response=await workspaceFetch\(path,init\)/);
+  assert.match(api,/Authorization:`Bearer \$\{state\.token\}`/);assert.match(api,/!init\.headers\['Idempotency-Key'\]/);assert.match(api,/if\(recoveryGuard\).*response=await guardedFetch\(path,init,assertRequestCurrent\).*else response=await workspaceFetch\(path,init\)/);
 });
