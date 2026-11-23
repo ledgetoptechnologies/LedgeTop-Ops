@@ -10,6 +10,8 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const v8 = require('node:v8');
+const vm = require('node:vm');
 const auth = require('../server/auth');
 const assets = require('../server/assets');
 const { config } = require('../server/config');
@@ -861,8 +863,9 @@ async function until(condition, label) {
   for (let i = 0; i < 400; i += 1) { if (condition()) return; await sleep(5); }
   assert.fail(`timed out: ${label}`);
 }
-const idle = (cache) => ({ bufferedBytes: cache.bufferedBytes, bufferWaiters: cache.bufferWaiters.length, sharedWaiters: cache.sharedWaiters, pending: cache.pending.size, activeStreams: cache.activeStreams });
-const IDLE = { bufferedBytes: 0, bufferWaiters: 0, sharedWaiters: 0, pending: 0, activeStreams: 0 };
+const subscriptions = (cache) => [...cache.sharedOwners.values()].reduce((sum, set) => sum + set.size, 0);
+const idle = (cache) => ({ sharedOwners: cache.sharedOwners.size, bufferedBytes: cache.bufferedBytes, bufferWaiters: cache.bufferWaiters.length, sharedWaiters: cache.sharedWaiters, pending: cache.pending.size, activeStreams: cache.activeStreams });
+const IDLE = { sharedOwners: 0, bufferedBytes: 0, bufferWaiters: 0, sharedWaiters: 0, pending: 0, activeStreams: 0 };
 
 for (const kind of ['slice', 'check']) {
   test(`a cancelled follower stops waiting for another request's check at once (${kind})`, async (t) => {
@@ -914,6 +917,51 @@ for (const kind of ['slice', 'check']) {
     const release = async (promise) => { const result = await promise; assert.ok(result); result.release?.(); };
     await Promise.all([owner, ...followers].map(release));
     assert.equal(g.gates.length, 1);
+    assert.deepEqual(idle(g.cache), IDLE);
+  });
+}
+
+for (const kind of ['slice', 'check']) {
+  test(`thousands of joins and aborts retain nothing on a pending check (${kind})`, async (t) => {
+    const BOUND = 16;
+    const g = await gatedCache(t, { maxQueuedStreams: BOUND });
+    const owner = g[kind]();
+    await until(() => g.gates.length === 1, 'owner reached its read');
+    const [inflight] = g.cache.pending.values();
+    let reactions = 0;
+    inflight.then = (...args) => { reactions += 1; return Promise.prototype.then.apply(inflight, args); };
+    const refs = []; // one object per finished follower, which nothing else keeps
+    const join = async (count) => {
+      const controllers = Array.from({ length: count }, () => new AbortController());
+      const followers = controllers.map((controller) => { refs.push(new WeakRef(controller.signal)); return assert.rejects(g[kind](controller.signal), { name: 'AbortError' }); });
+      await until(() => g.cache.sharedWaiters === count, 'followers wait');
+      assert.equal(subscriptions(g.cache), count);
+      await assert.rejects(g[kind](), { code: 'integrity_busy' }, 'the bound still holds');
+      for (const controller of controllers) {
+        const before = subscriptions(g.cache);
+        controller.abort();
+        assert.equal(subscriptions(g.cache), before - 1, 'removed at once, before the slot is free');
+      }
+      await Promise.all(followers);
+      assert.deepEqual([g.cache.sharedWaiters, subscriptions(g.cache)], [0, 0]);
+    };
+    for (let round = 0; round < 200; round += 1) await join(BOUND);
+    assert.equal(refs.length, 3200);
+    assert.equal(reactions, 1, 'one callback on the pending check for 3200 joins');
+    assert.equal(g.cache.sharedOwners.size, 1);
+    assert.equal(g.cache.stats.peakSharedWaiters, BOUND);
+    // The finished followers themselves can be collected while the owner waits.
+    v8.setFlagsFromString('--expose-gc');
+    const gc = vm.runInNewContext('gc');
+    const alive = () => refs.filter((ref) => ref.deref()).length;
+    for (let i = 0; i < 50 && alive() > BOUND; i += 1) { await sleep(10); gc(); }
+    assert.ok(alive() <= BOUND, `${alive()} of 3200 finished followers are still held`);
+    // The check still notifies whoever is waiting when it settles.
+    const last = [g[kind](), g[kind]()];
+    await until(() => g.cache.sharedWaiters === 2, 'late followers wait');
+    g.gates[0]();
+    for (const result of await Promise.all([owner, ...last])) { assert.ok(result); result.release?.(); }
+    assert.equal(g.gates.length, 1, 'hashed once');
     assert.deepEqual(idle(g.cache), IDLE);
   });
 }

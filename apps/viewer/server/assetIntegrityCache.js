@@ -139,6 +139,7 @@ class AssetIntegrityCache {
     this.bufferedBytes = 0;
     this.bufferWaiters = [];
     this.sharedWaiters = 0; // requests waiting for another request's check
+    this.sharedOwners = new Map(); // pending check -> Set of its waiters' callbacks
     this.carryMaxBytes = Math.max(0, Number(carryMaxBytes) || 0);
     this.bytesCacheMaxBytes = Math.max(0, Number(bytesCacheMaxBytes) || 0);
     this.bytes = new Map(); // region key -> { buffer, until }
@@ -249,6 +250,24 @@ class AssetIntegrityCache {
     return this.bufferWaiters.length + this.sharedWaiters >= this.maxQueuedStreams * (started ? STARTED_QUEUE_FACTOR : 1);
   }
 
+  // The waiters of one pending check. The check's promise gets a single
+  // callback, whatever the number of requests that join or leave, so a request
+  // that went away leaves nothing behind on it.
+  sharedSubscribers(inflight) {
+    let subscribers = this.sharedOwners.get(inflight);
+    if (!subscribers) {
+      subscribers = new Set();
+      this.sharedOwners.set(inflight, subscribers);
+      const settled = () => {
+        this.sharedOwners.delete(inflight);
+        for (const notify of subscribers) notify();
+        subscribers.clear();
+      };
+      inflight.then(settled, settled);
+    }
+    return subscribers;
+  }
+
   // Waits until another request's check settles, whatever its result. Holds no
   // budget, counts against the bounded wait queue (fails fast with
   // integrity_busy when it is full), and stops at once when this request goes
@@ -258,15 +277,19 @@ class AssetIntegrityCache {
     if (this.waitQueueFull(started)) { this.stats.busy += 1; throw busyError(); }
     this.sharedWaiters += 1;
     this.stats.peakSharedWaiters = Math.max(this.stats.peakSharedWaiters, this.sharedWaiters);
-    let onAbort = null;
+    const subscribers = this.sharedSubscribers(inflight);
     try {
       await new Promise((resolve, reject) => {
-        onAbort = () => { this.stats.cancelled += 1; reject(abortError()); };
+        const onAbort = () => {
+          subscribers.delete(notify); // before the slot is freed below
+          this.stats.cancelled += 1;
+          reject(abortError());
+        };
+        const notify = () => { signal?.removeEventListener('abort', onAbort); resolve(); };
         signal?.addEventListener('abort', onAbort, { once: true });
-        inflight.then(resolve, resolve);
+        subscribers.add(notify);
       });
     } finally {
-      signal?.removeEventListener('abort', onAbort);
       this.sharedWaiters -= 1;
     }
   }
