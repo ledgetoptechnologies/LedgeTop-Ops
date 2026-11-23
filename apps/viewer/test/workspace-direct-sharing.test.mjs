@@ -45,7 +45,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     openModal:(title,html)=>{rendered.push({title,html});modal.open=true},injectProjectShareCard:()=>{},
     values:form=>({label:form.elements.label?.value||'',password:form.elements.password?.value||'',expiresAt:form.elements.expiresAt.value}),
     api:async(path,options={})=>{calls.push({path,options:JSON.parse(JSON.stringify(options))});return path.startsWith('/api/v1/workspace/direct-client-grants')?directRespond(path,options):path.endsWith('/native-client-grants')?nativeRespond(path,options):respond(path,options)},
-    projectDataGeneration:0,refreshProjectWorkspace:async includeArtifacts=>{calls.refreshes=[...(calls.refreshes||[]),includeArtifacts]},
+    outputFences:new Map(),projectDataGeneration:0,refreshProjectOutputs:async projectId=>{calls.refreshes=[...(calls.refreshes||[]),projectId]},
     mutate:async(...args)=>calls.push({mutation:args}),toast:(...args)=>notices.push(args),navigator:{clipboard:{writeText:async()=>{throw new Error('clipboard denied')}}},
     dialogs:{confirm:async()=>{decisions.push('confirm');return true},form:async()=>null},
   });
@@ -240,8 +240,8 @@ test('a task keeps its View button after a public link publishes its ready model
   // The next tree repaint (the open project polls every 8 s) must still offer View, now of the published model.
   f.state.tasks[0].status='published';
   assert.deepEqual(rowActions(f),['View:view-output','Share:share-output']);
-  // The rest of the row (older version, report, download) comes from the server, and an older in-flight read is dropped.
-  assert.deepEqual(f.calls.refreshes,[true]);assert.equal(f.context.projectDataGeneration,1);
+  // The rest of the row (older version, report, download) comes from the server; unrelated reads stay valid.
+  assert.deepEqual(f.calls.refreshes,['project']);assert.equal(f.context.outputFences.get('project'),1);assert.equal(f.context.projectDataGeneration,0);
 });
 test('a model list read while the public link was being made cannot leave the row without View',async()=>{
   const f=fixture();f.state.projects[0].status='active';f.state.tasks[0].status='ready_for_review';
@@ -255,7 +255,79 @@ test('a public link for an already published model keeps its View address and re
   await f.context.createOutputShare(f.form,'project','output');
   assert.deepEqual(rowActions(f),['View:view-output','Share:share-output']);
   assert.equal(f.output.viewSessionUrl,'/server/view-sessions');
-  assert.equal(f.calls.refreshes,undefined);assert.equal(f.context.projectDataGeneration,0);
+  assert.equal(f.calls.refreshes,undefined);assert.equal(f.context.outputFences.size,0);
+});
+// The shipped full load and output refresh around the shipped share, with every read held until the test answers it.
+function loadFixture({section='dashboard',share=undefined}={}){
+  const f=fixture(),row=(id,projectId,extra={})=>({id,projectId,taskId:`task-of-${id}`,...extra}),held=new Map(),painted=[],renders=[];
+  Object.assign(f.state,{section,adminSession:{subject:'ops:staff'},projects:[{id:'project',displayName:'Site',status:'active'}],taskDetails:{},expandedTaskId:null,diagnosticRuns:[]});
+  f.state.outputs=[f.output,row('other-old','elsewhere')];
+  if(share)f.respond(share);
+  const answer=(path,value)=>{const entry=held.get(path);assert.ok(entry,`${path} was not read`);held.delete(path);entry.resolve(value)};
+  const hold=path=>{assert.equal(held.has(path),false,path);return new Promise((resolve,reject)=>held.set(path,{resolve,reject}))};
+  const shareApi=f.context.api;
+  Object.assign(f.context,{pagedApi:path=>hold(path),pagedStorage:()=>hold('storage'),
+    api:(path,options)=>options?.method==='POST'?shareApi(path,options):hold(path),workspaceLoads:0,projectPaintPending:false,projectArtifactsRefreshId:null,
+    validateWorkspaceView(){},syncWorkspaceView(){},setWorkspaceHealth(){},document:{querySelector:()=>null},hydrateExpandedTask(){},scheduleOperationRefresh(){},scheduleProjectRefresh(){},
+    access(){throw new Error('signed out')},render:()=>renders.push(1),patchProjectTree:id=>{painted.push(id);return false},console:{warn(){}}});
+  delete f.context.refreshProjectOutputs;
+  vm.runInContext(['fencedOutputs','refreshProjectOutputs','load'].map(declaration).join('\n'),f.context);
+  const settle=()=>new Promise(resolve=>setImmediate(resolve));
+  const answerLoad=overrides=>{for(const path of [...held.keys()]){if(path.includes('?projectId=')||path.endsWith('/shares'))continue;answer(path,overrides[path]||{})}};
+  return {...f,row,held,painted,renders,answer,answerLoad,settle,published:row('output','project',{taskId:'task',attemptId:'attempt',modelId:'model',status:'published',activePublished:true,viewSessionUrl:'/server/view',reportUrl:'/server/report'})};
+}
+for(const order of ['share answers before its project read','project read answers first'])
+test(`a full load already in flight keeps its fresh data and cannot undo the share: ${order}`,async()=>{
+  const f=loadFixture(),loading=f.context.load();
+  assert.equal(f.context.workspaceLoads,1);
+  await f.context.createOutputShare(f.form,'project','output');
+  const project='/api/v1/processing/outputs?projectId=project';
+  if(order==='project read answers first'){f.answer(project,{outputs:[f.published]});await f.settle()}
+  // These answers were read before the link published the model: new project and new other-project outputs, old row for this one.
+  f.answerLoad({'/api/v1/projects':{projects:[{id:'project',displayName:'Renamed',status:'active'},{id:'new',displayName:'New',status:'active'}]},
+    '/api/v1/tasks':{tasks:[{id:'task',projectId:'project',status:'ready_for_review'}]},
+    '/api/v1/processing/outputs':{outputs:[f.row('output','project',{taskId:'task',attemptId:'attempt',status:'ready',activePublished:false}),f.row('other-new','elsewhere')]},
+    '/api/v1/processing/ready':{ok:true}});
+  await f.settle();
+  if(f.held.has('/api/v1/processing/outputs/output/shares'))f.answer('/api/v1/processing/outputs/output/shares',{shares:[{id:'share'}]});
+  await loading;
+  assert.equal(f.context.workspaceLoads,0);assert.equal(f.renders.length,1,'the load rendered');
+  assert.deepEqual(f.state.projects.map(item=>item.displayName),['Renamed','New'],'unrelated fresh data committed');
+  assert.deepEqual([...f.state.outputs].map(item=>item.id).sort(),['other-new','output']);
+  assert.deepEqual(rowActions(f).slice(0,1),['View:view-output']);
+  if(order!=='project read answers first'){f.answer(project,{outputs:[f.published]});await f.settle()}
+  assert.equal(f.state.outputs.find(item=>item.id==='output').reportUrl,'/server/report','the server row replaced the local one');
+  assert.deepEqual([...f.state.shares.output].map(item=>item.id),['share']);
+  assert.deepEqual(f.painted,['project']);
+  assert.equal(rowActions(f)[0],'View:view-output');
+});
+test('a share made while the load reads links keeps the new link in the list',async()=>{
+  const f=loadFixture();Object.assign(f.output,{status:'published',activePublished:true,viewSessionUrl:'/view'});
+  f.state.outputs.push(f.row('ready','project',{status:'ready',attemptId:'ready-attempt',assetKinds:['glb']}));
+  const loading=f.context.load();
+  f.answerLoad({'/api/v1/processing/outputs':{outputs:f.state.outputs.slice()},'/api/v1/projects':{projects:f.state.projects},'/api/v1/processing/ready':{ok:true}});await f.settle();
+  f.form.dataset.outputId='ready';await f.context.createOutputShare(f.form,'project','ready');
+  f.state.shares.output=[{id:'new-link'}];
+  f.answer('/api/v1/processing/outputs/output/shares',{shares:[]});await loading;
+  assert.deepEqual(f.state.shares.output,[{id:'new-link'}]);
+});
+test('outside the dashboard with no project open, the outputs are still read again and nothing is painted',async()=>{
+  const f=loadFixture({section:'storage'});
+  await f.context.createOutputShare(f.form,'project','output');
+  f.answer('/api/v1/processing/outputs?projectId=project',{outputs:[f.published]});await f.settle();
+  assert.deepEqual([...f.state.outputs].map(item=>item.id),['other-old','output']);
+  assert.equal(f.state.outputs[1].viewSessionUrl,'/server/view');assert.deepEqual(f.painted,[]);assert.equal(f.renders.length,0);
+});
+for(const changed of ['token','session'])test(`a project read is dropped when the ${changed} changes`,async()=>{
+  const f=loadFixture();await f.context.createOutputShare(f.form,'project','output');
+  if(changed==='token')f.state.token='replacement';else f.state.adminSession={subject:'ops:other'};
+  f.answer('/api/v1/processing/outputs?projectId=project',{outputs:[]});await f.settle();
+  assert.equal(f.state.outputs.some(item=>item.id==='output'),true);assert.deepEqual(f.painted,[]);assert.equal(f.context.projectArtifactsRefreshId,null);
+});
+test('a failed project read keeps View and leaves the project queued for its next poll',async()=>{
+  const f=loadFixture();await f.context.createOutputShare(f.form,'project','output');
+  f.held.get('/api/v1/processing/outputs?projectId=project').reject(new Error('offline'));await f.settle();
+  assert.deepEqual([...f.context.projectArtifactsRefreshId],['project']);assert.equal(rowActions(f)[0],'View:view-output');
 });
 
 test('raced consent retry uses new key, uncertain retry retains exact consent payload even if output refreshes as published',async()=>{

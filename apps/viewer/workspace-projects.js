@@ -61,6 +61,13 @@ if(initialView.selectedProjectId&&initialView.selectedFolderId)treeReveals.set(i
 let folderAuthorizationGeneration=0,activeFolderMutation=null;
 let projectDataGeneration=0,projectRefreshTimer=null,projectRefreshBusy=false,projectPaintPending=false,workspaceLoads=0;
 let projectArtifactsRefreshId=null;
+// Projects whose outputs changed here (a public link published a model). A list read that started earlier
+// must not put that project's old rows back; everything else in the read still commits.
+const outputFences=new Map();
+function fencedOutputs(incoming,fences){
+  const changed=output=>outputFences.get(output.projectId)!==fences.get(output.projectId);
+  return [...incoming.filter(output=>!changed(output)),...state.outputs.filter(changed)];
+}
 let draggedFolderTask=null,folderUndo=null,folderUndoTimer=null,treeDragHover=null,treeDragExpandTimer=null;
 function isProjectOpen(projectId){return state.section==='dashboard'&&Boolean(projectId)&&(projectId===state.selectedProjectId||treeState.projects.has(projectId))}
 function openProjectIds(){return state.projects.filter(project=>isProjectOpen(project.id)).map(project=>project.id)}
@@ -630,6 +637,25 @@ function scheduleProjectRefresh(delay){
   },delay??8000);
 }
 
+// Reads one project's outputs again from any section, whether or not the project is open or a full load is running.
+async function refreshProjectOutputs(projectId){
+  const token=state.token,session=state.adminSession,fence=outputFences.get(projectId);
+  const current=()=>Boolean(token)&&token===state.token&&session===state.adminSession&&fence===outputFences.get(projectId);
+  try{
+    const result=await pagedApi(`/api/v1/processing/outputs?projectId=${encodeURIComponent(projectId)}`,'outputs',{recoveryGuard:current});
+    if(!current())return;
+    state.outputs=[...state.outputs.filter(item=>item.projectId!==projectId),...result.outputs];
+    const detail=state.taskDetails[state.expandedTaskId]?.task;
+    if(detail&&detail.projectId===projectId)detail.outputs=result.outputs.filter(item=>item.taskId===detail.id);
+    if(state.section==='dashboard')projectPaintPending=patchProjectTree(projectId)||projectPaintPending;
+  }catch(error){
+    if(!current())return;
+    // The open project's next poll, or opening the project, reads them again.
+    projectArtifactsRefreshId=new Set([...(projectArtifactsRefreshId||[]),projectId]);
+    if(error.status!==401)console.warn('Project output refresh failed',error.message);
+  }
+}
+
 // Refreshes every open project's tasks and folders, one project at a time.
 async function refreshProjectWorkspace(includeArtifacts=false){
   const projectIds=openProjectIds();
@@ -653,7 +679,7 @@ async function refreshProjectData(projectId){
   if(!entry||entry.loading)return false;
   const artifacts=Boolean(projectArtifactsRefreshId?.has(projectId));
   const authorized=folderAuthorizationGuard(projectId);
-  const generation=projectDataGeneration;
+  const generation=projectDataGeneration,fence=outputFences.get(projectId);
   const current=()=>authorized()&&generation===projectDataGeneration&&!state.busy&&!workspaceLoads&&!document.hidden&&folderCache.get(projectId)===entry;
   if(!current())return false;
   try{
@@ -673,13 +699,14 @@ async function refreshProjectData(projectId){
     projectDataGeneration++;
     state.tasks=[...state.tasks.filter(task=>task.projectId!==projectId),...tasks];
     if(datasetResult)state.datasets=[...state.datasets.filter(item=>item.projectId!==projectId),...datasetResult.datasets];
-    if(outputResult){
+    const outputsCurrent=fence===outputFences.get(projectId);
+    if(outputResult&&outputsCurrent){
       state.outputs=[...state.outputs.filter(item=>item.projectId!==projectId),...outputResult.outputs];
       const detail=state.taskDetails[state.expandedTaskId]?.task;
       if(detail&&detail.projectId===projectId)detail.outputs=outputResult.outputs.filter(item=>item.taskId===detail.id);
     }
     entry.folders=folders;entry.error=null;
-    if(artifacts)projectArtifactsRefreshId.delete(projectId);
+    if(artifacts&&outputsCurrent)projectArtifactsRefreshId.delete(projectId);
     const selectionPending=syncSelectedTaskFolder(projectId);
     return patchProjectTree(projectId)||selectionPending;
   }catch(error){
@@ -2001,7 +2028,9 @@ async function createOutputShare(form,projectId,onlyOutputId){
     for(const row of new Set([output,...state.outputs.filter(item=>item.id===output.id)])){
       row.activePublished=true;row.status='published';row.viewSessionUrl||=`/api/v1/processing/outputs/${encodeURIComponent(row.id)}/view-sessions`;
     }
-    if(body.publishIfReady){projectDataGeneration++;void refreshProjectWorkspace(true);}
+    if(body.publishIfReady){
+      const changed=output.projectId||projectId;outputFences.set(changed,(outputFences.get(changed)||0)+1);void refreshProjectOutputs(changed);
+    }
     delete form.shareRequest;
     toast('Public link created. Use Copy to share it.');
     // Clipboard is a separate explicit action, never part of creation success.
@@ -2088,10 +2117,10 @@ async function performLegacyUpload(form){const files=[...form.elements.files.fil
 async function pagedApi(path,key,options){const items=[],seen=new Set();let cursor=null;do{const separator=path.includes('?')?'&':'?',page=await api(`${path}${separator}limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`,options);items.push(...(page[key]||[]));cursor=page.nextCursor||null;if(cursor&&seen.has(cursor))throw Error(`Pagination cursor repeated for ${key}`);if(cursor)seen.add(cursor)}while(cursor);return{[key]:items}}
 async function pagedStorage(){let first=null,cursor=null;const items=[],seen=new Set();do{const page=await api(`/api/v1/storage?limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);if(!first)first=page;items.push(...(page.trash?.items||[]));cursor=page.trash?.nextCursor||null;if(cursor&&seen.has(cursor))throw Error('Pagination cursor repeated for trash');if(cursor)seen.add(cursor)}while(cursor);return{...(first||{}),trash:{...(first?.trash||{}),items,nextCursor:null}}}
 async function refreshTrash(){state.trashLoadError=null;render();try{state.storage=await pagedStorage()}catch(error){state.trashLoadError=error.message}render()}
-async function load(){const generation=++projectDataGeneration, token=state.token, session=state.adminSession;
+async function load(){const generation=++projectDataGeneration, token=state.token, session=state.adminSession, fences=new Map(outputFences);
   workspaceLoads++;
   const current=()=>generation===projectDataGeneration&&token===state.token&&session===state.adminSession;
-  try{const previousStorage=state.storage,requests=[pagedApi('/api/v1/projects','projects'),pagedApi('/api/v1/datasets','datasets'),pagedApi('/api/v1/tasks','tasks'),api('/api/v1/processing/providers?limit=100'),api('/api/v1/processing/presets'),pagedApi('/api/v1/processing/outputs','outputs'),pagedStorage(),can('viewer.storage.purge')?pagedApi('/api/v1/storage/mutations?status=failed','mutations'):Promise.resolve({mutations:[]}),api('/api/v1/processing/ready'),api('/api/v1/workspace/client-grants'),pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives'),api('/api/v1/diagnostics/runs?limit=20')],results=await Promise.allSettled(requests);if(!current())return;if(!state.token)return access();[state.projects,state.datasets,state.tasks,state.providers,state.presets,state.outputs,state.failedMutations,state.ready,state.clientAccess,state.operations,state.derivativeJobs]=[results[0].value?.projects||[],results[1].value?.datasets||[],results[2].value?.tasks||[],results[3].value?.providers||[],results[4].value?.presets||[],results[5].value?.outputs||[],results[7].value?.mutations||[],results[8].value||null,results[9].value||null,results[10].value?.operations||[],results[11].value?.derivatives||[]];if(results[6].status==='fulfilled'){state.storage=results[6].value;state.trashLoadError=null}else{state.storage=previousStorage;state.trashLoadError=results[6].reason?.message||'Storage service unavailable'}if(results[12].status==='fulfilled'){state.diagnosticRuns=results[12].value?.runs||[];state.diagnosticRunsCursor=results[12].value?.nextCursor||null;state.diagnosticRunsError=null}else{state.diagnosticRunsError=results[12].reason?.message||'Processing run history is unavailable'}validateWorkspaceView();syncWorkspaceView('replace');const published=state.outputs.filter(output=>output.activePublished),shareResults=await Promise.allSettled(published.map(output=>api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)));if(!current())return;state.shares=Object.fromEntries(published.map((output,index)=>[output.id,shareResults[index].value?.shares||[]]));const okay=state.ready?.ok===true;setWorkspaceHealth({dot:document.querySelector('#nav-health-dot'),label:document.querySelector('#nav-health-label'),foot:document.querySelector('.workspace-nav-foot')},okay);render();hydrateExpandedTask();scheduleOperationRefresh()}finally{workspaceLoads--;scheduleProjectRefresh();}
+  try{const previousStorage=state.storage,requests=[pagedApi('/api/v1/projects','projects'),pagedApi('/api/v1/datasets','datasets'),pagedApi('/api/v1/tasks','tasks'),api('/api/v1/processing/providers?limit=100'),api('/api/v1/processing/presets'),pagedApi('/api/v1/processing/outputs','outputs'),pagedStorage(),can('viewer.storage.purge')?pagedApi('/api/v1/storage/mutations?status=failed','mutations'):Promise.resolve({mutations:[]}),api('/api/v1/processing/ready'),api('/api/v1/workspace/client-grants'),pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives'),api('/api/v1/diagnostics/runs?limit=20')],results=await Promise.allSettled(requests);if(!current())return;if(!state.token)return access();[state.projects,state.datasets,state.tasks,state.providers,state.presets,state.outputs,state.failedMutations,state.ready,state.clientAccess,state.operations,state.derivativeJobs]=[results[0].value?.projects||[],results[1].value?.datasets||[],results[2].value?.tasks||[],results[3].value?.providers||[],results[4].value?.presets||[],fencedOutputs(results[5].value?.outputs||[],fences),results[7].value?.mutations||[],results[8].value||null,results[9].value||null,results[10].value?.operations||[],results[11].value?.derivatives||[]];if(results[6].status==='fulfilled'){state.storage=results[6].value;state.trashLoadError=null}else{state.storage=previousStorage;state.trashLoadError=results[6].reason?.message||'Storage service unavailable'}if(results[12].status==='fulfilled'){state.diagnosticRuns=results[12].value?.runs||[];state.diagnosticRunsCursor=results[12].value?.nextCursor||null;state.diagnosticRunsError=null}else{state.diagnosticRunsError=results[12].reason?.message||'Processing run history is unavailable'}validateWorkspaceView();syncWorkspaceView('replace');const published=state.outputs.filter(output=>output.activePublished),shareResults=await Promise.allSettled(published.map(output=>api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)));if(!current())return;const changed=id=>outputFences.get(id)!==fences.get(id);state.shares=Object.fromEntries(published.map((output,index)=>[output.id,changed(output.projectId)&&state.shares[output.id]||shareResults[index].value?.shares||[]]));const okay=state.ready?.ok===true;setWorkspaceHealth({dot:document.querySelector('#nav-health-dot'),label:document.querySelector('#nav-health-label'),foot:document.querySelector('.workspace-nav-foot')},okay);render();hydrateExpandedTask();scheduleOperationRefresh()}finally{workspaceLoads--;scheduleProjectRefresh();}
 }
 function access(){content.innerHTML='<div class="auth-state"><div><p class="eyebrow">Secure workspace</p><h2>Open Viewer from Ledge Top Operations</h2><p>This workspace reuses your Operations identity and has no separate login.</p></div></div>'}
 
