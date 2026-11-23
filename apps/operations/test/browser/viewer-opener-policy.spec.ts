@@ -4,7 +4,7 @@ import { isolatedBrowserArgs, startProxySink, unexpectedHosts, type ProxySink } 
 // The fixture server sends the Worker's own opener policy for each path, so this
 // proves in a real browser what the header lets Viewer keep. Operations reads the
 // Viewer address from its API, so a reserved cross-site name stands in for it. The
-// browser cannot resolve or reach any other host, and trying to fails the test.
+// browser is asked to resolve and reach nothing else, and trying to fails the test.
 const viewerHost = "viewer.example.test", viewer = `https://${viewerHost}`;
 // Never fulfilled: proves the guard is live.
 const controlHost = "blocked.example.test";
@@ -26,7 +26,7 @@ const test = base.extend<{ network: NetworkGuard }, { sink: ProxySink }>({
     if (unexpected.length) throw new Error(`The browser tried to reach: ${unexpected.join(", ")}`);
   }, { scope: "worker" }],
   launchOptions: [async ({ launchOptions, sink }, use) => {
-    await use({ ...launchOptions, args: [...(launchOptions.args ?? []), ...isolatedBrowserArgs(sink.port)] });
+    await use({ ...launchOptions, args: isolatedBrowserArgs(sink.port, launchOptions.args) });
   }, { scope: "worker" }],
   network: [async ({ context, sink }, use) => {
     const requested: string[] = [], start = sink.hosts.length;

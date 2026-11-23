@@ -1,10 +1,13 @@
-// Keeps a browser test off every real host. Playwright fulfils requests, but the
-// browser itself may still resolve and preconnect to the names it sees, so request
-// routing alone does not contain it. Three layers, none of which can forward:
-//  1. no name resolves except loopback;
-//  2. every non-loopback connection, speculative ones included, goes to a loopback
-//     proxy that records the target and hangs up;
-//  3. anything recorded that is not an allowed reserved name fails the test.
+// Keeps a browser test off real hosts, as defense in depth. Playwright fulfils requests,
+// but the browser may still resolve and preconnect to the names it sees, so request routing
+// alone does not contain it. The spec uses only reserved names, and the browser is asked to:
+//  1. resolve no name except loopback;
+//  2. send every other connection, speculative ones included, to a loopback proxy that
+//     records the target and hangs up;
+// and 3. anything recorded that is not a declared reserved name fails the test.
+// Not proof of no egress: managed policy (for example Edge ProxySettings) overrides the proxy
+// switch, and WebRTC, updaters, crash reporting and Node's own requests are outside it. The
+// spec's control test fails if the sink is not really in use.
 import { createServer, type Server, type Socket } from "node:net";
 
 /** RFC 2606 / 6761 names: nobody can own them, so nothing real can answer. */
@@ -22,19 +25,23 @@ export function unexpectedHosts(hosts: Iterable<string>, declared: readonly stri
   return [...new Set(hosts)].filter(host => !loopbackHost(host) && !declared.includes(host)).sort();
 }
 
-export function isolatedBrowserArgs(proxyPort: number): string[] {
-  return [
-    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
+const switchName = (arg: string) => /^--([a-z0-9-]+)/u.exec(arg)?.[1] ?? arg;
+
+/** The inherited launch arguments with these in place of any of the same name: one of each
+ * switch, so nothing depends on which duplicate a browser takes. Playwright itself passes
+ * the background-networking, update, sync and --disable-features switches. */
+export function isolatedBrowserArgs(proxyPort: number, inherited: readonly string[] = []): string[] {
+  const own = [
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE [::1]",
     // Chromium's implicit bypass keeps loopback direct; everything else meets the sink.
     `--proxy-server=http://127.0.0.1:${proxyPort}`,
     "--disable-quic",
     "--dns-prefetch-disable",
-    "--disable-background-networking",
-    "--disable-component-update",
     "--disable-domain-reliability",
-    "--disable-sync",
     "--no-pings",
   ];
+  const owned = new Set(own.map(switchName));
+  return [...inherited.filter(arg => !owned.has(switchName(arg))), ...own];
 }
 
 export interface ProxySink { port: number; hosts: string[]; close(): Promise<void> }

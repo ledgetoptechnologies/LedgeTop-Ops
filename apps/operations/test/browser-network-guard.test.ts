@@ -1,6 +1,7 @@
 // The guard itself, without a browser: raw sockets to a loopback sink.
 import { readFileSync } from "node:fs";
 import { connect } from "node:net";
+import { chromium } from "@playwright/test";
 import { afterEach, describe, expect, it } from "vitest";
 import { isolatedBrowserArgs, loopbackHost, proxiedHost, reservedHost, startProxySink, unexpectedHosts, type ProxySink } from "./browser-network-guard";
 
@@ -40,12 +41,33 @@ describe("browser network guard", () => {
     expect(proxiedHost("CONNECT [::1]:443 HTTP/1.1")).toBe("[::1]");
   });
 
-  it("blocks resolution of everything except loopback and proxies the rest to the sink", () => {
-    const args = isolatedBrowserArgs(4321);
-    expect(args).toContain("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1");
-    expect(args).toContain("--proxy-server=http://127.0.0.1:4321");
-    // A bypass list would open a direct path; --disable-features would replace Playwright's own list.
-    expect(args.some(arg => arg.startsWith("--proxy-bypass-list") || arg.startsWith("--disable-features"))).toBe(false);
+  it("sends everything but loopback to the sink, with one explicit proxy switch", async () => {
+    // What the shared Playwright config is expected to pass (PR #738), and nothing at all.
+    for (const inherited of [[], ["--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost", "--proxy-server=direct://", "--disable-domain-reliability", "--dns-prefetch-disable", "--no-pings", "--kept=1"]]) {
+      const args = isolatedBrowserArgs(4321, inherited);
+      expect(args.filter(arg => arg.startsWith("--proxy-server"))).toEqual(["--proxy-server=http://127.0.0.1:4321"]);
+      expect(args.filter(arg => arg.startsWith("--host-resolver-rules"))).toEqual(["--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE [::1]"]);
+      expect(args.includes("--kept=1")).toBe(inherited.length > 0);
+      const names = args.map(arg => arg.split("=", 1)[0]);
+      expect(names).toEqual([...new Set(names)]);
+      // A bypass list would open a direct path; --disable-features would replace Playwright's own list.
+      expect(args.some(arg => arg.startsWith("--proxy-bypass-list") || arg.startsWith("--disable-features"))).toBe(false);
+
+      // Playwright's real final command line, read by launching Node instead of a browser:
+      // Node rejects the first Chromium switch and exits.
+      const launch = async (list: string[]) => {
+        const message = await chromium.launch({ executablePath: process.execPath, headless: true, args: list }).then(
+          async browser => { await browser.close(); throw new Error("A browser started"); }, (error: Error) => error.message);
+        const command = /<launching> ([^\n]*)/u.exec(message)?.[1] ?? "";
+        expect(command).toContain(process.execPath);
+        return command.split(/\s(?=--)/u).slice(1).map(value => value.trim().split("=", 1)[0]!);
+      };
+      const repeats = (list: string[]) => list.filter((name, index) => list.indexOf(name) !== index);
+      const defaults = await launch([]), final = await launch(args);
+      expect(repeats(final)).toEqual(repeats(defaults));
+      for (const name of names) expect(final.filter(value => value === name), name).toHaveLength(1);
+      expect(final.filter(value => value === "--disable-features")).toHaveLength(1);
+    }
   });
 
   it("keeps every URL in the opener spec on a reserved name", () => {
@@ -53,7 +75,7 @@ describe("browser network guard", () => {
     expect(spec).toContain('viewerHost = "viewer.example.test"');
     for (const match of spec.matchAll(/(?:https?|wss?):\/\/([a-z0-9.-]+)/giu)) expect(reservedHost(match[1]!), match[0]).toBe(true);
     expect(spec).not.toMatch(/\b[a-z0-9-]+\.(?:com|app|net|org|io|dev)\b/iu);
-    expect(spec).toContain("...isolatedBrowserArgs(sink.port)");
+    expect(spec).toContain("args: isolatedBrowserArgs(sink.port, launchOptions.args)");
     expect(spec).toContain("{ auto: true }");
   });
 });
