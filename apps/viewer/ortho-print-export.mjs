@@ -138,30 +138,95 @@ function drawLegend(ctx, { width, height, gsdE, units, contours, scale, colors }
   ctx.restore();
 }
 
+const tooLarge = () => Object.assign(new Error('This browser cannot make an image that large. Choose a smaller size.'), { code: 'print_too_large' });
+
+/**
+ * Who may export what. The print is a report-style rendering, so a viewer
+ * allowed to measure may export the current view as PNG. The whole
+ * orthophoto and a georeferenced GeoTIFF are effectively the product, so
+ * they also need download permission. Expired or unavailable access gets
+ * nothing.
+ */
+export function orthoPrintPolicy({ accessAvailable = false, measure = false, download = false } = {}) {
+  const allowed = accessAvailable === true && measure !== false;
+  const product = allowed && download === true;
+  return { allowed, whole: product, geotiff: product };
+}
+
+export function assertOrthoPrintAllowed(policy, { area, format }) {
+  const deny = message => { throw Object.assign(new Error(message), { code: 'print_not_permitted' }); };
+  if (!policy?.allowed) deny('Image export is not available for this view.');
+  if (area !== 'view' && !policy.whole) deny('Exporting the whole orthophoto needs download permission.');
+  if (format === 'tif' && !policy.geotiff) deny('GeoTIFF export needs download permission.');
+}
+
+// iOS Safari caps a canvas at 16,777,216 pixels (4096 x 4096).
+export function isIosLike(navigatorRef = globalThis.navigator) {
+  const ua = String(navigatorRef?.userAgent || '');
+  return /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && Number(navigatorRef?.maxTouchPoints) > 1);
+}
+
+/** Whether a width x height 2D canvas really works here (some browsers fail silently). */
+export function canvasWorks(createCanvas, width, height) {
+  let canvas = null;
+  try {
+    canvas = createCanvas(width, height);
+    canvas.width = width; canvas.height = height;
+    if (canvas.width !== width || canvas.height !== height) return false;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+    ctx.fillStyle = '#ff0000'; ctx.fillRect(width - 1, height - 1, 1, 1);
+    const p = ctx.getImageData(width - 1, height - 1, 1, 1).data;
+    return p[0] === 255 && p[3] === 255;
+  } catch { return false; } finally { if (canvas) { canvas.width = 0; canvas.height = 0; } }
+}
+
+/** Print sizes this browser can render; sizes above 4096 px are probed at the worst case (square). */
+export function supportedPrintSizes({ navigatorRef = globalThis.navigator, createCanvas = null } = {}) {
+  return PRINT_SIZES.filter(size => {
+    if (size <= 4096) return true;
+    if (isIosLike(navigatorRef)) return false;
+    return createCanvas ? canvasWorks(createCanvas, size, size) : true;
+  });
+}
+
+function putPixels(ctx, rgba, width, height) {
+  // Wrap the resampled buffer directly; no second full-size copy.
+  if (typeof ImageData === 'function') { ctx.putImageData(new ImageData(rgba, width, height), 0, 0); return; }
+  const image = ctx.createImageData(width, height);
+  image.data.set(rgba);
+  ctx.putImageData(image, 0, 0);
+}
+
 /**
  * Render the print on a canvas.
  * @param opts {
  *   ortho: GeoTIFF dataset { images, minE, maxE, minN, maxN, nodata },
  *   extent: UTM extent, longEdge, format: 'png'|'tif',
  *   contours: { features: [{coords:[E,N...], isIndex, label}], interval, units } | null,
- *   colors, propertyLines: [[[E,N],...], ...] | null, units, createCanvas, pool, signal
+ *   colors, propertyLines: [[[E,N],...], ...] | null, propertyStyle: { color } | null,
+ *   units, createCanvas, pool, signal
  * }
  */
 export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 4096, format = 'png', contours = null,
-  colors = CONTOUR_COLORS.brown, propertyLines = null, units = 'imperial', createCanvas, pool, signal,
+  colors = CONTOUR_COLORS.brown, propertyLines = null, propertyStyle = null, units = 'imperial', createCanvas, pool, signal,
   maxStripPixels } = {}) {
   abortIf(signal);
   const extent = clampExtent(requested, ortho);
   if (!extent) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
   const { width, height, gsdE, gsdN } = printLayout(extent, longEdge);
   const print = format !== 'tif';
-  const { rgba, level } = await renderOrthoPixels({ ds: ortho, extent, width, height, signal, pool, maxStripPixels, background: print ? [255, 255, 255] : null });
-  const canvas = createCanvas(width, height);
-  canvas.width = width; canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  const imageData = ctx.createImageData(width, height);
-  imageData.data.set(rgba);
-  ctx.putImageData(imageData, 0, 0);
+  let canvas, ctx;
+  try {
+    canvas = createCanvas(width, height);
+    canvas.width = width; canvas.height = height;
+    ctx = canvas.getContext('2d');
+  } catch { throw tooLarge(); }
+  if (!ctx || canvas.width !== width || canvas.height !== height) throw tooLarge();
+  try {
+    const { rgba } = await renderOrthoPixels({ ds: ortho, extent, width, height, signal, pool, maxStripPixels, background: print ? [255, 255, 255] : null });
+    putPixels(ctx, rgba, width, height);
+  } catch (error) { if (error instanceof RangeError) throw tooLarge(); throw error; }
   const scale = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
   const project = (e, n) => [(e - extent.minE) / gsdE, (extent.maxN - n) / gsdN];
   let drawn = null;
@@ -169,7 +234,8 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
   let propertyCount = 0;
   if (propertyLines?.length) {
     ctx.save(); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-    for (const [style, w] of [[PROPERTY_LINE.halo, PROPERTY_LINE.haloWidth], [PROPERTY_LINE.color, PROPERTY_LINE.width]]) {
+    const lineColor = propertyStyle?.color || PROPERTY_LINE.color;
+    for (const [style, w] of [[PROPERTY_LINE.halo, PROPERTY_LINE.haloWidth], [lineColor, PROPERTY_LINE.width]]) {
       ctx.beginPath();
       for (const line of propertyLines) {
         line.forEach(([e, n], i) => { const [x, y] = project(e, n); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
@@ -179,23 +245,66 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
     ctx.restore();
     propertyCount = propertyLines.length;
   }
-  if (print) drawLegend(ctx, { width, height, gsdE, units: contours?.units || units, contours, scale, colors });
-  return { canvas, ctx, width, height, extent, gsdE, gsdN, level, contours: drawn, propertyLines: propertyCount };
+  if (print) {
+    drawLegend(ctx, { width, height, gsdE, units: contours?.units || units, contours, scale, colors });
+    // A canvas the browser could not back reads as blank: the print's
+    // corner is always opaque (white or imagery).
+    const corner = ctx.getImageData(width - 1, height - 1, 1, 1).data;
+    if (corner[3] !== 255) throw tooLarge();
+  }
+  return { canvas, ctx, width, height, extent, gsdE, gsdN, contours: drawn, propertyLines: propertyCount };
 }
 
-/** RGBA GeoTIFF in the orthophoto's projected CRS (PixelIsArea, north-up). */
-export function encodePrintGeoTiff({ rgba, width, height, extent, epsg, writeArrayBuffer }) {
-  if (!Number.isInteger(epsg) || epsg <= 0) throw Object.assign(new Error('GeoTIFF needs a verified coordinate reference. Export PNG instead.'), { code: 'print_crs' });
+/**
+ * RGBA GeoTIFF in the orthophoto's projected CRS (PixelIsArea, north-up):
+ * little-endian, uncompressed, one strip. Written directly (header, IFD,
+ * then one set() of the pixels) so a 6144 px print encodes without a
+ * per-byte JavaScript array.
+ */
+export function encodePrintGeoTiff({ rgba, width, height, extent, epsg }) {
+  if (!Number.isInteger(epsg) || epsg <= 0 || epsg > 65535) throw Object.assign(new Error('GeoTIFF needs a verified coordinate reference. Export PNG instead.'), { code: 'print_crs' });
+  const pixelBytes = width * height * 4;
+  if (rgba.length !== pixelBytes) throw new RangeError('RGBA buffer does not match the image size.');
   const gsdE = (extent.maxE - extent.minE) / width, gsdN = (extent.maxN - extent.minN) / height;
-  return writeArrayBuffer(rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength), {
-    width, height,
-    BitsPerSample: [8, 8, 8, 8], SamplesPerPixel: 4, PhotometricInterpretation: 2, ExtraSamples: 2, SampleFormat: [1, 1, 1, 1],
-    ModelPixelScale: [gsdE, gsdN, 0], ModelTiepoint: [0, 0, 0, extent.minE, extent.maxN, 0],
-    GTModelTypeGeoKey: 1, GTRasterTypeGeoKey: 1, ProjectedCSTypeGeoKey: epsg,
+  const SHORT = 3, LONG = 4, DOUBLE = 12, size = { [SHORT]: 2, [LONG]: 4, [DOUBLE]: 8 };
+  // GeoKeyDirectory: version 1.1.0, 3 keys: projected model, PixelIsArea, EPSG code.
+  const geoKeys = [1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, epsg];
+  const entries = [ // ascending tag order, as TIFF requires
+    [256, LONG, [width]], [257, LONG, [height]], [258, SHORT, [8, 8, 8, 8]], [259, SHORT, [1]], [262, SHORT, [2]],
+    [273, LONG, [0]], [277, SHORT, [4]], [278, LONG, [height]], [279, LONG, [pixelBytes]], [284, SHORT, [1]],
+    [338, SHORT, [2]], [339, SHORT, [1, 1, 1, 1]],
+    [33550, DOUBLE, [gsdE, gsdN, 0]], [33922, DOUBLE, [0, 0, 0, extent.minE, extent.maxN, 0]], [34735, SHORT, geoKeys],
+  ];
+  const align = n => n + (n % 8 ? 8 - (n % 8) : 0);
+  const ifdOffset = 8;
+  let cursor = ifdOffset + 2 + entries.length * 12 + 4;
+  const layout = entries.map(([tag, type, values]) => {
+    const bytes = values.length * size[type];
+    if (bytes <= 4) return { tag, type, values, offset: null };
+    cursor = align(cursor);
+    const offset = cursor; cursor += bytes;
+    return { tag, type, values, offset };
   });
+  const stripOffset = align(cursor);
+  if (stripOffset + pixelBytes > 0xffffffff) throw new RangeError('Image too large for a classic TIFF.');
+  const out = new Uint8Array(stripOffset + pixelBytes);
+  const view = new DataView(out.buffer);
+  view.setUint16(0, 0x4949); view.setUint16(2, 42, true); view.setUint32(4, ifdOffset, true);
+  view.setUint16(ifdOffset, entries.length, true);
+  const put = (type, at, value) => { if (type === SHORT) view.setUint16(at, value, true); else if (type === LONG) view.setUint32(at, value, true); else view.setFloat64(at, value, true); };
+  layout.forEach(({ tag, type, values, offset }, i) => {
+    const at = ifdOffset + 2 + i * 12;
+    if (tag === 273) values = [stripOffset];
+    view.setUint16(at, tag, true); view.setUint16(at + 2, type, true); view.setUint32(at + 4, values.length, true);
+    if (offset === null) values.forEach((v, j) => put(type, at + 8 + j * size[type], v));
+    else { view.setUint32(at + 8, offset, true); values.forEach((v, j) => put(type, offset + j * size[type], v)); }
+  });
+  view.setUint32(ifdOffset + 2 + entries.length * 12, 0, true); // no further IFDs
+  out.set(rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength), stripOffset);
+  return out.buffer;
 }
 
-export async function exportOrthoPrint({ format = 'png', epsg = null, writeArrayBuffer, traceContours = null, ...opts }) {
+export async function exportOrthoPrint({ format = 'png', epsg = null, traceContours = null, ...opts }) {
   const extent = clampExtent(opts.extent, opts.ortho);
   if (!extent) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
   if (format === 'tif' && !(Number.isInteger(epsg) && epsg > 0)) throw Object.assign(new Error('GeoTIFF needs a verified coordinate reference. Export PNG instead.'), { code: 'print_crs' });
@@ -204,13 +313,15 @@ export async function exportOrthoPrint({ format = 'png', epsg = null, writeArray
   const contours = traceContours ? await traceContours(extent, gsdE * 2.5) : null;
   const result = await renderOrthoPrint({ ...opts, extent, format, contours });
   let blob;
-  if (format === 'tif') {
-    const rgba = result.ctx.getImageData(0, 0, result.width, result.height).data;
-    const buffer = encodePrintGeoTiff({ rgba, width: result.width, height: result.height, extent: result.extent, epsg, writeArrayBuffer });
-    blob = new Blob([buffer], { type: 'image/tiff' });
-  } else {
-    blob = await new Promise((resolve, reject) => result.canvas.toBlob(b => b ? resolve(b) : reject(new Error('PNG encoding failed.')), 'image/png'));
-  }
+  try {
+    if (format === 'tif') {
+      let rgba;
+      try { rgba = result.ctx.getImageData(0, 0, result.width, result.height).data; } catch { throw tooLarge(); }
+      blob = new Blob([encodePrintGeoTiff({ rgba, width: result.width, height: result.height, extent: result.extent, epsg })], { type: 'image/tiff' });
+    } else {
+      blob = await new Promise((resolve, reject) => result.canvas.toBlob(b => b ? resolve(b) : reject(tooLarge()), 'image/png'));
+    }
+  } finally { result.canvas.width = 0; result.canvas.height = 0; } // release the backing store
   return { blob, width: result.width, height: result.height, extent: result.extent, contours: result.contours, propertyLines: result.propertyLines,
     filename: `orthophoto${contours?.features?.length ? '-contours' : ''}-${result.width}px.${format === 'tif' ? 'tif' : 'png'}`, gsd: width ? gsdE : null };
 }
@@ -248,8 +359,16 @@ export function mountOrthoPrintDialog({ documentRef = document, openButton, defa
     const d = defaults() || {};
     contours.disabled = !d.contoursAvailable; contours.checked = Boolean(d.contoursAvailable && d.contoursOn);
     property.disabled = !d.propertyAvailable; property.checked = Boolean(d.propertyAvailable && d.propertyOn);
-    format.querySelector('option[value="tif"]').disabled = !d.geotiffAvailable;
-    if (!d.geotiffAvailable) format.value = 'png';
+    // Options the viewer may not use are removed from view, not just greyed.
+    const gate = (selectEl, value, allowed, fallback) => {
+      const option = selectEl.querySelector(`option[value="${value}"]`);
+      option.disabled = !allowed; option.hidden = !allowed;
+      if (!allowed && selectEl.value === value) selectEl.value = fallback;
+    };
+    gate(format, 'tif', Boolean(d.geotiffAvailable), 'png');
+    gate(area, 'full', Boolean(d.wholeAvailable), 'view');
+    const sizes = Array.isArray(d.sizes) && d.sizes.length ? d.sizes : PRINT_SIZES;
+    for (const s of PRINT_SIZES) gate(size, String(s), sizes.includes(s), String(Math.max(...sizes.filter(x => x <= 4096), sizes[0])));
     status.textContent = '';
     if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
   });

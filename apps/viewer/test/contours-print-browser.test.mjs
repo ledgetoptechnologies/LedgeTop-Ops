@@ -39,7 +39,7 @@ process.on('exit', killAll);
 
 const SERVED = new Map([
   ['/contours.mjs', 'contours.mjs'], ['/contour-layer.mjs', 'contour-layer.mjs'], ['/contour-worker.mjs', 'contour-worker.mjs'],
-  ['/utm-conversion.mjs', 'utm-conversion.mjs'], ['/ortho-print-export.mjs', 'ortho-print-export.mjs'], ['/orthophoto-mask.mjs', 'orthophoto-mask.mjs'],
+  ['/utm-conversion.mjs', 'utm-conversion.mjs'], ['/raster-vertical-units.mjs', 'raster-vertical-units.mjs'], ['/ortho-print-export.mjs', 'ortho-print-export.mjs'], ['/orthophoto-mask.mjs', 'orthophoto-mask.mjs'],
   ['/leaflet.js', 'node_modules/leaflet/dist/leaflet-src.esm.js'], ['/leaflet.css', 'node_modules/leaflet/dist/leaflet.css'],
 ]);
 
@@ -156,7 +156,7 @@ test('print export burns contours, ft labels, property lines and legend into rea
     await client.command('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
     const ready = Date.now() + 15000;
     while (Date.now() < ready && !await client.evaluate("document.body?.dataset.ready==='true'")) await delay(50);
-    assert.equal(await client.evaluate("document.body?.dataset.ready==='true'"), true, client.errors.join(' | '));
+    assert.equal(await client.evaluate("document.body?.dataset.ready==='true'"), true, client.errors.join(' | ') || 'fixture page did not load');
 
     // Cone: 900 ft at the centre, 1 ft per metre; 2 ft interval, index every 10 ft.
     const print = await client.evaluate("renderPrint('cone', 2048, 2)");

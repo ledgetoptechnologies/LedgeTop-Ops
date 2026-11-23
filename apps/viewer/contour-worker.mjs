@@ -28,7 +28,7 @@ if (typeof self !== 'undefined' && typeof self.postMessage === 'function' && typ
       for (const f of features) { transfer.push(f.coords.buffer); if (f.latLng) transfer.push(f.latLng.buffer); }
       self.postMessage({ id, features }, transfer);
     } catch (error) {
-      self.postMessage({ id, error: String(error?.message || error) });
+      self.postMessage({ id, error: String(error?.message || error), code: error?.code || null });
     }
   };
 }

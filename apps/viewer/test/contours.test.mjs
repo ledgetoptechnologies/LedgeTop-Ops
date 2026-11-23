@@ -100,6 +100,16 @@ test('plane DEM: straight lines at the exact easting; nodata clips lines to the 
   }
 });
 
+test('declared vertical units scale raw values to metres; the point cap stops dense output', () => {
+  const w = 30, h = 10, values = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) values[y * w + x] = 998 + x; // feet
+  const { levels } = contourLevels(998 * FT, 1027 * FT, 5, 'imperial');
+  const features = buildContours({ values, width: w, height: h, valueScale: FT, levels, grid, smoothPasses: 0 });
+  assert.deepEqual(features.map(f => f.value), [1000, 1005, 1010, 1015, 1020, 1025]);
+  assert.ok(Math.abs(features[0].coords[0] - (grid.minE + 2.5)) < 1e-3, '1000 ft line at the 1000 ft column');
+  assert.throws(() => buildContours({ values, width: w, height: h, valueScale: FT, levels, grid, smoothPasses: 0, maxPoints: 5 }), { code: 'contours_too_dense' });
+});
+
 test('saddle cells resolve without crossing and segments stitch into whole lines', () => {
   // Two peaks: a saddle between them.
   const w = 51, h = 41, values = new Float32Array(w * h);

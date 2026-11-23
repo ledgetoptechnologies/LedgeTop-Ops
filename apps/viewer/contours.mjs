@@ -6,7 +6,9 @@
 // Douglas-Peucker simplification, Chaikin corner cutting. Cells next to
 // nodata produce no segments, so lines stop at the DTM's data extent.
 //
-// DTM values are metres (as the Viewer's DSM/DTM views already read them).
+// DTM values are converted to metres with the raster's declared vertical
+// units (valueScale); undeclared rasters are read as metres, as the DSM/DTM
+// views do.
 // Levels are chosen in display units (ft or m) so labels are exact multiples
 // of the interval, then converted to metres for tracing.
 
@@ -89,12 +91,14 @@ export function contourLevels(minM, maxM, interval, units = 'imperial', { maxLev
 }
 
 // Elevation guard matches the DEM views' statistics (-1000 m .. 10000 m).
-export function prepareGrid(values, width, height, nodata = NaN) {
+export function prepareGrid(values, width, height, nodata = NaN, valueScale = 1) {
   const n = width * height, out = new Float32Array(n);
   const hasNodata = Number.isFinite(nodata);
   for (let i = 0; i < n; i++) {
-    const v = values[i];
-    out[i] = (Number.isFinite(v) && v > -1000 && v < 10000 && !(hasNodata && v === nodata)) ? v : NaN;
+    const raw = values[i];
+    if (!Number.isFinite(raw) || (hasNodata && raw === nodata)) { out[i] = NaN; continue; }
+    const v = raw * valueScale;
+    out[i] = v > -1000 && v < 10000 ? v : NaN;
   }
   return out;
 }
@@ -295,14 +299,17 @@ export function chaikin(points, iterations = 2, closed = false) {
  * @returns {Array<{value:number,label:string,isIndex:boolean,closed:boolean,coords:Float64Array}>}
  *   coords are [E,N,E,N,...] in the raster CRS.
  */
-export function buildContours({ values, width, height, nodata = NaN, levels, grid,
-  smoothPasses = 2, simplifyCells = 0.2, chaikinIterations = 2, minLengthCells = 4 }) {
+export const CONTOUR_TOO_DENSE = 'contours_too_dense';
+
+export function buildContours({ values, width, height, nodata = NaN, valueScale = 1, levels, grid,
+  smoothPasses = 2, simplifyCells = 0.2, chaikinIterations = 2, minLengthCells = 4, maxPoints = Infinity }) {
   if (!levels?.length || width < 2 || height < 2) return [];
-  let surface = prepareGrid(values, width, height, nodata);
+  let surface = prepareGrid(values, width, height, nodata, valueScale);
   if (smoothPasses > 0) surface = smoothGrid(surface, width, height, smoothPasses);
   const meters = levels.map(l => l.meters);
   const traced = traceContours(surface, width, height, meters);
   const features = [];
+  let points = 0;
   const { minE, maxN, cellE, cellN } = grid;
   for (let li = 0; li < levels.length; li++) {
     const level = levels[li];
@@ -311,6 +318,9 @@ export function buildContours({ values, width, height, nodata = NaN, levels, gri
       let pts = simplifyLine(line.points, simplifyCells);
       if (line.closed) { pts = Float64Array.from([...pts.subarray(0, pts.length - 2), pts[0], pts[1]]); }
       pts = chaikin(pts, chaikinIterations, line.closed);
+      points += pts.length / 2;
+      // Bounded output: too many vertices means the interval is too fine here.
+      if (points > maxPoints) throw Object.assign(new Error('Too many contour lines at this interval.'), { code: CONTOUR_TOO_DENSE });
       const coords = new Float64Array(pts.length);
       for (let i = 0; i < pts.length; i += 2) {
         coords[i] = minE + (pts[i] + 0.5) * cellE;
