@@ -6,7 +6,7 @@ const {buildMeshRecoveryManifest,MAX_FILES}=require('./retainedManifest');
 const {copyRetainedClosure}=require('./webodmTaskImport');
 const {fsyncDirectory,fsyncDirectoryTree}=require('./durableFs');
 const {needsChunkRows}=require('./assetIntegrityRecords');
-const {hashFileChunks}=require('./storageManager');
+const {hashRecordedFile}=require('./scopedFileHash');
 const {LOD_DERIVATIVE_RECOVERY_REVISION}=require('./lodRecoveryPolicy');
 const {collectRecoveryCompanions,companionCopyManifests,ownedRecoveryCompanions,verifyRecoveryCompanionDestination,verifyRecoveryCompanionPlan}=require('./lodRecoveryCompanions');
 
@@ -81,9 +81,8 @@ async function processLodRecovery(operation,{processing,repository,storage,confi
   // hash them from the copy, which must still be the authorized source bytes.
   for(const asset of assets){
     if(!needsChunkRows(asset))continue;
-    const integrity=await hashFileChunks(storage.resolve('models',asset.relativePath),{signal});
-    if(integrity.sha256!==asset.sha256)throw Object.assign(new Error('the recovery destination conflicts with its authorized source manifest'),{code:'lod_recovery_destination_conflict'});
-    asset.chunks=integrity.chunks;
+    try{asset.chunks=await hashRecordedFile(storage.roots.models,asset.relativePath,{byteSize:asset.byteSize,sha256:asset.sha256,signal});}
+    catch(error){if(error.code!=='scoped_file_changed')throw error;throw Object.assign(new Error('the recovery destination conflicts with its authorized source manifest'),{code:'lod_recovery_destination_conflict',cause:error});}
   }
   const owned=ownedRecoveryCompanions(companions,payload.targetRelativePath,attempt.id);assets.push(...owned.assets);
   const versionMetadata={...(source.metadata||{}),lodRecovery:{schemaVersion:1,recoveryRevision:payload.recoveryRevision,operationId:operation.id,sourceOutputId:payload.sourceOutputId,sourceVersionId:payload.sourceVersionId,sourceManifestSha256:payload.sourceManifestSha256,companionManifestSha256:companions.manifestSha256,companionBytes:companions.byteSize}};

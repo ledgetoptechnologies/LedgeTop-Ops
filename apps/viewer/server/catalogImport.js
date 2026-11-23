@@ -3,8 +3,9 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { hashFile, hashFileChunks, hashTree } = require('./storageManager');
+const { hashFile, hashFileChunks, hashTree, physicalStorageRootKey } = require('./storageManager');
 const { needsChunkRows } = require('./assetIntegrityRecords');
+const { hashRecordedFile } = require('./scopedFileHash');
 const { lodDerivativeSpecs } = require('./lodDerivativePolicy');
 const { CUTLINE_PATTERN, validateCutlineFile } = require('./orthophotoCutline');
 const { recordImportedSourceUnits } = require('./importSourceUnitEvidence');
@@ -156,8 +157,12 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   for(const asset of candidate.assets){
     const relativePath=[assetPrefix,asset.relativePath].filter(Boolean).join('/'),entry={kind:asset.kind,rootKey:assetRootKey,relativePath,format:asset.format,contentType:asset.contentType||null,byteSize:asset.byteSize,sha256:asset.sha256,chunks:asset.chunks||[],storageMode:request.storageMode,published:false,sourceAttemptId:attempt.id};if(['ept','tiles'].includes(asset.kind)){const tree=await hashTree(path.dirname(path.join(originalRoot,...asset.relativePath.split('/'))));entry.manifestSha256=tree.manifestSha256;entry.manifestFiles=tree.files;}
     // A candidate scanned before chunk hashes existed gets them now, only if
-    // the same read reproduces the hash its approved scan recorded.
-    else if(needsChunkRows(entry)){const integrity=await hashFileChunks(path.join(originalRoot,...asset.relativePath.split('/')),{signal});if(integrity.sha256!==asset.sha256)throw Object.assign(new Error('catalog source changed after mapping approval'),{code:'catalog_source_changed'});entry.chunks=integrity.chunks;}
+    // the same read reproduces the size and hash its approved scan recorded.
+    else if(needsChunkRows(entry)){
+      const scope=request.storageMode==='external_reference'?{rootKey:candidate.sourceRootKey,relativePath:candidate.sourceRelativePath}:{rootKey:'datasets',relativePath:dataset.relativePath};
+      try{entry.chunks=await hashRecordedFile(storage.roots[physicalStorageRootKey(scope.rootKey)],`${scope.relativePath}/${asset.relativePath}`,{byteSize:asset.byteSize,sha256:asset.sha256,signal});}
+      catch(error){if(error.code!=='scoped_file_changed')throw error;throw Object.assign(new Error('catalog source changed after mapping approval'),{code:'catalog_source_changed',cause:error});}
+    }
     assets.push(entry);
   }
   const registeredAssets=assets.filter((asset)=>asset.kind!=='tiles');

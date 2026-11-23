@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict');const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const test=require('node:test');
-const {openDatabase}=require('../server/database');const {ProcessingRepository}=require('../server/processingRepository');const {ViewerRepository}=require('../server/repository');const {StorageManager}=require('../server/storageManager');const {scanCatalog}=require('../server/catalogImport');const {processOneDatasetOperation,reconcileCatalogAdoptionRecoveries,reconcileCatalogSourceCleanups}=require('../server/datasetOperationWorker');
+const {openDatabase}=require('../server/database');const {ProcessingRepository}=require('../server/processingRepository');const {ViewerRepository}=require('../server/repository');const {StorageManager}=require('../server/storageManager');const {scanCatalog}=require('../server/catalogImport');const {RACES,race}=require('./helpers/scoped-file-races');const {processOneDatasetOperation,reconcileCatalogAdoptionRecoveries,reconcileCatalogSourceCleanups}=require('../server/datasetOperationWorker');
 
 function fixture(t){const root=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-catalog-')),config={datasetsMount:path.join(root,'datasets'),modelsMount:path.join(root,'models'),cacheMount:path.join(root,'cache'),trashMount:path.join(root,'trash'),webodmMediaMount:path.join(root,'webodm'),terraImportMount:path.join(root,'terra'),storageReserveBytes:0,storageReservePercent:0,uploadMaxFiles:1000};for(const location of Object.values(config).filter((value)=>typeof value==='string'&&value.startsWith(root)))fs.mkdirSync(location,{recursive:true});const db=openDatabase(path.join(root,'viewer.sqlite')),processing=new ProcessingRepository(db),repository=new ViewerRepository(db),storage=new StorageManager(config);storage.initialize();t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});return{root,config,db,processing,repository,storage};}
 
@@ -55,5 +55,29 @@ for(const tampered of [false,true])test(`a candidate scanned before chunk hashes
   await processOneDatasetOperation(c,'catalog-worker');const done=c.processing.getDatasetOperation(map.id,'ops:one');
   if(tampered){assert.equal(done.status,'failed');assert.equal(done.errorCode,'catalog_source_changed');assert.equal(c.db.prepare('SELECT COUNT(*) n FROM model_assets').get().n,0);return;}
   assert.equal(done.status,'succeeded',done.errorMessage);
+  assert.deepEqual(c.repository.getModelAssetChunks(done.result.model.activeVersion.assets[0].id),candidate.assets[0].chunks);
+});
+
+for(const storageMode of ['external_reference','adopted'])for(const [label,change] of Object.entries(RACES))test(`an old candidate (${storageMode}) is refused after ${label}`,{skip:process.platform==='win32'},async(t)=>{
+  const c=fixture(t),source=path.join(c.config.terraImportMount,'Race Project','Race Task','products');fs.mkdirSync(source,{recursive:true});
+  fs.writeFileSync(path.join(source,'odm_orthophoto.tif'),Buffer.alloc(5*1024*1024,3));await runScan(c,'terra');
+  const candidate=c.processing.listCatalogCandidatesPage({provider:'terra'}).items[0];
+  c.db.prepare('UPDATE catalog_import_candidates SET assets_json=? WHERE id=?').run(JSON.stringify(candidate.assets.map(({chunks,...asset})=>asset)),candidate.id);
+  const project=c.processing.createProject({displayName:'Race'}),map=c.processing.createCatalogMapOperation({candidateId:candidate.id,subject:'ops:one',sessionId:'session',request:{projectId:project.id,taskDisplayName:'Race',storageMode}});
+  // Armed after the approved tree was fingerprinted and, if adopted, moved.
+  let state;const create=c.processing.createImportedAttempt.bind(c.processing);
+  c.processing.createImportedAttempt=(value)=>{const result=create(value),base=storageMode==='adopted'?path.join(c.config.datasetsMount,value.datasetId):path.join(c.config.terraImportMount,'Race Project','Race Task');state=race(t,change,path.join(fs.realpathSync.native(base),'products','odm_orthophoto.tif'),path.join(path.dirname(c.config.datasetsMount),'outside'));return result;};
+  await processOneDatasetOperation(c,'catalog-worker');const done=c.processing.getDatasetOperation(map.id,'ops:one');
+  assert.equal(state?.fired,1,done.errorMessage);assert.equal(done.status,'failed');assert.equal(done.errorCode,'catalog_source_changed');
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM model_assets').get().n,0);
+});
+
+test('an old adopted candidate gets its chunks from the adopted copy',{skip:process.platform==='win32'},async(t)=>{
+  const c=fixture(t),source=path.join(c.config.terraImportMount,'Adopt Project','Adopt Task');fs.mkdirSync(source,{recursive:true});
+  fs.writeFileSync(path.join(source,'odm_orthophoto.tif'),Buffer.alloc(5*1024*1024,3));await runScan(c,'terra');
+  const candidate=c.processing.listCatalogCandidatesPage({provider:'terra'}).items[0];
+  c.db.prepare('UPDATE catalog_import_candidates SET assets_json=? WHERE id=?').run(JSON.stringify(candidate.assets.map(({chunks,...asset})=>asset)),candidate.id);
+  const project=c.processing.createProject({displayName:'Adopt'}),map=c.processing.createCatalogMapOperation({candidateId:candidate.id,subject:'ops:one',sessionId:'session',request:{projectId:project.id,taskDisplayName:'Adopt',storageMode:'adopted'}});
+  await processOneDatasetOperation(c,'catalog-worker');const done=c.processing.getDatasetOperation(map.id,'ops:one');assert.equal(done.status,'succeeded',done.errorMessage);
   assert.deepEqual(c.repository.getModelAssetChunks(done.result.model.activeVersion.assets[0].id),candidate.assets[0].chunks);
 });
