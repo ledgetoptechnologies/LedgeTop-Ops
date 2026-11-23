@@ -186,6 +186,7 @@ test('expired or refused access clears the panel, and coming back with less iden
   await page.accept('client', 'client-a', REDUCED[0]);
   await page.sync(active);
   assert.deepEqual([panel.store.state.marks, panel.store.state.undo, panel.store.canWrite()], [[], [], false]);
+});
 
 const add = (panel, name, changes = {}) => panel.store.create({ geometry: { type: 'Point', coordinates: [-87, 43] }, name, color: '#1e88e5', icon: 'pin', note: '', ...changes });
 const line = { type: 'LineString', coordinates: [[-87, 43], [-87.001, 43.001]] };

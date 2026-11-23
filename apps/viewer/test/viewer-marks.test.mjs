@@ -62,11 +62,23 @@ async function openApi(t, options) {
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     db.close();
   });
-  const request = async (token, method = 'GET', route = '', body) => {
+  const raw = async (token, method = 'GET', route = '', body) => {
     const response = await fetch('http://127.0.0.1:' + server.address().port + '/marks' + (route ? '/' + route : ''),
       { method, headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
     const text = await response.text();
     return { status: response.status, body: text ? JSON.parse(text) : null, headers: response.headers };
+  };
+  // What the page ends up with: the person's own answer plus every shared page.
+  const request = async (token, method = 'GET', route = '', body) => {
+    const answer = await raw(token, method, route, body);
+    if (method !== 'GET' || route || !answer.body?.capabilities?.shared) return answer;
+    for (let next = ''; next !== null;) {
+      const { body: page } = await raw(token, 'GET', 'shared' + (next ? '?after=' + encodeURIComponent(next) : ''));
+      answer.body.marks.push(...page.marks);
+      answer.body.categories.push(...page.categories.filter(row => !answer.body.categories.some(item => item.id === row.id)));
+      next = page.next;
+    }
+    return answer;
   };
   return { session, request, sessions, db };
 }
@@ -321,8 +333,8 @@ test('a client mark shared with project staff is view-only to staff and unseen b
     assert.equal((await request(token, 'POST', shared.id + '/restore', { revision: 1 })).status, 404);
     assert.equal((await request(token, 'POST', '', bodyOf(shared, { revision: undefined }))).status, 409);
     assert.equal((await request(token, 'POST', '', point({ categoryId: used.id }))).status, 400, 'staff do not use a client category');
-    assert.equal((await request(token, 'PUT', 'categories/' + used.id, { ...used, name: 'Changed', revision: 1 })).status, 403);
-    assert.equal((await request(token, 'DELETE', 'categories/' + used.id, { revision: 1 })).status, 403);
+    assert.equal((await request(token, 'PUT', 'categories/' + used.id, { ...used, name: 'Changed', revision: 1 })).status, 404);
+    assert.equal((await request(token, 'DELETE', 'categories/' + used.id, { revision: 1 })).status, 404);
     assert.equal((await request(token, 'PUT', 'categories/' + unused.id, { ...unused, revision: 1 })).status, 404);
     assert.equal((await request(token, 'DELETE', 'categories/' + unused.id, { revision: 1 })).status, 404);
   }
@@ -443,11 +455,18 @@ test('deleted marks are bounded, and restoring respects the mark limits and a re
       insert.run(id, modelId, subject, JSON.stringify({ ...point(), id }), at, at, subject, deletedAt && new Date(Date.now() - 1000 - i).toISOString());
     }
   };
-  fill('client-a', marksRepository.LIMITS.deleted, true);
+  fill('client-a', marksRepository.LIMITS.deleted - 1, true);
   fill('client-b', 5, true);
   assert.equal((await request(client, 'DELETE', mark.id, { revision: 1 })).status, 204);
   const kept = subject => db.prepare("SELECT count(*) n FROM viewer_marks WHERE owner_subject=? AND deleted_at IS NOT NULL AND document_json<>'{}'").get(subject).n;
-  assert.equal(kept('client-a'), marksRepository.LIMITS.deleted, 'the oldest one gave way');
+  assert.equal(kept('client-a'), marksRepository.LIMITS.deleted, 'full, and nothing older went');
+  const extra = (await request(client, 'POST', '', point({ name: 'Extra' }))).body.mark;
+  const refused = await request(client, 'DELETE', extra.id, { revision: 1 });
+  assert.deepEqual([refused.status, refused.body.code], [409, 'mark_deleted_full']);
+  assert.equal((await request(client, 'DELETE', extra.id, { revision: 1, permanent: 'yes' })).status, 400);
+  assert.equal((await request(client, 'DELETE', extra.id, { revision: 1, permanent: true })).status, 204);
+  assert.equal((await request(client, 'POST', extra.id + '/restore', { revision: 1 })).status, 404, 'for good');
+  assert.equal(kept('client-a'), marksRepository.LIMITS.deleted);
   assert.equal(kept('client-b'), 5, 'nobody else\'s');
   assert.equal((await request(client, 'GET', 'deleted')).body.marks[0].id, mark.id);
   assert.equal((await request(client, 'DELETE', 'categories/' + category.id, { revision: 1 })).status, 204);

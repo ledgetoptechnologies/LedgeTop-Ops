@@ -10,7 +10,7 @@ import { createMiniDocument } from './mini-dom.mjs';
 import { createMiniLeaflet } from './mini-leaflet.mjs';
 
 // The real Marks panel on a mini DOM, against the real API on an in-memory database.
-export async function openMarksPanel(t, options) {
+export async function openMarksPanel(t, { rateLimited = () => false, maxRequestBytes, ...options } = {}) {
   const database = new DatabaseSync(':memory:');
   database.exec("PRAGMA foreign_keys=ON; CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('synthetic-model'),('other-model');");
   database.exec(schema.VIEWER_MARKS_SQL);
@@ -20,11 +20,11 @@ export async function openMarksPanel(t, options) {
     getViewerSessionByHash: hash => sessions.get(hash),
     viewerSessionLive: record => !record.revoked,
     getModel: () => ({ status: 'ready', activeVersion: { id: 'synthetic-v1', status: 'ready' } }),
-    rateLimited: () => false,
+    rateLimited,
   };
   const app = express();
-  app.use(express.json());
-  app.use('/api/v1/marks', api.createViewerMarkApi(repository, options));
+  app.use(express.json({ limit: '2mb' }));
+  app.use('/api/v1/marks', api.createViewerMarkApi(repository, { ...options, ...(maxRequestBytes && { maxRequestBytes }) }));
   const server = createServer(app);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); database.close(); });
@@ -37,6 +37,7 @@ export async function openMarksPanel(t, options) {
     return { mode: 'session', key: JSON.stringify([audience, subject, modelId, permissions.personalMeasurements === true]), token: () => token, record };
   };
   const requests = [];
+  const request = (path, init) => fetch(base + path, { ...init, redirect: 'follow' });
   const mount = ({ dom = createMiniDocument(), units = () => 'imperial', map = true, request = null, georef = () => null } = {}) => {
     const panel = dom.document.createElement('div');
     const leaflet = createMiniLeaflet(dom.document);
@@ -58,5 +59,5 @@ export async function openMarksPanel(t, options) {
       open: name => panel.querySelectorAll('.viewer-mark-list-item').find(node => node.textContent.startsWith(name)).click(),
     };
   };
-  return { mount, scope, database, requests };
+  return { mount, scope, database, requests, request };
 }

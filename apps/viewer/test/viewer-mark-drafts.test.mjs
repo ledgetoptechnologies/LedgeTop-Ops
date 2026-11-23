@@ -191,6 +191,21 @@ test('an expired session keeps the draft for the same person; refused access and
   assert.equal(stored(storage), false, 'a login without an individual identity is not offered it');
 });
 
+test('a lost identity or another person clears the stored draft at once, even with no map open', async t => {
+  const { page, person, storage, scope } = await start(t);
+  for (const next of [scope('client', 'client-a', { permissions: { view: true, measure: true } }), scope('client', 'client-b')]) {
+    const panel = page();
+    await panel.marks.setScope(person);
+    await panel.place('43.05, -87');
+    await panel.type('[name=name]', 'Unsaved');
+    panel.marks.setView({ map: false });
+    assert.equal(stored(storage), true);
+    await panel.marks.setScope(next);
+    assert.equal(stored(storage), false);
+    assert.doesNotMatch(panel.text() + panel.values(), /Unsaved/);
+  }
+});
+
 test('a draft renewed under the same scope stays open, and public links store nothing', async t => {
   const { page, person, storage } = await start(t);
   const panel = page();

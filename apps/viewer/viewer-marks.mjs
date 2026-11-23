@@ -44,6 +44,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   let draftChecked = false, draftBaseline = null;
   // A saved mark moves only while this is on, and only on Save.
   let moving = false;
+  let deleteForGood = null;
 
   const store = createMarksStore({ request, newId, onChange: () => render() });
   const layer = createMarkMapLayer({ L, getMap,
@@ -169,6 +170,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       color: style.color, icon: style.icon, elevationNavd88M: null, visibility: defaultVisibility() };
     selectedId = null;
     armedDelete = null;
+    deleteForGood = null;
     moving = false;
     setMode('idle');
     writeEditor();
@@ -182,6 +184,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     if (!mark || mode !== 'idle') return;
     selectedId = id;
     armedDelete = null;
+    deleteForGood = null;
     moving = false;
     draft = { ...mark, geometry: structuredClone(mark.geometry) };
     writeEditor();
@@ -194,6 +197,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     draft = null;
     selectedId = null;
     armedDelete = null;
+    deleteForGood = null;
     moving = false;
     render();
   }
@@ -344,7 +348,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       moveButton.disabled = state.busy;
       moveButton.setAttribute('aria-pressed', String(moving));
       deleteButton.hidden = !draft.id || !editable;
-      deleteButton.textContent = armedDelete === draft.id ? 'Tap again to delete' : 'Delete';
+      deleteButton.textContent = deleteForGood === draft.id && draft.id ? 'Delete for good' : armedDelete === draft.id ? 'Tap again to delete' : 'Delete';
       deleteButton.disabled = state.busy;
       saveButton.hidden = !editable;
     }
@@ -381,7 +385,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       const row = h(document, 'li', {}, icon, h(document, 'span', { class: 'viewer-mark-list-name', text: category.name }));
       if (writable && category.editable) {
         const rename = h(document, 'button', { type: 'button', text: 'Edit', 'aria-label': 'Edit ' + category.name });
-        const remove = h(document, 'button', { type: 'button', text: armedDelete === category.id ? 'Tap again' : 'Delete', 'aria-label': 'Delete ' + category.name });
+        const remove = h(document, 'button', { type: 'button', text: armedDelete === category.id ? 'Delete for good' : 'Delete', 'aria-label': 'Delete ' + category.name });
         on(rename, 'click', () => {
           categoryDraft = category;
           categoryName.value = category.name;
@@ -390,7 +394,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
           render();
         });
         on(remove, 'click', async () => {
-          if (armedDelete !== category.id) { armedDelete = category.id; render(); return; }
+          if (armedDelete !== category.id) { armedDelete = category.id; message("Deleting a category can't be undone. Its marks stay, without a category."); return; }
           armedDelete = null;
           if (await store.deleteCategory(category) && filter === category.id) filter = '';
           render();
@@ -503,9 +507,15 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   on(deleteButton, 'click', async () => {
     const current = draft?.id ? store.find(draft.id) : null;
     if (!current) return;
-    if (armedDelete !== current.id) { armedDelete = current.id; render(); return; }
+    if (deleteForGood !== current.id && armedDelete !== current.id) { armedDelete = current.id; render(); return; }
     armedDelete = null;
-    if (await store.remove(current)) { closeEditor(); await readDeleted(); }
+    const permanent = deleteForGood === current.id;
+    deleteForGood = null;
+    const removed = await store.remove(current, { permanent });
+    // Recently deleted is full: this one can still go, but only for good and only if asked again.
+    if (!removed && store.state.failure === 'mark_deleted_full' && draft?.id === current.id) deleteForGood = current.id;
+    render();
+    if (removed) { closeEditor(); await readDeleted(); }
   });
   on(editor, 'submit', async event => {
     event.preventDefault();
@@ -564,7 +574,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     try {
       const text = await file.text();
       if (!held.live()) return;
-      const parsed = geoJsonToMarks(JSON.parse(text), { categories: store.state.categories, newId,
+      const parsed = geoJsonToMarks(JSON.parse(text), { categories: store.state.categories.filter(category => category.mine), newId,
         visibility: defaultVisibility(), defaultColor: DEFAULT_STYLE.color });
       if (!parsed.marks.length) { message('No points, lines or areas were found in that file.'); return; }
       const count = await store.importMarks(parsed);
@@ -590,11 +600,13 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     async setScope(next, { keepDraft: mayReturn = true } = {}) {
       sessionScope = next?.mode === 'session';
       if (!mayReturn) recovery.clear();
+      // Anyone else's unsaved work goes as soon as they are gone, map open or not.
+      else if (sessionScope) recovery.read(next.key);
       if (!next || next.key !== scopeKey) {
         draftChecked = false;
         // Nothing one person typed or picked stays in the panel for the next one.
         draft = null; selectedId = null; mode = 'idle'; drawing = null;
-        preview = null; filter = ''; armedDelete = null; categoryDraft = null; moving = false;
+        preview = null; filter = ''; armedDelete = null; categoryDraft = null; moving = false; deleteForGood = null;
         showCategoryIcon(DEFAULT_STYLE.icon);
         categoryColor.value = DEFAULT_STYLE.color;
         for (const input of [coordInput, nameInput, noteInput, elevationInput, pointCoords, categoryName]) input.value = '';

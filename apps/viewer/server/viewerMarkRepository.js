@@ -8,9 +8,14 @@ const ICON = /^[a-z0-9-]{1,32}$/;
 const ACCOUNT = /^direct_client_grant:[A-Za-z0-9._:-]{1,200}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const NOTE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
-const LIMITS = Object.freeze({ perOwner: 1000, perModel: 5000, categories: 100, vertices: 500, batch: 500, accounts: 200, deleted: 1000 });
+// Limits are per person, so nobody else's marks use up one's own. Bytes are of the
+// stored documents: ownerBytes bounds one answer with a person's own marks,
+// pageBytes one page of marks shared by others.
+const LIMITS = Object.freeze({ perOwner: 1000, ownerBytes: 4_000_000, categories: 100, vertices: 500, batch: 500, accounts: 200,
+  deleted: 1000, deletedBytes: 4_000_000, pageRows: 500, pageBytes: 1_000_000 });
 const RECOVERY_DAYS = 30;
 const recoveryCutoff = now => new Date(now - RECOVERY_DAYS * 86_400_000).toISOString();
+const OWN_LIVE = 'model_id=? AND owner_audience=? AND owner_subject=? AND deleted_at IS NULL';
 const OWN_DELETED = 'model_id=? AND owner_audience=? AND owner_subject=? AND deleted_at IS NOT NULL';
 // The sharing choices each audience may use. The first entry is the default when
 // a request omits visibility. What is not listed cannot be written, and a row
@@ -198,18 +203,43 @@ class ViewerMarkRepository {
     };
   }
 
-  rows(principal) {
-    const shared = staff(principal) ? "visibility IN ('staff','internal','client')" : "(visibility='client' AND share_account=?)";
-    const args = staff(principal) ? [] : [principalAccount(principal)];
-    return this.database.prepare(`SELECT * FROM viewer_marks WHERE model_id=? AND deleted_at IS NULL
-      AND (${shared} OR (owner_audience=? AND owner_subject=?)) ORDER BY created_at,id LIMIT ?`)
-      .all(principal.modelId, ...args, principal.audience, principal.subject, LIMITS.perModel)
-      .filter(row => this.readable(principal, row));
-  }
-
+  // The person's own marks, all of them.
   list(principal) {
     const categories = this.liveCategoryIds(principal.modelId);
-    return this.rows(principal).map(row => this.view(principal, row, categories));
+    return this.database.prepare(`SELECT * FROM viewer_marks WHERE ${OWN_LIVE} ORDER BY created_at, id`).all(...this.owner(principal))
+      .map(row => this.view(principal, row, categories));
+  }
+
+  // The sharing choices through which this person can read somebody else's mark.
+  readableChoices(principal) {
+    const served = [...this.visibility.client, ...this.visibility.ops].filter(choice => choice !== 'private');
+    return staff(principal) ? served : served.filter(choice => choice === 'client' && principalAccount(principal) !== null);
+  }
+
+  // One page of the marks others share with this person, with the categories
+  // those marks use. Sizes are read before any document, so a page is bounded.
+  sharedPage(principal, after = null) {
+    const choices = this.readableChoices(principal);
+    if (!choices.length) return { marks: [], categories: [], next: null };
+    const account = staff(principal) ? [] : [principalAccount(principal)];
+    const sizes = this.database.prepare(`SELECT id, created_at, length(CAST(document_json AS BLOB)) AS bytes FROM viewer_marks
+      WHERE model_id=? AND deleted_at IS NULL AND visibility IN (${choices.map(() => '?').join(',')}) ${account.length ? 'AND share_account=?' : ''}
+      AND NOT (owner_audience=? AND owner_subject=?) AND (created_at>? OR (created_at=? AND id>?)) ORDER BY created_at, id LIMIT ?`)
+      .all(principal.modelId, ...choices, ...account, principal.audience, principal.subject, after?.at ?? '', after?.at ?? '', after?.id ?? '', LIMITS.pageRows + 1);
+    let bytes = 0, take = 0;
+    while (take < Math.min(sizes.length, LIMITS.pageRows) && (take === 0 || bytes + sizes[take].bytes <= LIMITS.pageBytes)) bytes += sizes[take++].bytes;
+    const live = this.liveCategoryIds(principal.modelId), categories = new Map();
+    const marks = sizes.slice(0, take).map(({ id }) => {
+      const row = this.row(principal, id), mark = this.view(principal, row, live);
+      if (mark?.categoryId && !categories.has(mark.categoryId)) {
+        const category = this.categoryRow(principal, mark.categoryId);
+        if (category && !category.deleted_at && categoryKey(category, category.id) === categoryKey(row, mark.categoryId))
+          categories.set(category.id, this.categoryView(principal, category));
+      }
+      return mark;
+    }).filter(Boolean);
+    const last = sizes[take - 1];
+    return { marks, categories: [...categories.values()], next: take < sizes.length ? `${last.created_at}~${last.id}` : null };
   }
 
   get(principal, id) { return this.view(principal, this.row(principal, id)); }
@@ -236,13 +266,21 @@ class ViewerMarkRepository {
     return shareAccount;
   }
 
-  checkRoom(principal) {
-    const count = sql => this.database.prepare(`SELECT count(*) n FROM viewer_marks WHERE model_id=? AND deleted_at IS NULL ${sql}`);
-    if (count('AND owner_audience=? AND owner_subject=?').get(principal.modelId, principal.audience, principal.subject).n >= LIMITS.perOwner
-      || count('').get(principal.modelId).n >= LIMITS.perModel) throw markError('mark_limit_reached', 429);
+  // What a person may still add: marks and bytes, live or recently deleted.
+  room(principal, where, limits, extra = []) {
+    const used = this.database.prepare(`SELECT count(*) n, coalesce(sum(length(CAST(document_json AS BLOB))), 0) bytes FROM viewer_marks WHERE ${where}`)
+      .get(...this.owner(principal), ...extra);
+    return { marks: limits.marks - used.n, bytes: limits.bytes - used.bytes };
+  }
+  liveRoom(principal) { return this.room(principal, OWN_LIVE, { marks: LIMITS.perOwner, bytes: LIMITS.ownerBytes }); }
+  takeRoom(room, document) {
+    room.marks -= 1;
+    room.bytes -= Buffer.byteLength(document);
+    if (room.marks < 0) throw markError('mark_limit_reached', 429);
+    if (room.bytes < 0) throw markError('mark_storage_limit', 429);
   }
 
-  insert(principal, input) {
+  insert(principal, input, room = this.liveRoom(principal)) {
     const { document: mark, visibility: requested, shareAccount: requestedAccount } = validateMark(input);
     const visibility = requested || this.visibility[principal.audience][0];
     const shareAccount = this.checkVisibility(principal, principal.audience, visibility, requestedAccount);
@@ -254,7 +292,7 @@ class ViewerMarkRepository {
       return { mark: this.view(principal, existing), replayed: true };
     }
     this.checkCategory(principal, mark.categoryId);
-    this.checkRoom(principal);
+    this.takeRoom(room, document);
     const now = new Date().toISOString();
     this.database.prepare(`INSERT INTO viewer_marks
       (id, model_id, owner_audience, owner_subject, owner_account, visibility, share_account, document_json, creation_hash,
@@ -266,10 +304,15 @@ class ViewerMarkRepository {
 
   create(principal, input) { return this.transaction(() => this.insert(principal, input)); }
 
-  // Import: all marks land or none do.
-  createMany(principal, inputs) {
-    if (!Array.isArray(inputs) || !inputs.length || inputs.length > LIMITS.batch) throw markError('invalid_mark_batch');
-    return this.transaction(() => inputs.map(input => this.insert(principal, input).mark));
+  // Import: its new categories and all its marks land together, or nothing does.
+  createMany(principal, { marks, categories = [] }) {
+    if (!Array.isArray(marks) || !marks.length || marks.length > LIMITS.batch
+      || !Array.isArray(categories) || categories.length > LIMITS.categories) throw markError('invalid_mark_batch');
+    return this.transaction(() => {
+      const made = categories.map(input => this.addCategory(principal, validateCategory(input)).category);
+      const room = this.liveRoom(principal);
+      return { marks: marks.map(input => this.insert(principal, input, room).mark), categories: made };
+    });
   }
 
   update(principal, id, input) {
@@ -289,29 +332,51 @@ class ViewerMarkRepository {
           requestedAccount === undefined ? row.share_account : requestedAccount);
       }
       this.checkCategory(principal, mark.categoryId, JSON.parse(row.document_json).categoryId);
+      const document = JSON.stringify(mark), growth = Buffer.byteLength(document) - Buffer.byteLength(row.document_json);
+      if (growth > 0 && growth > this.liveRoom(principal).bytes) throw markError('mark_storage_limit', 429);
       this.database.prepare(`UPDATE viewer_marks SET document_json=?, visibility=?, share_account=?, revision=revision+1, updated_at=?,
-        updated_by_audience=?, updated_by_subject=? WHERE model_id=? AND id=?`).run(JSON.stringify(mark), visibility, shareAccount,
+        updated_by_audience=?, updated_by_subject=? WHERE model_id=? AND id=?`).run(document, visibility, shareAccount,
         new Date().toISOString(), principal.audience, principal.subject, principal.modelId, id);
       return this.get(principal, id);
     });
   }
 
-  delete(principal, id, revision) {
+  removeOne(principal, id, revision, room) {
     if (!Number.isSafeInteger(revision) || revision < 1) throw markError('mark_revision_required', 428);
+    const row = this.row(principal, id);
+    if (!this.readable(principal, row)) throw markError('mark_not_found', 404);
+    if (!this.editable(principal, row)) throw markError('mark_edit_forbidden', 403);
+    if (row.revision !== revision) throw markError('mark_revision_conflict', 409);
+    // The owner can restore it for RECOVERY_DAYS; purgeDeleted then drops the
+    // content. The id stays used. A full list refuses instead of dropping older
+    // ones early; without room (the person said for good) the content goes now.
+    if (room) {
+      room.marks -= 1;
+      room.bytes -= Buffer.byteLength(row.document_json);
+      if (room.marks < 0 || room.bytes < 0) throw markError('mark_deleted_full', 409);
+    }
+    const now = new Date().toISOString();
+    this.database.prepare(`UPDATE viewer_marks SET deleted_at=?, updated_at=?, document_json=?,
+      updated_by_audience=?, updated_by_subject=? WHERE model_id=? AND id=?`)
+      .run(now, now, room ? row.document_json : '{}', principal.audience, principal.subject, principal.modelId, id);
+  }
+
+  deletedRoom(principal) {
+    return this.room(principal, `${OWN_DELETED} AND document_json<>'{}' AND deleted_at>=?`, { marks: LIMITS.deleted, bytes: LIMITS.deletedBytes },
+      [recoveryCutoff(Date.now())]);
+  }
+
+  delete(principal, id, revision, { permanent = false } = {}) {
+    return this.transaction(() => this.removeOne(principal, id, revision, permanent ? null : this.deletedRoom(principal)));
+  }
+
+  // Undo of an import: all of them or none.
+  deleteMany(principal, items) {
+    if (!Array.isArray(items) || !items.length || items.length > LIMITS.batch
+      || items.some(item => !plainObject(item) || typeof item.id !== 'string' || Object.keys(item).some(key => !['id', 'revision'].includes(key)))) throw markError('invalid_mark_batch');
     return this.transaction(() => {
-      const row = this.row(principal, id);
-      if (!this.readable(principal, row)) throw markError('mark_not_found', 404);
-      if (!this.editable(principal, row)) throw markError('mark_edit_forbidden', 403);
-      if (row.revision !== revision) throw markError('mark_revision_conflict', 409);
-      const now = new Date().toISOString();
-      // The owner can restore it for RECOVERY_DAYS; purgeDeleted then drops the content. The id stays used.
-      this.database.prepare(`UPDATE viewer_marks SET deleted_at=?, updated_at=?,
-        updated_by_audience=?, updated_by_subject=? WHERE model_id=? AND id=?`)
-        .run(now, now, principal.audience, principal.subject, principal.modelId, id);
-      // Repeated adding and deleting cannot pile up content: the oldest deleted marks beyond the limit go first.
-      this.database.prepare(`UPDATE viewer_marks SET document_json='{}' WHERE ${OWN_DELETED} AND document_json<>'{}' AND id NOT IN
-        (SELECT id FROM viewer_marks WHERE ${OWN_DELETED} AND document_json<>'{}' ORDER BY deleted_at DESC, rowid DESC LIMIT ?)`)
-        .run(...this.owner(principal), ...this.owner(principal), LIMITS.deleted);
+      const room = this.deletedRoom(principal);
+      for (const { id, revision } of items) this.removeOne(principal, id, revision, room);
     });
   }
 
@@ -333,7 +398,7 @@ class ViewerMarkRepository {
       if (row.revision !== revision) throw markError('mark_revision_conflict', 409);
       // It comes back with the sharing it had, if that is still served.
       if (!this.visibility[row.owner_audience].includes(row.visibility)) throw markError('mark_visibility_forbidden', 403);
-      this.checkRoom(principal);
+      this.takeRoom(this.liveRoom(principal), row.document_json);
       this.database.prepare(`UPDATE viewer_marks SET deleted_at=NULL, revision=revision+1, updated_at=?,
         updated_by_audience=?, updated_by_subject=? WHERE model_id=? AND id=?`)
         .run(new Date(now).toISOString(), principal.audience, principal.subject, principal.modelId, id);
@@ -351,32 +416,17 @@ class ViewerMarkRepository {
     return this.database.prepare('SELECT * FROM viewer_mark_categories WHERE model_id=? AND id=?').get(principal.modelId, id);
   }
 
-  // The owner reads a category. Anyone else reads it only while a mark they can
-  // read uses it (so that mark shows a name), and only from that mark's own side:
-  // the same person's, or any staff member's for a staff mark.
-  categoriesUsedBySharedMarks(principal) {
-    return new Set(this.rows(principal).filter(row => !isOwner(principal, row))
-      .map(row => categoryKey(row, JSON.parse(row.document_json).categoryId)));
-  }
-
-  categoryReadable(principal, row, shared = null) {
-    if (!row || row.deleted_at) return false;
-    if (isOwner(principal, row)) return true;
-    if (row.owner_audience === 'ops' && staff(principal) && this.shares('ops')) return true;
-    return (shared || this.categoriesUsedBySharedMarks(principal)).has(categoryKey(row, row.id));
-  }
-
   categoryView(principal, row) {
     return { ...JSON.parse(row.document_json), revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at,
       mine: isOwner(principal, row), editable: isOwner(principal, row),
       author: row.owner_audience === 'ops' ? 'staff' : 'client' };
   }
 
+  // The person's own, all of them. Others' come with the marks that use them.
   categories(principal) {
-    const shared = this.categoriesUsedBySharedMarks(principal);
+    const team = staff(principal) && this.shares('ops') ? "OR owner_audience='ops'" : '';
     return this.database.prepare(`SELECT * FROM viewer_mark_categories WHERE model_id=? AND deleted_at IS NULL
-      ORDER BY name COLLATE NOCASE, id`).all(principal.modelId)
-      .filter(row => this.categoryReadable(principal, row, shared)).slice(0, LIMITS.categories * 2)
+      AND ((owner_audience=? AND owner_subject=?) ${team}) ORDER BY name COLLATE NOCASE, id`).all(...this.owner(principal))
       .map(row => this.categoryView(principal, row));
   }
 
@@ -387,30 +437,36 @@ class ViewerMarkRepository {
 
   createCategory(principal, input) {
     const category = validateCategory(input);
-    return this.transaction(() => {
-      const existing = this.categoryRow(principal, category.id);
-      if (existing) {
-        if (existing.deleted_at || !isOwner(principal, existing) || existing.document_json !== JSON.stringify(category))
-          throw markError('mark_category_id_conflict', 409);
-        return { category: this.categoryView(principal, existing), replayed: true };
-      }
-      if (this.nameTaken(principal, category.name)) throw markError('mark_category_name_taken', 409);
-      const count = this.database.prepare(`SELECT count(*) n FROM viewer_mark_categories WHERE model_id=? AND owner_audience=?
-        AND owner_subject=? AND deleted_at IS NULL`).get(principal.modelId, principal.audience, principal.subject).n;
-      if (count >= LIMITS.categories) throw markError('mark_category_limit_reached', 429);
-      const now = new Date().toISOString();
-      this.database.prepare(`INSERT INTO viewer_mark_categories
-        (id, model_id, owner_audience, owner_subject, owner_account, name, document_json, revision, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`).run(category.id, principal.modelId, principal.audience, principal.subject,
-        principalAccount(principal), category.name, JSON.stringify(category), now, now);
-      return { category: this.categoryView(principal, this.categoryRow(principal, category.id)), replayed: false };
-    });
+    return this.transaction(() => this.addCategory(principal, category));
+  }
+
+  addCategory(principal, category) {
+    const existing = this.categoryRow(principal, category.id);
+    if (existing) {
+      if (existing.deleted_at || !isOwner(principal, existing) || existing.document_json !== JSON.stringify(category))
+        throw markError('mark_category_id_conflict', 409);
+      return { category: this.categoryView(principal, existing), replayed: true };
+    }
+    if (this.nameTaken(principal, category.name)) throw markError('mark_category_name_taken', 409);
+    return this.insertCategory(principal, category);
+  }
+
+  insertCategory(principal, category) {
+    const count = this.database.prepare(`SELECT count(*) n FROM viewer_mark_categories WHERE model_id=? AND owner_audience=?
+      AND owner_subject=? AND deleted_at IS NULL`).get(...this.owner(principal)).n;
+    if (count >= LIMITS.categories) throw markError('mark_category_limit_reached', 429);
+    const now = new Date().toISOString();
+    this.database.prepare(`INSERT INTO viewer_mark_categories
+      (id, model_id, owner_audience, owner_subject, owner_account, name, document_json, revision, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`).run(category.id, principal.modelId, principal.audience, principal.subject,
+      principalAccount(principal), category.name, JSON.stringify(category), now, now);
+    return { category: this.categoryView(principal, this.categoryRow(principal, category.id)), replayed: false };
   }
 
   editableCategory(principal, id, revision) {
     const row = this.categoryRow(principal, id);
-    if (!this.categoryReadable(principal, row)) throw markError('mark_category_not_found', 404);
-    if (!isOwner(principal, row)) throw markError('mark_category_edit_forbidden', 403);
+    // Others see a category only with a mark that uses it, and never change it.
+    if (!row || row.deleted_at || !isOwner(principal, row)) throw markError('mark_category_not_found', 404);
     if (row.revision !== revision) throw markError('mark_category_revision_conflict', 409);
     return row;
   }
@@ -431,9 +487,10 @@ class ViewerMarkRepository {
     if (!Number.isSafeInteger(revision) || revision < 1) throw markError('mark_revision_required', 428);
     return this.transaction(() => {
       this.editableCategory(principal, id, revision);
-      // Marks keep their own colour and icon; their category reads as none.
+      // Marks keep their own colour and icon; their category reads as none. It cannot
+      // be undone (the panel says so), so nothing of it is kept but its used id.
       const now = new Date().toISOString();
-      this.database.prepare('UPDATE viewer_mark_categories SET deleted_at=?, updated_at=? WHERE model_id=? AND id=?')
+      this.database.prepare("UPDATE viewer_mark_categories SET deleted_at=?, updated_at=?, name='', document_json='{}' WHERE model_id=? AND id=?")
         .run(now, now, principal.modelId, id);
     });
   }

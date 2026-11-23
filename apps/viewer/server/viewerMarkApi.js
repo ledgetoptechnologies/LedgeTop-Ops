@@ -1,5 +1,6 @@
 'use strict';
 
+const { config } = require('./config');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const { getMeasurementPrincipal } = require('./measurementApi');
 const { ViewerMarkRepository, RECOVERY_DAYS, markError } = require('./viewerMarkRepository');
@@ -9,7 +10,12 @@ const { ViewerMarkRepository, RECOVERY_DAYS, markError } = require('./viewerMark
 // shared with project staff (SERVED_SHARING). A client
 // session without a verified individual identity (a shared company login) has no
 // person to own marks: it gets an empty list and everything else is refused.
-function createViewerMarkApi(repository, { visibility } = {}) {
+// The app's JSON parser limit, so the page can say what is too large before sending it.
+const requestLimit = () => (config.processingPlatformEnabled ? config.uploadMaxManifestBytes : 100 * 1024);
+// A page cursor: the time and id of the last mark on the page before.
+const CURSOR = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)~([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/;
+
+function createViewerMarkApi(repository, { visibility, maxRequestBytes = requestLimit() } = {}) {
   const router = trackedRouter();
   const marks = new ViewerMarkRepository(repository.database, { visibility });
   router.use((req, res, next) => {
@@ -23,7 +29,7 @@ function createViewerMarkApi(repository, { visibility } = {}) {
       return res.status(403).json({ code: 'mark_identity_required' });
     }
     const reading = ['GET', 'HEAD'].includes(req.method);
-    if (!reading && repository.rateLimited(`viewer-mark-write:${principal.audience}:${principal.subject}`, 180, 60_000)) {
+    if (repository.rateLimited(`viewer-mark-${reading ? 'read' : 'write'}:${principal.audience}:${principal.subject}`, reading ? 240 : 180, 60_000)) {
       return res.status(429).json({ code: 'mark_rate_limited' });
     }
     req.markPrincipal = principal;
@@ -40,14 +46,26 @@ function createViewerMarkApi(repository, { visibility } = {}) {
     res.json({
       marks: marks.list(principal), categories: marks.categories(principal),
       capabilities: { write: true, staff: principal.audience === 'ops',
-        visibility: marks.visibility[principal.audience], recoveryDays: RECOVERY_DAYS },
+        visibility: marks.visibility[principal.audience], recoveryDays: RECOVERY_DAYS,
+        shared: marks.readableChoices(principal).length > 0, maxRequestBytes },
     });
+  });
+  // What others share with this person, a page at a time.
+  router.get('/shared', (req, res) => {
+    const after = req.query.after === undefined ? null : typeof req.query.after === 'string' && CURSOR.exec(req.query.after);
+    if (after === false || (req.query.after !== undefined && !after)) throw markError('invalid_mark_page');
+    res.json(marks.sharedPage(req.markPrincipal, after && { at: after[1], id: after[2] }));
   });
   router.get('/deleted', (req, res) => res.json({ marks: marks.deleted(req.markPrincipal) }));
   router.get('/audiences', (req, res) => res.json({ audiences: marks.audiences(req.markPrincipal) }));
   router.post('/batch', (req, res) => {
+    if (!req.body || typeof req.body !== 'object' || Object.keys(req.body).some(key => !['marks', 'categories'].includes(key))) throw markError('invalid_mark_batch');
+    res.status(201).json(marks.createMany(req.markPrincipal, req.body));
+  });
+  router.post('/batch/delete', (req, res) => {
     if (!req.body || typeof req.body !== 'object' || Object.keys(req.body).some(key => key !== 'marks')) throw markError('invalid_mark_batch');
-    res.status(201).json({ marks: marks.createMany(req.markPrincipal, req.body.marks) });
+    marks.deleteMany(req.markPrincipal, req.body.marks);
+    res.status(204).end();
   });
   router.post('/categories', (req, res) => {
     const result = marks.createCategory(req.markPrincipal, req.body);
@@ -70,7 +88,9 @@ function createViewerMarkApi(repository, { visibility } = {}) {
   router.put('/:id', (req, res) => res.json({ mark: marks.update(req.markPrincipal, req.params.id, req.body) }));
   router.post('/:id/restore', (req, res) => res.json({ mark: marks.restore(req.markPrincipal, req.params.id, revisionOnly(req.body)) }));
   router.delete('/:id', (req, res) => {
-    marks.delete(req.markPrincipal, req.params.id, revisionOnly(req.body));
+    const { permanent = false, ...body } = req.body && typeof req.body === 'object' ? req.body : {};
+    if (typeof permanent !== 'boolean') throw markError('invalid_mark_delete');
+    marks.delete(req.markPrincipal, req.params.id, revisionOnly(body), { permanent });
     res.status(204).end();
   });
   router.use((error, _req, res, next) => {

@@ -6,13 +6,20 @@
 //   temporary - public links: marks live in this tab only and are never sent
 const MARK_FIELDS = ['id', 'geometry', 'name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility', 'shareAccount'];
 const UNDO_LIMIT = 20;
+// What others share arrives in pages; this many are shown at most.
+const SHARED_LIMIT = 5000;
 const MESSAGES = {
   mark_revision_conflict: 'Someone else changed this mark. The list was reloaded.',
   mark_category_revision_conflict: 'Someone else changed this category. The list was reloaded.',
   mark_category_name_taken: 'A category with that name already exists.',
   mark_limit_reached: 'The mark limit for this project was reached.',
   mark_category_limit_reached: 'The category limit for this project was reached.',
-  mark_rate_limited: 'Too many changes at once. Wait a minute and try again.',
+  mark_rate_limited: 'Too many requests at once. Wait a minute and try again.',
+  mark_storage_limit: 'Your marks take up all the space there is for them here. Delete or simplify some first.',
+  mark_deleted_full: 'Recently deleted is full, so this one could not be brought back. Nothing was deleted.',
+  mark_category_not_found: 'That category is gone. The list was reloaded.',
+  import_too_large: 'That file is too large to import at once. Split it and import the parts.',
+  'entity.too.large': 'That is too large to save at once.',
   mark_edit_forbidden: 'You can only change your own marks.',
   mark_category_edit_forbidden: 'You can only change categories you made.',
   mark_identity_required: 'This login cannot keep marks.',
@@ -33,6 +40,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
     marks: [], categories: [], audiences: [], deleted: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
+    // Why the last change failed, for the panel to offer what is possible instead.
+    failure: '',
   };
   const emit = () => onChange(state);
   const temporary = () => context?.mode === 'temporary';
@@ -69,7 +78,6 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   function body(mark, extra = {}) {
     const result = {};
     for (const field of MARK_FIELDS) if (mark[field] !== undefined) result[field] = mark[field];
-    if (result.categoryId && !state.categories.some(category => category.id === result.categoryId)) result.categoryId = null;
     if (result.visibility !== 'client') delete result.shareAccount;
     if (temporary()) { delete result.visibility; delete result.shareAccount; }
     return { ...result, ...extra };
@@ -88,7 +96,45 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     const audiences = data.capabilities.staff && data.capabilities.visibility.includes('client') ? (await scope.api('/audiences')).audiences : [];
     scope.check();
     if (!data.capabilities.write) Object.assign(state, { undo: [], deleted: [] });
-    Object.assign(state, { marks: data.marks, categories: data.categories, capabilities: data.capabilities, audiences, ready: true });
+    const first = !state.ready;
+    if (first || !data.capabilities.shared) Object.assign(state, { marks: data.marks, categories: data.categories, capabilities: data.capabilities, audiences, ready: true });
+    if (!data.capabilities.shared) return;
+    // The first time, marks appear as they arrive. Later what is on screen stays
+    // until everything new is here.
+    let marks = first ? null : [...data.marks], categories = first ? null : [...data.categories], count = 0, next = null, missing = false;
+    try {
+      do {
+        const page = await scope.api('/shared' + (next ? '?after=' + encodeURIComponent(next) : ''));
+        scope.check();
+        const add = (list, items) => [...list, ...items.filter(item => !list.some(row => row.id === item.id))];
+        if (first) {
+          const have = new Set(state.marks.map(mark => mark.id));
+          state.marks = [...state.marks, ...page.marks.filter(mark => !have.has(mark.id))];
+          state.categories = byName(add(state.categories, page.categories));
+          emit();
+        } else {
+          marks.push(...page.marks);
+          categories = add(categories, page.categories);
+        }
+        count += page.marks.length;
+        next = page.next;
+      } while (next && count < SHARED_LIMIT);
+      if (next) state.message ||= `Only the first ${count} marks shared with you are shown.`;
+    } catch (error) {
+      scope.check();
+      if (error.code === 'marks_unavailable' || error.code === 'mark_identity_required') throw error;
+      missing = true;
+      state.message ||= 'Some shared marks could not be loaded. Reload the page to try again.';
+    }
+    if (!first) {
+      // Part of a reload failed: keep the shared marks already shown rather than dropping them.
+      if (missing) {
+        const have = new Set(marks.map(mark => mark.id));
+        marks = [...marks, ...state.marks.filter(mark => !mark.mine && !have.has(mark.id))];
+        categories = [...categories, ...state.categories.filter(row => !row.mine && !categories.some(item => item.id === row.id))];
+      }
+      Object.assign(state, { marks, categories: byName(categories), capabilities: data.capabilities, audiences, ready: true });
+    }
   }
 
   // Runs one change; on failure explains it and reloads when the data moved underneath us.
@@ -97,12 +143,14 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     const scope = currentScope();
     state.busy = true;
     state.message = '';
+    state.failure = '';
     emit();
     try {
       await task(scope);
       return scope.live();
     } catch (error) {
       if (!scope.live()) return false;
+      state.failure = error.code || 'failed';
       if (error.code === 'marks_unavailable') {
         state.message = 'Marks are hidden until access is restored.';
         state.marks = [];
@@ -112,7 +160,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         state.undo = [];
       } else {
         state.message = MESSAGES[error.code] || 'Could not save the change. Try again.';
-        if (error.status === 409 || error.status === 404 || error.code === 'mark_identity_required') await load(scope).catch(() => {});
+        if (error.status === 409 || error.status === 404 || ['mark_identity_required', 'mark_category_not_found'].includes(error.code)) await load(scope).catch(() => {});
       }
       return false;
     } finally {
@@ -123,6 +171,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     }
   }
 
+  const byName = list => [...list].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
   const remember = entry => { state.undo = [...state.undo, entry].slice(-UNDO_LIMIT); };
 
   async function createRaw(mark, scope) {
@@ -141,8 +190,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     return saved;
   }
 
-  async function removeRaw(current, scope) {
-    if (!scope.temporary) await scope.api('/' + encodeURIComponent(current.id), 'DELETE', { revision: current.revision });
+  async function removeRaw(current, scope, { permanent = false } = {}) {
+    if (!scope.temporary) await scope.api('/' + encodeURIComponent(current.id), 'DELETE', { revision: current.revision, ...(permanent && { permanent }) });
     scope.check();
     state.marks = state.marks.filter(mark => mark.id !== current.id);
   }
@@ -224,12 +273,13 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       return ok ? saved : null;
     },
 
-    async remove(current) {
+    // permanent: the person said for good, so there is nothing to undo.
+    async remove(current, { permanent = false } = {}) {
       if (!find(current?.id)) return false;
       return run(async scope => {
-        await removeRaw(current, scope);
+        await removeRaw(current, scope, { permanent });
         scope.check();
-        remember({ type: 'delete', before: current, label: 'delete ' + current.name });
+        if (!permanent) remember({ type: 'delete', before: current, label: 'delete ' + current.name });
       });
     },
 
@@ -259,12 +309,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       if (!entry) return false;
       const held = store.hold();
       const ok = await run(async scope => {
-        if (entry.type === 'create' || entry.type === 'import') {
-          for (const id of entry.ids || [entry.id]) {
-            const current = find(id);
-            if (current) await removeRaw(current, scope);
-            scope.check();
-          }
+        if (entry.type === 'create') {
+          const current = find(entry.id);
+          if (current) await removeRaw(current, scope);
+        } else if (entry.type === 'import') {
+          // One request: all of them or none.
+          const ids = new Set(entry.ids), marks = state.marks.filter(mark => ids.has(mark.id)).map(({ id, revision }) => ({ id, revision }));
+          if (marks.length && !scope.temporary) await scope.api('/batch/delete', 'POST', { marks });
+          scope.check();
+          state.marks = state.marks.filter(mark => !ids.has(mark.id));
         } else if (entry.type === 'update') {
           const current = find(entry.id);
           if (!current) throw new MarksError('mark_revision_conflict', 409);
@@ -275,7 +328,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         }
       });
       if (!held.live()) return false;
-      state.undo = state.undo.filter(item => item !== entry);
+      // A change that has moved underneath can never be undone; anything else can be tried again.
+      const gone = ['mark_revision_conflict', 'mark_not_found', 'mark_edit_forbidden', 'mark_category_not_found'].includes(state.failure);
+      if (ok || gone) state.undo = state.undo.filter(item => item !== entry);
       emit();
       return ok;
     },
@@ -315,7 +370,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       });
       if (!ok || !held.live()) return false;
       state.categories = state.categories.filter(row => row.id !== category.id);
-      state.marks = state.marks.map(mark => (mark.categoryId === category.id ? { ...mark, categoryId: null } : mark));
+      const without = mark => (mark?.categoryId === category.id ? { ...mark, categoryId: null } : mark);
+      state.marks = state.marks.map(without);
+      state.undo = state.undo.map(item => (item.before ? { ...item, before: without(item.before) } : item));
       emit();
       return true;
     },
@@ -331,15 +388,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           state.marks = [...state.marks, ...local];
           count = local.length;
         } else {
-          for (const category of categories) {
-            const saved = (await scope.api('/categories', 'POST', { id: category.id, name: category.name, color: category.color, icon: category.icon })).category;
-            scope.check();
-            state.categories = [...state.categories, saved];
-          }
-          const saved = (await scope.api('/batch', 'POST', { marks: marks.map(mark => body(mark)) })).marks;
+          const payload = { marks: marks.map(mark => body(mark)),
+            categories: categories.map(({ id, name, color, icon }) => ({ id, name, color, icon })) };
+          const limit = state.capabilities.maxRequestBytes;
+          if (limit && new TextEncoder().encode(JSON.stringify(payload)).length > limit) throw new MarksError('import_too_large', 413);
+          const saved = await scope.api('/batch', 'POST', payload);
           scope.check();
-          state.marks = [...state.marks, ...saved];
-          count = saved.length;
+          state.marks = [...state.marks, ...saved.marks];
+          state.categories = byName([...state.categories, ...saved.categories.filter(row => !state.categories.some(item => item.id === row.id))]);
+          count = saved.marks.length;
         }
         remember({ type: 'import', ids: marks.map(mark => mark.id), label: `import ${count} marks` });
       });

@@ -52,8 +52,9 @@ test('as served: a client shares with staff view-only, nobody asks for audiences
   const client = createMarksStore({ request: recorded }), staff = createMarksStore({ request: recorded });
   await client.setScope(scope('client', 'client-a'));
   await staff.setScope(scope('ops', 'staff-person'));
-  assert.deepEqual(client.state.capabilities, { write: true, staff: false, visibility: ['private', 'staff'], recoveryDays: 30 });
-  assert.deepEqual(staff.state.capabilities, { write: true, staff: true, visibility: ['private'], recoveryDays: 30 });
+  const { maxRequestBytes } = client.state.capabilities;
+  assert.deepEqual(client.state.capabilities, { write: true, staff: false, visibility: ['private', 'staff'], recoveryDays: 30, shared: false, maxRequestBytes });
+  assert.deepEqual(staff.state.capabilities, { write: true, staff: true, visibility: ['private'], recoveryDays: 30, shared: true, maxRequestBytes });
   assert.equal((await client.create(pin('Mine'))).visibility, 'private');
   const shared = await client.create(pin('Shared', { visibility: 'staff' }));
   assert.equal((await staff.create(pin('Staff pin'))).visibility, 'private');
@@ -222,8 +223,8 @@ for (const [name, start, isHeld] of [
   ['new category', store => store.saveCategory({ name: 'Late', color: '#43a047', icon: 'gate' }), (path, init) => init.method === 'POST'],
   ['category edit', store => store.saveCategory({ ...store.state.categories[0], name: 'Late' }), (path, init) => init.method === 'PUT'],
   ['category delete', store => store.deleteCategory(store.state.categories[0]), (path, init) => init.method === 'DELETE'],
-  ['import, waiting on its category', store => store.importMarks({ categories: [category('Late')], marks: [first()] }), path => path.endsWith('/categories')],
-  ['import, waiting on its batch', store => store.importMarks({ marks: [first()] }), path => path.endsWith('/batch')],
+  ['import', store => store.importMarks({ categories: [category('Late')], marks: [first()] }), path => path.endsWith('/batch')],
+  ['undo of an import', async store => { await store.importMarks({ marks: [first()] }); return store.undo(); }, path => path.endsWith('/batch/delete')],
   ['refresh', store => store.refresh(), (path, init) => init.method === 'GET'],
 ]) {
   for (const replacement of ['another person', 'a public link', 'no access']) {
@@ -264,23 +265,30 @@ for (const [name, start, isHeld] of [
   }
 }
 
-test('an import stops between its requests when the scope changes, and never uses the new token', async t => {
+test('reading shared marks stops between pages when the scope changes, and never uses the new token', async t => {
   const { request, scope } = await openServer(t);
-  const one = scope('client', 'client-a'), two = scope('client', 'client-b');
-  const sent = [];
-  const held = heldRequests(request, path => path.endsWith('/categories'));
-  const store = createMarksStore({ request: (path, init) => { sent.push([init.method, path, init.headers.authorization]); return held.request(path, init); } });
-  await store.setScope(one);
-  const pending = store.importMarks({ categories: [category('A'), category('B')], marks: [first()] });
-  await settled();
-  await store.setScope(two);
-  sent.length = 0;
-  await held.held[0].settle();
-  assert.equal(await pending, 0);
-  assert.deepEqual(sent, [], 'the second category and the batch are never sent');
-  const check = createMarksStore({ request });
-  await check.setScope(scope('client', 'client-b'));
-  assert.deepEqual([check.state.marks, check.state.categories], [[], []]);
+  const client = createMarksStore({ request });
+  await client.setScope(scope('client', 'client-a'));
+  await client.create(pin('Shared', { visibility: 'staff' }));
+  const staff = scope('ops', 'staff-person'), other = scope('client', 'client-b');
+  for (const replacement of [other, { mode: 'temporary', key: 'public' }, null]) {
+    const sent = [];
+    const held = heldRequests(request, path => path.includes('/shared'));
+    const store = createMarksStore({ request: (path, init) => { sent.push([path, init.headers.authorization]); return held.request(path, init); } });
+    const loading = store.setScope(staff);
+    await settled();
+    assert.equal(held.held.length, 1);
+    assert.equal(store.state.ready, true, 'own marks are already there');
+    await store.setScope(replacement);
+    const before = visibleState(store);
+    sent.length = 0;
+    await held.held[0].settle();
+    await loading;
+    await settled();
+    assert.deepEqual(visibleState(store), before);
+    assert.deepEqual(before.marks, []);
+    assert.deepEqual(sent, []);
+  }
 });
 
 test('work that waits before calling the store can tell its scope ended', async t => {
