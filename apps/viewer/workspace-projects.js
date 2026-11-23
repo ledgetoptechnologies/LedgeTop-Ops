@@ -922,22 +922,31 @@ function captureTaskMoveFocus(taskId){
   const neighbourId=sibling?.dataset.projectTask||null,element=document.activeElement;
   if(!element||element===document.body||!element.isConnected)return{mode:'none'};
   if(row?.contains(element)||modal.open&&modal.contains(element))return{mode:'moved',neighbourId};
-  // Enough to find the same control again if a full render replaces it.
-  const selector=[element.localName,element.id?`#${CSS.escape(element.id)}`:'',
-    ...['data-action','data-id','data-folder-drag','name'].filter(name=>element.hasAttribute(name)).map(name=>`[${name}="${CSS.escape(element.getAttribute(name))}"]`)].join('');
   let selection=null;
   try{if(typeof element.selectionStart==='number')selection=[element.selectionStart,element.selectionEnd];}catch{}
-  return{mode:'other',element,selector,rowId:element.closest('[data-project-task]')?.dataset.projectTask||null,selection};
+  return{mode:'other',element,locate:focusLocator(element),selection};
+}
+// How to find exactly this control again after a full render, or null when it cannot be
+// named uniquely; a generic or ambiguous match never receives focus.
+function focusLocator(element){
+  const unique=(scope,selector)=>{const matches=scope?.querySelectorAll(selector)||[];return matches.length===1?matches[0]:null;};
+  const disclosure=element.localName==='summary'&&element.parentElement?.matches('details[data-task-disclosure][data-task-id]')?element.parentElement:null;
+  if(disclosure){
+    const selector=`details[data-task-id="${CSS.escape(disclosure.dataset.taskId)}"][data-task-disclosure="${CSS.escape(disclosure.dataset.taskDisclosure)}"]`;
+    return unique(content,selector)===disclosure?()=>unique(content,selector)?.querySelector(':scope > summary')||null:null;
+  }
+  const attributes=['id','data-action','data-id','name','aria-label','data-folder-drag'].filter(name=>element.hasAttribute(name));
+  if(!attributes.some(name=>name!=='data-folder-drag'))return null;
+  const selector=element.localName+attributes.map(name=>`[${name}="${CSS.escape(element.getAttribute(name))}"]`).join('');
+  const rowId=element.closest('[data-project-task]')?.dataset.projectTask||null;
+  const find=()=>unique(rowId?content.querySelector(`[data-project-task="${CSS.escape(rowId)}"]`):document,selector);
+  return find()===element?find:null;
 }
 // A move moves focus only when it took focus away; a control the user chose keeps it.
 function settleTaskMoveFocus(taskId,focus,folderId){
   if(focus.mode==='moved')return placeTaskMoveFocus(taskId,{folderId,neighbourId:focus.neighbourId});
   if(focus.mode!=='other')return;
-  let target=focus.element;
-  if(!target.isConnected){
-    const scope=focus.rowId?content.querySelector(`[data-project-task="${CSS.escape(focus.rowId)}"]`):document;
-    target=scope?.querySelector(focus.selector);
-  }
+  const target=focus.element.isConnected?focus.element:focus.locate?.();
   if(!target||document.activeElement===target)return;
   target.focus({preventScroll:true});
   if(focus.selection)try{target.setSelectionRange(...focus.selection);}catch{}
