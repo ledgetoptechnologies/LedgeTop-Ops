@@ -221,12 +221,22 @@
     #property-lines-notice {
       position: absolute; top: 14px; left: 56px; z-index: 110; pointer-events: none;
       max-width: min(520px, calc(100% - 56px - 210px)); padding: 4px 9px; border-radius: 6px;
-      background: rgba(10,10,12,0.88); border: 1px solid rgba(255,214,10,0.55);
+      background: rgba(10,10,12,0.88); border: 1px solid rgba(238,80,7,0.6);
       color: #f2f2f2; font-size: 11px; line-height: 1.35;
     }
     #property-lines-about p { margin-top: 6px; }
     #property-lines-status:empty { display: none; }
     #property-lines-status { margin-top: 8px; }
+    #property-lines-vintage { margin-top: 6px; opacity: 0.8; }
+    .pl-option { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--brand-text); cursor: pointer; }
+    .pl-option[hidden] { display: none; }
+    .pl-option input { accent-color: var(--brand-orange); }
+    /* Owner names on the map (property-lines-layer.mjs); text only. */
+    .property-line-label {
+      position: absolute; left: 0; top: 0; pointer-events: none; white-space: pre; text-align: center;
+      font-family: var(--font); font-weight: 600; letter-spacing: 0.02em; color: #fff;
+      text-shadow: 0 0 2px #000, 0 0 3px #000, 0 1px 2px rgba(0,0,0,0.9);
+    }
     #layer-property-lines:disabled { cursor: not-allowed; opacity: 0.5; }
     #floating-controls { position: absolute; top: 14px; right: 14px; z-index: 120; display: flex; gap: 8px; }
     .icon-btn {
@@ -592,6 +602,8 @@
             <button class="layer-btn full" id="layer-property-lines" aria-pressed="false" aria-label="Show property lines" aria-describedby="property-lines-status">Show</button>
           </div>
           <p class="hint" id="property-lines-status" role="status" aria-live="polite"></p>
+          <label class="pl-option" id="property-lines-merge-row" hidden><input type="checkbox" id="property-lines-merge" checked> Merge parcels by owner</label>
+          <p class="hint" id="property-lines-vintage" hidden></p>
           <div class="hint" id="property-lines-about" hidden><p data-pl="disclaimer"></p><p>Source: <span data-pl="source"></span></p></div>
         </div>
 

@@ -22,6 +22,12 @@ const MAIN_MADISON_URL = 'https://services3.arcgis.com/n6uYoouQZW75n5WI/ArcGIS/r
 const MAIN_EDGE_URL = 'https://services3.arcgis.com/n6uYoouQZW75n5WI/ArcGIS/rest/services/Wisconsin_Statewide_Parcels_DB/FeatureServer/0/query?where=1%3D1&geometry=%7B%22xmin%22%3A-10340467.5%2C%22ymin%22%3A5234664.03%2C%22xmax%22%3A-10336014.72%2C%22ymax%22%3A5239194.01%2C%22spatialReference%22%3A%7B%22wkid%22%3A3857%7D%7D&geometryType=esriGeometryEnvelope&inSR=3857&spatialRel=esriSpatialRelIntersects&outFields=OBJECTID&returnGeometry=true&returnZ=false&returnM=false&outSR=3857&geometryPrecision=2&resultRecordCount=800&f=json';
 const MAIN_DESCRIPTION = '{"id":"wi-statewide-parcels","name":"Wisconsin Statewide Parcel Map","release":"V12 (2026)","credit":"Product of the Version 12 Statewide Parcel Map Database Project (V12). Created by the Wisconsin State Cartographer\'s Office; administered by the Wisconsin Land Information Program at the Department of Administration.","disclaimer":"Property lines are approximate and for reference only. They are not a survey and do not show legal ownership boundaries. No warranty of accuracy, completeness or currency is made. Only a licensed land surveyor can determine a boundary.","datumNote":"The state data is NAD83-based and is drawn with no datum shift. Against a model in a WGS84 or ITRF-based frame, expect roughly 1 to 1.5 m of offset in Wisconsin, within the parcel map\u2019s own accuracy.","datum":"NAD83","region":"Wisconsin"}';
 
+// Owner labels added the owner-name field to the request and the data
+// vintage to the description; nothing else about either changed.
+const withOwner = url => url.replace('outFields=OBJECTID&', 'outFields=OBJECTID%2COWNERNME1&');
+const WI_MADISON_URL = withOwner(MAIN_MADISON_URL), WI_EDGE_URL = withOwner(MAIN_EDGE_URL);
+const WI_DESCRIPTION = JSON.stringify({ ...JSON.parse(MAIN_DESCRIPTION), shortName: 'WI statewide', vintage: 'V12, 2025 tax roll', dataUpdated: '2026-06-30', owners: 'yes' });
+
 // A test-only second source (not a real state) north of Wisconsin's extent.
 const NORTH = Object.freeze({
   ...WISCONSIN, id: 'test-north', region: 'Test North', name: 'Test parcels', release: 'T1', discovery: null,
@@ -74,14 +80,21 @@ test('registry: Wisconsin is the only source and keeps its config', () => {
   assert.deepEqual(PARCEL_SOURCES.map(s => s.id), ['wi-statewide-parcels']);
   assert.equal(WISCONSIN_PARCELS, WISCONSIN, 'the old export is the registry entry');
   assert.equal(Object.isFrozen(PARCEL_SOURCES) && Object.isFrozen(WISCONSIN), true);
-  assert.equal(WISCONSIN.query.outFields, 'OBJECTID', 'geometry and row id only');
+  assert.equal(WISCONSIN.query.outFields, 'OBJECTID,OWNERNME1', 'geometry, row id and the first owner name only');
+  assert.equal(WISCONSIN.query.ownerField, 'OWNERNME1');
+  assert.deepEqual([WISCONSIN.shortName, WISCONSIN.vintage, WISCONSIN.dataUpdated], ['WI statewide', 'V12, 2025 tax roll', '2026-06-30']);
   assert.equal(WISCONSIN.discovery.currentVersion, 12);
   assert.match(WISCONSIN.release, /^V12 /);
 });
 
 test('registry: invalid or unsafe configs are refused', () => {
   assert.doesNotThrow(() => validateParcelSource(NORTH));
-  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, outFields: 'OBJECTID,OWNERNME1' } }), /outFields/);
+  assert.doesNotThrow(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, ownerField: null, outFields: 'OBJECTID' } }), 'owner names are optional');
+  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, outFields: 'OBJECTID,OWNERNME1,SITEADRESS' } }), /outFields/);
+  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, ownerField: null, outFields: 'OBJECTID,OWNERNME1' } }), /outFields/);
+  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, ownerField: 'SITEADRESS', outFields: 'OBJECTID,SITEADRESS' } }), /ownerField/);
+  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, outFields: '*' } }), /outFields/);
+  assert.throws(() => validateParcelSource({ ...NORTH, dataUpdated: 'June 2026' }), /dataUpdated/);
   assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, wkid: 4269 } }), /wkid/);
   assert.throws(() => validateParcelSource({ ...NORTH, layerUrl: 'http://parcels.example.invalid/x/FeatureServer/0' }), /layerUrl/);
   assert.throws(() => validateParcelSource({ ...NORTH, layerUrl: `${NORTH.layerUrl}?token=x` }), /layerUrl/);
@@ -106,18 +119,18 @@ test('selection: first source whose extent touches the location, else none', () 
 });
 
 test('Wisconsin request and description are byte-for-byte those of main', async () => {
-  assert.equal(upstreamQueryUrl(MADISON), MAIN_MADISON_URL);
-  assert.equal(upstreamQueryUrl(MADISON, WISCONSIN), MAIN_MADISON_URL);
-  assert.equal(upstreamQueryUrl(MADISON, WISCONSIN.layerUrl), MAIN_MADISON_URL);
-  assert.equal(upstreamQueryUrl({ west: -92.89, south: 42.49, east: -92.85, north: 42.52 }), MAIN_EDGE_URL);
-  assert.equal(JSON.stringify(sourceDescription()), MAIN_DESCRIPTION);
-  assert.equal(JSON.stringify(sourceDescription(WISCONSIN)), MAIN_DESCRIPTION);
+  assert.equal(upstreamQueryUrl(MADISON), WI_MADISON_URL);
+  assert.equal(upstreamQueryUrl(MADISON, WISCONSIN), WI_MADISON_URL);
+  assert.equal(upstreamQueryUrl(MADISON, WISCONSIN.layerUrl), WI_MADISON_URL);
+  assert.equal(upstreamQueryUrl({ west: -92.89, south: 42.49, east: -92.85, north: 42.52 }), WI_EDGE_URL);
+  assert.equal(JSON.stringify(sourceDescription()), WI_DESCRIPTION);
+  assert.equal(JSON.stringify(sourceDescription(WISCONSIN)), WI_DESCRIPTION);
   assert.deepEqual(parseBoundingBox('-89.402,43.074,-89.4,43.0755'), { bounds: MADISON });
   assert.deepEqual(parseBoundingBox('-93.30,44.97,-93.25,44.99'), { outside: true, bounds: { west: -93.3, south: 44.97, east: -93.25, north: 44.99 } });
   const seen = [];
   const source = createParcelSource({ fetchImpl: async (url, options) => { seen.push({ url, options }); return okResponse(); } });
   await source.parcels(MADISON);
-  assert.equal(seen[0].url, MAIN_MADISON_URL);
+  assert.equal(seen[0].url, WI_MADISON_URL);
   assert.deepEqual(Object.keys(seen[0].options).sort(), ['headers', 'method', 'redirect', 'referrerPolicy', 'signal']);
   assert.deepEqual(seen[0].options.headers, { Accept: 'application/json' });
 });
@@ -127,19 +140,19 @@ test('API: a Wisconsin model is served from the WI source with the same request 
   await withApi({ fetchImpl: async url => { seen.push(url); return okResponse(); } }, async get => {
     const offer = await (await get('/api/v1/property-lines?model=madison', 'madison')).json();
     assert.equal(offer.offered, true);
-    assert.equal(JSON.stringify(offer.source), MAIN_DESCRIPTION);
+    assert.equal(JSON.stringify(offer.source), WI_DESCRIPTION);
     const body = await (await get('/api/v1/property-lines/parcels?bbox=-89.402,43.074,-89.4,43.0755&model=madison', 'madison')).json();
     assert.deepEqual(body, { status: 'none', parcels: [] });
     await get('/api/v1/property-lines/parcels?bbox=-89.402,43.074,-89.4,43.0755&model=madison', 'madison');
   });
-  assert.deepEqual(seen, [MAIN_MADISON_URL], 'one upstream call, the cache answers the repeat');
+  assert.deepEqual(seen, [WI_MADISON_URL], 'one upstream call, the cache answers the repeat');
 });
 
 test('API: a model outside every extent gets no state source, as before', async () => {
   let upstream = 0;
   await withApi({ fetchImpl: async () => { upstream++; return okResponse(); } }, async get => {
     const offer = await (await get('/api/v1/property-lines?model=minneapolis', 'minneapolis')).json();
-    assert.equal(JSON.stringify(offer.source), MAIN_DESCRIPTION, 'unchanged response; the browser coverage check says Wisconsin only');
+    assert.equal(JSON.stringify(offer.source), WI_DESCRIPTION, 'unchanged response; the browser coverage check says Wisconsin only');
     const response = await get(`/api/v1/property-lines/parcels?bbox=${boxAround(44.98, -93.275)}&model=minneapolis`, 'minneapolis');
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { status: 'outside', parcels: [] });
@@ -155,11 +168,11 @@ test('API: each registered source serves its own models with its own fetcher', a
     assert.equal(offer.source.region, 'Test North');
     await get(`/api/v1/property-lines/parcels?bbox=${boxAround(48.0, -90.5)}&model=north`, 'north');
     await get('/api/v1/property-lines/parcels?bbox=-89.402,43.074,-89.4,43.0755&model=madison', 'madison');
-    assert.equal(JSON.stringify((await (await get('/api/v1/property-lines?model=madison', 'madison')).json()).source), MAIN_DESCRIPTION);
+    assert.equal(JSON.stringify((await (await get('/api/v1/property-lines?model=madison', 'madison')).json()).source), WI_DESCRIPTION);
   });
   assert.equal(seen.length, 2);
   assert.ok(seen[0].startsWith(`${NORTH.layerUrl}/query?`));
-  assert.equal(seen[1], MAIN_MADISON_URL);
+  assert.equal(seen[1], WI_MADISON_URL);
 });
 
 test('API: an uploaded boundary still takes precedence over any state source', async () => {

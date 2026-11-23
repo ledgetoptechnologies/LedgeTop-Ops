@@ -13,7 +13,10 @@ const {
   parseBoundingBox,
   resolvePropertyLinesCaller,
   modelSiteWindow,
+  modelCoverageWindow,
+  COVERAGE_METERS,
   boundsInsideSite,
+  boundsTouchSite,
   cacheBounds,
   propertyLinesOffered,
   upstreamQueryUrl,
@@ -33,13 +36,13 @@ test('bounding box accepts only four plain numbers in a small box', () => {
   assert.equal(parseBoundingBox('-87.66,41.86,-87.62,41.89').outside, true, 'Chicago');
 });
 
-test('upstream query is fixed: geometry only, Web Mercator, bounded count, fixed host', () => {
+test('upstream query is fixed: geometry and owner name only, Web Mercator, bounded count, fixed host', () => {
   const url = new URL(upstreamQueryUrl(MADISON));
   assert.equal(url.origin + url.pathname, `${WISCONSIN_PARCELS.layerUrl}/query`);
   assert.equal(url.hostname, 'services3.arcgis.com');
   const p = url.searchParams;
-  assert.equal(p.get('outFields'), 'OBJECTID', 'no owner, address or value fields');
-  assert.doesNotMatch(url.search, /OWNER|ADRESS|ADDRESS|VALUE|PSTL|SITE|\*/i);
+  assert.equal(p.get('outFields'), 'OBJECTID,OWNERNME1', 'row id and first owner name; no address or value fields');
+  assert.doesNotMatch(url.search, /OWNERNME2|ADRESS|ADDRESS|VALUE|PSTL|SITE|\*/i);
   assert.equal(p.get('returnGeometry'), 'true');
   assert.equal(p.get('inSR'), '3857');
   assert.equal(p.get('outSR'), '3857');
@@ -67,6 +70,13 @@ test('upstream features become lon/lat rings without attributes', () => {
   assert.equal(result.parcels[0].id, 578488);
   const [lon, lat] = result.parcels[0].rings[0][0];
   assert.ok(Math.abs(lon - -89.402) < 1e-6 && Math.abs(lat - 43.074) < 1e-5, `${lon},${lat}`);
+  // With the source's owner field: the cleaned first owner name and nothing else.
+  const owned = normalizeUpstream({ features: [
+    { attributes: { OBJECTID: 7, OWNERNME1: '  SAMPLE   FARMS\tLLC ', OWNERNME2: 'second owner', SITEADRESS: '1 Main St' }, geometry: { rings: [[[-9952185, 5323242], [-9952000, 5323242], [-9952000, 5323500]]] } },
+    { attributes: { OBJECTID: 8, OWNERNME1: '   ' }, geometry: { rings: [[[-9952185, 5323242], [-9952000, 5323242]]] } },
+  ] }, 'OBJECTID', 'OWNERNME1');
+  assert.deepEqual(owned.parcels.map(parcel => Object.keys(parcel).sort()), [['id', 'owner', 'rings'], ['id', 'rings']]);
+  assert.equal(owned.parcels[0].owner, 'SAMPLE FARMS LLC');
   assert.equal(normalizeUpstream({ features: [], exceededTransferLimit: false }).status, 'none');
   assert.equal(normalizeUpstream({ features: [{}], exceededTransferLimit: true }).status, 'too_many');
   assert.equal(normalizeUpstream({ error: { code: 400 } }).status, 'unavailable');
@@ -141,6 +151,21 @@ test('model site window comes from the verified centre and surveyed area', () =>
   assert.equal(modelSiteWindow({ ...unverified, georef: { ...unverified.georef, bboxCenter: undefined } }), null);
   const noArea = modelSiteWindow({ ...unverified, metadata: {} });
   assert.ok(noArea.maxE - noArea.minE > 3000 && noArea.maxE - noArea.minE < 3400, 'default half-size 1.5 km plus margin');
+  // Coverage for map tiles: the site window widened by COVERAGE_METERS; a
+  // tile overlapping it is served, a tile wholly beyond it is not.
+  const coverage = modelCoverageWindow(madisonModel('m').activeVersion);
+  assert.equal(coverage.maxE - coverage.minE, site.maxE - site.minE + 2 * COVERAGE_METERS);
+  const [cLat, cLon] = site.projection.utmToLatLon((site.minE + site.maxE) / 2, (site.minN + site.maxN) / 2);
+  const tileAt = (dEast, half = 800) => {
+    const [, west] = site.projection.utmToLatLon((site.minE + site.maxE) / 2 + dEast - half, (site.minN + site.maxN) / 2);
+    const [, east] = site.projection.utmToLatLon((site.minE + site.maxE) / 2 + dEast + half, (site.minN + site.maxN) / 2);
+    return { west, east, south: cLat - 0.007, north: cLat + 0.007 };
+  };
+  assert.ok(cLon < -89 && cLon > -90);
+  assert.equal(boundsTouchSite(tileAt(3000), coverage), true, '3 km east of the model: inside the coverage');
+  assert.equal(boundsTouchSite(tileAt((coverage.maxE - coverage.minE) / 2 + 500), coverage), true, 'overlapping the edge');
+  assert.equal(boundsTouchSite(tileAt((coverage.maxE - coverage.minE) / 2 + 1200), coverage), false, 'wholly beyond the coverage');
+  assert.equal(boundsTouchSite({ west: -87.915, south: 43.035, east: -87.905, north: 43.045 }, coverage), false, 'Milwaukee is still not this model');
 });
 
 test('every viewer with live access to the model is offered the layer', () => {

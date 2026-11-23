@@ -16,7 +16,8 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 
 const v12Layer = { type: 'Feature Layer', geometryType: 'esriGeometryPolygon', name: 'V1200_WisconsinParcels_2026',
   copyrightText: 'Product of the Version 12 Statewide Parcel Map Database Project (V12).',
-  extent: { spatialReference: { wkid: 102100, latestWkid: 3857 } }, fields: [{ name: 'OBJECTID' }, { name: 'PARCELID' }] };
+  extent: { spatialReference: { wkid: 102100, latestWkid: 3857 } }, fields: [{ name: 'OBJECTID' }, { name: 'PARCELID' }, { name: 'OWNERNME1' }],
+  editingInfo: { dataLastEditDate: Date.UTC(2026, 5, 30, 21, 21, 29) } };
 const v12Item = { title: 'Wisconsin Statewide Parcels DB', name: 'Wisconsin_Statewide_Parcels_DB', url: SERVICE.replace('/ArcGIS/', '/arcgis/'),
   snippet: 'Wisconsin Statewide Parcel Layer Version 12.0.0 (V12.0.0)', tags: ['V12 Parcels', 'V11 Parcels', 'V2 Parcels', 'Parcels'] };
 const directoryWith = (...services) => ({ services: [{ name: '2015_Grants', type: 'FeatureServer', url: `${DIRECTORY}/2015_Grants/FeatureServer` }, ...services] });
@@ -64,11 +65,24 @@ test('check: configured layer up and no newer release', async () => {
   assert.deepEqual(r.warnings, []);
   assert.equal(exitCodeFor(report), 0);
   assert.deepEqual(issuesFor(report), []);
-  assert.match(formatReport(report), /OK: the configured layer answers \(V1200_WisconsinParcels_2026\)\.\n {2}No release newer than V12 found\./);
+  assert.equal(r.layer.dataUpdated, '2026-06-30');
+  assert.match(formatReport(report), /OK: the configured layer answers \(V1200_WisconsinParcels_2026\)\.\n {2}Data last edited 2026-06-30 \(registry: 2026-06-30\)\.\n {2}No release newer than V12 found\./);
   const search = new URL(seen.find(url => url.includes('/sharing/rest/search')));
   assert.equal(search.searchParams.get('q'), 'orgid:n6uYoouQZW75n5WI AND type:"Feature Service" AND parcels', 'scoped to the publishing organisation');
   assert.ok(seen.every(url => url.startsWith('https://')), 'https only');
   assert.ok(!seen.some(url => url.includes('/2015_Grants/')), 'unrelated services are not opened');
+});
+
+test('check: newer layer data or a missing owner field is a warning, not an error', async () => {
+  const later = { ...v12Layer, fields: [{ name: 'OBJECTID' }], editingInfo: { dataLastEditDate: Date.UTC(2026, 9, 2) } };
+  const { fetchImpl } = mockFetch(baseRoutes({ [WISCONSIN.layerUrl]: later }));
+  const report = await checkAll([WISCONSIN], { fetchImpl, now });
+  const [r] = report.results;
+  assert.equal(r.layer.up, true);
+  assert.equal(r.layer.dataUpdated, '2026-10-02');
+  assert.ok(r.warnings.some(w => /no longer has owner field OWNERNME1/.test(w)), r.warnings.join('; '));
+  assert.ok(r.warnings.some(w => /edited on 2026-10-02, after the registry's dataUpdated 2026-06-30/.test(w)), r.warnings.join('; '));
+  assert.equal(exitCodeFor(report), 0);
 });
 
 test('check: a newer release published as a new service is reported, not an error', async () => {

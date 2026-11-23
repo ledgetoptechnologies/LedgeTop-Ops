@@ -79,7 +79,8 @@ const [e, n] = projection.latLonToUtm(39.7392, -104.9903);
 const controller = createPropertyLinesController({
   L, fetchImpl: (url, options) => fetch(url, options), headers: () => ({ Authorization: 'Bearer viewer-session-token' }), fetcherOptions: { debounceMs: 50 },
   dom: { panel: document.getElementById('panel-property-lines'), button: document.getElementById('layer-property-lines'),
-    status: document.getElementById('property-lines-status'), about: document.getElementById('property-lines-about'), notice: document.getElementById('property-lines-notice') },
+    status: document.getElementById('property-lines-status'), about: document.getElementById('property-lines-about'), notice: document.getElementById('property-lines-notice'),
+    merge: document.getElementById('property-lines-merge'), mergeRow: document.getElementById('property-lines-merge-row'), vintage: document.getElementById('property-lines-vintage') },
   projectId: () => 'model-co', getMode: () => 'ortho', getCloudMode: () => 'none', getMap: () => map, getScene: () => null, getPotreeApi: () => null,
   georefVerified: () => true, modelDatum: () => 'NAD83', getSceneExtentUtm: () => ({ minE: e - 120, minN: n - 90, maxE: e + 120, maxN: n + 90 }), getGroundGrid: async () => null,
   utmToLatLon: projection.utmToLatLon, latLonToUtm: projection.latLonToUtm, utmToWorld: () => null,
@@ -127,7 +128,7 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
       if (url.pathname === '/api/v1/property-lines/parcels') {
         return json(200, { status: 'ok', parcels: [{ id: 1, rings: [[[-104.9910, 39.7388], [-104.9896, 39.7388], [-104.9896, 39.7396], [-104.9910, 39.7396], [-104.9910, 39.7388]]] }] });
       }
-      const allowed = new Set(['/workspace-property-lines.mjs', '/property-lines.mjs', '/property-lines-layer.mjs', '/utm-conversion.mjs', '/node_modules/leaflet/dist/leaflet-src.esm.js', '/node_modules/leaflet/dist/leaflet.css']);
+      const allowed = new Set(['/workspace-property-lines.mjs', '/property-lines.mjs', '/property-lines-layer.mjs', '/property-lines-owners.mjs', '/brand-colors.mjs', '/utm-conversion.mjs', '/node_modules/leaflet/dist/leaflet-src.esm.js', '/node_modules/leaflet/dist/leaflet.css']);
       if (!allowed.has(url.pathname)) { res.statusCode = 404; res.end(); return; }
       res.setHeader('Content-Type', url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript');
       res.end(readFileSync(path.join(root, url.pathname.slice(1))));

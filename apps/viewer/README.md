@@ -631,8 +631,19 @@ WGS84 UTM 16N
   Statewide Parcel Map (release V12). The browser calls this server
   (`GET /api/v1/property-lines/parcels?bbox=west,south,east,north&model=id`), which
   asks the state's public ArcGIS service with fixed parameters for geometry
-  only (no owner, address or value fields), with a size, record, time and
-  rate limit and a ten-minute cache. The third party never sees the viewer's
+  and the first owner name (`OWNERNME1`; no address, value or other fields),
+  with a size, record, time and rate limit and a ten-minute cache. Lines are
+  the Viewer's orange accent. Touching parcels whose owner names match (case,
+  punctuation spacing and whitespace ignored) are drawn as one outline with
+  the shared lines removed, and map views label each outline with the owner's
+  name from zoom 14, only where the name fits and never overlapping another;
+  "Merge parcels by owner" in the card turns merging off to show every parcel
+  (remembered in `ltds-viewer:property-lines-merge`). Map views fetch fixed
+  map tiles (Web Mercator zoom 14, split down to 16 where a tile is dense)
+  covering the visible map up to 4 km around the model, at most 48 tiles per
+  view, and nothing below map zoom 13 ("Zoom in to see property lines"); 3D
+  views use the model's extent. The card shows the data's vintage from the
+  registry (`Parcels: WI statewide V12, 2025 tax roll (updated Jun 2026)`). The third party never sees the viewer's
   session, link or browser, and the page's content security policy is
   unchanged. The state confirmed in writing on 2026-11-18 that the data is public domain,
   so staff, client sessions and public links with live access to the model all
@@ -652,10 +663,12 @@ WGS84 UTM 16N
   Wisconsin, within the parcel map's own accuracy (the panel says this too).
   Each request names the model; the server checks live access to that model
   (session, admin, or a live share at its current revision) and accepts only
-  boxes inside the model's site window (verified centre plus a half-size from
-  the surveyed area, default 1.5 km, plus margin). The service URL changes with each yearly
-  release: update `WISCONSIN_PARCELS` in `server/propertyLines.js` (URL,
-  release and credit together).
+  boxes that reach the model's coverage window (its site window, a verified
+  centre plus a half-size from the surveyed area, default 1.5 km, plus margin,
+  widened by 4 km). The service URL changes with each yearly release: update
+  the Wisconsin entry in `server/parcelSources.js` (URL, release, vintage,
+  dataUpdated and credit together); the monthly release check reports a newer
+  release and newer layer data.
 - **Uploaded boundary file** (fallback property-lines source): staff with
   `viewer.projects.write` open a project's "Property lines source" in the
   workspace, upload one GeoJSON or KML file (20 MB, 5,000 features, 200,000

@@ -79,7 +79,14 @@ export async function checkLayer(source, { fetchImpl = globalThis.fetch } = {}) 
   const warnings = [];
   const sr = layer.extent?.spatialReference;
   if (sr && ![sr.wkid, sr.latestWkid].includes(source.query.wkid)) warnings.push(`layer spatial reference is now ${sr.latestWkid ?? sr.wkid}, not ${source.query.wkid}`);
-  return { up: true, name: layer.name ?? null, version: releaseVersion([layer.name, layer.copyrightText], source.discovery.versionPatterns), warnings };
+  // Owner names are optional for drawing: a missing field only loses labels and merging.
+  if (source.query.ownerField && !fields.includes(source.query.ownerField)) warnings.push(`the layer no longer has owner field ${source.query.ownerField}; owner labels and merging will stop`);
+  // The data's own last edit, shown in the Viewer as "updated <month year>".
+  const edited = Number(layer.editingInfo?.dataLastEditDate);
+  const dataUpdated = Number.isFinite(edited) && edited > 0 ? new Date(edited).toISOString().slice(0, 10) : null;
+  if (dataUpdated && source.dataUpdated && dataUpdated > source.dataUpdated)
+    warnings.push(`layer data was edited on ${dataUpdated}, after the registry's dataUpdated ${source.dataUpdated}; check the tax-roll year and update vintage and dataUpdated`);
+  return { up: true, name: layer.name ?? null, version: releaseVersion([layer.name, layer.copyrightText], source.discovery.versionPatterns), dataUpdated, warnings };
 }
 
 // (b) Releases the publishing organisation has online, with their versions.
@@ -122,7 +129,7 @@ export async function checkSource(source, options = {}) {
   if (layer.up && layer.version !== null) candidates.push({ via: 'configured layer', title: layer.name, url: source.layerUrl, version: layer.version });
   const newest = candidates.filter(c => c.version > current).sort((a, b) => b.version - a.version)[0] || null;
   return {
-    id: source.id, region: source.region, release: source.release, currentVersion: current, layerUrl: source.layerUrl,
+    id: source.id, region: source.region, release: source.release, dataUpdated: source.dataUpdated ?? null, currentVersion: current, layerUrl: source.layerUrl,
     layer, newer: newest ? { ...newest, inPlace: sameUrl(newest.url, source.layerUrl) } : null,
     warnings: [...(layer.warnings || []), ...found.warnings],
   };
@@ -142,6 +149,7 @@ export function formatReport(report) {
   for (const r of report.results) {
     lines.push('', `${r.region} (${r.id}), configured release ${r.release}`, `  layer: ${r.layerUrl}`);
     lines.push(r.layer.up ? `  OK: the configured layer answers${r.layer.name ? ` (${r.layer.name})` : ''}.` : `  DOWN: the configured layer does not answer: ${r.layer.reason}.`);
+    if (r.layer.dataUpdated) lines.push(`  Data last edited ${r.layer.dataUpdated}${r.dataUpdated ? ` (registry: ${r.dataUpdated})` : ''}.`);
     if (!r.newer) lines.push(`  No release newer than V${r.currentVersion} found.`);
     else if (r.newer.inPlace) lines.push(`  NEWER RELEASE: the configured layer now reports V${r.newer.version}. Check its fields, then update the release in parcelSources.js.`);
     else lines.push(`  NEWER RELEASE: V${r.newer.version} "${r.newer.title}" (${r.newer.via})${r.newer.url ? ` at ${r.newer.url}` : ''}. Check its fields, then update parcelSources.js.`);

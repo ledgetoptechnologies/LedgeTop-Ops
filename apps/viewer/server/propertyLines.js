@@ -3,7 +3,8 @@
 // Property lines proxy. The browser asks this Viewer for parcel outlines in a
 // small bounding box; this server asks the registered public parcel service
 // for that location (parcelSources.js; today the State of Wisconsin's) with
-// fixed parameters and returns geometry only. The third party
+// fixed parameters and returns geometry and, where the source publishes it,
+// the first owner name (for labels and merging by owner). The third party
 // sees this server, never the viewer's session, link, browser or address.
 //
 // Accepts only `bbox=west,south,east,north` (WGS84 degrees). Never forwards a
@@ -40,18 +41,29 @@ const DEG = Math.PI / 180;
 // (parcelSources.js), with the release and the monthly release check.
 const WISCONSIN_PARCELS = WISCONSIN;
 
+// The browser asks for fixed map tiles (property-lines.mjs, about 1.7 km
+// across in Wisconsin), up to a few dozen for a zoomed-out view, so the cache,
+// slots and rates allow that; the cache is also bounded by stored points.
 const LIMITS = Object.freeze({
   maxSpanDegrees: 0.06,
   maxParcels: 800,
   maxResponseBytes: 8 * 1024 * 1024,
   timeoutMs: 10_000,
-  cacheEntries: 64,
+  cacheEntries: 256,
+  cachePoints: 2_000_000,
   cacheTtlMs: 10 * 60 * 1000,
-  maxInFlight: 4,
-  perCallerInFlight: 2,
-  ratePerMinute: 90,
-  callerRatePerMinute: 60,
+  maxInFlight: 8,
+  perCallerInFlight: 3,
+  ratePerMinute: 240,
+  callerRatePerMinute: 150,
 });
+
+const OWNER_MAX_LENGTH = 120;
+// Plain text only: control characters removed, whitespace collapsed.
+function cleanOwner(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, OWNER_MAX_LENGTH);
+}
 
 function webMercatorToLonLat(x, y) {
   return [Number(x) / WEB_MERCATOR_RADIUS / DEG,
@@ -78,10 +90,11 @@ function parseBoundingBox(value, sources = PARCEL_SOURCES) {
   return { bounds };
 }
 
-// Fixed query: geometry only (plus the service's own row id), the layer's
-// native Web Mercator in and out (no reprojection and no datum
-// transformation; see the datum convention above), bounded record count. No attribute such as owner, address or value
-// is ever requested.
+// Fixed query: geometry, the service's own row id and, where the registry
+// names one, the owner-name field; the layer's native Web Mercator in and out
+// (no reprojection and no datum transformation; see the datum convention
+// above), bounded record count. No address, value or other attribute is ever
+// requested.
 // source: a registry entry, or a bare layer URL for the Wisconsin query.
 function upstreamQueryUrl(bounds, source = WISCONSIN) {
   const { layerUrl, query } = typeof source === 'string' ? { ...WISCONSIN, layerUrl: source } : source;
@@ -106,8 +119,10 @@ function upstreamQueryUrl(bounds, source = WISCONSIN) {
   return `${layerUrl}/query?${params}`;
 }
 
-// Esri JSON (Web Mercator rings) -> { status, parcels: [{ id, rings: lon/lat }] }.
-function normalizeUpstream(body, idField = WISCONSIN.query.idField) {
+// Esri JSON (Web Mercator rings) -> { status, parcels: [{ id, rings: lon/lat, owner? }] }.
+// owner: the cleaned owner name, only when the source names an owner field
+// and the row has one. No other attribute is passed on.
+function normalizeUpstream(body, idField = WISCONSIN.query.idField, ownerField = null) {
   if (!body || typeof body !== 'object' || body.error) return { status: 'unavailable', parcels: [] };
   if (!Array.isArray(body.features)) return { status: 'unavailable', parcels: [] };
   if (body.exceededTransferLimit === true || body.features.length > LIMITS.maxParcels) return { status: 'too_many', parcels: [] };
@@ -125,7 +140,8 @@ function normalizeUpstream(body, idField = WISCONSIN.query.idField) {
       if (out.length >= 2) rings.push(out);
     }
     const id = Number(feature?.attributes?.[idField]);
-    if (rings.length) parcels.push({ id: Number.isSafeInteger(id) ? id : null, rings });
+    const owner = ownerField ? cleanOwner(feature?.attributes?.[ownerField]) : '';
+    if (rings.length) parcels.push({ id: Number.isSafeInteger(id) ? id : null, rings, ...(owner ? { owner } : {}) });
   }
   return { status: parcels.length ? 'ok' : 'none', parcels };
 }
@@ -220,6 +236,29 @@ function boundsInsideSite(bounds, site) {
   });
 }
 
+// Property lines cover the map around the model, not only the model itself:
+// tiles may reach the site window widened by COVERAGE_METERS on every side
+// (the browser stops at the same distance from the model,
+// PROPERTY_LINES_LIMITS.coverageMeters). Anywhere further is still refused,
+// so this proxy never serves the state's parcels for an unrelated area.
+const COVERAGE_METERS = 4000;
+function modelCoverageWindow(version, extraMeters = COVERAGE_METERS) {
+  const site = modelSiteWindow(version);
+  return site && { ...site, minE: site.minE - extraMeters, maxE: site.maxE + extraMeters, minN: site.minN - extraMeters, maxN: site.maxN + extraMeters };
+}
+
+// True when the box (its corners and edge midpoints in UTM) overlaps the
+// window. Tiles at the edge of the coverage may reach past it by one tile.
+function boundsTouchSite(bounds, site) {
+  if (!site) return false;
+  const midLon = (bounds.west + bounds.east) / 2, midLat = (bounds.south + bounds.north) / 2;
+  const points = [[bounds.south, bounds.west], [bounds.south, midLon], [bounds.south, bounds.east], [midLat, bounds.east],
+    [bounds.north, bounds.east], [bounds.north, midLon], [bounds.north, bounds.west], [midLat, bounds.west]].map(([lat, lon]) => site.projection.latLonToUtm(lat, lon));
+  if (!points.every(([e, n]) => Number.isFinite(e) && Number.isFinite(n))) return false;
+  const es = points.map(p => p[0]), ns = points.map(p => p[1]);
+  return Math.min(...es) <= site.maxE && Math.max(...es) >= site.minE && Math.min(...ns) <= site.maxN && Math.max(...ns) >= site.minN;
+}
+
 // Snap outward to a coarse grid so near-identical requests share one cache
 // entry and one upstream call.
 const CACHE_GRID_DEGREES = 0.0005;
@@ -258,12 +297,28 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, conf
   const cache = new Map();
   const pending = new Map();
   const perCaller = new Map();
-  let inFlight = 0;
+  let inFlight = 0, cachedPoints = 0;
+
+  function drop(key) {
+    const hit = cache.get(key);
+    if (!hit) return;
+    cachedPoints -= hit.points;
+    cache.delete(key);
+  }
+
+  function store(key, value) {
+    drop(key);
+    const points = value.parcels.reduce((sum, parcel) => sum + parcel.rings.reduce((n, ring) => n + ring.length, 0), 0);
+    cache.set(key, { at: now(), value, points });
+    cachedPoints += points;
+    const budget = limits.cachePoints || Infinity;
+    while (cache.size > limits.cacheEntries || (cachedPoints > budget && cache.size > 1)) drop(cache.keys().next().value);
+  }
 
   function cached(key) {
     const hit = cache.get(key);
     if (!hit) return null;
-    if (now() - hit.at > limits.cacheTtlMs) { cache.delete(key); return null; }
+    if (now() - hit.at > limits.cacheTtlMs) { drop(key); return null; }
     cache.delete(key); cache.set(key, hit);
     return hit.value;
   }
@@ -280,7 +335,7 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, conf
     const text = await readLimited(response, limits.maxResponseBytes);
     let body;
     try { body = JSON.parse(text); } catch { return { status: 'unavailable', parcels: [] }; }
-    return normalizeUpstream(body, target.query.idField);
+    return normalizeUpstream(body, target.query.idField, target.query.ownerField || null);
   }
 
   return {
@@ -299,10 +354,7 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, conf
       inFlight++;
       perCaller.set(caller, mine + 1);
       const work = fetchUpstream(bounds).catch(() => ({ status: 'unavailable', parcels: [] })).then(value => {
-        if (value.status !== 'unavailable') {
-          cache.set(key, { at: now(), value });
-          while (cache.size > limits.cacheEntries) cache.delete(cache.keys().next().value);
-        }
+        if (value.status !== 'unavailable') store(key, value);
         return value;
       }).finally(() => {
         inFlight--; pending.delete(key);
@@ -312,13 +364,15 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, conf
       pending.set(key, work);
       return work;
     },
-    stats: () => ({ cached: cache.size, inFlight }),
+    stats: () => ({ cached: cache.size, cachedPoints, inFlight }),
   };
 }
 
 function sourceDescription(config = WISCONSIN) {
-  const { id, name, release, credit, disclaimer, datumNote, datum, region } = config;
-  return { id, name, release, credit, disclaimer, datumNote, datum, region };
+  const { id, name, release, credit, disclaimer, datumNote, datum, region, shortName, vintage, dataUpdated } = config;
+  const owners = config.query?.ownerField ? 'yes' : 'no';
+  return Object.fromEntries(Object.entries({ id, name, release, credit, disclaimer, datumNote, datum, region, shortName, vintage, dataUpdated, owners })
+    .filter(([, value]) => value !== undefined));
 }
 
 // boundaries: optional uploaded-boundary store (propertyLinesBoundary.js).
@@ -382,7 +436,7 @@ function createPropertyLinesApi({ repository, sources = PARCEL_SOURCES, source =
     if (!caller) return denied(req, res);
     if (!propertyLinesOffered(caller.audience))
       return res.status(403).json({ error: 'property lines are not offered for this viewer', code: 'property_lines_not_offered' });
-    if (!boundsInsideSite(parsed.bounds, modelSiteWindow(caller.version)))
+    if (!boundsTouchSite(parsed.bounds, modelCoverageWindow(caller.version)))
       return res.status(403).json({ error: 'area is outside this model', code: 'outside_model' });
     if (repository?.rateLimited?.(`property-lines:${req.ip}`, LIMITS.ratePerMinute, 60_000)
       || repository?.rateLimited?.(`property-lines:${caller.caller}`, LIMITS.callerRatePerMinute, 60_000))
@@ -419,7 +473,10 @@ module.exports = {
   parseBoundingBox,
   resolvePropertyLinesCaller,
   modelSiteWindow,
+  modelCoverageWindow,
+  COVERAGE_METERS,
   boundsInsideSite,
+  boundsTouchSite,
   cacheBounds,
   propertyLinesOffered,
   upstreamQueryUrl,

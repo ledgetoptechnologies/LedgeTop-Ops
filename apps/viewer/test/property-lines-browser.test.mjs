@@ -54,7 +54,8 @@ const controller = createPropertyLinesController({
   L, fetchImpl: (url, options) => { window.requests.push(url); return fetch(url, options); }, headers: () => ({ Authorization: 'Bearer test-session-token-xx' }),
   fetcherOptions: { debounceMs: 50 },
   dom: { panel: document.getElementById('panel-property-lines'), button: document.getElementById('layer-property-lines'),
-    status: document.getElementById('property-lines-status'), about: document.getElementById('property-lines-about'), notice: document.getElementById('property-lines-notice') },
+    status: document.getElementById('property-lines-status'), about: document.getElementById('property-lines-about'), notice: document.getElementById('property-lines-notice'),
+    merge: document.getElementById('property-lines-merge'), mergeRow: document.getElementById('property-lines-merge-row'), vintage: document.getElementById('property-lines-vintage') },
   projectId: () => 'model-1', getMode: () => window.viewMode || 'ortho', getCloudMode: () => window.cloudMode || 'none', getMap: () => map, getScene: () => null, getPotreeApi: () => null,
   georefVerified: () => true, getSceneExtentUtm: () => ({ minE: e - 120, minN: n - 90, maxE: e + 120, maxN: n + 90 }), getGroundGrid: async () => null,
   utmToLatLon: projection.utmToLatLon, latLonToUtm: projection.latLonToUtm, utmToWorld: () => null,
@@ -65,9 +66,11 @@ controller.loadOffer().then(() => { document.body.dataset.ready = 'true'; });
 </script></body></html>`;
 }
 
+// Two touching parcels of one (generic) owner, written with different case
+// and spacing, so they draw as one outline with one label.
 const PARCELS = { status: 'ok', parcels: [
-  { id: 1, rings: [[[-89.4020, 43.0740], [-89.4005, 43.0740], [-89.4005, 43.0752], [-89.4020, 43.0752], [-89.4020, 43.0740]]] },
-  { id: 2, rings: [[[-89.4005, 43.0740], [-89.3995, 43.0740], [-89.3995, 43.0752], [-89.4005, 43.0752], [-89.4005, 43.0740]]] },
+  { id: 1, owner: 'SAMPLE FARMS LLC', rings: [[[-89.4020, 43.0740], [-89.4020, 43.0752], [-89.4005, 43.0752], [-89.4005, 43.0740], [-89.4020, 43.0740]]] },
+  { id: 2, owner: 'Sample  Farms LLC', rings: [[[-89.4005, 43.0740], [-89.4005, 43.0752], [-89.3995, 43.0752], [-89.3995, 43.0740], [-89.4005, 43.0740]]] },
 ] };
 
 test('property lines: shown by default with notice, states, Hide kept over reload and no foreign requests', { timeout: 90000 }, async t => {
@@ -85,7 +88,8 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
       if (url.pathname === '/') { res.setHeader('Content-Type', 'text/html'); res.end(page()); return; }
       if (url.pathname === '/api/v1/property-lines' && url.searchParams.get('model') === 'model-1') {
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ offered: offered && req.headers.authorization === 'Bearer test-session-token-xx', source: { id: 'wi-statewide-parcels', name: 'Wisconsin Statewide Parcel Map', release: 'V12 (2026)', credit: 'Credit line.', disclaimer: 'Property lines are approximate and for reference only. They are not a survey.' } }));
+        res.end(JSON.stringify({ offered: offered && req.headers.authorization === 'Bearer test-session-token-xx', source: { id: 'wi-statewide-parcels', name: 'Wisconsin Statewide Parcel Map', release: 'V12 (2026)', credit: 'Credit line.', disclaimer: 'Property lines are approximate and for reference only. They are not a survey.',
+          shortName: 'WI statewide', vintage: 'V12, 2025 tax roll', dataUpdated: '2026-06-30', owners: 'yes' } }));
         return;
       }
       if (url.pathname === '/api/v1/property-lines/parcels') {
@@ -94,7 +98,7 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
         res.end(JSON.stringify(mode === 'many' ? { status: 'too_many', parcels: [] } : mode === 'none' ? { status: 'none', parcels: [] } : PARCELS));
         return;
       }
-      const allowed = new Set(['/property-lines.mjs', '/property-lines-layer.mjs', '/utm-conversion.mjs', '/node_modules/leaflet/dist/leaflet-src.esm.js', '/node_modules/leaflet/dist/leaflet.css']);
+      const allowed = new Set(['/property-lines.mjs', '/property-lines-layer.mjs', '/property-lines-owners.mjs', '/brand-colors.mjs', '/utm-conversion.mjs', '/node_modules/leaflet/dist/leaflet-src.esm.js', '/node_modules/leaflet/dist/leaflet.css']);
       if (!allowed.has(url.pathname)) { res.statusCode = 404; res.end(); return; }
       res.setHeader('Content-Type', url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript');
       res.end(readFileSync(path.join(root, url.pathname.slice(1))));
@@ -141,6 +145,34 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     const request = hits.find(h => h.startsWith('/api/v1/property-lines/parcels'));
     assert.match(request, /^\/api\/v1\/property-lines\/parcels\?bbox=-89\.\d{6}%2C43\.\d{6}%2C-89\.\d{6}%2C43\.\d{6}&model=model-1$/);
     assert.equal(await client.evaluate('map.hasLayer && Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && typeof l.getLatLngs === "function").length'), 2);
+    // Orange accent line over a dark halo.
+    assert.deepEqual(await client.evaluate('Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && l.getLatLngs).map(l => l.options.color)'), ['#111111', '#ee5007']);
+    // One owner: one merged outline and one label in the middle of it; the data vintage under the button.
+    const owners = () => client.evaluate(`(() => { const labels = [...document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label')];
+      return { outlines: controller.state.outlines, labels: labels.map(l => l.textContent), merge: document.getElementById('property-lines-merge').checked,
+        mergeShown: !document.getElementById('property-lines-merge-row').hidden, vintage: document.getElementById('property-lines-vintage').textContent,
+        vintageShown: !document.getElementById('property-lines-vintage').hidden,
+        inside: labels.every(l => { const r = l.getBoundingClientRect(), m = map.getContainer().getBoundingClientRect(); return r.left >= m.left && r.right <= m.right && r.top >= m.top && r.bottom <= m.bottom; }) }; })()`);
+    let own = await owners();
+    assert.equal(own.outlines, 1, 'touching parcels of one owner draw as one outline');
+    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC']);
+    assert.equal(own.inside, true);
+    assert.deepEqual([own.merge, own.mergeShown, own.vintageShown], [true, true, true]);
+    assert.equal(own.vintage, 'Parcels: WI statewide V12, 2025 tax roll (updated Jun 2026)');
+    // Raw parcels on request, without fetching again; the choice is remembered.
+    const beforeSplit = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length;
+    await client.evaluate("document.getElementById('property-lines-merge').click(); 0");
+    await waitFor('controller.state.outlines === 2', 'unmerged');
+    own = await owners();
+    assert.equal(own.merge, false);
+    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC'], 'the narrower parcel is too small for its name at this zoom');
+    await client.evaluate('map.setZoom(18, {animate:false}); 0');
+    await waitFor("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length === 2", 'one label per parcel when zoomed in');
+    assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC', 'Sample Farms LLC']);
+    assert.equal(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length, beforeSplit, 'redrawn from the parcels already fetched');
+    assert.equal(await client.evaluate("localStorage.getItem('ltds-viewer:property-lines-merge')"), '0');
+    await client.evaluate("document.getElementById('property-lines-merge').click(); 0");
+    await waitFor('controller.state.outlines === 1', 'merged again');
 
     // Layout: the notice does not cover the zoom buttons or the floating controls.
     const overlaps = async () => client.evaluate(`(() => { const r = s => document.querySelector(s).getBoundingClientRect();
@@ -161,13 +193,33 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     assert.equal(await client.evaluate("document.querySelectorAll('.leaflet-propertyLines-pane canvas').length"), 1, 'one canvas after repeated pans');
 
     // Too many, none and service failure are reported.
-    // Each state uses a different zoom so the box differs and is not served from cache.
-    for (const [next, expected, zoom, lon] of [['many', /Too many parcels/, 19, -89.401], ['none', /No property lines found/, 20, -89.401], ['down', /service unavailable/, 20, -89.4018]]) {
+    // Each state uses a different map tile, so it is not served from the tile cache.
+    for (const [next, expected, zoom, lon] of [['many', /Too many parcels/, 19, -89.42], ['none', /No property lines found/, 20, -89.377], ['down', /service unavailable/, 20, -89.44]]) {
       mode = next;
       await client.evaluate(`map.setView([43.0745, ${lon}], ${zoom}, {animate:false}); 0`);
       await waitFor(`/${expected.source}/.test(document.getElementById('property-lines-status').textContent)`, next);
     }
     mode = 'ok';
+
+    // Labels hide when zoomed far out and come back when zoomed in.
+    const beforeWide = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length;
+    await client.evaluate('map.setView([43.0745, -89.401], 13, {animate:false}); 0');
+    await waitFor(`document.getElementById('property-lines-status').dataset.state === 'ready' && controller.stats().tiles.requests > ${await client.evaluate('controller.stats().tiles.requests')} + 3`, 'zoomed out');
+    assert.equal(await client.evaluate("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length"), 0, 'no names at zoom 13');
+    // Zoomed out, the lines cover the visible map around the model: several
+    // tiles, none further than the coverage around the model.
+    const tileHits = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).slice(beforeWide);
+    assert.ok(tileHits.length >= 4, `tiles fetched for the wider view: ${tileHits.length}`);
+    for (const hit of tileHits) {
+      const [west, south, east, north] = decodeURIComponent(new URL(hit, 'http://x').searchParams.get('bbox')).split(',').map(Number);
+      assert.ok(east - west < 0.03 && north - south < 0.03, 'tile-sized requests');
+      assert.ok(west < -89.401 + 0.08 && east > -89.401 - 0.08 && south < 43.0745 + 0.06 && north > 43.0745 - 0.06, 'within the coverage around the model');
+    }
+    await client.evaluate('map.setView([43.0745, -89.401], 11, {animate:false}); 0');
+    await waitFor("document.getElementById('property-lines-status').dataset.state === 'zoom_in'", 'zoom-in cutoff');
+    assert.match(await client.evaluate("document.getElementById('property-lines-status').textContent"), /Zoom in to see property lines/);
+    await client.evaluate('map.setView([43.0745, -89.401], 17, {animate:false}); 0');
+    await waitFor("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length === 1", 'label back when zoomed in');
 
     // Hide: lines and notice go away.
     await client.evaluate("document.getElementById('layer-property-lines').click()");
