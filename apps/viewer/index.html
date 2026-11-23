@@ -134,6 +134,54 @@
        border-radius: 6px; padding: 4px 6px; font-size: 12px; font-family: var(--font); flex: 1; min-width: 0;
      }
      .slider-row .val { min-width: 34px; text-align: right; color: var(--brand-muted); }
+
+    #panel-marks { display:grid; gap:8px; }
+    #panel-marks h3 { margin-bottom:0; }
+    #panel-marks button:not(.tool-btn):not(.viewer-mark-swatch):not(.viewer-mark-icon):not(.viewer-mark-list-item) {
+      padding:6px 9px; border-radius:6px; border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.05);
+      color:#e0e0e0; font:600 12px var(--font); cursor:pointer; min-height:32px;
+    }
+    #panel-marks button:disabled { opacity:.5; cursor:default; }
+    #panel-marks .viewer-mark-primary { background:var(--brand-orange); border-color:var(--brand-orange); color:#fff; }
+    #panel-marks :is(input:not([type=checkbox]):not([type=color]),select,textarea) {
+      width:100%; min-width:0; background:rgba(0,0,0,.3); color:#f5f5f5; border:1px solid rgba(255,255,255,.12);
+      border-radius:6px; padding:6px 8px; font:13px var(--font);
+    }
+    #panel-marks :is(button,input,select,textarea,summary):focus-visible { outline:2px solid var(--brand-orange); outline-offset:2px; }
+    .viewer-mark-tools { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+    .viewer-mark-row { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+    .viewer-mark-row > select { flex:1 1 120px; width:auto; }
+    .viewer-mark-coords { display:grid; gap:6px; }
+    .viewer-mark-form { display:grid; gap:8px; padding:10px; border-radius:8px; background:rgba(0,0,0,.22); }
+    .viewer-mark-form h4 { font-size:12px; color:#fff; }
+    .viewer-mark-form label { display:grid; gap:3px; font-size:11px; color:#c0c0c0; }
+    .viewer-mark-form fieldset { border:0; display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+    .viewer-mark-form legend { font-size:11px; color:#c0c0c0; margin-bottom:3px; }
+    .viewer-mark-swatch { width:26px; height:26px; border-radius:50%; border:2px solid rgba(255,255,255,.35); cursor:pointer; padding:0; }
+    .viewer-mark-swatch[aria-pressed=true] { border-color:#fff; box-shadow:0 0 0 2px var(--brand-orange); }
+    .viewer-mark-form input[type=color] { width:32px; height:28px; padding:0; border:0; background:none; }
+    .viewer-mark-icon { width:32px; height:32px; display:grid; place-items:center; padding:0; border-radius:6px; border:1px solid transparent; background:rgba(255,255,255,.04); cursor:pointer; }
+    .viewer-mark-icon[aria-pressed=true] { border-color:var(--brand-orange); }
+    .viewer-mark-readout { overflow-wrap:anywhere; }
+    .viewer-mark-toggle { display:flex; align-items:center; gap:4px; font-size:12px; }
+    .viewer-mark-list { list-style:none; padding:0; display:grid; gap:2px; max-height:40vh; overflow:auto; }
+    .viewer-mark-list li { display:flex; align-items:center; gap:6px; }
+    .viewer-mark-list-item { flex:1; display:flex; align-items:center; gap:8px; min-width:0; padding:6px; border:0; border-radius:6px; background:none; color:#e0e0e0; font:12px var(--font); text-align:left; cursor:pointer; }
+    .viewer-mark-list-item:hover, .viewer-mark-list-item[aria-current=true] { background:rgba(238,80,7,.16); }
+    .viewer-mark-list-icon { flex:none; display:grid; }
+    .viewer-mark-list-name { flex:1; min-width:0; display:grid; overflow-wrap:anywhere; }
+    .viewer-mark-list-name small { color:var(--brand-muted); font-size:10px; }
+    .viewer-mark-category-form input[name=categoryName] { flex:1 1 110px; width:auto; }
+    .viewer-mark-category-form input[type=color] { width:32px; height:30px; padding:0; border:0; background:none; }
+    .viewer-mark-section summary { cursor:pointer; font-size:12px; font-weight:600; color:#e0e0e0; padding:4px 0; }
+    .viewer-map-mark { background:none; border:0; filter:drop-shadow(0 1px 3px rgba(0,0,0,.8)); }
+    .viewer-map-mark.selected svg circle { stroke:var(--brand-orange); stroke-width:3; }
+    .viewer-map-mark.draft { opacity:.85; }
+    .viewer-mark-vertex { background:#fff; border:2px solid var(--brand-orange); border-radius:50%; }
+    .leaflet-tooltip.viewer-mark-label { background:rgba(10,10,12,.78); color:#fff; border:0; box-shadow:none; font:600 11px var(--font); padding:2px 6px; }
+    .leaflet-tooltip.viewer-mark-label::before { display:none; }
+    @media (pointer:coarse) { .viewer-mark-vertex { transform:scale(1.4); } #panel-marks button { min-height:40px; } }
+
     #measure-output {
       margin-top: 10px; padding: 10px; border-radius: 8px; background: rgba(0,0,0,0.25);
       font-size: 12px; color: #f5f5f5; min-height: 24px; line-height: 1.5;
@@ -638,6 +686,11 @@
           <div class="tool-grid"><button class="tool-btn" data-slice="flip" aria-pressed="false">Flip side</button><button class="tool-btn" data-slice="reset">Reset slice</button></div>
           <p class="hint" data-slice="status" role="status"></p>
           <p class="hint">View only. The orange outline marks the cut plane. Saved measurements and volume calculations still use the full source surface and their own reference base.</p>
+        </div>
+
+        <div class="panel" id="panel-marks" hidden>
+          <h3><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="9.5" r="2.5" stroke="currentColor" stroke-width="2" fill="none"/></svg> Marks</h3>
+          <div data-marks-root></div>
         </div>
 
         <div class="panel" id="panel-model-report" hidden><h3>Reports</h3><div id="measurement-report-actions" hidden><button class="tool-btn full" id="btn-model-report">Measurements report</button><p class="hint">Your saved measurements, quantities, and overview images.</p></div><div id="model-report-download"></div></div>

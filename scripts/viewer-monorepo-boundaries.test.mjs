@@ -32,6 +32,13 @@ const reviewedAckMigrations = [
 const reviewedFolderMigration = { version: 48, name: 'project_organizational_folders' };
 const reviewedTimerMigration = { version: 83, name: 'provider_engine_processing_elapsed' };
 const reviewedTimerSqlSha256 = 'c8b8205fbcf5b066030223c1176527f347ffc1bf4861b6ccf32e5845000f3214';
+// Schema 84 is below the pinned maximum (it was reserved before 85 and 86 shipped), so
+// MAX(version) is the same with or without it. It is pinned by name and SQL here and the
+// candidate image is checked for it by name.
+const reviewedMarksMigration = { version: 84, name: 'viewer_coordinate_marks' };
+const reviewedMarksSqlSha256 = 'a52d3f8dca73392f6032d080364e50e2eb1253fb62083f5f7f57943c848d69ab';
+const reviewedMarksImageCheck = `            if(db.prepare("SELECT name FROM schema_migrations WHERE version=${reviewedMarksMigration.version}").get()?.name!=="${reviewedMarksMigration.name}")throw new Error("Schema 84 is missing or recorded under another name");\n`;
+const imageSchemaQuery = '            try{process.stdout.write(String(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version));}\n';
 const reviewedProviderRemovalMigration = { version: 85, name: 'processing_provider_removal' };
 const reviewedProviderRemovalSqlSha256 = 'a916f9316bc0c2d332e599113b8bf8eee0657294bc6236270612b3902808a913';
 const reviewedTrashPurgeMigration = { version: 86, name: 'trash_container_purge_started' };
@@ -49,7 +56,8 @@ const reviewedConverter = {
 // delivered, and prevents ACK deletion. Unknown or mismatched rows abort the
 // migration. Schema 48 adds project folders and same-project task placement;
 // schema 83 adds an attempt- and provider-task-bound engine elapsed
-// record; schema 85 adds nullable removed_at/removed_by provider archive
+// record; schema 84 adds Viewer Marks, mark categories and mark accounts; schema 85
+// adds nullable removed_at/removed_by provider archive
 // columns; schema 86 adds a nullable storage_trash.purge_started_at marker for
 // crash-safe Recycle Bin container purges. The candidate image verification
 // and attestation pins advance from the upstream 38 to 86; the other runtime,
@@ -92,6 +100,7 @@ function reviewedUpstreamStep(name) {
       '              const manifest=JSON.parse(fs.readFileSync(license+"manifest.json","utf8"));\n' +
       '              for(const item of manifest.files){const actual=crypto.createHash("sha256").update(fs.readFileSync(license+item.path)).digest("hex");if(actual!==item.sha256)process.exit(3);}',
       'Obj2Tiles build and license manifest verification');
+    reviewed = replaceReviewedOnce(reviewed, imageSchemaQuery, reviewedMarksImageCheck + imageSchemaQuery, 'schema 84 name check');
   } else {
     reviewed = replaceReviewedOnce(reviewed,
       '          EXPECTED_OBJ2TILES_VERSION: "1.6.2"',
@@ -329,17 +338,39 @@ test('No script writes the Viewer image to a registry', () => {
   assert.deepEqual(writers.filter(file => !file.endsWith('.test.mjs')), []);
 });
 
-test('Viewer publication preserves the ACK and folder migrations and pins the exact timer, provider-removal and trash-purge schemas', () => {
+test('Viewer publication preserves the ACK and folder migrations and pins the exact timer, Marks, provider-removal and trash-purge schemas', () => {
   const migrations = MIGRATIONS.filter(({ version }) => version >= reviewedAckMigrations[0].version);
   assert.deepEqual(migrations.map(({ version, name }) => ({ version, name })),
-    [...reviewedAckMigrations, reviewedFolderMigration, reviewedTimerMigration, reviewedProviderRemovalMigration, reviewedTrashPurgeMigration], 'another schema advance requires a new explicit gate review');
+    [...reviewedAckMigrations, reviewedFolderMigration, reviewedTimerMigration, reviewedMarksMigration, reviewedProviderRemovalMigration, reviewedTrashPurgeMigration], 'another schema advance requires a new explicit gate review');
   const timer = migrations.find(({ version }) => version === reviewedTimerMigration.version);
   const sqlSha256 = createHash('sha256').update(timer.sql.replace(/\r\n/g, '\n')).digest('hex');
   assert.equal(sqlSha256, reviewedTimerSqlSha256, 'migration 83 SQL must match the reviewed timer schema');
+  const marks = migrations.find(({ version }) => version === reviewedMarksMigration.version);
+  assert.equal(createHash('sha256').update(marks.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedMarksSqlSha256, 'migration 84 SQL must match the reviewed Marks schema');
   const removal = migrations.find(({ version }) => version === reviewedProviderRemovalMigration.version);
   assert.equal(createHash('sha256').update(removal.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedProviderRemovalSqlSha256, 'migration 85 SQL must match the reviewed provider-removal schema');
   const trashPurge = migrations.at(-1);
   assert.equal(createHash('sha256').update(trashPurge.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedTrashPurgeSqlSha256, 'migration 86 SQL must match the reviewed trash-purge schema');
+});
+
+test('The candidate image check fails without schema 84 even though the maximum version is unchanged', () => {
+  const step = migratedSteps.get('Verify exact candidate image');
+  const start = step.indexOf('            const {openDatabase}=require("./server/database");');
+  const end = step.indexOf("\n          ')\"", start);
+  assert.ok(start > 0 && end > start);
+  const script = step.slice(start, end).replace('"/tmp/release-attestation.sqlite"', '":memory:"');
+  const check = prelude => spawnSync(process.execPath, ['-e', prelude + script], { cwd: path.join(root, 'apps/viewer'), encoding: 'utf8' });
+  const migrations = 'const {MIGRATIONS}=require("./server/database");';
+  const at = `MIGRATIONS.findIndex(item=>item.version===${reviewedMarksMigration.version})`;
+  const complete = check('');
+  assert.equal(complete.status, 0, complete.stderr);
+  assert.equal(`EXPECTED_SCHEMA_VERSION: "${complete.stdout}"`, reviewedCandidateSchemaPin);
+  for (const prelude of [`${migrations}MIGRATIONS.splice(${at},1);`, `${migrations}MIGRATIONS[${at}].name='another_name';`]) {
+    const refused = check(prelude);
+    assert.notEqual(refused.status, 0);
+    assert.equal(refused.stdout, '');
+    assert.match(refused.stderr, /Schema 84 is missing or recorded under another name/);
+  }
 });
 
 test('All upstream runtime and numerical-engine verification remains intact', () => {
