@@ -2218,6 +2218,12 @@ const MIGRATIONS = [
     const columns = new Set(database.prepare('PRAGMA table_info(processing_providers)').all().map(column=>column.name));
     return columns.has('removed_at') && columns.has('removed_by');
   }},
+  // A Recycle Bin container that has started purging (see ProcessingRepository.beginContainerPurge).
+  {version:86,name:'trash_container_purge_started',sql:`
+    ALTER TABLE storage_trash ADD COLUMN purge_started_at TEXT;
+  `,verify(database){
+    return database.prepare('PRAGMA table_info(storage_trash)').all().some(column=>column.name==='purge_started_at'&&column.type==='TEXT'&&column.notnull===0);
+  }},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;

@@ -17,16 +17,27 @@ function sharedDatasetTrash(processing,root,members){
   for(const taskId of taskIds){const task=processing.getTask(taskId),dataset=task&&processing.getDataset(task.datasetId);if(dataset?.status!=='trashed')continue;const item=processing.activeTrashForEntity('dataset',dataset.id);if(item&&!memberIds.has(item.id))found.set(item.id,item);}
   return[...found.values()];
 }
-function restoreContainerTrash(processing,storage,containerId,actor){const root=processing.getTrash(containerId);if(!root||root.permanentlyDeletedAt||!['project','task'].includes(root.entityType))return null;
+function restoreContainerTrash(processing,storage,containerId,actor){const root=processing.getTrash(containerId);if(!root||root.permanentlyDeletedAt||root.purgeStartedAt||!['project','task'].includes(root.entityType))return null;
   // A task on its own comes back only into an active project. Check that before restoring any shared source set, so a
   // refused restore never leaves a set out of the Recycle Bin with nothing left to purge it.
   if(root.entityType==='task'){const task=processing.getTask(root.entityId);if(processing.getProject(task?.projectId)?.status!=='active')return null;}
   const members=processing.listContainerTrashMembers(root.id),shared=sharedDatasetTrash(processing,root,members),data=[...shared,...members.filter(item=>['dataset','output'].includes(item.entityType))],tasks=members.filter(item=>item.entityType==='task');if(!restorePreflight(processing,storage,root)||[...shared,...members].some(item=>!restorePreflight(processing,storage,item)))return null;for(const item of data)if(!restoreItem(processing,storage,item,actor))return null;if(root.entityType==='project'&&!processing.restoreMetadataEntity(root.id,actor,{finalizeTrash:false}))return null;for(const item of tasks)if(!restoreItem(processing,storage,item,actor))return null;if(root.entityType==='task'&&!restoreItem(processing,storage,root,actor))return null;if(root.entityType==='project'&&!processing.finishMetadataRestore(root.id,actor))return null;return root.entityType==='project'?processing.getProject(root.entityId):processing.getTask(root.entityId);}
 // containerId: the container being purged, so tasks deleted in it don't block their own source set (see datasetPurgeBlocked).
 function purgeItem(processing,storage,item,actor,containerId=null){if(!item||item.permanentlyDeletedAt)return true;if(item.entityType==='project'){const purged=Boolean(processing.purgeMetadataEntity(item.id,actor));if(purged)purgeProjectBoundary(storage,item.entityId);return purged;}if(item.entityType==='task')return Boolean(processing.purgeMetadataEntity(item.id,actor));if(item.entityType==='dataset'){const dataset=processing.getDataset(item.entityId);if(dataset?.storageMode==='external_reference')return Boolean(processing.markTrashPurged(item.id,actor,{containerId}));}else if(item.entityType==='output'){const output=processing.getModelOutput(item.entityId);if(output?.storageMode!=='managed')return Boolean(processing.purgeMetadataOutput(item.id,actor));}const mutation=processing.beginPurgeMutation(item.id,actor,{containerId});if(!mutation)return false;applyStorageMutation(processing,storage,mutation);return true;}
-// A source set in this container may still be used by another deleted task (one that shared it) whose trash is live.
-// The set then moves into the newest such Recycle Bin item, so that task can still be restored with its photos; it is
-// purged only with the last deleted task that uses it.
-function purgeContainerTrash(processing,storage,containerId,actor){const root=processing.getTrash(containerId);if(!root||!['project','task'].includes(root.entityType))return null;if(root.permanentlyDeletedAt)return root;const order={output:0,dataset:1,task:2,project:3},members=processing.listContainerTrashMembers(root.id).sort((a,b)=>(order[a.entityType]??4)-(order[b.entityType]??4));for(const item of members){if(item.entityType==='dataset'&&!item.permanentlyDeletedAt){const heir=processing.datasetTrashHeir(item.entityId,root.id);if(heir){if(!processing.moveContainerTrashMember(root.id,heir.id,item.id,actor))return null;continue;}}if(!purgeItem(processing,storage,item,actor,root.id))return null;}return purgeItem(processing,storage,root,actor,root.id)?processing.getTrash(root.id):null;}
+// Purging a container, in order, each step safe to repeat after a crash (expiredTrash resumes it):
+// 1. A source set in it that another deleted, restorable task still uses moves into the newest such Recycle Bin item,
+//    so that task keeps its photos; the set is purged only with the last deleted task that uses it.
+// 2. The container is marked purging in its own committed transaction: from here on nothing in it can be restored.
+// 3. Files and member records are purged, then the container's own record.
+function purgeContainerTrash(processing,storage,containerId,actor){
+  const root=processing.getTrash(containerId);if(!root||!['project','task'].includes(root.entityType))return null;if(root.permanentlyDeletedAt)return root;
+  const order={output:0,dataset:1,task:2,project:3},members=()=>processing.listContainerTrashMembers(root.id).sort((a,b)=>(order[a.entityType]??4)-(order[b.entityType]??4));
+  for(const item of members()){if(item.entityType!=='dataset'||item.permanentlyDeletedAt)continue;if(processing.hasPendingStorageMutation('dataset',item.entityId))continue;/* its purge already began; let it finish */const heir=processing.datasetTrashHeir(item.entityId,root.id);if(heir&&!processing.moveContainerTrashMember(root.id,heir.id,item.id,actor))return null;}
+  // A set still needed outside this container (an active task) refuses the purge before anything is marked or deleted.
+  if(!root.purgeStartedAt&&members().some(item=>item.entityType==='dataset'&&!item.permanentlyDeletedAt&&!processing.hasPendingStorageMutation('dataset',item.entityId)&&processing.datasetPurgeBlocked(item.entityId,root.id)))return null;
+  if(!processing.beginContainerPurge(root.id,actor))return null;
+  for(const item of members())if(!purgeItem(processing,storage,item,actor,root.id))return null;
+  return purgeItem(processing,storage,root,actor,root.id)?processing.getTrash(root.id):null;
+}
 
 module.exports={trashOutput,trashTaskTree,trashProjectTree,restoreContainerTrash,purgeContainerTrash};
