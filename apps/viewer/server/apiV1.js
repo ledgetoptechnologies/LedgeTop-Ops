@@ -7,6 +7,7 @@ const auth = require('./auth');
 const shareTokenVault = require('./shareTokenVault');
 const { config } = require('./config');
 const { requireService } = require('./serviceAuth');
+const { newSharePermissions, newShareExpiry } = require('./publicSharePolicy');
 const { encrypt, idempotent } = require('./serviceIdempotency');
 const { publicDerivativeKind } = require('./processingSecurity');
 const { receiptVerifiedLodProvenance, verifiedLodProvenance, viewerEligibleAssets } = require('./lodDerivativePolicy');
@@ -474,12 +475,8 @@ function createApiV1(repository) {
         if (String(body.password).length < 8) return res.status(400).json({ error: 'password must be at least 8 characters' });
         passwordHash = await auth.hashPassword(String(body.password));
       }
-      let expiresAt = null;
-      if (body.expiresAt !== undefined && body.expiresAt !== null) {
-        const parsed = Date.parse(body.expiresAt);
-        if (!Number.isFinite(parsed) || parsed <= Date.now()) return res.status(400).json({ error: 'expiresAt must be in the future' });
-        expiresAt = new Date(parsed).toISOString();
-      }
+      const expiresAt = newShareExpiry(body.expiresAt);
+      if (expiresAt === undefined) return res.status(400).json({ error: 'expiresAt must be in the future' });
       if(shareClass==='client'&&source.expiresAt!==null&&(expiresAt===null||Date.parse(expiresAt)>Date.parse(source.expiresAt)))return res.status(400).json({error:'client share expiry cannot exceed source authorization'});
       const { token, tokenHash } = auth.newShareToken();
       if (body.displayUnits !== undefined && body.displayUnits !== 'imperial' && body.displayUnits !== 'metric')
@@ -491,7 +488,7 @@ function createApiV1(repository) {
         publicIdHash: tokenHash,
         tokenCiphertext: shareClass==='staff'?shareTokenVault.seal(token,tokenHash):null,
         passwordHash,
-        permissions: permissions(body.permissions),
+        permissions: newSharePermissions(body.permissions),
         label: body.label ? String(body.label).slice(0, 120) : null,
         createdBy: body.createdBy ? String(body.createdBy).slice(0, 200) : req.servicePrincipal.keyId,
         expiresAt,

@@ -370,6 +370,16 @@ test('a new public link starts without camera positions and ends in 30 days; sav
   const edit=f.html();assert.match(edit,/name="cameras" type="checkbox" checked/);assert.match(edit,/name="expiresAt" type="datetime-local" value=""/);
 });
 
+test('the emergency admin page starts a link the same way, and an empty end is an explicit no end',()=>{
+  const page=readFileSync(new URL('../index.html',import.meta.url),'utf8'),script=readFileSync(new URL('../main.js',import.meta.url),'utf8');
+  const input=id=>new RegExp(`<input[^>]*id="${id}"[^>]*>`).exec(page)[0];
+  assert.doesNotMatch(input('share-new-perm-cameras'),/checked/);assert.match(input('share-new-perm-measure'),/checked/);
+  assert.match(input('share-new-expires'),/value="30"/);assert.match(input('share-new-expires'),/placeholder="Never"/);
+  const create=script.slice(script.indexOf('async function createShareLink('),script.indexOf('\n}\n',script.indexOf('async function createShareLink(')));
+  assert.match(create,/expiresDays: dom\.shareNewExpires\.value \? Number\(dom\.shareNewExpires\.value\) : null/);
+  assert.match(create,/dom\.shareNewExpires\.value = dom\.shareNewExpires\.defaultValue;/);
+});
+
 test('available-view selection comes from verified kinds and defaults to all supported views only',()=>{
   const f=fixture();f.state.sharePreflight.output={eligibleAssetKinds:['glb','tiles','ept','ortho','dsm','dtm','report','camera']};
   assert.deepEqual([...f.context.availableShareViews(f.output)],['model','pointCloud','ortho','dsm','dtm']);

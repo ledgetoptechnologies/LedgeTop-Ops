@@ -367,6 +367,7 @@ describe("Viewer service client", () => {
       label: "Client demo",
       expiresAt: "2026-08-23T12:00:00.000Z",
       password: "correct horse battery staple",
+      permissions: { view: true, measure: true, cameras: true, download: false },
     });
     expect(created).toEqual({
       share,
@@ -377,6 +378,33 @@ describe("Viewer service client", () => {
     await expect(client.revokePublicShare({
       shareId: "share-one", idempotencyKey: "viewer-share-revoke-0001", reason: "Demo complete",
     })).resolves.toMatchObject({ id: "share-one", revokedAt: "2026-08-17T12:00:00.000Z" });
+  });
+
+  it.each([[undefined], [{ view: true as const }]])("sends every permission for a new link, with camera positions off unless chosen", async permissions => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)); bodies.push(body);
+      return Response.json({ share: { ...share, hasPassword: false, expiresAt: body.expiresAt, permissions: body.permissions },
+        token: "a-secure-token-that-is-not-forwarded",
+        viewUrl: "https://viewer.example.test/view/a-secure-token-that-is-not-forwarded",
+        embedUrl: "https://viewer.example.test/embed/a-secure-token-that-is-not-forwarded" }, { status: 201 });
+    });
+    const client = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, fetcher as typeof fetch);
+    const created = await client.createPublicShare({ modelId: "model-one", idempotencyKey: "viewer-share-defaults-0001",
+      createdBy: "ops:staff-one", expiresAt: null, ...(permissions ? { permissions } : {}) });
+    expect(bodies[0]!.permissions).toEqual({ view: true, measure: true, cameras: false, download: false });
+    expect(bodies[0]).toHaveProperty("expiresAt", null);
+    expect(created.share.permissions.cameras).toBe(false);
+  });
+
+  it("refuses a link that came back with camera positions nobody chose", async () => {
+    const fetcher = vi.fn(async () => Response.json({ share: { ...share, hasPassword: false, expiresAt: null },
+      token: "a-secure-token-that-is-not-forwarded",
+      viewUrl: "https://viewer.example.test/view/a-secure-token-that-is-not-forwarded",
+      embedUrl: "https://viewer.example.test/embed/a-secure-token-that-is-not-forwarded" }, { status: 201 }));
+    const client = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, fetcher as typeof fetch);
+    await expect(client.createPublicShare({ modelId: "model-one", idempotencyKey: "viewer-share-defaults-0002",
+      createdBy: "ops:staff-one", expiresAt: null, permissions: { view: true } })).rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("rejects a cross-origin public share URL", async () => {

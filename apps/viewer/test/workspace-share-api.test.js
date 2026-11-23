@@ -67,6 +67,44 @@ async function readyShareFixture(t) {
   return c;
 }
 
+const {assetAllowed}=require('../server/publicSharePolicy');
+const DAY=24*60*60*1000,near=(value,expected)=>assert.ok(Math.abs(Date.parse(value)-expected)<60_000,`${value}`);
+test('a new link stores every permission: what a request leaves out is off for camera positions and downloads',async t=>{
+  for(const permissions of [undefined,{view:true},{view:true,measure:true},{view:true,download:false}]){
+    const c=await readyShareFixture(t),response=await c.request({body:{publishIfReady:true,...(permissions?{permissions}:{})}});
+    assert.equal(response.status,201);const created=(await response.json()).share,stored=c.repository.getPublicShare(created.id);
+    assert.deepEqual(stored.permissions,{view:true,measure:true,cameras:false,download:false});
+    assert.deepEqual(created.permissions,stored.permissions);
+    assert.equal(assetAllowed(stored,'shots'),false);assert.equal(assetAllowed(stored,'report'),false);assert.equal(assetAllowed(stored,'glb'),true);
+  }
+  const c=await readyShareFixture(t),chosen={view:true,measure:false,cameras:true,download:true};
+  const created=(await (await c.request({body:{publishIfReady:true,permissions:chosen}})).json()).share;
+  assert.deepEqual(c.repository.getPublicShare(created.id).permissions,chosen);
+});
+test('a link that names no end gets 30 days; no end is an explicit null and nothing else',async t=>{
+  let c=await readyShareFixture(t);near((await (await c.request()).json()).share.expiresAt,Date.now()+30*DAY);
+  c=await readyShareFixture(t);assert.equal((await (await c.request({body:{publishIfReady:true,expiresAt:null}})).json()).share.expiresAt,null);
+  c=await readyShareFixture(t);const chosen=new Date(Date.now()+90*DAY).toISOString();
+  assert.equal((await (await c.request({body:{publishIfReady:true,expiresAt:chosen}})).json()).share.expiresAt,chosen);
+  c=await readyShareFixture(t);
+  for(const expiresAt of ['',0,false,'soon','2000-01-01'])assert.equal((await c.request({body:{publishIfReady:true,expiresAt}})).status,400,JSON.stringify(expiresAt));
+  c.assertPrivate();
+});
+test('existing links keep what they had: the list says what they really allow, and a partial edit changes only what it names',async t=>{
+  const c=await readyShareFixture(t),created=(await (await c.request()).json()).share;
+  const link=permissions=>c.repository.createPublicShare({modelId:created.modelId,publicIdHash:crypto.randomBytes(32).toString('hex'),permissions});
+  const old=link({view:true}),off=link({view:true,measure:false,cameras:false,download:false});
+  assert.equal(assetAllowed(c.repository.getPublicShare(old.id),'shots'),true,'a stored link is not rewritten');
+  const shown=(await (await c.request({method:'GET'})).json()).shares.find(share=>share.id===old.id);
+  assert.equal(shown.permissions.cameras,true);assert.equal(shown.permissions.download,false);assert.equal(shown.expiresAt,null);
+  assert.deepEqual(c.repository.getPublicShare(old.id).permissions,{view:true});
+  for(const [share,expected] of [[old,{view:true,measure:true,cameras:true,download:false}],[off,{view:true,measure:false,cameras:false,download:false}]]){
+    const response=await c.manage(share.id,{method:'PATCH',suffix:'',body:{permissions:{view:true}}});assert.equal(response.status,200);
+    assert.deepEqual(c.repository.getPublicShare(share.id).permissions,expected);assert.equal(c.repository.getPublicShare(share.id).expiresAt,null);
+  }
+  await c.manage(off.id,{method:'PATCH',suffix:'',body:{permissions:{view:true,cameras:true}}});assert.equal(c.repository.getPublicShare(off.id).permissions.cameras,true);
+});
+
 test('durable recopy is authenticated, encrypted, stable through edits and fails closed for unrecoverable legacy links',async t=>{
   const c=await readyShareFixture(t),created=await (await c.request()).json(),id=created.share.id;
   assert.deepEqual(created.share.allowedViews,['model']);

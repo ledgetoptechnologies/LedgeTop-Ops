@@ -39,8 +39,8 @@ function pageQuery(req) { const raw=String(req.query.limit||'50');if(!/^\d{1,3}$
 function publicStorageSpace(value) { return {availableBytes:Number(value.available),totalBytes:Number(value.total),reserveBytes:Number(value.reserve),requiredBytes:Number(value.required),sufficient:Boolean(value.ok)}; }
 function publicImportPreview(preview) { return {...preview,destinationSpace:publicStorageSpace(preview.destinationSpace)}; }
 const shareVault=require('./shareTokenVault');
-const {VIEW_KINDS}=require('./publicSharePolicy');
-function adminShareView(share){return{id:share.id,modelId:share.modelId,label:share.label,permissions:share.permissions,allowedViews:share.allowedViews,linkRecoverable:Boolean(share.tokenCiphertext),hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
+const {VIEW_KINDS,newSharePermissions,effectiveSharePermissions,newShareExpiry}=require('./publicSharePolicy');
+function adminShareView(share){return{id:share.id,modelId:share.modelId,label:share.label,permissions:effectiveSharePermissions(share.permissions),allowedViews:share.allowedViews,linkRecoverable:Boolean(share.tokenCiphertext),hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
 function adminProjectShareView(share){return{id:share.id,projectId:share.projectId,label:share.label,permissions:share.permissions,hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,versionPolicy:share.versionPolicy,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
 function workspaceSessionView(session,accessToken){return{...(accessToken?{accessToken}:{}),session:{id:session.id,subject:session.subject,permissions:session.permissions,displayUnits:session.displayUnits,expiresAt:session.expiresAt},units:{default:config.defaultUnits,resolved:session.displayUnits},controllerOrigin:session.controllerOrigin};}
 function onlyKeys(value,allowed){return value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every((key)=>allowed.includes(key));}
@@ -427,13 +427,13 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       if(b.selectedAssetKinds!==undefined&&(!Array.isArray(b.selectedAssetKinds)||!b.selectedAssetKinds.length
         ||b.selectedAssetKinds.some(kind=>!publicDerivativeKind(kind))))return error(res,400,'invalid_published_assets');
       if(b.password!==undefined&&b.password!==''&&String(b.password).length<8)return error(res,400,'password_too_short');
-      const expiry=b.expiresAt?Date.parse(b.expiresAt):null;
-      if(b.expiresAt&&(!Number.isFinite(expiry)||expiry<=Date.now()))return error(res,400,'invalid_expiry');
-      const expiresAt=expiry?new Date(expiry).toISOString():null;
+      const expiresAt=newShareExpiry(b.expiresAt);
+      if(expiresAt===undefined)return error(res,400,'invalid_expiry');
       if(b.displayUnits!==undefined&&!validUnits(b.displayUnits))return error(res,400,'invalid_units');
-      const permissions=b.permissions||{view:true,measure:true,cameras:false,download:false};
-      if(!onlyKeys(permissions,['view','measure','cameras','download'])||permissions.view!==true
-        ||Object.values(permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');
+      const requested=b.permissions===undefined||b.permissions===null?{view:true}:b.permissions;
+      if(!onlyKeys(requested,['view','measure','cameras','download'])||requested.view!==true
+        ||Object.values(requested).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');
+      const permissions=newSharePermissions(requested);
       const initial=outputShareState(processing.getModelOutput(req.params.id));
       if(!initial)return error(res,404,'published_output_not_found');
       const availableViews=Object.keys(VIEW_KINDS).filter(view=>VIEW_KINDS[view].some(kind=>(b.selectedAssetKinds||initial.eligibleAssetKinds).includes(kind)));
@@ -524,7 +524,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       if(b.label!==undefined){if(b.label!==null&&(typeof b.label!=='string'||b.label.length>120))return error(res,400,'invalid_label');patch.label=b.label||null;}
       if(b.password!==undefined){if(b.password!==null&&(typeof b.password!=='string'||(b.password!==''&&b.password.length<8)||b.password.length>1024))return error(res,400,'invalid_password');patch.passwordHash=b.password?await auth.hashPassword(b.password):null;}
       if(b.expiresAt!==undefined){const expiry=b.expiresAt===null?null:Date.parse(b.expiresAt);if(b.expiresAt!==null&&(!Number.isFinite(expiry)||expiry<=Date.now()))return error(res,400,'invalid_expiry');patch.expiresAt=expiry?new Date(expiry).toISOString():null;}
-      if(b.permissions!==undefined){if(!onlyKeys(b.permissions,['view','measure','cameras','download'])||b.permissions.view!==true||Object.values(b.permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');patch.permissions=b.permissions;}
+      if(b.permissions!==undefined){if(!onlyKeys(b.permissions,['view','measure','cameras','download'])||b.permissions.view!==true||Object.values(b.permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');patch.permissions={...effectiveSharePermissions(share.permissions),...b.permissions};}
       if(b.allowedViews!==undefined){const model=repository.getModel(share.modelId),available=Object.keys(VIEW_KINDS).filter(view=>VIEW_KINDS[view].some(kind=>model?.activeVersion?.assets.some(asset=>asset.kind===kind&&asset.published)));if(!Array.isArray(b.allowedViews)||!b.allowedViews.length||b.allowedViews.some(view=>!available.includes(view)))return error(res,400,'invalid_allowed_views');patch.allowedViews=[...new Set(b.allowedViews)];}
       if(b.displayUnits!==undefined){if(!validUnits(b.displayUnits))return error(res,400,'invalid_units');patch.displayUnits=b.displayUnits;}
       // Password hashing yields; recheck the administrative session before committing.

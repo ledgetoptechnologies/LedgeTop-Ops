@@ -100,6 +100,19 @@ test('Potree shell is public but EPT assets stay authorized and byte-range capab
   });
   assert.equal(createShare.status, 200);
   const share = await createShare.json();
+  const DAY = 24 * 60 * 60 * 1000;
+  assert.deepEqual(share.permissions, { measure: true, cameras: false });
+  assert.ok(Math.abs(Date.parse(share.expiresAt) - (Date.now() + 30 * DAY)) < 60_000, share.expiresAt);
+  const make = async body => fetch(`${baseUrl}/api/models/webodm-1-2/share-links`, {
+    method: 'POST', headers: { ...authorizedHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const endless = await (await make({ expiresDays: null, permissions: { measure: false, cameras: true } })).json();
+  assert.equal(endless.expiresAt, null);
+  assert.deepEqual(endless.permissions, { measure: false, cameras: true });
+  const week = await (await make({ expiresDays: 7, permissions: {} })).json();
+  assert.ok(Math.abs(Date.parse(week.expiresAt) - (Date.now() + 7 * DAY)) < 60_000);
+  assert.equal(week.permissions.cameras, false);
+  for (const expiresDays of [0, -1, '', 'never', false]) assert.equal((await make({ expiresDays })).status, 400, JSON.stringify(expiresDays));
   const exchange = await fetch(`${baseUrl}/api/share/${encodeURIComponent(share.token)}`);
   assert.equal(exchange.status, 200);
   const shareCookie = (exchange.headers.get('set-cookie') || '').split(';', 1)[0];
