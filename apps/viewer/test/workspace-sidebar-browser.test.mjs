@@ -71,6 +71,8 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
       await client.command('Input.dispatchKeyEvent', { type: 'keyUp', ...code });
     };
     await client.command('Page.enable');
+    // Reduced motion turns the rail's column transition off (workspace-sidebar.css), so widths are final.
+    await client.command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     await size(1280, 760);
     await load();
     assert.ok(shippedStylesheets.includes('/workspace-density.css'), 'workspace.html links the density sheet');
@@ -86,7 +88,9 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
 
     // Collapse: names and platform status remain available to assistive technology, with tooltips.
     await client.evaluate("document.querySelector('#nav-collapse').click()");
-    await delay(400); // let the column transition finish
+    assert.equal(await client.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches"), true, 'reduced motion emulated');
+    // Bounded wait for the collapsed rail width instead of a fixed delay.
+    for (const until = Date.now() + 3000; Date.now() < until && await client.evaluate("Math.round(document.querySelector('.workspace-nav').getBoundingClientRect().width)") !== 64;) await delay(25);
     const collapsed = await client.evaluate(`(() => {
       const links = [...document.querySelectorAll('.nav-link')], status = document.querySelector('#nav-health-label');
       return {
