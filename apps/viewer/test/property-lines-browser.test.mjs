@@ -153,7 +153,7 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
         inside: labels.every(l => { const r = l.getBoundingClientRect(), m = map.getContainer().getBoundingClientRect(); return r.left >= m.left && r.right <= m.right && r.top >= m.top && r.bottom <= m.bottom; }) }; })()`);
     let own = await owners();
     assert.equal(own.outlines, 1, 'touching parcels of one owner draw as one outline');
-    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC']);
+    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n≈ 6.7 ac'], 'the owner total under the name');
     assert.equal(own.inside, true);
     assert.deepEqual([own.merge, own.mergeShown], [true, true]);
     // Raw parcels on request, without fetching again; the choice is remembered.
@@ -162,10 +162,10 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     await waitFor('controller.state.outlines === 2', 'unmerged');
     own = await owners();
     assert.equal(own.merge, false);
-    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC'], 'the narrower parcel is too small for its name at this zoom');
+    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n≈ 4.0 ac'], 'the narrower parcel is too small for its name at this zoom');
     await client.evaluate('map.setZoom(18, {animate:false}); 0');
     await waitFor("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length === 2", 'one label per parcel when zoomed in');
-    assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC', 'Sample Farms LLC']);
+    assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC\n≈ 4.0 ac', 'Sample Farms LLC\n≈ 2.7 ac']);
     assert.equal(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length, beforeSplit, 'redrawn from the parcels already fetched');
     assert.equal(await client.evaluate("localStorage.getItem('ltds-viewer:property-lines-merge')"), '0');
     await client.evaluate("document.getElementById('property-lines-merge').click(); 0");

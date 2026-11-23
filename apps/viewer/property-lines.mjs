@@ -219,6 +219,20 @@ export function childTiles(tile, area = null) {
   return out;
 }
 
+// True when the loaded tiles (a set of z/x/y keys; a dense tile may be there as
+// its children) hold everything touching these bounds, with a metre to spare
+// so a neighbour sharing an edge on a tile boundary counts too.
+export function tilesCoverBounds(loaded, bounds, limits = PROPERTY_LINES_LIMITS) {
+  const area = expandLonLatBounds(bounds, 1);
+  if (!area || !loaded?.size) return false;
+  const z = limits.tileZoom;
+  const [x0, y0] = lonLatToTileXY(area.west, area.north, z), [x1, y1] = lonLatToTileXY(area.east, area.south, z);
+  if ((x1 - x0 + 1) * (y1 - y0 + 1) > limits.maxTiles) return false;
+  const covered = tile => loaded.has(tile.key) || (tile.z < limits.maxTileZoom && childTiles(tile, area).every(covered));
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) if (!covered(makeTile(z, x, y))) return false;
+  return true;
+}
+
 // Tiles for one map view: the visible area clipped to the coverage around the
 // model, nearest the view centre first, at most maxTiles (partial: true when
 // some were left out). Statuses: ok, zoom_in, out_of_view, unknown.
@@ -302,7 +316,7 @@ export function createParcelTileLoader({ fetchImpl, endpoint = '/api/v1/property
     controller?.abort();
     controller = own;
     const modelId = String(model() || ''), ownEpoch = epoch;
-    const queue = [...tiles], results = [];
+    const queue = [...tiles], results = [], loaded = [];
     let tooMany = 0, failed = 0, outside = 0, done = 0, forbidden = false, lastProgress = -Infinity;
     const live = () => token === generation && !own.signal.aborted;
     const progress = force => {
@@ -330,7 +344,8 @@ export function createParcelTileLoader({ fetchImpl, endpoint = '/api/v1/property
           if (tile.z < maxTileZoom) queue.unshift(...childTiles(tile, area)); else tooMany++;
         } else if (result.status === 'unavailable') failed++;
         else if (result.status === 'outside') outside++;
-        else if (result.status === 'ok') { results.push(result); progress(false); }
+        else if (result.status === 'ok') { loaded.push(tile.key); results.push(result); progress(false); }
+        else if (result.status === 'none') loaded.push(tile.key);
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
@@ -340,8 +355,8 @@ export function createParcelTileLoader({ fetchImpl, endpoint = '/api/v1/property
     const parcels = mergeTileParcels(results);
     // partial: tiles still too dense at the deepest split (zoom in to see
     // them); failed: tiles the server could not answer now (busy or down),
-    // worth asking again shortly.
-    if (parcels.length) return { status: 'ok', parcels, partial: tooMany > 0, failed: failed > 0 };
+    // worth asking again shortly. loaded: the tiles answered in full.
+    if (parcels.length) return { status: 'ok', parcels, partial: tooMany > 0, failed: failed > 0, loaded };
     if (tooMany) return { status: 'too_many', parcels: [] };
     if (failed) return { status: 'unavailable', parcels: [] };
     if (outside && outside === done) return { status: 'outside', parcels: [] };
