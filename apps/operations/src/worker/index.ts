@@ -164,7 +164,7 @@ import { incomingUploadsCapability } from "./incoming-policy";
 import { servePdfSourceFile, serveSourceFile } from "./source-file";
 import { directDeliveryUploadsCapability } from "./direct-upload-policy";
 import { isFrameableOperationsPdfRequest } from "./frame-policy";
-import { legacyViewerControllerCompatibilityAllowed, requestHostAllowed, staffShellResponse } from "./host-admission";
+import { legacyViewerControllerCompatibilityAllowed, requestHostAllowed } from "./host-admission";
 import { canonicalOperationsNavigationRedirect, isLegacyOperationsDropboxCallback } from "./canonical-navigation";
 import {
   dropboxImportCapability,
@@ -221,7 +221,7 @@ import { registerNativeDeliveryBindingRoutes } from "./native-delivery-binding-r
 import { searchClientShareRecipients } from "./client-share-recipients";
 import { searchNativeShareProjects } from "./native-delivery-bindings";
 import { dispatchOperationsPortalNativeOwnerRequest } from "./operations-portal-native-owner-routes";
-import { dispatchOperationsUiReleaseRequest } from "./ui-release-routes";
+import { dispatchOperationsUiReleaseRequest, operationsUiPresentationPath } from "./ui-release-routes";
 import { registerInvitationReviewRoutes } from "./invitation-review-routes";
 import { reconcileClientHubIndex } from "./client-hub-index";
 import {
@@ -320,7 +320,7 @@ import {
   projectAlphaDeliveryMachineRequest,
 } from "./project-alpha-delivery-intents";
 
-type Variables = { principal: StaffPrincipal; administrator: boolean };
+type Variables = { principal: StaffPrincipal; administrator: boolean; staffShell?: true };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 type RequestNotificationDb = {
@@ -473,9 +473,12 @@ app.use("*", async (c, next) => {
     : lockedSecurityHeaders(c, next));
   // Operations opens Viewer in a new tab and renews it over that exact opener.
   // Strict same-origin COOP severs the opener the moment the tab reaches Viewer,
-  // so only the staff app's HTML shell allows its own popups. Every other
-  // response, including public links and APIs, keeps strict same-origin COOP.
-  if (staffShellResponse(c.req.raw, c.env, c.res)) c.header("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+  // so the shell allows its own popups. The marker is set only by the route that
+  // served that shell, after host admission; anything else, including public
+  // links, APIs, assets and errors, keeps strict same-origin COOP.
+  if (c.get("staffShell") && c.res.status === 200
+    && c.res.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase() === "text/html")
+    c.header("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
 });
 app.use("*", async (c, next) => {
   const machine = viewerMachineEventRequest(c.req.method, c.req.path);
@@ -3858,6 +3861,7 @@ app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
 
 app.all("*", async c => {
   const presentation = await dispatchOperationsUiReleaseRequest(c.req.raw, c.env);
+  if (presentation && operationsUiPresentationPath(new URL(c.req.url).pathname)) c.set("staffShell", true);
   return presentation ?? c.notFound();
 });
 app.notFound((c) => c.json({ error: "Not found" }, 404));

@@ -291,33 +291,185 @@ test('the sign-in dialog closes itself and releases waiting uploads when access 
 });
 
 const workspace = fs.readFileSync(new URL('../workspace-projects.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-function guarded({ statuses, renew, expired = false, current = () => true }) {
-  const calls = [];
-  const context = vm.createContext({ DOMException, Date, calls,
-    workspaceRenewal: renew && { expiresAtMs: Date.now() + (expired ? -1 : 60_000), waitForRenewal: renew },
-    fetch: async (path, init) => { calls.push({ path, init }); return { status: statuses[calls.length - 1] }; },
-    responseError: (message, status) => Object.assign(new Error(message), { status }) });
-  vm.runInContext(`${workspace.slice(workspace.indexOf('async function guardedFetch('), workspace.indexOf('async function workspaceFetch('))}\nthis.run=guardedFetch;`, context);
-  const check = () => { if (!current()) throw Object.assign(new Error('changed'), { code: 'recovery_session_changed' }); };
-  return { calls, run: init => context.run('/poll', init, check) };
+const between = (from, to) => { const start = workspace.indexOf(from), end = workspace.indexOf(to, start); assert.ok(start >= 0 && end > start, from); return workspace.slice(start, end); };
+const line = start => { const found = workspace.split('\n').find(value => value.startsWith(start)); assert.ok(found, start); return found; };
+
+// The shipped guards, api(), folder loader, quiet task poll and installWorkspaceSession
+// (its real onSession/onResumed order) around the real WorkspaceSessionRenewal.
+function page({ expiresIn = 30 * MINUTE, server, renew = true, lifetime = 30 * MINUTE }) {
+  let clock = Date.now();
+  const requests = [], log = [], timers = [];
+  const envelope = { accessToken: TOKEN, controllerOrigin: PINNED, session: { id: SESSION, subject: 'ops:staff', permissions: ['viewer.projects.read'], expiresAt: new Date(clock + expiresIn).toISOString() } };
+  const fetchImpl = async (url, init = {}) => {
+    if (url.startsWith(PINNED)) {
+      if (!renew) throw new TypeError('Failed to fetch');
+      if (url.endsWith('/challenge')) return json(url, { protocolVersion: 1, challenge: CSRF, expiresAt: Math.floor(clock / 1000) + 120 });
+      return json(url, { protocolVersion: 1, requestId: ID, sessionId: SESSION, grant: GRANT, grantExpiresAt: new Date(clock + MINUTE).toISOString(), sessionTtlSeconds: 1800, redeemUrl: VIEWER + REDEEM }, 201);
+    }
+    if (url === REDEEM) return json(url, { ...envelope, session: { ...envelope.session, expiresAt: new Date(clock + lifetime).toISOString() } });
+    requests.push({ url, method: init.method, authorization: init.headers.Authorization });
+    return server({ url, init, count: requests.length, context, advance: ms => { clock += ms; } });
+  };
+  const windowRef = { location: { origin: VIEWER }, addEventListener() {}, removeEventListener() {} };
+  class TestDate extends Date { static now() { return clock; } }
+  const context = vm.createContext({
+    Date: TestDate, DOMException, queueMicrotask, JSON, Promise, Map, Set, Error, Object, Array, Number, crypto: { randomUUID: () => ID }, fetch: fetchImpl,
+    sessionStorage: { getItem: () => PINNED, setItem() {} }, TOKEN_KEY: 'token', OPS_ORIGIN_KEY: 'origin', LIVE_ATTEMPT_STATUSES: new Set(['running']),
+    state: { token: TOKEN, adminSession: null, section: 'dashboard', selectedProjectId: 'p', tasks: [{ id: 't', projectId: 'p', datasetId: 'd', latestAttempt: { id: 'a', status: 'running' } }], taskDetails: {}, expandedTaskId: 't', busy: false },
+    folderCache: new Map(), treeState: { projects: new Set(), folders: new Set() }, projectDataGeneration: 0, folderAuthorizationGeneration: 0, activeFolderMutation: null,
+    workspaceAuthorizationClearing: false, workspaceController: null, can: () => true, openProjectIds: () => ['p'], clearFolderUndo() {}, revealTreeFolder() {},
+    shell: { setAttribute() {}, removeAttribute() {} }, paintProjectTree: id => log.push(`painted ${id}`), toast: (message, bad) => log.push(`toast ${bad} ${message}`),
+    storageUsagePoll: { stop() {}, sync() {} }, scheduleOperationRefresh() {}, clearInterval() {}, clearTimeout() {}, setInterval: () => { log.push('poll restarted'); return 1; },
+    reviewSessionController: { setAuthenticatedSubject() {}, suspend: () => log.push('suspended') }, access: () => log.push('signed out'), renderNav() {},
+    workspaceRecovery: { wait: async () => {}, isPaused: () => false, resume: () => log.push('resumed'), pause: () => log.push('dialog') },
+    responseError: (message, status) => Object.assign(new Error(message), { status }), clientAccessDiagnostic: () => ({}),
+    validateWorkspaceSessionEnvelope: value => ({ session: value.session, controllerOrigin: value.controllerOrigin }),
+    clearWorkspaceAuthorization: reason => log.push(`cleared ${reason}`), beginWorkspaceReauthorization: () => log.push('dialog'),
+    WorkspaceSessionRenewal: class extends WorkspaceSessionRenewal {
+      constructor(options) {
+        super({ ...options, fetchImpl, windowRef, documentRef: { addEventListener() {}, removeEventListener() {} }, now: () => clock, randomUUID: () => ID, random: () => 0,
+          setTimer: (handler, delay) => { const timer = { handler, delay, cleared: false }; timers.push(timer); return timer; }, clearTimer: timer => { timer.cleared = true; } });
+      }
+    },
+  });
+  // The renderer's own rule for a project whose folders are not cached.
+  const loadOnPaint = line('  if(!folderCache.has(project.id)&&isProjectOpen(project.id))');
+  vm.runInContext(['let workspaceRenewal=null;', line('function isProjectOpen('), between('function invalidateFolderAuthorization(', '\nfunction folderRequestOptions('),
+    between('function repaintFolderAuthorization(', '\nasync function mutateFolder('), between('async function mutateFolder(', '\nfunction folderPath(').replace(/\/\/ Expands the saved path[\s\S]*$/, ''),
+    between('async function guardedFetch(', '\nasync function authenticatedDownload'), between('const taskDetailRefreshes=', '\nfunction releaseGcpImage('),
+    line('function installWorkspaceSession('), `function render(){const project={id:'p'};${loadOnPaint}}`,
+    'this.page={installWorkspaceSession,loadProjectFolders,refreshTaskDetails,mutateFolder,folderAuthorizationGuard,taskDetailRefreshes,renewal:()=>workspaceRenewal};'].join('\n'), context);
+  context.page.installWorkspaceSession(envelope);
+  return { context, page: context.page, requests, log, timers, advance: ms => { clock += ms; } };
 }
 
-test('a background poll that lands on expiry waits for silent renewal instead of asking for sign-in', async () => {
-  const poll = guarded({ statuses: [401, 200], renew: async () => true });
-  assert.equal((await poll.run({ method: 'GET' })).status, 200); assert.equal(poll.calls.length, 2, 'one retry');
-  const twice = guarded({ statuses: [401, 401], renew: async () => true });
-  assert.equal((await twice.run({ method: 'GET' })).status, 401); assert.equal(twice.calls.length, 2, 'never loops');
-  let waited = null;
-  const expired = guarded({ statuses: [200], expired: true, renew: async options => { waited = options; return true; } });
-  assert.equal((await expired.run({ method: 'GET' })).status, 200); assert.equal(waited.whileExpired, true);
-  const write = guarded({ statuses: [401], renew: async () => true });
-  await assert.rejects(write.run({ method: 'POST' }), { status: 409 }); assert.equal(write.calls.length, 1, 'writes are not replayed');
-  let same = true;
-  const changed = guarded({ statuses: [401], renew: async () => { same = false; return true; }, current: () => same });
-  await assert.rejects(changed.run({ method: 'GET' }), { code: 'recovery_session_changed' }); assert.equal(changed.calls.length, 1);
-  const denied = guarded({ statuses: [401], renew: async () => false });
-  assert.equal((await denied.run({ method: 'GET' })).status, 401);
-  assert.equal((await guarded({ statuses: [401] }).run({ method: 'GET' })).status, 401);
+test('a folder read discarded by a renewal is replaced by the repaint, with a fresh guard (real onSession order)', async () => {
+  for (const when of ['before-send', 'after-401']) {
+    const f = page({ server: ({ count, advance }) => {
+      if (when === 'after-401' && count === 1) { advance(31 * MINUTE); return json('/x', { error: 'authentication_required' }, 401); }
+      return json('/x', { folders: [{ id: 'folder', projectId: 'p' }] });
+    } });
+    const before = f.context.state.adminSession, guard = f.page.folderAuthorizationGuard('p');
+    if (when === 'before-send') f.advance(31 * MINUTE);
+    await f.page.loadProjectFolders('p'); await tick(40);
+    // The renewal kept the bearer and session ID, and still retired every older guard.
+    assert.equal(f.context.state.token, TOKEN); assert.equal(f.context.state.adminSession.id, SESSION); assert.notEqual(f.context.state.adminSession, before);
+    assert.equal(guard(), false, when);
+    assert.equal(f.requests.length, when === 'before-send' ? 1 : 2, 'the discarded read was not re-sent; only the repaint asked again');
+    const entry = f.context.folderCache.get('p');
+    assert.deepEqual(entry.folders.map(folder => folder.id), ['folder'], when); assert.equal(entry.error, null); assert.equal(entry.loading, false);
+    assert.ok(f.log.includes('painted p')); assert.ok(!f.log.some(item => /cleared|dialog|signed out|toast/.test(item)), f.log.join());
+    f.page.renewal().dispose();
+  }
+});
+
+test('a quiet task poll discarded by a renewal changes nothing and the next tick asks again', async () => {
+  let next = false, asked = 0;
+  const f = page({ server: ({ url, context, advance }) => {
+    if (url.endsWith('/folders')) return json(url, { folders: [] });
+    if (!next) { advance(31 * MINUTE); return json(url, { error: 'authentication_required' }, 401); }
+    if ((asked += 1) === 5) context.state.tasks = []; return json(url, {});
+  } });
+  const tasks = f.context.state.tasks;
+  await f.page.refreshTaskDetails('t', true); await tick(20);
+  assert.equal(f.context.state.tasks, tasks); assert.deepEqual(Object.keys(f.context.state.taskDetails), []);
+  assert.equal(f.page.taskDetailRefreshes.size, 0, 'not stuck as in progress');
+  assert.ok(f.log.includes('poll restarted'), 'the paused poll timer is running again');
+  next = true;
+  await f.page.refreshTaskDetails('t', true);
+  assert.equal(asked, 1 + 4, 'the whole poll ran again with its new guard'); assert.ok(!f.log.some(item => /cleared|dialog|signed out|toast/.test(item)), f.log.join());
+  f.page.renewal().dispose();
+});
+
+test('a guarded write is never sent twice: not sent across an expiry, not repeated after a 401, and never silent', async () => {
+  for (const when of ['before-send', 'after-401']) {
+    const f = page({ server: ({ init, advance }) => {
+      if (init.method === 'GET') return json('/x', { folders: [] });
+      advance(31 * MINUTE); return json('/x', { error: 'authentication_required' }, 401);
+    } });
+    if (when === 'before-send') f.advance(31 * MINUTE);
+    let succeeded = false;
+    await f.page.mutateFolder('p', '/api/v1/projects/p/folders', { method: 'POST', body: {}, headers: { 'Idempotency-Key': 'one' } }, 'Saved', f.page.folderAuthorizationGuard('p'), () => { succeeded = true; });
+    await tick(40);
+    assert.equal(f.requests.filter(item => item.method === 'POST').length, when === 'before-send' ? 0 : 1, when);
+    assert.equal(succeeded, false); assert.equal(f.context.state.busy, false);
+    assert.deepEqual(f.log.filter(item => item.startsWith('toast')), ['toast true Access was renewed before that change was saved. Try it again.']);
+    f.page.renewal().dispose();
+  }
+});
+
+test('a server that keeps answering 401 after a renewal is handled once, never renewed in a loop', async () => {
+  const f = page({ server: () => json('/x', { error: 'authentication_required' }, 401) });
+  await f.page.loadProjectFolders('p'); await tick(80);
+  assert.equal(f.requests.length, 2, 'the original read and the one repaint');
+  assert.deepEqual(f.log.filter(item => item.startsWith('cleared')), ['cleared undefined']);
+  f.page.renewal().dispose();
+});
+
+test('a 401 that renewal cannot fix still reaches the existing handling once', async () => {
+  const f = page({ renew: false, server: () => json('/x', { error: 'authentication_required' }, 401) });
+  const done = f.page.loadProjectFolders('p'); await tick(20);
+  f.timers.findLast(timer => timer.delay === 25_000 && !timer.cleared).handler();
+  await done;
+  assert.equal(f.requests.length, 1); assert.deepEqual(f.log.filter(item => item.startsWith('cleared')), ['cleared undefined']);
+  f.page.renewal().dispose();
+});
+
+// Every answer either endpoint can give, and what the attempt as a whole means.
+const ANSWERS = {
+  unreadable: () => { throw new TypeError('Failed to fetch'); },
+  hang: (_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))),
+  html: url => { const response = new Response('<p>sign in</p>', { status: 200, headers: { 'Content-Type': 'text/html' } }); Object.defineProperty(response, 'url', { value: url }); return response; },
+  outage503: url => json(url, { error: 'Workspace renewal is temporarily unavailable' }, 503),
+  limited429: url => json(url, { error: 'Workspace renewal rate limit exceeded' }, 429),
+  disabled404: url => json(url, { error: 'Not found' }, 404),
+  rejected400: url => json(url, { error: 'Invalid renewal request' }, 400),
+  csrf403: url => json(url, { error: 'Renewal CSRF challenge is invalid or expired' }, 403),
+  signedOut401: url => json(url, { error: 'Cloudflare Access authentication required' }, 401),
+  denied403: url => json(url, { error: 'Global viewer.view permission required' }, 403),
+};
+const OUTAGES = ['outage503', 'limited429'], SILENT = ['unreadable', 'hang', 'html'];
+const expected = (alternate, pinned) => pinned === 'signedOut401' ? 'signed-out' : pinned === 'denied403' ? 'revoked'
+  : alternate === 'denied403' && SILENT.includes(pinned) ? 'revoked'
+    : OUTAGES.includes(alternate) || OUTAGES.includes(pinned) ? 'outage' : 'unknown';
+
+for (const alternate of Object.keys(ANSWERS)) test(`every pinned answer after a same-site "${alternate}" keeps the whole attempt's meaning`, async () => {
+  for (const pinned of Object.keys(ANSWERS)) {
+    const label = `${alternate} + ${pinned}`, outcome = expected(alternate, pinned);
+    const context = harness({ respond: ({ url, init }) => url.startsWith(SAME_SITE) ? ANSWERS[alternate](url, init) : url.startsWith(PINNED) ? ANSWERS[pinned](url, init) : undefined });
+    // While the session is live nothing is shown unless Operations refused this identity.
+    await context.advance(30 * MINUTE - 1);
+    if (outcome === 'signed-out' || outcome === 'revoked') { assert.deepEqual(context.events, [['expired', outcome]], label); continue; }
+    assert.deepEqual(context.names(), [], label);
+    // After real expiry Viewer itself answers 401: only that plus no outage asks for sign-in.
+    await context.advance(10 * MINUTE);
+    assert.deepEqual(context.names(), outcome === 'outage' ? ['paused'] : ['paused', 'sign-in'], label);
+    assert.ok(!urls(context).includes(REDEEM), label);
+    context.renewal.dispose();
+  }
+});
+
+test('without a same-site host every pinned answer keeps its own meaning', async () => {
+  for (const pinned of Object.keys(ANSWERS)) {
+    const outcome = expected(null, pinned);
+    const context = harness({ renewalOrigin: null, respond: ({ url, init }) => url.startsWith('https:') ? ANSWERS[pinned](url, init) : undefined });
+    await context.advance(40 * MINUTE);
+    assert.deepEqual(context.events.map(event => event[0] === 'expired' ? event[1] : event[0]),
+      outcome === 'outage' ? ['paused'] : outcome === 'unknown' ? ['paused', 'sign-in'] : [outcome], pinned);
+    context.renewal.dispose();
+  }
+});
+
+test('an outage that ends becomes an ordinary renewal, and one that turns into a refusal is not hidden by it', async () => {
+  let mode = 'outage503';
+  const context = harness({ respond: ({ url, init }) => url.startsWith(SAME_SITE) ? ANSWERS[mode]?.(url, init) : url.startsWith(PINNED) ? ANSWERS.unreadable(url, init) : undefined });
+  await context.advance(40 * MINUTE);
+  assert.deepEqual(context.names(), ['paused']);
+  mode = 'signedOut401'; await context.advance(10 * MINUTE);
+  assert.deepEqual(context.names(), ['paused', 'sign-in']);
+  mode = null; await context.advance(2 * MINUTE);
+  assert.deepEqual(context.names().slice(-2), ['session', 'resumed']);
+  context.renewal.dispose();
 });
 
 test('the page wires sign-in to the existing dialog and silent success to closing it', () => {

@@ -1,7 +1,10 @@
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import { fetchUiReleaseAsset, fetchUiReleaseShell } from "../../../../packages/shared/src/ui-release-assets";
 import { findUiReleaseManifest, uiReleaseForRequest } from "../../../../packages/shared/src/ui-release-catalog";
+import { operationsUiPresentationPath } from "./operations-presentation-paths";
 import type { Env } from "./types";
+
+export { operationsUiPresentationPath };
 
 type UiReleaseEnv = Pick<Env, "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL"
   | "ASSETS" | "UI_RELEASE_ASSETS" | "UI_ACTIVE_RELEASE">;
@@ -22,16 +25,6 @@ function htmlNavigation(request: Request): boolean {
       const [mime, ...parameters] = entry.trim().toLowerCase().split(";");
       return mime?.trim() === "text/html" && !parameters.some(value => /^\s*q\s*=\s*0(?:\.0*)?\s*$/.test(value));
     });
-}
-
-/** Finite SPA surfaces only. API, legacy assets, Incoming and staging-owner
- * namespaces are never inferred to be presentation routes from Accept alone. */
-export function operationsUiPresentationPath(pathname: string): boolean {
-  if (pathname === "/") return true;
-  if (["/dashboard", "/notifications", "/airspace", "/team", "/administration", "/configurations", "/intel", "/account", "/fleet",
-    "/administration/client-onboarding", "/administration/client-portal/recipients"].includes(pathname)) return true;
-  return ["/operations", "/clients", "/viewer", "/delivery", "/jobs", "/projects", "/tasks", "/sops"]
-    .some(base => pathname === base || pathname.startsWith(`${base}/`));
 }
 
 /** Only called after presentation admission, including native-owner flags.

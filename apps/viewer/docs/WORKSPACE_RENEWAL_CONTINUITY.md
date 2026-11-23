@@ -37,11 +37,13 @@ Order of silent attempts now:
 
 1. An approved Operations host on Viewer's own site, when `OPS_CONTROLLER_ORIGINS` has one. Viewer returns it as `renewalOrigin`. Operations already admits only the renewal routes there. The request names the session's pinned controller; Operations accepts only its own request origin or its one canonical origin, and Viewer still requires the grant's controller, subject and target session to match.
 2. The pinned controller, exactly as before.
-3. The opener, now preserved because the Operations HTML shell sends `same-origin-allow-popups`.
+3. The opener, now preserved because the Operations HTML shell sends `same-origin-allow-popups`. Only the route that serves that shell sets it.
 
 Renewal runs about 60% of the way through a session (12 minutes before a 30-minute expiry, with jitter), and on focus, visibility, pageshow and online once due. A duplicated tab shares its session and renews once (Web Locks); the others re-read their own session from Viewer.
 
-The sign-in dialog appears only when Operations itself answers that the sign-in ended, or when, after real expiry, two attempts fail unreadably and Viewer confirms the session is over. Readable outages and offline periods never prompt. Silent attempts continue behind the dialog and close it when one succeeds.
+The sign-in dialog appears only when Operations itself answers that the sign-in ended, or when, after real expiry, two attempts fail unreadably and Viewer confirms the session is over. An attempt has one outcome across its endpoints: the pinned controller's refusal decides; the same-site host's 403 decides only when the pinned controller gave no readable answer, and its 401 never does; otherwise a readable outage (5xx, 408, 409, 425, 429) from either endpoint is an outage. Outages and offline periods never prompt. Silent attempts continue behind the dialog and close it when one succeeds.
+
+Guarded requests (folders, quiet task polls, folder and task writes) belong to one exact session. Every renewal replaces that session and its folder authorization, so a guarded request that meets an expiry waits for renewal and is then discarded, never re-sent. The repaint after a renewal reloads folders and the polling timers ask again with a fresh guard; a discarded write tells the user it was not saved. A 401 within 30 seconds of a renewal is not treated as an expiry.
 
 Nothing extends access: every renewal is a fresh one-use grant issued after Operations re-checks Access, staff binding and permissions, capped at 30 minutes and at the Access expiry. Sign-out, revocation and lost permission therefore end the workspace within 30 minutes, as before.
 

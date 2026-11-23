@@ -72,6 +72,28 @@ describe("Operations additive UI through the actual Worker entrypoint", () => {
     expect(f.assets).not.toHaveBeenCalled(); expect(f.fetchRelease).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, release.id])("keeps opener access for the served shell alone, bound to the route that served it: %s", async selector => {
+    const coop = async (path: string, init: RequestInit = {}, requestOrigin = origin, change: (env: Env) => void = () => {}) => {
+      const f = fixture(); f.env.UI_ACTIVE_RELEASE = selector; change(f.env);
+      return (await f.request(path, init, requestOrigin)).headers.get("Cross-Origin-Opener-Policy");
+    };
+    for (const path of ["/", "/dashboard", "/viewer", "/viewer/models", "/operations/processing", "/clients/one"])
+      for (const method of ["GET", "HEAD"]) expect(await coop(path, { method })).toBe("same-origin-allow-popups");
+    // Owner pages serve the same HTML from their own dispatcher, outside this middleware: unchanged, never granted.
+    for (const path of ["/administration/client-portal/operations-recipients", "/administration/client-portal/operations-delivery-authority"])
+      expect(await coop(path), path).toBeNull();
+    // Public links, APIs, errors, other hosts and registered assets stay strict.
+    for (const path of ["/r/public-link", "/api/session", "/api/unknown", "/unknown", "/health", `${release.prefix}/assets/main.js`, `${release.prefix}/index.html`])
+      expect(await coop(path), path).toBe("same-origin");
+    expect(await coop("/viewer", { method: "POST" })).toBe("same-origin");
+    expect(await coop("/viewer", { headers: { Accept: "application/json" } })).toBe("same-origin");
+    expect(await coop("/viewer", {}, "https://ops.not-admitted.example.test")).toBe("same-origin");
+    expect(await coop("/viewer", {}, origin, env => { env.UI_ACTIVE_RELEASE = "unknown"; })).toBe("same-origin");
+    for (const answer of [new Response("no", { status: 503, headers: { "Content-Type": "text/html" } }),
+      new Response("{}", { headers: { "Content-Type": "application/json" } })])
+      expect(await coop("/viewer", {}, origin, env => { env.UI_ACTIVE_RELEASE = ""; (env as { ASSETS: unknown }).ASSETS = { fetch: async () => answer.clone() }; })).toBe("same-origin");
+  });
+
   it.each([undefined, ""])("retains legacy HTML for absent/empty selector %s", async selector => {
     const f = fixture(); f.env.UI_ACTIVE_RELEASE = selector;
     for (const path of ["/", "/dashboard", "/viewer/session/association/model", "/operations/projects"]) {

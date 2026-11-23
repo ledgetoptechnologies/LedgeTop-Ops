@@ -320,24 +320,36 @@ function clientAccessDiagnostic(error){
 function validOpsOrigin(value){try{const parsed=new URL(value);return parsed.protocol==='https:'&&parsed.origin===value&&parsed.pathname==='/'&&!parsed.search&&!parsed.hash?value:null}catch{return null}}
 function beginWorkspaceReauthorization(){if(!state.adminSession||!state.token||!validOpsOrigin(sessionStorage.getItem(OPS_ORIGIN_KEY)))return false;void workspaceRecovery.pause();return true}
 function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidateFolderAuthorization();const expired=reason==='expired'||reason==='signed-out'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
-// Guarded reads and writes belong to one exact session, so they are not queued
-// across a sign-in like workspaceFetch. They still wait for silent renewal: an
-// ordinary poll landing on expiry must not be what asks someone to sign in.
+// Guarded requests belong to one exact session, and every renewal replaces that
+// session and its folder authorization, so none of them is ever re-sent here. They
+// still wait for silent renewal (a poll landing on expiry must not be what asks
+// someone to sign in) and are then discarded: the repaint that follows a renewal
+// reloads folders, and the polling timers ask again with a fresh guard. A 401 means
+// a write was not applied; its caller is already stale, so say so here.
 async function guardedFetch(path,init,assertRequestCurrent){
   if(!workspaceRenewal)return fetch(path,init);
+  const session=state.adminSession,discard=()=>{
+    if(init.method!=='GET')toast('Access was renewed before that change was saved. Try it again.',true);
+    throw Object.assign(Error('Access was renewed while this request was running.'),{code:'recovery_session_changed'});
+  };
   if(workspaceRenewal.expiresAtMs<=Date.now()){
-    await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
+    const renewed=await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
     if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
+    if(renewed)discard();
     assertRequestCurrent();
   }
   const response=await fetch(path,init);
   if(response.status!==401||!workspaceRenewal)return response;
+  if(state.adminSession&&state.adminSession!==session)discard();
+  assertRequestCurrent();
+  // Bounded: a 401 for a session that was only just renewed is not an expiry, and
+  // renewing again would loop with the repaint that asked.
+  if(workspaceRenewal.recentlyRenewed())return response;
   const renewed=await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
   if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
+  if(renewed)discard();
   assertRequestCurrent();
-  if(!renewed)return response;
-  if(init.method!=='GET')throw responseError('Access changed while this request was running. Please retry.',409);
-  return fetch(path,init);
+  return response;
 }
 async function workspaceFetch(path,init={}){
   await workspaceRecovery.wait(init.signal);
@@ -1439,6 +1451,9 @@ function moveTaskFolderModal(taskId,{projectId:initialProjectId=null}={}){
       pickerFolders.set(projectId,response.folders.filter(folder=>folder.projectId===projectId));
       folderSelect.innerHTML=folderPickerOptions(pickerFolders.get(projectId),null);folderSelect.disabled=false;submit.disabled=false;
     }catch(error){
+      if(request===folderRequest&&form.isConnected&&error.code==='recovery_session_changed'){
+        status.hidden=false;status.textContent='Access was renewed while the folders were loading. Close this and choose Move again.';return;
+      }
       if(request!==folderRequest||!current())return;
       folderSelect.innerHTML='<option value="">Project root</option>';folderSelect.disabled=false;submit.disabled=false;
       status.hidden=false;status.textContent=`Folders could not be loaded (${error.message}). You can still move the task to the project root.`;

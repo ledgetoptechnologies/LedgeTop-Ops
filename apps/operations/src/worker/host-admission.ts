@@ -68,20 +68,6 @@ export function legacyViewerControllerCompatibilityAllowed(
   } catch { return false; }
 }
 
-/** The authenticated staff app's HTML document on an admitted Operations host:
- * never an API, a public link, a capability path, another host or an error. */
-export function staffShellResponse(
-  request: Pick<Request, "url" | "method">,
-  env: Pick<Env, "ENVIRONMENT" | "EXPECTED_HOST" | "OPERATIONS_ORIGINS">,
-  response: Response,
-): boolean {
-  if (request.method !== "GET" && request.method !== "HEAD") return false;
-  if (response.status !== 200 || response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase() !== "text/html") return false;
-  const { pathname } = new URL(request.url);
-  if (/^\/(?:api|r|health|assets|_ui)(?:\/|$)/u.test(pathname)) return false;
-  return requestHostAllowed(request.url, env);
-}
-
 /** Returns the exact admitted Operations origin for browser API and CSRF checks.
  * Fixed Ops aliases are admitted only for known Ops deployments; a custom
  * deployment retains its configured primary origin without gaining aliases. */

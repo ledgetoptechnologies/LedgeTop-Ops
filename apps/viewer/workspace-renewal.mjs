@@ -52,6 +52,25 @@ function sessionEnvelope(value, expected = {}) {
   return { session, controllerOrigin: value.controllerOrigin, renewalOrigin, accessToken: value.accessToken, expiresAtMs };
 }
 
+/**
+ * One outcome for a whole attempt, from what each endpoint said. `alternate` is
+ * the same-site host's error (null when there is none) and `pinned` the session's
+ * own controller's (null when it never answered).
+ *
+ *  - The pinned controller's authoritative refusal always decides.
+ *  - The same-site host's 403 is authoritative for this account, but decides only
+ *    when the pinned controller gave no readable answer. Its 401 never does: a
+ *    missing cookie on that host is not a sign-out.
+ *  - Otherwise a readable outage from either endpoint is an outage, whatever the
+ *    other failed with. Anything else is unknown.
+ */
+export function aggregateRenewalFailure(alternate, pinned) {
+  const refused = error => error?.renewalAuthenticationRequired === true ? error.renewalStatus : null;
+  if (refused(pinned)) return refused(pinned) === 401 ? 'signed-out' : 'revoked';
+  if (refused(alternate) === 403 && !Number.isInteger(pinned?.renewalStatus)) return 'revoked';
+  return alternate?.renewalOutage === true || pinned?.renewalOutage === true ? 'outage' : 'unknown';
+}
+
 export class WorkspaceSessionRenewal {
   constructor({
     controllerWindow,
@@ -110,7 +129,7 @@ export class WorkspaceSessionRenewal {
     this.retryAttempt = 0;
     this.lastRenewedAtMs = -Infinity;
     this.expiredFailures = 0;
-    this.lastFailureReadable = false;
+    this.lastAttemptOutage = false;
     this.signInRequested = false;
     this.adopting = null;
     this.channel = null;
@@ -170,9 +189,11 @@ export class WorkspaceSessionRenewal {
 
   hasTransport(){return Boolean(this.controllerWindow&&!this.controllerWindow.closed||this.viewerOrigin);}
 
+  recentlyRenewed(){return this.now()-this.lastRenewedAtMs<MINIMUM_RENEWAL_INTERVAL_MS;}
+
   requestIfDue(reason) {
     const remaining = this.expiresAtMs - this.now();
-    if (remaining <= WORKSPACE_RENEWAL_LEAD_MS && (remaining <= 0 || this.now() - this.lastRenewedAtMs >= MINIMUM_RENEWAL_INTERVAL_MS)) {
+    if (remaining <= WORKSPACE_RENEWAL_LEAD_MS && (remaining <= 0 || !this.recentlyRenewed())) {
       // A later focus/visibility/pageshow is a new recovery opportunity after
       // a bounded transient retry run was exhausted while the tab slept.
       if (!this.pendingRequestId && this.retryAttempt >= RETRY_DELAYS_MS.length) this.retryAttempt = 0;
@@ -221,6 +242,7 @@ export class WorkspaceSessionRenewal {
     this.retryTimer = null;
     const requestId = this.randomUUID();
     this.pendingRequestId = requestId;
+    this.lastAttemptOutage = false;
     this.retryAttempt += 1;
     if(this.viewerOrigin&&(this.preferBackground||!this.controllerWindow||this.controllerWindow.closed)){
       void this.requestBackground(requestId);
@@ -253,15 +275,18 @@ export class WorkspaceSessionRenewal {
   }
 
   async requestBackground(requestId){
-    const attempt={requestId,abortController:new AbortController()};this.transportAttempt=attempt;
+    // `alternate` is the same-site answer, kept for the whole attempt so a later
+    // unreadable or hung pinned controller cannot erase it.
+    const attempt={requestId,abortController:new AbortController(),alternate:null};this.transportAttempt=attempt;
     this.responseTimer=this.setTimer(()=>{
       if(this.disposed||this.transportAttempt!==attempt)return;
-      attempt.abortController.abort();this.transportAttempt=null;this.lastFailureReadable=false;this.finishRequest(requestId);this.fallbackToOpener(requestId);
+      attempt.abortController.abort();this.transportAttempt=null;this.finishRequest(requestId);
+      this.settleFailure(aggregateRenewalFailure(attempt.alternate,null),requestId);
     },RESPONSE_TIMEOUT_MS);
     const startedWith=this.expiresAtMs;
     const current=()=>!this.disposed&&this.transportAttempt===attempt&&this.pendingRequestId===requestId;
     const renew=async()=>{
-      const grant=await this.requestGrant(requestId,attempt.abortController.signal);
+      const grant=await this.requestGrant(requestId,attempt);
       if(!current())return;
       this.transportAttempt=null;
       await this.redeemGrant(grant,requestId,'cors');
@@ -283,36 +308,34 @@ export class WorkspaceSessionRenewal {
     }catch(error){
       if(this.disposed||this.transportAttempt!==attempt)return;
       this.transportAttempt=null;this.finishRequest(requestId);
-      // Operations answered for this exact identity: 401 means its sign-in ended
-      // and 403 means this account may no longer use the workspace.
-      if(error?.renewalAuthenticationRequired===true){this.expire(error.renewalStatus===401?'signed-out':'revoked');return;}
-      this.lastFailureReadable=Number.isInteger(error?.renewalStatus);
-      // Browser privacy restrictions or a temporary network failure can block
-      // CORS while the original Ops tab still has a valid authenticated session.
-      // Try that existing channel silently in the same bounded attempt.
-      this.fallbackToOpener(requestId);
+      this.settleFailure(aggregateRenewalFailure(attempt.alternate,error),requestId);
     }
   }
 
+  settleFailure(outcome,requestId){
+    // Operations answered for this exact identity: 401 means its sign-in ended
+    // and 403 means this account may no longer use the workspace.
+    if(outcome==='signed-out'||outcome==='revoked'){this.expire(outcome);return;}
+    this.lastAttemptOutage=outcome==='outage';
+    // Browser privacy restrictions or a temporary network failure can block
+    // CORS while the original Ops tab still has a valid authenticated session.
+    // Try that existing channel silently in the same bounded attempt.
+    this.fallbackToOpener(requestId);
+  }
+
   // The same-site host comes first: its Access cookie is first-party to Viewer,
-  // so SameSite rules and third-party cookie blocking do not apply. It is only a
-  // route. A refusal there ends the session only when the pinned controller
-  // cannot be reached to say otherwise.
-  async requestGrant(requestId,signal){
+  // so SameSite rules and third-party cookie blocking do not apply.
+  async requestGrant(requestId,attempt){
+    const signal=attempt.abortController.signal;
     const request=(endpointOrigin,requestSignal)=>requestWorkspaceRenewalGrant({controllerOrigin:this.controllerOrigin,endpointOrigin,viewerOrigin:this.viewerOrigin,subject:this.session.subject,sessionId:this.session.id,requestId,signal:requestSignal,fetchImpl:this.fetchImpl,now:this.now});
     if(!this.renewalOrigin)return request(this.controllerOrigin,signal);
     const alternate=new AbortController(),abort=()=>alternate.abort();
     signal.addEventListener('abort',abort,{once:true});
     const timer=this.setTimer(abort,ALTERNATE_ENDPOINT_TIMEOUT_MS);
-    let refused=null;
     try{return await request(this.renewalOrigin,alternate.signal);}
-    catch(error){if(signal.aborted)throw error;refused=error;}
+    catch(error){if(signal.aborted)throw error;attempt.alternate=error;}
     finally{this.clearTimer(timer);signal.removeEventListener('abort',abort);}
-    try{return await request(this.controllerOrigin,signal);}
-    catch(error){
-      if(!Number.isInteger(error?.renewalStatus)&&refused?.renewalAuthenticationRequired===true&&refused.renewalStatus===403)throw refused;
-      throw error;
-    }
+    return request(this.controllerOrigin,signal);
   }
 
   openChannel(){
@@ -379,7 +402,7 @@ export class WorkspaceSessionRenewal {
   scheduleRetry() {
     if (this.disposed) return;
     if (this.expiresAtMs <= this.now()) {
-      this.expiredFailures = this.lastFailureReadable ? 0 : this.expiredFailures + 1;
+      this.expiredFailures = this.lastAttemptOutage ? 0 : this.expiredFailures + 1;
       if (this.expiredFailures >= EXPIRED_FAILURES_BEFORE_SIGN_IN) void this.confirmSignInRequired();
     }
     if (this.retryAttempt >= RETRY_DELAYS_MS.length) {
@@ -402,7 +425,7 @@ export class WorkspaceSessionRenewal {
   }
 
   async redeemGrant(grant,requestId,transport){
-    this.lastFailureReadable=true; // Operations just authorized this identity.
+    this.lastAttemptOutage=true; // Operations just authorized this identity; only Viewer can fail now.
     if (this.responseTimer) this.clearTimer(this.responseTimer);
     const attempt = { requestId, abortController: new AbortController() };
     this.redemptionAttempt = attempt;
@@ -471,7 +494,7 @@ export class WorkspaceSessionRenewal {
     this.retryAttempt = 0;
     this.lastRenewedAtMs = this.now();
     this.expiredFailures = 0;
-    this.lastFailureReadable = false;
+    this.lastAttemptOutage = false;
     this.signInRequested = false;
     if (this.retryTimer) this.clearTimer(this.retryTimer);
     this.retryTimer = null;

@@ -6,7 +6,11 @@ export function exactRenewalOrigin(value){try{const url=new URL(value);return ur
 // `renewalStatus` is set only when Operations itself answered with readable JSON.
 // A blocked cookie, an Access sign-in redirect and an outage all reject the fetch
 // and stay indistinguishable here, so they never carry one.
-const failure=(terminal=false,status=null)=>Object.assign(new Error('Workspace renewal transport unavailable'),{renewalAuthenticationRequired:terminal,renewalStatus:status});
+// `renewalOutage` is a readable "not now"; every other readable answer is a
+// refusal of this route, which is no evidence that Operations is down.
+const OUTAGE=new Set([408,409,425,429]);
+const failure=(terminal=false,status=null)=>Object.assign(new Error('Workspace renewal transport unavailable'),{renewalAuthenticationRequired:terminal,renewalStatus:status,
+  renewalOutage:!terminal&&Number.isInteger(status)&&(status>=500||OUTAGE.has(status))});
 const terminalErrors=new Map([
   [401,new Set(['Cloudflare Access authentication required','Invalid Cloudflare Access authentication','A current human Cloudflare Access identity is required','Operations authorization is too close to expiry to renew'])],
   [403,new Set(['This Operations staff account is not bound to the current Access identity','Renewal subject does not match the authenticated Operations identity','Global viewer.view permission required'])],

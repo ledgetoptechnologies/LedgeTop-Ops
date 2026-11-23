@@ -3,6 +3,7 @@ import { access, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { operationsUiPresentationPath } from "../src/worker/operations-presentation-paths.ts";
 
 const root = resolve("dist/client");
 const port = Number(process.env.PLAYWRIGHT_PORT || 4174);
@@ -37,6 +38,9 @@ export function createBrowserFixtureServer() {
   }
   response.writeHead(200, {
     "Cache-Control": "no-store",
+    // The Worker's rule: only the shell its presentation route serves keeps its popups.
+    "Cross-Origin-Opener-Policy": file === resolve(root, "index.html") && operationsUiPresentationPath(url.pathname)
+      ? "same-origin-allow-popups" : "same-origin",
     "Content-Type": contentTypes.get(extname(file)) ?? "application/octet-stream",
     "Content-Security-Policy": "default-src 'self'; img-src 'self' https://ledgetopdroneservices.com https://*.mapbox.com https://server.arcgisonline.com data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://*.r2.cloudflarestorage.com https://api.mapbox.com https://events.mapbox.com https://viewer.ledgetopdroneservices.com; frame-src https://viewer.ledgetopdroneservices.com; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   });
