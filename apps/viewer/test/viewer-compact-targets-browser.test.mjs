@@ -21,8 +21,16 @@ const binary = () => [process.env.CHROME_PATH, process.env.EDGE_PATH, 'C:/Progra
 
 const indexHtml = readFileSync(path.join(root, 'index.html'), 'utf8');
 const modelCss = indexHtml.match(/<style>([\s\S]*?)<\/style>/)[1];
+// measurement-workspace.css is imported by a module, so the bundle links it after the inline style.
+const measurementCss = readFileSync(path.join(root, 'measurement-workspace.css'), 'utf8');
 const modelMarkup = indexHtml.match(/<div id="app">[\s\S]*?<div id="viewer-wrap">/)[0] + '</div></div></div>';
-const modelPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${modelCss}</style>${modelMarkup}<script>document.querySelector('#panel-property-lines').hidden=false;</script>`;
+const modelPageWith = css => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style><style>${measurementCss}</style>${modelMarkup}<script>document.querySelector('#panel-property-lines').hidden=false;</script>`;
+const modelPage = modelPageWith(modelCss);
+// Probe: the compact tool grid gap rule must be the one in effect on every tool grid,
+// the measurement tools included, so changing it must move them all.
+const gapRule = '.tool-grid { gap: 6px; }';
+assert.ok(modelCss.includes(gapRule), 'index.html keeps the compact tool grid gap rule');
+const gapProbePage = modelPageWith(modelCss.replace(gapRule, '.tool-grid { gap: 5px; }'));
 
 const workspaceHtml = readFileSync(path.join(root, 'workspace.html'), 'utf8');
 const workspaceSheets = [...workspaceHtml.matchAll(/<link rel="stylesheet" href="\/([a-z-]+\.css)">/g)].map(match => match[1]);
@@ -30,7 +38,7 @@ const workspaceSheets = [...workspaceHtml.matchAll(/<link rel="stylesheet" href=
 const workspaceCss = [...workspaceSheets, 'workspace-task-workflow.css'].map(file => readFileSync(path.join(root, file), 'utf8')).join('\n');
 const workspacePage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${workspaceCss}</style>
 <div id="workspace" class="workspace-shell"><aside class="workspace-nav"><nav><div class="nav-group"><button class="nav-link active" data-t="nav-link"><span class="nav-label">Dashboard</span></button></div></nav><button class="nav-collapse" data-t="nav-collapse"><span class="nav-label">Collapse sidebar</span></button></aside>
-<main class="workspace-main"><header class="workspace-header"><button class="icon-button" data-t="nav-toggle">&#9776;</button><div><h1>Dashboard</h1></div><div class="workspace-actions"><button class="secondary-button" data-t="secondary-button">Refresh</button><button class="primary-button" data-t="primary-button">New project</button></div></header>
+<main class="workspace-main"><header class="workspace-header"><button class="icon-button" data-t="nav-toggle">&#9776;</button><div><h1>Dashboard</h1></div><div class="workspace-actions"><button class="secondary-button background-work-indicator" data-t="background-button"><span aria-hidden="true">&#8635;</span><span>Background</span><strong>0</strong></button><button class="secondary-button" data-t="secondary-button">Refresh</button><button class="primary-button" data-t="primary-button">New project</button></div></header>
 <section id="workspace-content">
 <div class="project-search"><input data-t="project-search" placeholder="Search projects"></div>
 <div class="project-list"><div class="project-row"><button class="project-open" data-t="project-open"><span class="project-name"><strong>Road survey</strong></span></button></div></div>
@@ -45,7 +53,7 @@ const workspacePage = `<!doctype html><meta charset="utf-8"><meta name="viewport
 
 function serve(request, response) {
   const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
-  const body = pathname === '/model' ? modelPage : pathname === '/workspace' ? workspacePage : null;
+  const body = pathname === '/model' ? modelPage : pathname === '/model-gap-probe' ? gapProbePage : pathname === '/workspace' ? workspacePage : null;
   if (!body) { response.writeHead(404).end(); return; }
   response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(body);
 }
@@ -82,6 +90,8 @@ test('compact Viewer targets are 32px on a desktop fine pointer and 44px on phon
     };
     const measure = selectors => evaluate(`(${JSON.stringify(selectors)}).flatMap(selector=>[...document.querySelectorAll(selector)].filter(element=>element.getClientRects().length).map(element=>{const r=element.getBoundingClientRect();return {target:element.dataset.t||element.id||selector,width:r.width,height:r.height};}))`);
 
+    const toolGridGaps = `[...document.querySelectorAll('.tool-grid')].filter(grid=>grid.getClientRects().length).map(grid=>({panel:grid.closest('.panel')?.id,gap:getComputedStyle(grid).gap}))`;
+
     for (const mode of modes) await t.test(`${mode.name}: model viewer controls`, async () => {
       await open(mode, 'model');
       const sizes = await measure(modelTargets);
@@ -91,18 +101,30 @@ test('compact Viewer targets are 32px on a desktop fine pointer and 44px on phon
       const header = await evaluate(`(()=>{const h=document.querySelector('#topbar').getBoundingClientRect(),n=document.querySelector('#view-tabs').getBoundingClientRect();return {height:h.height,bottom:h.bottom,tabsBottom:n.bottom,tabsTop:n.top,top:h.top};})()`);
       assert.ok(header.tabsTop >= header.top && header.tabsBottom <= header.bottom, `${mode.name}: mode tabs fit inside the top bar ${JSON.stringify(header)}`);
       if (mode.width > 1024) assert.equal(header.height, mode.touch ? 60 : 52, `${mode.name}: top bar height`);
+      const gaps = await evaluate(toolGridGaps);
+      assert.ok(gaps.some(grid => grid.panel === 'panel-measure'), JSON.stringify(gaps));
+      for (const grid of gaps) assert.equal(grid.gap, '6px', `${mode.name}: ${grid.panel} tool grid gap`);
+    });
+
+    await t.test('the compact tool grid gap rule sets every tool grid, measurement tools included', async () => {
+      await open(modes[0], 'model-gap-probe');
+      const gaps = await evaluate(toolGridGaps);
+      assert.ok(gaps.length >= 4, JSON.stringify(gaps));
+      for (const grid of gaps) assert.equal(grid.gap, '5px', `${grid.panel} tool grid does not follow the compact gap rule`);
     });
 
     for (const mode of modes) await t.test(`${mode.name}: workspace controls`, async () => {
       await open(mode, 'workspace');
       const sizes = await measure(['[data-t]']);
-      const expected = ['nav-link', 'secondary-button', 'primary-button', 'project-search', 'project-open', 'task-summary-toggle', 'quick-view', 'quick-share', 'more-summary', 'more-menu-button', 'task-disclosure', 'quick-action', 'import-tab', 'share-legacy', 'manage-input', 'manage-select', 'modal-close'];
+      const expected = ['nav-link', 'background-button', 'secondary-button', 'primary-button', 'project-search', 'project-open', 'task-summary-toggle', 'quick-view', 'quick-share', 'more-summary', 'more-menu-button', 'task-disclosure', 'quick-action', 'import-tab', 'share-legacy', 'manage-input', 'manage-select', 'modal-close'];
       if (mode.width > 720) expected.push('nav-collapse');
       if (mode.width <= 720) expected.push('nav-toggle');
       for (const target of expected) assert.ok(sizes.some(size => size.target === target), `${mode.name}: ${target} is not visible`);
       for (const size of sizes) assert.ok(size.height >= mode.minimum - 0.5, `${mode.name}: ${size.target} is ${size.height}px, below ${mode.minimum}px`);
       if (!mode.compact) for (const target of ['more-summary', 'modal-close']) assert.ok(sizes.find(size => size.target === target).width >= 43.5, `${mode.name}: ${target} is narrower than 44px`);
       if (mode.compact) for (const target of ['primary-button', 'secondary-button', 'quick-view']) assert.ok(sizes.find(size => size.target === target).height < 36, `${mode.name}: ${target} is not compact`);
+      // Header buttons share one stretched row, so the Background count badge must not make it taller than 32px.
+      if (mode.compact) for (const target of ['background-button', 'secondary-button', 'primary-button']) assert.equal(sizes.find(size => size.target === target).height, 32, `${mode.name}: ${target} header button height`);
     });
   } finally {
     client?.close();
