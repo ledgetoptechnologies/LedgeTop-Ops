@@ -46,7 +46,12 @@ const WISCONSIN_PARCELS = WISCONSIN;
 // across in Wisconsin), up to a few dozen for a zoomed-out view, so the cache,
 // slots and rates allow that; the cache is also bounded by stored points.
 // originPerMinute caps the calls this server makes to one parcel service in
-// any minute, across every caller, however many distinct tiles they miss.
+// any minute, across every caller, however many distinct tiles they miss;
+// callerOriginPerMinute caps one caller's share of it, so one viewer cycling
+// uncached tiles cannot spend the budget of everyone else. Cache hits count
+// against neither. A caller is one viewer session, the admin login, or one
+// public link from one client address (every anonymous viewer of a link is
+// not one caller).
 const LIMITS = Object.freeze({
   maxSpanDegrees: 0.06,
   maxParcels: 800,
@@ -60,7 +65,16 @@ const LIMITS = Object.freeze({
   ratePerMinute: 240,
   callerRatePerMinute: 150,
   originPerMinute: 240,
+  callerOriginPerMinute: 60,
 });
+
+// A public link's caller key: the share plus a short one-way hash of the
+// client address (from req.ip, which honours the server's trust-proxy
+// setting). Only kept in memory for the limits; the address is not stored.
+function publicCallerKey(req, shareId) {
+  const address = String(req?.ip || req?.socket?.remoteAddress || 'unknown');
+  return `share:${shareId}:${require('node:crypto').createHash('sha256').update(address).digest('hex').slice(0, 16)}`;
+}
 
 const OWNER_MAX_LENGTH = 120;
 // Plain text only: control characters removed, whitespace collapsed.
@@ -184,7 +198,7 @@ async function resolvePropertyLinesCaller(req, repository, modelId, { validator 
       && share.permissions?.view !== false && model?.status === 'ready' && model.activeVersion
       && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId)
       && await validator.allows(share))
-      return { audience: 'public', model, version: model.activeVersion, caller: `share:${share.id}` };
+      return { audience: 'public', model, version: model.activeVersion, caller: publicCallerKey(req, share.id) };
   }
   return null;
 }
@@ -250,10 +264,11 @@ function boundsInsideSite(bounds, site) {
 //     COVERAGE_METERS) and lie wholly inside that window widened by
 //     TILE_EDGE_ALLOWANCE_METERS, which is one zoom-14 tile in Wisconsin, so
 //     the tiles along the coverage edge are accepted and nothing else is.
-// For both, the upstream query is the request clipped to the authorized
-// envelope (the window's lon/lat bounds), and every returned ring is clipped
-// to that envelope as well: nothing past the promised window is served, to
-// any audience. The browser stops at the same distance from the model
+// For both, the upstream query is the request clipped to the window's
+// lon/lat bounds (slightly larger than the window, see authorizedEnvelope),
+// and every returned ring, line and uploaded feature is then clipped to the
+// UTM window itself: nothing past the promised window is served, to any
+// audience. The browser stops at the same distance from the model
 // (PROPERTY_LINES_LIMITS.coverageMeters).
 const COVERAGE_METERS = 4000;
 const TILE_EDGE_ALLOWANCE_METERS = 2000;
@@ -299,16 +314,26 @@ function parseTile(value, sources = PARCEL_SOURCES) {
   return { tile, bounds };
 }
 
-// Whether a request of this kind is inside what this model authorizes, and
-// the lon/lat envelope it is clipped to.
-function authorizedEnvelope(kind, bounds, version) {
+// The model window a request of this kind may reach (the site window for a
+// scene, the coverage window for a tile), or null when the request is not
+// inside what this model authorizes.
+function authorizedWindow(kind, bounds, version) {
   if (kind === 'scene') {
     const site = modelSiteWindow(version);
-    return boundsInsideSite(bounds, site) ? siteLonLatBounds(site) : null;
+    return boundsInsideSite(bounds, site) ? site : null;
   }
   const coverage = modelCoverageWindow(version);
   if (!coverage || !boundsTouchSite(bounds, coverage) || !boundsInsideSite(bounds, expandWindow(coverage, TILE_EDGE_ALLOWANCE_METERS))) return null;
-  return siteLonLatBounds(coverage);
+  return coverage;
+}
+
+// The window's lon/lat bounds: the rectangle the state is queried with. It
+// is a little larger than the window (grid convergence turns the UTM
+// rectangle; up to about 0.5 km at the edge of a UTM zone), which is why
+// every returned ring is then clipped to the UTM window itself.
+function authorizedEnvelope(kind, bounds, version) {
+  const window = authorizedWindow(kind, bounds, version);
+  return window ? siteLonLatBounds(window) : null;
 }
 
 function intersectBounds(a, b) {
@@ -388,20 +413,55 @@ function clipBoundary(ring, b) {
   return lines;
 }
 
-// The state's parcels clipped to the authorized envelope; parcels wholly
+// What a clip works in: a model window is clipped in its own UTM zone
+// against the window rectangle exactly (no lon/lat slack); plain lon/lat
+// bounds are clipped as they are.
+function clipSpace(area) {
+  if (!area?.projection) return { rect: area, to: p => p, from: p => p };
+  const round = v => Math.round(v * 1e7) / 1e7;
+  return {
+    rect: { west: area.minE, east: area.maxE, south: area.minN, north: area.maxN },
+    to: ([lon, lat]) => area.projection.latLonToUtm(lat, lon),
+    from: ([e, n]) => { const [lat, lon] = area.projection.utmToLatLon(e, n); return [round(lon), round(lat)]; },
+  };
+}
+
+// The state's parcels clipped to the authorized window; parcels wholly
 // outside it are dropped. A clipped parcel carries, besides its closed
 // `rings` (shape only: labels and merging), `lines`: its real boundary
-// inside the envelope, which is all the browser strokes for it.
-function clipParcels(result, envelope) {
+// inside the window, which is all the browser strokes for it. Rings wholly
+// inside come back exactly as the state sent them.
+function clipParcels(result, area) {
   if (result.status !== 'ok') return result;
+  const space = clipSpace(area);
   const parcels = [];
   for (const parcel of result.parcels) {
-    const rings = parcel.rings.map(ring => clipRing(ring, envelope)).filter(Boolean);
+    const projected = parcel.rings.map(ring => ring.map(space.to));
+    const inside = projected.map(ring => ring.every(p => insideBounds(p, space.rect)));
+    const rings = projected.map((ring, i) => (inside[i] ? parcel.rings[i] : clipRing(ring, space.rect)?.map(space.from))).filter(Boolean);
     if (!rings.length) continue;
-    const clipped = parcel.rings.some(ring => !ring.every(p => insideBounds(p, envelope)));
-    parcels.push(clipped ? { ...parcel, rings, lines: parcel.rings.flatMap(ring => clipBoundary(ring, envelope)) } : { ...parcel, rings });
+    if (inside.every(Boolean)) { parcels.push({ ...parcel, rings }); continue; }
+    const lines = projected.flatMap((ring, i) => (inside[i] ? [parcel.rings[i]] : clipBoundary(ring, space.rect).map(line => line.map(space.from))));
+    parcels.push({ ...parcel, rings, lines });
   }
   return { status: parcels.length ? 'ok' : 'none', parcels };
+}
+
+// A project's uploaded features clipped to the authorized window as lines
+// (an upload may hold open lines as well as polygons, and has no owners to
+// label or merge): only what lies inside the window is served.
+function clipFeatures(result, area) {
+  if (result.status !== 'ok') return result;
+  const space = clipSpace(area);
+  const parcels = [];
+  for (const feature of result.parcels) {
+    const rings = feature.rings.flatMap(ring => {
+      const projected = ring.map(space.to);
+      return projected.every(p => insideBounds(p, space.rect)) ? [ring] : clipBoundary(projected, space.rect).map(line => line.map(space.from));
+    });
+    if (rings.length) parcels.push({ id: feature.id, rings });
+  }
+  return { ...result, status: parcels.length ? 'ok' : 'none', parcels };
 }
 
 // Snap outward to a coarse grid so near-identical requests share one cache
@@ -443,13 +503,25 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, conf
   const pending = new Map();
   const perCaller = new Map();
   const originCalls = [];
-  let inFlight = 0, cachedPoints = 0, originRefused = 0;
+  const callerOriginCalls = new Map();   // caller -> times of its calls to the service
+  let inFlight = 0, cachedPoints = 0, originRefused = 0, callerRefused = 0;
 
   // Sliding one-minute budget of calls to the parcel service, all callers together.
   function originBudgetLeft() {
     const since = now() - 60_000;
     while (originCalls.length && originCalls[0] <= since) originCalls.shift();
     return originCalls.length < (limits.originPerMinute || Infinity);
+  }
+
+  // The same for one caller (cache hits never count).
+  function callerBudgetLeft(caller) {
+    const since = now() - 60_000;
+    const times = callerOriginCalls.get(caller) || [];
+    while (times.length && times[0] <= since) times.shift();
+    if (!times.length) callerOriginCalls.delete(caller);
+    // Forget idle callers so the map stays small.
+    if (callerOriginCalls.size > 10_000) for (const [key, list] of callerOriginCalls) if (!list.length || list[list.length - 1] <= since) callerOriginCalls.delete(key);
+    return times.length < (limits.callerOriginPerMinute || Infinity);
   }
 
   function drop(key) {
@@ -506,8 +578,11 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, conf
       const mine = perCaller.get(caller) || 0;
       if (mine >= (limits.perCallerInFlight || 1)) return { status: 'busy', parcels: [] };
       if (inFlight >= limits.maxInFlight) return { status: 'busy', parcels: [] };
+      if (!callerBudgetLeft(caller)) { callerRefused++; return { status: 'busy', parcels: [] }; }
       if (!originBudgetLeft()) { originRefused++; return { status: 'busy', parcels: [] }; }
       originCalls.push(now());
+      if (!callerOriginCalls.has(caller)) callerOriginCalls.set(caller, []);
+      callerOriginCalls.get(caller).push(now());
       inFlight++;
       perCaller.set(caller, mine + 1);
       const work = fetchUpstream(bounds).catch(() => ({ status: 'unavailable', parcels: [] })).then(value => {
@@ -521,7 +596,7 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, conf
       pending.set(key, work);
       return work;
     },
-    stats: () => ({ cached: cache.size, cachedPoints, inFlight, originCalls: originCalls.length, originRefused }),
+    stats: () => ({ cached: cache.size, cachedPoints, inFlight, originCalls: originCalls.length, originRefused, callerRefused }),
   };
 }
 
@@ -600,7 +675,8 @@ function createPropertyLinesApi({ repository, sources = PARCEL_SOURCES, source =
     if (!caller) return denied(req, res);
     if (!propertyLinesOffered(caller.audience))
       return res.status(403).json({ error: 'property lines are not offered for this viewer', code: 'property_lines_not_offered' });
-    const envelope = authorizedEnvelope(kind, parsed.bounds, caller.version);
+    const window = authorizedWindow(kind, parsed.bounds, caller.version);
+    const envelope = window && siteLonLatBounds(window);
     if (!envelope) return res.status(403).json({ error: 'area is outside this model', code: 'outside_model' });
     // What is asked of the source: the request clipped to the envelope (a
     // scene box first rounded to the cache grid, then clipped).
@@ -612,9 +688,9 @@ function createPropertyLinesApi({ repository, sources = PARCEL_SOURCES, source =
     const upload = boundaries?.activeForModel(caller.model?.id);
     if (upload && !uploadVisible(upload, caller.audience))
       return res.status(403).json({ error: 'property lines are not offered for this viewer', code: 'property_lines_not_offered' });
-    // A project's own uploaded file: the features touching the clipped query
-    // (not cut: an upload may hold open lines as well as polygons).
-    if (upload) return res.json(parcelsInBounds(upload.parcels, query));
+    // A project's own uploaded file: the features touching the query, cut
+    // to the window as lines (an upload may hold open lines as well).
+    if (upload) return res.json(clipFeatures(parcelsInBounds(upload.parcels, query), window));
     if (parsed.outside) return res.json({ status: 'outside', parcels: [] });
     // The model's source wherever its extent reaches this request; otherwise
     // the first source that does (the request is inside the model's window,
@@ -625,7 +701,7 @@ function createPropertyLinesApi({ repository, sources = PARCEL_SOURCES, source =
     const result = await fetcherFor(config).parcels(query, { caller: caller.caller, snap: false });
     if (result.status === 'busy') return res.status(429).json({ status: 'unavailable', parcels: [], code: 'busy' });
     if (result.status === 'unavailable') return res.status(502).json({ status: 'unavailable', parcels: [] });
-    const clipped = clipParcels(result, envelope);
+    const clipped = clipParcels(result, window);
     return res.json({ status: clipped.status, parcels: clipped.parcels });
   });
 
@@ -655,6 +731,8 @@ module.exports = {
   clipSegment,
   clipBoundary,
   clipParcels,
+  clipFeatures,
+  authorizedWindow,
   boundsInsideSite,
   boundsTouchSite,
   cacheBounds,

@@ -14,7 +14,7 @@ import {
   normalizeParcelResponse, parcelsToUtmPolylines, propertyLinesMessage, propertyLinesTilesForView,
 } from '../property-lines.mjs';
 import {
-  dissolveParcelsByOwner, normalizeOwnerName, ownerLabelCandidates, ownerLabelFontPx, placeOwnerLabels, polygonLabelPoint, wrapOwnerLabel,
+  dissolveParcelsByOwner, normalizeOwnerName, ownerLabelCandidates, ownerLabelFontPx, parcelLabelGeometry, placeOwnerLabels, polygonLabelPoint, wrapOwnerLabel,
 } from '../property-lines-owners.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -318,4 +318,44 @@ test('cutoff: a genuine edge lying on the cutoff stays drawn while the closing s
   // Merged: the shared y = 4 edge is gone, and so is nothing else real.
   const [merged] = dissolveParcelsByOwner(parcels);
   assert.ok(segmentsOf(merged.lines).every(([a, b]) => !(Math.abs(a[1] - y(4)) < 1e-12 && Math.abs(b[1] - y(4)) < 1e-12)));
+});
+
+test('placeholder owners (NOT AVAILABLE, UNKNOWN, ...) never merge or label; real names that contain such words do', () => {
+  for (const placeholder of ['NOT AVAILABLE', 'Not  Available', 'NOT AVAILABLE NOT AVAILABLE', 'UNKNOWN', 'UNKNOWN OWNER', 'OWNER UNKNOWN', 'UNKNOWN UNKNOWN',
+    'UNKNOWN OWNERSHIP', 'UNKNOWN OWNER UNTILRESEARCHED', 'PRIVATE', 'REDACTED', 'N/A', 'NONE', '?', '-', '0', '  '])
+    assert.equal(normalizeOwnerName(placeholder), '', placeholder);
+  for (const real of ['SAMPLE FARMS LLC', 'PRIVATE ROAD', 'UNKNOWN-MILL POND', 'EXAMPLE OWNER LLC', 'NOT A REAL TRUST'])
+    assert.notEqual(normalizeOwnerName(real), '', real);
+  // Three touching parcels all marked NOT AVAILABLE stay three, with no names.
+  const parcels = [parcel(1, 'NOT AVAILABLE', square(0, 0, 2, 2)), parcel(2, 'NOT AVAILABLE', square(2, 0, 2, 2)), parcel(3, 'not available', square(4, 0, 2, 2))];
+  const outlines = dissolveParcelsByOwner(parcels);
+  assert.equal(outlines.length, 3);
+  assert.ok(outlines.every(o => o.owner === '' && o.ownerKey === ''));
+  assert.deepEqual(ownerLabelCandidates(outlines), []);
+});
+
+test('rings: an island inside a hole is land again (odd nesting is a hole)', () => {
+  // 10 x 10 squares of land, a 6 x 6 hole in it, and a 2 x 2 island in the hole.
+  const outer = square(0, 0, 10, 10), hole = square(2, 2, 6, 6).slice().reverse(), island = square(4, 4, 2, 2);
+  const unit = parcelLabelGeometry(parcel(9, 'SAMPLE FARMS LLC', square(0, 0))).areaM2;
+  const nested = { id: 1, owner: 'SAMPLE FARMS LLC', rings: [outer, hole, island] };
+  const geometry = parcelLabelGeometry(nested);
+  assert.ok(Math.abs(geometry.areaM2 / unit - (100 - 36 + 4)) < 0.5, `area ${geometry.areaM2 / unit} squares, not 60 (island taken as a hole)`);
+  // The label sits on land, not in the hole.
+  const [lon, lat] = geometry.lonLat;
+  const inHole = lon > corner(2, 0)[0] && lon < corner(8, 0)[0] && lat > corner(0, 2)[1] && lat < corner(0, 8)[1];
+  const onIsland = lon > corner(4, 0)[0] && lon < corner(6, 0)[0] && lat > corner(0, 4)[1] && lat < corner(0, 6)[1];
+  assert.ok(!inHole || onIsland);
+});
+
+test('failed tiles are a separate state from too-dense tiles', async () => {
+  const reply = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+  const tiles = [makeTile(14, 4107, 5880), makeTile(14, 4108, 5880)];
+  const loader = createParcelTileLoader({ debounceMs: 0, fetchImpl: async url => (url.includes(encodeURIComponent(tiles[0].key))
+    ? reply({ status: 'ok', parcels: [parcel(1, 'SAMPLE FARMS LLC', square(0, 0))] }) : reply({ status: 'unavailable', parcels: [], code: 'busy' }, 429)) });
+  const result = await loader.load(tiles);
+  assert.deepEqual([result.status, result.partial, result.failed], ['ok', false, true]);
+  assert.equal(propertyLinesMessage('ready', { failed: true, retrying: true }), 'Some property lines could not load. Retrying…');
+  assert.equal(propertyLinesMessage('ready', { failed: true }), 'Some property lines could not load.');
+  assert.equal(propertyLinesMessage('ready', { partial: true }), 'Zoom in to see more property lines.');
 });

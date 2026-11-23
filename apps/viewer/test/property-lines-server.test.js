@@ -21,6 +21,8 @@ const {
   clipSegment,
   clipBoundary,
   clipParcels,
+  clipFeatures,
+  siteLonLatBounds,
   LIMITS,
   boundsInsideSite,
   boundsTouchSite,
@@ -249,6 +251,8 @@ test('upstream slots are shared fairly between callers', async () => {
 
 async function withServer({ source, boundaries = null, repository = fakeRepository(sessions, { shares: { 'share-1': liveShare, 'share-revoked': { ...liveShare, id: 'share-revoked', active: false } } }) }, run) {
   const app = express();
+  // As behind the production proxy: req.ip comes from X-Forwarded-For.
+  app.set('trust proxy', 1);
   app.use((req, _res, next) => { req.cookies = Object.fromEntries(String(req.headers.cookie || '').split(';').filter(Boolean).map(p => p.trim().split('='))); next(); });
   app.use(createPropertyLinesApi({ repository, source, validator: allow, boundaries }));
   const server = http.createServer(app);
@@ -328,7 +332,7 @@ test('API: public link map tiles: only on-grid tiles inside the coverage, querie
     assert.equal(own.status, 200);
     assert.equal(seen.at(-1).options.snap, false, 'tiles are queried exactly, not snapped outward');
     assert.equal(seen.at(-1).bounds.west, tileWest(cx, 14));
-    assert.equal(seen.at(-1).options.caller, 'share:share-1');
+    assert.match(seen.at(-1).options.caller, /^share:share-1:[0-9a-f]{16}$/, 'a public link caller is the share plus a hash of the client address');
     // Off-grid or malformed tiles never reach the state service.
     const before = seen.length;
     for (const tile of ['13/2061/2985', '17/1/1', '14/4123.5/5940', '14/-1/5940', '14/16384/5940', `14/${cx}/${cy}/1`, `14,${cx},${cy}`, '014/1/1', '', `14/${cx}/${cy}&bbox=-89.402,43.074,-89.4,43.0755`])
@@ -351,13 +355,15 @@ test('API: public link map tiles: only on-grid tiles inside the coverage, querie
       // The tile itself lies within the coverage plus the allowance.
       assert.ok(eastOf(tileWest(x + 1, 14)) <= coverage.maxE + TILE_EDGE_ALLOWANCE_METERS + 1, `tile ${x} within the allowance`);
       // The query and every returned point stop at the coverage envelope.
-      // The envelope is the coverage window's lon/lat bounds: grid convergence
-      // this far from the zone's central meridian adds a bounded sliver.
+      // The query uses the window's lon/lat bounds (a little larger: grid
+      // convergence); the answer is clipped to the UTM window itself.
       const env = authorizedEnvelope('tile', query, version);
-      assert.ok(eastOf(env.east) <= coverage.maxE + 250, 'envelope within 250 m of the coverage window');
+      assert.ok(eastOf(env.east) > coverage.maxE && eastOf(env.east) <= coverage.maxE + 600, 'lon/lat query bounds: bounded slack past the window');
       assert.ok(query.east <= env.east && query.west >= env.west, `tile ${x} query clipped`);
-      for (const ring of body.parcels.flatMap(p => p.rings)) for (const [lon, lat] of ring)
-        assert.ok(lon <= env.east && lon >= env.west && lat <= env.north && lat >= env.south, `tile ${x} response clipped`);
+      for (const line of body.parcels.flatMap(p => [...p.rings, ...(p.lines || [])])) for (const [lon, lat] of line) {
+        const [e, n] = projection.latLonToUtm(lat, lon);
+        assert.ok(e <= coverage.maxE + 0.05 && e >= coverage.minE - 0.05 && n <= coverage.maxN + 0.05 && n >= coverage.minN - 0.05, `tile ${x} response clipped to the UTM window`);
+      }
       assert.equal(body.parcels[0].owner, 'SAMPLE FARMS LLC');
     }
     const edge = accepted.at(-1);
@@ -430,6 +436,79 @@ test('origin budget: unrelated cache misses from many callers stay within the pe
     assert.deepEqual(codes, [200, 200, 200, 429, 429, 429, 429, 429]);
   });
   assert.equal(upstream, 3);
+});
+
+test('public links: each client address is its own caller, with its own cap on calls to the parcel service', async () => {
+  // One caller cycling uncached tiles spends only its own allowance.
+  let calls = 0;
+  const source = createParcelSource({ limits: { ...LIMITS, callerOriginPerMinute: 3, originPerMinute: 100 }, fetchImpl: async () => { calls++; return response({ features: [] }); } });
+  const box = i => ({ west: -89.5 + i * 0.003, south: 43.07, east: -89.5 + i * 0.003 + 0.002, north: 43.072 });
+  const statuses = [];
+  for (let i = 0; i < 6; i++) statuses.push((await source.parcels(box(i), { caller: 'share:s:aaaa', snap: false })).status);
+  assert.deepEqual(statuses, ['none', 'none', 'none', 'busy', 'busy', 'busy']);
+  assert.equal(source.stats().callerRefused, 3);
+  assert.equal((await source.parcels(box(0), { caller: 'share:s:aaaa', snap: false })).status, 'none', 'cache hits never count against the cap');
+  assert.equal((await source.parcels(box(10), { caller: 'share:s:bbbb', snap: false })).status, 'none', 'another viewer of the same link still gets through');
+  assert.equal(calls, 4);
+  assert.equal(LIMITS.callerOriginPerMinute, 60, 'production cap per caller');
+
+  // Through the API: two viewers of one public link are two callers.
+  const seen = [];
+  const recording = { parcels: async (bounds, options) => { seen.push(options.caller); return { status: 'none', parcels: [] }; } };
+  const [cx, cy] = tileXY(-89.401, 43.07475, 14);
+  await withServer({ source: recording }, async base => {
+    for (const address of ['198.51.100.7', '203.0.113.9', '198.51.100.7'])
+      assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?tile=14/${cx}/${cy}&model=model-a`, { headers: { Cookie: `ltds_share=${shareCookie()}`, 'X-Forwarded-For': address } })).status, 200);
+  });
+  assert.equal(seen.length, 3);
+  assert.notEqual(seen[0], seen[1], 'different client addresses: different callers');
+  assert.equal(seen[0], seen[2], 'the same address: the same caller');
+  assert.ok(seen.every(caller => /^share:share-1:[0-9a-f]{16}$/.test(caller) && !caller.includes('198.51') && !caller.includes('203.0')), 'the address itself is not kept');
+});
+
+test('clipping to a model window is exact in its UTM zone, with no lon/lat slack', () => {
+  const version = madisonModel('model-a').activeVersion;
+  const window = modelCoverageWindow(version);
+  const { projection } = window;
+  const envelope = authorizedEnvelope('tile', siteLonLatBounds(window), version) || siteLonLatBounds(window);
+  // A parcel reaching from inside the window to the far corner of the
+  // lon/lat bounds (which lie past the UTM window by grid convergence).
+  const [insideLat, insideLon] = projection.utmToLatLon(window.maxE - 300, window.maxN - 300);
+  const ring = [[insideLon, insideLat], [insideLon, envelope.north], [envelope.east, envelope.north], [envelope.east, insideLat], [insideLon, insideLat]];
+  const [cornerE] = projection.latLonToUtm(envelope.north, envelope.east);
+  assert.ok(cornerE > window.maxE + 50, `the lon/lat corner lies ${Math.round(cornerE - window.maxE)} m past the window`);
+  const out = clipParcels({ status: 'ok', parcels: [{ id: 1, rings: [ring] }] }, window);
+  const points = out.parcels.flatMap(p => [...p.rings, ...p.lines]).flat();
+  assert.ok(points.length > 0);
+  for (const [lon, lat] of points) {
+    const [e, n] = projection.latLonToUtm(lat, lon);
+    assert.ok(e <= window.maxE + 0.05 && n <= window.maxN + 0.05, `${e - window.maxE}, ${n - window.maxN}`);
+  }
+  // A parcel wholly inside comes back exactly as sent.
+  const [aLat, aLon] = projection.utmToLatLon(window.maxE - 500, window.maxN - 500);
+  const small = [[aLon, aLat], [aLon, aLat + 0.001], [aLon + 0.001, aLat + 0.001], [aLon, aLat]];
+  assert.deepEqual(clipParcels({ status: 'ok', parcels: [{ id: 2, rings: [small] }] }, window).parcels, [{ id: 2, rings: [small] }]);
+});
+
+test('uploaded features are cut to the window as lines, open or closed', () => {
+  const version = madisonModel('model-a').activeVersion;
+  const window = modelSiteWindow(version);
+  const { projection } = window;
+  const at = (dE, dN) => { const [lat, lon] = projection.utmToLatLon(window.maxE + dE, (window.minN + window.maxN) / 2 + dN); return [lon, lat]; };
+  const open = [at(-200, 0), at(+300, 0)];                                      // a line running out of the window
+  const closed = [at(-100, -50), at(-100, 50), at(+100, 50), at(+100, -50), at(-100, -50)]; // a polygon straddling it
+  const inside = [at(-300, -20), at(-300, 20), at(-250, 20), at(-300, -20)];
+  const out = clipFeatures({ status: 'ok', simplified: true, parcels: [{ id: 1, rings: [open] }, { id: 2, rings: [closed] }, { id: 3, rings: [inside] }, { id: 4, rings: [[at(+200, 0), at(+400, 0)]] }] }, window);
+  assert.equal(out.simplified, true);
+  assert.deepEqual(out.parcels.map(p => p.id), [1, 2, 3], 'a feature wholly outside is dropped');
+  for (const [lon, lat] of out.parcels.flatMap(p => p.rings).flat()) assert.ok(projection.latLonToUtm(lat, lon)[0] <= window.maxE + 0.05);
+  const [e1] = projection.latLonToUtm(out.parcels[0].rings[0][1][1], out.parcels[0].rings[0][1][0]);
+  assert.ok(Math.abs(e1 - window.maxE) < 0.05, 'the open line stops at the window edge');
+  // The polygon's part inside, as open lines: nothing drawn along the window edge.
+  const along = out.parcels[1].rings.flatMap(line => line.slice(1).map((p, k) => [line[k], p]))
+    .filter(([a, b]) => [a, b].every(([lon, lat]) => Math.abs(projection.latLonToUtm(lat, lon)[0] - window.maxE) < 0.05));
+  assert.equal(along.length, 0);
+  assert.deepEqual(out.parcels[2].rings, [inside], 'wholly inside: unchanged');
 });
 
 test('API: an uploaded boundary replaces the state layer behind the same access checks', async () => {

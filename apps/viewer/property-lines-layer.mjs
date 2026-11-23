@@ -32,6 +32,11 @@ export const PROPERTY_LINE_STYLE = Object.freeze({
 });
 
 const RETRY_MS = 1500;
+// Tiles the server could not answer (busy or down) are asked for again,
+// backing off: 2 s, 4 s, 8 s, 16 s, 30 s, then the card says so and stops.
+const TILE_RETRY_MS = 2000;
+const TILE_RETRY_MAX_MS = 30_000;
+const TILE_RETRIES = 5;
 const MAX_RETRIES = 40;
 
 export function propertyLinesModeKind(mode, cloudMode) {
@@ -138,6 +143,7 @@ export function createPropertyLinesController(deps) {
   let merge = true;
   try { merge = preferences.merged?.() !== false; } catch { merge = true; }
   let offered = false, source = null, hidden = false, suspended = false, status = 'off', count = 0, partial = false;
+  let failedTiles = false, tileRetries = 0, tileRetryTimer = null, tileRetryKey = null;
   let labelsEl = null, labelsMap = null, labelKey = null;
   let life = 0, lifeKey = null, lifeProject = null, offerSeq = 0;
   let siteBounds = null, retryTimer = null, retries = 0, seq = 0;
@@ -173,6 +179,7 @@ export function createPropertyLinesController(deps) {
   function stopWork() {
     seq++;
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    if (tileRetryTimer) { clearTimeout(tileRetryTimer); tileRetryTimer = null; }
     fetcher.cancel();
     tiles.cancel();
     groundAbort?.abort();
@@ -186,7 +193,7 @@ export function createPropertyLinesController(deps) {
     retries = 0;
     fetcher.clear();
     tiles.clear();
-    siteBounds = null; current = null; count = 0; partial = false; heightNote = ''; heightDraped = false; draped.clear();
+    siteBounds = null; current = null; count = 0; partial = false; failedTiles = false; tileRetries = 0; tileRetryKey = null; heightNote = ''; heightDraped = false; draped.clear();
     clearDrawings();
   }
 
@@ -249,7 +256,7 @@ export function createPropertyLinesController(deps) {
     // The merge choice, where the source has owner names.
     if (dom.mergeRow) dom.mergeRow.hidden = !(shown && source?.owners === 'yes');
     if (dom.merge && dom.merge.checked !== merge) dom.merge.checked = merge;
-    let message = disabled ? propertyLinesMessage(av.reason) : (on ? propertyLinesMessage(status, { count, partial, threeD: kind() !== 'map' }) : '');
+    let message = disabled ? propertyLinesMessage(av.reason) : (on ? propertyLinesMessage(status, { count, partial, failed: failedTiles, retrying: Boolean(tileRetryTimer), threeD: kind() !== 'map' }) : '');
     if (drawn && kind() !== 'map' && heightNote && !heightDraped) message = [message, heightNote].filter(Boolean).join(' ');
     if (dom.status.textContent !== message) dom.status.textContent = message;
     dom.status.dataset.state = disabled ? av.reason : (on ? status : 'off');
@@ -471,6 +478,9 @@ export function createPropertyLinesController(deps) {
     // Also compare the live project/version/authority, in case it changed without a sync yet.
     const stillCurrent = () => mySeq === seq && myLife === life && myKey === lifecycleKey().key;
     if (active === 'map') return refreshMap({ immediate, stillCurrent });
+    // Map tiles' retry state belongs to the map view only.
+    failedTiles = false;
+    if (tileRetryTimer) { clearTimeout(tileRetryTimer); tileRetryTimer = null; }
     const request = propertyLinesRequestBounds({ modelBounds: siteBounds, viewBounds: null });
     if (request.status !== 'ok') {
       fetcher.cancel(); clearDrawings();
@@ -503,12 +513,13 @@ export function createPropertyLinesController(deps) {
     const zoom = typeof map?.getZoom === 'function' ? map.getZoom() : null;
     const plan = propertyLinesTilesForView({ modelBounds: siteBounds, viewBounds: mapViewBounds(), zoom });
     if (plan.status !== 'ok') {
-      tiles.cancel(); clearDrawings(); current = null; count = 0; partial = false;
+      tiles.cancel(); clearDrawings(); current = null; count = 0; partial = false; failedTiles = false;
       if (plan.status === 'unknown') { status = 'pending'; render(); scheduleRetry(); } else settle(plan.status);
       return;
     }
     const key = `tiles:${plan.tiles.map(tile => tile.key).join(';')}`;
-    if (current && current.key === key && current.complete) {
+    if (key !== tileRetryKey) { tileRetryKey = key; tileRetries = 0; }
+    if (current && current.key === key && current.complete && !current.failed) {
       tiles.cancel();
       drawMap(); settle('ready'); return;
     }
@@ -522,10 +533,19 @@ export function createPropertyLinesController(deps) {
     };
     const result = await tiles.load(plan.tiles, { area: plan.area, immediate: immediate || tiles.cached(plan.tiles), onProgress });
     if (result.status === 'aborted' || !stillCurrent() || !isOn()) { if (lifeKey !== lifecycleKey().key) void refresh(); return; }
-    if (result.status !== 'ok') { clearDrawings(); current = null; count = 0; partial = false; settle(result.status); return; }
-    current = { key, parcels: result.parcels, complete: true };
+    if (result.status !== 'ok') { clearDrawings(); current = null; count = 0; partial = false; failedTiles = false; settle(result.status); return; }
+    current = { key, parcels: result.parcels, complete: true, failed: Boolean(result.failed) };
     count = result.parcels.length;
     partial = Boolean(result.partial || plan.partial);
+    failedTiles = Boolean(result.failed);
+    if (tileRetryTimer) { clearTimeout(tileRetryTimer); tileRetryTimer = null; }
+    if (!failedTiles) tileRetries = 0;
+    else if (tileRetries < TILE_RETRIES) {
+      // Ask again for the tiles that failed; the ones already answered come from the cache.
+      const wait = Math.min(TILE_RETRY_MAX_MS, TILE_RETRY_MS * 2 ** tileRetries);
+      tileRetries++;
+      tileRetryTimer = setTimeout(() => { tileRetryTimer = null; void refresh(); }, wait);
+    }
     drawMap();
     settle('ready');
   }
@@ -622,7 +642,7 @@ export function createPropertyLinesController(deps) {
     suspend,
     resume,
     get state() {
-      return { offered, on: isOn(), hidden, suspended, status, count, partial, merge, outlines: current ? outlines().length : 0,
+      return { offered, on: isOn(), hidden, suspended, status, count, partial, failedTiles, tileRetries, retryingTiles: Boolean(tileRetryTimer), merge, outlines: current ? outlines().length : 0,
         labels: labelsEl?.childElementCount ?? 0, siteBounds, heightNote, retries,
         drawn: { map: Boolean(mapLayers), three: Boolean(threeGroup?.visible), potree: potreeShown } };
     },

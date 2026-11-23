@@ -25,16 +25,35 @@ export const OWNER_LABEL_LIMITS = Object.freeze({
   maxChars: 40,          // and are cut with an ellipsis beyond this
 });
 
-// The key two parcels must share to count as one owner: case, punctuation
-// spacing and repeated whitespace do not matter. Empty means "no owner".
-export function normalizeOwnerName(name) {
-  if (typeof name !== 'string') return '';
-  return name.normalize('NFKC').toUpperCase().replace(/[.,;]/g, ' ').replace(/\s+/g, ' ').trim();
+// Placeholder "owners" that name nobody. Merging on them would join whole
+// runs of unrelated neighbours, so they never merge or label. A name made
+// only of these words (or with no letters at all) is a placeholder. From the
+// V12 statewide data (checked 2026-11-23): NOT AVAILABLE (about 90,000
+// parcels), NOT AVAILABLE NOT AVAILABLE, UNKNOWN OWNER, UNKNOWN, OWNER
+// UNKNOWN, UNKNOWN UNKNOWN, UNKNOWN OWNERSHIP, UNKNOWN OWNER UNTILRESEARCHED,
+// PRIVATE and REDACTED; the rest are common placeholders elsewhere.
+const PLACEHOLDER_OWNER_WORDS = new Set([
+  'NOT', 'AVAILABLE', 'UNAVAILABLE', 'UNKNOWN', 'UNK', 'OWNER', 'OWNERS', 'OWNERSHIP', 'UNTILRESEARCHED', 'NONE', 'NULL',
+  'N/A', 'NA', 'TBD', 'REDACTED', 'WITHHELD', 'CONFIDENTIAL', 'PRIVATE', 'PROVIDED', 'LISTED', 'UNASSIGNED', 'NO', 'NAME',
+]);
+export function isPlaceholderOwner(normalized) {
+  if (!normalized || !/\p{L}/u.test(normalized)) return true;
+  return normalized.split(' ').every(word => PLACEHOLDER_OWNER_WORDS.has(word));
 }
 
-// The text shown: the owner's name as published, with whitespace tidied.
+// The key two parcels must share to count as one owner: case, punctuation
+// spacing and repeated whitespace do not matter. Empty means "no owner",
+// including placeholders such as NOT AVAILABLE or UNKNOWN.
+export function normalizeOwnerName(name) {
+  if (typeof name !== 'string') return '';
+  const key = name.normalize('NFKC').toUpperCase().replace(/[.,;]/g, ' ').replace(/\s+/g, ' ').trim();
+  return isPlaceholderOwner(key) ? '' : key;
+}
+
+// The text shown: the owner's name as published, with whitespace tidied;
+// nothing for a placeholder.
 export function ownerDisplayName(name) {
-  return typeof name === 'string' ? name.replace(/\s+/g, ' ').trim() : '';
+  return typeof name === 'string' && normalizeOwnerName(name) ? name.replace(/\s+/g, ' ').trim() : '';
 }
 
 // Local metres around one reference point (good to well under 0.1% over a
@@ -73,8 +92,11 @@ function orientedRings(parcel, frame) {
     if (fx !== lx || fy !== ly) pts.push([fx, fy]);
     rings.push(pts);
   }
+  // A ring inside an odd number of the parcel's other rings is a hole; an
+  // island inside a hole (inside two) is an outer ring again.
   return rings.map((pts, index) => {
-    const hole = rings.some((other, j) => j !== index && pointInRing(pts[0][0], pts[0][1], other));
+    const depth = rings.filter((other, j) => j !== index && pointInRing(pts[0][0], pts[0][1], other)).length;
+    const hole = depth % 2 === 1;
     const clockwise = signedArea(pts) > 0;
     return { hole, pts: clockwise === !hole ? pts : pts.slice().reverse() };
   });

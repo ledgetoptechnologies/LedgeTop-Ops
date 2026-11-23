@@ -636,7 +636,9 @@ WGS84 UTM 16N
   (Wisconsin: `OBJECTID` and the first owner name `OWNERNME1`; no address,
   value or other fields),
   with a size, record, time and rate limit and a ten-minute cache. Lines are
-  the Viewer's orange accent. Parcels whose owner names match (case,
+  the Viewer's orange accent. Placeholder owners that name nobody (NOT
+  AVAILABLE, on about 90,000 Wisconsin parcels, UNKNOWN OWNER, REDACTED and
+  the like) never merge or label. Parcels whose owner names match (case,
   punctuation spacing and whitespace ignored) are joined where they share a
   boundary: an edge one parcel has and another has in the opposite direction
   (corners within 0.2 m) is removed and the parcels draw as one outline.
@@ -679,16 +681,24 @@ WGS84 UTM 16N
   verified centre plus a half-size from the surveyed area, default 1.5 km,
   plus margin). A map `tile` must be on the fixed grid (zoom 14 to 16), touch
   the coverage window (the site window widened by 4 km) and lie inside it
-  widened by one zoom-14 tile (2 km). For both, the query to the state and
-  every returned ring are clipped to the window's lon/lat bounds, so nothing
-  past it is served. Where a parcel crosses that limit, the server returns two
+  widened by one zoom-14 tile (2 km). For both, the query to the state uses
+  the window's lon/lat bounds (a little larger than the window: grid
+  convergence, up to about 0.5 km at the edge of a UTM zone), and every
+  returned ring, line and uploaded feature is then clipped to the UTM window
+  itself, so nothing past it is served. Uploaded features are cut as lines. Where a parcel crosses that limit, the server returns two
   things: its `rings` clipped and closed along the limit (shape only, for
   labels and merging) and `lines`, its real boundary inside the limit, each
   original edge clipped on its own. The Viewer strokes only real boundary
   (raw, merged, map and 3D): a real edge lying on the limit stays drawn, and
   the closing segment along the limit never is. When merging, each segment
-  carries where it came from through snapping and splitting. Calls to the state are also capped at 240 a minute for
-  the whole server, besides the per-caller slots and rates and the cache. The service URL changes with each yearly release: update
+  carries where it came from through snapping and splitting. A caller is one
+  viewer session, the admin login, or one public link from one client
+  address (a hash of the address, kept in memory only). Each caller has 3
+  calls in flight, 150 requests a minute and 60 calls a minute to the state
+  (cache hits do not count); the whole server makes at most 240 calls a
+  minute to the state. Tiles the state could not answer (busy or down) are
+  asked for again after 2, 4, 8, 16 and 30 s, and the card says "Some
+  property lines could not load. Retrying…" meanwhile. The service URL changes with each yearly release: update
   the Wisconsin entry in `server/parcelSources.js` (URL, release, vintage,
   dataUpdated and credit together); the monthly release check reports a newer
   release and newer layer data.

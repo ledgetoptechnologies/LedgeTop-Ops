@@ -338,7 +338,10 @@ export function createParcelTileLoader({ fetchImpl, endpoint = '/api/v1/property
     if (!live()) return ABORTED();
     if (forbidden) return { status: 'forbidden', parcels: [] };
     const parcels = mergeTileParcels(results);
-    if (parcels.length) return { status: 'ok', parcels, partial: tooMany > 0 || failed > 0 };
+    // partial: tiles still too dense at the deepest split (zoom in to see
+    // them); failed: tiles the server could not answer now (busy or down),
+    // worth asking again shortly.
+    if (parcels.length) return { status: 'ok', parcels, partial: tooMany > 0, failed: failed > 0 };
     if (tooMany) return { status: 'too_many', parcels: [] };
     if (failed) return { status: 'unavailable', parcels: [] };
     if (outside && outside === done) return { status: 'outside', parcels: [] };
@@ -401,7 +404,8 @@ export const PROPERTY_LINES_MESSAGES = Object.freeze({
   forbidden: 'Property lines are not available for this link.',
 });
 
-export function propertyLinesMessage(status, { threeD = false, partial = false } = {}) {
+export function propertyLinesMessage(status, { threeD = false, partial = false, failed = false, retrying = false } = {}) {
+  if (status === 'ready' && failed) return retrying ? 'Some property lines could not load. Retrying…' : 'Some property lines could not load.';
   // Drawn lines need no words in the card; only a partial view says so.
   if (status === 'ready') return partial ? 'Zoom in to see more property lines.' : '';
   if (status === 'too_many' && threeD) return PROPERTY_LINES_MESSAGES.too_many_3d;

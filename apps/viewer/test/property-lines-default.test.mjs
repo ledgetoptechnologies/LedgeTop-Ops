@@ -508,3 +508,42 @@ test('cutoff: map and 3D layers keep a real edge lying on the cutoff and never d
   assert.ok(potree.some(([[latA, lonA], [latB, lonB]]) => nearCut(lonA, lonB) && Math.min(latA, latB) < 43.07445), '3D: the real edge on the cutoff is drawn');
   assert.equal(potree.filter(([[latA, lonA], [latB, lonB]]) => nearCut(lonA, lonB) && Math.min(latA, latB) > 43.07451).length, 0, '3D: the closing segment is not drawn');
 });
+
+test('tiles the server could not answer: "retrying" (not "zoom in"), asked again with back-off, then drawn', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let busy = true;
+    // A view across two map tiles; the western tile is busy (429) until it is not.
+    const ctx = page({ parcels: (_project, url) => (url.includes('4122%2F6015') && busy ? reply({ status: 'unavailable', parcels: [], code: 'busy' }, 429) : reply(PARCELS)) });
+    ctx.map.getBounds = () => ({ getWest: () => -89.4075, getSouth: () => 43.0741, getEast: () => -89.4060, getNorth: () => 43.0749 });
+    await open(ctx);
+    let state = ctx.controller.state;
+    assert.equal(state.status, 'ready', 'what did load is drawn');
+    assert.deepEqual([state.failedTiles, state.retryingTiles, state.partial], [true, true, false]);
+    assert.equal(ctx.dom.status.textContent, 'Some property lines could not load. Retrying…');
+    const tilesAsked = () => ctx.requests.map(r => new URL(r.url, 'http://x').searchParams.get('tile'));
+    assert.deepEqual(tilesAsked().sort(), ['14/4122/6015', '14/4123/6015'].sort());
+    // First retry after 2 s: still busy; only the failed tile is asked again.
+    mock.timers.tick(2000); await flush();
+    assert.deepEqual(tilesAsked().slice(2), ['14/4122/6015'], 'answered tiles come from the cache');
+    assert.equal(ctx.controller.state.tileRetries, 2);
+    // Then it answers: drawn, and the card is quiet again.
+    busy = false;
+    mock.timers.tick(4000); await flush();
+    state = ctx.controller.state;
+    assert.deepEqual([state.status, state.failedTiles, state.retryingTiles], ['ready', false, false]);
+    assert.equal(ctx.dom.status.textContent, '');
+    // Never more than the retry budget while a tile stays down.
+    busy = true;
+    const other = page({ parcels: (_project, url) => (url.includes('4122%2F6015') ? reply({}, 502) : reply(PARCELS)) });
+    other.map.getBounds = ctx.map.getBounds;
+    await open(other);
+    for (const wait of [2000, 4000, 8000, 16000, 30000, 30000]) { mock.timers.tick(wait); await flush(); }
+    const westAsked = other.requests.filter(r => r.url.includes('4122%2F6015')).length;
+    assert.equal(westAsked, 1 + 5, 'first try plus five retries');
+    assert.equal(other.controller.state.retryingTiles, false);
+    assert.equal(other.dom.status.textContent, 'Some property lines could not load.');
+  } finally {
+    mock.timers.reset();
+  }
+});
