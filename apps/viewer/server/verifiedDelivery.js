@@ -14,7 +14,11 @@
 //   to buffer: tiles, EPT nodes, small photos) send exactly the bytes that were
 //   hashed: each region is read once into memory through the descriptor,
 //   hashed, and that buffer (sliced to the range) is what gets written. A
-//   region whose bytes no longer match aborts the response.
+//   region whose bytes no longer match aborts the response. Where results are
+//   not remembered (non-POSIX or network filesystems), the pre-header check
+//   hands its buffers to the same response through a per-request carry, so
+//   each region is still read and hashed once per request; regions beyond the
+//   carry are hashed right before they are sent.
 // - Large whole-file assets with no chunk records (legacy rasters) are
 //   OUTSIDE the byte-integrity guarantee above, by decision: they keep the
 //   behaviour inherited from before (the whole file is hashed on every
@@ -149,13 +153,13 @@ async function pump(res, handle, identity, start, len, signal) {
 
 // Writes [start, end] from registered regions, each one exactly-verified
 // bytes (see assetIntegrityCache.verifiedSlice). Throws on mismatch or gap.
-async function sendRegions(res, cache, filePath, stat, handle, regions, start, end, signal) {
+async function sendRegions(res, cache, filePath, stat, handle, regions, start, end, signal, carry) {
   let position = start;
   for (const region of regions) {
     if (signal.aborted) return;
     if (region.offset > position || region.offset + region.size <= position) throw new Error('asset region table does not cover the response');
     const sliceEnd = Math.min(end + 1, region.offset + region.size);
-    const piece = await cache.verifiedSlice(filePath, stat, region, position, sliceEnd, { handle, signal });
+    const piece = await cache.verifiedSlice(filePath, stat, region, position, sliceEnd, { handle, signal, carry });
     if (!piece) throw new Error('asset bytes failed verification during delivery');
     try {
       if (!res.write(piece.bytes)) await waitForDrain(res);
@@ -187,6 +191,7 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
   const identity = fileIdentity(stat);
   const size = Number(stat.size);
   const controller = new AbortController();
+  const carry = cache.createCarry();
   const onClose = () => { if (!res.writableFinished) controller.abort(); };
   res.once('close', onClose);
   try {
@@ -225,7 +230,7 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
 
     let verified;
     try {
-      verified = await verify(outcome === 206 ? range : null, controller.signal);
+      verified = await verify(outcome === 206 ? range : null, controller.signal, carry);
     } catch (error) {
       if (abortError(error) || controller.signal.aborted) return;
       if (busyError(error)) {
@@ -264,7 +269,8 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
     if (req.method === 'HEAD') return res.end();
     try {
       const plan = len > 0 && typeof regions === 'function' ? regions(start, start + len - 1) : null;
-      if (plan) await sendRegions(res, cache, filePath, stat, handle, plan, start, start + len - 1, controller.signal);
+      if (plan) await sendRegions(res, cache, filePath, stat, handle, plan, start, start + len - 1, controller.signal, carry);
+      else if (carry.deferred) throw new Error('deferred region checks need a region plan');
       else await pump(res, handle, identity, start, len, controller.signal);
     } catch (error) {
       if (busyError(error) && !res.headersSent && !controller.signal.aborted) {
@@ -277,6 +283,7 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
     }
   } finally {
     res.removeListener('close', onClose);
+    cache.releaseCarry(carry);
     await handle.close().catch(() => {});
   }
 }

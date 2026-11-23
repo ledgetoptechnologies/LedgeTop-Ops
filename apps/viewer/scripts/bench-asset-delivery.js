@@ -34,6 +34,9 @@ const RANGE_BYTES = 256 * 1024; // geotiff.js blockSize used by the Viewer
 const CONCURRENCY = option('concurrency', 6);
 const CHUNK = 4 * 1024 * 1024; // storageManager.hashFileChunks
 const JSON_OUTPUT = args.includes('--json');
+// --uncached: force the path used on filesystems where verification results
+// are not remembered (Windows/NTFS, NFS, CIFS/SMB, FUSE), as the tests do.
+const UNCACHED = args.includes('--uncached');
 
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 function pseudoRandom(size, seed) {
@@ -151,6 +154,7 @@ async function main() {
     });
 
     assets.setRepository(repository);
+    if (UNCACHED && assets.assetIntegrityCache) assets.assetIntegrityCache.platform = 'win32';
     const app = express();
     app.use((req, _res, next) => { req.cookies = {}; next(); });
     app.use(assets);
@@ -185,7 +189,7 @@ async function main() {
     await firstResponse.arrayBuffer();
     const headers = Object.fromEntries(['cache-control', 'etag', 'content-encoding', 'accept-ranges', 'server-timing'].map((name) => [name, firstResponse.headers.get(name)]));
 
-    const result = { fixture: { tiles: TILE_COUNT, tileKiB: TILE_BYTES / 1024, ept: EPT_COUNT, eptKiB: EPT_BYTES / 1024, orthoMiB: ORTHO_BYTES / 1048576, orthoRanges: RANGE_COUNT, legacyDsmRanges: dsmRanges.length, concurrency: CONCURRENCY }, headers, passes: {} };
+    const result = { fixture: { tiles: TILE_COUNT, tileKiB: TILE_BYTES / 1024, ept: EPT_COUNT, eptKiB: EPT_BYTES / 1024, orthoMiB: ORTHO_BYTES / 1048576, orthoRanges: RANGE_COUNT, legacyDsmRanges: dsmRanges.length, concurrency: CONCURRENCY, uncached: UNCACHED }, headers, passes: {} };
     for (const pass of ['cold', 'warm']) {
       result.passes[pass] = {
         tiles: await runPool(tileJobs, CONCURRENCY),

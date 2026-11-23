@@ -493,3 +493,34 @@ test('buffer budget exhausted after the body started: the response is aborted, n
   assert.equal(status, 200, 'the status line was already committed');
   assert.equal(completed, false, 'a busy rejection mid-body aborts the response');
 });
+
+test('uncached path (verification not remembered): each region is read and hashed exactly once per request', async (t) => {
+  const f = await managedFixture(t, { aged: false });
+  f.integrity.platform = 'win32'; // the switch the other uncached tests use
+  const hashed = [];
+  const hashRegion = f.integrity.hashRegion.bind(f.integrity);
+  f.integrity.hashRegion = async (...args) => { hashed.push(`${args[2]}+${args[3]}`); return hashRegion(...args); };
+  t.after(() => { delete f.integrity.hashRegion; f.integrity.carryMaxBytes = 16 * MiB; });
+  const once = (label, list) => assert.equal(new Set(list).size, list.length, `${label}: a region was hashed twice (${list.join(', ')})`);
+  const cases = [
+    ['ortho range inside one chunk', 'ortho.tif', [100, 262_243], 1],
+    ['ortho range across chunks', 'ortho.tif', [CHUNK - 5000, CHUNK + 5000], 2],
+    ['ortho whole file', 'ortho.tif', null, 4],
+    ['tile', 'tiles/0/tile.b3dm', null, 1],
+    ['tile range', 'tiles/0/tile.b3dm', [10, 2000], 1],
+  ];
+  for (const carryMaxBytes of [16 * MiB, 4 * MiB]) {
+    f.integrity.carryMaxBytes = carryMaxBytes; // 4 MiB forces deferral past the first chunk
+    for (const [label, rel, range, regions] of cases) {
+      hashed.length = 0;
+      const result = await attempt(`${f.base}/${rel}`, range ? { range: `bytes=${range[0]}-${range[1]}` } : {});
+      const body = rel === 'ortho.tif' ? f.bodies.ortho : f.bodies.tile;
+      assert.equal(result.status, range ? 206 : 200, label);
+      assert.deepEqual(result.body, range ? body.subarray(range[0], range[1] + 1) : body, label);
+      once(`${label} (carry ${carryMaxBytes / MiB} MiB)`, hashed);
+      assert.equal(hashed.length, regions, `${label} (carry ${carryMaxBytes / MiB} MiB): one hash per region`);
+    }
+  }
+  assert.equal(f.integrity.bufferedBytes, 0, 'every carried buffer was released');
+  assert.equal(f.integrity.bytes.size, 0, 'nothing remembered on the uncached path');
+});

@@ -178,7 +178,7 @@ function integrityRegions(plan,size,start,end){if(!plan?.required)return null;if
 // will be served, through the descriptor it will be served from.
 async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null,opened=null){const plan=integrityPlan(repository,project,publishedAsset,requested);if(!plan)return false;if(!plan.required)return true;const stat=opened?opened.stat:await fs.promises.stat(abs,{bigint:true});return verifyIntegrityPlan(plan,abs,stat,opened?opened.range:requestedRange(rangeHeader,Number(stat.size)),{handle:opened?.handle||null,signal:opened?.signal||null});}
 // deliverVerified options for one opened managed asset.
-function integrityDelivery(repository,project,publishedAsset,requested,abs,opened){const plan=integrityPlan(repository,project,publishedAsset,requested);return {verify:(range,signal)=>verifyIntegrityPlan(plan,abs,opened.stat,range,{handle:opened.handle,signal}),regions:(start,end)=>integrityRegions(plan,Number(opened.stat.size),start,end)};}
+function integrityDelivery(repository,project,publishedAsset,requested,abs,opened){const plan=integrityPlan(repository,project,publishedAsset,requested);return {verify:(range,signal,carry)=>verifyIntegrityPlan(plan,abs,opened.stat,range,{handle:opened.handle,signal,carry}),regions:(start,end)=>integrityRegions(plan,Number(opened.stat.size),start,end)};}
 
 async function pathTokenAuthorization(req, projectId) {
   if (!canonicalRepository) return false;
@@ -355,7 +355,7 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
       ...opened,
       filePath: absolute,
       headers,
-      verify: (_range, signal) => assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle, signal }),
+      verify: (_range, signal, carry) => assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle, signal, carry }),
       regions: () => (assetIntegrityCache.canBuffer(photo.byteSize + 1) ? [{ kind: 'file', offset: 0, size: photo.byteSize, sha256: photo.sha256, toEof: true }] : null),
       onFailure: () => res.status(404).json({ error: 'photo not found' }),
       beforeSend: shareStillAllows,

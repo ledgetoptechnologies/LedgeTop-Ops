@@ -57,6 +57,10 @@ const MAX_QUEUED_STREAMS = 64;
 // Verified region bytes (4 MiB chunks, small whole files) kept so responses
 // can send exactly the bytes that were hashed without re-reading them.
 const VERIFIED_BYTES_CACHE_MAX_BYTES = 256 * 1024 * 1024;
+// Uncached path (no remembered results): verified region bytes one response
+// may hold from its pre-header check until they are sent, so each region is
+// read and hashed once per request. Regions beyond this are hashed when sent.
+const REQUEST_CARRY_MAX_BYTES = 16 * 1024 * 1024;
 // Linux statfs f_type magic numbers of local filesystems where ctime is
 // kernel-maintained and attributes are not cached remotely.
 const CACHEABLE_FILESYSTEMS = new Map([
@@ -107,6 +111,7 @@ class AssetIntegrityCache {
     maxConcurrentStreams = MAX_CONCURRENT_STREAMS,
     maxQueuedStreams = MAX_QUEUED_STREAMS,
     bytesCacheMaxBytes = VERIFIED_BYTES_CACHE_MAX_BYTES,
+    carryMaxBytes = REQUEST_CARRY_MAX_BYTES,
   } = {}) {
     this.ttlMs = Math.max(0, Number(ttlMs) || 0);
     this.maxEntries = Math.max(1, Number(maxEntries) || 1);
@@ -128,10 +133,11 @@ class AssetIntegrityCache {
     this.generation = 0;
     this.bufferedBytes = 0;
     this.bufferWaiters = [];
+    this.carryMaxBytes = Math.max(0, Number(carryMaxBytes) || 0);
     this.bytesCacheMaxBytes = Math.max(0, Number(bytesCacheMaxBytes) || 0);
     this.bytes = new Map(); // region key -> { buffer, until }
     this.bytesTotal = 0;
-    this.stats = { legacy: 0, bytesHits: 0, bytesMisses: 0, hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0, busy: 0, cancelled: 0 };
+    this.stats = { carried: 0, legacy: 0, bytesHits: 0, bytesMisses: 0, hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0, busy: 0, cancelled: 0 };
   }
 
   clear() {
@@ -149,6 +155,39 @@ class AssetIntegrityCache {
   }
 
   canBuffer(size) { return size <= this.bufferedHashMaxBytes; }
+
+  // Per-response hand-off of verified region bytes on the uncached path.
+  createCarry(maxBytes = this.carryMaxBytes) { return { maxBytes, held: 0, entries: new Map(), deferred: 0 }; }
+
+  releaseCarry(carry) {
+    if (!carry) return;
+    for (const entry of carry.entries.values()) entry.release();
+    carry.entries.clear();
+    carry.held = 0;
+  }
+
+  // Uncached path with a carry: hash the region now and keep its buffer for
+  // the same response, so it is never hashed twice. A region that would
+  // exceed the carry is not read here; verifiedSlice hashes it right before
+  // it is sent (a mismatch then aborts the response).
+  async verifyIntoCarry(filePath, identity, key, region, carry, { handle, signal }) {
+    const capacity = region.toEof ? region.size + 1 : region.size;
+    if (carry.entries.has(key)) return true;
+    if (carry.held + capacity > carry.maxBytes) { carry.deferred += 1; return true; }
+    await this.reserve(capacity, signal);
+    let kept = false;
+    try {
+      const result = await this.hashRegion(filePath, identity, region.offset, region.size, { toEof: Boolean(region.toEof), handle, signal, preReserved: true });
+      if (!result?.buffer || result.digest !== region.sha256) { this.stats.failures += 1; return false; }
+      let released = false;
+      carry.entries.set(key, { buffer: result.buffer, capacity, release: () => { if (!released) { released = true; this.unreserve(capacity); } } });
+      carry.held += capacity;
+      kept = true;
+      return true;
+    } finally {
+      if (!kept) this.unreserve(capacity);
+    }
+  }
 
   // A whole file too large to hold in memory, i.e. a legacy asset registered
   // without chunk records. OUTSIDE THE BYTE-INTEGRITY GUARANTEE of this module:
@@ -210,9 +249,16 @@ class AssetIntegrityCache {
   // a copy of bytes hashed earlier for this exact identity (kept in memory) or
   // read now through `handle` and hashed before being returned. The caller
   // must call release() once the bytes have been written. null = mismatch.
-  async verifiedSlice(filePath, stat, region, start, endExclusive, { handle = null, signal = null } = {}) {
+  async verifiedSlice(filePath, stat, region, start, endExclusive, { handle = null, signal = null, carry = null } = {}) {
     const identity = fileIdentity(stat);
     const key = this.regionKey(filePath, identity, region);
+    const carried = carry?.entries.get(key);
+    if (carried) {
+      carry.entries.delete(key);
+      carry.held -= carried.capacity;
+      this.stats.carried += 1;
+      return { bytes: carried.buffer.subarray(start - region.offset, endExclusive - region.offset), release: carried.release };
+    }
     const eligible = await this.filesystemCacheable(filePath, stat.dev);
     const entry = eligible ? this.bytes.get(key) : undefined;
     if (entry && entry.until > this.now()) {
@@ -421,7 +467,7 @@ class AssetIntegrityCache {
   // legacy assets without chunk rows).
   // With `handle`, the check reads that already-open descriptor (whose fstat
   // is `stat`); `signal` cancels a queued or running check.
-  async verifyWholeFile(filePath, stat, expectedSha256, { handle = null, signal = null } = {}) {
+  async verifyWholeFile(filePath, stat, expectedSha256, { handle = null, signal = null, carry = null } = {}) {
     const identity = fileIdentity(stat);
     const key = this.regionKey(filePath, identity, { kind: 'file', sha256: expectedSha256 });
     const verify = async (activeSignal) => {
@@ -432,13 +478,22 @@ class AssetIntegrityCache {
       this.stats.legacy += 1;
       return this.verifyAlone(verify, signal);
     }
+    if (carry && !await this.filesystemCacheable(filePath, stat.dev)) {
+      this.stats.uncached += 1;
+      return this.verifyIntoCarry(filePath, identity, key, { kind: 'file', offset: 0, size: Number(stat.size), sha256: expectedSha256, toEof: true }, carry, { handle, signal });
+    }
     return this.check(filePath, stat, key, verify, signal);
   }
 
   // Exact registered-chunk check for one 4 MiB (or shorter tail) region.
-  async verifyChunk(filePath, stat, chunk, { handle = null, signal = null } = {}) {
+  async verifyChunk(filePath, stat, chunk, { handle = null, signal = null, carry = null } = {}) {
     const identity = fileIdentity(stat);
-    const key = this.regionKey(filePath, identity, { kind: 'chunk', offset: chunk.byteOffset, size: chunk.byteSize, sha256: chunk.sha256 });
+    const region = { kind: 'chunk', offset: chunk.byteOffset, size: chunk.byteSize, sha256: chunk.sha256 };
+    const key = this.regionKey(filePath, identity, region);
+    if (carry && !await this.filesystemCacheable(filePath, stat.dev)) {
+      this.stats.uncached += 1;
+      return this.verifyIntoCarry(filePath, identity, key, region, carry, { handle, signal });
+    }
     return this.check(filePath, stat, key, async (activeSignal) => {
       const result = await this.hashRegion(filePath, identity, chunk.byteOffset, chunk.byteSize, { handle, signal: activeSignal });
       return { ok: Boolean(result) && result.digest === chunk.sha256, cacheable: Boolean(result?.cacheable), buffer: result?.buffer || null };
@@ -451,5 +506,5 @@ const assetIntegrityCache = new AssetIntegrityCache();
 module.exports = {
   AssetIntegrityCache, assetIntegrityCache, fileIdentity, sha256Hex,
   BUFFERED_HASH_MAX_BYTES, BUFFERED_HASH_BUDGET_BYTES, DEFAULT_TTL_MS, RACY_WINDOW_MS,
-  CACHEABLE_FILESYSTEMS, MAX_CONCURRENT_STREAMS, MAX_QUEUED_STREAMS, VERIFIED_BYTES_CACHE_MAX_BYTES, busyError, abortError,
+  CACHEABLE_FILESYSTEMS, MAX_CONCURRENT_STREAMS, MAX_QUEUED_STREAMS, VERIFIED_BYTES_CACHE_MAX_BYTES, REQUEST_CARRY_MAX_BYTES, busyError, abortError,
 };
