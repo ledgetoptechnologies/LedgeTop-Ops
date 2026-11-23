@@ -18,6 +18,8 @@ const {
   TILE_EDGE_ALLOWANCE_METERS,
   authorizedEnvelope,
   clipRing,
+  clipSegment,
+  clipBoundary,
   clipParcels,
   LIMITS,
   boundsInsideSite,
@@ -372,27 +374,35 @@ test('API: public link map tiles: only on-grid tiles inside the coverage, querie
   });
 });
 
-test('clipping names the segments it adds along the envelope, and only those', () => {
+test('clipping: rings are closed shapes only; lines are the real boundary, each original edge clipped on its own', () => {
   const envelope = { west: -89.41, south: 43.07, east: -89.40, north: 43.08 };
-  // Crosses the east side: clipped, with one cut along lon -89.40.
+  const segmentsOf = lines => lines.flatMap(line => line.slice(1).map((p, k) => [line[k], p]));
+  const onCut = ([p, q]) => p[0] === envelope.east && q[0] === envelope.east;
+  // Crosses the east side: the ring closes along the envelope; the lines do not.
   const crossing = [[-89.405, 43.072], [-89.405, 43.075], [-89.395, 43.075], [-89.395, 43.072], [-89.405, 43.072]];
-  const { ring, cuts } = clipRing(crossing, envelope);
+  const ring = clipRing(crossing, envelope);
   assert.ok(ring.every(([lon]) => lon <= envelope.east));
-  assert.equal(cuts.length, 1);
-  const [a, b] = [ring[cuts[0]], ring[cuts[0] + 1]];
-  assert.deepEqual([a[0], b[0]], [envelope.east, envelope.east], 'the cut runs along the envelope');
-  const real = ring.slice(1).map((p, k) => [ring[k], p]).filter((_, k) => !cuts.includes(k));
-  assert.ok(real.every(([p, q]) => !(p[0] === envelope.east && q[0] === envelope.east)), 'every other segment is real boundary');
-  // Wholly inside: unchanged, no cuts. Across a corner: both sides named.
+  assert.equal(segmentsOf([ring]).filter(onCut).length, 1, 'the closed shape runs along the envelope');
+  const lines = clipBoundary(crossing, envelope);
+  assert.deepEqual(lines, [[[-89.4, 43.072], [-89.405, 43.072], [-89.405, 43.075], [-89.4, 43.075]]], 'one open run, ends on the envelope');
+  assert.equal(segmentsOf(lines).filter(onCut).length, 0);
+  // Stepped parcel: a genuine edge lies exactly on the cutoff while another part crosses it.
+  const stepped = [[-89.405, 43.072], [-89.405, 43.078], [-89.395, 43.078], [-89.395, 43.075], [-89.40, 43.075], [-89.40, 43.072], [-89.405, 43.072]];
+  const steppedLines = clipBoundary(stepped, envelope);
+  const steppedOnCut = segmentsOf(steppedLines).filter(onCut);
+  assert.deepEqual(steppedOnCut, [[[-89.40, 43.075], [-89.40, 43.072]]], 'the genuine edge on the cutoff stays; the closure does not appear');
+  assert.equal(segmentsOf([clipRing(stepped, envelope)]).filter(onCut).filter(([p, q]) => p[1] !== q[1]).length, 2, 'the shape has both (genuine and closing)');
+  // Liang-Barsky per segment: outside, inside, crossing and along a side.
+  assert.equal(clipSegment([-89.39, 43.071], [-89.39, 43.079], envelope), null);
+  assert.deepEqual(clipSegment([-89.405, 43.071], [-89.402, 43.079], envelope), [[-89.405, 43.071], [-89.402, 43.079]]);
+  assert.deepEqual(clipSegment([-89.405, 43.075], [-89.395, 43.075], envelope).map(p => p.map(v => Math.round(v * 1e7) / 1e7)), [[-89.405, 43.075], [-89.4, 43.075]]);
+  // Wholly inside: unchanged and no lines field. Clipped: { id, rings, lines, owner? }.
   const inside = [[-89.405, 43.072], [-89.405, 43.075], [-89.402, 43.075], [-89.405, 43.072]];
-  assert.deepEqual(clipRing(inside, envelope), { ring: inside, cuts: [] });
-  const corner = clipRing([[-89.405, 43.075], [-89.405, 43.09], [-89.39, 43.09], [-89.39, 43.075], [-89.405, 43.075]], envelope);
-  assert.equal(corner.cuts.length, 2);
-  // Parcels carry cuts only when clipped; the response shape stays { id, rings, owner?, cuts? }.
+  assert.equal(clipRing(inside, envelope), inside);
   const out = clipParcels({ status: 'ok', parcels: [{ id: 1, rings: [crossing] }, { id: 2, owner: 'SAMPLE FARMS LLC', rings: [inside] }] }, envelope);
-  assert.deepEqual(out.parcels.map(p => Object.keys(p).sort()), [['cuts', 'id', 'rings'], ['id', 'owner', 'rings']]);
-  assert.deepEqual(out.parcels[0].cuts, [cuts]);
-});
+  assert.deepEqual(out.parcels.map(p => Object.keys(p).sort()), [['id', 'lines', 'rings'], ['id', 'owner', 'rings']]);
+  assert.deepEqual(out.parcels[0].lines, lines);
+});;
 
 test('origin budget: unrelated cache misses from many callers stay within the per-minute origin budget', async () => {
   let calls = 0, now = 0;

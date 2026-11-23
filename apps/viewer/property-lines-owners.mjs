@@ -2,9 +2,10 @@
 // outline, and each outline gets one clean label in its middle. Pure maths,
 // no DOM and no network; shared by the map views, 3D views and tests.
 //
-// Parcels arrive as { id, rings: [[[lon, lat], ...], ...], owner?, cuts? }
-// (see property-lines.mjs). `cuts` names ring segments the server closed
-// along its clipping envelope: used for shape (labels, merging), never drawn. Esri rings are closed, outer rings clockwise and holes
+// Parcels arrive as { id, rings: [[[lon, lat], ...], ...], owner?, lines? }
+// (see property-lines.mjs). A parcel the server clipped at its coverage
+// envelope has `lines`, its real boundary; its rings, closed along the
+// envelope, then serve as shape only (labels, merging) and are not drawn. Esri rings are closed, outer rings clockwise and holes
 // anticlockwise; orientation is enforced here so any source works.
 
 const DEG = Math.PI / 180;
@@ -116,9 +117,12 @@ const bboxTouch = (a, b, pad) => a.minX - pad <= b.maxX && a.maxX + pad >= b.min
 // one side of a shared boundary has a corner the other does not) are inserted
 // into the edge, so the shared stretch can cancel on both sides. This is
 // bounded work (splitBudget); a parcel over the budget is not reconciled.
-function splitAtVertices(ids, verts, candidates, snap) {
-  if (!candidates.length) return ids;
-  const out = [ids[0]];
+// flags[i] belongs to segment ids[i] -> ids[i + 1]; the pieces of a split
+// segment keep its flag. Returns { ids, flags }.
+function splitAtVertices(ids, flags, verts, candidates, snap) {
+  if (!candidates.length) return { ids, flags };
+  const out = [ids[0]], outFlags = [];
+  const push = (id, flag) => { if (out[out.length - 1] !== id) { out.push(id); outFlags.push(flag); } };
   for (let i = 1; i < ids.length; i++) {
     const a = verts[ids[i - 1]], b = verts[ids[i]];
     const dx = b[0] - a[0], dy = b[1] - a[1], len2 = dx * dx + dy * dy;
@@ -133,28 +137,28 @@ function splitAtVertices(ids, verts, candidates, snap) {
         if (ex * ex + ey * ey <= snap * snap) hits.push([t, id]);
       }
       hits.sort((p, q) => p[0] - q[0]);
-      for (const [, id] of hits) if (out[out.length - 1] !== id) out.push(id);
+      for (const [, id] of hits) push(id, flags[i - 1]);
     }
-    if (out[out.length - 1] !== ids[i]) out.push(ids[i]);
+    push(ids[i], flags[i - 1]);
   }
-  return out;
+  return { ids: out, flags: outFlags };
 }
 
-// The parts of a parcel's rings that are real boundary: a ring the server
-// clipped at its coverage envelope is split at the segments it names in
-// `cuts`, which run along the cut and are never drawn.
+// What to stroke for one parcel: its real boundary. A parcel the server
+// clipped at its coverage envelope says so itself (`lines`, the original
+// edges clipped one by one); otherwise its rings are its boundary.
 export function parcelStrokeLines(parcel) {
-  const lines = [];
-  parcel.rings.forEach((ring, index) => {
-    const cut = new Set(parcel.cuts?.[index] || []);
-    if (!cut.size) { lines.push(ring); return; }
-    let run = [ring[0]];
-    for (let k = 0; k < ring.length - 1; k++) {
-      if (cut.has(k)) { if (run.length >= 2) lines.push(run); run = [ring[k + 1]]; } else run.push(ring[k + 1]);
-    }
-    if (run.length >= 2) lines.push(run);
-  });
-  return lines;
+  return Array.isArray(parcel.lines) ? parcel.lines : parcel.rings;
+}
+
+// Within this distance (metres) a clipped parcel's ring segment counts as
+// lying on its own real boundary: rounding only (coordinates are 1e-7°).
+const PROVENANCE_METERS = 0.05;
+function onSegment(p, [a, b], tolerance) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], len2 = dx * dx + dy * dy;
+  const t = len2 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2 : 0;
+  if (t < -1e-9 || t > 1 + 1e-9) return Math.min(Math.hypot(p[0] - a[0], p[1] - a[1]), Math.hypot(p[0] - b[0], p[1] - b[1])) <= tolerance;
+  return Math.hypot(a[0] + t * dx - p[0], a[1] + t * dy - p[1]) <= tolerance;
 }
 
 // Chain directed edges [u, v] into polylines (closed loops end where they
@@ -182,25 +186,27 @@ function chainEdges(edges) {
 
 function mergeGroup(group, frame, snap, splitBudget) {
   const index = vertexIndex(snap);
+  // Each ring segment carries where it came from: real boundary, or (for a
+  // parcel the server clipped) a closing segment along the envelope. That
+  // is decided per parcel, in its own unsnapped coordinates, against its own
+  // real boundary (`lines`); the flag then travels with the segment through
+  // snapping and splitting, and only real segments are ever stroked.
   const items = group.map(parcel => {
-    const rings = orientedRings(parcel, frame).map(({ pts }) => {
-      const ids = [];
-      for (const [x, y] of pts) { const id = index.id(x, y); if (ids[ids.length - 1] !== id) ids.push(id); }
-      return ids;
-    }).filter(ids => ids.length >= 4);
-    return { parcel, rings, bbox: bboxOf(rings.map(ids => ids.map(id => index.verts[id]))), vertexIds: [...new Set(rings.flat())] };
+    const real = Array.isArray(parcel.lines) ? parcel.lines.flatMap(line => line.slice(1).map((p, k) => [frame.to(...line[k]), frame.to(...p)])) : null;
+    const genuine = (p, q) => !real || real.some(seg => onSegment(p, seg, PROVENANCE_METERS) && onSegment(q, seg, PROVENANCE_METERS));
+    const rings = [], flags = [];
+    for (const { pts } of orientedRings(parcel, frame)) {
+      const ids = [], segmentFlags = [];
+      for (let k = 0; k < pts.length; k++) {
+        const id = index.id(pts[k][0], pts[k][1]);
+        if (ids[ids.length - 1] === id) continue;
+        if (ids.length) segmentFlags.push(genuine(pts[k - 1], pts[k]));
+        ids.push(id);
+      }
+      if (ids.length >= 4) { rings.push(ids); flags.push(segmentFlags); }
+    }
+    return { parcel, rings, flags, bbox: bboxOf(rings.map(ids => ids.map(id => index.verts[id]))), vertexIds: [...new Set(rings.flat())] };
   });
-  // Segments the server closed along its clipping envelope, in local metres:
-  // an edge lying on one is kept for the shape but never drawn.
-  const cutSegments = group.flatMap(parcel => parcel.rings.flatMap((ring, r) => (parcel.cuts?.[r] || [])
-    .filter(k => ring[k + 1]).map(k => [frame.to(...ring[k]), frame.to(...ring[k + 1])])));
-  const onSegment = (p, [a, b]) => {
-    const dx = b[0] - a[0], dy = b[1] - a[1], len2 = dx * dx + dy * dy;
-    const t = len2 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2 : 0;
-    if (t < -1e-6 || t > 1 + 1e-6) return false;
-    return Math.hypot(a[0] + t * dx - p[0], a[1] + t * dy - p[1]) <= snap;
-  };
-  const isCut = (u, v) => cutSegments.some(seg => onSegment(index.verts[u], seg) && onSegment(index.verts[v], seg));
   // Insert neighbours' corners into edges, within the per-parcel budget. Over
   // it (very dense same-owner land), only edges whose corners already match
   // cancel, and a shared stretch with unmatched corners stays drawn.
@@ -208,19 +214,24 @@ function mergeGroup(group, frame, snap, splitBudget) {
     const candidates = [];
     for (const other of items) if (other !== item && bboxTouch(item.bbox, other.bbox, snap)) candidates.push(...other.vertexIds);
     const edges = item.rings.reduce((n, ids) => n + ids.length, 0);
-    if (candidates.length && edges * candidates.length <= splitBudget)
-      item.rings = item.rings.map(ids => splitAtVertices(ids, index.verts, candidates, snap));
+    if (candidates.length && edges * candidates.length <= splitBudget) {
+      const split = item.rings.map((ids, r) => splitAtVertices(ids, item.flags[r], index.verts, candidates, snap));
+      item.rings = split.map(s => s.ids); item.flags = split.map(s => s.flags);
+    }
   }
   // Directed edges; an edge also present in the opposite direction from
   // another parcel is a shared boundary inside the owner's land.
-  const edgeOwners = new Map();
+  const edgeOwners = new Map(), realEdges = new Set();
   items.forEach((item, i) => {
-    for (const ids of item.rings) for (let k = 1; k < ids.length; k++) {
-      if (ids[k - 1] === ids[k]) continue;
-      const key = `${ids[k - 1]}>${ids[k]}`;
-      if (!edgeOwners.has(key)) edgeOwners.set(key, new Set());
-      edgeOwners.get(key).add(i);
-    }
+    item.rings.forEach((ids, r) => {
+      for (let k = 1; k < ids.length; k++) {
+        if (ids[k - 1] === ids[k]) continue;
+        const key = `${ids[k - 1]}>${ids[k]}`;
+        if (!edgeOwners.has(key)) edgeOwners.set(key, new Set());
+        edgeOwners.get(key).add(i);
+        if (item.flags[r][k - 1]) realEdges.add(key);
+      }
+    });
   });
   const parent = items.map((_, i) => i);
   const find = i => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
@@ -244,7 +255,7 @@ function mergeGroup(group, frame, snap, splitBudget) {
   for (const [key, owners] of edgeOwners) {
     if (internal.has(key)) continue;
     const [u, v] = key.split('>').map(Number);
-    if (cutSegments.length && isCut(u, v)) continue;
+    if (!realEdges.has(key)) continue;   // a closing segment along the envelope: shape only
     components.get(find(owners.values().next().value)).edges.push([u, v]);
   }
   return [...components.values()].map(({ members, edges }) => ({

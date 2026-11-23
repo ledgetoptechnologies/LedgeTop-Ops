@@ -316,15 +316,21 @@ function intersectBounds(a, b) {
   return out.west < out.east && out.south < out.north ? out : null;
 }
 
-// Sutherland-Hodgman clip of one closed ring to a lon/lat rectangle ->
-// { ring, cuts }. The clipped ring is closed along the rectangle; `cuts`
-// lists the indexes k of the segments ring[k] -> ring[k + 1] that run along
-// the rectangle (the cut, not a parcel boundary). They keep the shape whole
-// for labels and merging and must never be drawn. Rings wholly inside come
-// back unchanged with no cuts.
-function clipRing(ring, b) {
-  if (ring.every(([lon, lat]) => lon >= b.west && lon <= b.east && lat >= b.south && lat <= b.north)) return { ring, cuts: [] };
+// Coordinates as the source rings are rounded, and never past the rectangle.
+function snapInside([lon, lat], b) {
   const round = v => Math.round(v * 1e7) / 1e7;
+  return [Math.min(b.east, Math.max(b.west, round(lon))), Math.min(b.north, Math.max(b.south, round(lat)))];
+}
+
+const insideBounds = ([lon, lat], b) => lon >= b.west && lon <= b.east && lat >= b.south && lat <= b.north;
+
+// Sutherland-Hodgman clip of one closed ring to a lon/lat rectangle: the
+// shape inside it, closed along the rectangle where the parcel ran past.
+// Used for labels and merging only; it is never drawn, because its closing
+// segments along the rectangle are not parcel boundary (see clipBoundary).
+// Rings wholly inside come back unchanged.
+function clipRing(ring, b) {
+  if (ring.every(p => insideBounds(p, b))) return ring;
   const edges = [
     [p => p[0] >= b.west, (p, q) => [b.west, p[1] + (q[1] - p[1]) * (b.west - p[0]) / (q[0] - p[0])]],
     [p => p[0] <= b.east, (p, q) => [b.east, p[1] + (q[1] - p[1]) * (b.east - p[0]) / (q[0] - p[0])]],
@@ -342,30 +348,58 @@ function clipRing(ring, b) {
     if (!points.length) return null;
   }
   if (points.length < 3) return null;
-  // Which rectangle sides each point lies on (exact: crossings are computed
-  // onto the side itself); a segment with both ends on one side is a cut.
-  const sides = ([lon, lat]) => (lon === b.west ? 1 : 0) | (lon === b.east ? 2 : 0) | (lat === b.south ? 4 : 0) | (lat === b.north ? 8 : 0);
-  const cuts = [];
-  for (let k = 0; k < points.length; k++) if (sides(points[k]) & sides(points[(k + 1) % points.length])) cuts.push(k);
-  // Rounded as the source rings are, and never past the rectangle.
-  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-  points = points.map(([lon, lat]) => [clamp(round(lon), b.west, b.east), clamp(round(lat), b.south, b.north)]);
-  return { ring: [...points, points[0]], cuts };
+  points = points.map(p => snapInside(p, b));
+  return [...points, points[0]];
+}
+
+// Liang-Barsky clip of one segment to the rectangle: the part inside, or null.
+function clipSegment(p, q, b) {
+  const dx = q[0] - p[0], dy = q[1] - p[1];
+  let t0 = 0, t1 = 1;
+  for (const [step, room] of [[-dx, p[0] - b.west], [dx, b.east - p[0]], [-dy, p[1] - b.south], [dy, b.north - p[1]]]) {
+    if (step === 0) { if (room < 0) return null; continue; }
+    const t = room / step;
+    if (step < 0) { if (t > t1) return null; if (t > t0) t0 = t; } else { if (t < t0) return null; if (t < t1) t1 = t; }
+  }
+  if (t0 >= t1) return null;
+  return [t0 === 0 ? p : [p[0] + t0 * dx, p[1] + t0 * dy], t1 === 1 ? q : [p[0] + t1 * dx, p[1] + t1 * dy]];
+}
+
+// The parcel's real boundary inside the rectangle: every original edge
+// clipped on its own, joined into runs. A genuine edge lying on the
+// rectangle is kept; nothing is added along the rectangle.
+function clipBoundary(ring, b) {
+  const lines = [];
+  let run = null;
+  for (let i = 1; i < ring.length; i++) {
+    const piece = clipSegment(ring[i - 1], ring[i], b);
+    if (!piece) { run = null; continue; }
+    const [a, c] = piece.map(p => snapInside(p, b));
+    if (a[0] === c[0] && a[1] === c[1]) continue;
+    const last = run?.[run.length - 1];
+    if (last && last[0] === a[0] && last[1] === a[1]) run.push(c);
+    else { run = [a, c]; lines.push(run); }
+  }
+  // A closed ring whose first and last runs meet becomes one run.
+  if (lines.length > 1) {
+    const first = lines[0], end = lines[lines.length - 1].at(-1);
+    if (end[0] === first[0][0] && end[1] === first[0][1]) { lines[lines.length - 1].push(...first.slice(1)); lines.shift(); }
+  }
+  return lines;
 }
 
 // The state's parcels clipped to the authorized envelope; parcels wholly
-// outside it are dropped. A clipped parcel carries `cuts` (one list of
-// segment indexes per ring) naming the segments along the envelope, which
-// the browser never strokes.
+// outside it are dropped. A clipped parcel carries, besides its closed
+// `rings` (shape only: labels and merging), `lines`: its real boundary
+// inside the envelope, which is all the browser strokes for it.
 function clipParcels(result, envelope) {
   if (result.status !== 'ok') return result;
   const parcels = [];
   for (const parcel of result.parcels) {
-    const clipped = parcel.rings.map(ring => clipRing(ring, envelope)).filter(Boolean);
-    if (!clipped.length) continue;
-    const out = { ...parcel, rings: clipped.map(c => c.ring) };
-    if (clipped.some(c => c.cuts.length)) out.cuts = clipped.map(c => c.cuts);
-    parcels.push(out);
+    const rings = parcel.rings.map(ring => clipRing(ring, envelope)).filter(Boolean);
+    if (!rings.length) continue;
+    const clipped = parcel.rings.some(ring => !ring.every(p => insideBounds(p, envelope)));
+    parcels.push(clipped ? { ...parcel, rings, lines: parcel.rings.flatMap(ring => clipBoundary(ring, envelope)) } : { ...parcel, rings });
   }
   return { status: parcels.length ? 'ok' : 'none', parcels };
 }
@@ -618,6 +652,8 @@ module.exports = {
   parseTile,
   authorizedEnvelope,
   clipRing,
+  clipSegment,
+  clipBoundary,
   clipParcels,
   boundsInsideSite,
   boundsTouchSite,

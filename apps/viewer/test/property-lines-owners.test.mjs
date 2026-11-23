@@ -256,10 +256,10 @@ test('cutoff: a parcel crossing the coverage cutoff is never stroked along the c
     parcel(1, 'SAMPLE FARMS LLC', square(0, 0, 5, 2)), parcel(2, 'sample farms llc', square(0, 2, 5, 2)), parcel(3, 'EXAMPLE OWNER', square(0, 4, 5, 1)),
   ] };
   const clipped = clipParcels(upstream, envelope);
-  assert.ok(clipped.parcels.every(p => Array.isArray(p.cuts)), 'the server names the cut segments');
+  assert.ok(clipped.parcels.every(p => Array.isArray(p.lines)), 'clipped parcels carry their real boundary');
   for (const p of clipped.parcels) for (const ring of p.rings) assert.ok(ring.every(([lon]) => lon <= cutLon), 'geometry stays inside the envelope');
   const parcels = normalizeParcelResponse(JSON.parse(JSON.stringify(clipped))).parcels; // as the browser receives it
-  assert.ok(parcels.every(p => p.cuts?.some(c => c.length)), 'cuts survive the browser check');
+  assert.ok(parcels.every(p => p.lines?.length), 'lines survive the browser check');
   const onCut = ([a, b]) => Math.abs(a[0] - cutLon) < 1e-9 && Math.abs(b[0] - cutLon) < 1e-9;
   const segmentsOf = lines => lines.flatMap(line => line.slice(1).map((point, k) => [line[k], point]));
   for (const merge of [true, false]) {
@@ -282,4 +282,40 @@ test('cutoff: a parcel crossing the coverage cutoff is never stroked along the c
   const farm = dissolveParcelsByOwner(parcels).find(o => o.ownerKey === 'SAMPLE FARMS LLC');
   assert.equal(farm.lines.length, 1, 'one open run');
   assert.ok(segmentsOf(farm.lines).every(([a, b]) => !(a[1] === corner(0, 2)[1] && b[1] === corner(0, 2)[1])), 'the shared edge between the two parcels is removed');
+});
+
+test('cutoff: a genuine edge lying on the cutoff stays drawn while the closing segment does not (raw, merged, 3D)', () => {
+  const { clipParcels } = require('../server/propertyLines.js');
+  const cutLon = corner(3, 0)[0];
+  const envelope = { west: corner(-2, 0)[0], south: corner(0, -2)[1], east: cutLon, north: corner(0, 8)[1] };
+  // Stepped parcel: its real east edge lies exactly on the cutoff for y 0..2;
+  // for y 2..4 it reaches x = 5, past the cutoff. A same-owner parcel above
+  // (y 4..6) also crosses, and shares the y = 4 edge with it.
+  const stepped = [corner(0, 0), corner(3, 0), corner(3, 2), corner(5, 2), corner(5, 4), corner(0, 4), corner(0, 0)];
+  const upstream = { status: 'ok', parcels: [
+    parcel(1, 'SAMPLE FARMS LLC', stepped), parcel(2, 'Sample Farms LLC', square(0, 4, 5, 2)),
+  ] };
+  const parcels = normalizeParcelResponse(JSON.parse(JSON.stringify(clipParcels(upstream, envelope)))).parcels;
+  const y = j => corner(0, j)[1];
+  const along = (from, to) => ([a, b]) => Math.abs(a[0] - cutLon) < 1e-9 && Math.abs(b[0] - cutLon) < 1e-9
+    && Math.min(a[1], b[1]) >= Math.min(y(from), y(to)) - 1e-9 && Math.max(a[1], b[1]) <= Math.max(y(from), y(to)) + 1e-9 && a[1] !== b[1];
+  const genuine = along(0, 2), closing = along(2, 6);
+  const segmentsOf = lines => lines.flatMap(line => line.slice(1).map((point, k) => [line[k], point]));
+  const length = segments => segments.reduce((sum, [a, b]) => sum + Math.abs(a[1] - b[1]), 0);
+  for (const merge of [false, true]) {
+    const outlines = dissolveParcelsByOwner(parcels, { merge });
+    assert.equal(outlines.length, merge ? 1 : 2);
+    const drawn = segmentsOf(outlines.flatMap(o => o.lines));
+    const label = merge ? 'merged' : 'raw';
+    assert.ok(Math.abs(length(drawn.filter(genuine)) - (y(2) - y(0))) < 1e-9, `${label}: the real edge on the cutoff is drawn in full`);
+    assert.equal(drawn.filter(closing).length, 0, `${label}: the closing segment is not drawn`);
+    // 3D strokes the same lines.
+    const { lines: utm } = parcelsToUtmPolylines(outlines.map(o => ({ rings: o.lines })), (lat, lon) => [lon, lat], { densifyMeters: 0 });
+    const utmSegments = segmentsOf(utm);
+    assert.ok(Math.abs(length(utmSegments.filter(genuine)) - (y(2) - y(0))) < 1e-9, `${label} 3D: real edge drawn`);
+    assert.equal(utmSegments.filter(closing).length, 0, `${label} 3D: closing segment not drawn`);
+  }
+  // Merged: the shared y = 4 edge is gone, and so is nothing else real.
+  const [merged] = dissolveParcelsByOwner(parcels);
+  assert.ok(segmentsOf(merged.lines).every(([a, b]) => !(Math.abs(a[1] - y(4)) < 1e-12 && Math.abs(b[1] - y(4)) < 1e-12)));
 });

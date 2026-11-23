@@ -497,23 +497,17 @@ export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-li
 export function normalizeParcelResponse(body) {
   const status = ['ok', 'none', 'too_many', 'outside'].includes(body?.status) ? body.status : 'unavailable';
   if (status !== 'ok') return { status, parcels: [] };
+  const cleanLine = line => (Array.isArray(line) ? line : []).filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])
+    && Math.abs(p[0]) <= 180 && Math.abs(p[1]) <= 85).map(p => [p[0], p[1]]);
   const parcels = [];
   for (const parcel of Array.isArray(body.parcels) ? body.parcels : []) {
-    const rings = [], cuts = [];
-    const sourceRings = Array.isArray(parcel?.rings) ? parcel.rings : [];
-    sourceRings.forEach((ring, index) => {
-      if (!Array.isArray(ring)) return;
-      const clean = ring.filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])
-        && Math.abs(p[0]) <= 180 && Math.abs(p[1]) <= 85).map(p => [p[0], p[1]]);
-      if (clean.length < 2) return;
-      rings.push(clean);
-      // Segments the server closed along its clipping envelope (never drawn).
-      // Indexes only hold while the ring kept every point.
-      const named = Array.isArray(parcel.cuts) && Array.isArray(parcel.cuts[index]) && clean.length === ring.length ? parcel.cuts[index] : [];
-      cuts.push([...new Set(named.filter(k => Number.isInteger(k) && k >= 0 && k < clean.length - 1))].sort((a, b) => a - b));
-    });
-    const owner = typeof parcel.owner === 'string' ? parcel.owner.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) : '';
-    if (rings.length) parcels.push({ id: Number.isSafeInteger(parcel.id) ? parcel.id : null, rings, ...(owner ? { owner } : {}), ...(cuts.some(c => c.length) ? { cuts } : {}) });
+    const rings = (Array.isArray(parcel?.rings) ? parcel.rings : []).map(cleanLine).filter(ring => ring.length >= 2);
+    // A parcel the server clipped at its coverage envelope also carries
+    // `lines`, its real boundary inside the envelope: the only part drawn.
+    // Its rings then give the shape only (labels and merging).
+    const lines = Array.isArray(parcel?.lines) ? parcel.lines.map(cleanLine).filter(line => line.length >= 2) : null;
+    const owner = typeof parcel?.owner === 'string' ? parcel.owner.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+    if (rings.length) parcels.push({ id: Number.isSafeInteger(parcel.id) ? parcel.id : null, rings, ...(owner ? { owner } : {}), ...(lines ? { lines } : {}) });
   }
   return { status: parcels.length ? 'ok' : 'none', parcels };
 }

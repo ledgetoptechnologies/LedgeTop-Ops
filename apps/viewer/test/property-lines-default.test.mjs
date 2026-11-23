@@ -474,3 +474,37 @@ test('cutoff: map and 3D layers never stroke the segments the server cut along i
   const lonOf = ([e, n]) => projection.utmToLatLon(e, n)[1];
   assert.equal(potreeSegments.filter(([a, b]) => Math.abs(lonOf(a) - cutLon) < 1e-7 && Math.abs(lonOf(b) - cutLon) < 1e-7).length, 0, '3D');
 });
+
+test('cutoff: map and 3D layers keep a real edge lying on the cutoff and never draw the closing segment', async () => {
+  const { clipParcels } = createRequire(import.meta.url)('../server/propertyLines.js');
+  const cutLon = -89.4008;
+  const envelope = { west: -89.42, south: 43.06, east: cutLon, north: 43.09 };
+  // Real east edge on the cutoff for lat 43.0742..43.0745; past it for 43.0745..43.0748.
+  const stepped = [[-89.4013, 43.0742], [cutLon, 43.0742], [cutLon, 43.0745], [-89.4003, 43.0745], [-89.4003, 43.0748], [-89.4013, 43.0748], [-89.4013, 43.0742]];
+  const above = [[-89.4013, 43.0748], [-89.4013, 43.0749], [-89.4003, 43.0749], [-89.4003, 43.0748], [-89.4013, 43.0748]];
+  const body = clipParcels({ status: 'ok', parcels: [
+    { id: 1, owner: 'SAMPLE FARMS LLC', rings: [stepped] }, { id: 2, owner: 'Sample Farms LLC', rings: [above] },
+  ] }, envelope);
+  const onCut = (lonA, lonB) => Math.abs(lonA - cutLon) < 1e-9 && Math.abs(lonB - cutLon) < 1e-9;
+  const inRange = (latA, latB, lo, hi) => Math.min(latA, latB) >= lo - 1e-9 && Math.max(latA, latB) <= hi + 1e-9 && latA !== latB;
+  const realLength = segments => segments.filter(([[latA, lonA], [latB, lonB]]) => onCut(lonA, lonB) && inRange(latA, latB, 43.0742, 43.0745))
+    .reduce((sum, [[latA], [latB]]) => sum + Math.abs(latA - latB), 0);
+  const closing = segments => segments.filter(([[latA, lonA], [latB, lonB]]) => onCut(lonA, lonB) && inRange(latA, latB, 43.0745, 43.0749));
+  const ctx = await open(page({ parcels: () => reply(JSON.parse(JSON.stringify(body))) }));
+  assertShownOn(ctx, 'map');
+  // The orange line layer (the halo draws the same lines underneath).
+  const mapSegments = () => [...ctx.layers].filter(layer => layer.options.color !== '#111111').flatMap(layer => layer.rings.flatMap(line => line.slice(1).map((p, k) => [line[k], p])));
+  for (const merge of [true, false]) {
+    ctx.controller.setMerge(merge);
+    await flush();
+    const segments = mapSegments();
+    assert.ok(Math.abs(realLength(segments) - 0.0003) < 1e-9, `map ${merge ? 'merged' : 'raw'}: the real edge on the cutoff is drawn`);
+    assert.equal(closing(segments).length, 0, `map ${merge ? 'merged' : 'raw'}: the closing segment is not drawn`);
+  }
+  const three = await open(page({ mode: 'cloud', cloudMode: 'potree', parcels: () => reply(JSON.parse(JSON.stringify(body))) }));
+  assertShownOn(three, 'potree');
+  const potree = three.potree.lines.flatMap(line => line.slice(1).map((p, k) => [projection.utmToLatLon(line[k][0], line[k][1]), projection.utmToLatLon(p[0], p[1])]));
+  const nearCut = (lonA, lonB) => Math.abs(lonA - cutLon) < 1e-7 && Math.abs(lonB - cutLon) < 1e-7;
+  assert.ok(potree.some(([[latA, lonA], [latB, lonB]]) => nearCut(lonA, lonB) && Math.min(latA, latB) < 43.07445), '3D: the real edge on the cutoff is drawn');
+  assert.equal(potree.filter(([[latA, lonA], [latB, lonB]]) => nearCut(lonA, lonB) && Math.min(latA, latB) > 43.07451).length, 0, '3D: the closing segment is not drawn');
+});

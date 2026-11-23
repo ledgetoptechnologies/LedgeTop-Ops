@@ -681,10 +681,13 @@ WGS84 UTM 16N
   the coverage window (the site window widened by 4 km) and lie inside it
   widened by one zoom-14 tile (2 km). For both, the query to the state and
   every returned ring are clipped to the window's lon/lat bounds, so nothing
-  past it is served. Where a parcel crosses that limit, the server lists the
-  segments it added along the cut (`cuts`); the Viewer keeps them for the
-  shape (labels, merging) but never draws them, on the map or in 3D, so the
-  outline stops at the limit instead of showing an invented boundary. Calls to the state are also capped at 240 a minute for
+  past it is served. Where a parcel crosses that limit, the server returns two
+  things: its `rings` clipped and closed along the limit (shape only, for
+  labels and merging) and `lines`, its real boundary inside the limit, each
+  original edge clipped on its own. The Viewer strokes only real boundary
+  (raw, merged, map and 3D): a real edge lying on the limit stays drawn, and
+  the closing segment along the limit never is. When merging, each segment
+  carries where it came from through snapping and splitting. Calls to the state are also capped at 240 a minute for
   the whole server, besides the per-caller slots and rates and the cache. The service URL changes with each yearly release: update
   the Wisconsin entry in `server/parcelSources.js` (URL, release, vintage,
   dataUpdated and credit together); the monthly release check reports a newer
