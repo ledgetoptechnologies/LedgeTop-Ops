@@ -405,6 +405,8 @@ function createApiV1(repository) {
     } catch (error) {
       if (error?.code === 'source_authorization_revoked')
         return res.status(409).json({ error: 'sourceAuthorization is revoked' });
+      if (error?.code === 'model_deleted')
+        return res.status(404).json({ error: 'ready model not found' });
       throw error;
     }
     const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
@@ -508,7 +510,10 @@ function createApiV1(repository) {
         viewUrl: `${base}/view/${token}`,
         embedUrl: `${base}/embed/${token}`,
       });
-    } catch (error) { next(error); }
+    } catch (error) {
+      if (error?.code === 'model_deleted') return res.status(404).json({ error: 'ready model not found' });
+      next(error);
+    }
   });
 
   router.delete('/api/v1/shares/:id', serviceOnly, idempotentService, (req, res) => {

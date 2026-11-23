@@ -583,7 +583,30 @@ class ViewerRepository {
     };
   }
 
+  // True while the model's task or project is in the Recycle Bin, or once it is
+  // purged, however far that delete got. The model version's own output decides;
+  // a version with no output of its own follows the model's other outputs. A
+  // model that was never processed here has no outputs and is never deleted.
+  modelDeleted(modelId, modelVersionId = null) {
+    const rows = this.database.prepare(`SELECT o.id,
+        t.purged_at IS NOT NULL OR p.purged_at IS NOT NULL OR EXISTS(SELECT 1 FROM storage_trash s
+          WHERE s.permanently_deleted_at IS NULL
+            AND ((s.entity_type='task' AND s.entity_id=t.id) OR (s.entity_type='project' AND s.entity_id=p.id))) AS deleted
+      FROM model_outputs o JOIN processing_tasks t ON t.id=o.task_id JOIN projects p ON p.id=o.project_id
+      WHERE o.model_id=?`).all(modelId);
+    if (!rows.length) return false;
+    const versionId = modelVersionId || this.database.prepare('SELECT active_version_id FROM models WHERE id=?').get(modelId)?.active_version_id;
+    const own = rows.filter((row) => row.id === versionId);
+    return (own.length ? own : rows).some((row) => row.deleted === 1);
+  }
+
+  assertModelNotDeleted(modelId, modelVersionId = null) {
+    if (this.modelDeleted(modelId, modelVersionId))
+      throw Object.assign(new Error('the model is in the Recycle Bin'), { code: 'model_deleted' });
+  }
+
   createPublicShare(input) {
+    this.assertModelNotDeleted(input.modelId, input.modelVersionId);
     const id = input.id || crypto.randomUUID();
     const timestamp = now();
     this.database.prepare(`INSERT INTO public_shares(
@@ -789,6 +812,7 @@ class ViewerRepository {
   }
 
   createSessionGrant({ modelId, modelVersionId = null, reviewAttemptId = null, sessionMode = 'published', sourceAuthorization: authorization = null, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
+    this.assertModelNotDeleted(modelId, modelVersionId);
     this.pruneAuthState();
     const id = crypto.randomUUID();
     const timestamp = now();
@@ -825,6 +849,7 @@ class ViewerRepository {
     return this.transaction(() => {
       const row = this.database.prepare('SELECT * FROM session_grants WHERE id=?').get(id);
       if (!row || row.redeemed_at || Date.parse(row.expires_at) <= at) return null;
+      if (this.modelDeleted(row.model_id, row.model_version_id)) return null;
       if (row.source_authorization_id && this.database.prepare(`SELECT 1
         FROM revoked_published_session_authorizations
         WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`
@@ -877,6 +902,7 @@ class ViewerRepository {
     const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
     if (sessionMode !== 'published' && sourceId !== null)
       throw new TypeError('source authorization is only valid for published sessions');
+    if (this.modelDeleted(modelId, modelVersionId)) return null;
     const inserted = this.database.prepare(`INSERT INTO viewer_sessions(
       id,token_hash,model_id,model_version_id,review_attempt_id,session_mode,
       source_authorization_type,source_authorization_id,source_authorization_version,
