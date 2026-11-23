@@ -4270,6 +4270,18 @@ test('built routes load the same-origin brand mark and the basemap tiles under t
     await client.command('Page.addScriptToEvaluateOnNewDocument', { source: `window.__cspViolations = [];
       document.addEventListener('securitypolicyviolation', event => window.__cspViolations.push({
         directive: event.effectiveDirective, blocked: event.blockedURI }));` });
+    // The basemap host is answered here, before any connection: the CSP still decides
+    // whether the page may ask for it, and the browser can reach nothing but loopback.
+    const tilePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const tileFailures = [];
+    client.socket.addEventListener('message', (event) => {
+      const message = JSON.parse(event.data);
+      if (message.method !== 'Fetch.requestPaused') return;
+      client.command('Fetch.fulfillRequest', { requestId: message.params.requestId, responseCode: 200, body: tilePng,
+        responseHeaders: [{ name: 'Content-Type', value: 'image/png' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
+      }).catch((error) => tileFailures.push(error.message));
+    });
+    await client.command('Fetch.enable', { patterns: [{ urlPattern: 'https://server.arcgisonline.com/*', requestStage: 'Request' }] });
     const brandMarks = `[...document.querySelectorAll('img')].filter(image => new URL(image.src, location.href).pathname === '/lt-mark.svg')`;
     const checkRoute = async (route, label) => {
       await client.command('Page.navigate', { url: `${fixture.origin}${route}` });
@@ -4285,7 +4297,8 @@ test('built routes load the same-origin brand mark and the basemap tiles under t
     await waitFor(client, `(() => { const tiles = [...document.querySelectorAll('img.leaflet-tile')]
       .filter(image => image.src.startsWith('https://server.arcgisonline.com/'));
       return tiles.some(image => image.complete && image.naturalWidth > 0); })()`,
-    'viewer: no Esri basemap tile loaded (is the network reachable?)', 30_000);
+    'viewer: no Esri basemap tile loaded', 30_000);
+    assert.deepEqual(tileFailures, [], 'every basemap tile was answered by the test');
     const tiles = await client.evaluate(`[...document.querySelectorAll('img.leaflet-tile')]
       .filter(image => image.src.startsWith('https://server.arcgisonline.com/') && image.complete && image.naturalWidth > 0).length`);
     assert.ok(tiles > 0, 'basemap tiles must render');

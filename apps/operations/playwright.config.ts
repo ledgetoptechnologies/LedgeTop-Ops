@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { BROWSER_NETWORK_ARGS } from "./test/browser-network-args";
 
 const fixturePort = Number(process.env.PLAYWRIGHT_PORT || 4174);
 
@@ -12,6 +13,7 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${fixturePort}`,
     channel: "msedge",
     headless: true,
+    launchOptions: { args: [...BROWSER_NETWORK_ARGS] },
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },

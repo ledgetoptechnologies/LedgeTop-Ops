@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
+import { isolatedBrowserArguments } from './launch-network-isolation.mjs';
 
 // Opt in deliberately: ordinary Linux/unit runs do not import Playwright or
 // require Edge. An opted-in run fails if the build/browser is unavailable.
@@ -173,7 +174,7 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
   assert.ok(existsSync(edge), `Microsoft Edge executable unavailable: ${edge}`);
   const release = await acquireBrowserHarnessLock({ root }); let browser;
   t.after(async () => { try { await browser?.close(); } finally { release(); } });
-  browser = await chromium.launch({ executablePath: edge, headless: true, args: ['--disable-gpu', '--no-first-run'] });
+  browser = await chromium.launch({ executablePath: edge, headless: true, args: isolatedBrowserArguments(['--disable-gpu', '--no-first-run']) });
 
   for (const deferLegacy of [false, true]) await t.test(`direct sharing works with ${deferLegacy ? 'pending then failed' : 'failed'} legacy project lookup`, async child => {
     const state = await fixture(child, { legacyUnavailable: true, deferLegacy });
