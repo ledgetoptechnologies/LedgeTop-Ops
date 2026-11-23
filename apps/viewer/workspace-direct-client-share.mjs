@@ -67,7 +67,7 @@ export function directShareErrorText(error){
 // A Share opened from the project starts on the whole project; one opened from a task starts on that task,
 // and never on the whole project, even when that task cannot be shared yet.
 // "Also share models published later" always starts unticked: whole-project access needs that explicit choice.
-export function directShareDefaultScope({taskId=null}={}){return taskId?'tasks':'project'}
+export function directShareDefaultScope({entry=null,taskId=null}={}){return (entry||(taskId?'task':'project'))==='project'?'project':'tasks'}
 const permissionList=permissions=>{
   const can=['view',permissions?.measure&&'measure',permissions?.cameras&&'see camera positions',permissions?.download&&'download'].filter(Boolean);
   return can.length>1?`${can.slice(0,-1).join(', ')} and ${can.at(-1)}`:can[0];
@@ -77,8 +77,11 @@ export function directShareReviewText({summary,permissions,expiresAt,dateTime=va
   return `${summary} They can ${permissionList(permissions)}. ${expiresAt?`Access ends ${dateTime(expiresAt)}.`:'Access does not expire until you revoke it.'}`;
 }
 
-export function directShareForm({projectName,tasks,taskId=null,taskName=''}){
-  const scope=directShareDefaultScope({taskId}),unpublished=taskId&&!tasks.some(task=>task.id===taskId);
+// The task this Share was opened on is gone from the project: nothing can be shared from here.
+export const SHARE_TARGET_MISSING='This task or its model is no longer in this project, so it can’t be shared from here. Close Share and open it again.';
+export function directShareForm({projectName,tasks,entry=null,taskId=null,taskName='',targetMissing=false}){
+  if(targetMissing)return `<p class="form-note" role="alert">${esc(SHARE_TARGET_MISSING)}</p>`;
+  const scope=directShareDefaultScope({entry,taskId}),unpublished=taskId&&!tasks.some(task=>task.id===taskId);
   const taskList=tasks.length?tasks.map(task=>`<label class="check"><input type="checkbox" name="taskId" value="${esc(task.id)}" ${task.id===taskId?'checked':''}> ${esc(task.name)}</label>`).join('')
     :'<p class="form-note">No tasks in this project have a published model yet.</p>';
   const notice=unpublished?`<p class="form-note" role="status">${taskName?`“${esc(taskName)}”`:'This task'} is not published yet, so a client cannot be given it on its own. Publish it first.</p>`:'';

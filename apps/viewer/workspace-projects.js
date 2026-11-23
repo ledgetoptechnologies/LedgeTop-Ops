@@ -20,7 +20,7 @@ import { createWorkspaceNavigationWork, workspaceNavigationState } from './works
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -189,7 +189,9 @@ function canShareOutput(output) {
 }
 async function openShareModal(projectId,onlyOutputId=null){
   state.clientNativeAccess=null;state.clientDirectAccess=null;
-  const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
+  // A task's Share stays that task's Share: what it was opened on is fixed now, not looked up again after a refresh.
+  const openedTask=onlyOutputId?state.tasks.find(task=>task.id===state.outputs.find(output=>output.id===onlyOutputId)?.taskId):null;
+  const context={projectId,onlyOutputId,taskId:openedTask?.id||null,taskName:openedTask?.displayName||'',id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
   const token=state.token,subject=state.adminSession?.subject;
   const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
     &&modalContent.querySelector('.share-columns')?.dataset.shareContext===context.id;
@@ -1747,9 +1749,11 @@ function legacyClientSharePanel(output,onlyOutputId){
 }
 function directShareContext(onlyOutputId){
   const projectId=state.shareContext.projectId,project=state.projects.find(item=>item.id===projectId);
-  const taskId=onlyOutputId?state.outputs.find(output=>output.id===onlyOutputId)?.taskId||null:null;
+  const taskId=onlyOutputId?state.shareContext.taskId||null:null,task=taskId?state.tasks.find(item=>item.id===taskId):null;
   return {projectId,projectName:project?.displayName||'this project',tasks:shareableTasks(projectId,state.tasks,state.outputs),
-    taskId,taskName:state.tasks.find(task=>task.id===taskId)?.displayName||''};
+    entry:onlyOutputId?'task':'project',taskId,taskName:onlyOutputId?state.shareContext.taskName||'':'',
+    // The task and the model it was opened on must both still be there, in this project.
+    targetMissing:Boolean(onlyOutputId)&&!(task?.projectId===projectId&&state.outputs.some(output=>output.id===onlyOutputId&&output.taskId===taskId))};
 }
 function directClientShareCard(onlyOutputId){
   const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
@@ -1791,6 +1795,7 @@ function bindDirectShare(form,projectId,onlyOutputId){
   // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
   form.onsubmit=async event=>{
     event.preventDefault();if(form.shareBusy)return;
+    if(directShareContext(onlyOutputId).targetMissing){if(form.reviewing)setReviewing(false);summary.textContent=SHARE_TARGET_MISSING;return}
     let bodies,target;try{target=read();bodies=target.bodies()}catch(error){summary.textContent=error.message;if(form.reviewing)setReviewing(false);return}
     if(!form.reviewing){
       const body=bodies[0];

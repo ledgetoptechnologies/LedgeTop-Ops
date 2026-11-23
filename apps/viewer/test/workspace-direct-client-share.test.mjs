@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { directClientAccess, directClientLabel, directClientsPath, directGrantRows, directScopeSummary, directShareDefaultScope, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from '../workspace-direct-client-share.mjs';
+import { SHARE_TARGET_MISSING, directClientAccess, directClientLabel, directClientsPath, directGrantRows, directScopeSummary, directShareDefaultScope, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from '../workspace-direct-client-share.mjs';
 
 const clients=[{sourceId:'source-a',workspaceId:'ws-1',displayName:'Acme Construction',businessName:'Ledge Top'},{sourceId:'source-a',workspaceId:'ws-2',displayName:'Harbor Works',businessName:null}];
 const tasks=[{id:'task-1',name:'North wall'},{id:'task-2',name:'South wall'}];
@@ -143,6 +143,7 @@ test('new client shares start with measurements on and camera positions and down
 test('Share project opens on the whole project with later models unticked; a task Share opens on that task',()=>{
   assert.equal(directShareDefaultScope({taskId:null}),'project');
   assert.equal(directShareDefaultScope({taskId:'task-2'}),'tasks');
+  assert.equal(directShareDefaultScope({entry:'task',taskId:null}),'tasks');
   const project=directShareForm({projectName:'Site',tasks});
   assert.match(project,/name="scope" value="project" checked/);assert.match(project,/name="includeLater" >/);
   assert.match(project,/Also share models published later/);assert.match(project,/data-direct-review hidden/);assert.match(project,/Review share<\/button>/);
@@ -160,6 +161,11 @@ test('a Share opened from a task that is not published never starts on the whole
   }
   assert.doesNotMatch(directShareForm({projectName:'Site',tasks,taskId:'task-1',taskName:'North wall'}),/not published yet/);
   assert.doesNotMatch(directShareForm({projectName:'Site',tasks}),/not published yet/);
+});
+
+test('a Share whose task has gone offers no form at all',()=>{
+  const html=directShareForm({projectName:'Site',tasks,entry:'task',taskId:'task-1',taskName:'North wall',targetMissing:true});
+  assert.match(html,/role="alert"/);assert.ok(html.includes(SHARE_TARGET_MISSING));assert.doesNotMatch(html,/<form|<input|<button/);
 });
 
 test('the shared-with list says what a client can do and shows an expired share as expired',()=>{
