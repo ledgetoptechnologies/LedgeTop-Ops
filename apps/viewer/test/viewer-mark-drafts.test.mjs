@@ -309,8 +309,8 @@ test('recently deleted lists the person\'s own marks and restores them in place'
   const { mount, scope } = await openMarksPanel(t);
   const panel = mount(), other = mount();
   await panel.marks.setScope(scope('client', 'client-a'));
-  const section = node => node.panel.querySelectorAll('details').find(row => row.textContent.startsWith('Recently deleted'));
-  const openSection = async node => { section(node).open = true; await section(node).fire('toggle'); };
+  const section = node => node.q('.viewer-mark-deleted');
+  const openSection = node => node.q('[data-tab=deleted]').click();
   await panel.place('43.05, -87');
   await panel.type('[name=name]', 'Gone');
   await panel.save();
@@ -331,6 +331,7 @@ test('recently deleted lists the person\'s own marks and restores them in place'
   await panel.button('Undo').click();
   assert.match(section(panel).textContent, /Gone/, 'undoing a restore deletes it again');
   await panel.marks.setScope({ mode: 'temporary', key: 'public' });
-  assert.equal(section(panel).hidden, true);
+  assert.equal(panel.q('[data-tab=deleted]').hidden, true);
+  assert.equal(section(panel).parent.hidden, true);
   assert.doesNotMatch(panel.text(), /Gone/);
 });

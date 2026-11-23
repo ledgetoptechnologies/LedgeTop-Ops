@@ -164,6 +164,10 @@
     .viewer-mark-icon[aria-pressed=true] { border-color:var(--brand-orange); }
     .viewer-mark-readout { overflow-wrap:anywhere; }
     .viewer-mark-toggle { display:flex; align-items:center; gap:4px; font-size:12px; }
+    .viewer-mark-tabs > button { flex:1 1 0; }
+    #panel-marks .viewer-mark-tabs > button.active { background:rgba(255,255,255,.16); color:#fff; }
+    #panel-marks [role=tabpanel]:not([hidden]) { display:grid; gap:8px; }
+    #panel-marks [role=tabpanel][hidden] { display:none; }
     .viewer-mark-list { list-style:none; padding:0; display:grid; gap:2px; max-height:40vh; overflow:auto; }
     .viewer-mark-list li { display:flex; align-items:center; gap:6px; }
     .viewer-mark-list-item { flex:1; display:flex; align-items:center; gap:8px; min-width:0; padding:6px; border:0; border-radius:6px; background:none; color:#e0e0e0; font:12px var(--font); text-align:left; cursor:pointer; }

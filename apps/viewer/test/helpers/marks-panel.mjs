@@ -56,7 +56,7 @@ export async function openMarksPanel(t, { rateLimited = () => false, maxRequestB
         await q('.viewer-mark-coords').fire('submit');
       },
       save: () => q('.viewer-mark-form').fire('submit'),
-      open: name => panel.querySelectorAll('.viewer-mark-list-item').find(node => node.textContent.startsWith(name)).click(),
+      open: name => panel.querySelector('[id=viewer-marks-list]').querySelectorAll('.viewer-mark-list-item').find(node => node.textContent.startsWith(name)).click(),
     };
   };
   return { mount, scope, database, requests, request };

@@ -3,6 +3,7 @@ import { createMarkMapLayer, geometryFrom, markPositions } from './viewer-mark-m
 import { DEFAULT_STYLE, ICON_CHOICES, MARK_SWATCHES, categoryBadge, categoryStyle, iconMarkup, keepIcon, markBadge, markIconName, safeColor } from './viewer-mark-style.mjs';
 import { elevationForDisplay, elevationToMetres, elevationUnit, formatDecimal, formatDms, formatUtm, parseCoordinateInput } from './viewer-mark-coordinates.mjs';
 import { geoJsonToMarks, marksToGeoJson } from './viewer-mark-geojson.mjs';
+import { NO_CATEGORY, categoryOf, createMarkVisibility } from './viewer-mark-visibility.mjs';
 import { createMarkDraftRecovery, reconcileMarkDraft } from './viewer-mark-draft-recovery.mjs';
 
 const TYPE_LABEL = { Point: 'Pin', LineString: 'Line', Polygon: 'Area' };
@@ -37,8 +38,9 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const listeners = new AbortController();
   const on = (target, type, handler) => target.addEventListener(type, handler, { signal: listeners.signal });
   let view = { map: false }, mode = 'idle', drawing = null, draft = null, selectedId = null, preview = null;
-  let labels = readLabelsPreference(window), filter = '', armedDelete = null, categoryDraft = null;
+  let labels = readLabelsPreference(window), tab = 'list', search = '', armedDelete = null, categoryDraft = null;
   let sessionScope = false, scopeKey, writtenCoords = null;
+  const visibility = createMarkVisibility({ storage: () => window.localStorage });
   // Unsaved work, kept for this person and model. Nothing is kept or cleared until the stored draft was looked at.
   const recovery = createMarkDraftRecovery({ storage: () => window.sessionStorage });
   let draftChecked = false, draftBaseline = null;
@@ -104,11 +106,12 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     h(document, 'div', { class: 'viewer-mark-row' }, saveButton, moveButton, deleteButton, closeButton));
 
   // List
-  const filterSelect = h(document, 'select', { 'aria-label': 'Show category' });
+  const searchInput = h(document, 'input', { type: 'search', name: 'markSearch', autocomplete: 'off', 'aria-label': 'Search marks', placeholder: 'Search' });
   const labelsToggle = h(document, 'input', { type: 'checkbox' });
   const undoButton = h(document, 'button', { type: 'button', text: 'Undo' });
-  const listHead = h(document, 'div', { class: 'viewer-mark-row viewer-mark-list-head' }, filterSelect,
-    h(document, 'label', { class: 'viewer-mark-toggle' }, labelsToggle, h(document, 'span', { text: 'Labels' })), undoButton);
+  // What is hidden is always said, and leads to where it can be shown again.
+  const hiddenButton = h(document, 'button', { type: 'button', class: 'viewer-mark-hidden-count' });
+  const listHead = h(document, 'div', { class: 'viewer-mark-row viewer-mark-list-head' }, hiddenButton, undoButton);
   const list = h(document, 'ul', { class: 'viewer-mark-list', 'aria-label': 'Marks' });
 
   // Categories
@@ -127,7 +130,10 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const categorySave = h(document, 'button', { type: 'submit', text: 'Add' });
   const categoryCancel = h(document, 'button', { type: 'button', text: 'Cancel', hidden: true });
   const categoryForm = h(document, 'form', { class: 'viewer-mark-row viewer-mark-category-form' }, categoryName, categoryColor, categoryIcon, categorySave, categoryCancel);
-  const categories = h(document, 'details', { class: 'viewer-mark-section' }, h(document, 'summary', { text: 'Categories' }), categoryList, categoryForm);
+  const showAllButton = h(document, 'button', { type: 'button', text: 'Show all' });
+  const hideAllButton = h(document, 'button', { type: 'button', text: 'Hide all' });
+  const categoryTools = h(document, 'div', { class: 'viewer-mark-row' }, showAllButton, hideAllButton,
+    h(document, 'label', { class: 'viewer-mark-toggle' }, labelsToggle, h(document, 'span', { text: 'Labels' })));
 
   // Import / export
   const exportButton = h(document, 'button', { type: 'button', text: 'Export GeoJSON' });
@@ -138,14 +144,27 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
 
   // Recently deleted
   const deletedList = h(document, 'ul', { class: 'viewer-mark-list viewer-mark-deleted', 'aria-label': 'Recently deleted marks' });
-  const deletedSection = h(document, 'details', { class: 'viewer-mark-section' }, h(document, 'summary', { text: 'Recently deleted' }), deletedList);
 
-  root.replaceChildren(status, tools, drawBar, coordForm, editor, listHead, list, categories, deletedSection, exchange);
+  // One panel: Categories, List, Deleted.
+  const sections = {
+    categories: h(document, 'div', { id: 'viewer-marks-categories', role: 'tabpanel' }, categoryTools, categoryList, categoryForm),
+    list: h(document, 'div', { id: 'viewer-marks-list', role: 'tabpanel' }, searchInput, list),
+    deleted: h(document, 'div', { id: 'viewer-marks-deleted', role: 'tabpanel' }, deletedList),
+  };
+  const tabButtons = Object.entries({ categories: 'Categories', list: 'List', deleted: 'Deleted' }).map(([name, text]) =>
+    h(document, 'button', { type: 'button', role: 'tab', 'data-tab': name, 'aria-controls': `viewer-marks-${name}`, text }));
+  const tabs = h(document, 'div', { class: 'viewer-mark-row viewer-mark-tabs', role: 'tablist', 'aria-label': 'Marks' }, ...tabButtons);
+
+  root.replaceChildren(status, tools, drawBar, coordForm, editor, listHead, tabs, ...Object.values(sections), exchange);
 
   // ---- helpers --------------------------------------------------------------
   const canWrite = () => store.canWrite() && Boolean(view.map);
   const categoryById = id => store.state.categories.find(category => category.id === id) || null;
-  const visibleMarks = () => store.state.marks.filter(mark => !filter || (filter === 'none' ? !mark.categoryId : mark.categoryId === filter));
+  const visibleMarks = () => store.state.marks.filter(visibility.shows);
+  const searched = mark => !search || [mark.name, mark.note, categoryById(mark.categoryId)?.name].some(value => value?.toLowerCase().includes(search));
+  const categoryIds = () => [...store.state.categories.map(category => category.id), NO_CATEGORY];
+  // Placing or saving into a hidden category shows it again.
+  const reveal = (...marks) => visibility.show(marks.filter(Boolean).map(categoryOf));
   const defaultVisibility = () => store.state.capabilities.visibility[0];
   const message = text => { store.state.message = text; render(); };
 
@@ -159,7 +178,8 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   }
 
   function lastStyle() {
-    const category = categoryById(filter) || null;
+    // New marks go into the category being looked at, when there is just one and it can be used.
+    const category = store.state.categories.find(item => item.mine && visibility.isOnly(item.id, categoryIds())) || null;
     return { ...categoryStyle(category), categoryId: category?.id || null };
   }
 
@@ -250,7 +270,6 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
 
   function fillCategoryOptions(select, value, emptyLabel, usable = () => true) {
     const options = [h(document, 'option', { value: '', text: emptyLabel })];
-    if (select === filterSelect) options.push(h(document, 'option', { value: 'none', text: 'No category' }));
     for (const category of store.state.categories.filter(usable)) options.push(h(document, 'option', { value: category.id, text: category.name }));
     select.replaceChildren(...options);
     select.value = value || '';
@@ -354,14 +373,15 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     }
 
     // List
-    fillCategoryOptions(filterSelect, filter, 'All categories');
-    if (filterSelect.value !== filter) filter = filterSelect.value;
+    const hiddenCount = state.marks.length - visibleMarks().length;
+    hiddenButton.hidden = !hiddenCount;
+    hiddenButton.textContent = `${hiddenCount} hidden`;
     labelsToggle.checked = labels;
     const lastUndo = state.undo.at(-1);
     undoButton.hidden = !lastUndo;
     undoButton.disabled = state.busy;
     undoButton.title = lastUndo ? 'Undo ' + lastUndo.label : '';
-    const rows = visibleMarks().map(mark => {
+    const rows = visibleMarks().filter(searched).map(mark => {
       const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
       icon.innerHTML = markBadge(mark);
       const category = categoryById(mark.categoryId);
@@ -374,15 +394,39 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       return h(document, 'li', {}, button);
     });
     list.replaceChildren(...rows);
-    listHead.hidden = !state.ready || !state.marks.length && !state.undo.length;
+    listHead.hidden = !state.ready || !hiddenCount && !state.undo.length;
+    searchInput.hidden = !state.marks.length;
 
     // Categories
-    categories.hidden = !state.ready || !writable && !state.categories.length;
+    const showDeleted = sessionScope && state.capabilities.write;
+    if (tab === 'deleted' && !showDeleted) tab = 'list';
+    tabs.hidden = !state.ready;
+    for (const button of tabButtons) {
+      const current = button.dataset.tab === tab;
+      button.setAttribute('aria-selected', String(current));
+      button.classList.toggle('active', current);
+      button.hidden = button.dataset.tab === 'deleted' && !showDeleted;
+    }
+    for (const [name, section] of Object.entries(sections)) section.hidden = !state.ready || name !== tab;
     categoryForm.hidden = !writable;
-    categoryList.replaceChildren(...state.categories.map(category => {
+    showAllButton.disabled = !categoryIds().some(visibility.isHidden);
+    hideAllButton.disabled = categoryIds().every(visibility.isHidden);
+    // One row per category: eye, icon, name (only this), count.
+    const categoryRow = (id, name, category) => {
+      const hidden = visibility.isHidden(id), alone = visibility.isOnly(id, categoryIds());
+      const eye = h(document, 'button', { type: 'button', class: 'viewer-mark-eye', 'data-eye': id,
+        'aria-label': `${hidden ? 'Show' : 'Hide'} ${name}`, text: hidden ? 'Show' : 'Hide' });
+      on(eye, 'click', () => { visibility.toggle(id); render(); categoryList.querySelector(`[data-eye="${id}"]`)?.focus(); });
       const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
-      icon.innerHTML = categoryBadge(category);
-      const row = h(document, 'li', {}, icon, h(document, 'span', { class: 'viewer-mark-list-name', text: category.name }));
+      if (category) icon.innerHTML = categoryBadge(category);
+      const only = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'data-only': id, 'aria-pressed': String(alone),
+        'aria-label': 'Show only ' + name }, h(document, 'span', { class: 'viewer-mark-list-name' }, h(document, 'span', { text: name }),
+        h(document, 'small', { text: category && !category.mine ? (category.author === 'staff' ? 'From project staff' : 'From a client') : '' })));
+      on(only, 'click', () => { if (alone) visibility.showAll(); else visibility.only(id, categoryIds()); render(); categoryList.querySelector(`[data-only="${id}"]`)?.focus(); });
+      return h(document, 'li', {}, eye, icon, only, h(document, 'span', { class: 'hint', text: String(state.marks.filter(mark => categoryOf(mark) === id).length) }));
+    };
+    const rowsByCategory = state.categories.map(category => {
+      const row = categoryRow(category.id, category.name, category);
       if (writable && category.editable) {
         const rename = h(document, 'button', { type: 'button', text: 'Edit', 'aria-label': 'Edit ' + category.name });
         const remove = h(document, 'button', { type: 'button', text: armedDelete === category.id ? 'Delete for good' : 'Delete', 'aria-label': 'Delete ' + category.name });
@@ -396,19 +440,23 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
         on(remove, 'click', async () => {
           if (armedDelete !== category.id) { armedDelete = category.id; message("Deleting a category can't be undone. Its marks stay, without a category."); return; }
           armedDelete = null;
-          if (await store.deleteCategory(category) && filter === category.id) filter = '';
+          const orphans = state.marks.filter(mark => mark.categoryId === category.id);
+          if (await store.deleteCategory(category)) {
+            visibility.show([category.id]);
+            if (orphans.length) visibility.show([NO_CATEGORY]);
+          }
           render();
         });
         row.append(rename, remove);
       }
       return row;
-    }));
-    deletedSection.hidden = !sessionScope || !state.ready || !state.capabilities.write;
+    });
+    categoryList.replaceChildren(...rowsByCategory, categoryRow(NO_CATEGORY, 'No category', null));
     deletedList.replaceChildren(...(state.deleted.length ? state.deleted.map(mark => {
       const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
       icon.innerHTML = markBadge(mark);
       const restore = h(document, 'button', { type: 'button', text: 'Restore', 'aria-label': 'Restore ' + mark.name, disabled: state.busy });
-      on(restore, 'click', () => store.restore(mark));
+      on(restore, 'click', async () => { const back = await store.restore(mark); if (back) { reveal(back); render(); } });
       return h(document, 'li', {}, icon, h(document, 'span', { class: 'viewer-mark-list-name' }, h(document, 'span', { text: mark.name }),
         h(document, 'small', { text: new Date(mark.deletedAt).toLocaleDateString() })), restore);
     }) : [h(document, 'li', { class: 'hint', text: `None in the last ${state.capabilities.recoveryDays} days.` })]));
@@ -416,7 +464,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     categoryCancel.hidden = !categoryDraft;
     exchange.hidden = !state.ready;
     importButton.hidden = !writable;
-    exportButton.disabled = !state.marks.length;
+    exportButton.disabled = !visibleMarks().length;
 
     layer.render({ visible: Boolean(view.map && state.ready && !state.blocked), marks: visibleMarks(), draft: editable ? { ...draft, movable: !draft.id || moving, ...(draft.id ? {} : { id: '__draft__' }) } : null,
       selectedId, labels, preview, drawing });
@@ -502,8 +550,21 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   // Fields that do not redraw anything while typing.
   for (const type of ['input', 'change']) on(editor, type, keepDraft);
   on(visibilitySelect, 'change', () => render());
-  const readDeleted = () => (deletedSection.open ? store.loadDeleted() : null);
-  on(deletedSection, 'toggle', readDeleted);
+  const readDeleted = () => (tab === 'deleted' ? store.loadDeleted() : null);
+  for (const button of tabButtons) on(button, 'click', () => { tab = button.dataset.tab; render(); return readDeleted(); });
+  on(tabs, 'keydown', event => {
+    const shown = tabButtons.filter(button => !button.hidden), index = shown.indexOf(event.target);
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    if (!step || index < 0) return;
+    event.preventDefault();
+    const next = shown[(index + step + shown.length) % shown.length];
+    next.focus();
+    next.click();
+  });
+  on(hiddenButton, 'click', () => { tab = 'categories'; render(); });
+  on(showAllButton, 'click', () => { visibility.showAll(); render(); });
+  on(hideAllButton, 'click', () => { visibility.hideAll(categoryIds()); render(); });
+  on(searchInput, 'input', () => { search = searchInput.value.trim().toLowerCase(); render(); });
   on(deleteButton, 'click', async () => {
     const current = draft?.id ? store.find(draft.id) : null;
     if (!current) return;
@@ -531,10 +592,10 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     // A new mark keeps one id, so saving again after a lost answer updates it instead of adding a copy.
     const current = store.find(draft.id || draft.newId);
     if (draft.id && !current) { message('That mark is no longer there.'); return; }
-    if (current ? await store.update(current, changes) : await store.create({ ...changes, id: draft.newId })) closeEditor();
+    const saved = current ? await store.update(current, changes) : await store.create({ ...changes, id: draft.newId });
+    if (saved) { reveal(saved); closeEditor(); }
   });
 
-  on(filterSelect, 'change', () => { filter = filterSelect.value; render(); });
   on(labelsToggle, 'change', () => { labels = labelsToggle.checked; writeLabelsPreference(window, labels); render(); });
   on(undoButton, 'click', async () => { closeEditor(); if (await store.undo()) await readDeleted(); });
 
@@ -554,7 +615,10 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   on(categoryCancel, 'click', () => { categoryDraft = null; categoryName.value = ''; showCategoryIcon(DEFAULT_STYLE.icon); render(); });
 
   on(exportButton, 'click', () => {
-    const data = marksToGeoJson(visibleMarks(), store.state.categories);
+    // What is shown is what is exported, and it says so when some is not.
+    const shown = visibleMarks();
+    const data = marksToGeoJson(shown, store.state.categories);
+    if (shown.length < store.state.marks.length) message(`Exported ${shown.length} of ${store.state.marks.length} marks; the rest are hidden.`);
     const blob = new window.Blob([JSON.stringify(data, null, 2)], { type: 'application/geo+json' });
     const url = window.URL.createObjectURL(blob);
     const link = h(document, 'a', { href: url, download: `${String(fileName()).replace(/[^\w.-]+/g, '-').slice(0, 60) || 'marks'}-marks.geojson` });
@@ -578,6 +642,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
         visibility: defaultVisibility(), defaultColor: DEFAULT_STYLE.color });
       if (!parsed.marks.length) { message('No points, lines or areas were found in that file.'); return; }
       const count = await store.importMarks(parsed);
+      if (count && held.live()) reveal(...parsed.marks);
       if (count && held.live()) message(`Imported ${count} mark${count === 1 ? '' : 's'}${parsed.skipped ? `; skipped ${parsed.skipped} unsupported` : ''}.`);
     } catch (error) {
       if (!held.live()) return;
@@ -606,10 +671,11 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
         draftChecked = false;
         // Nothing one person typed or picked stays in the panel for the next one.
         draft = null; selectedId = null; mode = 'idle'; drawing = null;
-        preview = null; filter = ''; armedDelete = null; categoryDraft = null; moving = false; deleteForGood = null;
+        preview = null; search = ''; tab = 'list'; armedDelete = null; categoryDraft = null; moving = false; deleteForGood = null;
         showCategoryIcon(DEFAULT_STYLE.icon);
         categoryColor.value = DEFAULT_STYLE.color;
-        for (const input of [coordInput, nameInput, noteInput, elevationInput, pointCoords, categoryName]) input.value = '';
+        visibility.setScope(sessionScope ? next.key : null);
+        for (const input of [searchInput, coordInput, nameInput, noteInput, elevationInput, pointCoords, categoryName]) input.value = '';
         for (const choice of [categorySelect, accountSelect]) choice.replaceChildren();
         for (const shown of [coordDetected, coordReadout]) shown.textContent = '';
       }

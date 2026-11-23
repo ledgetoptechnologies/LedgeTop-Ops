@@ -274,11 +274,11 @@ test('an icon this build does not know survives an edit, undo, its category and 
   await panel.q('.viewer-mark-category-form').fire('submit');
   assert.deepEqual(panel.store.state.categories.map(row => [row.name, row.icon]), [['Future two', 'future-category']]);
   // A new mark in that category takes the category's icon, known here or not.
-  panel.q('[aria-label="Show category"]').value = category.id;
-  await panel.q('[aria-label="Show category"]').fire('change');
+  await panel.q(`[data-only="${category.id}"]`).click();
   await panel.place('43.05, -87');
   await panel.save();
   assert.equal(panel.store.state.marks.at(-1).icon, 'future-category');
+  await panel.q(`[data-only="${category.id}"]`).click();
   await panel.open('Mark');
   panel.q('[name=categoryId]').value = category.id;
   await panel.q('[name=categoryId]').fire('change');

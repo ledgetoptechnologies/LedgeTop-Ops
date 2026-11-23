@@ -26,7 +26,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const executable = () => [process.env.CHROME_PATH, process.env.EDGE_PATH,
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].filter(Boolean).find(existsSync) || null;
-const MODULES = ['viewer-marks.mjs', 'viewer-marks-store.mjs', 'viewer-mark-map-layer.mjs', 'viewer-mark-icons.mjs', 'viewer-mark-style.mjs', 'viewer-mark-draft-recovery.mjs',
+const MODULES = ['viewer-marks.mjs', 'viewer-marks-store.mjs', 'viewer-mark-map-layer.mjs', 'viewer-mark-icons.mjs', 'viewer-mark-style.mjs', 'viewer-mark-draft-recovery.mjs', 'viewer-mark-visibility.mjs',
   'viewer-mark-coordinates.mjs', 'viewer-mark-geojson.mjs', 'utm-conversion.mjs'];
 const SESSION_TOKEN = 'synthetic-browser-session-token-0001';
 
@@ -167,7 +167,7 @@ test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeou
 
   // Move, drag and Save; undo puts it back.
   await client.evaluate('map.setView([43.05, -87.0], 18, { animate: false }), 0');
-  if (await client.evaluate("document.querySelector('.viewer-mark-form').hidden")) await h.press('.viewer-mark-list-item');
+  if (await client.evaluate("document.querySelector('.viewer-mark-form').hidden")) await h.press('#viewer-marks-list .viewer-mark-list-item');
   await client.evaluate('map.setView([43.05, -87.0], 18, { animate: false }), 0');
   await h.pressText('Move');
   const placedLon = saved.geometry.coordinates[0];
@@ -202,10 +202,10 @@ test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeou
   await client.evaluate("document.querySelector('.viewer-mark-toggle input').click(), 0");
   // Leaflet fades tooltips out over 200 ms before removing them.
   await waitFor("document.querySelectorAll('.viewer-mark-label').length === 0", 'labels off');
-  assert.equal(await client.evaluate("document.querySelectorAll('.viewer-mark-list-item').length"), 3);
+  assert.equal(await client.evaluate("document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item').length"), 3);
 
   // Delete asks twice.
-  await h.press('.viewer-mark-list-item');
+  await h.press('#viewer-marks-list .viewer-mark-list-item');
   await h.pressText('Delete');
   assert.equal((await h.state()).length, 3);
   await h.pressText('Tap again to delete');
@@ -254,7 +254,7 @@ test('signed-in client: map-click and typed pins survive a reload at full precis
     const treeStand = rows[1];
 
     const openTreeStand = async () => {
-      await h.client.evaluate(`[...document.querySelectorAll('.viewer-mark-list-item')].find(b => b.textContent.includes('Tree stand')).click(), 0`);
+      await h.client.evaluate(`[...document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item')].find(b => b.textContent.includes('Tree stand')).click(), 0`);
       await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'edit open');
     };
 
