@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
+import { attemptProviderName } from '../workspace-provider-remove.mjs';
 
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 const lines=source.split(/\r?\n/);
@@ -19,6 +20,7 @@ const context=vm.createContext({state,selectedFolderId:null,projectDataGeneratio
   // Keep the shipped render lifecycle hook, while forbidding node requests in
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
+  context.attemptProviderName=attemptProviderName;
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
   vm.runInContext([...names,'taskOutputStage','logPanel'].map(declaration).concat(
     sourceBetween('function applyWorkspaceView(', '\nfunction validateWorkspaceView('),

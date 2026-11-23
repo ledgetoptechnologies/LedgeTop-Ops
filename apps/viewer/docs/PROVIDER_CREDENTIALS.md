@@ -30,6 +30,7 @@ Provider mutation idempotency fingerprints are keyed with a domain-separated der
 - `PUT /api/v1/processing/providers/:id/credential` with `{ "token": "..." }` installs or rotates a credential.
 - `DELETE /api/v1/processing/providers/:id/credential` removes it.
 - `PATCH /api/v1/processing/providers/:id` changes metadata and enablement; it never accepts credential material.
+- `DELETE /api/v1/processing/providers/:id` removes a node. The row is archived (`removed_at`, `removed_by`), not deleted, so past attempts keep its name; its credential is wiped as in credential removal, and it leaves the provider list, new-task choices and health polling. It is refused with 409 `provider_in_use` while the node has queued or running attempts, with 409 `provider_pending_acks` while any Viewer acceptance acknowledgement for it is pending or leased (including a delivery in flight), and with 409 `provider_last_enabled` when it is the only enabled node. Undelivered acknowledgements are never discarded by removal; retiring an unreachable node that still has them would need a separately reviewed, audited abandonment option. Removal is audited as `provider.removed` and cannot be undone from the UI.
 
 Credential set, rotation, and removal are rejected while the provider has a nonterminal processing attempt. Each credential mutation disables the provider and clears cached health/capabilities. An endpoint change does the same. The admin must run an authenticated capability probe after the current credential and endpoint are in place, then explicitly enable the provider.
 

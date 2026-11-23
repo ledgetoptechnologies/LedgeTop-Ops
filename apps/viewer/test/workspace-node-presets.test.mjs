@@ -9,7 +9,8 @@ function harness({write=true,api=async()=>({providers:[],presets:[]})}={}){
   const context={state,api,can:permission=>permission!=='viewer.providers.write'||write,render(){context.renders++;},renders:0,Map,Date,
     providerName:value=>value,esc:value=>String(value),available:value=>String(value),
     dateTime:value=>value,badge:value=>value,empty:value=>value,
-    button:(action,id,label)=>`<button data-action="${action}">${label}</button>`};
+    button:(action,id,label)=>`<button data-action="${action}">${label}</button>`,
+    dangerButton:(action,id,label)=>`<button class="danger-button" data-action="${action}" data-id="${id}">${label}</button>`};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('const providerCapabilityRefreshes='),source.indexOf('function providerForm('))+'\nthis.subject={refreshProviderCapabilities,refreshOpenedProvider,providerDetail,providerCapabilityNotice};',context);
   return context;
