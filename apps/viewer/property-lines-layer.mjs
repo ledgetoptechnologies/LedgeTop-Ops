@@ -49,7 +49,9 @@ export function propertyLinesModeKind(mode, cloudMode) {
 
 // "Source: ...": which parcel data the lines come from, on the view and in print.
 export function propertyLinesSourceText(source) {
-  return source?.name ? `Source: ${[source.name, source.release].filter(Boolean).join(' ')}.` : '';
+  const plain = value => (typeof value === 'string' ? value.replace(/\p{Cf}/gu, '').replace(/\s+/g, ' ').trim() : '');
+  const name = plain(source?.name);
+  return name ? `Source: ${[name, plain(source.release)].filter(Boolean).join(' ')}.` : '';
 }
 
 // Heights for UTM polylines: the published DTM when it agrees with the scene,
@@ -654,7 +656,7 @@ export function createPropertyLinesController(deps) {
     loadOffer,
     refresh,
     // The source of the lines drawn now and its credit line, for prints.
-    attribution: () => (offered && source?.name ? [propertyLinesSourceText(source), source.credit].filter(Boolean).join(' ') : ''),
+    attribution: () => (offered && propertyLinesSourceText(source) ? [propertyLinesSourceText(source), source.credit].filter(Boolean).join(' ') : ''),
     toggle,
     setMerge,
     wake,
