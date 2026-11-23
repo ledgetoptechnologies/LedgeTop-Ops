@@ -127,7 +127,7 @@ test('print export burns contours, ft labels, property lines and legend into rea
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     let profile;
     ({ child: browser, profile } = launchBrowser(binary, dir => ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${dir}`, 'about:blank'], { prefix: 'ltds-contours-browser-' }));
-    const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
+    const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'), { timeoutMs: 30_000 });
     const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     client = await Cdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
     await client.command('Page.enable'); await client.command('Runtime.enable');
