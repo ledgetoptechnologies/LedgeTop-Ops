@@ -122,7 +122,7 @@ async function fixture(t) {
       dataset: processing.getDataset(item.dataset.id).status, model: model.status, activeVersion: model.active_version_id, publishedAssets: database.prepare('SELECT COUNT(*) n FROM model_assets WHERE version_id=? AND published=1').get(item.versionId).n, bin: Boolean(bin(item)) };
   }
   const IN_REVIEW = { task: 'ready_for_review', attempt: 'ready_for_review', active: true, publishedModel: null, output: 'ready', dataset: 'finalized', model: 'unregistered', activeVersion: null, publishedAssets: 0, bin: false };
-  const DELETED = { task: 'archived', attempt: 'published', active: false, publishedModel: null, output: 'trashed', dataset: 'trashed', model: 'unregistered', activeVersion: null, publishedAssets: 0, bin: true };
+  const DELETED = { task: 'archived', attempt: 'published', active: true, publishedModel: null, output: 'trashed', dataset: 'trashed', model: 'unregistered', activeVersion: null, publishedAssets: 0, bin: true };
   async function publishAgain(item) {
     const published = await request('POST', `/api/v1/attempts/${item.attempt.id}/publish`, { selectedAssetKinds: ['glb', 'ortho', 'shots'] });
     assert.equal(published.status, 200, JSON.stringify(published.body));
@@ -234,7 +234,7 @@ test('a task an earlier version left half deleted can be restored, or deleted pr
     if (deleteAgain) {
       const removed = await f.remove(item);
       assert.equal(removed.status, 200, JSON.stringify(removed.body));
-      assert.deepEqual(f.state(item), f.DELETED);
+      assert.deepEqual(f.state(item), { ...f.DELETED, active: false });
     }
     const restored = await f.restore(item);
     assert.equal(restored.status, 200, JSON.stringify(restored.body));
@@ -384,4 +384,312 @@ test('restoring a task does not undo an output delete that failed before the tas
   assert.ok(f.processing.trashTask(item.task.id, 'ops:test'));
   assert.equal((await f.restore(item)).status, 200);
   assert.equal(f.processing.getModelOutput(item.older.versionId).status, 'archived');
+});
+
+// Publishes a newer run of the task's model; the older output keeps its
+// published status, as publishing does.
+async function publishNewer(f, item, name = 'Newer') {
+  const newer = f.output(f.processing.getTask(item.task.id), name);
+  const published = await f.request('POST', `/api/v1/attempts/${newer.attempt.id}/publish`, { selectedAssetKinds: ['glb', 'ortho', 'shots'] });
+  assert.equal(published.status, 200, JSON.stringify(published.body));
+  assert.equal(f.processing.getModelOutput(item.versionId).status, 'published', 'the case under test');
+  return { ...item, ...newer, older: item };
+}
+async function assertOnlyCurrentCanBePublished(f, item, note) {
+  assert.deepEqual(f.state(item), f.IN_REVIEW, note);
+  const old = await f.request('POST', `/api/v1/attempts/${item.older.attempt.id}/publish`, { selectedAssetKinds: ['glb', 'ortho', 'shots'] });
+  assert.equal(old.status, 409, `${note}: the superseded model`);
+  assert.equal(f.processing.getModelOutput(item.older.versionId).status, 'ready', `${note}: kept`);
+  await f.publishAgain(item);
+}
+// What an earlier version left of a republished task: both outputs in the bin,
+// the task a draft that has lost track of its current output.
+async function republishedLeftByEarlierVersion(f, project, name) {
+  const item = await publishNewer(f, await f.publishedTask(project, name)), before = f.snapshot(item);
+  const trash = f.processing.trashTask(item.task.id, 'ops:test'), { trashOutput } = require('../server/containerLifecycle');
+  for (const versionId of [item.older.versionId, item.versionId]) assert.ok(f.processing.addContainerTrashMember(trash.id, trashOutput(f.processing, f.storage, versionId, 'ops:test').id));
+  f.database.prepare("UPDATE processing_tasks SET status='draft',active_attempt_id=NULL,published_model_id=NULL WHERE id=?").run(item.task.id);
+  return { item, before, trash };
+}
+// Makes a Recycle Bin item, and what is in it, look as old as given.
+function age(f, trash, days) {
+  const at = (offset) => new Date(Date.now() - (days - offset) * 86400_000).toISOString();
+  f.database.prepare('UPDATE storage_trash SET created_at=?,purge_after=? WHERE id=? OR id IN (SELECT member_trash_id FROM container_trash_members WHERE container_trash_id=?)').run(at(0), at(30), trash.id, trash.id);
+}
+function assertFullWindow(f, trash, note) {
+  for (const item of [f.processing.getTrash(trash.id), ...f.processing.listContainerTrashMembers(trash.id).filter((member) => !member.permanentlyDeletedAt)])
+    assert.ok(Date.parse(item.purgeAfter) > Date.now() + 29 * 86400_000, `${note} ${item.entityType} ${item.purgeAfter}`);
+}
+const pause = () => new Promise((resolve) => { setTimeout(resolve, 5); });
+
+test('a republished task comes back with its current output, never the one it replaced', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' });
+  for (const way of ['task', 'output first', 'old output first', 'old output only']) {
+    const item = await publishNewer(f, await f.publishedTask(project, way)), before = f.snapshot(item);
+    assert.equal((await f.remove(item)).status, 200, way);
+    const order = { 'output first': [item.versionId], 'old output first': [item.older.versionId, item.versionId], 'old output only': [item.older.versionId] }[way] || [];
+    for (const versionId of order) {
+      const trash = f.processing.activeTrashForEntity('output', versionId);
+      assert.equal((await f.request('POST', `/api/v1/storage/trash/${trash.id}/restore`)).status, 200, way);
+    }
+    const restored = await f.restore(item);
+    assert.equal(restored.status, 200, `${way} ${JSON.stringify(restored.body)}`);
+    assert.deepEqual(f.snapshot(item), before, way);
+    await assertOnlyCurrentCanBePublished(f, item, way);
+  }
+  const item = await publishNewer(f, await publishNewer(f, await f.publishedTask(project, 'Third')), 'Newest'), before = f.snapshot(item);
+  const removed = await f.request('DELETE', `/api/v1/projects/${project.id}`);
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.equal((await f.request('POST', `/api/v1/storage/trash/${removed.body.trash.id}/restore`)).status, 200);
+  assert.deepEqual(f.snapshot(item), before);
+  await assertOnlyCurrentCanBePublished(f, item, 'project');
+});
+
+test('a republished task whose delete was interrupted, or that an earlier version half deleted, comes back with its current output', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), moveExact = f.storage.moveExact;
+  for (const code of ['EIO', 'lifecycle_conflict']) {
+    for (const failAt of [1, 2]) {
+      const note = `${code} ${failAt}`, item = await publishNewer(f, await f.publishedTask(project, note)), before = f.snapshot(item);
+      let moves = 0;
+      f.storage.moveExact = function move(source, ...rest) {
+        if (source === 'models' && (moves += 1) === failAt) throw Object.assign(new Error('synthetic'), { code });
+        return moveExact.call(this, source, ...rest);
+      };
+      assert.equal((await f.remove(item)).status, 409, note);
+      f.storage.moveExact = moveExact;
+      reconcileStorageMutations(f.processing, f.storage);
+      const restored = await f.restore(item);
+      assert.equal(restored.status, 200, `${note} ${JSON.stringify(restored.body)}`);
+      assert.deepEqual(f.snapshot(item), before, note);
+      if (f.state(item).task === 'published') assert.equal(f.state(item).output, 'published', `${note}: never taken down`);
+      else await assertOnlyCurrentCanBePublished(f, item, note);
+    }
+  }
+  for (const way of ['restore', 'delete again', 'old output first', 'no record of what was live']) {
+    const { item, before } = await republishedLeftByEarlierVersion(f, project, `Left ${way}`);
+    if (way === 'no record of what was live') f.database.prepare("DELETE FROM audit_events WHERE action='output.archived'").run();
+    if (way === 'delete again') assert.equal((await f.remove(item)).status, 200);
+    if (way === 'old output first') assert.equal((await f.request('POST', `/api/v1/storage/trash/${f.processing.activeTrashForEntity('output', item.older.versionId).id}/restore`)).status, 200);
+    const restored = await f.restore(item);
+    assert.equal(restored.status, 200, `${way} ${JSON.stringify(restored.body)}`);
+    assert.deepEqual(f.snapshot(item), before, way);
+    await assertOnlyCurrentCanBePublished(f, item, way);
+  }
+});
+
+test('a published task with a later run keeps what was current', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' });
+  // The later run failed: the published model is what comes back to publish.
+  const failed = await f.publishedTask(project, 'Later run failed'), run = f.processing.createAttempt({ taskId: failed.task.id, providerId: f.database.prepare('SELECT id FROM processing_providers').get().id, options: {}, createdBy: 'ops:test' });
+  f.processing.transitionAttempt(run.id, 'failed', {});
+  const before = f.snapshot(failed);
+  before.task[0].active_attempt_id = failed.attempt.id;
+  assert.equal((await f.remove(failed)).status, 200);
+  assert.equal((await f.restore(failed)).status, 200);
+  assert.deepEqual(f.snapshot(failed), before);
+  assert.equal(f.processing.getAttempt(run.id).status, 'failed');
+  assert.deepEqual(f.state(failed), f.IN_REVIEW);
+  await f.publishAgain(failed);
+
+  // The later run waits for review: it still does, and can be published.
+  const first = await f.publishedTask(project, 'Later run in review'), review = { ...first, ...f.output(f.processing.getTask(first.task.id), 'In review'), older: first }, reviewBefore = f.snapshot(review);
+  assert.equal((await f.remove(review)).status, 200);
+  assert.equal((await f.restore(review)).status, 200);
+  assert.deepEqual(f.snapshot(review), reviewBefore);
+  await assertOnlyCurrentCanBePublished(f, review, 'in review');
+
+  // The current output was deleted on its own first: nothing takes its place.
+  const none = await publishNewer(f, await f.publishedTask(project, 'No current output'));
+  assert.equal((await f.request('DELETE', `/api/v1/processing/outputs/${none.versionId}`)).status, 200);
+  await pause();
+  assert.equal((await f.remove(none)).status, 200);
+  assert.equal((await f.restore(none)).status, 200);
+  assert.deepEqual([f.state(none).task, f.processing.getTask(none.task.id).activeAttemptId, f.state(none).output], ['draft', null, 'trashed']);
+  assert.equal(f.processing.getModelOutput(none.older.versionId).status, 'ready');
+});
+
+test('deleting a long half-deleted task again starts a new full recovery time for everything in it', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' });
+  for (const way of ['left as it was', 'reprocessed', 'reprocessed and published']) {
+    const { item, trash } = await leftByEarlierVersion(f, project, way);
+    age(f, trash, 45);
+    let current = item;
+    if (way !== 'left as it was') current = { ...item, ...f.output(f.processing.getTask(item.task.id), 'Reprocessed'), older: item };
+    if (way === 'reprocessed and published') {
+      // Publishing is refused while the bin item is open; an earlier version allowed it.
+      f.database.prepare('UPDATE storage_trash SET permanently_deleted_at=? WHERE id=?').run(new Date().toISOString(), trash.id);
+      assert.ok(f.processing.publishAttemptAtomic(current.attempt.id, ['glb', 'ortho', 'shots'], { actorId: 'ops:test' }));
+      f.database.prepare('UPDATE storage_trash SET permanently_deleted_at=NULL WHERE id=?').run(trash.id);
+    }
+    const before = f.snapshot(current);
+    const removed = await f.remove(current);
+    assert.equal(removed.status, 200, `${way} ${JSON.stringify(removed.body)}`);
+    assert.ok(Date.parse(removed.body.trash.purgeAfter) > Date.now() + 29 * 86400_000, way);
+    assertFullWindow(f, trash, way);
+    assert.deepEqual(f.processing.listContainerTrashMembers(trash.id).map((member) => member.entityType).sort(), way === 'left as it was' ? ['dataset', 'output'] : ['dataset', 'output', 'output'], way);
+    // Maintenance right after the delete removes nothing.
+    assert.deepEqual(purgeExpiredTrash(f.processing, f.storage), [], way);
+    const restored = await f.restore(current);
+    assert.equal(restored.status, 200, `${way} ${JSON.stringify(restored.body)}`);
+    // Left as it was, the restore also gives the task its output back.
+    if (way === 'left as it was') { before.task[0].active_attempt_id = item.attempt.id; before.files[1] = f.snapshot(current).files[1]; assert.ok(before.files[1]['model.glb']); before.models = f.snapshot(current).models; }
+    else { before.files[2] = f.snapshot(current).files[2]; assert.ok(before.files[2]['model.glb']); }
+    assert.deepEqual(f.snapshot(current), before, way);
+    // A model that was reprocessed stays listed, with nothing active.
+    assert.deepEqual(f.state(current), way === 'left as it was' || way === 'reprocessed and published' ? f.IN_REVIEW : { ...f.IN_REVIEW, model: 'ready' }, way);
+    assert.deepEqual(purgeExpiredTrash(f.processing, f.storage), [], way);
+    await f.publishAgain(current);
+  }
+});
+
+test('deleting the project of a long half-deleted task, and a project again, starts a new full recovery time', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), { item, before, trash } = await leftByEarlierVersion(f, project, 'Left'), other = await f.publishedTask(project, 'Other'), otherBefore = f.snapshot(other);
+  age(f, trash, 45);
+  const removed = await f.request('DELETE', `/api/v1/projects/${project.id}`);
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assertFullWindow(f, removed.body.trash, 'first');
+  assert.deepEqual(purgeExpiredTrash(f.processing, f.storage), []);
+  // A project delete that has to be repeated later.
+  age(f, removed.body.trash, 45);
+  const again = await f.request('DELETE', `/api/v1/projects/${project.id}`);
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assertFullWindow(f, again.body.trash, 'again');
+  assert.deepEqual(purgeExpiredTrash(f.processing, f.storage), []);
+  const restored = await f.request('POST', `/api/v1/storage/trash/${again.body.trash.id}/restore`);
+  assert.equal(restored.status, 200, JSON.stringify(restored.body));
+  for (const [task, snapshot] of [[item, before], [other, otherBefore]]) {
+    assert.deepEqual(f.snapshot(task), snapshot);
+    assert.deepEqual(f.state(task), f.IN_REVIEW);
+  }
+});
+
+test('a restore interrupted by a storage error, then deleted and restored again, loses nothing', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), moveExact = f.storage.moveExact;
+  for (const kind of ['datasets', 'models']) {
+    for (const finishFirst of [true, false]) {
+      const note = `${kind} ${finishFirst}`, item = await publishNewer(f, await f.publishedTask(project, note)), before = f.snapshot(item);
+      assert.equal((await f.remove(item)).status, 200, note);
+      const trash = f.bin(item);
+      f.storage.moveExact = function move(source, sourcePath, destination, ...rest) {
+        if (destination === kind) throw Object.assign(new Error('synthetic I/O error'), { code: 'EIO' });
+        return moveExact.call(this, source, sourcePath, destination, ...rest);
+      };
+      await f.request('POST', `/api/v1/storage/trash/${trash.id}/restore`).catch(() => {}); // not a JSON error on this route
+      f.storage.moveExact = moveExact;
+      // Deleting waits while that restore is unfinished, and changes nothing.
+      const half = [f.state(item), f.processing.listContainerTrashMembers(trash.id).map((member) => member.id)];
+      assert.equal((await f.remove(item)).status, 409, note);
+      assert.equal((await f.request('DELETE', `/api/v1/projects/${project.id}`)).status, 409, note);
+      assert.equal(f.processing.getProject(project.id).status, 'active', note);
+      assert.deepEqual([f.state(item), f.processing.listContainerTrashMembers(trash.id).map((member) => member.id)], half, note);
+      if (finishFirst) reconcileStorageMutations(f.processing, f.storage);
+      else assert.equal((await f.request('POST', `/api/v1/storage/trash/${trash.id}/restore`)).status, 200, note);
+      const removed = await f.remove(item);
+      assert.equal(removed.status, 200, `${note} ${JSON.stringify(removed.body)}`);
+      const members = f.processing.listContainerTrashMembers(f.bin(item).id).filter((member) => !member.permanentlyDeletedAt);
+      assert.deepEqual(members.map((member) => member.entityType).sort(), ['dataset', 'output', 'output'], note);
+      assert.equal(f.database.prepare("SELECT COUNT(*) n FROM storage_trash s WHERE permanently_deleted_at IS NULL AND entity_type<>'task' AND NOT EXISTS(SELECT 1 FROM container_trash_members m WHERE m.member_trash_id=s.id AND m.container_trash_id=?)").get(f.bin(item).id).n, 0, `${note}: nothing outside the item`);
+      const restored = await f.restore(item);
+      assert.equal(restored.status, 200, `${note} ${JSON.stringify(restored.body)}`);
+      assert.equal(f.database.prepare('SELECT COUNT(*) n FROM storage_trash WHERE permanently_deleted_at IS NULL').get().n, 0, `${note}: the bin is empty`);
+      f.database.prepare("UPDATE storage_trash SET purge_after='2020-01-01T00:00:00.000Z'").run();
+      assert.deepEqual(purgeExpiredTrash(f.processing, f.storage), [], note);
+      assert.deepEqual(f.snapshot(item), before, note);
+      await assertOnlyCurrentCanBePublished(f, item, note);
+    }
+  }
+});
+
+test('a delete or restore that would leave an item behind is refused, not reported as done', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), item = await f.publishedTask(project), before = f.snapshot(item);
+  f.database.exec("CREATE TRIGGER drop_member BEFORE INSERT ON container_trash_members WHEN NEW.entity_type='output' BEGIN SELECT RAISE(IGNORE); END");
+  assert.equal((await f.remove(item)).status, 409);
+  assert.equal((await f.restore(item)).status, 409);
+  assert.equal(f.processing.getTask(item.task.id).status, 'archived');
+  f.database.exec('DROP TRIGGER drop_member');
+  assert.equal((await f.remove(item)).status, 200);
+  assert.equal((await f.restore(item)).status, 200);
+  assert.deepEqual(f.snapshot(item), before);
+  await f.publishAgain(item);
+});
+
+test('a task deleted on its own and then with its project comes back with the project, outputs included', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), item = await publishNewer(f, await f.publishedTask(project)), before = f.snapshot(item);
+  assert.equal((await f.remove(item)).status, 200);
+  await pause();
+  const removed = await f.request('DELETE', `/api/v1/projects/${project.id}`);
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.equal((await f.remove(item)).status, 409, 'a task of a deleted project is not deleted on its own');
+  const restored = await f.request('POST', `/api/v1/storage/trash/${removed.body.trash.id}/restore`);
+  assert.equal(restored.status, 200, JSON.stringify(restored.body));
+  assert.deepEqual(f.snapshot(item), before);
+  await assertOnlyCurrentCanBePublished(f, item, 'project');
+});
+
+test('photos shared with another task: the same for a new delete and for one an earlier version left', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), dataset = f.photos(project, 'Shared');
+  f.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Sibling' });
+  const item = await f.publishedTask(project, 'New delete', { dataset }), before = f.snapshot(item);
+  assert.equal((await f.remove(item)).status, 200);
+  assert.deepEqual(f.state(item), { ...f.DELETED, dataset: 'finalized' });
+  assert.equal((await f.restore(item)).status, 200);
+  assert.deepEqual(f.snapshot(item), before);
+  await f.publishAgain(item);
+
+  // Earlier version: the delete answered 200 and looked complete.
+  const left = await f.publishedTask(project, 'Left', { dataset }), leftBefore = f.snapshot(left), trash = f.processing.trashTask(left.task.id, 'ops:test'), { trashOutput } = require('../server/containerLifecycle');
+  assert.ok(f.processing.addContainerTrashMember(trash.id, trashOutput(f.processing, f.storage, left.versionId, 'ops:test').id));
+  f.database.prepare("UPDATE processing_tasks SET status='draft',active_attempt_id=NULL WHERE id=?").run(left.task.id);
+  age(f, trash, 45);
+  assert.deepEqual(purgeExpiredTrash(f.processing, f.storage).map((result) => result.status), ['failed']);
+  assert.equal((await f.restore(left)).status, 200);
+  assert.deepEqual(f.snapshot(left), leftBefore);
+  assert.deepEqual(f.state(left), f.IN_REVIEW);
+});
+
+test('an item whose permanent deletion an earlier version began: staff are told, and nothing more is removed', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), { item, trash } = await leftByEarlierVersion(f, project, 'Left');
+  const current = { ...item, ...f.output(f.processing.getTask(item.task.id), 'Reprocessed'), older: item };
+  f.database.prepare("UPDATE storage_trash SET purge_started_at='2020-01-01T00:00:00.000Z',purge_after='2020-01-01T00:00:00.000Z' WHERE id=?").run(trash.id);
+  const now = () => [f.state(current), f.snapshot(current), f.database.prepare('SELECT * FROM storage_trash ORDER BY id').all(), f.processing.getProject(project.id).status], before = now();
+  for (const [method, route, body] of [['POST', `/api/v1/storage/trash/${trash.id}/restore`], ['DELETE', `/api/v1/tasks/${item.task.id}`], ['DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: item.task.id }], ['DELETE', `/api/v1/projects/${project.id}`]]) {
+    const response = await f.request(method, route, body);
+    assert.equal(response.status, 409, `${method} ${route}`);
+    assert.equal(response.body.code, 'purge_started');
+    assert.match(response.body.error, /^Permanent deletion of this Recycle Bin item has already started/);
+  }
+  purgeExpiredTrash(f.processing, f.storage);
+  assert.deepEqual(now(), before);
+});
+
+test('a task in the Recycle Bin cannot be published', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), { item } = await leftByEarlierVersion(f, project, 'Left');
+  const current = { ...item, ...f.output(f.processing.getTask(item.task.id), 'Reprocessed'), older: item };
+  const refused = await f.request('POST', `/api/v1/attempts/${current.attempt.id}/publish`, { selectedAssetKinds: ['glb'] });
+  assert.deepEqual([refused.status, refused.body.code], [409, 'attempt_not_reviewable']);
+  assert.equal(f.processing.publishAttemptAtomic(current.attempt.id, ['glb'], { actorId: 'ops:test' }), null);
+  assert.equal((await f.restore(current)).status, 200);
+  await f.publishAgain(current);
+  const other = await f.publishedTask(project, 'In a deleted project'), next = { ...other, ...f.output(f.processing.getTask(other.task.id), 'In review'), older: other };
+  f.processing.trashProject(project.id, 'ops:test');
+  assert.equal(f.processing.publishAttemptAtomic(next.attempt.id, ['glb'], { actorId: 'ops:test' }), null);
+});
+
+test('a task whose published model has no recorded output here keeps it through delete and restore', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), dataset = f.photos(project), task = f.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Imported' });
+  const model = f.repository.upsertModelVersion({ provider: 'terra', providerModelId: 'imported', providerVersionId: 'v1', displayName: 'Imported', status: 'ready', makeActive: true, assets: [] });
+  f.database.prepare("UPDATE processing_tasks SET status='published',published_model_id=? WHERE id=?").run(model.id, task.id);
+  assert.equal((await f.request('DELETE', `/api/v1/tasks/${task.id}`)).status, 200);
+  assert.equal((await f.request('POST', `/api/v1/storage/trash/${f.processing.activeTrashForEntity('task', task.id).id}/restore`)).status, 200);
+  assert.deepEqual([f.processing.getTask(task.id).status, f.processing.getTask(task.id).publishedModelId], ['published', model.id]);
+});
+
+test('a task whose current output was permanently deleted from the bin comes back as a draft', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), item = await publishNewer(f, await f.publishedTask(project));
+  assert.equal((await f.remove(item)).status, 200);
+  const output = f.processing.activeTrashForEntity('output', item.versionId);
+  assert.equal((await f.request('DELETE', `/api/v1/storage/trash/${output.id}`, { typedId: item.versionId })).status, 204);
+  assert.equal((await f.restore(item)).status, 200);
+  assert.deepEqual([f.state(item).task, f.processing.getTask(item.task.id).activeAttemptId], ['draft', null]);
+  assert.equal(f.processing.getModelOutput(item.older.versionId).status, 'ready');
 });
