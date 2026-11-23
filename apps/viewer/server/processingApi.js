@@ -431,7 +431,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       if(b.expiresAt&&(!Number.isFinite(expiry)||expiry<=Date.now()))return error(res,400,'invalid_expiry');
       const expiresAt=expiry?new Date(expiry).toISOString():null;
       if(b.displayUnits!==undefined&&!validUnits(b.displayUnits))return error(res,400,'invalid_units');
-      const permissions=b.permissions||{view:true,measure:true,cameras:true,download:false};
+      const permissions=b.permissions||{view:true,measure:true,cameras:false,download:false};
       if(!onlyKeys(permissions,['view','measure','cameras','download'])||permissions.view!==true
         ||Object.values(permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');
       const initial=outputShareState(processing.getModelOutput(req.params.id));

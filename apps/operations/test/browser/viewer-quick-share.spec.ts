@@ -463,7 +463,7 @@ test("a public link ends at the close of its last day in Central time", async ({
   const dialog = await openShare(page, "Seawall orthomosaic");
   await dialog.getByRole("tab", { name: "Public link" }).click();
   const lastDay = dialog.getByLabel("Last day (Central time)");
-  await expect(lastDay).toHaveValue("2026-11-03");
+  await expect(lastDay).toHaveValue("2026-11-25");
   await expect(lastDay).toHaveAttribute("min", "2026-10-27");
   await expect(lastDay).toHaveAttribute("max", "2026-11-25");
   await lastDay.fill("2026-10-31");

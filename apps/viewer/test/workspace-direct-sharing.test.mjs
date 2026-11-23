@@ -23,7 +23,7 @@ function declaration(name){
 }
 const names=['clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
   'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
-  'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
+  'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','newLinkExpiry','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
   const state={token:'signed-in',projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
@@ -48,7 +48,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     mutate:async(...args)=>calls.push({mutation:args}),toast:(...args)=>notices.push(args),navigator:{clipboard:{writeText:async()=>{throw new Error('clipboard denied')}}},
     dialogs:{confirm:async()=>{decisions.push('confirm');return true},form:async()=>null},
   });
-  vm.runInContext(names.map(declaration).join('\n'),context);
+  vm.runInContext(/^const PUBLIC_LINK_DAYS=.*$/m.exec(source)[0]+'\n'+names.map(declaration).join('\n'),context);
   const form={dataset:{outputId:'output'},isConnected:true,elements:{label:{value:''},password:{value:''},expiresAt:{value:''},
     measure:{checked:true},cameras:{checked:true},download:{checked:false}},button:{disabled:false},querySelector(){return this.button},
     querySelectorAll(selector){return selector==='input[name="allowedViews"]'?[{checked:true,value:'model'}]:[]}};
@@ -352,6 +352,22 @@ test('failed or cancelled revoke does not erase an otherwise valid created link'
   await element.onclick();assert.equal(f.state.lastShareUrl,'https://viewer.test/link');
   f.context.dialogs.confirm=async()=>true;f.context.mutate=async()=>undefined;
   await element.onclick();assert.equal(f.state.lastShareUrl,'https://viewer.test/link');
+});
+
+test('a new public link starts without camera positions and ends in 30 days; saved links keep their own settings',()=>{
+  const f=fixture(),now=Date.parse('2026-10-20T15:04:00Z');
+  for(const [published,status] of [[false,'ready'],[true,'published']]){
+    Object.assign(f.output,{activePublished:published,status});f.context.shareModal('project','output');
+    const form=/<form class="manage-form share-form"[\s\S]*?<\/form>/.exec(f.html())[0];
+    assert.match(form,/name="measure" checked/);assert.doesNotMatch(form,/name="cameras" checked|name="download" checked/);assert.match(form,/name="cameras"/);
+    const value=/name="expiresAt" type="datetime-local" value="([^"]+)"/.exec(form)[1],ahead=new Date(value).getTime()-Date.now();
+    assert.ok(Math.abs(ahead-30*86400000)<90_000,`ends ${ahead} ms ahead`);assert.doesNotMatch(form,/name="expiresAt"[^>]*required/);
+  }
+  assert.equal(new Date(f.context.newLinkExpiry(now)).getTime(),now+30*86400000);
+  f.state.shares.output=[{id:'old',permissions:{view:true,measure:false,cameras:true,download:true},expiresAt:null,hasPassword:false}];
+  f.modalContent.querySelector=()=>({elements:{passwordAction:{}},querySelector:()=>null,querySelectorAll:()=>[]});
+  f.context.editShareModal('project','output','old');
+  const edit=f.html();assert.match(edit,/name="cameras" type="checkbox" checked/);assert.match(edit,/name="expiresAt" type="datetime-local" value=""/);
 });
 
 test('available-view selection comes from verified kinds and defaults to all supported views only',()=>{

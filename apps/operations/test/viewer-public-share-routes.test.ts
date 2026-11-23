@@ -141,6 +141,22 @@ describe("Operations Viewer public-share routes", () => {
     expect(env.batches).toHaveLength(1);
   });
 
+  it.each([[undefined], [{ view: true }]])("starts a link whose request does not choose them without camera positions or downloads", async permissions => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/api/v1/models") return Response.json({ models: [model] });
+      const body = JSON.parse(String(init?.body)); bodies.push(body.permissions);
+      return Response.json({ share: { ...share, hasPassword: false, expiresAt: body.expiresAt, permissions: body.permissions }, token: "a-secure-token-that-is-never-listed",
+        viewUrl: "https://viewer.example.test/view/a-secure-token-that-is-never-listed", embedUrl: "https://viewer.example.test/embed/a-secure-token-that-is-never-listed" }, { status: 201 });
+    }));
+    const response = await worker.fetch(request("/api/viewer/models/model-one/shares", {
+      method: "POST", headers: { "Idempotency-Key": "viewer-public-share-default-0001" },
+      body: JSON.stringify({ expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), ...(permissions ? { permissions } : {}) }),
+    }), environment() as never, executionCtx);
+    expect(response.status).toBe(201);
+    expect(bodies).toEqual([{ view: true, measure: true, cameras: false, download: false }]);
+  });
+
   it("revokes with the distinct viewer.share.revoke permission", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ share: {
       ...share, revokedAt: new Date().toISOString(), revokedBy: "ops-v1", revokeReason: "Demo complete",

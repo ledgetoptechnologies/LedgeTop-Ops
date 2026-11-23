@@ -101,9 +101,9 @@ const publicShareInput = z.object({
   permissions: z.object({
     view: z.literal(true),
     measure: z.boolean().default(true),
-    cameras: z.boolean().default(true),
+    cameras: z.boolean().default(false),
     download: z.boolean().default(false),
-  }).strict().default({ view: true, measure: true, cameras: true, download: false }),
+  }).strict().default({ view: true, measure: true, cameras: false, download: false }),
 }).strict().superRefine((value, context) => {
   if (value.expiresAt === null) return;
   const expiry = Date.parse(value.expiresAt), now = Date.now();

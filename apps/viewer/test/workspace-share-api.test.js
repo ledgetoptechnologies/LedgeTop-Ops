@@ -100,7 +100,7 @@ test('ready Share is read-only until explicit link creation, publishes only elig
   let response=await c.request({body:{}});assert.equal(response.status,409);
   assert.equal((await response.json()).code,'publication_confirmation_required');c.assertPrivate();
   response=await c.request();assert.equal(response.status,201);
-  const created=await response.json();assert.equal(created.share.hasPassword,false);assert.equal(created.share.permissions.download,false);
+  const created=await response.json();assert.equal(created.share.hasPassword,false);assert.equal(created.share.permissions.download,false);assert.equal(created.share.permissions.cameras,false);
   assert.match(created.viewUrl,/\/view\/[A-Za-z0-9_-]+$/);
   assert.equal(c.processing.getModelOutput(c.item.versionId).status,'published');
   assert.deepEqual(c.db.prepare('SELECT kind,published FROM model_assets WHERE version_id=? ORDER BY kind').all(c.item.versionId).map(x=>({...x})),[{kind:'glb',published:1},{kind:'report',published:0}]);

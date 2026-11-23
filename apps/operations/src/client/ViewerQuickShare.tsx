@@ -169,6 +169,9 @@ export function publicLinkDayRange(now = Date.now()): { min: string; max: string
   return { min, max };
 }
 
+/** A new public link starts on the latest last day allowed: 30 days out. Staff can shorten it or choose no end. */
+export const defaultPublicLinkDay = (now = Date.now()) => publicLinkDayRange(now).max;
+
 /** The end of a public link's last Central-time day, only while it is within the allowed range. */
 export function publicLinkExpiry(day: string, now = Date.now()): string | null {
   const { min, max } = publicLinkDayRange(now);
@@ -603,7 +606,7 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
   const [loadError, setLoadError] = useState("");
   const [label, setLabel] = useState("");
   // Like client shares, a link ends at the close of its last day in Central time.
-  const [expiryDay, setExpiryDay] = useState(() => chicagoToday(Date.now() + 7 * DAY_MS));
+  const [expiryDay, setExpiryDay] = useState(() => defaultPublicLinkDay());
   const [neverExpires, setNeverExpires] = useState(false);
   const [password, setPassword] = useState("");
   const [download, setDownload] = useState(false);
