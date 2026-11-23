@@ -765,7 +765,8 @@ for (const [label, setup] of [
     for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(Buffer.from(value)); }
     assert.deepEqual(Buffer.concat(parts), f.bodies.ortho);
     assert.deepEqual(hashed, [0, CHUNK, 2 * CHUNK, 3 * CHUNK], 'each region hashed once, in order');
-    assert.equal(f.integrity.bufferedBytes, 0);
+    // The server releases the last region just after the client has received it.
+    await until(() => f.integrity.bufferedBytes === 0, 'all budget returned');
   });
 
   test(`corruption in the first region is a clean error, in a later region an aborted transfer (${label})`, async (t) => {
@@ -834,4 +835,169 @@ test('a range loads only the chunk rows around it', async (t) => {
   assert.deepEqual(await rowsFor(range(3 * CHUNK + 5, f.bodies.ortho.length - 1)), [206, [3]]);
   assert.deepEqual(await rowsFor({}), [200, [0, 1, 2, 3]], 'a full response checks the whole table');
   assert.deepEqual(await rowsFor({ method: 'HEAD' }), [200, [0, 1, 2, 3]]);
+});
+
+// A cache whose region checks wait on a gate, over one small real file.
+async function gatedCache(t, options = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-delivery-gate-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'asset.bin'), body = crypto.randomBytes(2 * 64 * 1024);
+  fs.writeFileSync(file, body);
+  const chunks = [0, 64 * 1024].map((offset) => ({ byteOffset: offset, byteSize: 64 * 1024, sha256: sha256(body.subarray(offset, offset + 64 * 1024)) }));
+  const cache = new AssetIntegrityCache({ ...localPosix, wallNow: () => Date.now() + 60_000, ...options });
+  const gates = []; // one entry per check that reached its read
+  const hashRegion = cache.hashRegion.bind(cache);
+  let gateOffset = 0;
+  cache.hashRegion = async (...args) => {
+    if (args[2] === gateOffset) await new Promise((resolve) => { gates.push(resolve); });
+    return hashRegion(...args);
+  };
+  const stat = fs.statSync(file, { bigint: true });
+  return { cache, file, stat, body, chunks, gates, setGateOffset: (value) => { gateOffset = value; },
+    slice: (signal, started = false) => cache.verifiedSlice(file, stat, { kind: 'chunk', offset: 0, size: 64 * 1024, sha256: chunks[0].sha256 }, 0, 100, { signal, started }),
+    check: (signal) => cache.verifyChunk(file, stat, chunks[0], { signal }) };
+}
+async function until(condition, label) {
+  for (let i = 0; i < 400; i += 1) { if (condition()) return; await sleep(5); }
+  assert.fail(`timed out: ${label}`);
+}
+const idle = (cache) => ({ bufferedBytes: cache.bufferedBytes, bufferWaiters: cache.bufferWaiters.length, sharedWaiters: cache.sharedWaiters, pending: cache.pending.size, activeStreams: cache.activeStreams });
+const IDLE = { bufferedBytes: 0, bufferWaiters: 0, sharedWaiters: 0, pending: 0, activeStreams: 0 };
+
+for (const kind of ['slice', 'check']) {
+  test(`a cancelled follower stops waiting for another request's check at once (${kind})`, async (t) => {
+    const g = await gatedCache(t);
+    const owner = g[kind]();
+    await until(() => g.gates.length === 1, 'owner reached its read');
+    const held = g.cache.bufferedBytes;
+    const controller = new AbortController();
+    const follower = g[kind](controller.signal), other = g[kind]();
+    await until(() => g.cache.sharedWaiters === 2, 'followers wait');
+    assert.equal(g.cache.bufferedBytes, held, 'a follower holds no budget');
+    controller.abort();
+    await assert.rejects(follower, { name: 'AbortError' }, 'while the owner is still blocked');
+    assert.equal(g.cache.sharedWaiters, 1);
+    assert.equal(g.cache.stats.cancelled, 1);
+    const late = new AbortController();
+    late.abort();
+    await assert.rejects(g[kind](late.signal), { name: 'AbortError' }, 'already gone');
+    assert.equal(g.cache.sharedWaiters, 1);
+    g.gates[0]();
+    for (const result of await Promise.all([owner, other])) { assert.ok(result); result.release?.(); }
+    assert.equal(g.gates.length, 1, 'the region was hashed once');
+    assert.deepEqual(idle(g.cache), IDLE);
+  });
+
+  test(`followers and budget waiters share one bounded queue (${kind})`, async (t) => {
+    const g = await gatedCache(t, { maxQueuedStreams: 3, bufferedBudgetBytes: 64 * 1024 });
+    const owner = g[kind]();
+    await until(() => g.gates.length === 1, 'owner reached its read');
+    const followers = [g[kind](), g[kind]()];
+    await until(() => g.cache.sharedWaiters === 2, 'followers wait');
+    const free = g.cache.bufferedBudgetBytes - g.cache.bufferedBytes;
+    if (free) await g.cache.reserve(free);
+    const budget = g.cache.reserve(10); // the third waiter
+    await assert.rejects(g[kind](), { code: 'integrity_busy' }, 'a follower past the bound');
+    await assert.rejects(g.cache.reserve(10), { code: 'integrity_busy' }, 'a budget waiter past the bound');
+    assert.equal(g.cache.sharedWaiters, 2);
+    if (kind === 'slice') {
+      // Responses that already started may wait longer, up to 8 times as many.
+      const started = Array.from({ length: 21 }, () => g.slice(null, true));
+      await until(() => g.cache.sharedWaiters === 23, 'started followers wait');
+      await assert.rejects(g.slice(null, true), { code: 'integrity_busy' });
+      followers.push(...started);
+    }
+    assert.equal(g.cache.stats.peakSharedWaiters, kind === 'slice' ? 23 : 2);
+    budget.then(() => g.cache.unreserve(10));
+    g.gates[0]();
+    if (free) g.cache.unreserve(free);
+    const release = async (promise) => { const result = await promise; assert.ok(result); result.release?.(); };
+    await Promise.all([owner, ...followers].map(release));
+    assert.equal(g.gates.length, 1);
+    assert.deepEqual(idle(g.cache), IDLE);
+  });
+}
+
+test('when the owner goes away, its followers still get verified bytes and the queue drains', async (t) => {
+  const g = await gatedCache(t);
+  const controller = new AbortController();
+  const owner = g.slice(controller.signal);
+  await until(() => g.gates.length === 1, 'owner reached its read');
+  const followers = [g.slice(), g.check()];
+  await until(() => g.cache.sharedWaiters === 2, 'followers wait');
+  controller.abort();
+  const pump = setInterval(() => g.gates.forEach((open) => open()), 5);
+  await assert.rejects(owner, { name: 'AbortError' });
+  const [piece, ok] = await Promise.all(followers);
+  clearInterval(pump);
+  assert.deepEqual(piece.bytes, g.body.subarray(0, 100));
+  piece.release();
+  assert.equal(ok, true);
+  await until(() => g.cache.pending.size === 0, 'nothing pending');
+  assert.deepEqual(idle(g.cache), IDLE);
+});
+
+for (const [label, gateOffset] of [['before its headers', 0], ['after its headers', 64 * 1024]]) {
+  test(`a client that disconnects while waiting for a shared check ${label} releases its file handle at once`, async (t) => {
+    const g = await gatedCache(t);
+    g.setGateOffset(gateOffset);
+    const closed = [];
+    let requests = 0;
+    const app = express();
+    app.get('/asset', async (req, res) => {
+      const id = requests;
+      requests += 1;
+      const opened = await openForDelivery(g.file);
+      const closeHandle = opened.handle.close.bind(opened.handle);
+      opened.handle.close = async () => { await closeHandle(); closed.push(id); };
+      await deliverVerified(req, res, { ...opened, filePath: g.file, cache: g.cache,
+        verify: async (range, signal) => {
+          for (const chunk of g.chunks) if (chunk.byteOffset <= range.end && !await g.cache.verifyChunk(g.file, opened.stat, chunk, { handle: opened.handle, signal })) return false;
+          return true;
+        },
+        regions: () => g.chunks.map((c) => ({ kind: 'chunk', offset: c.byteOffset, size: c.byteSize, sha256: c.sha256 })),
+        onFailure: () => res.sendStatus(404), onError: (error) => res.sendStatus(error.status || 500) });
+    });
+    const server = await listen(app);
+    t.after(() => close(server));
+    const url = `http://127.0.0.1:${server.address().port}/asset`;
+    const owner = request(url);
+    await until(() => g.gates.length === 1, 'owner reached its read');
+    const client = http.get(url, { agent: false }, (response) => response.on('error', () => {}).resume());
+    client.on('error', () => {});
+    await until(() => g.cache.sharedWaiters === 1, 'the second request waits for the first');
+    client.destroy();
+    await until(() => closed.length === 1, 'its handle closes while the owner is still blocked');
+    assert.deepEqual(closed, [1]);
+    assert.equal(g.cache.sharedWaiters, 0);
+    g.gates[0]();
+    const served = await owner;
+    assert.equal(served.status, 200);
+    assert.deepEqual(served.body, g.body, 'the owner is unaffected');
+    await until(() => closed.length === 2, 'the owner handle closes');
+    assert.deepEqual(idle(g.cache), IDLE);
+  });
+}
+
+test('a follower past the bound gets 503 before its headers and its file handle closes', async (t) => {
+  const f = await managedFixture(t);
+  const saved = f.integrity.maxQueuedStreams;
+  t.after(() => { f.integrity.maxQueuedStreams = saved; delete f.integrity.hashRegion; });
+  f.integrity.maxQueuedStreams = 2;
+  let open;
+  const gate = new Promise((resolve) => { open = resolve; });
+  const hashRegion = f.integrity.hashRegion.bind(f.integrity);
+  f.integrity.hashRegion = async (...args) => { await gate; return hashRegion(...args); };
+  const url = `${f.base}/tiles/0/tile.b3dm`;
+  const waiting = [request(url)];
+  await until(() => f.integrity.pending.size === 1, 'owner');
+  waiting.push(request(url), request(url));
+  await until(() => f.integrity.sharedWaiters === 2, 'two followers');
+  const refused = await request(url);
+  assert.deepEqual([refused.status, refused.headers['retry-after']], [503, '1']);
+  assert.equal(f.integrity.sharedWaiters, 2);
+  open();
+  for (const { status, body } of await Promise.all(waiting)) { assert.equal(status, 200); assert.deepEqual(body, f.bodies.tile); }
+  await until(() => f.integrity.bufferedBytes === 0, 'all budget returned');
+  assert.deepEqual(idle(f.integrity), IDLE);
 });

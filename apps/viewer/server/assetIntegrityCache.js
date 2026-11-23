@@ -52,7 +52,8 @@ const INLINE_HASH_MAX_BYTES = 1024 * 1024;
 const RACY_WINDOW_MS = 2_000;
 const MAX_CONCURRENT_STREAMS = 8;
 // Streamed checks waiting for a slot; beyond this, requests get a fast 503.
-// The same bound applies to requests waiting for buffer budget.
+// The same bound applies to requests waiting for buffer budget together with
+// those waiting for another request's check of the same region.
 const MAX_QUEUED_STREAMS = 64;
 // A response whose headers are already sent cannot get a 503, only an aborted
 // transfer. It may therefore wait for the buffer budget in a longer (still
@@ -137,11 +138,12 @@ class AssetIntegrityCache {
     this.generation = 0;
     this.bufferedBytes = 0;
     this.bufferWaiters = [];
+    this.sharedWaiters = 0; // requests waiting for another request's check
     this.carryMaxBytes = Math.max(0, Number(carryMaxBytes) || 0);
     this.bytesCacheMaxBytes = Math.max(0, Number(bytesCacheMaxBytes) || 0);
     this.bytes = new Map(); // region key -> { buffer, until }
     this.bytesTotal = 0;
-    this.stats = { carried: 0, legacy: 0, bytesHits: 0, bytesMisses: 0, hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0, busy: 0, cancelled: 0 };
+    this.stats = { carried: 0, legacy: 0, bytesHits: 0, bytesMisses: 0, hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, peakSharedWaiters: 0, uncached: 0, busy: 0, cancelled: 0 };
   }
 
   clear() {
@@ -243,6 +245,32 @@ class AssetIntegrityCache {
     }
   }
 
+  waitQueueFull(started) {
+    return this.bufferWaiters.length + this.sharedWaiters >= this.maxQueuedStreams * (started ? STARTED_QUEUE_FACTOR : 1);
+  }
+
+  // Waits until another request's check settles, whatever its result. Holds no
+  // budget, counts against the bounded wait queue (fails fast with
+  // integrity_busy when it is full), and stops at once when this request goes
+  // away, so its file handle is released without waiting for the other request.
+  async awaitShared(inflight, signal = null, started = false) {
+    if (signal?.aborted) throw abortError();
+    if (this.waitQueueFull(started)) { this.stats.busy += 1; throw busyError(); }
+    this.sharedWaiters += 1;
+    this.stats.peakSharedWaiters = Math.max(this.stats.peakSharedWaiters, this.sharedWaiters);
+    let onAbort = null;
+    try {
+      await new Promise((resolve, reject) => {
+        onAbort = () => { this.stats.cancelled += 1; reject(abortError()); };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        inflight.then(resolve, resolve);
+      });
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      this.sharedWaiters -= 1;
+    }
+  }
+
   // Waits (FIFO, bounded) until `size` bytes fit in the global buffer budget.
   reserve(size, signal = null, started = false) {
     if (signal?.aborted) return Promise.reject(abortError());
@@ -252,7 +280,7 @@ class AssetIntegrityCache {
       this.stats.peakBufferedBytes = Math.max(this.stats.peakBufferedBytes, this.bufferedBytes);
       return Promise.resolve();
     }
-    if (this.bufferWaiters.length >= this.maxQueuedStreams * (started ? STARTED_QUEUE_FACTOR : 1)) { this.stats.busy += 1; return Promise.reject(busyError()); }
+    if (this.waitQueueFull(started)) { this.stats.busy += 1; return Promise.reject(busyError()); }
     return new Promise((resolve, reject) => {
       const onAbort = () => {
         const index = this.bufferWaiters.indexOf(waiter);
@@ -321,7 +349,7 @@ class AssetIntegrityCache {
     // then use the bytes it kept. If it kept none, hash them here.
     const inflight = eligible && !waited ? this.pending.get(key) : undefined;
     if (inflight) {
-      await inflight.catch(() => {});
+      await this.awaitShared(inflight, signal, started);
       return this.verifiedSlice(filePath, stat, region, start, endExclusive, { handle, signal, carry, started, waited: true });
     }
     const capacity = region.toEof ? region.size + 1 : region.size;
@@ -435,6 +463,7 @@ class AssetIntegrityCache {
     }
     const inflight = this.pending.get(key);
     if (inflight) {
+      await this.awaitShared(inflight, signal);
       try { return await inflight; } catch (error) {
         // The request that owned the shared check went away; check for this one.
         if (isAbort(error) && !signal?.aborted) return this.verifyAlone(verify, signal);
