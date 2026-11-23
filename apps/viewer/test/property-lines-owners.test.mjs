@@ -1,6 +1,6 @@
 // Property lines: orange accent colour, owner labels, merging touching
-// parcels of one owner, map-tile coverage around the model and the data
-// vintage line. Synthetic parcels and generic owner names only.
+// parcels of one owner and map-tile coverage around the model. Synthetic
+// parcels and generic owner names only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND_COLORS } from '../brand-colors.mjs';
-import { PROPERTY_LINE_STYLE, propertyLinesVintageText } from '../property-lines-layer.mjs';
+import { PROPERTY_LINE_STYLE } from '../property-lines-layer.mjs';
 import {
   PROPERTY_LINES_LIMITS, childTiles, createParcelTileLoader, expandLonLatBounds, makeTile, mergeTileParcels,
   normalizeParcelResponse, propertyLinesMessage, propertyLinesTilesForView,
@@ -169,7 +169,8 @@ test('viewport coverage: zoomed out, tiles cover the visible map around the mode
   const capped = propertyLinesTilesForView({ modelBounds: model, viewBounds: wide, zoom: 13, limits: { ...PROPERTY_LINES_LIMITS, maxTiles: 5 } });
   assert.equal(capped.tiles.length, 5);
   assert.equal(capped.partial, true);
-  assert.equal(propertyLinesMessage('ready', { count: 3, partial: true }), '3 parcels shown. Zoom in to see the rest.');
+  assert.equal(propertyLinesMessage('ready', { count: 3, partial: true }), 'Zoom in to see more property lines.');
+  assert.equal(propertyLinesMessage('ready', { count: 3 }), '', 'drawn lines need no words in the card');
 });
 
 test('tile loader: parcels once across tiles, cached tiles reused, dense tiles split, edge and access answers', async () => {
@@ -217,10 +218,3 @@ test('responses keep only geometry, id and a plain owner name', () => {
   assert.equal(body.parcels[0].owner, 'SAMPLE FARMS LLC');
 });
 
-test('data vintage line for the panel', () => {
-  assert.equal(propertyLinesVintageText({ shortName: 'WI statewide', vintage: 'V12, 2025 tax roll', dataUpdated: '2026-06-30' }),
-    'Parcels: WI statewide V12, 2025 tax roll (updated Jun 2026)');
-  assert.equal(propertyLinesVintageText({ shortName: 'WI statewide', vintage: 'V12, 2025 tax roll' }), 'Parcels: WI statewide V12, 2025 tax roll');
-  assert.equal(propertyLinesVintageText({ kind: 'upload', name: 'Uploaded boundary file' }), '');
-  assert.equal(propertyLinesVintageText(null), '');
-});

@@ -400,8 +400,9 @@ export const PROPERTY_LINES_MESSAGES = Object.freeze({
   forbidden: 'Property lines are not available for this link.',
 });
 
-export function propertyLinesMessage(status, { count = 0, threeD = false, partial = false } = {}) {
-  if (status === 'ready') return `${count} parcel${count === 1 ? '' : 's'} shown.${partial ? ' Zoom in to see the rest.' : ''}`;
+export function propertyLinesMessage(status, { threeD = false, partial = false } = {}) {
+  // Drawn lines need no words in the card; only a partial view says so.
+  if (status === 'ready') return partial ? 'Zoom in to see more property lines.' : '';
   if (status === 'too_many' && threeD) return PROPERTY_LINES_MESSAGES.too_many_3d;
   return PROPERTY_LINES_MESSAGES[status] ?? '';
 }

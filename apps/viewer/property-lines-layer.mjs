@@ -11,7 +11,6 @@ import {
   groundHeightsConsistent,
   parcelsToUtmPolylines,
   propertyLinesAvailability,
-  propertyLinesDatumNote,
   propertyLinesMessage,
   propertyLinesRequestBounds,
   propertyLinesTilesForView,
@@ -75,16 +74,6 @@ export const PROPERTY_LINES_HIDDEN_KEY = 'ltds-viewer:property-lines-hidden';
 export const PROPERTY_LINES_HIDDEN_LIMIT = 100;
 // "Merge parcels by owner" is on unless this browser turned it off ('0').
 export const PROPERTY_LINES_MERGE_KEY = 'ltds-viewer:property-lines-merge';
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-// "Parcels: WI statewide V12, 2025 tax roll (updated Jun 2026)", or '' when
-// the source does not say.
-export function propertyLinesVintageText(source) {
-  if (!source?.shortName || !source?.vintage) return '';
-  const date = /^(\d{4})-(\d{2})-\d{2}$/.exec(source.dataUpdated || '');
-  const month = date && MONTHS[Number(date[2]) - 1];
-  return `Parcels: ${source.shortName} ${source.vintage}${month ? ` (updated ${month} ${date[1]})` : ''}`;
-}
 
 export function createPropertyLinesPreferences(storage) {
   const store = () => { try { return storage === undefined ? globalThis.localStorage ?? null : storage; } catch { return null; } };
@@ -154,7 +143,7 @@ export function createPropertyLinesController(deps) {
   let siteBounds = null, retryTimer = null, retries = 0, seq = 0;
   // One canvas renderer per Leaflet map, reused for every redraw.
   let mapRenderer = null, rendererMap = null, drawnMapKey = null;
-  let current = null, mapLayers = null, threeGroup = null, threeKey = null, potreeKey = null, potreeShown = false, heightNote = '', groundAbort = null;
+  let current = null, mapLayers = null, threeGroup = null, threeKey = null, potreeKey = null, potreeShown = false, heightNote = '', heightDraped = false, groundAbort = null;
   const draped = new Map();
 
   function kind() { return propertyLinesModeKind(deps.getMode(), deps.getCloudMode()); }
@@ -197,7 +186,7 @@ export function createPropertyLinesController(deps) {
     retries = 0;
     fetcher.clear();
     tiles.clear();
-    siteBounds = null; current = null; count = 0; partial = false; heightNote = ''; draped.clear();
+    siteBounds = null; current = null; count = 0; partial = false; heightNote = ''; heightDraped = false; draped.clear();
     clearDrawings();
   }
 
@@ -240,8 +229,6 @@ export function createPropertyLinesController(deps) {
     dom.panel.hidden = !panelShown;
     if (!panelShown) {
       if (dom.notice) dom.notice.hidden = true;
-      if (dom.about) dom.about.hidden = true;
-      if (dom.vintage) dom.vintage.hidden = true;
       if (dom.mergeRow) dom.mergeRow.hidden = true;
       return;
     }
@@ -249,30 +236,23 @@ export function createPropertyLinesController(deps) {
     const av = availability();
     const disabled = !av.available;
     const shown = on && !disabled;
-    // The source note and the "not a survey" notice belong to drawn lines only.
+    // The "not a survey" notice on the view belongs to drawn lines only. The
+    // card itself is the title and its controls: no count, source or
+    // disclaimer text, only a status line while loading or when something
+    // needs the viewer (unavailable, zoom in, too many, lines show through).
     const drawn = shown && status === 'ready';
     dom.button.disabled = disabled;
     dom.button.classList.toggle('active', shown);
     dom.button.textContent = shown ? 'Hide' : 'Show';
     dom.button.setAttribute('aria-pressed', String(shown));
     dom.button.setAttribute('aria-label', shown ? 'Hide property lines' : 'Show property lines');
-    // Data vintage, and the merge choice where the source has owner names.
-    if (dom.vintage) {
-      const text = shown ? propertyLinesVintageText(source) : '';
-      if (dom.vintage.textContent !== text) dom.vintage.textContent = text;
-      dom.vintage.hidden = !text;
-    }
+    // The merge choice, where the source has owner names.
     if (dom.mergeRow) dom.mergeRow.hidden = !(shown && source?.owners === 'yes');
     if (dom.merge && dom.merge.checked !== merge) dom.merge.checked = merge;
     let message = disabled ? propertyLinesMessage(av.reason) : (on ? propertyLinesMessage(status, { count, partial, threeD: kind() !== 'map' }) : '');
-    if (drawn && kind() !== 'map' && heightNote) message += ` ${heightNote}`;
+    if (drawn && kind() !== 'map' && heightNote && !heightDraped) message = [message, heightNote].filter(Boolean).join(' ');
     if (dom.status.textContent !== message) dom.status.textContent = message;
     dom.status.dataset.state = disabled ? av.reason : (on ? status : 'off');
-    if (dom.about) dom.about.hidden = !drawn;
-    if (drawn && source && dom.about) {
-      dom.about.querySelector('[data-pl="source"]').textContent = source.kind === 'upload' ? `${source.name}, ${source.release}. ${source.credit}` : `${source.name}, release ${source.release}. ${source.credit}`;
-      dom.about.querySelector('[data-pl="disclaimer"]').textContent = [source.disclaimer, propertyLinesDatumNote(deps.modelDatum?.(), source.datum) || source.datumNote].filter(Boolean).join(' ');
-    }
     if (dom.notice) {
       dom.notice.hidden = !drawn;
       if (drawn && source) dom.notice.textContent = `Property lines are approximate, not a survey. Source: ${source.name} ${source.release}.`;
@@ -509,7 +489,7 @@ export function createPropertyLinesController(deps) {
     if (!stillCurrent() || !isOn()) { if (lifeKey !== lifecycleKey().key) void refresh(); return; }
     if (!lines) { status = 'pending'; render(); scheduleRetry(); return; }
     if (lines.tooMany) { clearDrawings(); settle('too_many'); return; }
-    heightNote = lines.note;
+    heightNote = lines.note; heightDraped = lines.draped === true;
     if (active === 'three') drawThree(lines);
     else if (!drawPotree(lines)) { status = 'pending'; render(); scheduleRetry(); return; }
     settle('ready');
@@ -587,7 +567,7 @@ export function createPropertyLinesController(deps) {
       const body = response.ok ? await response.json() : null;
       nextOffered = body?.offered === true && Boolean(body.source);
       // Plain strings only; they are shown with textContent, never as HTML.
-      nextSource = nextOffered ? Object.fromEntries(['kind', 'name', 'release', 'credit', 'disclaimer', 'datumNote', 'datum', 'region', 'shortName', 'vintage', 'dataUpdated', 'owners']
+      nextSource = nextOffered ? Object.fromEntries(['kind', 'name', 'release', 'credit', 'disclaimer', 'datumNote', 'datum', 'region', 'owners']
         .filter(key => typeof body.source[key] === 'string').map(key => [key, body.source[key].slice(0, 600)])) : null;
     } catch { nextOffered = false; nextSource = null; }
     if (stale()) return;

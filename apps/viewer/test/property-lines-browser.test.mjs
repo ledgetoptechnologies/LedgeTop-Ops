@@ -54,8 +54,8 @@ const controller = createPropertyLinesController({
   L, fetchImpl: (url, options) => { window.requests.push(url); return fetch(url, options); }, headers: () => ({ Authorization: 'Bearer test-session-token-xx' }),
   fetcherOptions: { debounceMs: 50 },
   dom: { panel: document.getElementById('panel-property-lines'), button: document.getElementById('layer-property-lines'),
-    status: document.getElementById('property-lines-status'), about: document.getElementById('property-lines-about'), notice: document.getElementById('property-lines-notice'),
-    merge: document.getElementById('property-lines-merge'), mergeRow: document.getElementById('property-lines-merge-row'), vintage: document.getElementById('property-lines-vintage') },
+    status: document.getElementById('property-lines-status'), notice: document.getElementById('property-lines-notice'),
+    merge: document.getElementById('property-lines-merge'), mergeRow: document.getElementById('property-lines-merge-row') },
   projectId: () => 'model-1', getMode: () => window.viewMode || 'ortho', getCloudMode: () => window.cloudMode || 'none', getMap: () => map, getScene: () => null, getPotreeApi: () => null,
   georefVerified: () => true, getSceneExtentUtm: () => ({ minE: e - 120, minN: n - 90, maxE: e + 120, maxN: n + 90 }), getGroundGrid: async () => null,
   utmToLatLon: projection.utmToLatLon, latLonToUtm: projection.latLonToUtm, utmToWorld: () => null,
@@ -124,8 +124,7 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     const ui = () => client.evaluate(`(() => { const b = document.getElementById('layer-property-lines'), n = document.getElementById('property-lines-notice');
       return { panelHidden: document.getElementById('panel-property-lines').hidden, pressed: b.getAttribute('aria-pressed'), label: b.textContent,
         status: document.getElementById('property-lines-status').textContent, state: document.getElementById('property-lines-status').dataset.state,
-        noticeHidden: n.hidden, notice: n.textContent, aboutHidden: document.getElementById('property-lines-about').hidden,
-        about: document.getElementById('property-lines-about').textContent, canvas: !!document.querySelector('.leaflet-propertyLines-pane canvas') }; })()`);
+        noticeHidden: n.hidden, notice: n.textContent, card: document.getElementById('panel-property-lines').innerText, canvas: !!document.querySelector('.leaflet-propertyLines-pane canvas') }; })()`);
 
     await size(1280, 760);
     await load();
@@ -135,30 +134,28 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     assert.equal(state.panelHidden, false);
     assert.equal(state.pressed, 'true');
     assert.equal(state.label, 'Hide');
-    assert.equal(state.status, '2 parcels shown.');
+    assert.equal(state.status, '', 'no parcel count in the card');
     assert.equal(state.canvas, true, 'lines drawn in their own pane');
     assert.equal(state.noticeHidden, false);
     assert.match(state.notice, /approximate, not a survey.*Wisconsin Statewide Parcel Map V12/);
-    assert.equal(state.aboutHidden, false);
-    assert.match(state.about, /not a survey/);
-    assert.match(state.about, /release V12 \(2026\)/);
+    // The card is its title and controls only: no count, disclaimer, source credit or data date.
+    assert.equal(state.card.replace(/\s+/g, ' ').trim().toLowerCase(), 'property lines hide merge parcels by owner');
+    assert.doesNotMatch(state.card, /parcels? shown|not a survey|Source|release|V12|tax roll|updated/i);
     const request = hits.find(h => h.startsWith('/api/v1/property-lines/parcels'));
     assert.match(request, /^\/api\/v1\/property-lines\/parcels\?bbox=-89\.\d{6}%2C43\.\d{6}%2C-89\.\d{6}%2C43\.\d{6}&model=model-1$/);
     assert.equal(await client.evaluate('map.hasLayer && Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && typeof l.getLatLngs === "function").length'), 2);
     // Orange accent line over a dark halo.
     assert.deepEqual(await client.evaluate('Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && l.getLatLngs).map(l => l.options.color)'), ['#111111', '#ee5007']);
-    // One owner: one merged outline and one label in the middle of it; the data vintage under the button.
+    // One owner: one merged outline and one label in the middle of it.
     const owners = () => client.evaluate(`(() => { const labels = [...document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label')];
       return { outlines: controller.state.outlines, labels: labels.map(l => l.textContent), merge: document.getElementById('property-lines-merge').checked,
-        mergeShown: !document.getElementById('property-lines-merge-row').hidden, vintage: document.getElementById('property-lines-vintage').textContent,
-        vintageShown: !document.getElementById('property-lines-vintage').hidden,
+        mergeShown: !document.getElementById('property-lines-merge-row').hidden,
         inside: labels.every(l => { const r = l.getBoundingClientRect(), m = map.getContainer().getBoundingClientRect(); return r.left >= m.left && r.right <= m.right && r.top >= m.top && r.bottom <= m.bottom; }) }; })()`);
     let own = await owners();
     assert.equal(own.outlines, 1, 'touching parcels of one owner draw as one outline');
     assert.deepEqual(own.labels, ['SAMPLE FARMS LLC']);
     assert.equal(own.inside, true);
-    assert.deepEqual([own.merge, own.mergeShown, own.vintageShown], [true, true, true]);
-    assert.equal(own.vintage, 'Parcels: WI statewide V12, 2025 tax roll (updated Jun 2026)');
+    assert.deepEqual([own.merge, own.mergeShown], [true, true]);
     // Raw parcels on request, without fetching again; the choice is remembered.
     const beforeSplit = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length;
     await client.evaluate("document.getElementById('property-lines-merge').click(); 0");

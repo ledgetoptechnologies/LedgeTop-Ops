@@ -642,8 +642,12 @@ WGS84 UTM 16N
   map tiles (Web Mercator zoom 14, split down to 16 where a tile is dense)
   covering the visible map up to 4 km around the model, at most 48 tiles per
   view, and nothing below map zoom 13 ("Zoom in to see property lines"); 3D
-  views use the model's extent. The card shows the data's vintage from the
-  registry (`Parcels: WI statewide V12, 2025 tax roll (updated Jun 2026)`). The third party never sees the viewer's
+  views use the model's extent. The card is only its title and controls (no
+  parcel count, source credit, disclaimer or data date); a status line appears
+  only while loading or when the viewer must act (unavailable, zoom in, too
+  many, lines showing through the surface). The loaded release and vintage
+  live in the registry (`server/parcelSources.js`: V12, 2025 tax roll, data
+  last edited 2026-06-30) and the offer response. The third party never sees the viewer's
   session, link or browser, and the page's content security policy is
   unchanged. The state confirmed in writing on 2026-11-18 that the data is public domain,
   so staff, client sessions and public links with live access to the model all
@@ -651,16 +655,16 @@ WGS84 UTM 16N
   do not show the layer and make no property-lines request; models outside Wisconsin
   show the toggle as unavailable with the reason. In 3D the lines follow the
   published DTM when its heights agree with the scene, otherwise they are drawn
-  flat at the site's lowest level and show through the surface; the panel says
-  which. Lines are approximate and not a survey; the panel and an on-view note
-  say so whenever lines are drawn. The layer is on by default wherever it is
+  flat at the site's lowest level and show through the surface; the card says
+  so. Lines are approximate and not a survey; an on-view note says so whenever
+  lines are drawn. The layer is on by default wherever it is
   offered and available; a viewer's Hide is kept per project for later views
   and reloads in that browser (localStorage key `ltds-viewer:property-lines-hidden`,
   project ids only), and another project starts at its own default. Results
   from an earlier project, model version or access state are dropped, and
   losing access removes the lines until access returns. The state data is NAD83-based: against a
   model in a WGS84 or ITRF-based frame expect roughly 1 to 1.5 m of offset in
-  Wisconsin, within the parcel map's own accuracy (the panel says this too).
+  Wisconsin, within the parcel map's own accuracy.
   Each request names the model; the server checks live access to that model
   (session, admin, or a live share at its current revision) and accepts only
   boxes that reach the model's coverage window (its site window, a verified
