@@ -35,7 +35,7 @@ function harness() {
     SHARE_PERMISSIONS: { cameras: true, measure: true },
     VIEW_MODE: 'session', sessionAccessState: 'active', activeViewerSession: { expiresAt: new Date(Date.now() + 600_000).toISOString() },
     rememberMapView() {}, viewerDiagnostic() {}, hideLoading() {}, updateStatus() {}, onResize() {},
-    syncCameraLayer() {}, syncMapVolumeAvailability() {}, propertyLines: { refresh() { ctx.calls.push('property-lines-refresh'); } },
+    syncCameraLayer() {}, syncMapVolumeAvailability() {}, propertyLines: { refresh() { ctx.calls.push('property-lines-refresh'); } }, contourLines: null,
     measurementWorkspace: { modeChanged() { ctx.calls.push('measurement-mode-change'); } },
     tilesParent: {}, glbParent: {}, pointCloudParent: {}, dom: elements,
     isMapMode: (mode = ctx.state.activeMode) => ['ortho', 'dsm', 'dtm'].includes(mode),

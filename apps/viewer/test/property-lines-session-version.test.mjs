@@ -88,7 +88,7 @@ function page() {
     viewerProductDownloads: null,
     setDisplayUnits() {}, renderStaffNavigation() {}, renderClientNavigation() {}, applyProjectConfig() {},
     scheduleLodAvailabilityRefresh() {}, stopLodAvailabilityRefresh() {}, scheduleSessionRenewal() {},
-    propertyLinesGroundGrid: async () => null, recoverFailedLodTiles() {}, pcApi: () => null, installMeasurementWorkspace() {}, applyAvailability: () => [],
+    propertyLinesGroundGrid: async () => null, recoverFailedLodTiles() {}, pcApi: () => null, installMeasurementWorkspace() {}, installContours() {}, cancelStaleOrthoPrintExports() {}, applyAvailability: () => [],
     currentViewerSession: async () => session('v1'),
   });
   vm.runInContext(SHIPPED, context);
