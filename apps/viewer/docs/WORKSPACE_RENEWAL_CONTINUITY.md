@@ -28,3 +28,21 @@ This patch does **not** implement silent grant issuance for an openerless worksp
 Focused tests cover same-subject restoration, wrong subject, explicit disposal, authoritative denial, malformed/aged descriptors, early and foreign requests, exact version rejection, published/review contexts, pending redemption timeout, duplicate focus, and late disposed responses. A strict same-channel/model controller-ready advisory accelerates an already-due renewal after workspace restoration. It grants no access, does not interrupt an in-flight redemption, and never clears authoritative denial. Older open model tabs without this handler still reconnect on their existing retry schedule. Real production token-lifetime and cross-tab reauthorization soak tests remain necessary.
 
 The issuance follow-up adds deterministic stalled-transport, late-success, close/revocation, invalid-navigation and synchronous-failure/bounded-retry checks. The controller, Viewer recovery and workspace renewal suites pass 48/48 tests together. This confirms the local liveness fix, not the cause of the observed production expiry. Distinguishing an absent workspace listener, missing Operations opener, stalled issuance and failed redemption still requires token-free session diagnostics and HTTP route/status evidence from the affected session.
+
+## Silent renewal across sites (2026-11-23)
+
+Operations moved to a different registrable domain than Viewer. The credentialed renewal request became cross-site, so browsers that restrict third-party cookies, or any non-`None` SameSite setting on the Access cookie, stop it reaching Operations; Access then answers with a cross-site sign-in redirect that a page cannot read. Operations' strict `Cross-Origin-Opener-Policy` also severed the opener channel. Both silent transports could fail while the Operations sign-in was still valid.
+
+Order of silent attempts now:
+
+1. An approved Operations host on Viewer's own site, when `OPS_CONTROLLER_ORIGINS` has one. Viewer returns it as `renewalOrigin`. Operations already admits only the renewal routes there. The request names the session's pinned controller; Operations accepts only its own request origin or its one canonical origin, and Viewer still requires the grant's controller, subject and target session to match.
+2. The pinned controller, exactly as before.
+3. The opener, now preserved because the Operations HTML shell sends `same-origin-allow-popups`.
+
+Renewal runs about 60% of the way through a session (12 minutes before a 30-minute expiry, with jitter), and on focus, visibility, pageshow and online once due. A duplicated tab shares its session and renews once (Web Locks); the others re-read their own session from Viewer.
+
+The sign-in dialog appears only when Operations itself answers that the sign-in ended, or when, after real expiry, two attempts fail unreadably and Viewer confirms the session is over. Readable outages and offline periods never prompt. Silent attempts continue behind the dialog and close it when one succeeds.
+
+Nothing extends access: every renewal is a fresh one-use grant issued after Operations re-checks Access, staff binding and permissions, capped at 30 minutes and at the Access expiry. Sign-out, revocation and lost permission therefore end the workspace within 30 minutes, as before.
+
+Configuration this relies on and does not change: the staff Access application covers the same-site Operations host with the same audience and sets its cookie there at sign-in; CORS preflight passes through Access for that host; any zone redirect of the retired host leaves `/api/viewer/workspace/session-renewal*` alone; and Viewer lists that host in `OPS_CONTROLLER_ORIGINS`. Without them step 1 fails quietly and steps 2 and 3 apply.
