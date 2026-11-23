@@ -481,13 +481,18 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     importInput.value = '';
     if (!file) return;
     if (file.size > 5 * 1024 * 1024) { message('GeoJSON files up to 5 MB can be imported.'); return; }
+    // The file belongs to whoever chose it: if the scope changes while it is read, it is dropped.
+    const held = store.hold();
     try {
-      const parsed = geoJsonToMarks(JSON.parse(await file.text()), { categories: store.state.categories, newId,
+      const text = await file.text();
+      if (!held.live()) return;
+      const parsed = geoJsonToMarks(JSON.parse(text), { categories: store.state.categories, newId,
         visibility: defaultVisibility(), defaultColor: MARK_SWATCHES[0] });
       if (!parsed.marks.length) { message('No points, lines or areas were found in that file.'); return; }
       const count = await store.importMarks(parsed);
-      if (count) message(`Imported ${count} mark${count === 1 ? '' : 's'}${parsed.skipped ? `; skipped ${parsed.skipped} unsupported` : ''}.`);
+      if (count && held.live()) message(`Imported ${count} mark${count === 1 ? '' : 's'}${parsed.skipped ? `; skipped ${parsed.skipped} unsupported` : ''}.`);
     } catch (error) {
+      if (!held.live()) return;
       message(error instanceof SyntaxError ? 'That file is not valid JSON.' : error.message || 'Could not import that file.');
     }
   });
@@ -505,7 +510,14 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     store,
     async setScope(next) {
       sessionScope = next?.mode === 'session';
-      if (!next || next.key !== scopeKey) { draft = null; selectedId = null; mode = 'idle'; drawing = null; }
+      if (!next || next.key !== scopeKey) {
+        // Nothing one person typed or picked stays in the panel for the next one.
+        draft = null; selectedId = null; mode = 'idle'; drawing = null;
+        preview = null; filter = ''; armedDelete = null; categoryDraft = null;
+        for (const input of [coordInput, nameInput, noteInput, elevationInput, pointCoords, categoryName]) input.value = '';
+        for (const choice of [categorySelect, accountSelect]) choice.replaceChildren();
+        for (const shown of [coordDetected, coordReadout]) shown.textContent = '';
+      }
       scopeKey = next?.key;
       return store.setScope(next);
     },

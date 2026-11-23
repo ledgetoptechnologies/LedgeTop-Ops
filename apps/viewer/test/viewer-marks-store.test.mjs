@@ -115,7 +115,7 @@ test('[proposed sharing] a client shares with staff, staff share back to the cli
   assert.notEqual(staff.state.marks.find(mark => mark.name === 'Staff note').id, internal.id);
 });
 
-test('[proposed sharing] categories and GeoJSON import go through the API; company logins only read', async t => {
+test('[proposed sharing] categories and GeoJSON import go through the API; company logins see no marks', async t => {
   const { request, scope } = await openServer(t, SHARING);
   const client = createMarksStore({ request });
   await client.setScope(scope('client', 'client-a'));
@@ -141,7 +141,8 @@ test('[proposed sharing] categories and GeoJSON import go through the API; compa
   const company = createMarksStore({ request });
   await company.setScope(scope('client', 'company-login', { view: true, measure: true }));
   assert.equal(company.canWrite(), false);
-  assert.deepEqual(company.state.marks.map(mark => mark.name), ['Visible']);
+  assert.deepEqual(company.state.marks, []);
+  assert.deepEqual(company.state.categories, []);
 });
 
 test('temporary marks on public links never touch the network and guard scope changes', async () => {
@@ -166,4 +167,116 @@ test('losing access hides marks', async () => {
   await store.setScope({ mode: 'session', key: 'k', token: () => 'token' });
   assert.equal(store.state.ready, false);
   assert.match(store.state.message, /unavailable/);
+});
+
+// A request the test settles by hand, so it can finish after the scope was replaced.
+function heldRequests(request, isHeld) {
+  const held = [];
+  const wrapped = (path, init) => {
+    const { signal, ...rest } = init;
+    // Deliberately ignore the abort signal: the late answer must be harmless by itself.
+    if (!isHeld(path, init)) return request(path, rest);
+    return new Promise(resolve => held.push({ path, token: init.headers.authorization, settle: async () => resolve(await request(path, rest)) }));
+  };
+  return { held, request: wrapped };
+}
+const settled = () => new Promise(resolve => setTimeout(resolve, 20));
+const visibleState = store => JSON.parse(JSON.stringify({ marks: store.state.marks, categories: store.state.categories, undo: store.state.undo,
+  audiences: store.state.audiences, busy: store.state.busy, message: store.state.message, ready: store.state.ready }));
+
+const category = name => ({ id: randomUUID(), name, color: '#43a047', icon: 'gate' });
+const first = () => ({ ...pin('First person'), id: randomUUID() });
+for (const [name, start, isHeld] of [
+  ['create', store => store.create(first()), (path, init) => init.method === 'POST'],
+  ['update', store => store.update(store.state.marks[0], { name: 'Late' }), (path, init) => init.method === 'PUT'],
+  ['delete', store => store.remove(store.state.marks[0]), (path, init) => init.method === 'DELETE'],
+  ['undo of a delete', async store => { await store.remove(store.state.marks[0]); return store.undo(); }, (path, init) => init.method === 'POST' && path.endsWith('/marks')],
+  ['new category', store => store.saveCategory({ name: 'Late', color: '#43a047', icon: 'gate' }), (path, init) => init.method === 'POST'],
+  ['category edit', store => store.saveCategory({ ...store.state.categories[0], name: 'Late' }), (path, init) => init.method === 'PUT'],
+  ['category delete', store => store.deleteCategory(store.state.categories[0]), (path, init) => init.method === 'DELETE'],
+  ['import, waiting on its category', store => store.importMarks({ categories: [category('Late')], marks: [first()] }), path => path.endsWith('/categories')],
+  ['import, waiting on its batch', store => store.importMarks({ marks: [first()] }), path => path.endsWith('/batch')],
+  ['refresh', store => store.refresh(), (path, init) => init.method === 'GET'],
+]) {
+  for (const replacement of ['another person', 'a public link', 'no access']) {
+    test(`${name} settling after the scope became ${replacement} changes nothing there`, async t => {
+      const { request, scope } = await openServer(t);
+      const owner = createMarksStore({ request });
+      const one = scope('client', 'client-a'), two = scope('client', 'client-b');
+      await owner.setScope(one);
+      await owner.create(pin('Owned'));
+      await owner.saveCategory({ name: 'Owned category', color: '#1e88e5', icon: 'target' });
+
+      let armed = false;
+      const held = heldRequests(request, (path, init) => armed && isHeld(path, init));
+      const store = createMarksStore({ request: held.request });
+      await store.setScope(one);
+      armed = true;
+      const pending = start(store);
+      await settled();
+      assert.equal(held.held.length, 1, 'the request is waiting');
+      assert.equal(held.held[0].token, 'Bearer ' + one.token());
+      armed = false;
+      await store.setScope(replacement === 'another person' ? two : replacement === 'a public link' ? { mode: 'temporary', key: 'public' } : null);
+      const before = visibleState(store);
+      assert.deepEqual([before.marks, before.categories, before.undo], [[], [], []]);
+      const requests = held.held.length;
+      await held.held[0].settle();
+      const result = await pending;
+      await settled();
+      assert.ok(!result, 'the caller is told it did not apply');
+      assert.deepEqual(visibleState(store), before);
+      assert.equal(held.held.length, requests, 'no further request');
+      if (replacement === 'another person') {
+        const mine = await store.create(pin('Second person'));
+        assert.deepEqual(store.state.marks.map(mark => mark.name), ['Second person']);
+        assert.deepEqual(store.state.undo.map(entry => entry.id), [mine.id]);
+      }
+    });
+  }
+}
+
+test('an import stops between its requests when the scope changes, and never uses the new token', async t => {
+  const { request, scope } = await openServer(t);
+  const one = scope('client', 'client-a'), two = scope('client', 'client-b');
+  const sent = [];
+  const held = heldRequests(request, path => path.endsWith('/categories'));
+  const store = createMarksStore({ request: (path, init) => { sent.push([init.method, path, init.headers.authorization]); return held.request(path, init); } });
+  await store.setScope(one);
+  const pending = store.importMarks({ categories: [category('A'), category('B')], marks: [first()] });
+  await settled();
+  await store.setScope(two);
+  sent.length = 0;
+  await held.held[0].settle();
+  assert.equal(await pending, 0);
+  assert.deepEqual(sent, [], 'the second category and the batch are never sent');
+  const check = createMarksStore({ request });
+  await check.setScope(scope('client', 'client-b'));
+  assert.deepEqual([check.state.marks, check.state.categories], [[], []]);
+});
+
+test('work that waits before calling the store can tell its scope ended', async t => {
+  const { request, scope } = await openServer(t);
+  const store = createMarksStore({ request });
+  assert.equal(store.hold().live(), false, 'no scope, nothing to hold');
+  const one = scope('client', 'client-a');
+  await store.setScope(one);
+  const held = store.hold();
+  await store.setScope(one);
+  assert.equal(held.live(), true, 'the same scope again keeps it');
+  await store.setScope(null);
+  assert.equal(held.live(), false);
+  await store.setScope(one);
+  assert.equal(held.live(), false, 'returning to the same person does not revive it');
+});
+
+test('a mark that is no longer in this scope cannot be changed, deleted or undone', async t => {
+  const { request, scope } = await openServer(t);
+  const store = createMarksStore({ request });
+  await store.setScope(scope('client', 'client-a'));
+  const old = await store.create(pin('First person'));
+  await store.setScope({ mode: 'temporary', key: 'public' });
+  assert.equal(await store.update(old, { name: 'Moved' }), null);
+  assert.equal(await store.remove(old), false);
+  assert.deepEqual(store.state.undo, []);
 });

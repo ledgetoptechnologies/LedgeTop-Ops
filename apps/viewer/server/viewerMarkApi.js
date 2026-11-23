@@ -6,8 +6,8 @@ const { ViewerMarkRepository, markError } = require('./viewerMarkRepository');
 
 // Same explicit bearer and live model access as personal measurements, and the
 // same rule: each person reads and changes their own marks (OWNER_ONLY). A client
-// session without a verified individual identity (a shared company login)
-// cannot write: writes need a person to own them.
+// session without a verified individual identity (a shared company login) has no
+// person to own marks: it gets an empty list and everything else is refused.
 function createViewerMarkApi(repository, { visibility } = {}) {
   const router = trackedRouter();
   const marks = new ViewerMarkRepository(repository.database, { visibility });
@@ -15,8 +15,13 @@ function createViewerMarkApi(repository, { visibility } = {}) {
     res.set('Cache-Control', 'no-store');
     const principal = getMeasurementPrincipal(req, repository, { allowTransient: true });
     if (!principal) return res.status(403).json({ code: 'marks_unavailable' });
+    if (!principal.personalPersistence) {
+      if (req.method === 'GET' && req.path === '/') {
+        return res.json({ marks: [], categories: [], capabilities: { write: false, staff: false, visibility: ['private'] } });
+      }
+      return res.status(403).json({ code: 'mark_identity_required' });
+    }
     const reading = ['GET', 'HEAD'].includes(req.method);
-    if (!reading && !principal.personalPersistence) return res.status(403).json({ code: 'mark_identity_required' });
     if (!reading && repository.rateLimited(`viewer-mark-write:${principal.audience}:${principal.subject}`, 180, 60_000)) {
       return res.status(429).json({ code: 'mark_rate_limited' });
     }
@@ -33,7 +38,7 @@ function createViewerMarkApi(repository, { visibility } = {}) {
     const principal = req.markPrincipal;
     res.json({
       marks: marks.list(principal), categories: marks.categories(principal),
-      capabilities: { write: principal.personalPersistence, staff: principal.audience === 'ops',
+      capabilities: { write: true, staff: principal.audience === 'ops',
         visibility: marks.visibility[principal.audience] },
     });
   });

@@ -132,6 +132,37 @@ test('only the owner reads, changes or deletes a mark, whatever is asked for or 
   assert.equal((await request(people.client, 'DELETE', made.client.id, { revision: 2 })).status, 204);
 });
 
+test('without a verified individual identity a client reads nothing, even under a person\'s own subject', async t => {
+  for (const options of [undefined, SHARING]) {
+    const { session, request, db } = await openApi(t, options);
+    const person = session('client', 'client-a');
+    const mark = (await request(person, 'POST', '', point({ name: 'Mine' }))).body.mark;
+    const category = { id: randomUUID(), name: 'Mine', color: '#3366ff', icon: 'flag' };
+    assert.equal((await request(person, 'POST', 'categories', category)).status, 201);
+    const accounts = db.prepare('SELECT * FROM viewer_mark_accounts').all();
+    for (const permissions of [{ view: true, measure: true }, { view: true, measure: true, personalMeasurements: false },
+      { view: true, measure: true, personalMeasurements: 'true' }]) {
+      for (const subject of ['client-a', 'company-login']) {
+        const transient = session('client', subject, { permissions });
+        const list = await request(transient);
+        assert.equal(list.status, 200);
+        assert.deepEqual(list.body, { marks: [], categories: [], capabilities: { write: false, staff: false, visibility: ['private'] } });
+        assert.equal((await request(transient, 'GET', mark.id)).status, 403);
+        assert.equal((await request(transient, 'HEAD')).status, 403);
+        assert.equal((await request(transient, 'GET', 'audiences')).status, 403);
+        assert.equal((await request(transient, 'POST', '', point())).status, 403);
+        assert.equal((await request(transient, 'PUT', mark.id, { ...point(), id: mark.id, revision: 1 })).status, 403);
+        assert.equal((await request(transient, 'DELETE', mark.id, { revision: 1 })).status, 403);
+        assert.equal((await request(transient, 'PUT', 'categories/' + category.id, { ...category, revision: 1 })).status, 403);
+        assert.equal((await request(transient, 'DELETE', 'categories/' + category.id, { revision: 1 })).status, 403);
+        assert.equal((await request(transient, 'POST', 'batch', { marks: [point()] })).status, 403);
+      }
+    }
+    assert.equal((await request(person, 'GET', mark.id)).body.mark.revision, 1);
+    assert.deepEqual(db.prepare('SELECT * FROM viewer_mark_accounts').all(), accounts, 'a transient read records nothing');
+  }
+});
+
 test('[proposed sharing] two clients on one model never read each other\'s marks', async t => {
   const { session, request } = await openApi(t, SHARING);
   const list = names(request);
@@ -196,7 +227,7 @@ test('[proposed sharing] staff share a mark with one named client account only',
   assert.equal(toA.shareAccount, 'direct_client_grant:grant-a');
 
   assert.deepEqual(await list(clientA), ['For A']);
-  assert.deepEqual(await list(companyA), ['For A'], 'a company login reads within its account');
+  assert.deepEqual(await list(companyA), [], 'a company login has no person to read as');
   assert.deepEqual(await list(clientB), []);
   assert.deepEqual(await list(unaccounted), []);
   assert.equal((await request(clientB, 'GET', toA.id)).status, 404);
@@ -206,7 +237,7 @@ test('[proposed sharing] staff share a mark with one named client account only',
   assert.equal(seenByA.shareAccount, undefined, 'clients do not see share targets');
   assert.equal((await request(clientA, 'PUT', toA.id, { ...point(), id: toA.id, revision: 1 })).status, 403);
   assert.equal((await request(companyA, 'POST', '', point())).status, 403, 'company logins stay read-only');
-  assert.deepEqual((await request(companyA)).body.capabilities, { write: false, staff: false, visibility: ['private', 'staff'] });
+  assert.deepEqual((await request(companyA)).body.capabilities, { write: false, staff: false, visibility: ['private'] });
 
   // Moving the share to B takes it away from A.
   const moved = await request(staff, 'PUT', toA.id, { ...point({ name: 'For B' }), id: toA.id, revision: 1, visibility: 'client',
