@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { createServer } from 'node:http';
 import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -137,7 +137,7 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
   try {
     ({ server, origin } = await startServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
-    browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    browser = spawnBrowser(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     devTools = await waitForDevTools(profile);
     const pages = await until(async () => {
@@ -239,8 +239,10 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
     });
   } finally {
     // The endpoint was discovered only from this run's fresh private profile.
-    // Close that browser through its own protocol, never enumerate/kill a
-    // shared profile or retry cleanup of historical retained profiles.
+    // Close that browser through its own protocol first, then stopBrowser
+    // kills any process still on this run's own temporary profile (Edge
+    // relaunches itself on Windows). Never touch a shared profile or retry
+    // cleanup of historical retained profiles.
     if (control) {
       let timer;
       try { await Promise.race([control.command('Browser.close'), new Promise(resolve => { timer=setTimeout(resolve,1_000); })]); }
@@ -253,7 +255,7 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
         try { await Promise.race([new Promise(resolve=>browser.once('exit',resolve)),new Promise(resolve=>{timer=setTimeout(resolve,5_000);})]); }
         finally { clearTimeout(timer); }
       }
-    } finally { release(); }
+    } finally { stopBrowser(browser, { removeProfile: false }); release(); }
     if (server) await new Promise(resolve => server.close(resolve));
     let endpointClosed=false,profileRemoved=false;
     if (devTools) {

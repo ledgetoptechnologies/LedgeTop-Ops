@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -74,7 +74,7 @@ test('workspace renewal redeems a grant with default native browser fetch and re
   const viewerOrigin = await listen(viewer);
   let browser;
   try {
-    browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    browser = spawnBrowser(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'],
     { windowsHide: true, stdio: 'ignore' });
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'), {timeoutMs:15_000,label:'browser DevTools endpoint must start'});
@@ -98,7 +98,7 @@ test('workspace renewal redeems a grant with default native browser fetch and re
     assert.equal(redemptions, 2, 'each browser workspace redeems exactly one fresh grant');
     assert.deepEqual(received, {method:'POST',authorization:'Bearer '+token,body:{grant}});
   } finally {
-    if (browser && browser.exitCode === null) { const closed = new Promise(resolve => browser.once('close', resolve)); browser.kill(); await closed; }
+    if (browser && browser.exitCode === null) { const closed = new Promise(resolve => browser.once('close', resolve)); stopBrowser(browser); await closed; } else stopBrowser(browser);
     await Promise.all([viewer].map(server => new Promise(resolve => server.close(resolve))));
     try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
     catch (error) { t.diagnostic(`Browser profile cleanup unavailable: ${error.code}`); }
