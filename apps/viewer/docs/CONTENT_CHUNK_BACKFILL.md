@@ -11,6 +11,9 @@ have none yet: rasters, camera photos, point clouds, meshes and large EPT or
 - One read pass feeds the whole-file hash and the chunk hashes from the same
   buffer. A set is stored only if that pass reproduces the recorded hash and
   size exactly, so a changed file never gets one.
+- Recorded paths are used exactly as stored. An absolute path, an empty, `.` or
+  `..` segment, a backslash or a NUL is refused before anything is opened; a tree
+  entry and its child are checked separately before they are combined.
 - The file is hashed through one descriptor whose path is the registered path
   inside its root, that ends exactly at the recorded size, and that did not change
   (device, inode, size, mtime, ctime) during the read.
@@ -43,8 +46,10 @@ conversion or measurement runs. A stop or crash loses at most the current file's
 progress; nothing partial is stored. Stop and pause are checked again in the
 transaction that records a result.
 
-One scan returns at most 500 digests with 8 places each (4,000 rows). A digest
-with more places moves on to the next 8 at each retry.
+One scan returns at most 500 digests with 8 places each (4,000 rows). That caps
+the result and the queue, not the query: SQLite reads every eligible registered
+location to choose them, so scan time grows with the inventory. A digest with
+more places moves on to the next 8 at each retry.
 
     node scripts/content-chunk-backfill.js status
     node scripts/content-chunk-backfill.js pause

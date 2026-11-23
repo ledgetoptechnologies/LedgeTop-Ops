@@ -18,8 +18,8 @@ const { scopedStorageRootKey } = require('./storageManager');
 const CONTENT_CHUNK_BYTES = 1024 * 1024;
 const MIN_FILE_BYTES = 4 * 1024 * 1024;
 const BYTES_PER_SECOND = 50 * 1024 * 1024;
-// One scan returns at most SCAN_LIMIT digests and LOCATIONS_PER_DIGEST rows for
-// each, however often a file is registered.
+// One scan RETURNS at most SCAN_LIMIT digests and LOCATIONS_PER_DIGEST rows for
+// each. SQLite still reads the whole eligible inventory to choose them.
 const SCAN_LIMIT = 500;
 const LOCATIONS_PER_DIGEST = 8;
 const RESCAN_MS = 10 * 60 * 1000;
@@ -184,16 +184,23 @@ function reasonFor(error) {
   return 'read_error';
 }
 
+// Persisted paths are used exactly as recorded and never normalized, so a path
+// that could mean another place is refused instead of being resolved.
+function exactSegments(recorded) {
+  const segments = typeof recorded === 'string' ? recorded.split('/') : [];
+  if (!segments.length || recorded.includes('\0') || recorded.includes('\\') || path.win32.isAbsolute(recorded)
+    || segments.some((segment) => !segment || segment === '.' || segment === '..')) throw failure('unsafe_path');
+  return segments;
+}
+
 // Opens one regular file strictly inside its root, following no symbolic link.
 // Only O_RDONLY is ever used; nothing here creates, changes or removes a file.
 async function openRegistered(root, relativePath) {
   if (!root || !path.isAbsolute(root)) throw failure('unavailable');
-  const normalized = String(relativePath || '').replaceAll('\\', '/');
-  if (!normalized || normalized.includes('\0') || path.posix.isAbsolute(normalized) || path.win32.isAbsolute(normalized)
-    || normalized.split('/').some((segment) => !segment || segment === '.' || segment === '..')) throw failure('unsafe_path');
+  const segments = exactSegments(relativePath);
   const realRoot = await fs.promises.realpath(root);
   let current = realRoot;
-  for (const segment of normalized.split('/')) {
+  for (const segment of segments) {
     current = path.join(current, segment);
     if ((await fs.promises.lstat(current)).isSymbolicLink()) throw failure('unsafe_path');
   }
@@ -306,7 +313,7 @@ class ContentChunkBackfill {
       const asset = this.database.prepare('SELECT relative_path,manifest_sha256 FROM model_assets WHERE id=?').get(assetId);
       const files = this.database.prepare('SELECT relative_path AS relativePath,byte_size AS byteSize,sha256 FROM model_asset_files WHERE asset_id=?').all(assetId)
         .map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 })).sort((a, b) => a.relativePath.localeCompare(b.relativePath));
-      this.manifests.set(assetId, { directory: asset && path.posix.dirname(asset.relative_path),
+      this.manifests.set(assetId, { entry: asset?.relative_path,
         intact: Boolean(asset) && crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex') === asset.manifest_sha256 });
     }
     return this.manifests.get(assetId);
@@ -323,7 +330,9 @@ class ContentChunkBackfill {
         if (location.assetId) {
           const manifest = this.manifestIntact(location.assetId);
           if (!manifest.intact) throw failure('manifest_mismatch');
-          relativePath = path.posix.join(manifest.directory, relativePath);
+          // Both recorded parts are checked before they are put together.
+          const child = exactSegments(relativePath);
+          relativePath = [...exactSegments(manifest.entry).slice(0, -1), ...child].join('/');
         }
         const root = backfillRoot(this.version(location.versionId), location.rootKey, this.config);
         if (tried.has(`${root}\0${relativePath}`)) continue;

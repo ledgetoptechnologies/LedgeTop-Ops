@@ -527,6 +527,47 @@ test('unsafe registered paths are refused without opening anything', async t => 
   assertNothingBlessed(c, { sha256: sha(bytes) }, 'unsafe_path');
 });
 
+const INVALID_PATHS = { 'a parent segment': 'sub/../safe', 'a leading parent': '../models/safe', 'a dot segment': './safe', 'an inner dot segment': 'sub/./safe', 'an empty segment': 'sub//safe', 'a trailing slash': 'safe/',
+  'an absolute path': '/safe', 'a drive path': 'C:/safe', 'a backslash': 'sub\\safe', 'a backslash parent': '..\\safe', 'a NUL': 'safe\0x', 'an empty path': '' };
+function registerTree(c, entry, child, big) {
+  const files = [{ relativePath: child, byteSize: big.length, sha256: sha(big) }];
+  c.register([{ kind: 'ept', rootKey: 'models', relativePath: entry, byteSize: 2, sha256: sha('{}'), manifestSha256: sha(JSON.stringify(files)), manifestFiles: files }]);
+}
+const PLACES = {
+  'single file': (c, bad, big) => c.register([{ kind: 'ortho', rootKey: 'models', relativePath: bad, byteSize: big.length, sha256: sha(big) }]),
+  'camera photo': (c, bad, big) => {
+    const id = c.register([], { cameraPhotos: [{ filename: 'A.JPG', rootKey: 'models', relativePath: 'A.JPG', contentType: 'image/jpeg', byteSize: big.length, sha256: sha(big) }] });
+    c.database.prepare('UPDATE model_camera_photos SET relative_path=? WHERE version_id=?').run(bad, id);
+  },
+  'tree child': (c, bad, big) => registerTree(c, 'tree/ept.json', bad, big),
+  'tree entry': (c, bad, big) => registerTree(c, `${bad}/ept.json`, 'child.bin', big),
+};
+for (const [place, register] of Object.entries(PLACES)) for (const [label, bad] of Object.entries(INVALID_PATHS))
+  test(`${label} recorded for a ${place} is refused before any file system call`, async t => {
+    const c = fixture(t), big = crypto.randomBytes(4 * MIB);
+    // Matching files wait where a normalized path would lead.
+    for (const name of ['safe', 'sub/safe', 'tree/safe', 'tree/sub/safe', 'child.bin', 'sub/child.bin'].filter(name => place !== 'tree entry' || name.endsWith('child.bin'))) c.write(name, big);
+    if (place === 'tree entry') c.write('safe/child.bin', big);
+    register(c, bad, big);
+    assert.equal(scanCandidates(c.database).items.length, 1, 'the row reaches the lane');
+    const saved = {};
+    t.after(() => Object.assign(fs.promises, saved));
+    let calls = 0;
+    for (const name of ['open', 'lstat', 'realpath', 'stat', 'readlink']) { saved[name] = fs.promises[name]; fs.promises[name] = (...args) => { calls += 1; return saved[name].apply(fs.promises, args); }; }
+    await c.run();
+    Object.assign(fs.promises, saved);
+    assert.equal(calls, 0);
+    assertNothingBlessed(c, { sha256: sha(big) }, 'unsafe_path');
+  });
+
+test('a tree whose entry is at the root of its storage still resolves its children', async t => {
+  const c = fixture(t), big = crypto.randomBytes(4 * MIB);
+  c.write('data/child.bin', big);
+  registerTree(c, 'ept.json', 'data/child.bin', big);
+  await c.run();
+  assert.equal(c.sets().length, 1);
+});
+
 test('symbolic links and special files are refused', linux, async t => {
   const c = fixture(t), target = raster(c, 'real/ortho.tif'), bytes = fs.readFileSync(target.file);
   fs.symlinkSync(path.join(c.config.modelsMount, 'real'), path.join(c.config.modelsMount, 'linked'));
