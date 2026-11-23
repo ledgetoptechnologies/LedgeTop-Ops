@@ -9,102 +9,171 @@
 // cost a whole-file hash per range, and every 3D Tiles/EPT child cost a full
 // hash on the event loop.
 //
-// A positive verification is remembered for a short time, keyed by the exact
+// A positive verification may be remembered for a short time, keyed by the
 // file identity (device, inode, size, mtime and ctime in nanoseconds) plus the
-// expected digest and byte region. Any write, truncate, replace, rename-over or
-// timestamp change alters that identity, so the next request misses the cache
-// and re-hashes the bytes, failing closed exactly as before. Failures are never
-// cached. Concurrent requests for the same region share one verification.
-// Hashing of bounded buffers runs on the libuv thread pool (WebCrypto) instead
-// of blocking the request event loop.
+// expected digest and byte region. File timestamps have a finite tick, so a
+// same-size rewrite inside the tick that produced the current timestamps can
+// leave that identity unchanged. As in Git's "racily clean" rule, a result is
+// therefore remembered only when the read began more than RACY_WINDOW_MS after
+// the file's newest timestamp (max of mtime and ctime); any later write then
+// necessarily produces a different ctime, so the next request misses the cache,
+// re-hashes the bytes and fails closed exactly as before. Recently written
+// files are re-hashed on every request. Failures are never remembered.
+//
+// The bytes are read and hashed from one open descriptor whose identity is
+// checked before and after the read. Concurrent requests for the same region
+// share one verification. Buffered hashing (WebCrypto, off the event loop) is
+// limited per file and by a global in-flight byte budget; anything else is
+// streamed through a small fixed buffer.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const { performance } = require('node:perf_hooks');
 
 const DEFAULT_TTL_MS = 120_000;
 const DEFAULT_MAX_ENTRIES = 50_000;
-// Whole files at or below this size are read once and hashed off-thread.
-// Larger legacy files keep the bounded-memory streaming hash.
-const BUFFERED_HASH_MAX_BYTES = 16 * 1024 * 1024;
-
-async function sha256Hex(buffer) {
-  const digest = await crypto.webcrypto.subtle.digest('SHA-256', buffer);
-  return Buffer.from(digest).toString('hex');
-}
-
-function streamSha256(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.on('error', reject);
-    stream.on('end', () => resolve(hash.digest('hex')));
-  });
-}
+// Equal to the registered chunk size, so chunk checks stay single-read.
+const BUFFERED_HASH_MAX_BYTES = 4 * 1024 * 1024;
+// Process-wide ceiling on bytes held for buffered hashing at once.
+const BUFFERED_HASH_BUDGET_BYTES = 64 * 1024 * 1024;
+const STREAM_BUFFER_BYTES = 256 * 1024;
+// Below this, a thread-pool round trip costs more than hashing inline.
+const INLINE_HASH_MAX_BYTES = 1024 * 1024;
+const RACY_WINDOW_MS = 2_000;
 
 function fileIdentity(stat) {
   return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String).join(':');
 }
 
-// Reads `size` bytes at `offset` from the file whose identity was recorded in
-// the cache key. The opened handle must still be that exact file, so a rename
-// or rewrite between stat and open can never verify one file under another
-// file's identity. With `toEof`, the file must also end exactly there.
-async function readExact(filePath, identity, offset, size, { toEof = false } = {}) {
-  const handle = await fs.promises.open(filePath, 'r');
-  try {
-    if (fileIdentity(await handle.stat({ bigint: true })) !== identity) return null;
-    const capacity = toEof ? size + 1 : size;
-    const buffer = Buffer.allocUnsafe(capacity);
-    let filled = 0;
-    while (filled < capacity) {
-      const { bytesRead } = await handle.read(buffer, filled, capacity - filled, offset + filled);
-      if (!bytesRead) break;
-      filled += bytesRead;
-    }
-    return filled === size ? buffer.subarray(0, size) : null;
-  } finally {
-    await handle.close();
-  }
+function newestTimestampMs(stat) {
+  const newest = stat.mtimeNs > stat.ctimeNs ? stat.mtimeNs : stat.ctimeNs;
+  return Number(newest / 1_000_000n);
+}
+
+async function sha256Hex(buffer) {
+  if (buffer.length <= INLINE_HASH_MAX_BYTES) return crypto.createHash('sha256').update(buffer).digest('hex');
+  const digest = await crypto.webcrypto.subtle.digest('SHA-256', buffer);
+  return Buffer.from(digest).toString('hex');
 }
 
 class AssetIntegrityCache {
-  constructor({ ttlMs = DEFAULT_TTL_MS, maxEntries = DEFAULT_MAX_ENTRIES, bufferedHashMaxBytes = BUFFERED_HASH_MAX_BYTES, now = () => Date.now() } = {}) {
+  constructor({
+    ttlMs = DEFAULT_TTL_MS,
+    maxEntries = DEFAULT_MAX_ENTRIES,
+    bufferedHashMaxBytes = BUFFERED_HASH_MAX_BYTES,
+    bufferedBudgetBytes = BUFFERED_HASH_BUDGET_BYTES,
+    racyWindowMs = RACY_WINDOW_MS,
+    now = () => performance.now(), // monotonic, for TTL only
+    wallNow = () => Date.now(), // wall clock, compared with file timestamps
+    openFile = (filePath) => fs.promises.open(filePath, 'r'),
+  } = {}) {
     this.ttlMs = Math.max(0, Number(ttlMs) || 0);
     this.maxEntries = Math.max(1, Number(maxEntries) || 1);
     this.bufferedHashMaxBytes = Math.max(0, Number(bufferedHashMaxBytes) || 0);
+    this.bufferedBudgetBytes = Math.max(0, Number(bufferedBudgetBytes) || 0);
+    this.racyWindowMs = Math.max(0, Number(racyWindowMs) || 0);
     this.now = now;
+    this.wallNow = wallNow;
+    this.openFile = openFile;
     this.verified = new Map();
     this.pending = new Map();
-    this.stats = { hits: 0, misses: 0, failures: 0 };
+    this.generation = 0;
+    this.bufferedBytes = 0;
+    this.stats = { hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0 };
   }
 
-  clear() { this.verified.clear(); this.pending.clear(); }
+  clear() {
+    this.generation += 1;
+    this.verified.clear();
+    this.pending.clear();
+  }
 
   // Returns true only when `verify()` (or an identical in-flight/remembered
   // verification of the same identity and region) proved the bytes match.
+  // `verify()` resolves to { ok, cacheable }.
   async remember(key, verify) {
-    const at = this.now();
     const until = this.verified.get(key);
     if (until !== undefined) {
-      if (until > at) { this.stats.hits += 1; return true; }
+      if (until > this.now()) { this.stats.hits += 1; return true; }
       this.verified.delete(key);
     }
     const inflight = this.pending.get(key);
     if (inflight) return inflight;
     this.stats.misses += 1;
+    const generation = this.generation;
     const promise = (async () => {
-      let ok = false;
-      try { ok = await verify() === true; } catch { ok = false; }
-      if (ok && this.ttlMs > 0) {
+      let result;
+      try { result = await verify(); } catch { result = null; }
+      const ok = result?.ok === true;
+      if (!ok) { this.stats.failures += 1; return false; }
+      if (!result.cacheable) { this.stats.racy += 1; return true; }
+      if (this.ttlMs > 0 && generation === this.generation) {
         this.verified.set(key, this.now() + this.ttlMs);
         while (this.verified.size > this.maxEntries) this.verified.delete(this.verified.keys().next().value);
       }
-      if (!ok) this.stats.failures += 1;
-      return ok;
-    })().finally(() => this.pending.delete(key));
+      return true;
+    })().finally(() => { if (this.pending.get(key) === promise) this.pending.delete(key); });
     this.pending.set(key, promise);
     return promise;
+  }
+
+  reserveBuffer(size) {
+    if (size > this.bufferedHashMaxBytes || this.bufferedBytes + size > this.bufferedBudgetBytes) return false;
+    this.bufferedBytes += size;
+    this.stats.peakBufferedBytes = Math.max(this.stats.peakBufferedBytes, this.bufferedBytes);
+    return true;
+  }
+
+  // Hashes `size` bytes at `offset` of the exact file whose identity the caller
+  // recorded, from one descriptor that must keep that identity before and after
+  // the read. With `toEof`, the file must also end exactly at offset + size.
+  async hashRegion(filePath, identity, offset, size, { toEof = false } = {}) {
+    const readStartedAt = this.wallNow();
+    const handle = await this.openFile(filePath);
+    try {
+      const before = await handle.stat({ bigint: true });
+      if (fileIdentity(before) !== identity) return null;
+      let digest;
+      // One extra byte proves end-of-file in the same read when required.
+      const capacity = toEof ? size + 1 : size;
+      let atEof = !toEof;
+      if (this.reserveBuffer(capacity)) {
+        try {
+          const buffer = Buffer.allocUnsafe(capacity);
+          let filled = 0;
+          while (filled < capacity) {
+            const { bytesRead } = await handle.read(buffer, filled, capacity - filled, offset + filled);
+            if (!bytesRead) break;
+            filled += bytesRead;
+          }
+          if (filled !== size) return null;
+          atEof = true;
+          digest = await sha256Hex(buffer.subarray(0, size));
+        } finally {
+          this.bufferedBytes -= capacity;
+        }
+      } else {
+        this.stats.streamed += 1;
+        const hash = crypto.createHash('sha256');
+        const buffer = Buffer.allocUnsafe(Math.min(STREAM_BUFFER_BYTES, Math.max(1, size)));
+        let position = 0;
+        while (position < size) {
+          const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, size - position), offset + position);
+          if (!bytesRead) return null;
+          hash.update(buffer.subarray(0, bytesRead));
+          position += bytesRead;
+        }
+        digest = hash.digest('hex');
+      }
+      if (!atEof) {
+        const probe = Buffer.allocUnsafe(1);
+        if ((await handle.read(probe, 0, 1, offset + size)).bytesRead !== 0) return null;
+      }
+      if (fileIdentity(await handle.stat({ bigint: true })) !== identity) return null;
+      return { digest, cacheable: readStartedAt - newestTimestampMs(before) > this.racyWindowMs };
+    } finally {
+      await handle.close();
+    }
   }
 
   // Exact whole-file SHA-256 check (nested manifest files, small assets, and
@@ -113,14 +182,8 @@ class AssetIntegrityCache {
     const identity = fileIdentity(stat);
     const key = `file\0${filePath}\0${identity}\0${expectedSha256}`;
     return this.remember(key, async () => {
-      const size = Number(stat.size);
-      if (size <= this.bufferedHashMaxBytes) {
-        const buffer = await readExact(filePath, identity, 0, size, { toEof: true });
-        return Boolean(buffer) && await sha256Hex(buffer) === expectedSha256;
-      }
-      if (await streamSha256(filePath) !== expectedSha256) return false;
-      // The streamed bytes must belong to the identity being remembered.
-      return fileIdentity(await fs.promises.stat(filePath, { bigint: true })) === identity;
+      const result = await this.hashRegion(filePath, identity, 0, Number(stat.size), { toEof: true });
+      return { ok: Boolean(result) && result.digest === expectedSha256, cacheable: Boolean(result?.cacheable) };
     });
   }
 
@@ -129,12 +192,15 @@ class AssetIntegrityCache {
     const identity = fileIdentity(stat);
     const key = `chunk\0${filePath}\0${identity}\0${chunk.byteOffset}\0${chunk.byteSize}\0${chunk.sha256}`;
     return this.remember(key, async () => {
-      const buffer = await readExact(filePath, identity, chunk.byteOffset, chunk.byteSize);
-      return Boolean(buffer) && await sha256Hex(buffer) === chunk.sha256;
+      const result = await this.hashRegion(filePath, identity, chunk.byteOffset, chunk.byteSize);
+      return { ok: Boolean(result) && result.digest === chunk.sha256, cacheable: Boolean(result?.cacheable) };
     });
   }
 }
 
 const assetIntegrityCache = new AssetIntegrityCache();
 
-module.exports = { AssetIntegrityCache, assetIntegrityCache, fileIdentity, sha256Hex, BUFFERED_HASH_MAX_BYTES, DEFAULT_TTL_MS };
+module.exports = {
+  AssetIntegrityCache, assetIntegrityCache, fileIdentity, sha256Hex,
+  BUFFERED_HASH_MAX_BYTES, BUFFERED_HASH_BUDGET_BYTES, DEFAULT_TTL_MS, RACY_WINDOW_MS,
+};

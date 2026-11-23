@@ -125,6 +125,9 @@ async function main() {
     const dsm = pseudoRandom(ORTHO_BYTES / 2, 'dsm');
     write(modelsMount, 'task-1/attempt-1/dsm.tif', dsm);
 
+    // Published assets are long settled. Let the fixture age past the integrity
+    // cache's racily-clean window so it is measured like real storage.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
     database = openDatabase(path.join(root, 'viewer.sqlite'));
     const repository = new ViewerRepository(database);
     const modelId = crypto.randomUUID();
@@ -191,11 +194,13 @@ async function main() {
         legacyDsmRanges: await runPool(dsmRanges, CONCURRENCY),
       };
     }
+    if (assets.assetIntegrityCache) result.integrityCache = { ...assets.assetIntegrityCache.stats };
     const round = (value) => typeof value === 'number' ? Math.round(value * 10) / 10 : value;
     const rounded = JSON.parse(JSON.stringify(result, (_key, value) => round(value)));
     if (JSON_OUTPUT) { console.log(JSON.stringify(rounded, null, 2)); return; }
     console.log('fixture', JSON.stringify(rounded.fixture));
     console.log('tile response headers', JSON.stringify(rounded.headers));
+    if (rounded.integrityCache) console.log('integrity cache', JSON.stringify(rounded.integrityCache));
     for (const [pass, groups] of Object.entries(rounded.passes)) {
       for (const [name, value] of Object.entries(groups)) {
         console.log(`${pass.padEnd(5)} ${name.padEnd(16)} wall ${String(value.wallMs).padStart(8)} ms  p50 ${String(value.p50).padStart(7)}  p95 ${String(value.p95).padStart(7)}  max ${String(value.max).padStart(7)}  n=${value.n}`);

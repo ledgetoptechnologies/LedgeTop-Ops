@@ -12,11 +12,14 @@ const assets = require('../server/assets');
 const { config } = require('../server/config');
 const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
-const { AssetIntegrityCache } = require('../server/assetIntegrityCache');
+const { AssetIntegrityCache, RACY_WINDOW_MS } = require('../server/assetIntegrityCache');
 
 const CHUNK = 4 * 1024 * 1024;
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const stat = (file) => fs.statSync(file, { bigint: true });
+// Pretends the read starts well after the file was last written, so a result
+// is eligible to be remembered. Only for tests that never rewrite the file.
+const aged = () => Date.now() + 60_000;
 
 function tempDir(t, prefix) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -32,12 +35,23 @@ function countingCache(options = {}) {
   return cache;
 }
 
+// Wraps every opened handle so a test can act right after a read completes.
+function hookedOpen(afterRead) {
+  return async (filePath) => {
+    const handle = await fs.promises.open(filePath, 'r');
+    const read = handle.read.bind(handle);
+    let reads = 0;
+    handle.read = async (...args) => { const result = await read(...args); reads += 1; await afterRead(filePath, reads); return result; };
+    return handle;
+  };
+}
+
 test('a verified region is hashed once per file identity and concurrent requests share one hash', async (t) => {
   const root = tempDir(t, 'ltds-integrity-unit-');
   const file = path.join(root, 'tile.b3dm');
   const body = crypto.randomBytes(64 * 1024);
   fs.writeFileSync(file, body);
-  const cache = countingCache();
+  const cache = countingCache({ wallNow: aged });
   const results = await Promise.all(Array.from({ length: 6 }, () => cache.verifyWholeFile(file, stat(file), sha256(body))));
   assert.deepEqual(results, [true, true, true, true, true, true]);
   assert.equal(cache.verifications, 1);
@@ -49,53 +63,140 @@ test('failures are never remembered and the wrong digest never passes', async (t
   const root = tempDir(t, 'ltds-integrity-unit-');
   const file = path.join(root, 'tile.b3dm');
   fs.writeFileSync(file, 'tile bytes');
-  const cache = countingCache();
+  const cache = countingCache({ wallNow: aged });
   assert.equal(await cache.verifyWholeFile(file, stat(file), sha256('other bytes')), false);
   assert.equal(await cache.verifyWholeFile(file, stat(file), sha256('other bytes')), false);
   assert.equal(cache.verifications, 2);
   assert.equal(cache.verified.size, 0);
 });
 
-test('same-size rewrites, restored timestamps, and rename-over replacements are re-hashed and fail closed', async (t) => {
+test('back-to-back same-size rewrites inside one timestamp tick always fail closed', async (t) => {
+  const root = tempDir(t, 'ltds-integrity-unit-');
+  const file = path.join(root, 'tile.b3dm');
+  const good = crypto.randomBytes(4096);
+  const tampered = Buffer.from(good); tampered[7] ^= 0xff;
+  const cache = countingCache();
+  const chunk = { byteOffset: 0, byteSize: good.length, sha256: sha256(good) };
+  for (let i = 0; i < 300; i += 1) {
+    fs.writeFileSync(file, good);
+    assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(good)), true);
+    assert.equal(await cache.verifyChunk(file, stat(file), chunk), true);
+    fs.writeFileSync(file, tampered);
+    assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(good)), false, `whole-file rewrite ${i}`);
+    assert.equal(await cache.verifyChunk(file, stat(file), chunk), false, `chunk rewrite ${i}`);
+  }
+  assert.equal(cache.verified.size, 0, 'a file written within the racy window is never remembered');
+  assert.ok(cache.stats.racy >= 600);
+});
+
+test('a result is remembered only once the read starts more than the racy window after the newest timestamp', async (t) => {
+  const root = tempDir(t, 'ltds-integrity-unit-');
+  const file = path.join(root, 'tile.b3dm');
+  fs.writeFileSync(file, 'tile');
+  const s = stat(file);
+  const newest = Number((s.mtimeNs > s.ctimeNs ? s.mtimeNs : s.ctimeNs) / 1_000_000n);
+  let wall = newest + RACY_WINDOW_MS;
+  const cache = countingCache({ wallNow: () => wall });
+  assert.equal(await cache.verifyWholeFile(file, s, sha256('tile')), true);
+  assert.equal(cache.verified.size, 0, 'exactly at the window edge is still racy');
+  wall = newest + RACY_WINDOW_MS + 1;
+  assert.equal(await cache.verifyWholeFile(file, s, sha256('tile')), true);
+  assert.equal(cache.verified.size, 1);
+});
+
+test('after the racy window a rewrite changes the identity, misses the cache and fails closed', async (t) => {
   const root = tempDir(t, 'ltds-integrity-unit-');
   const file = path.join(root, 'ortho.tif');
   const good = crypto.randomBytes(32 * 1024);
   fs.writeFileSync(file, good);
+  await new Promise((resolve) => setTimeout(resolve, RACY_WINDOW_MS + 150));
   const cache = countingCache();
   assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(good)), true);
-
+  assert.equal(cache.verified.size, 1, 'the settled file is remembered with the real clock');
   const original = fs.statSync(file);
   const tampered = Buffer.from(good); tampered[100] ^= 0xff;
   fs.writeFileSync(file, tampered);
   fs.utimesSync(file, original.atime, original.mtime);
   assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(good)), false, 'in-place same-size rewrite with restored mtime');
-
-  fs.writeFileSync(file, good);
-  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(good)), true);
-  const replacement = path.join(root, 'replacement.tif');
-  fs.writeFileSync(replacement, tampered);
-  fs.renameSync(replacement, file);
-  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(good)), false, 'rename-over replacement');
+  assert.equal(cache.verifications, 2);
 });
 
-test('a stat taken before a swap cannot verify the swapped-in file under the old identity', async (t) => {
+test('rename-over replacements and a stat taken before a swap fail closed', async (t) => {
   const root = tempDir(t, 'ltds-integrity-unit-');
   const file = path.join(root, 'tile.b3dm');
-  const good = Buffer.from('good tile bytes');
-  fs.writeFileSync(file, Buffer.from('bad! tile bytes'));
+  const good = Buffer.from('good tile bytes'), bad = Buffer.from('bad! tile bytes');
+  fs.writeFileSync(file, good);
+  const cache = countingCache({ wallNow: aged });
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(good)), true);
+  const replacement = path.join(root, 'replacement.b3dm');
+  fs.writeFileSync(replacement, bad);
+  fs.renameSync(replacement, file);
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(good)), false, 'rename-over replacement');
+
   const before = stat(file);
-  const replacement = path.join(root, 'good.b3dm');
   fs.writeFileSync(replacement, good);
   fs.renameSync(replacement, file);
-  const cache = countingCache();
-  assert.equal(await cache.verifyWholeFile(file, before, sha256(good)), false);
+  const fresh = countingCache({ wallNow: aged });
+  assert.equal(await fresh.verifyWholeFile(file, before, sha256(good)), false, 'good bytes cannot be recorded under the old identity');
+  assert.equal(fresh.verified.size, 0);
+});
+
+test('an identity change while the bytes are read fails closed and is not remembered', async (t) => {
+  const root = tempDir(t, 'ltds-integrity-unit-');
+  const file = path.join(root, 'tile.b3dm');
+  const body = crypto.randomBytes(8192);
+  fs.writeFileSync(file, body);
+  let changed = false;
+  const openFile = hookedOpen(async (filePath) => { if (!changed) { changed = true; fs.appendFileSync(filePath, 'x'); } });
+  const cache = countingCache({ wallNow: aged, openFile });
+  assert.equal(await cache.verifyChunk(file, stat(file), { byteOffset: 0, byteSize: body.length, sha256: sha256(body) }), false);
   assert.equal(cache.verified.size, 0);
 });
 
-test('remembered verifications expire after the TTL and are bounded in number', async (t) => {
+test('large files stream from the verified descriptor and fail closed if it changes mid-stream', async (t) => {
+  const root = tempDir(t, 'ltds-integrity-unit-');
+  const file = path.join(root, 'dsm.tif');
+  const body = crypto.randomBytes(1024 * 1024);
+  fs.writeFileSync(file, body);
+  const cache = countingCache({ wallNow: aged, bufferedHashMaxBytes: 1024 });
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(body)), true);
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(body)), true);
+  assert.equal(cache.verifications, 1);
+  assert.equal(cache.stats.streamed, 1);
+  assert.equal(cache.stats.peakBufferedBytes, 0, 'streaming never allocates the whole file');
+
+  let appended = false;
+  const changing = countingCache({ wallNow: aged, bufferedHashMaxBytes: 1024, openFile: hookedOpen(async (filePath, reads) => { if (reads === 2 && !appended) { appended = true; fs.appendFileSync(filePath, 'x'); } }) });
+  const current = stat(file);
+  assert.equal(await changing.verifyWholeFile(file, current, sha256(body)), false);
+  assert.equal(changing.verified.size, 0);
+});
+
+test('buffered hashing stays within the per-file limit and the global in-flight budget', async (t) => {
+  const root = tempDir(t, 'ltds-integrity-unit-');
+  const files = Array.from({ length: 12 }, (_, i) => {
+    const file = path.join(root, `photo-${i}.jpg`), body = crypto.randomBytes(64 * 1024);
+    fs.writeFileSync(file, body);
+    return { file, sha: sha256(body) };
+  });
+  const cache = countingCache({ wallNow: aged, bufferedHashMaxBytes: 64 * 1024 + 1, bufferedBudgetBytes: 160 * 1024 });
+  const results = await Promise.all(files.map(({ file, sha }) => cache.verifyWholeFile(file, stat(file), sha)));
+  assert.ok(results.every(Boolean));
+  assert.ok(cache.stats.peakBufferedBytes <= 160 * 1024, `peak ${cache.stats.peakBufferedBytes}`);
+  assert.ok(cache.stats.peakBufferedBytes > 0, 'small files are buffered while the budget allows');
+  assert.ok(cache.stats.streamed > 0, 'over-budget checks fall back to fixed-buffer streaming');
+  assert.equal(cache.bufferedBytes, 0, 'reservations are released');
+  const big = path.join(root, 'big.tif'), bigBody = crypto.randomBytes(128 * 1024);
+  fs.writeFileSync(big, bigBody);
+  const before = cache.stats.streamed;
+  assert.equal(await cache.verifyWholeFile(big, stat(big), sha256(bigBody)), true);
+  assert.equal(cache.stats.streamed, before + 1, 'files over the per-file limit always stream');
+});
+
+test('remembered verifications expire on the monotonic clock and are bounded in number', async (t) => {
   const root = tempDir(t, 'ltds-integrity-unit-');
   let now = 1_000;
-  const cache = countingCache({ ttlMs: 50, maxEntries: 2, now: () => now });
+  const cache = countingCache({ ttlMs: 50, maxEntries: 2, now: () => now, wallNow: aged });
   const files = ['a', 'b', 'c'].map((name) => { const file = path.join(root, name); fs.writeFileSync(file, name); return file; });
   assert.equal(await cache.verifyWholeFile(files[0], stat(files[0]), sha256('a')), true);
   now += 49;
@@ -107,22 +208,42 @@ test('remembered verifications expire after the TTL and are bounded in number', 
   await cache.verifyWholeFile(files[1], stat(files[1]), sha256('b'));
   await cache.verifyWholeFile(files[2], stat(files[2]), sha256('c'));
   assert.equal(cache.verified.size, 2);
+
+  const real = new AssetIntegrityCache({ wallNow: aged });
+  assert.equal(await real.verifyWholeFile(files[0], stat(files[0]), sha256('a')), true);
+  const dateNow = Date.now;
+  Date.now = () => dateNow() + 365 * 86_400_000;
+  try {
+    const [until] = real.verified.values();
+    assert.ok(until < dateNow() + 365 * 86_400_000 / 2, 'TTL is not on the wall clock');
+    assert.equal(await real.verifyWholeFile(files[0], stat(files[0]), sha256('a')), true);
+    assert.equal(real.stats.hits, 1, 'a wall-clock jump neither expires nor extends entries');
+  } finally { Date.now = dateNow; }
 });
 
-test('large legacy files stream-hash and still bind the result to the file identity', async (t) => {
+test('clear() during an in-flight verification neither drops the newer check nor stores the stale result', async (t) => {
   const root = tempDir(t, 'ltds-integrity-unit-');
-  const file = path.join(root, 'dsm.tif');
-  const body = crypto.randomBytes(256 * 1024);
-  fs.writeFileSync(file, body);
-  const cache = countingCache({ bufferedHashMaxBytes: 1024 });
-  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(body)), true);
-  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(body)), true);
-  assert.equal(cache.verifications, 1);
-  fs.appendFileSync(file, 'x');
-  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(body)), false);
+  const file = path.join(root, 'tile.b3dm');
+  fs.writeFileSync(file, 'tile');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let opens = 0;
+  const cache = countingCache({ wallNow: aged, openFile: async (filePath) => { opens += 1; if (opens === 1) await gate; return fs.promises.open(filePath, 'r'); } });
+  const s = stat(file);
+  const first = cache.verifyWholeFile(file, s, sha256('tile'));
+  await new Promise((resolve) => setImmediate(resolve));
+  cache.clear();
+  const second = cache.verifyWholeFile(file, s, sha256('tile'));
+  assert.equal(cache.pending.size, 1);
+  release();
+  assert.equal(await first, true);
+  assert.equal(await second, true);
+  assert.equal(cache.verifications, 2, 'the cleared check did not satisfy the newer request');
+  assert.equal(cache.pending.size, 0);
+  assert.equal(cache.verified.size, 1, 'only the post-clear verification is remembered');
 });
 
-test('session asset ranges and tiles stay byte-exact, verify once, and fail closed after tampering', async (t) => {
+test('session asset ranges and tiles stay byte-exact, verify once, fail closed after tampering and on chunk-table gaps', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-integrity-http-'));
   const modelsMount = path.join(root, 'models');
   fs.mkdirSync(modelsMount, { recursive: true });
@@ -137,6 +258,11 @@ test('session asset ranges and tiles stay byte-exact, verify once, and fail clos
     const slice = ortho.subarray(offset, Math.min(ortho.length, offset + CHUNK));
     return { chunkIndex: index, byteOffset: offset, byteSize: slice.length, sha256: sha256(slice) };
   });
+  // A raster whose chunk table is missing its middle MiB.
+  const dsm = crypto.randomBytes(3 * 1024 * 1024);
+  write('task/dsm.tif', dsm);
+  const MiB = 1024 * 1024;
+  const dsmChunks = [0, 2 * MiB].map((offset, index) => ({ chunkIndex: index, byteOffset: offset, byteSize: MiB, sha256: sha256(dsm.subarray(offset, offset + MiB)) }));
   const tileset = Buffer.from('{"asset":{"version":"1.1"},"root":{}}');
   const tile = crypto.randomBytes(96 * 1024);
   write('task/tiles/tileset.json', tileset);
@@ -154,6 +280,7 @@ test('session asset ranges and tiles stay byte-exact, verify once, and fail clos
     displayName: 'Integrity model', status: 'ready', sourceLocator: {}, versionMetadata: {},
     assets: [
       { kind: 'ortho', rootKey: 'models', relativePath: 'task/ortho.tif', format: 'tif', byteSize: ortho.length, sha256: sha256(ortho), chunks, storageMode: 'managed', published: true },
+      { kind: 'dsm', rootKey: 'models', relativePath: 'task/dsm.tif', format: 'tif', byteSize: dsm.length, sha256: sha256(dsm), chunks: dsmChunks, storageMode: 'managed', published: true },
       { kind: 'tiles', rootKey: 'models', relativePath: 'task/tiles/tileset.json', format: '3dtiles', byteSize: tileset.length, sha256: sha256(tileset), manifestSha256: sha256(JSON.stringify(manifest)), manifestFiles: manifest, storageMode: 'managed', published: true },
     ],
     makeActive: true,
@@ -163,7 +290,11 @@ test('session asset ranges and tiles stay byte-exact, verify once, and fail clos
     permissions: { view: true, cameras: true }, expiresAt: new Date(Date.now() + 60_000).toISOString(),
   });
   assets.setRepository(repository);
-  assets.assetIntegrityCache.clear();
+  const integrity = assets.assetIntegrityCache, realWallNow = integrity.wallNow;
+  integrity.clear();
+  // Treat the fixture as settled so the caching path is exercised; the real
+  // clock is restored before any rewrite below.
+  integrity.wallNow = () => Date.now() + 60_000;
   const app = express();
   app.use((req, _res, next) => { req.cookies = {}; next(); });
   app.use(assets);
@@ -171,7 +302,8 @@ test('session asset ranges and tiles stay byte-exact, verify once, and fail clos
   t.after(async () => {
     await new Promise((resolve) => server.close(resolve));
     assets.setRepository(null);
-    assets.assetIntegrityCache.clear();
+    integrity.wallNow = realWallNow;
+    integrity.clear();
     Object.assign(config, previous);
     database.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -182,7 +314,7 @@ test('session asset ranges and tiles stay byte-exact, verify once, and fail clos
     return { status: response.status, body: Buffer.from(await response.arrayBuffer()), cacheControl: response.headers.get('cache-control') };
   };
 
-  const missesBefore = assets.assetIntegrityCache.stats.misses;
+  const missesBefore = integrity.stats.misses;
   const ranges = [[0, 262143], [262144, 524287], [CHUNK - 1000, CHUNK + 1000], [CHUNK + 1024, ortho.length - 1]];
   for (const [start, end] of ranges) {
     const response = await get('ortho.tif', `bytes=${start}-${end}`);
@@ -190,14 +322,24 @@ test('session asset ranges and tiles stay byte-exact, verify once, and fail clos
     assert.deepEqual(response.body, ortho.subarray(start, end + 1));
     assert.equal(response.cacheControl, 'private, no-store', 'authorization-bound caching policy is unchanged');
   }
-  assert.equal(assets.assetIntegrityCache.stats.misses - missesBefore, 2, 'each 4 MiB chunk is hashed once for many block requests');
+  assert.equal(integrity.stats.misses - missesBefore, 2, 'each 4 MiB chunk is hashed once for many block requests');
   for (let i = 0; i < 2; i += 1) {
     const response = await get('tiles/0/0/tile.b3dm');
     assert.equal(response.status, 200);
     assert.deepEqual(response.body, tile);
   }
-  assert.equal(assets.assetIntegrityCache.stats.misses - missesBefore, 3, 'repeat tile requests reuse the verification');
+  assert.equal(integrity.stats.misses - missesBefore, 3, 'repeat tile requests reuse the verification');
 
+  const gapped = await get('dsm.tif', `bytes=${MiB - 100}-${MiB + 100}`);
+  assert.equal(gapped.status, 404, 'a range reaching bytes with no registered chunk fails closed');
+  assert.equal((await get('dsm.tif', `bytes=${MiB + 10}-${MiB + 20}`)).status, 404);
+  const covered = await get('dsm.tif', `bytes=${2 * MiB}-${2 * MiB + 99}`);
+  assert.equal(covered.status, 206);
+  assert.deepEqual(covered.body, dsm.subarray(2 * MiB, 2 * MiB + 100));
+
+  // Rewrites below use the real clock: freshly written files are never remembered.
+  integrity.clear();
+  integrity.wallNow = realWallNow;
   const tamperedTile = Buffer.from(tile); tamperedTile[10] ^= 0xff;
   fs.writeFileSync(tileFile, tamperedTile);
   assert.equal((await get('tiles/0/0/tile.b3dm')).status, 404);
@@ -205,10 +347,10 @@ test('session asset ranges and tiles stay byte-exact, verify once, and fail clos
   const handle = fs.openSync(orthoFile, 'r+');
   try { fs.writeSync(handle, tamperedOrtho, 0, tamperedOrtho.length, 0); } finally { fs.closeSync(handle); }
   assert.equal((await get('ortho.tif', 'bytes=0-262143')).status, 404, 'tampered chunk fails closed');
-  const missesAfterTamper = assets.assetIntegrityCache.stats.misses;
+  const missesAfterTamper = integrity.stats.misses;
   const intact = await get('ortho.tif', `bytes=${CHUNK + 1024}-${CHUNK + 2047}`);
   assert.equal(intact.status, 206, 'an untouched chunk still serves, exactly as before');
   assert.deepEqual(intact.body, ortho.subarray(CHUNK + 1024, CHUNK + 2048));
-  assert.equal(assets.assetIntegrityCache.stats.misses - missesAfterTamper, 1, 'the changed file identity forced a fresh hash of that chunk');
+  assert.equal(integrity.stats.misses - missesAfterTamper, 1, 'the untouched chunk was hashed again, not served from memory');
   assert.equal((await get('ortho.tif')).status, 404, 'a full response still requires every chunk');
 });
