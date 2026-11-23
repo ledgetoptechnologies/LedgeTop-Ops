@@ -200,3 +200,22 @@ test('a public link offers them in the tab only; read-only logins are not offere
   await panel.marks.setScope(scope('client', 'company-login', { permissions: { view: true, measure: true } }));
   assert.equal(panel.q('.viewer-mark-suggested').hidden, true);
 });
+
+test('knowing another person\'s subject does not let anyone take or block their starters', async t => {
+  const probe = await open(t), { repository, rows } = await open(t);
+  const victim = principal('client-a'), other = principal('client-b');
+  for (const { key } of STARTER_CATEGORIES) {
+    // The id is fixed, so someone who knows the subject can work it out.
+    const { id } = probe.repository.createStarter(victim, input(key)).category;
+    assert.throws(() => repository.createCategory(other, { id, name: 'Taken ' + key, color: '#1565c0', icon: 'flag' }), { code: 'invalid_mark_category', status: 400 });
+    assert.throws(() => repository.createMany(other, { categories: [{ id: id.toUpperCase(), name: 'Taken', color: '#1565c0', icon: 'flag' }],
+      marks: [{ id: crypto.randomUUID(), geometry: { type: 'Point', coordinates: [-87, 43] }, name: 'x', color: '#1565c0' }] }), { code: 'invalid_mark_category' });
+    assert.equal(rows(), STARTER_CATEGORIES.findIndex(item => item.key === key));
+    assert.equal(repository.createStarter(victim, input(key)).replayed, false, key);
+  }
+  // The owner still renames and deletes theirs by that id, and cannot make one by hand either.
+  const [first] = repository.categories(victim);
+  assert.equal(repository.updateCategory(victim, first.id, { id: first.id, name: 'Renamed', color: '#1565c0', icon: 'flag', revision: 1 }).name, 'Renamed');
+  repository.deleteCategory(victim, first.id, 2);
+  assert.throws(() => repository.createCategory(victim, { id: first.id, name: 'Back', color: '#1565c0', icon: 'flag' }), { code: 'invalid_mark_category' });
+});

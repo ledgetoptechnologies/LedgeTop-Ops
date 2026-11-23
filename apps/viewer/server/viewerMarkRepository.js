@@ -125,12 +125,21 @@ function validateCategory(input, { update = false } = {}) {
   return { id: input.id.toLowerCase(), name: input.name.trim(), color: input.color.toLowerCase(), icon: input.icon };
 }
 
+const SERVER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-8/i;
+function validateNewCategory(input) {
+  const category = validateCategory(input);
+  if (SERVER_ID.test(category.id)) throw markError('invalid_mark_category');
+  return category;
+}
+
 const isOwner = (principal, row) => row.owner_audience === principal.audience && row.owner_subject === principal.subject;
 const staff = principal => principal.audience === 'ops';
 // One fixed id per person, model and starter, so two devices never make two of it.
+// Version 8 ids are the server's own: nobody can create a category with one, so
+// knowing someone's subject does not let anyone take or block their starters.
 function starterId(principal, key) {
   const hex = createHash('sha256').update(JSON.stringify(['viewer-mark-starter', principal.modelId, principal.audience, principal.subject, key])).digest('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 const categoryKey = (row, id) => JSON.stringify(row.owner_audience === 'ops' ? ['ops', id] : [row.owner_audience, row.owner_subject, id]);
 
@@ -316,7 +325,7 @@ class ViewerMarkRepository {
     if (!Array.isArray(marks) || !marks.length || marks.length > LIMITS.batch
       || !Array.isArray(categories) || categories.length > LIMITS.categories) throw markError('invalid_mark_batch');
     return this.transaction(() => {
-      const made = categories.map(input => this.addCategory(principal, validateCategory(input)).category);
+      const made = categories.map(input => this.addCategory(principal, validateNewCategory(input)).category);
       const room = this.liveRoom(principal);
       return { marks: marks.map(input => this.insert(principal, input, room).mark), categories: made };
     });
@@ -443,7 +452,7 @@ class ViewerMarkRepository {
   }
 
   createCategory(principal, input) {
-    const category = validateCategory(input);
+    const category = validateNewCategory(input);
     return this.transaction(() => this.addCategory(principal, category));
   }
 
