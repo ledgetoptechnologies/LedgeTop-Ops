@@ -24,7 +24,17 @@
 // checked before and after the read. Concurrent requests for the same region
 // share one verification. Buffered hashing (WebCrypto, off the event loop) is
 // limited per file and by a global in-flight byte budget; anything else is
-// streamed through a small fixed buffer.
+// streamed through a small fixed buffer, with a bounded number of concurrent
+// streams.
+//
+// Filesystem assumption: the identity rule relies on ctime being set only by
+// the local kernel on every change, from one clock, with attributes read
+// fresh. That holds for local POSIX filesystems (the deployed ZFS bind mount,
+// ext2/3/4, XFS, btrfs, overlayfs, tmpfs). It does not hold on Windows/NTFS
+// (a writer can set the change time) or network filesystems such as NFS/CIFS
+// (cached attributes, clock skew). On any filesystem outside the allowlist,
+// on Windows, or when statfs fails, nothing is remembered or shared: every
+// request hashes its own bytes, exactly as before this cache existed.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -40,6 +50,17 @@ const STREAM_BUFFER_BYTES = 256 * 1024;
 // Below this, a thread-pool round trip costs more than hashing inline.
 const INLINE_HASH_MAX_BYTES = 1024 * 1024;
 const RACY_WINDOW_MS = 2_000;
+const MAX_CONCURRENT_STREAMS = 8;
+// Linux statfs f_type magic numbers of local filesystems where ctime is
+// kernel-maintained and attributes are not cached remotely.
+const CACHEABLE_FILESYSTEMS = new Map([
+  [0x2fc12fc1, 'zfs'],
+  [0xef53, 'ext2/ext3/ext4'],
+  [0x58465342, 'xfs'],
+  [0x9123683e, 'btrfs'],
+  [0x794c7630, 'overlay'],
+  [0x01021994, 'tmpfs'],
+]);
 
 function fileIdentity(stat) {
   return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String).join(':');
@@ -66,6 +87,9 @@ class AssetIntegrityCache {
     now = () => performance.now(), // monotonic, for TTL only
     wallNow = () => Date.now(), // wall clock, compared with file timestamps
     openFile = (filePath) => fs.promises.open(filePath, 'r'),
+    statfs = (filePath) => fs.promises.statfs(filePath),
+    platform = process.platform,
+    maxConcurrentStreams = MAX_CONCURRENT_STREAMS,
   } = {}) {
     this.ttlMs = Math.max(0, Number(ttlMs) || 0);
     this.maxEntries = Math.max(1, Number(maxEntries) || 1);
@@ -75,17 +99,60 @@ class AssetIntegrityCache {
     this.now = now;
     this.wallNow = wallNow;
     this.openFile = openFile;
+    this.statfs = statfs;
+    this.platform = platform;
+    this.filesystems = new Map(); // stat.dev -> Promise<boolean>
+    this.maxConcurrentStreams = Math.max(1, Number(maxConcurrentStreams) || 1);
+    this.activeStreams = 0;
+    this.streamWaiters = [];
     this.verified = new Map();
     this.pending = new Map();
     this.generation = 0;
     this.bufferedBytes = 0;
-    this.stats = { hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0 };
+    this.stats = { hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0 };
   }
 
   clear() {
     this.generation += 1;
     this.verified.clear();
     this.pending.clear();
+  }
+
+  // Whether results for files on this device may be remembered (see the
+  // filesystem assumption above). Decided once per device id.
+  filesystemCacheable(filePath, dev) {
+    if (this.platform === 'win32' || this.ttlMs <= 0) return Promise.resolve(false);
+    const key = String(dev);
+    let decision = this.filesystems.get(key);
+    if (!decision) {
+      decision = Promise.resolve().then(() => this.statfs(filePath))
+        .then((info) => CACHEABLE_FILESYSTEMS.has(Number(info?.type)))
+        // A failed statfs is not a decision: stay uncached and ask again later.
+        .catch(() => { if (this.filesystems.get(key) === decision) this.filesystems.delete(key); return false; });
+      this.filesystems.set(key, decision);
+      while (this.filesystems.size > 64) this.filesystems.delete(this.filesystems.keys().next().value);
+    }
+    return decision;
+  }
+
+  async acquireStream() {
+    if (this.activeStreams >= this.maxConcurrentStreams) await new Promise((resolve) => this.streamWaiters.push(resolve));
+    else this.activeStreams += 1;
+    this.stats.peakStreams = Math.max(this.stats.peakStreams, this.activeStreams);
+  }
+
+  releaseStream() {
+    const next = this.streamWaiters.shift();
+    if (next) next(); // the slot passes directly to the next waiter
+    else this.activeStreams -= 1;
+  }
+
+  // Verifies with the cache on an eligible filesystem; elsewhere every request
+  // performs its own verification with no sharing or remembering.
+  async check(filePath, stat, key, verify) {
+    if (await this.filesystemCacheable(filePath, stat.dev)) return this.remember(key, verify);
+    this.stats.uncached += 1;
+    try { return (await verify())?.ok === true; } catch { return false; }
   }
 
   // Returns true only when `verify()` (or an identical in-flight/remembered
@@ -128,17 +195,19 @@ class AssetIntegrityCache {
   // recorded, from one descriptor that must keep that identity before and after
   // the read. With `toEof`, the file must also end exactly at offset + size.
   async hashRegion(filePath, identity, offset, size, { toEof = false } = {}) {
-    const readStartedAt = this.wallNow();
-    const handle = await this.openFile(filePath);
+    // One extra byte proves end-of-file in the same read when required.
+    const capacity = toEof ? size + 1 : size;
+    const buffered = this.reserveBuffer(capacity);
+    if (!buffered) await this.acquireStream();
     try {
-      const before = await handle.stat({ bigint: true });
-      if (fileIdentity(before) !== identity) return null;
-      let digest;
-      // One extra byte proves end-of-file in the same read when required.
-      const capacity = toEof ? size + 1 : size;
-      let atEof = !toEof;
-      if (this.reserveBuffer(capacity)) {
-        try {
+      const readStartedAt = this.wallNow();
+      const handle = await this.openFile(filePath);
+      try {
+        const before = await handle.stat({ bigint: true });
+        if (fileIdentity(before) !== identity) return null;
+        let digest;
+        let atEof = !toEof;
+        if (buffered) {
           const buffer = Buffer.allocUnsafe(capacity);
           let filled = 0;
           while (filled < capacity) {
@@ -149,39 +218,41 @@ class AssetIntegrityCache {
           if (filled !== size) return null;
           atEof = true;
           digest = await sha256Hex(buffer.subarray(0, size));
-        } finally {
-          this.bufferedBytes -= capacity;
+        } else {
+          this.stats.streamed += 1;
+          const hash = crypto.createHash('sha256');
+          const buffer = Buffer.allocUnsafe(Math.min(STREAM_BUFFER_BYTES, Math.max(1, size)));
+          let position = 0;
+          while (position < size) {
+            const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, size - position), offset + position);
+            if (!bytesRead) return null;
+            hash.update(buffer.subarray(0, bytesRead));
+            position += bytesRead;
+          }
+          digest = hash.digest('hex');
         }
-      } else {
-        this.stats.streamed += 1;
-        const hash = crypto.createHash('sha256');
-        const buffer = Buffer.allocUnsafe(Math.min(STREAM_BUFFER_BYTES, Math.max(1, size)));
-        let position = 0;
-        while (position < size) {
-          const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, size - position), offset + position);
-          if (!bytesRead) return null;
-          hash.update(buffer.subarray(0, bytesRead));
-          position += bytesRead;
+        if (!atEof) {
+          const probe = Buffer.allocUnsafe(1);
+          if ((await handle.read(probe, 0, 1, offset + size)).bytesRead !== 0) return null;
         }
-        digest = hash.digest('hex');
+        if (fileIdentity(await handle.stat({ bigint: true })) !== identity) return null;
+        return { digest, cacheable: readStartedAt - newestTimestampMs(before) > this.racyWindowMs };
+      } finally {
+        await handle.close();
       }
-      if (!atEof) {
-        const probe = Buffer.allocUnsafe(1);
-        if ((await handle.read(probe, 0, 1, offset + size)).bytesRead !== 0) return null;
-      }
-      if (fileIdentity(await handle.stat({ bigint: true })) !== identity) return null;
-      return { digest, cacheable: readStartedAt - newestTimestampMs(before) > this.racyWindowMs };
     } finally {
-      await handle.close();
+      if (buffered) this.bufferedBytes -= capacity;
+      else this.releaseStream();
     }
   }
+
 
   // Exact whole-file SHA-256 check (nested manifest files, small assets, and
   // legacy assets without chunk rows).
   async verifyWholeFile(filePath, stat, expectedSha256) {
     const identity = fileIdentity(stat);
     const key = `file\0${filePath}\0${identity}\0${expectedSha256}`;
-    return this.remember(key, async () => {
+    return this.check(filePath, stat, key, async () => {
       const result = await this.hashRegion(filePath, identity, 0, Number(stat.size), { toEof: true });
       return { ok: Boolean(result) && result.digest === expectedSha256, cacheable: Boolean(result?.cacheable) };
     });
@@ -191,7 +262,7 @@ class AssetIntegrityCache {
   async verifyChunk(filePath, stat, chunk) {
     const identity = fileIdentity(stat);
     const key = `chunk\0${filePath}\0${identity}\0${chunk.byteOffset}\0${chunk.byteSize}\0${chunk.sha256}`;
-    return this.remember(key, async () => {
+    return this.check(filePath, stat, key, async () => {
       const result = await this.hashRegion(filePath, identity, chunk.byteOffset, chunk.byteSize);
       return { ok: Boolean(result) && result.digest === chunk.sha256, cacheable: Boolean(result?.cacheable) };
     });
@@ -203,4 +274,5 @@ const assetIntegrityCache = new AssetIntegrityCache();
 module.exports = {
   AssetIntegrityCache, assetIntegrityCache, fileIdentity, sha256Hex,
   BUFFERED_HASH_MAX_BYTES, BUFFERED_HASH_BUDGET_BYTES, DEFAULT_TTL_MS, RACY_WINDOW_MS,
+  CACHEABLE_FILESYSTEMS, MAX_CONCURRENT_STREAMS,
 };

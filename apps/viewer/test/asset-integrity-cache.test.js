@@ -12,7 +12,7 @@ const assets = require('../server/assets');
 const { config } = require('../server/config');
 const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
-const { AssetIntegrityCache, RACY_WINDOW_MS } = require('../server/assetIntegrityCache');
+const { AssetIntegrityCache, RACY_WINDOW_MS, MAX_CONCURRENT_STREAMS } = require('../server/assetIntegrityCache');
 
 const CHUNK = 4 * 1024 * 1024;
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
@@ -20,6 +20,9 @@ const stat = (file) => fs.statSync(file, { bigint: true });
 // Pretends the read starts well after the file was last written, so a result
 // is eligible to be remembered. Only for tests that never rewrite the file.
 const aged = () => Date.now() + 60_000;
+const FS = { zfs: 0x2fc12fc1, ext4: 0xef53, xfs: 0x58465342, btrfs: 0x9123683e, overlay: 0x794c7630, tmpfs: 0x01021994, ntfs: 0x5346544e, nfs: 0x6969, cifs: 0xff534d42, smb2: 0xfe534d42, fuse: 0x65735546 };
+// Pretends the fixture lives on a local POSIX filesystem (the deployed case).
+const localPosix = { platform: 'linux', statfs: async () => ({ type: FS.zfs }) };
 
 function tempDir(t, prefix) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -28,10 +31,10 @@ function tempDir(t, prefix) {
 }
 
 function countingCache(options = {}) {
-  const cache = new AssetIntegrityCache(options);
-  const remember = cache.remember.bind(cache);
+  const cache = new AssetIntegrityCache({ ...localPosix, ...options });
+  const hashRegion = cache.hashRegion.bind(cache);
   cache.verifications = 0;
-  cache.remember = (key, verify) => remember(key, async () => { cache.verifications += 1; return verify(); });
+  cache.hashRegion = (...args) => { cache.verifications += 1; return hashRegion(...args); };
   return cache;
 }
 
@@ -209,7 +212,7 @@ test('remembered verifications expire on the monotonic clock and are bounded in 
   await cache.verifyWholeFile(files[2], stat(files[2]), sha256('c'));
   assert.equal(cache.verified.size, 2);
 
-  const real = new AssetIntegrityCache({ wallNow: aged });
+  const real = new AssetIntegrityCache({ ...localPosix, wallNow: aged });
   assert.equal(await real.verifyWholeFile(files[0], stat(files[0]), sha256('a')), true);
   const dateNow = Date.now;
   Date.now = () => dateNow() + 365 * 86_400_000;
@@ -231,16 +234,97 @@ test('clear() during an in-flight verification neither drops the newer check nor
   const cache = countingCache({ wallNow: aged, openFile: async (filePath) => { opens += 1; if (opens === 1) await gate; return fs.promises.open(filePath, 'r'); } });
   const s = stat(file);
   const first = cache.verifyWholeFile(file, s, sha256('tile'));
-  await new Promise((resolve) => setImmediate(resolve));
+  while (opens === 0) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cache.pending.size, 1, 'the first check is in flight');
   cache.clear();
   const second = cache.verifyWholeFile(file, s, sha256('tile'));
-  assert.equal(cache.pending.size, 1);
+  while (cache.pending.size === 0) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cache.pending.size, 1, 'the newer check has its own in-flight entry');
   release();
   assert.equal(await first, true);
   assert.equal(await second, true);
   assert.equal(cache.verifications, 2, 'the cleared check did not satisfy the newer request');
   assert.equal(cache.pending.size, 0);
   assert.equal(cache.verified.size, 1, 'only the post-clear verification is remembered');
+});
+
+test('results are remembered only on allowlisted local POSIX filesystems', async (t) => {
+  const root = tempDir(t, 'ltds-integrity-unit-');
+  const file = path.join(root, 'tile.b3dm');
+  fs.writeFileSync(file, 'tile');
+  const cases = [
+    ...['zfs', 'ext4', 'xfs', 'btrfs', 'overlay', 'tmpfs'].map((name) => [name, 'linux', FS[name], true]),
+    ...['ntfs', 'nfs', 'cifs', 'smb2', 'fuse'].map((name) => [name, 'linux', FS[name], false]),
+    ['zfs reported on Windows', 'win32', FS.zfs, false],
+  ];
+  for (const [name, platform, type, cacheable] of cases) {
+    let statfsCalls = 0;
+    const cache = countingCache({ wallNow: aged, platform, statfs: async () => { statfsCalls += 1; return { type }; } });
+    const results = await Promise.all(Array.from({ length: 4 }, () => cache.verifyWholeFile(file, stat(file), sha256('tile'))));
+    assert.deepEqual(results, [true, true, true, true], name);
+    assert.equal(await cache.verifyWholeFile(file, stat(file), sha256('tile')), true, name);
+    assert.equal(await cache.verifyWholeFile(file, stat(file), sha256('bad')), false, name);
+    if (cacheable) {
+      assert.equal(cache.verifications, 2, `${name}: one shared hash, then a hit; the wrong digest is hashed`);
+      assert.equal(statfsCalls, 1, `${name}: statfs is asked once per device`);
+    } else {
+      assert.equal(cache.verifications, 6, `${name}: every request hashes its own bytes, nothing shared`);
+      assert.equal(cache.verified.size + cache.pending.size, 0, name);
+      assert.equal(cache.stats.uncached, 6, name);
+      if (platform === 'win32') assert.equal(statfsCalls, 0);
+    }
+  }
+});
+
+test('a failing statfs keeps the cache off and is asked again later', async (t) => {
+  const root = tempDir(t, 'ltds-integrity-unit-');
+  const file = path.join(root, 'tile.b3dm');
+  fs.writeFileSync(file, 'tile');
+  let calls = 0, fail = true;
+  const cache = countingCache({ wallNow: aged, statfs: async () => { calls += 1; if (fail) throw new Error('EIO'); return { type: FS.ext4 }; } });
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256('tile')), true);
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256('tile')), true);
+  assert.equal(cache.verifications, 2);
+  assert.equal(calls, 2);
+  fail = false;
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256('tile')), true);
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256('tile')), true);
+  assert.equal(cache.verifications, 3, 'remembered once statfs succeeds on an allowlisted filesystem');
+});
+
+test('the real default never enables the cache on Windows', { skip: process.platform !== 'win32' }, async (t) => {
+  const root = tempDir(t, 'ltds-integrity-unit-');
+  const file = path.join(root, 'tile.b3dm');
+  fs.writeFileSync(file, 'tile');
+  const cache = new AssetIntegrityCache({ wallNow: aged });
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256('tile')), true);
+  assert.equal(cache.verified.size, 0);
+  assert.equal(cache.stats.uncached, 1);
+});
+
+test('streamed checks are limited to a fixed number at once', async (t) => {
+  const root = tempDir(t, 'ltds-integrity-unit-');
+  const files = Array.from({ length: 24 }, (_, i) => {
+    const file = path.join(root, `dsm-${i}.tif`), body = crypto.randomBytes(64 * 1024);
+    fs.writeFileSync(file, body);
+    return { file, sha: sha256(body) };
+  });
+  const slow = hookedOpen(() => new Promise((resolve) => setTimeout(resolve, 2)));
+  const cache = countingCache({ wallNow: aged, bufferedHashMaxBytes: 0, openFile: slow });
+  const results = await Promise.all(files.map(({ file, sha }) => cache.verifyWholeFile(file, stat(file), sha)));
+  assert.ok(results.every(Boolean));
+  assert.equal(cache.stats.streamed, 24);
+  assert.equal(MAX_CONCURRENT_STREAMS, 8);
+  assert.ok(cache.stats.peakStreams <= MAX_CONCURRENT_STREAMS, `peak ${cache.stats.peakStreams}`);
+  assert.ok(cache.stats.peakStreams >= 2, 'streams do run in parallel up to the limit');
+  assert.equal(cache.activeStreams, 0, 'every slot is released');
+  assert.equal(cache.streamWaiters.length, 0);
+  const tiny = countingCache({ wallNow: aged, bufferedHashMaxBytes: 0, maxConcurrentStreams: 1, openFile: slow });
+  await Promise.all(files.slice(0, 6).map(({ file, sha }) => tiny.verifyWholeFile(file, stat(file), sha)));
+  assert.equal(tiny.stats.peakStreams, 1);
+  const failing = countingCache({ wallNow: aged, bufferedHashMaxBytes: 0, maxConcurrentStreams: 2 });
+  await Promise.all(files.slice(0, 6).map(({ file }) => failing.verifyWholeFile(file, stat(file), sha256('wrong'))));
+  assert.equal(failing.activeStreams, 0, 'slots are released on failure too');
 });
 
 test('session asset ranges and tiles stay byte-exact, verify once, fail closed after tampering and on chunk-table gaps', async (t) => {
@@ -295,6 +379,9 @@ test('session asset ranges and tiles stay byte-exact, verify once, fail closed a
   // Treat the fixture as settled so the caching path is exercised; the real
   // clock is restored before any rewrite below.
   integrity.wallNow = () => Date.now() + 60_000;
+  const realPlatform = integrity.platform, realStatfs = integrity.statfs;
+  Object.assign(integrity, localPosix);
+  integrity.filesystems.clear();
   const app = express();
   app.use((req, _res, next) => { req.cookies = {}; next(); });
   app.use(assets);
@@ -303,6 +390,8 @@ test('session asset ranges and tiles stay byte-exact, verify once, fail closed a
     await new Promise((resolve) => server.close(resolve));
     assets.setRepository(null);
     integrity.wallNow = realWallNow;
+    Object.assign(integrity, { platform: realPlatform, statfs: realStatfs });
+    integrity.filesystems.clear();
     integrity.clear();
     Object.assign(config, previous);
     database.close();
