@@ -15,6 +15,7 @@ const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
 
 const WINDOW = 5 * 60_000;
+const refuse = { rateLimited: () => assert.fail('overflow used below the bound'), abuseWindowLive: () => assert.fail('overflow read below the bound') };
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-asset-limit-')), file = path.join(root, 'viewer.sqlite');
@@ -29,7 +30,7 @@ test('allows and denies exactly like the SQLite limiter at every boundary', (t) 
   const limiter = createAssetRateLimiter({ windowMs: WINDOW, now: () => at });
   const both = (bucket, max) => {
     const expected = repository.rateLimited(bucket, max, WINDOW, { at });
-    assert.equal(limiter.rateLimited(bucket, max), expected, `${bucket} at ${new Date(at).toISOString()}`);
+    assert.equal(limiter.rateLimited(bucket, max, refuse), expected, `${bucket} at ${new Date(at).toISOString()}`);
     return expected;
   };
   const start = at;
@@ -61,43 +62,86 @@ test('allows and denies exactly like the SQLite limiter over randomized traffic'
     else at += random(4000);
     const bucket = `bucket-${random(6)}`, max = 1 + Number(bucket.at(-1));
     const expected = repository.rateLimited(bucket, max, WINDOW, { at });
-    assert.equal(limiter.rateLimited(bucket, max), expected, `request ${index}`);
+    assert.equal(limiter.rateLimited(bucket, max, refuse), expected, `request ${index}`);
     decisions[expected ? 'denied' : 'allowed'] += 1;
   }
   assert.ok(decisions.allowed > 1000 && decisions.denied > 1000, JSON.stringify(decisions));
 });
 
-test('memory is bounded, elapsed entries are dropped, and blocked callers are forgotten last', () => {
+test('elapsed entries are dropped and nothing touches SQLite below the bound', () => {
   let at = 1000;
   const limiter = createAssetRateLimiter({ windowMs: WINDOW, maxEntries: 100, now: () => at });
-  limiter.rateLimited('blocked', 1);
-  assert.equal(limiter.rateLimited('blocked', 1), true);
-  for (let index = 0; index < 50; index += 1) limiter.rateLimited(`early-${index}`, 1);
-  at += 1;
-  assert.equal(limiter.rateLimited('blocked', 1), true);
-  assert.equal(limiter.size, 51);
-  for (let index = 0; index < 10_000; index += 1) {
-    limiter.rateLimited(`junk-${index}-${'x'.repeat(8000)}`, 1);
-    assert.ok(limiter.size <= 100);
+  for (let round = 0; round < 5; round += 1) {
+    for (let index = 0; index < 100; index += 1) assert.equal(limiter.rateLimited(`bucket-${index}`, 1, refuse), false);
+    for (let index = 0; index < 100; index += 1) assert.equal(limiter.rateLimited(`bucket-${index}`, 1, refuse), true);
+    assert.equal(limiter.size, 100);
+    at += WINDOW;
+    limiter.rateLimited('next', 1, refuse);
+    assert.equal(limiter.size, 1);
+    at += WINDOW;
   }
+});
+
+test('at the bound live blocks and quotas survive, and new buckets are decided by SQLite', (t) => {
+  const { database, repository } = fixture(t), reference = fixture(t).repository;
+  database.exec('PRAGMA synchronous=OFF'); reference.database.exec('PRAGMA synchronous=OFF');
+  const start = Date.parse('2026-11-23T00:00:00.000Z');
+  let at = start;
+  const limiter = createAssetRateLimiter({ windowMs: WINDOW, maxEntries: 100, now: () => at });
+  const check = (bucket, max) => {
+    const decision = limiter.rateLimited(bucket, max, repository);
+    assert.equal(decision, reference.rateLimited(bucket, max, WINDOW, { at }), bucket);
+    assert.ok(limiter.size <= 100);
+    return decision;
+  };
+  // The oldest entries, so eviction by age or release would take them first.
+  check('blocked', 1); assert.equal(check('blocked', 1), true);
+  for (let hit = 0; hit < 5; hit += 1) assert.equal(check('counting', 6), false);
+  const rows = () => database.prepare('SELECT COUNT(*) AS n FROM abuse_windows').get().n;
+  for (let index = 0; index < 98; index += 1) check(`filler-${index}`, 10);
+  assert.equal(rows(), 0);
+  at += 1;
+  for (let index = 0; index < 3000; index += 1) check(`junk-${index}-${'x'.repeat(2000)}`, 10);
   assert.equal(limiter.size, 100);
-  at += WINDOW + 1;
-  limiter.rateLimited('next', 1);
-  assert.equal(limiter.size, 1, 'elapsed entries do not linger');
+  assert.equal(rows(), 3000, 'overflow is counted in SQLite');
+  assert.equal(check('blocked', 1), true, 'a live block survives saturation');
+  assert.equal(check('counting', 6), false, 'the sixth request is still allowed');
+  assert.equal(check('counting', 6), true, 'and a live quota survives saturation');
+  // A legitimate newcomer is not locked out and has the normal quota.
+  assert.deepEqual([check('client', 3), check('client', 3), check('client', 3), check('client', 3)], [false, false, false, true]);
+  // Room again: the newcomer's block continues in SQLite until it ends.
+  at = start + WINDOW;
+  assert.equal(check('fresh', 10), false);
+  assert.ok(limiter.size < 100);
+  assert.equal(check('client', 3), true, 'freeing the table does not forget an overflowed block');
+  at = start + 1 + WINDOW;
+  assert.equal(check('client', 3), false, 'released when SQLite releases it');
+  // Long after the overflow nothing is written to SQLite any more.
+  at += 3 * WINDOW;
+  const before = database.prepare('SELECT MAX(updated_at) AS latest FROM abuse_windows').get().latest;
+  for (let index = 0; index < 50; index += 1) check(`later-${index}`, 10);
+  assert.equal(database.prepare('SELECT MAX(updated_at) AS latest FROM abuse_windows').get().latest, before);
+});
 
-  // Within the bound, traffic from other callers never releases a block.
-  limiter.rateLimited('busy', 1); limiter.rateLimited('busy', 1);
-  for (let index = 0; index < 90; index += 1) limiter.rateLimited(`other-${index}`, 1);
-  assert.equal(limiter.rateLimited('busy', 1), true);
-
-  // At the bound the entry closest to release goes first.
-  const ordered = createAssetRateLimiter({ windowMs: WINDOW, maxEntries: 3, now: () => at });
-  ordered.rateLimited('denied', 1);
-  at += 1; ordered.rateLimited('counting', 1);
-  at += 1; assert.equal(ordered.rateLimited('denied', 1), true);
-  ordered.rateLimited('third', 1);
-  ordered.rateLimited('fourth', 1);
-  assert.equal(ordered.rateLimited('denied', 1), true, 'a newer block outlives an older window');
+test('decisions equal SQLite over randomized traffic at a saturated bound', (t) => {
+  const { database, repository } = fixture(t), reference = fixture(t).repository;
+  database.exec('PRAGMA synchronous=OFF'); reference.database.exec('PRAGMA synchronous=OFF');
+  let at = Date.parse('2026-11-23T00:00:00.000Z'), state = 99;
+  const random = (n) => { state = (Math.imul(state, 1103515245) + 12345) >>> 0; return Math.floor(state / 65536) % n; };
+  const limiter = createAssetRateLimiter({ windowMs: WINDOW, maxEntries: 4, now: () => at });
+  let overflowed = 0, kept = 0, denied = 0;
+  const spy = { abuseWindowLive: (...args) => repository.abuseWindowLive(...args), rateLimited: (...args) => { overflowed += 1; return repository.rateLimited(...args); } };
+  for (let index = 0; index < 8000; index += 1) {
+    const choice = random(60);
+    at += choice === 0 ? WINDOW : choice === 1 ? WINDOW - random(3000) : random(6000);
+    const bucket = `bucket-${random(10)}`, max = 1 + Number(bucket.at(-1)) % 4, before = overflowed;
+    const expected = reference.rateLimited(bucket, max, WINDOW, { at });
+    assert.equal(limiter.rateLimited(bucket, max, spy), expected, `request ${index}`);
+    if (overflowed === before) kept += 1;
+    if (expected) denied += 1;
+    assert.ok(limiter.size <= 4);
+  }
+  assert.ok(overflowed > 1000 && kept > 1000 && denied > 1000, JSON.stringify({ overflowed, kept, denied }));
 });
 
 async function delivery(t) {
@@ -125,7 +169,7 @@ const PHOTO = '/session-camera-photos/session/model/photo.jpg';
 test('asset routes keep their buckets, limits and 429 responses', async (t) => {
   const c = await delivery(t), calls = [];
   let limited = false;
-  assets.setAssetRateLimiter({ rateLimited: (bucket, max) => { calls.push([bucket.replace(/:(::ffff:)?127\.0\.0\.1:/, ':IP:'), max]); return limited; } });
+  assets.setAssetRateLimiter({ rateLimited: (bucket, max, overflow) => { assert.equal(overflow, c.repository); calls.push([bucket.replace(/:(::ffff:)?127\.0\.0\.1:/, ':IP:'), max]); return limited; } });
   const hash = auth.hashToken('session'), expected = [[`capability-asset:${hash}:IP:model`, 6000], [`public-asset:${hash}:IP:model`, 6000], [`camera-photo:${hash}:IP:model`, 1200]];
   assert.deepEqual(await c.get(TILE), { status: 200, body: 'mesh' });
   assert.deepEqual(await c.get(COOKIE_TILE, { 'x-viewer': 'session' }), { status: 200, body: 'mesh' });

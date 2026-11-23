@@ -168,6 +168,14 @@ class ViewerRepository {
     return this.transaction(()=>{const row=this.database.prepare('SELECT * FROM abuse_windows WHERE bucket_key=?').get(key);if(row?.blocked_until&&Date.parse(row.blocked_until)>at)return true;const reset=!row||Date.parse(row.window_started_at)+windowMs<=at;if(reset){this.database.prepare(`INSERT INTO abuse_windows(bucket_key,window_started_at,hit_count,blocked_until,updated_at) VALUES (?,?,1,NULL,?) ON CONFLICT(bucket_key) DO UPDATE SET window_started_at=excluded.window_started_at,hit_count=1,blocked_until=NULL,updated_at=excluded.updated_at`).run(key,timestamp,timestamp);return false;}const hits=Number(row.hit_count)+1,blocked=hits>max?new Date(at+blockMs).toISOString():null;this.database.prepare('UPDATE abuse_windows SET hit_count=?,blocked_until=COALESCE(?,blocked_until),updated_at=? WHERE bucket_key=?').run(hits,blocked,timestamp,key);return Boolean(blocked);});
   }
 
+  // True while rateLimited would continue this bucket's window or block instead
+  // of starting a new window. Read only.
+  abuseWindowLive(bucket,windowMs,{at=Date.now()}={}){
+    const key=crypto.createHash('sha256').update(String(bucket).normalize('NFKC')).digest('hex');
+    const row=this.database.prepare('SELECT window_started_at,blocked_until FROM abuse_windows WHERE bucket_key=?').get(key);
+    return Boolean(row)&&((Boolean(row.blocked_until)&&Date.parse(row.blocked_until)>at)||Date.parse(row.window_started_at)+windowMs>at);
+  }
+
   pruneAbuseWindows(at=Date.now(),maxAgeMs=7*86400_000){return this.database.prepare('DELETE FROM abuse_windows WHERE updated_at<? AND (blocked_until IS NULL OR blocked_until<?)').run(new Date(at-maxAgeMs).toISOString(),new Date(at).toISOString()).changes;}
 
   resolveModelId(id) {

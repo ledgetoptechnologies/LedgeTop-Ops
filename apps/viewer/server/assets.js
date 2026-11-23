@@ -283,7 +283,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
 
 router.get('/assets/:id/:root/*', async (req, res, next) => {
   const capability=req.cookies?.[VIEWER_COOKIE]||req.cookies?.[SHARE_COOKIE];
-  if(capability&&canonicalRepository&&assetRateLimiter.rateLimited(`public-asset:${auth.hashToken(capability)}:${req.ip}:${req.params.id}`,6000))return res.status(429).json({error:'too many asset requests'});
+  if(capability&&canonicalRepository&&assetRateLimiter.rateLimited(`public-asset:${auth.hashToken(capability)}:${req.ip}:${req.params.id}`,6000,canonicalRepository))return res.status(429).json({error:'too many asset requests'});
   if (!await isAuthorizedForProject(req, req.params.id)) {
     return res.status(403).json({ error: 'not authorized' });
   }
@@ -295,7 +295,7 @@ router.get('/assets/:id/:root/*', async (req, res, next) => {
 // even when the browser blocks third-party cookies. Relative 3D Tiles/EPT
 // children inherit this path prefix automatically.
 router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
-  if(canonicalRepository&&assetRateLimiter.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000))return res.status(429).json({error:'too many asset requests'});
+  if(canonicalRepository&&assetRateLimiter.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000,canonicalRepository))return res.status(429).json({error:'too many asset requests'});
   const authorization = await pathTokenAuthorization(req, req.params.id);
   if (!authorization) return res.status(403).json({ error: 'not authorized' });
   return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly, cameras: authorization.cameras,share:authorization.share }).catch(next);
@@ -303,7 +303,7 @@ router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
 
 router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next) => {
   try {
-    if(canonicalRepository&&assetRateLimiter.rateLimited(`camera-photo:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,1200))return res.status(429).json({error:'too many photo requests'});
+    if(canonicalRepository&&assetRateLimiter.rateLimited(`camera-photo:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,1200,canonicalRepository))return res.status(429).json({error:'too many photo requests'});
     const authorization = await pathTokenAuthorization(req, req.params.id);
     if (!authorization || !authorization.cameras) return res.status(403).json({ error: 'not authorized' });
     const filename = validCameraFilename(req.params.filename), model = authorization.model;
