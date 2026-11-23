@@ -416,7 +416,7 @@ test('session asset ranges and tiles stay byte-exact, verify once, fail closed a
     const response = await get('ortho.tif', `bytes=${start}-${end}`);
     assert.equal(response.status, 206);
     assert.deepEqual(response.body, ortho.subarray(start, end + 1));
-    assert.equal(response.cacheControl, 'private, no-store', 'authorization-bound caching policy is unchanged');
+    assert.match(response.cacheControl, /^private, max-age=(5\d|60), must-revalidate$/, 'kept by the browser no longer than the 60 s session');
   }
   assert.equal(integrity.stats.misses - missesBefore, 2, 'each 4 MiB chunk is hashed once for many block requests');
   for (let i = 0; i < 2; i += 1) {

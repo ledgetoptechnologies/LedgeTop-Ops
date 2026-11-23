@@ -169,6 +169,25 @@ function requestedRange(header,size){const match=/^bytes=(\d*)-(\d*)$/.exec(Stri
 function chunksOverlapping(chunks,range){return range?chunks.filter((chunk)=>chunk.byteOffset<=range.end&&chunk.byteOffset+chunk.byteSize-1>=range.start):chunks;}
 function chunksCover(chunks,range,totalSize){const selected=chunksOverlapping(chunks,range);if(!selected.length)return false;if(range){let covered=range.start;for(const chunk of [...selected].sort((x,y)=>x.byteOffset-y.byteOffset)){if(chunk.byteOffset>covered)return false;covered=Math.max(covered,chunk.byteOffset+chunk.byteSize);}return covered>range.end;}let offset=0;for(const chunk of chunks){if(chunk.byteOffset!==offset)return false;offset+=chunk.byteSize;}return offset===totalSize;}
 async function verifyChunks(filePath,stat,chunks,range,totalSize,options={}){if(!chunksCover(chunks,range,totalSize))return false;for(const chunk of chunksOverlapping(chunks,range)){if(!await assetIntegrityCache.verifyChunk(filePath,stat,chunk,options))return false;}return true;}
+// Map and model assets a browser may keep for a short time (session-assets
+// only). Photos, camera positions, reports and original downloads are never
+// cacheable.
+const BROWSER_CACHE_KINDS=new Set(['tiles','ept','glb','ortho','orthoCutline','dsm','dtm']);
+const BROWSER_CACHE_MAX_SECONDS=300;
+// The oldest an Operations answer about a client share can be when the share is
+// allowed. sourceAuthorization enforces it: no allow is used more than 5 s after
+// its check started, on the wall and the monotonic clock, kept or in flight.
+const SOURCE_DECISION_MAX_AGE_MS=5000;
+// A cached copy never outlives the capability (`until`), and the 5 minutes start
+// at the authorization decision, not when the response is sent: access removed
+// after the decision is honoured at most BROWSER_CACHE_MAX_SECONDS later, however
+// long the check, the queue or an already known decision took. Age is measured on
+// whichever clock moved further.
+function authorizationClock(){return {wall:Date.now(),monotonic:performance.now()};}
+function browserCacheControl({until,decided,decisionAgeMs=0}){const elapsed=Math.max(Date.now()-decided.wall,performance.now()-decided.monotonic,0);const seconds=Math.floor(Math.min(BROWSER_CACHE_MAX_SECONDS*1000-decisionAgeMs,until-decided.wall)/1000-elapsed/1000);return seconds>0?`private, max-age=${seconds}, must-revalidate`:'private, no-store';}
+// Earliest of the given expiries (ms, ISO string, or null for none); 0 (never
+// cacheable) when there is none or one cannot be read.
+function earliestExpiry(...values){const times=values.filter((value)=>value!==null&&value!==undefined).map((value)=>typeof value==='number'?value:Date.parse(value));return times.length&&times.every(Number.isFinite)?Math.min(...times):0;}
 // The registered rows needed for one request: those around its byte range, or
 // all of them (range null, or no row near the range). Empty only when the file
 // has no chunk rows at all.
@@ -186,11 +205,16 @@ function integrityRegions(plan,size,start,end){if(!plan?.required)return null;co
 // `opened` = { handle, stat, range, signal } verifies the exact byte range that
 // will be served, through the descriptor it will be served from.
 async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null,opened=null){const plan=integrityPlan(repository,project,publishedAsset,requested);if(!plan)return false;if(!plan.required)return true;const stat=opened?opened.stat:await fs.promises.stat(abs,{bigint:true});return verifyIntegrityPlan(plan,abs,stat,opened?opened.range:requestedRange(rangeHeader,Number(stat.size)),{handle:opened?.handle||null,signal:opened?.signal||null});}
+// Strong ETag from the registered SHA-256, only when the bytes sent are the
+// bytes that were hashed (registered chunks or a small whole file).
+function integrityEtag(plan,size){if(!plan?.required||!/^[a-f0-9]{64}$/.test(plan.expected.sha256||''))return null;return assetIntegrityCache.canBuffer(size+1)||plan.chunks({start:0,end:0}).length?`"sha256-${plan.expected.sha256}"`:null;}
 // deliverVerified options for one opened managed asset.
-function integrityDelivery(repository,project,publishedAsset,requested,abs,opened){const plan=integrityPlan(repository,project,publishedAsset,requested);return {check:(range)=>integrityRecordCovers(plan,Number(opened.stat.size),range),verify:(range,signal,carry)=>verifyIntegrityPlan(plan,abs,opened.stat,range,{handle:opened.handle,signal,carry}),regions:(start,end)=>integrityRegions(plan,Number(opened.stat.size),start,end)};}
+function integrityDelivery(repository,project,publishedAsset,requested,abs,opened){const plan=integrityPlan(repository,project,publishedAsset,requested);return {etag:()=>integrityEtag(plan,Number(opened.stat.size)),check:(range)=>integrityRecordCovers(plan,Number(opened.stat.size),range),verify:(range,signal,carry)=>verifyIntegrityPlan(plan,abs,opened.stat,range,{handle:opened.handle,signal,carry}),regions:(start,end)=>integrityRegions(plan,Number(opened.stat.size),start,end)};}
 
+// The `freshness` of an authorization starts before anything is looked up.
 async function pathTokenAuthorization(req, projectId) {
   if (!canonicalRepository) return false;
+  const decided = authorizationClock();
   const requestedModelId = canonicalRepository.resolveModelId(projectId);
   if (!requestedModelId) return false;
   const viewer = canonicalRepository.getViewerSessionByHash(auth.hashToken(req.params.token));
@@ -204,7 +228,7 @@ async function pathTokenAuthorization(req, projectId) {
       && (review
         ? model?.activeVersion?.id === viewer.modelVersionId && model.activeVersion.status === 'ready'
         : model?.status === 'ready' && model.activeVersionId === viewer.modelVersionId);
-    return allowed ? { model, review, cameras: viewer.permissions?.cameras !== false, download: viewer.permissions?.download === true } : false;
+    return allowed ? { model, review, cameras: viewer.permissions?.cameras !== false, download: viewer.permissions?.download === true, freshness: { decided, until: earliestExpiry(viewer.expiresAt) } } : false;
   }
   const payload = auth.verify(req.params.token);
   if (!payload) return false;
@@ -219,7 +243,7 @@ async function pathTokenAuthorization(req, projectId) {
         && share.modelId === requestedModelId
         && model?.status === 'ready'
         && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId);
-      return allowed ? { model, share, review: false, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
+      return allowed ? { model, share, review: false, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true, freshness: { decided, until: earliestExpiry(payload.exp, share.expiresAt, share.sourceAuthorization?.expiresAt), decisionAgeMs: share.shareClass === 'client' ? SOURCE_DECISION_MAX_AGE_MS : 0 } } : false;
     }
     const share = shareStore.getById(payload.shareId);
     return shareStore.isLive(share) && share.viewerProjectId === projectId ? { model: null, review: false, cameras: share.permissions?.cameras !== false } : false;
@@ -234,7 +258,7 @@ async function pathTokenAuthorization(req, projectId) {
       && selected?.modelId === requestedModelId
       && selected.modelVersionId === payload.modelVersionId
       && model?.activeVersion?.id === payload.modelVersionId;
-    return allowed ? { model, review: false, publicOnly: true, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
+    return allowed ? { model, review: false, publicOnly: true, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true, freshness: { decided, until: earliestExpiry(payload.exp, share.expiresAt) } } : false;
   }
   return false;
 }
@@ -259,7 +283,7 @@ function xAccelLocation(abs) {
   return null;
 }
 
-async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true, share = req.publicShare } = {}) {
+async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true, share = req.publicShare, freshness = null } = {}) {
   const resolved = authorizedModel
     ? { project: authorizedModel, rootPath: canonicalAssetRoot(authorizedModel, req.params.root) }
     : resolveProject(req.params.id, req.params.root);
@@ -279,8 +303,11 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
 
   // Authorization/revocation is evaluated for every request, and again after
   // the (possibly slow) integrity check, right before any byte is sent.
-  // Responses are never stored by browsers or intermediaries, so a URL stops
-  // working as soon as its session/share expires or is revoked.
+  // Responses are never stored by browsers or intermediaries, except map and
+  // model assets on capability URLs: the viewer's own browser may reuse those
+  // for up to 5 minutes from this authorization, never past the end of the
+  // session/share. Revocation stops every new request at once, and a kept copy
+  // within that time.
   const shareStillAllows=()=>{if(!share)return true;const current=canonicalRepository.getPublicShare(share.id);return canonicalRepository.publicShareLive(current)&&revisionMatches(current,{shareRevision:share.authorizationRevision})&&assetAllowed(current,publishedAsset?.kind);};
   const requested = String(rel).replaceAll('\\', '/');
   const accelerated = xAccelLocation(abs);
@@ -303,11 +330,16 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   }
   let opened;
   try { opened = await openForDelivery(abs); } catch { return res.status(404).json({ error: 'asset not found' }); }
+  // The integrity record is read with the file open: a failure closes it.
+  let etag, delivery;
+  try { ({ etag, ...delivery } = integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened)); }
+  catch (error) { await opened.handle.close().catch(() => {}); throw error; }
   return deliverVerified(req, res, {
     ...opened,
     filePath: abs,
     headers: { 'Cache-Control': 'private, no-store' },
-    ...integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened),
+    browserCache: freshness && BROWSER_CACHE_KINDS.has(publishedAsset.kind) ? { etag, cacheControl: () => browserCacheControl(freshness) } : null,
+    ...delivery,
     onFailure: () => res.status(404).json({ error: 'asset not found' }),
     beforeSend: () => { if (shareStillAllows()) return true; res.status(403).json({ error: 'not authorized' }); return false; },
     onError: (err) => { if (!res.headersSent) res.status(err.status || 404).json({ error: 'asset not found' }); },
@@ -328,10 +360,11 @@ router.get('/assets/:id/:root/*', async (req, res, next) => {
 // even when the browser blocks third-party cookies. Relative 3D Tiles/EPT
 // children inherit this path prefix automatically.
 router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
+  res.setHeader('Cache-Control', 'private, no-store'); // only a successful delivery replaces this
   if(canonicalRepository?.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000,5*60_000))return res.status(429).json({error:'too many asset requests'});
   const authorization = await pathTokenAuthorization(req, req.params.id);
   if (!authorization) return res.status(403).json({ error: 'not authorized' });
-  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly, cameras: authorization.cameras,share:authorization.share }).catch(next);
+  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly, cameras: authorization.cameras,share:authorization.share,freshness:authorization.freshness }).catch(next);
 });
 
 router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next) => {

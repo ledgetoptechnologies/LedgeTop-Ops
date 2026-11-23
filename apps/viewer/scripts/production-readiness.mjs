@@ -190,8 +190,11 @@ function tileContentUris(tile, result = []) {
 
 async function requirePrivateResponse(response, label, expectedStatus) {
   if (response.status !== expectedStatus) fail(`${label} returned HTTP ${response.status}, expected ${expectedStatus}`);
-  if (response.headers.get('cache-control') !== 'private, no-store') {
-    fail(`${label} did not return Cache-Control: private, no-store`);
+  const cacheControl = response.headers.get('cache-control') || '';
+  const maxAge = /^private, max-age=(\d{1,3}), must-revalidate$/.exec(cacheControl)?.[1];
+  // Successful map and model assets may be kept by the browser for 5 minutes.
+  if (cacheControl !== 'private, no-store' && !([200, 206].includes(expectedStatus) && Number(maxAge) >= 1 && Number(maxAge) <= 300)) {
+    fail(`${label} did not return a private Cache-Control (no-store, or max-age up to 300 with must-revalidate)`);
   }
 }
 
