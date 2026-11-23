@@ -2,8 +2,9 @@
 // outline, and each outline gets one clean label in its middle. Pure maths,
 // no DOM and no network; shared by the map views, 3D views and tests.
 //
-// Parcels arrive as { id, rings: [[[lon, lat], ...], ...], owner? } (see
-// property-lines.mjs). Esri rings are closed, outer rings clockwise and holes
+// Parcels arrive as { id, rings: [[[lon, lat], ...], ...], owner?, cuts? }
+// (see property-lines.mjs). `cuts` names ring segments the server closed
+// along its clipping envelope: used for shape (labels, merging), never drawn. Esri rings are closed, outer rings clockwise and holes
 // anticlockwise; orientation is enforced here so any source works.
 
 const DEG = Math.PI / 180;
@@ -139,13 +140,32 @@ function splitAtVertices(ids, verts, candidates, snap) {
   return out;
 }
 
-// Chain directed edges [u, v] into polylines (closed loops end where they start).
+// The parts of a parcel's rings that are real boundary: a ring the server
+// clipped at its coverage envelope is split at the segments it names in
+// `cuts`, which run along the cut and are never drawn.
+export function parcelStrokeLines(parcel) {
+  const lines = [];
+  parcel.rings.forEach((ring, index) => {
+    const cut = new Set(parcel.cuts?.[index] || []);
+    if (!cut.size) { lines.push(ring); return; }
+    let run = [ring[0]];
+    for (let k = 0; k < ring.length - 1; k++) {
+      if (cut.has(k)) { if (run.length >= 2) lines.push(run); run = [ring[k + 1]]; } else run.push(ring[k + 1]);
+    }
+    if (run.length >= 2) lines.push(run);
+  });
+  return lines;
+}
+
+// Chain directed edges [u, v] into polylines (closed loops end where they
+// start; open runs start at their free end).
 function chainEdges(edges) {
-  const outgoing = new Map();
-  edges.forEach(([u], index) => { if (!outgoing.has(u)) outgoing.set(u, []); outgoing.get(u).push(index); });
+  const outgoing = new Map(), incoming = new Set();
+  edges.forEach(([u, v], index) => { if (!outgoing.has(u)) outgoing.set(u, []); outgoing.get(u).push(index); incoming.add(v); });
   const used = new Uint8Array(edges.length);
   const lines = [];
-  for (let start = 0; start < edges.length; start++) {
+  const order = [...edges.keys()].sort((a, b) => Number(incoming.has(edges[a][0])) - Number(incoming.has(edges[b][0])));
+  for (const start of order) {
     if (used[start]) continue;
     used[start] = 1;
     const line = [edges[start][0], edges[start][1]];
@@ -170,6 +190,17 @@ function mergeGroup(group, frame, snap, splitBudget) {
     }).filter(ids => ids.length >= 4);
     return { parcel, rings, bbox: bboxOf(rings.map(ids => ids.map(id => index.verts[id]))), vertexIds: [...new Set(rings.flat())] };
   });
+  // Segments the server closed along its clipping envelope, in local metres:
+  // an edge lying on one is kept for the shape but never drawn.
+  const cutSegments = group.flatMap(parcel => parcel.rings.flatMap((ring, r) => (parcel.cuts?.[r] || [])
+    .filter(k => ring[k + 1]).map(k => [frame.to(...ring[k]), frame.to(...ring[k + 1])])));
+  const onSegment = (p, [a, b]) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1], len2 = dx * dx + dy * dy;
+    const t = len2 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2 : 0;
+    if (t < -1e-6 || t > 1 + 1e-6) return false;
+    return Math.hypot(a[0] + t * dx - p[0], a[1] + t * dy - p[1]) <= snap;
+  };
+  const isCut = (u, v) => cutSegments.some(seg => onSegment(index.verts[u], seg) && onSegment(index.verts[v], seg));
   // Insert neighbours' corners into edges, within the per-parcel budget. Over
   // it (very dense same-owner land), only edges whose corners already match
   // cancel, and a shared stretch with unmatched corners stays drawn.
@@ -213,6 +244,7 @@ function mergeGroup(group, frame, snap, splitBudget) {
   for (const [key, owners] of edgeOwners) {
     if (internal.has(key)) continue;
     const [u, v] = key.split('>').map(Number);
+    if (cutSegments.length && isCut(u, v)) continue;
     components.get(find(owners.values().next().value)).edges.push([u, v]);
   }
   return [...components.values()].map(({ members, edges }) => ({
@@ -230,7 +262,9 @@ function mergeGroup(group, frame, snap, splitBudget) {
 // that stretch stays drawn (and parcels joined by nothing else stay
 // separate outlines). Same-owner parcels that do not touch stay separate.
 // With merge off, or without an owner name, every parcel is its own outline.
-// Returns [{ ownerKey, owner, parcels, parcelIds, lines: [[[lon, lat], ...]] }].
+// Returns [{ ownerKey, owner, parcels, parcelIds, lines: [[[lon, lat], ...]] }]:
+// `lines` are the boundary to stroke (never a clipping cut); `parcels` keep
+// their whole rings for labels.
 export function dissolveParcelsByOwner(parcels, { merge = true, snapMeters = OWNER_LABEL_LIMITS.snapMeters, splitBudget = OWNER_LABEL_LIMITS.splitBudget } = {}) {
   const list = Array.isArray(parcels) ? parcels.filter(p => Array.isArray(p?.rings) && p.rings.length) : [];
   if (!list.length) return [];
@@ -249,7 +283,7 @@ export function dissolveParcelsByOwner(parcels, { merge = true, snapMeters = OWN
     parcelIds: members.map(p => p.id).filter(id => id != null), lines,
   });
   for (const { ownerKey, parcels: group } of groups.values()) {
-    if (group.length === 1) { outlines.push(describe(ownerKey, group, group[0].rings)); continue; }
+    if (group.length === 1) { outlines.push(describe(ownerKey, group, parcelStrokeLines(group[0]))); continue; }
     for (const component of mergeGroup(group, frame, snapMeters, splitBudget))
       if (component.lines.length) outlines.push(describe(ownerKey, component.members, component.lines));
   }

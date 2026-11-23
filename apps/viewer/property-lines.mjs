@@ -499,15 +499,21 @@ export function normalizeParcelResponse(body) {
   if (status !== 'ok') return { status, parcels: [] };
   const parcels = [];
   for (const parcel of Array.isArray(body.parcels) ? body.parcels : []) {
-    const rings = [];
-    for (const ring of Array.isArray(parcel?.rings) ? parcel.rings : []) {
-      if (!Array.isArray(ring)) continue;
+    const rings = [], cuts = [];
+    const sourceRings = Array.isArray(parcel?.rings) ? parcel.rings : [];
+    sourceRings.forEach((ring, index) => {
+      if (!Array.isArray(ring)) return;
       const clean = ring.filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])
         && Math.abs(p[0]) <= 180 && Math.abs(p[1]) <= 85).map(p => [p[0], p[1]]);
-      if (clean.length >= 2) rings.push(clean);
-    }
+      if (clean.length < 2) return;
+      rings.push(clean);
+      // Segments the server closed along its clipping envelope (never drawn).
+      // Indexes only hold while the ring kept every point.
+      const named = Array.isArray(parcel.cuts) && Array.isArray(parcel.cuts[index]) && clean.length === ring.length ? parcel.cuts[index] : [];
+      cuts.push([...new Set(named.filter(k => Number.isInteger(k) && k >= 0 && k < clean.length - 1))].sort((a, b) => a - b));
+    });
     const owner = typeof parcel.owner === 'string' ? parcel.owner.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) : '';
-    if (rings.length) parcels.push({ id: Number.isSafeInteger(parcel.id) ? parcel.id : null, rings, ...(owner ? { owner } : {}) });
+    if (rings.length) parcels.push({ id: Number.isSafeInteger(parcel.id) ? parcel.id : null, rings, ...(owner ? { owner } : {}), ...(cuts.some(c => c.length) ? { cuts } : {}) });
   }
   return { status: parcels.length ? 'ok' : 'none', parcels };
 }

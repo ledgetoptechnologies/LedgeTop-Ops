@@ -316,10 +316,14 @@ function intersectBounds(a, b) {
   return out.west < out.east && out.south < out.north ? out : null;
 }
 
-// Sutherland-Hodgman clip of one closed ring to a lon/lat rectangle. Rings
-// wholly inside come back unchanged.
+// Sutherland-Hodgman clip of one closed ring to a lon/lat rectangle ->
+// { ring, cuts }. The clipped ring is closed along the rectangle; `cuts`
+// lists the indexes k of the segments ring[k] -> ring[k + 1] that run along
+// the rectangle (the cut, not a parcel boundary). They keep the shape whole
+// for labels and merging and must never be drawn. Rings wholly inside come
+// back unchanged with no cuts.
 function clipRing(ring, b) {
-  if (ring.every(([lon, lat]) => lon >= b.west && lon <= b.east && lat >= b.south && lat <= b.north)) return ring;
+  if (ring.every(([lon, lat]) => lon >= b.west && lon <= b.east && lat >= b.south && lat <= b.north)) return { ring, cuts: [] };
   const round = v => Math.round(v * 1e7) / 1e7;
   const edges = [
     [p => p[0] >= b.west, (p, q) => [b.west, p[1] + (q[1] - p[1]) * (b.west - p[0]) / (q[0] - p[0])]],
@@ -338,20 +342,30 @@ function clipRing(ring, b) {
     if (!points.length) return null;
   }
   if (points.length < 3) return null;
+  // Which rectangle sides each point lies on (exact: crossings are computed
+  // onto the side itself); a segment with both ends on one side is a cut.
+  const sides = ([lon, lat]) => (lon === b.west ? 1 : 0) | (lon === b.east ? 2 : 0) | (lat === b.south ? 4 : 0) | (lat === b.north ? 8 : 0);
+  const cuts = [];
+  for (let k = 0; k < points.length; k++) if (sides(points[k]) & sides(points[(k + 1) % points.length])) cuts.push(k);
   // Rounded as the source rings are, and never past the rectangle.
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   points = points.map(([lon, lat]) => [clamp(round(lon), b.west, b.east), clamp(round(lat), b.south, b.north)]);
-  return [...points, points[0]];
+  return { ring: [...points, points[0]], cuts };
 }
 
 // The state's parcels clipped to the authorized envelope; parcels wholly
-// outside it are dropped.
+// outside it are dropped. A clipped parcel carries `cuts` (one list of
+// segment indexes per ring) naming the segments along the envelope, which
+// the browser never strokes.
 function clipParcels(result, envelope) {
   if (result.status !== 'ok') return result;
   const parcels = [];
   for (const parcel of result.parcels) {
-    const rings = parcel.rings.map(ring => clipRing(ring, envelope)).filter(Boolean);
-    if (rings.length) parcels.push({ ...parcel, rings });
+    const clipped = parcel.rings.map(ring => clipRing(ring, envelope)).filter(Boolean);
+    if (!clipped.length) continue;
+    const out = { ...parcel, rings: clipped.map(c => c.ring) };
+    if (clipped.some(c => c.cuts.length)) out.cuts = clipped.map(c => c.cuts);
+    parcels.push(out);
   }
   return { status: parcels.length ? 'ok' : 'none', parcels };
 }

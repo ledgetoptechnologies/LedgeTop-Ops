@@ -17,6 +17,8 @@ const {
   COVERAGE_METERS,
   TILE_EDGE_ALLOWANCE_METERS,
   authorizedEnvelope,
+  clipRing,
+  clipParcels,
   LIMITS,
   boundsInsideSite,
   boundsTouchSite,
@@ -368,6 +370,28 @@ test('API: public link map tiles: only on-grid tiles inside the coverage, querie
     const sceneBox = `bbox=${(outsideSiteLon - 0.002).toFixed(4)},43.074,${outsideSiteLon.toFixed(4)},43.0755`;
     assert.equal((await get(sceneBox)).status, 403, 'a scene box past the site window is refused even inside the coverage');
   });
+});
+
+test('clipping names the segments it adds along the envelope, and only those', () => {
+  const envelope = { west: -89.41, south: 43.07, east: -89.40, north: 43.08 };
+  // Crosses the east side: clipped, with one cut along lon -89.40.
+  const crossing = [[-89.405, 43.072], [-89.405, 43.075], [-89.395, 43.075], [-89.395, 43.072], [-89.405, 43.072]];
+  const { ring, cuts } = clipRing(crossing, envelope);
+  assert.ok(ring.every(([lon]) => lon <= envelope.east));
+  assert.equal(cuts.length, 1);
+  const [a, b] = [ring[cuts[0]], ring[cuts[0] + 1]];
+  assert.deepEqual([a[0], b[0]], [envelope.east, envelope.east], 'the cut runs along the envelope');
+  const real = ring.slice(1).map((p, k) => [ring[k], p]).filter((_, k) => !cuts.includes(k));
+  assert.ok(real.every(([p, q]) => !(p[0] === envelope.east && q[0] === envelope.east)), 'every other segment is real boundary');
+  // Wholly inside: unchanged, no cuts. Across a corner: both sides named.
+  const inside = [[-89.405, 43.072], [-89.405, 43.075], [-89.402, 43.075], [-89.405, 43.072]];
+  assert.deepEqual(clipRing(inside, envelope), { ring: inside, cuts: [] });
+  const corner = clipRing([[-89.405, 43.075], [-89.405, 43.09], [-89.39, 43.09], [-89.39, 43.075], [-89.405, 43.075]], envelope);
+  assert.equal(corner.cuts.length, 2);
+  // Parcels carry cuts only when clipped; the response shape stays { id, rings, owner?, cuts? }.
+  const out = clipParcels({ status: 'ok', parcels: [{ id: 1, rings: [crossing] }, { id: 2, owner: 'SAMPLE FARMS LLC', rings: [inside] }] }, envelope);
+  assert.deepEqual(out.parcels.map(p => Object.keys(p).sort()), [['cuts', 'id', 'rings'], ['id', 'owner', 'rings']]);
+  assert.deepEqual(out.parcels[0].cuts, [cuts]);
 });
 
 test('origin budget: unrelated cache misses from many callers stay within the per-minute origin budget', async () => {

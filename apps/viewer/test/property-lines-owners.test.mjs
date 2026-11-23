@@ -11,7 +11,7 @@ import { BRAND_COLORS } from '../brand-colors.mjs';
 import { PROPERTY_LINE_STYLE } from '../property-lines-layer.mjs';
 import {
   PROPERTY_LINES_LIMITS, childTiles, createParcelTileLoader, expandLonLatBounds, makeTile, mergeTileParcels,
-  normalizeParcelResponse, propertyLinesMessage, propertyLinesTilesForView,
+  normalizeParcelResponse, parcelsToUtmPolylines, propertyLinesMessage, propertyLinesTilesForView,
 } from '../property-lines.mjs';
 import {
   dissolveParcelsByOwner, normalizeOwnerName, ownerLabelCandidates, ownerLabelFontPx, placeOwnerLabels, polygonLabelPoint, wrapOwnerLabel,
@@ -246,3 +246,40 @@ test('responses keep only geometry, id and a plain owner name', () => {
   assert.equal(body.parcels[0].owner, 'SAMPLE FARMS LLC');
 });
 
+test('cutoff: a parcel crossing the coverage cutoff is never stroked along the cut (raw, merged, map lines and 3D)', () => {
+  const { clipParcels } = require('../server/propertyLines.js');
+  // The authorized envelope ends at x = 3 (a cutoff through the middle of the parcels).
+  const cutLon = corner(3, 0)[0];
+  const envelope = { west: corner(-2, 0)[0], south: corner(0, -2)[1], east: cutLon, north: corner(0, 6)[1] };
+  // Two same-owner parcels stacked north-south, both reaching x = 5, past the cutoff, and a third owner's parcel.
+  const upstream = { status: 'ok', parcels: [
+    parcel(1, 'SAMPLE FARMS LLC', square(0, 0, 5, 2)), parcel(2, 'sample farms llc', square(0, 2, 5, 2)), parcel(3, 'EXAMPLE OWNER', square(0, 4, 5, 1)),
+  ] };
+  const clipped = clipParcels(upstream, envelope);
+  assert.ok(clipped.parcels.every(p => Array.isArray(p.cuts)), 'the server names the cut segments');
+  for (const p of clipped.parcels) for (const ring of p.rings) assert.ok(ring.every(([lon]) => lon <= cutLon), 'geometry stays inside the envelope');
+  const parcels = normalizeParcelResponse(JSON.parse(JSON.stringify(clipped))).parcels; // as the browser receives it
+  assert.ok(parcels.every(p => p.cuts?.some(c => c.length)), 'cuts survive the browser check');
+  const onCut = ([a, b]) => Math.abs(a[0] - cutLon) < 1e-9 && Math.abs(b[0] - cutLon) < 1e-9;
+  const segmentsOf = lines => lines.flatMap(line => line.slice(1).map((point, k) => [line[k], point]));
+  for (const merge of [true, false]) {
+    const outlines = dissolveParcelsByOwner(parcels, { merge });
+    assert.equal(outlines.length, merge ? 2 : 3);
+    const drawn = segmentsOf(outlines.flatMap(o => o.lines));
+    assert.ok(drawn.length > 0);
+    assert.equal(drawn.filter(onCut).length, 0, `no stroke along the cutoff (${merge ? 'merged' : 'raw'})`);
+    // The real boundary up to the cutoff is still drawn: the top and bottom edges reach it.
+    assert.ok(drawn.some(([a, b]) => Math.max(a[0], b[0]) === cutLon), 'real edges run up to the cutoff');
+    // 3D uses the same stroke lines.
+    const projectLonLat = (lat, lon) => [lon * 1e5, lat * 1e5];
+    const { lines: utm } = parcelsToUtmPolylines(outlines.map(o => ({ rings: o.lines })), projectLonLat, { densifyMeters: 0 });
+    assert.equal(segmentsOf(utm).filter(([a, b]) => Math.abs(a[0] - cutLon * 1e5) < 1e-4 && Math.abs(b[0] - cutLon * 1e5) < 1e-4).length, 0, '3D');
+  }
+  // Labels still use the whole clipped shape.
+  const candidates = ownerLabelCandidates(dissolveParcelsByOwner(parcels));
+  assert.ok(candidates.every(c => c.lon < cutLon && c.lon > envelope.west));
+  // The merged owner is one stroke run, open at the cutoff, without its shared internal edge.
+  const farm = dissolveParcelsByOwner(parcels).find(o => o.ownerKey === 'SAMPLE FARMS LLC');
+  assert.equal(farm.lines.length, 1, 'one open run');
+  assert.ok(segmentsOf(farm.lines).every(([a, b]) => !(a[1] === corner(0, 2)[1] && b[1] === corner(0, 2)[1])), 'the shared edge between the two parcels is removed');
+});

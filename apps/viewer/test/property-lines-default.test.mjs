@@ -5,6 +5,7 @@
 // model version or access lifecycle being dropped.
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import * as THREE from 'three';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
@@ -441,4 +442,35 @@ test('3D scene not ready: bounded wait, then the mesh or cloud readiness signal 
   await ctx.controller.wake();
   await flush();
   assertShownOn(ctx, 'three');
+});
+
+test('cutoff: map and 3D layers never stroke the segments the server cut along its envelope', async () => {
+  const { clipParcels } = createRequire(import.meta.url)('../server/propertyLines.js');
+  // The envelope ends at lon -89.4008; two same-owner parcels and a neighbour reach past it.
+  const cutLon = -89.4008;
+  const envelope = { west: -89.42, south: 43.06, east: cutLon, north: 43.09 };
+  const box = (w, s, e, n) => [[w, s], [w, n], [e, n], [e, s], [w, s]];
+  const body = clipParcels({ status: 'ok', parcels: [
+    { id: 1, owner: 'SAMPLE FARMS LLC', rings: [box(-89.4013, 43.0742, -89.4003, 43.0745)] },
+    { id: 2, owner: 'Sample Farms LLC', rings: [box(-89.4013, 43.0745, -89.4003, 43.0748)] },
+    { id: 3, owner: 'EXAMPLE OWNER', rings: [box(-89.4013, 43.0748, -89.4003, 43.0749)] },
+  ] }, envelope);
+  const alongCut = (a, b) => Math.abs(a - cutLon) < 1e-9 && Math.abs(b - cutLon) < 1e-9;
+  const ctx = await open(page({ parcels: () => reply(JSON.parse(JSON.stringify(body))) }));
+  assertShownOn(ctx, 'map');
+  const mapSegments = () => [...ctx.layers].flatMap(layer => layer.rings.flatMap(line => line.slice(1).map((p, k) => [line[k], p])));
+  for (const merge of [true, false]) {
+    ctx.controller.setMerge(merge);
+    await flush();
+    assert.equal(ctx.controller.state.outlines, merge ? 2 : 3);
+    const segments = mapSegments();
+    assert.ok(segments.length > 0);
+    assert.equal(segments.filter(([[, lonA], [, lonB]]) => alongCut(lonA, lonB)).length, 0, `map, ${merge ? 'merged' : 'raw'}`);
+  }
+  // 3D (Potree): the same stroke lines, in UTM.
+  const three = await open(page({ mode: 'cloud', cloudMode: 'potree', parcels: () => reply(JSON.parse(JSON.stringify(body))) }));
+  assertShownOn(three, 'potree');
+  const potreeSegments = three.potree.lines.flatMap(line => line.slice(1).map((p, k) => [line[k], p]));
+  const lonOf = ([e, n]) => projection.utmToLatLon(e, n)[1];
+  assert.equal(potreeSegments.filter(([a, b]) => Math.abs(lonOf(a) - cutLon) < 1e-7 && Math.abs(lonOf(b) - cutLon) < 1e-7).length, 0, '3D');
 });

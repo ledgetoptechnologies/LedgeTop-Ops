@@ -367,11 +367,11 @@ export function createPropertyLinesController(deps) {
       rendererMap = map;
     }
     const renderer = mapRenderer;
-    const rings = outlines().flatMap(outline => outline.lines.map(line => line.map(([lon, lat]) => [lat, lon])));
+    const lines = outlines().flatMap(outline => outline.lines.map(line => line.map(([lon, lat]) => [lat, lon])));
     const common = { pane: 'propertyLines', renderer, interactive: false, lineJoin: 'round', lineCap: 'round', smoothFactor: 0.5 };
     mapLayers = [
-      L.polyline(rings, { ...common, color: PROPERTY_LINE_STYLE.halo, weight: PROPERTY_LINE_STYLE.mapHaloWeight * (thin ? 0.6 : 1), opacity: 0.55 }),
-      L.polyline(rings, { ...common, color: PROPERTY_LINE_STYLE.color, weight: PROPERTY_LINE_STYLE.mapWeight * (thin ? 0.6 : 1), opacity: 1 }),
+      L.polyline(lines, { ...common, color: PROPERTY_LINE_STYLE.halo, weight: PROPERTY_LINE_STYLE.mapHaloWeight * (thin ? 0.6 : 1), opacity: 0.55 }),
+      L.polyline(lines, { ...common, color: PROPERTY_LINE_STYLE.color, weight: PROPERTY_LINE_STYLE.mapWeight * (thin ? 0.6 : 1), opacity: 1 }),
     ];
     for (const layer of mapLayers) layer.addTo(map);
     drawnMapKey = mapKey;
