@@ -236,7 +236,7 @@ test('settings route displays authoritative metadata and preserves dataset lifec
   const denied=fixture([]);denied.context.taskAction('task-settings','task');assert.doesNotMatch(denied.content.innerHTML,/trash-dataset|upload-dataset/);
 });
 
-test('workspace runtime requires a native observation for the displayed attempt',()=>{
+test('workspace runtime ignores samples from other attempts and never uses completedAt',()=>{
   const f=fixture(),attempt=f.task.latestAttempt;
   Object.assign(attempt,{startedAt:'2026-09-01T00:00:00Z',completedAt:'2026-09-01T07:00:00Z'});
   for(const metrics of [{}, {processingDurationMs:25_200_000},
@@ -249,6 +249,36 @@ test('workspace runtime requires a native observation for the displayed attempt'
   assert.match(f.context.taskPanel(f.task),/0m 0s<\/strong><small>runtime/);
   f.task.metrics={processingDurationMs:9_000,processingDurationAttemptId:attempt.id};
   assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),/0m 9s/);
+});
+
+test('workspace runtime falls back to attempt start-to-finish only when no engine sample exists',()=>{
+  const f=fixture(),attempt=f.task.latestAttempt,duration=vm.runInContext('duration',f.context);
+  const timed={id:attempt.id,startedAt:'2026-09-01T00:00:00Z',upstreamCompletedAt:'2026-09-01T02:05:00Z'};
+  // Engine sample present: the engine value wins over the timestamps.
+  assert.equal(duration(timed,{processingDurationMs:9_000,processingDurationAttemptId:attempt.id}),'0m 9s');
+  // No engine sample: start-to-finish, formatted like the engine runtime.
+  assert.equal(duration(timed,{processingDurationMs:null,processingDurationAttemptId:null}),'2h 5m');
+  assert.equal(duration(timed,{}),'2h 5m');
+  // Attempt ID mismatch: the other attempt's sample is ignored.
+  assert.equal(duration(timed,{processingDurationMs:9_000,processingDurationAttemptId:'another-attempt'}),'2h 5m');
+  assert.equal(duration({id:attempt.id,startedAt:timed.startedAt},{processingDurationMs:9_000,processingDurationAttemptId:'another-attempt'}),'Unavailable');
+  // Missing or invalid end, or a negative duration, stays Unavailable.
+  for(const upstreamCompletedAt of [undefined,null,'','not a date'])assert.equal(duration({...timed,upstreamCompletedAt},{}),'Unavailable');
+  assert.equal(duration({...timed,startedAt:null},{}),'Unavailable');
+  assert.equal(duration({...timed,upstreamCompletedAt:'2026-08-31T23:59:59Z'},{}),'Unavailable');
+  assert.equal(duration({...timed,id:undefined},{}),'Unavailable');
+  // Processing history passes the attempt as its own metrics.
+  assert.equal(duration(timed),'2h 5m');
+  assert.equal(duration({...timed,processingDurationMs:9_000,processingDurationAttemptId:attempt.id}),'0m 9s');
+  // The task row and the task settings page use the same rule, with no extra label.
+  Object.assign(attempt,timed);f.task.metrics={sourceImageCount:20,processingDurationMs:null,processingDurationAttemptId:null};
+  assert.match(f.context.taskPanel(f.task),/<strong>2h 5m<\/strong><small>runtime/);
+  assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),/2h 5m/);
+  assert.doesNotMatch(f.context.taskPanel(f.task),/approx/i);
+  f.task.metrics={processingDurationMs:9_000,processingDurationAttemptId:attempt.id};
+  assert.match(f.context.taskPanel(f.task),/<strong>0m 9s<\/strong><small>runtime/);
+  attempt.upstreamCompletedAt='2026-08-31T00:00:00Z';f.task.metrics={};
+  assert.match(f.context.taskPanel(f.task),/Unavailable<\/strong><small>runtime/);
 });
 
 test('file route renders verified artifact actions and gates mutations for archived/read-only cases',()=>{
