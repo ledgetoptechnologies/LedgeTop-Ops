@@ -60,7 +60,7 @@
 /* Menus. */
 .menu-separator{height:1px;margin:2px 0;background:var(--border)}
 .menu-shortcut{float:right;margin-left:12px;color:var(--muted);font-size:11px;font-weight:500}
-.project-more-menu>button:disabled{opacity:.5;cursor:not-allowed}
+.project-more-menu>button:disabled,.project-more-menu>button[aria-disabled=true]{opacity:.5;cursor:not-allowed}
 .task-panel:has(.tree-menu[open]),.folder-tree-row:has(.tree-menu[open]){overflow:visible;position:relative;z-index:3}
 .tree-toolbar-new-folder{display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}
 .tree-toolbar-new-folder .tree-icon{width:16px;height:16px;color:currentColor}

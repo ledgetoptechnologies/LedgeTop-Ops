@@ -71,7 +71,7 @@ test('daily task menu exposes rename and Delete with Undo; the source lifecycle 
   assert.match(menu,/role="separator"><\/div><button[^>]*data-action="delete-task"[^>]*>Delete<\/button><\/div>$/);
   assert.doesNotMatch(menu.match(/<button[^>]*data-action="delete-task"[^>]*>/)[0],/disabled/);
   f.task.latestAttempt.status='running';
-  assert.match(f.context.taskQuickActions(f.task).match(/<button[^>]*data-action="delete-task"[^>]*>/)[0],/disabled title="Stop processing before deleting this task\."/);
+  assert.match(f.context.taskQuickActions(f.task).match(/<button[^>]*data-action="delete-task"[^>]*>/)[0],/aria-disabled="true" title="Stop processing before deleting this task\."/);
   f.task.latestAttempt.status='ready_for_review';
   f.state.taskPage='settings';const settings=f.context.taskWorkspaceBody(f.task,f.dataset);
   assert.equal((settings.match(/data-action="trash-task"/g)||[]).length,1);
@@ -94,7 +94,7 @@ test('task toolbar keeps View, Model report and Share primary with every seconda
   assert.deepEqual([...primary.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['view-output','download-report','share-output']);
   // The menu holds the rest, in this order; Duplicate is a disabled follow-up for now.
   assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['edit-task','folder-move-task','duplicate-task','download-output','task-settings','task-files','task-history','task-gcp','delete-task']);
-  assert.match(menu,/<button[^>]*data-action="duplicate-task"[^>]*disabled title="Coming soon"[^>]*>Duplicate</);
+  assert.match(menu,/<button[^>]*data-action="duplicate-task"[^>]*aria-disabled="true" title="Coming soon"[^>]*>Duplicate</);
   assert.doesNotMatch(primary,/folder-move-task|>Move</,'no separate Move button on the row');
   assert.match(primary,/tabindex="-1"/,'row buttons are reached with the arrow keys, not Tab');
   const move=()=>f.context.taskQuickActions(f.task).match(/<button[^>]*data-action="folder-move-task"[^>]*>/)?.[0];

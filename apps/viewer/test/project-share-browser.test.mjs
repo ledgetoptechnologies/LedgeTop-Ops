@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,9 +31,7 @@ async function removeBrowserProfile(profile, t) {
   const resolved = path.resolve(profile);
   const expectedPrefix = path.resolve(tmpdir(), 'ltds-project-share-browser-');
   if (!resolved.startsWith(expectedPrefix)) throw new Error(`refusing to remove unexpected browser profile: ${resolved}`);
-  // Edge on Windows relaunches itself, so killing the spawned process can leave the browser
-  // running; stop every browser process on this run's own temporary profile.
-  if (process.platform === 'win32') spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p='${resolved.replace(/'/g, "''")}';Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($p) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`], { stdio: 'ignore', timeout: 20_000, windowsHide: true });
+  stopBrowser(resolved, { removeProfile: false });
   let lastError;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
@@ -402,7 +400,7 @@ test('project sharing is internal-only while legacy public links remain viewable
   try {
     ({ server, runtime } = await startFixtureServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-project-share-browser-'));
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
     ], { windowsHide: true, stdio: 'ignore' });

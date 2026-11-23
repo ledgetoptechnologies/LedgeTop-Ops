@@ -253,3 +253,19 @@ test('folder create and rename refuse control and invisible characters but keep 
   assert.equal(p.projectFolders(project.id).find(row=>row.id===legacy).displayName,'Legacy\u007fname');
   assert.equal(p.renameProjectFolder(project.id,legacy,'Legacy name','staff').displayName,'Legacy name');
 });
+
+test('a task in an archived (read-only) project cannot be trashed on its own',t=>{
+  const {trashTaskTree}=require('../server/containerLifecycle');
+  const db=openDatabase(':memory:');t.after(()=>db.close());
+  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Archived synthetic'});
+  const source=p.createDataset({projectId:project.id,displayName:'Source',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()});
+  p.finalizeDataset(source.id,[],crypto.createHash('sha256').update('').digest('hex'));
+  const task=p.createTask({projectId:project.id,datasetId:source.id,displayName:'Task'});
+  assert.ok(p.archiveProject(project.id));
+  assert.equal(p.trashTask(task.id,'staff'),null);
+  assert.throws(()=>trashTaskTree(p,{},task.id,'staff'),{code:'task_not_trashable'},'DELETE /api/v1/tasks/:id answers 409');
+  assert.notEqual(p.getTask(task.id).status,'archived');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM storage_trash WHERE entity_type='task' AND entity_id=?").get(task.id).count,0);
+  // Trashing the whole project still takes its tasks with it.
+  assert.ok(p.trashTask(task.id,'staff',{withinProjectTrash:true}));
+});

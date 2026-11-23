@@ -2,7 +2,7 @@ import { waitForDevToolsPort } from './devtools-port.mjs';
 import { BoundedTestCdp as CdpClient } from './bounded-test-cdp.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { writeArrayBuffer } from 'geotiff';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { FINE_POINTER_SWITCH, assertFinePointer } from './fine-pointer.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -130,23 +131,13 @@ function browserPath() {
   return candidates.find(existsSync) || null;
 }
 
-// Edge on Windows relaunches itself (--edge-skip-compat-layer-relaunch), so the spawned process
-// is not the browser and killing its tree leaves the browser running. Stop every browser process
-// that uses this run's own temporary profile, and nothing else.
-function stopProfileBrowsers(profile) {
-  if (process.platform !== 'win32') return;
-  const resolved = path.resolve(profile);
-  if (!resolved.startsWith(path.resolve(tmpdir(), 'ltds-viewer-browser-'))) return;
-  const script = `$p='${resolved.replace(/'/g, "''")}';Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($p) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
-  spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: 'ignore', timeout: 20_000, windowsHide: true });
-}
-
 async function removeBrowserProfile(profile, t) {
   if (!profile) return;
   const resolved = path.resolve(profile);
   const expectedPrefix = path.resolve(tmpdir(), 'ltds-viewer-browser-');
   if (!resolved.startsWith(expectedPrefix)) throw new Error(`refusing to remove unexpected browser profile: ${resolved}`);
-  stopProfileBrowsers(resolved);
+  // Kills any browser still on this run's own profile (Edge relaunches itself on Windows).
+  stopBrowser(resolved, { removeProfile: false });
   let lastError;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
@@ -799,7 +790,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('.task-more-actions > summary').click()`);
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
     // "⋯" holds the rest: Rename (F2), Move to…, Duplicate (a disabled follow-up), the task pages, then Delete.
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>[button.firstChild.textContent,button.disabled])`),[['Rename',false],['Move to…',false],['Duplicate',true],['Download model files',false],['Details & processing',false],['Files & versions',false],['Processing history',false],['Ground control points',false],['Delete',true]]);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>[button.firstChild.textContent,button.getAttribute('aria-disabled')==='true'])`),[['Rename',false],['Move to…',false],['Duplicate',true],['Download model files',false],['Details & processing',false],['Files & versions',false],['Processing history',false],['Ground control points',false],['Delete',true]]);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
@@ -1139,7 +1130,7 @@ async function withTreeBrowser(t,{name,width=1280,height=860,mobile=false,fine=!
     ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;
     configure?.(runtime);
     profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox',...(fine?[FINE_POINTER_SWITCH]:[]),'--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox',...(fine?[FINE_POINTER_SWITCH]:[]),'--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
     await client.command('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile,screenWidth:width,screenHeight:height});
@@ -1225,16 +1216,26 @@ test('New folder and Rename happen inline, and an empty folder deletes with Undo
   await pressKey(client,'Enter');
   await waitFor(client,`document.querySelector('${treeRow(`f:${flights.id}`)} strong')?.textContent==='Drone flights'&&document.activeElement?.closest('[data-tree-key]')?.dataset.treeKey==='f:${flights.id}'`,'the rename did not land on the row');
   assert.equal(processing.projectFolders('project-johnson').find(folder=>folder.id===flights.id).displayName,'Drone flights');
+  // Leaving the name for another control saves it there and leaves focus where the user went.
+  await pressKey(client,'F2');
+  await waitFor(client,`document.activeElement?.matches('.tree-inline-name[data-tree-rename="${flights.id}"]')`,'F2 did not start renaming a third time');
+  await client.command('Input.insertText',{text:'Survey flights'});
+  start=runtime.requests.length;
+  await client.evaluate(`document.querySelector('#project-filter').focus()`);
+  await waitForRequest(runtime,start,'PATCH',`/api/v1/projects/project-johnson/folders/${flights.id}`);
+  await waitFor(client,`document.querySelector('${treeRow(`f:${flights.id}`)} strong')?.textContent==='Survey flights'&&!document.querySelector('#workspace').hasAttribute('aria-busy')`,'the blur rename did not land');
+  assert.equal(await client.evaluate(`document.activeElement?.id`),'project-filter','saving on blur pulled focus back into the tree');
+  await client.evaluate(`document.querySelector('${treeRow(`f:${flights.id}`)} [data-tree-focus]').focus()`);
   // An empty folder deletes without a confirmation and comes back with Undo; a folder with tasks cannot be deleted.
-  assert.equal(await client.evaluate(`document.querySelector('${treeRow(`f:${top.id}`)} [data-action="folder-delete"]').disabled`),true);
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow(`f:${top.id}`)} [data-action="folder-delete"]').getAttribute('aria-disabled')`),'true');
   start=runtime.requests.length;
   await client.evaluate(`(()=>{const menu=document.querySelector('${treeRow(`f:${flights.id}`)} details');menu.open=true;menu.querySelector('[data-action="folder-delete"]').click();})()`);
   await waitForRequest(runtime,start,'DELETE',`/api/v1/projects/project-johnson/folders/${flights.id}`);
   assert.equal(await client.evaluate(`Boolean(document.querySelector('.workspace-decision'))`),false,'folder Delete asked for a confirmation');
   await waitFor(client,`!document.querySelector('${treeRow(`f:${flights.id}`)}')&&document.querySelector('#workspace-folder-undo')?.textContent.includes('Folder deleted')`,'folder Delete did not offer Undo');
   await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
-  await waitFor(client,`[...document.querySelectorAll('.folder-tree-row[aria-level="3"] strong')].some(name=>name.textContent==='Drone flights')`,'Undo did not restore the folder');
-  assert.ok(processing.projectFolders('project-johnson').some(folder=>folder.displayName==='Drone flights'&&folder.parentId===top.id));
+  await waitFor(client,`[...document.querySelectorAll('.folder-tree-row[aria-level="3"] strong')].some(name=>name.textContent==='Survey flights')`,'Undo did not restore the folder');
+  assert.ok(processing.projectFolders('project-johnson').some(folder=>folder.displayName==='Survey flights'&&folder.parentId===top.id));
   // The project's "⋯" adds a top-level folder.
   await client.evaluate(`(()=>{const menu=document.querySelector('${treeRow('p:project-johnson')} details');menu.open=true;menu.querySelector('[data-action="folder-create"]').click();})()`);
   await waitFor(client,`document.activeElement?.matches('.tree-inline-name[data-tree-new-folder=""]')`,'project New folder did not open an inline row');
@@ -1389,7 +1390,7 @@ test('Delete moves a task to the Recycle Bin with Undo and no confirmation', {ti
   await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
   await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))&&Boolean(document.querySelector('${treeRow('t:task-johnson')}'))`,'tasks unavailable');
   // Live processing disables Delete; the menu shows Duplicate as a disabled follow-up.
-  assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-johnson')} [data-action="delete-task"]').disabled`),true);
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-johnson')} [data-action="delete-task"]').getAttribute('aria-disabled')`),'true');
   assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="duplicate-task"]').title`),'Coming soon');
   await client.evaluate(`(()=>{const menu=document.querySelector('${treeRow('t:task-quarry')} details.task-more-actions');menu.open=true;menu.querySelector('[data-action="delete-task"]').focus();})()`);
   await treeScreenshot(client,'desktop-1440-task-menu.png');
@@ -1455,12 +1456,12 @@ test('Move to… picks a project, then a folder, and asks before moving a publis
     const quarryFolder=processing.createProjectFolder('project-quarry',{displayName:'2026 reprocess'},'staff');
     const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));folderServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
     ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
     await client.command('Emulation.setDeviceMetricsOverride',{width:1280,height:860,deviceScaleFactor:1,mobile:false});
     await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
-    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… menu action unavailable');
+    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([aria-disabled="true"])'))`,'Move to… menu action unavailable');
     assert.equal(await client.evaluate(`document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]').textContent`),'Move to…');
     await client.evaluate(`(()=>{const menu=document.querySelector('[data-project-task="task-johnson"] .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
     await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
@@ -1521,7 +1522,7 @@ test('a delayed move or Undo keeps focus on the control the user chose meanwhile
     ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
     // Unpublished, so moves across projects and their Undo need no sharing confirmation.
     runtime.outputs=runtime.outputs.filter(output=>output.taskId!=='task-johnson');
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox',FINE_POINTER_SWITCH,'--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox',FINE_POINTER_SWITCH,'--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
     await client.command('Emulation.setDeviceMetricsOverride',{width:1280,height:860,deviceScaleFactor:1,mobile:false});
@@ -1568,7 +1569,7 @@ test('a delayed move or Undo keeps focus on the control the user chose meanwhile
     assert.equal(await focusedOn(filter),true,'folder Undo kept focus on the filter');
 
     // 3. Move to another project: the user closes the dialog and moves to the filter before the response.
-    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… unavailable');
+    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([aria-disabled="true"])'))`,'Move to… unavailable');
     await client.evaluate(`(()=>{const menu=document.querySelector('${moved} .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
     await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
     await client.evaluate(`(()=>{const select=document.querySelector('#folder-move-form').elements.projectId;select.value='project-quarry';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
@@ -1604,7 +1605,7 @@ test('a delayed move or Undo keeps focus on the control the user chose meanwhile
 
     // 6. Undo of a project move while another, expanded task's menu has focus: the render replaces it.
     // The move opened the folder, so the task is visible inside it.
-    await waitFor(client,`document.querySelector('[data-tree-key="t:task-johnson"]')?.dataset.treeParent==='f:${folder.id}'&&Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… unavailable in the folder');
+    await waitFor(client,`document.querySelector('[data-tree-key="t:task-johnson"]')?.dataset.treeParent==='f:${folder.id}'&&Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([aria-disabled="true"])'))`,'Move to… unavailable in the folder');
     await client.evaluate(`(()=>{const menu=document.querySelector('[data-tree-key="t:task-johnson"] .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
     await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
     await client.evaluate(`(()=>{const select=document.querySelector('#folder-move-form').elements.projectId;select.value='project-quarry';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
@@ -1667,7 +1668,7 @@ test('project-first workspace is interactive and overflow-free in real desktop a
   try {
     ({ server, runtime, origin } = await startFixtureServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
     ], { windowsHide: true, stdio: 'ignore' });
@@ -1703,7 +1704,7 @@ test('orthophoto preview settles on the mounted task after navigation during dec
   try {
     ({ server, runtime, origin } = await startFixtureServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
     ], { windowsHide: true, stdio: 'ignore' });
@@ -1763,7 +1764,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
   try {
     ({ server, runtime, origin } = await startFixtureServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
-    browser = spawn(executable, [
+    browser = spawnBrowser(executable, [
       '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
     ], { windowsHide: true, stdio: 'ignore' });
@@ -1902,7 +1903,7 @@ test('recovery UI keeps one request identity across an uncertain response in a r
  const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client;
  try{
   ({server,runtime,origin}=await startFixtureServer());runtime.testIngestRecovery=true;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
-  browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+  browser=spawnBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
   const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
   await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
   await client.command('Page.navigate',{url:`${origin}/workspace?section=diagnostics`});

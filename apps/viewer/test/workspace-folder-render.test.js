@@ -59,7 +59,7 @@ test('an open project shows its folders and tasks inline, with nested folders ex
   // Folder "⋯": New subfolder, Rename (F2), separator, Delete (only when empty).
   const menu = html.slice(html.indexOf('data-tree-key="f:f"'), html.indexOf('data-tree-key="f:child"'));
   assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match => match[1]), ['folder-toggle', 'folder-new', 'folder-rename', 'folder-delete']);
-  assert.match(menu, /data-action="folder-delete"[^>]*disabled title="Only empty folders can be deleted\."/);
+  assert.match(menu, /data-action="folder-delete"[^>]*aria-disabled="true" title="Only empty folders can be deleted\."/);
   assert.match(html.slice(html.indexOf('data-tree-key="f:empty"')), /data-action="folder-delete" data-id="empty"  data-project-id/);
   // An empty open folder shows a drop row.
   context.treeState.folders.add('empty');
@@ -277,4 +277,33 @@ test('Undo follows the server window after a slow response despite browser clock
   assert.deepEqual(target.children, [], 'the click guard uses the monotonic deadline');
   context.offerFolderUndo(moved, null, undoExpiresAt, new Date(responseTime + 10_001).toISOString());
   assert.deepEqual(target.children, [], 'an expired server result cannot advertise a new window');
+});
+
+test('Delete and F2 follow the task menu rules: nothing for a read-only project or live processing', async () => {
+  const start = source.indexOf('// The same rules as the task menu'), end = source.indexOf('\nasync function deleteTaskWithUndo(', start);
+  const fnStart = end + 1, fnEnd = source.indexOf('\n// ---- Keyboard', fnStart);
+  let requests = 0, confirmations = 0;
+  const toasts = [];
+  const context = {
+    state: { busy: false, projects: [{ id: 'archived', status: 'archived' }, { id: 'active', status: 'active' }], tasks: [
+      { id: 'read-only', projectId: 'archived', status: 'ready_for_review' },
+      { id: 'live', projectId: 'active', status: 'processing', latestAttempt: { status: 'running' } },
+      { id: 'archived-task', projectId: 'active', status: 'archived' },
+    ] },
+    can: () => true, LIVE_ATTEMPT_STATUSES: new Set(['running']), api: async () => { requests++; return {}; },
+    toast: message => toasts.push(message), trashMutation: async () => { confirmations++; }, taskHasPublishedOutput: () => false,
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end) + '\n' + source.slice(fnStart, fnEnd), context);
+  assert.equal(context.taskWritable(context.state.tasks[0]), false);
+  assert.equal(context.taskWritable(context.state.tasks[2]), false);
+  assert.equal(context.taskWritable(context.state.tasks[1]), true);
+  await context.deleteTaskWithUndo('read-only');
+  await context.deleteTaskWithUndo('archived-task');
+  await context.deleteTaskWithUndo('live');
+  assert.equal(requests, 0); assert.equal(confirmations, 0);
+  assert.deepEqual(toasts, ['Stop processing before deleting this task.']);
+  // F2 on a task or project row uses the same write rules as the menus.
+  assert.match(source, /kind==='t'&&taskWritable\(state\.tasks\.find\(task=>task\.id===id\)\)\)editTask\(id\)/);
+  assert.match(source, /kind==='p'&&canWriteFolders\(state\.projects\.find\(project=>project\.id===id\)\)\)editProject\(id\)/);
 });

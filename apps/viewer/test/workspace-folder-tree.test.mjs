@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { folderAncestry, folderIsEmpty, folderTaskCounts, projectTreeRows, readTreeState, treeKeyAction, treeStorageKey, writeTreeState } from '../workspace-folder-tree.mjs';
+import { MAX_OPEN_PROJECTS, folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, treeStorageKey, writeTreeState } from '../workspace-folder-tree.mjs';
 
 const folders = [
   { id: 'b', projectId: 'p', parentId: null, displayName: 'Folder 10' },
@@ -81,4 +81,18 @@ test('arrow keys move through visible rows, open and close folders, and step to 
   assert.deepEqual(treeKeyAction(rows, 2, 'ArrowLeft'), { focus: 1 }, 'Left on a child goes to its parent');
   assert.deepEqual(treeKeyAction(rows, 4, 'ArrowLeft'), { focus: 0 });
   assert.equal(treeKeyAction(rows, 2, 'x'), null);
+});
+
+test('at most ten projects stay open: the most recently opened, never the selected one', () => {
+  assert.equal(MAX_OPEN_PROJECTS, 10);
+  const values = new Map();
+  const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  const many = Array.from({ length: 14 }, (_, index) => `p${index}`);
+  values.set(treeStorageKey('ops:alice'), JSON.stringify({ projects: many, folders: [] }));
+  assert.deepEqual([...readTreeState(storage, 'ops:alice').projects], many.slice(-10), 'a saved list is cut to the last ten');
+  writeTreeState(storage, 'ops:alice', { projects: new Set(many), folders: new Set() });
+  assert.deepEqual(JSON.parse(values.get(treeStorageKey('ops:alice'))).projects, many.slice(-10));
+  const open = limitOpenProjects(new Set(many), 'p0');
+  assert.equal(open.size, 10); assert.ok(open.has('p0'), 'the selected project stays open'); assert.ok(open.has('p13'));
+  assert.equal(open.has('p1'), false);
 });

@@ -4,6 +4,8 @@
 
 export const TREE_STORAGE_PREFIX = 'ltds-viewer-tree:v1:';
 const MAX_SAVED_IDS = 500;
+// Each open project is refreshed every few seconds, so only the most recently opened stay open.
+export const MAX_OPEN_PROJECTS = 10;
 
 export function treeStorageKey(subject) {
   return `${TREE_STORAGE_PREFIX}${subject || 'anonymous'}`;
@@ -12,13 +14,13 @@ export function treeStorageKey(subject) {
 // Expanded projects and folders for one user. Storage can be missing, full or
 // blocked; the tree then works for this visit only.
 export function readTreeState(storage, subject) {
-  const ids = list => new Set(Array.isArray(list)
-    ? list.filter(id => typeof id === 'string' && id.length > 0 && id.length <= 200).slice(0, MAX_SAVED_IDS)
+  const ids = (list, limit) => new Set(Array.isArray(list)
+    ? list.filter(id => typeof id === 'string' && id.length > 0 && id.length <= 200).slice(-limit)
     : []);
   try {
     const value = JSON.parse(storage?.getItem(treeStorageKey(subject)) || 'null');
     if (!value || typeof value !== 'object') return { projects: new Set(), folders: new Set() };
-    return { projects: ids(value.projects), folders: ids(value.folders) };
+    return { projects: ids(value.projects, MAX_OPEN_PROJECTS), folders: ids(value.folders, MAX_SAVED_IDS) };
   } catch {
     return { projects: new Set(), folders: new Set() };
   }
@@ -27,7 +29,7 @@ export function readTreeState(storage, subject) {
 export function writeTreeState(storage, subject, tree) {
   try {
     storage?.setItem(treeStorageKey(subject), JSON.stringify({
-      projects: [...tree.projects].slice(-MAX_SAVED_IDS),
+      projects: [...tree.projects].slice(-MAX_OPEN_PROJECTS),
       folders: [...tree.folders].slice(-MAX_SAVED_IDS),
     }));
     return true;
@@ -44,6 +46,15 @@ export function childFolders(folders, parentId) {
 }
 
 // Folder ids from the top level down to folderId; stops at unknown ids and cycles.
+// Keeps the most recently opened projects (insertion order), never dropping `keep`.
+export function limitOpenProjects(projects, keep = null, limit = MAX_OPEN_PROJECTS) {
+  for (const id of [...projects]) {
+    if (projects.size <= limit) break;
+    if (id !== keep) projects.delete(id);
+  }
+  return projects;
+}
+
 export function folderAncestry(folders, folderId) {
   const result = [], seen = new Set();
   for (let current = folderId; current && !seen.has(current);) {

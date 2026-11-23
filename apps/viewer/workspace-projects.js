@@ -17,7 +17,7 @@ import { renderCurrentTabRecoveryOffer } from './workspace-current-tab-recovery-
 import { resumeCurrentTabWorkspaceRecovery } from './workspace-current-tab-recovery.mjs';
 import { createWorkspaceNavigationWork, workspaceNavigationState } from './workspace-navigation-state.mjs';
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
-import { folderAncestry, folderIsEmpty, folderTaskCounts, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
+import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
 import { DIRECT_CLIENT_GRANTS_PATH, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
@@ -70,7 +70,7 @@ function loadTreeState(){
   if(state.selectedProjectId)treeState.projects.add(state.selectedProjectId);
 }
 // Saved only once the signed-in user is known; before that the tree lives in memory.
-function saveTreeState(){if(treeSubject)writeTreeState(globalThis.localStorage,treeSubject,treeState)}
+function saveTreeState(){limitOpenProjects(treeState.projects,state.selectedProjectId);if(treeSubject)writeTreeState(globalThis.localStorage,treeSubject,treeState)}
 function invalidateFolderAuthorization(){
   folderAuthorizationGeneration++;folderCache.clear();
   projectDataGeneration++;
@@ -677,7 +677,7 @@ function treeIcon(name){return`<svg class="tree-icon" viewBox="0 0 24 24" fill="
 const TREE_GRIP='<svg class="tree-drag-grip" viewBox="0 0 10 18" fill="currentColor" aria-hidden="true"><circle cx="3" cy="4" r="1.3"/><circle cx="7" cy="4" r="1.3"/><circle cx="3" cy="9" r="1.3"/><circle cx="7" cy="9" r="1.3"/><circle cx="3" cy="14" r="1.3"/><circle cx="7" cy="14" r="1.3"/></svg>';
 // Phones and touch screens move tasks with Move to…; drag is for a desktop pointer.
 function treeDragAvailable(){return typeof matchMedia!=='function'||!matchMedia('(max-width:767px),(pointer:coarse)').matches}
-function menuItem(action,id,label,{danger=false,disabled='',shortcut='',extra=''}={}){return`<button type="button" class="secondary-button${danger?' danger-button':''}" role="menuitem" tabindex="-1" data-action="${esc(action)}" data-id="${esc(id)}" ${disabled?`disabled title="${esc(disabled)}"`:''} ${extra}>${esc(label)}${shortcut?`<span class="menu-shortcut" aria-hidden="true">${esc(shortcut)}</span>`:''}</button>`}
+function menuItem(action,id,label,{danger=false,disabled='',shortcut='',extra=''}={}){return`<button type="button" class="secondary-button${danger?' danger-button':''}" role="menuitem" tabindex="-1" data-action="${esc(action)}" data-id="${esc(id)}" ${disabled?`aria-disabled="true" title="${esc(disabled)}"`:''} ${extra}>${esc(label)}${shortcut?`<span class="menu-shortcut" aria-hidden="true">${esc(shortcut)}</span>`:''}</button>`}
 const MENU_SEPARATOR='<div class="menu-separator" role="separator"></div>';
 function treeMenu(label,items,className=''){return`<details class="project-more-actions tree-menu ${className}"><summary tabindex="-1" aria-label="${esc(label)}" title="${esc(label)}" aria-haspopup="menu">⋯</summary><div class="project-more-menu" role="menu" aria-label="${esc(label)}">${items}</div></details>`}
 function canWriteFolders(project){return project?.status==='active'&&can('viewer.projects.write')}
@@ -735,7 +735,7 @@ function lodJobForOutput(output){return state.derivativeJobs.find(job=>job.attem
 function recoveryOperationForOutput(outputId){return[...state.operations].filter(operation=>operation.type==='lod_recovery'&&operation.status!=='cancelled'&&(operation.sourceOutputId===outputId||operation.result?.recovery?.sourceOutputId===outputId)).sort((left,right)=>Date.parse(right.updatedAt||right.createdAt||0)-Date.parse(left.updatedAt||left.createdAt||0))[0]||null}
 function lodAction(output){if(!can('viewer.processing.write'))return'';const repair=companionRepairAction(output);if(repair)return repair;const job=lodJobForOutput(output),lod=output.lod||{},recovery=lod.recoveryAction,feedStatus=job?.status==='pending'?'queued':job?.status==='leased'?'running':job?.status,status=feedStatus||lod.status,id=job?.id||lod.jobId||output.id,retryable=Boolean(lod.canRetry||(status==='failed'&&job?.optional&&(Number(job.manualRetryCount)||0)<1));if(recovery?.kind==='new_version'&&recovery.eligible){const existing=recoveryOperationForOutput(output.id);if(existing?.status==='failed')return existing.retryable===false?button('derivative-status',existing.id,'Recovery retry exhausted',false,'disabled title="The one authorized manual recovery retry has already failed."'):button('retry-operation',existing.id,'Retry recovery',false,'title="Retry the existing recovery version without changing the current model."');if(existing){const label=existing.status==='queued'?'Recovery queued':existing.status==='leased'?'Creating recovery…':existing.status==='awaiting_derivatives'?'Generating 3D tiles…':'Recovery complete';return button('derivative-status',existing.id,label,false,'disabled')}return button('create-lod-recovery',output.id,'Create recovery version',false,`data-endpoint="${esc(recovery.endpoint)}" title="The current version remains safe while a new recovery version is built."`)}if(lod.disabledByPolicy)return button('derivative-status',id,'3D tiles disabled by server',false,`disabled title="${esc(lod.reason||'3D tile generation is disabled on this Viewer deployment.')}"`);if(['failed','fallback'].includes(status)&&retryable)return button('retry-derivative',id,'Retry 3D tiles');if(status==='queued')return button('derivative-status',id,'3D tiles queued',false,'disabled');if(status==='running')return button('derivative-status',id,'Generating 3D tiles…',false,'disabled');if(status==='available'||(status==='complete'&&job?.result?.verified))return button('derivative-status',id,'3D tiles ready',false,'disabled');if(status==='fallback')return button('derivative-status',id,'Using full mesh fallback',false,`disabled title="${esc(lod.reason||'Verified streaming tiles are unavailable.')}"`);if(lod.canGenerate)return button('generate-tiles',output.id,'Generate 3D tiles');return''}
 function taskQuickActions(task){const outputs=state.outputs.filter(item=>item.taskId===task.id),output=outputs.find(item=>item.activePublished&&item.status==='published')||outputs.find(item=>item.status==='ready'&&item.attemptId),readOnly=task.status==='archived'||state.projects.find(project=>project.id===task.projectId)?.status!=='active',items=[],more=[];let download='';if(output){const kinds=new Set(Array.isArray(output.assetKinds)?output.assetKinds:[]),published=output.activePublished&&output.status==='published';if(published&&output.viewSessionUrl)items.push(button('view-output',output.id,'View',true,'tabindex="-1"'));else if(!readOnly&&output.status==='ready'&&output.attemptId&&can('viewer.processing.publish'))items.push(button('open-review',output.attemptId,'View',true,'tabindex="-1"'));if(output.reportUrl&&kinds.has('report'))items.push(button('download-report',output.id,'Model report',false,`tabindex="-1" data-url="${esc(output.reportUrl)}"`));if(!readOnly&&canShareOutput(output))items.push(button('share-output',output.id,'Share',false,'tabindex="-1"'));if(output.downloadProducts?.length||output.downloadUrl&&kinds.size)download=menuItem('download-output',output.id,'Download model files',{extra:`data-url="${esc(output.downloadUrl)}"`})}const writable=!readOnly&&can('viewer.processing.write');if(writable){more.push(menuItem('edit-task',task.id,'Rename',{shortcut:'F2'}),menuItem('folder-move-task',task.id,'Move to…',{disabled:Array.isArray(folderCache.get(task.projectId)?.folders)?'':'Folders are still loading.'}),menuItem('duplicate-task',task.id,'Duplicate',{disabled:'Coming soon'}));}if(download)more.push(download);more.push(menuItem('task-settings',task.id,'Details & processing'),menuItem('task-files',task.id,'Files & versions'),menuItem('task-history',task.id,'Processing history'));if(!readOnly&&can('viewer.gcp.read'))more.push(menuItem('task-gcp',task.id,'Ground control points'));if(writable)more.push(MENU_SEPARATOR,menuItem('delete-task',task.id,'Delete',{danger:true,disabled:LIVE_ATTEMPT_STATUSES.has(task.latestAttempt?.status)?'Stop processing before deleting this task.':''}));items.push(treeMenu('More task actions',more.join(''),'task-more-actions'));return items.join('')}
-function taskPanel(task,row=null){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task),drag=Boolean(row)&&canDragFolderTask(task)&&treeDragAvailable();return`<article class="task-panel tree-row ${expanded?'expanded':''}" data-project-task="${esc(task.id)}"${row?` ${treeRowAttributes(row,task.projectId)}`:''}><div class="task-summary"${drag?` draggable="true" data-folder-drag data-id="${esc(task.id)}"`:''}>${drag?TREE_GRIP:''}<button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" data-tree-focus tabindex="-1" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-lead" aria-hidden="true"><span class="task-chevron">›</span>${treeIcon('task')}</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="region" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
+function taskPanel(task,row=null){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task),drag=Boolean(row)&&canDragFolderTask(task)&&treeDragAvailable();return`<article class="task-panel tree-row ${expanded?'expanded':''}" data-project-task="${esc(task.id)}"${row?` ${treeRowAttributes(row,task.projectId)}`:''}><div class="task-summary"${row?' role="gridcell"':''}${drag?` draggable="true" data-folder-drag data-id="${esc(task.id)}"`:''}>${drag?TREE_GRIP:''}<button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" data-tree-focus tabindex="-1" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-lead" aria-hidden="true"><span class="task-chevron">›</span>${treeIcon('task')}</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="${row?'gridcell':'region'}" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
 function taskFact(label,value){const display=label==='Reconstructed points'&&value!==null&&value!==undefined?groupedNumber(value):value;return`<div><dt>${esc(label)}</dt><dd>${available(display)}</dd></div>`}
 function disclosureAttributes(taskId,name){return`data-task-id="${esc(taskId)}" data-task-disclosure="${esc(name)}" ${state.taskDisclosures[taskId]?.[name]?'open':''}`}
 function taskDisclosurePanel(taskId,name,label,body,meta=''){return`<details class="task-subsection task-disclosure" ${disclosureAttributes(taskId,name)}><summary><span>${esc(label)}</span>${meta?`<small>${esc(meta)}</small>`:''}</summary><div class="task-disclosure-body">${body}</div></details>`}
@@ -881,6 +881,8 @@ function bind(){content.querySelectorAll('[data-section]').forEach(element=>elem
 async function action(element){
   const action=element.dataset.action,id=element.dataset.id,taskId=element.dataset.taskId;
   // A menu command closes its menu; focus waits on the menu button for the command to move it.
+  // Unavailable menu items stay focusable (aria-disabled) so the arrow keys reach them, but do nothing.
+  if(element.getAttribute('aria-disabled')==='true')return;
   const menu=element.getAttribute('role')==='menuitem'?element.closest('details.tree-menu'):null;
   if(menu){menu.open=false;menu.querySelector(':scope > summary')?.focus({preventScroll:true});}
   if(action==='new-project')return newProjectModal();
@@ -1111,29 +1113,45 @@ function replaceTreeRow(projectId,key){
   if(fresh)row.replaceWith(fresh);else row.remove();
   bindProjectActions(content.querySelector(`[data-tree-body="${CSS.escape(projectId)}"]`)||content);
 }
+// Waits (up to 10 s) for another change to finish, so a typed name is never dropped.
+async function treeWhenIdle(limit=10_000){
+  for(const end=performance.now()+limit;state.busy&&performance.now()<end;)await new Promise(resolve=>setTimeout(resolve,100));
+  return!state.busy;
+}
 async function commitTreeName(input,cancel=false){
   if(input.dataset.committing)return;input.dataset.committing='1';
   const projectId=input.dataset.projectId,value=input.value.trim(),row=input.closest('[data-tree-key]'),key=row?.dataset.treeKey;
+  // Saving on blur must not pull focus back from wherever the user went (the search box, say):
+  // the row takes focus only when the name field had it, or nothing does once the field is gone.
+  const start=document.activeElement,ownedFocus=start===input||!start||start===document.body||!start.isConnected;
+  const refocus=(target,options)=>{
+    if(!ownedFocus)return false;
+    const active=document.activeElement;
+    return(!active||active===document.body||!active.isConnected||active===input)&&focusTreeRow(target,options);
+  };
+  const idle=async()=>{if(await treeWhenIdle())return true;toast(`“${value}” was not saved because another change is still running. Try again.`,true);return false;};
   if(input.hasAttribute('data-tree-new-folder')){
     const parentId=input.dataset.treeNewFolder||null,parentKey=parentId?`f:${parentId}`:`p:${projectId}`;
     treePending=null;
-    if(cancel||!value){replaceTreeRow(projectId,key);focusTreeRow(parentKey,{scroll:false});return;}
+    if(cancel||!value){replaceTreeRow(projectId,key);refocus(parentKey,{scroll:false});return;}
     input.disabled=true;
+    const ready=await idle();
     const authorized=folderAuthorizationGuard(projectId,'viewer.projects.write');
-    const result=await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,folderRequestOptions('POST',{displayName:value,parentId},{}),null,authorized);
+    const result=ready?await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,folderRequestOptions('POST',{displayName:value,parentId},{}),null,authorized):null;
     if(treeRowElement(key))replaceTreeRow(projectId,key);
     const created=result?.folder?.id?`f:${result.folder.id}`:null;
-    if(created&&focusTreeRow(created)){flashTreeRow(created);announce(`Created folder ${value} in ${treeLocationLabel(projectId,parentId)}.`);}
-    else focusTreeRow(parentKey,{scroll:false});
+    if(created){refocus(created);flashTreeRow(created);announce(`Created folder ${value} in ${treeLocationLabel(projectId,parentId)}.`);}
+    else refocus(parentKey,{scroll:false});
     return;
   }
   const folderId=input.dataset.treeRename,folder=folderCache.get(projectId)?.folders?.find(item=>item.id===folderId);
   treeRenaming=null;
-  if(cancel||!value||!folder||value===folder.displayName){replaceTreeRow(projectId,key);focusTreeRow(key,{scroll:false});return;}
+  if(cancel||!value||!folder||value===folder.displayName){replaceTreeRow(projectId,key);refocus(key,{scroll:false});return;}
   input.disabled=true;
+  const ready=await idle();
   const authorized=folderAuthorizationGuard(projectId,'viewer.projects.write');
-  const result=await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders/${encodeURIComponent(folderId)}`,folderRequestOptions('PATCH',{displayName:value},{}),null,authorized);
-  replaceTreeRow(projectId,key);focusTreeRow(key,{scroll:false});
+  const result=ready?await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders/${encodeURIComponent(folderId)}`,folderRequestOptions('PATCH',{displayName:value},{}),null,authorized):null;
+  replaceTreeRow(projectId,key);refocus(key,{scroll:false});
   if(result)announce(`Renamed folder to ${value}.`);
 }
 // Only empty folders can be deleted; Undo creates the same empty folder again in the same place.
@@ -1152,8 +1170,9 @@ async function deleteFolder(projectId,folderId){
   announce(`Deleted folder ${folder.displayName}.`);
   void loadProjectFolders(projectId);
   offerUndo('Folder deleted',10_000,()=>canWriteFolders(state.projects.find(item=>item.id===projectId))&&isProjectOpen(projectId),async()=>{
+    const undoFocus=captureUndoFocus();
     const restored=await mutateFolder(projectId,`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,folderRequestOptions('POST',{displayName:folder.displayName,parentId:folder.parentId||null},{}),'Folder restored',folderAuthorizationGuard(projectId,'viewer.projects.write'));
-    if(restored?.folder?.id){const restoredKey=`f:${restored.folder.id}`;if(hadFocus)focusTreeRow(restoredKey);flashTreeRow(restoredKey);announce(`Restored folder ${folder.displayName}.`);}
+    if(restored?.folder?.id){const restoredKey=`f:${restored.folder.id}`;settleUndoFocus(undoFocus,restoredKey);flashTreeRow(restoredKey);announce(`Restored folder ${folder.displayName}.`);}
   });
 }
 
@@ -1449,9 +1468,24 @@ async function moveProjectTask(task,projectId,folderId,receipt,{undo=false,confi
 // Undo restores them for 10 s. A published task still asks first, because deleting it removes it
 // from client shares at once and restoring does not publish it again; so does an account that
 // cannot restore from the Recycle Bin.
+// The same rules as the task menu: a writable task in an active project, with no live processing.
+function taskWritable(task){return Boolean(task)&&task.status!=='archived'&&state.projects.find(project=>project.id===task.projectId)?.status==='active'&&can('viewer.processing.write')}
+// Where focus goes when an Undo lands, decided when it runs: back to the restored row when the
+// Undo control (now gone), the tree or nothing had focus; a control the user chose keeps it.
+function captureUndoFocus(){
+  const element=document.activeElement;
+  if(!element||element===document.body||!element.isConnected||element.closest?.('#workspace-folder-undo,#project-list'))return{mode:'tree'};
+  return{mode:'other',element,locate:focusLocator(element)};
+}
+function settleUndoFocus(focus,key){
+  if(focus.mode==='tree'){focusTreeRow(key);return;}
+  const target=focus.element.isConnected?focus.element:focus.locate?.();
+  if(target&&document.activeElement!==target)target.focus({preventScroll:true});
+}
 async function deleteTaskWithUndo(taskId){
   const task=state.tasks.find(item=>item.id===taskId);
-  if(!task||state.busy||!can('viewer.processing.write'))return;
+  if(!task||state.busy||!taskWritable(task))return;
+  if(LIVE_ATTEMPT_STATUSES.has(task.latestAttempt?.status))return toast('Stop processing before deleting this task.',true);
   const path=`/api/v1/tasks/${encodeURIComponent(task.id)}`;
   if(taskHasPublishedOutput(task))return trashMutation(`This task is published. Deleting it removes it from client shares now, and restoring it later does not publish it again. It can be restored until ${purgeDate(30)}; after that date it will be permanently purged.`,path,'Task moved to Recycle Bin');
   if(!can('viewer.storage.purge'))return trashMutation(`Delete this task and its exclusively owned dataset and outputs? It can be restored until ${purgeDate(30)}; after that date it will be permanently purged.`,path,'Task moved to Recycle Bin');
@@ -1475,13 +1509,13 @@ async function deleteTaskWithUndo(taskId){
   const trashId=result.trash?.id;
   if(!trashId)return;
   offerUndo('Task moved to Recycle Bin',10_000,()=>can('viewer.storage.purge'),async()=>{
+    const undoFocus=captureUndoFocus();
     state.busy=true;shell.setAttribute('aria-busy','true');
     try{await api(`/api/v1/storage/trash/${encodeURIComponent(trashId)}/restore`,{method:'POST',body:{}});}
     catch(error){toast(error.message,true);return;}
     finally{state.busy=false;shell.removeAttribute('aria-busy');}
-    const hadFocus=focus.mode==='moved';
     await load();
-    if(hadFocus)focusTreeRow(key);
+    settleUndoFocus(undoFocus,key);
     flashTreeRow(key);
     announce(`Restored ${task.displayName||'the task'}.`);
     toast('Task restored');
@@ -1500,7 +1534,7 @@ function openTreeRowMenu(row){
   menu.querySelector('.project-more-menu button:not(:disabled)')?.focus();
 }
 function treeMenuKeys(event,menu){
-  const items=[...menu.querySelectorAll('.project-more-menu > button:not(:disabled)')].filter(item=>item.getClientRects().length);
+  const items=[...menu.querySelectorAll('.project-more-menu > button')].filter(item=>item.getClientRects().length);
   const index=items.indexOf(document.activeElement);
   if(event.key==='ArrowDown'){menu.open=true;items[(index+1)%items.length]?.focus();}
   else if(event.key==='ArrowUp'){menu.open=true;items[(index-1+items.length)%items.length]?.focus();}
@@ -1546,8 +1580,8 @@ function treeKeydown(event){
   if(event.key==='F2'){
     event.preventDefault();
     if(kind==='f')startFolderRename(row.dataset.treeProject,id);
-    else if(kind==='t'&&can('viewer.processing.write'))editTask(id);
-    else if(kind==='p'&&can('viewer.projects.write'))editProject(id);
+    else if(kind==='t'&&taskWritable(state.tasks.find(task=>task.id===id)))editTask(id);
+    else if(kind==='p'&&canWriteFolders(state.projects.find(project=>project.id===id)))editProject(id);
   }else if(event.key==='ContextMenu'||event.key==='F10'&&event.shiftKey){event.preventDefault();openTreeRowMenu(row);}
   else if(event.key==='Delete'&&kind==='t'){event.preventDefault();void deleteTaskWithUndo(id);}
 }
