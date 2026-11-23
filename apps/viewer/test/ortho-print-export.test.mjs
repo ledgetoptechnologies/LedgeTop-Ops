@@ -153,7 +153,6 @@ function fakeCanvasFactory(log) {
       putImageData(image) { this.image = image; },
       getImageData(x, y, gw, gh) {
         const data = new Uint8ClampedArray(gw * gh * 4);
-        if (!('image' in this)) return { data: data.fill(255) }; // the note rows' own canvas
         for (let r = 0; r < gh; r++) data.set(this.image.data.subarray(((y + r) * w + x) * 4, ((y + r) * w + x + gw) * 4), r * gw * 4);
         return { data };
       },
@@ -203,9 +202,8 @@ test('export traces contours for the print extent and burns lines, ft labels and
   });
   assert.equal(tif.filename, 'orthophoto-contours-400px.tif');
   const geo = await (await fromArrayBuffer(await tif.blob.arrayBuffer())).getImage();
-  // The note's rows lie below the map: the top-left corner and pixel size are the map's.
-  assert.deepEqual(geo.getBoundingBox(), [500000, 4700200 - geo.getHeight(), 500400, 4700200]);
-  assert.ok(geo.getHeight() > 200);
+  assert.deepEqual(geo.getBoundingBox(), [500000, 4700000, 500400, 4700200]);
+  assert.deepEqual([geo.getWidth(), geo.getHeight()], [400, 200]);
   // Index line at 800 ft is 100 m east of the west edge: x = 100 / gsd.
   const moves = ops.filter(o => o[0] === 'moveTo' || o[0] === 'lineTo').map(o => o[1]);
   assert.ok(moves.some(x => Math.abs(x - 100 * 2048 / 400) < 1), 'an 800 ft vertex lands at the right pixel column');
@@ -304,7 +302,7 @@ test('the legend names the property lines and stays clear of the note', async ()
   assert.ok(others.some(t => /ft$/.test(t.text)), 'scale bar');
   for (const other of others) assert.ok(other.y + other.px / 2 < result.height - 36, other.text);
   const tif = await printWith({ format: 'tif' });
-  assert.equal(joined(tif.texts), '', 'a GeoTIFF still has no legend, and no note over its map pixels');
+  assert.equal(joined(tif.texts), '', 'a GeoTIFF still has no legend, and no text on its pixels');
 });
 
 test('no property lines, no note: the rest of the image is unchanged', async () => {
@@ -331,7 +329,7 @@ test('the note wraps on narrow prints, and an image too small for it is refused 
   const ctx = pixelCanvasFactory([])().getContext(), credit = Array(4).fill(ATTRIBUTION).join(' ');
   for (const [width, height] of [[2048, 1024], [4096, 4096], [6144, 4608], [1280, 720], [720, 1280], [375, 812]]) {
     const size = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
-    const note = layoutPropertyNote(ctx, { width, maxHeight: height * 0.4, scale: size, attribution: credit });
+    const note = layoutPropertyNote(ctx, { width, height, scale: size, attribution: credit });
     assert.equal(note.font.split('px')[0], `600 ${12 * size}`, `${width} x ${height}`);
     assert.equal(note.lines.join(' '), `${PROPERTY_LINES_NOTE} ${credit}`);
   }
@@ -368,35 +366,30 @@ async function readTif(blob) {
 const exportTif = async (options = {}) => {
   const log = [], { ds } = orthoFixture();
   const out = await exportOrthoPrint({ ortho: ds, extent: FULL, longEdge: 800, format: 'tif', epsg: 32616, propertyLines: PARCEL, propertyAttribution: ATTRIBUTION, createCanvas: pixelCanvasFactory(log), ...options });
-  return { log, ...(await readTif(out.blob)) };
+  return { log, out, ...(await readTif(out.blob)) };
 };
 
-test('GeoTIFF with property lines: every map pixel and the georeference are untouched; the note is extra rows below and the description tag', async () => {
-  // The same picture without any note: what the map pixels must be.
+test('GeoTIFF with property lines: same size, bounds, corner, pixel size and pixels as without a note; the note is the description tag', async () => {
+  // The same picture without any note: what the pixels must be.
   const { result, pixel } = await printWith({ format: 'tif', longEdge: 800 });
-  const out = await exportTif();
-  assert.deepEqual([out.width, result.width, result.height], [800, 800, 400]);
-  assert.ok(out.height > 400, `${out.height} rows`);
+  const tif = await exportTif();
+  assert.deepEqual([tif.width, tif.height], [800, 400]);
   const map = [];
   for (let y = 0; y < 400; y++) for (let x = 0; x < 800; x++) map.push(...pixel(x, y));
-  assert.deepEqual(out.rgba.slice(0, 800 * 400 * 4), map, 'every original row, byte for byte');
-  assert.equal(out.rgba[(395 * 800 + 5) * 4 + 3], 0, 'nodata at the bottom of the map is still transparent');
-  const lineAt = (Math.round(400 - 1 / 0.5) * 800 + 400) * 4;
-  assert.deepEqual(out.rgba.slice(lineAt, lineAt + 3), [0xee, 0x50, 0x07], 'the parcel line along the bottom edge is not covered');
-  // The extra rows: opaque white with the text, nothing else.
-  const rows = out.rgba.slice(800 * 400 * 4);
-  assert.ok(rows.every((v, i) => i % 4 !== 3 || v === 255), 'opaque');
-  assert.ok(rows.some((v, i) => i % 4 === 0 && v === 27), 'text ink');
-  assert.deepEqual(rows.slice(-4), [255, 255, 255, 255]);
-  assert.equal(joined(out.log[1].texts), NOTE);
-  assert.equal(out.log[0].texts.length, 0, 'nothing written on the map canvas');
-  // Same corner, same pixel size: the map footprint is where it was, and the rows lie below it.
+  assert.deepEqual(tif.rgba, map, 'every pixel, byte for byte');
+  assert.equal(tif.rgba[(395 * 800 + 5) * 4 + 3], 0, 'nodata at the bottom of the map is still transparent');
+  const lineAt = (398 * 800 + 400) * 4;
+  assert.deepEqual(tif.rgba.slice(lineAt, lineAt + 3), [0xee, 0x50, 0x07], 'the parcel line along the bottom edge is not covered');
+  assert.ok(tif.log.every(canvas => canvas.texts.length === 0), 'no text drawn anywhere');
+  assert.equal(tif.log.length, 1, 'no second canvas');
+  // Decoded bounds are the extent asked for, and what the export reports; nothing south of it.
+  assert.deepEqual(tif.image.getBoundingBox(), [FULL.minE, FULL.minN, FULL.maxE, FULL.maxN]);
+  assert.deepEqual([tif.out.extent, tif.out.width, tif.out.height], [FULL, 800, 400]);
+  assert.deepEqual([result.width, result.height, result.note], [800, 400, null]);
   const plain = await exportTif({ propertyLines: null });
-  assert.deepEqual([out.tiepoint, out.scale, out.geoKeys], [plain.tiepoint, plain.scale, plain.geoKeys]);
-  assert.deepEqual(out.tiepoint, [0, 0, 0, 500000, 4700200, 0]);
-  assert.deepEqual(out.scale.slice(0, 2), [0.5, 0.5]);
-  assert.deepEqual(out.image.getBoundingBox(), [500000, 4700200 - out.height * 0.5, 500400, 4700200]);
-  assert.equal(String(out.description).replace(/\0+$/, ''), NOTE);
+  assert.deepEqual([tif.tiepoint, tif.scale, tif.geoKeys, tif.image.getBoundingBox()], [plain.tiepoint, plain.scale, plain.geoKeys, plain.image.getBoundingBox()]);
+  assert.deepEqual([tif.tiepoint, tif.scale.slice(0, 2)], [[0, 0, 0, 500000, 4700200, 0], [0.5, 0.5]]);
+  assert.equal(String(tif.description).replace(/\0+$/, ''), NOTE);
 });
 
 test('a plain GeoTIFF is unchanged: no extra rows, no description', async () => {
@@ -412,13 +405,11 @@ test('a plain GeoTIFF is unchanged: no extra rows, no description', async () => 
   assert.deepEqual(tif.image.getBoundingBox(), [500000, 4700000, 500400, 4700200]);
 });
 
-test('GeoTIFF note: a small map still gets its rows, plain characters go in the tag, and a blocked note canvas stops the export', async () => {
+test('GeoTIFF note: plain characters go in the tag, at any map size', async () => {
   const small = await exportTif({ longEdge: 120, propertyAttribution: 'Source: State Cartographer’s Parcel Map – R1.' });
   assert.equal(String(small.description).replace(/\0+$/, ''), `${PROPERTY_LINES_NOTE} Source: State Cartographer's Parcel Map - R1.`);
-  assert.ok(small.height > 60);
-  let made = 0;
-  const factory = pixelCanvasFactory([]);
-  await assert.rejects(exportTif({ createCanvas: () => (++made === 1 ? factory() : { width: 0, height: 0, getContext: () => null }) }), { code: 'print_too_large' });
+  assert.deepEqual([small.width, small.height], [120, 60]);
+  assert.deepEqual(small.image.getBoundingBox(), [500000, 4700000, 500400, 4700200]);
 });
 
 test('the Viewer prints the same source as its on-screen notice, taken with the lines', () => {

@@ -8,8 +8,8 @@ import { isRgbNoData } from './orthophoto-mask.mjs';
 
 export const PRINT_SIZES = Object.freeze([2048, 4096, 6144]);
 export const PRINT_STRIP_SOURCE_PIXELS = 12_000_000;
-// Goes with every export that shows property lines: a band on a PNG, extra
-// rows below the map (and the description tag) in a GeoTIFF.
+// Goes with every export that shows property lines: a band on a PNG, the
+// description tag in a GeoTIFF (whose pixels and bounds are map data).
 export const PROPERTY_LINES_NOTE = 'Property lines are approximate, not a survey.';
 const PROPERTY_LINE = Object.freeze({ color: BRAND_COLORS.orange, halo: 'rgba(17,17,17,0.55)', width: 2.5, haloWidth: 5 });
 
@@ -119,10 +119,10 @@ export function propertyNoteText(attribution) { return `${PROPERTY_LINES_NOTE} $
 
 /**
  * The property-line note as wrapped lines for a band `width` wide: legend-size
- * text, smaller where it would take more than `maxHeight`. An image too small
+ * text, smaller where it would take more than 40% of the height. An image too small
  * to carry it legibly is refused, so the lines never leave without the note.
  */
-export function layoutPropertyNote(ctx, { width, maxHeight = Infinity, scale, attribution = '' }) {
+export function layoutPropertyNote(ctx, { width, height, scale, attribution = '' }) {
   const words = propertyNoteText(attribution).split(' ');
   const pad = 6 * scale, room = width - pad * 2;
   ctx.save();
@@ -138,14 +138,15 @@ export function layoutPropertyNote(ctx, { width, maxHeight = Infinity, scale, at
         if (longer && fits(longer)) lines[lines.length - 1] = longer; else lines.push(word);
       }
       const lineHeight = Math.ceil(px * 1.3), bandHeight = Math.ceil(lines.length * lineHeight + pad * 2);
-      if (bandHeight <= maxHeight) return { lines, font, lineHeight, bandHeight, pad };
+      if (bandHeight <= height * 0.4) return { lines, font, lineHeight, bandHeight, pad };
     }
   } finally { ctx.restore(); }
   throw Object.assign(new Error('This image is too small to carry the property line note. Choose a larger area, or export without property lines.'), { code: 'print_note' });
 }
 
 // Opaque, and drawn last: nothing covers it.
-function drawPropertyNote(ctx, { lines, font, lineHeight, bandHeight, pad }, { width, top }) {
+function drawPropertyNote(ctx, { lines, font, lineHeight, bandHeight, pad }, { width, height }) {
+  const top = height - bandHeight;
   ctx.save();
   ctx.fillStyle = '#ffffff'; ctx.fillRect(0, top, width, bandHeight);
   ctx.font = font; ctx.fillStyle = '#1b1b1b'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
@@ -319,9 +320,9 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
   const scale = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
   let note = null;
   try {
-    // On a PNG the note is part of the picture. A GeoTIFF's pixels are map data:
-    // its note goes in rows below them (exportOrthoPrint), never on them.
-    if (propertyLines?.length) note = layoutPropertyNote(ctx, { width, maxHeight: print ? height * 0.4 : Infinity, scale, attribution: propertyAttribution });
+    // Part of the picture on a PNG only. A GeoTIFF's pixels are map data; its
+    // note is a tag (exportOrthoPrint).
+    if (print && propertyLines?.length) note = layoutPropertyNote(ctx, { width, height, scale, attribution: propertyAttribution });
     const { rgba } = await renderOrthoPixels({ ds: ortho, extent, width, height, signal, pool, maxStripPixels, background: print ? [255, 255, 255] : null });
     putPixels(ctx, rgba, width, height);
   } catch (error) { release(); if (error instanceof RangeError) throw tooLarge(); throw error; }
@@ -344,28 +345,13 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
   }
   if (print) {
     drawLegend(ctx, { width, height, gsdE, units: contours?.units || units, contours, propertyColor: propertyCount ? lineColor : null, bottom: note?.bandHeight || 0, scale, colors });
-    if (note) drawPropertyNote(ctx, note, { width, top: height - note.bandHeight });
+    if (note) drawPropertyNote(ctx, note, { width, height });
     // A canvas the browser could not back reads as blank: the print's
     // corner is always opaque (white or imagery).
     const corner = ctx.getImageData(width - 1, height - 1, 1, 1).data;
     if (corner[3] !== 255) { release(); throw tooLarge(); }
   }
   return { canvas, ctx, width, height, extent, gsdE, gsdN, contours: drawn, propertyLines: propertyCount, note };
-}
-
-// The note as its own rows, for a GeoTIFF: { rgba, height }.
-function renderNoteRows(note, width, createCanvas) {
-  const canvas = createCanvas(width, note.bandHeight);
-  canvas.width = width; canvas.height = note.bandHeight;
-  try {
-    const ctx = canvas.getContext('2d');
-    if (!ctx || canvas.width !== width || canvas.height !== note.bandHeight) throw tooLarge();
-    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, width, note.bandHeight);
-    drawPropertyNote(ctx, note, { width, top: 0 });
-    const rgba = ctx.getImageData(0, 0, width, note.bandHeight).data;
-    if (rgba[3] !== 255 || rgba[rgba.length - 1] !== 255) throw tooLarge();
-    return { rgba, height: note.bandHeight };
-  } finally { canvas.width = 0; canvas.height = 0; }
 }
 
 // TIFF text tags are 7-bit ASCII ending in NUL.
@@ -379,15 +365,13 @@ function tiffAscii(text) {
  * little-endian, uncompressed, one strip. Written directly (header, IFD,
  * then one set() of the pixels) so a 6144 px print encodes without a
  * per-byte JavaScript array.
- * `rows` ({ rgba, height }, optional) are appended below the map: the corner
- * and pixel size stay the map's, so the map's own pixels do not move or change.
  * `description` (optional) is the ImageDescription tag.
  */
-export function encodePrintGeoTiff({ rgba, width, height: mapHeight, extent, epsg, rows = null, description = '' }) {
+export function encodePrintGeoTiff({ rgba, width, height, extent, epsg, description = '' }) {
   if (!Number.isInteger(epsg) || epsg <= 0 || epsg > 65535) throw Object.assign(new Error('GeoTIFF needs a verified coordinate reference. Export PNG instead.'), { code: 'print_crs' });
-  const mapBytes = width * mapHeight * 4, height = mapHeight + (rows?.height || 0), pixelBytes = width * height * 4;
-  if (rgba.length !== mapBytes || (rows && rows.rgba.length !== pixelBytes - mapBytes)) throw new RangeError('RGBA buffer does not match the image size.');
-  const gsdE = (extent.maxE - extent.minE) / width, gsdN = (extent.maxN - extent.minN) / mapHeight;
+  const pixelBytes = width * height * 4;
+  if (rgba.length !== pixelBytes) throw new RangeError('RGBA buffer does not match the image size.');
+  const gsdE = (extent.maxE - extent.minE) / width, gsdN = (extent.maxN - extent.minN) / height;
   const ASCII = 2, SHORT = 3, LONG = 4, DOUBLE = 12, size = { [ASCII]: 1, [SHORT]: 2, [LONG]: 4, [DOUBLE]: 8 };
   // GeoKeyDirectory: version 1.1.0, 3 keys: projected model, PixelIsArea, EPSG code.
   const geoKeys = [1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, epsg];
@@ -423,9 +407,7 @@ export function encodePrintGeoTiff({ rgba, width, height: mapHeight, extent, eps
     else { view.setUint32(at + 8, offset, true); values.forEach((v, j) => put(type, offset + j * size[type], v)); }
   });
   view.setUint32(ifdOffset + 2 + entries.length * 12, 0, true); // no further IFDs
-  const bytes = data => (data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
-  out.set(bytes(rgba), stripOffset);
-  if (rows) out.set(bytes(rows.rgba), stripOffset + mapBytes);
+  out.set(rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength), stripOffset);
   return out.buffer;
 }
 
@@ -453,9 +435,8 @@ export async function exportOrthoPrint({ format = 'png', epsg = null, traceConto
       let rgba;
       try { rgba = result.ctx.getImageData(0, 0, result.width, result.height).data; } catch { throw tooLarge(); }
       release(); // the pixels are copied out; free the canvas before encoding
-      const rows = result.note ? renderNoteRows(result.note, result.width, opts.createCanvas) : null;
-      let buffer = encodePrintGeoTiff({ rgba, width: result.width, height: result.height, extent: result.extent, epsg, rows,
-        description: result.note ? propertyNoteText(opts.propertyAttribution) : '' });
+      let buffer = encodePrintGeoTiff({ rgba, width: result.width, height: result.height, extent: result.extent, epsg,
+        description: result.propertyLines ? propertyNoteText(opts.propertyAttribution) : '' });
       rgba = null; // drop the read-back copy before the Blob takes its own
       blob = new Blob([buffer], { type: 'image/tiff' });
       buffer = null;
