@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { validatePortalReleasePreflight } from '../apps/client/scripts/project-alpha-portal-receiver-preflight.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { assertHeldOpsSyncCompanion } from './ops-sync-companion-witness.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const PROFILE = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/production-deploy-profile.json')));
@@ -211,8 +212,14 @@ export function validateReviewedExpectedDeploymentVersions(value) {
 }
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
   ordinaryFrontendPreflightMode, ordinaryFrontendApp, assetAssociationOverrides = {},
-  opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId } = {}) {
+  opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId, heldOpsSyncCompanionWitness } = {}) {
   const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
+  if (heldOpsSyncCompanionWitness !== undefined) {
+    need(selectedApp === 'operations' && ordinaryFrontendApp === 'operations'
+      && ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+      && opsSuccessorReaderContract === undefined, 'Held Ops Sync companion is limited to canonical Operations release');
+    assertHeldOpsSyncCompanion(heldOpsSyncCompanionWitness, snapshot);
+  }
   need(assetAssociationOverrides && Object.getPrototypeOf(assetAssociationOverrides) === Object.prototype,
     'Unreviewed canonical v4 asset association override');
   const overrideApps = Object.keys(assetAssociationOverrides ?? {});
@@ -250,7 +257,10 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     need(s.version.id === id && s.modern.id === id && UUID.test(s.latest), 'Active/version identity invalid');
     if (!selectedApp || app === selectedApp) need(s.latest === (allowLatest[app] ?? id), 'Latest must equal the selected sole active version; reconcile an incomplete deployment first');
     else if (s.latest !== id) {
-      need(s.latestVersion?.id === s.latest && s.latestModern?.id === s.latest && s.latestVersion.resources.script.last_deployed_from === 'wrangler', 'Unselected inactive version lacks native metadata proof');
+      const witnessedSync = app === 'ops-sync' && heldOpsSyncCompanionWitness !== undefined;
+      need(s.latestVersion?.id === s.latest && s.latestModern?.id === s.latest
+        && (s.latestVersion.resources.script.last_deployed_from === 'wrangler' || witnessedSync),
+      'Unselected inactive version lacks native metadata proof');
       need(equal(resourcesShape(s.latestVersion.resources), resourcesShape(s.version.resources)) && equal(s.latestModern.assets ?? null, s.modern.assets ?? null), 'Unselected rolling version changed resources or assets');
     }
     need(equal(without(s.settings, ['bindings', 'annotations']), spec.settings), `${app}: unrecognized production settings`);
@@ -312,11 +322,11 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
 }
 
 export function compileConfig(snapshot, app, main, profile = PROFILE, expectedDeploymentVersions, ordinaryFrontendPreflightMode,
-  opsSuccessorReaderContract) {
+  opsSuccessorReaderContract, heldOpsSyncCompanionWitness) {
   const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
   validateInstallation(snapshot, { profile, selectedApp: app, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
     ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
-    opsSuccessorReaderContract }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
+    opsSuccessorReaderContract, heldOpsSyncCompanionWitness }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
   const s = snapshot[app], spec = profile.workers[app];
   const annotations = clone(s.settings.annotations ?? {});
   delete annotations['workers/triggered_by']; // API-owned, rejected by native versions upload.

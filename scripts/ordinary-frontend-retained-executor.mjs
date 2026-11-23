@@ -1,3 +1,5 @@
+import { assertHeldOpsSyncCompanion, assertHeldOpsSyncCompanionMap,
+  heldOpsSyncCompanionReceipt } from './ops-sync-companion-witness.mjs';
 /** Explicit callable native-Wrangler executor for retained ordinary frontends.
  * It is intentionally not wired into production-deploy's CLI or automation. */
 import fs from 'node:fs';
@@ -131,7 +133,7 @@ function appendProviderResponseDigest(directory, response) {
   try { fs.writeSync(fd, `${JSON.stringify(detail)}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
-async function verifyVersionAssets({ provider, application, workerName, entries, versionId, journalDirectory, receiptName }) {
+async function verifyVersionAssets({ provider, application, workerName, entries, versionId, journalDirectory, receiptName, concurrency = 1 }) {
   needFn(provider && ['createVerifier','fetchVerifierAsset','removeVerifier','verifierAbsent'].every(name => typeof provider[name] === 'function'),
     'Journaled native asset verifier provider required');
   needFn(['operations', 'client'].includes(application) && WORKERS[application].name === workerName
@@ -140,7 +142,7 @@ async function verifyVersionAssets({ provider, application, workerName, entries,
   const manifest = entries.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, contentType: mime }));
   appendIntent(journalDirectory, 'temporary-asset-verifier-create', { workerName, verifiedVersionId: versionId, verifierName: name,
     assetCount: manifest.length, receiptName, automaticRetry: false });
-  const result = await executeAssetVerification({ entries: manifest, timeoutMs: 300_000,
+  const result = await executeAssetVerification({ entries: manifest, timeoutMs: 300_000, concurrency,
     create: () => provider.createVerifier({ name, workerName,
       origin: WORKERS[application].origin, entries: manifest, nonceHash: nonce.nonceHash, versionId }),
     fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath,
@@ -358,6 +360,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
   frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
+  heldOpsSyncCompanionWitness, reviewedCompanionExecutorCommit,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
   readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
@@ -422,7 +425,32 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   if (ordinaryPlan.expectedDeploymentVersions !== undefined) needFn(equal(expectedDeploymentVersions, ordinaryPlan.expectedDeploymentVersions),
     'Executor deployment weights differ from exact pinned plan');
   const sourceCommit = ordinaryPlan.sourceCommit;
+  const companionReceipt = heldOpsSyncCompanionWitness === undefined ? undefined
+    : heldOpsSyncCompanionReceipt(heldOpsSyncCompanionWitness, sourceCommit);
+  needFn(equal(ordinaryPlan.heldOpsSyncCompanion, companionReceipt),
+    'Exact held Ops Sync companion witness differs from the reviewed plan');
+  if (companionReceipt) needFn(app === 'operations' && !resumeCandidate
+    && staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT
+    && ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+    && !installedOpsSuccessorReaderContract && !opsSuccessorReaderPromotionContract
+    && !canonicalBrowserRetirementSelector,
+  'Held Ops Sync companion is restricted to a new canonical Operations preservation release');
+  if (companionReceipt) needFn(expectedDeploymentVersions === undefined,
+    'Held Ops Sync companion requires the pinned sole-active Operations baseline');
+  const soleActiveOperationsBaseline = operationsSuccessorPromotion || companionReceipt !== undefined;
+  const recheckCompanion = async (phase, expectedVersions, phaseSnapshot) => {
+    if (!companionReceipt) return;
+    const snapshot = await captureFn(reader, {selectedApp:app, expectedDeploymentVersions:expectedVersions});
+    assertHeldOpsSyncCompanion(heldOpsSyncCompanionWitness, snapshot);
+    needFn(equal(snapshot.operations, phaseSnapshot.operations),
+      `Operations changed at the exact Team release fence (${phase})`);
+  };
   const artifactCommit = sourceReader(artifactSourceRoot), executorCommit = sourceReader(executorSourceRoot);
+  needFn(companionReceipt ? executorCommit === reviewedCompanionExecutorCommit
+    && /^[a-f0-9]{40}$/u.test(reviewedCompanionExecutorCommit ?? '')
+    && reviewedCompanionExecutorCommit === ordinaryPlan.reviewedCompanionExecutorCommit
+    : reviewedCompanionExecutorCommit === undefined && ordinaryPlan.reviewedCompanionExecutorCommit === undefined,
+  'Exact independently reviewed Team executor checkout differs from the approved plan');
   needFn(artifactCommit === sourceCommit && pinnedPlan.sourceCommit === sourceCommit
     && /^[a-f0-9]{40}$/u.test(executorCommit ?? ''),
   'Ordinary release artifacts and clean executor checkout provenance must be independently pinned');
@@ -439,7 +467,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     const rows = expectedDeploymentVersions?.operations;
     if (operationsSuccessorPromotion) needFn(expectedDeploymentVersions === undefined,
       'Operations successor promotion requires the pinned sole-active-version baseline');
-    else needFn(Array.isArray(rows) && rows.length === 2
+    else if (!soleActiveOperationsBaseline) needFn(Array.isArray(rows) && rows.length === 2
         && rows.filter(row => row.percentage === 100).length === 1
         && rows.filter(row => row.percentage === 0).length === 1,
       'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
@@ -449,11 +477,15 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     ? validateInstallation(structuredClone(resumeCandidate.originalSnapshot), { profile, selectedApp: app, expectedDeploymentVersions,
       ordinaryFrontendPreflightMode, ordinaryFrontendApp: app })
     : validateTransitionControlCapture(liveAtStart, liveAtStart, pinnedPlan, { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, opsSuccessorReaderContract: baselineOpsReaderContract });
+      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, heldOpsSyncCompanionWitness, opsSuccessorReaderContract: baselineOpsReaderContract });
   const baselineVersionId = before[app].version.id;
+  if (companionReceipt) needFn(baselineVersionId === companionReceipt.opsBaselineVersionId
+    && before.operations.deployment.id === companionReceipt.opsDeploymentId
+    && hash(canonical(before)) === ordinaryPlan.baselineSHA256,
+  'Held Ops Sync companion release baseline changed before asset verification');
   const operationsBaselineRows = expectedDeploymentVersions?.operations
     ?? before.operations.deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage }));
-  if (app === 'operations') needFn(operationsSuccessorPromotion
+  if (app === 'operations') needFn(soleActiveOperationsBaseline
     ? operationsBaselineRows.length === 1 && operationsBaselineRows[0].versionId === baselineVersionId
       && operationsBaselineRows[0].percentage === 100
     : expectedDeploymentVersions.operations.some(row => row.versionId === baselineVersionId && row.percentage === 100),
@@ -526,6 +558,12 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     return receipt;
   };
   await qualifyStaff('before-prior-asset-verification');
+  if (companionReceipt) {
+    const syncHeldVersion = companionReceipt.syncHeldVersionId;
+    assertHeldOpsSyncCompanionMap(heldOpsSyncCompanionWitness,
+      await reader.get(`/workers/workers/ledgetop-ops-sync/versions/${syncHeldVersion}?include=modules,sourcemaps`));
+  }
+  await recheckCompanion('before-prior-asset-verification', expectedDeploymentVersions, liveAtStart);
   preparePrivateProductionDirectory(journalDirectory);
   if (resumeCandidate) writePrivateJson(journalDirectory, 'resume-candidate.private.json', {
     schemaVersion: 1, candidateId: priorResumeProof.candidateId, baselineVersionId,
@@ -535,6 +573,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     priorReleasePlanSHA256: priorResumeProof.priorPlanSHA256, uploadReplayed: false,
   });
   const priorAssetBytes = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
+    concurrency: companionReceipt ? 3 : 1,
     entries: priorBytesRows, versionId: baselineVersionId, journalDirectory, receiptName: 'verified-prior-active-assets' });
   const previousLedger = bootstrap
     ? completeOpsLegacyLedgerBootstrap(bootstrap, { verifiedAssets: priorAssetBytes, verifiedVersionId: baselineVersionId })
@@ -545,9 +584,11 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
     installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}),
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
-    ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }) });
+    ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }),
+    heldOpsSyncCompanionWitness });
   writePrivateJson(journalDirectory, 'release-plan.private.json', { schemaVersion: 2, contract: pinnedPlan.contract,
     application: app, sourceCommit, baselineVersionId, ordinaryPlanSHA256: pinnedPlan.ordinaryPlanSHA256,
+    ...(companionReceipt ? { heldOpsSyncCompanion: companionReceipt, reviewedCompanionExecutorCommit } : {}),
     ledgerSHA256: pinnedPlan.retentionLedgerSHA256, rollbackVersionId: baselineVersionId,
     assetProviderIdentifierProvenance: pinnedPlan.assetProviderIdentifierProvenance,
     oldAssetCount: previousLedger.assets.length, retainedAssetCount: pinnedPlan.retentionLedger.assets.length });
@@ -561,7 +602,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   if (resumeCandidate) assertResumeControls(before, preuploadRaw, { app, candidateId: resumeCandidate.candidateId, profile, expectedDeploymentVersions });
   else {
     validateTransitionControlCapture(preuploadRaw, before, pinnedPlan, { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, heldOpsSyncCompanionWitness,
       opsSuccessorReaderContract: baselineOpsReaderContract });
     needFn(equal(stableState(before, app), stableState(preuploadRaw, app)), 'Production controls changed before native asset/module upload');
   }
@@ -569,7 +610,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
     installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}),
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
-    ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }) });
+    ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }),
+    heldOpsSyncCompanionWitness });
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate qualification');
   let candidateId;
   if (resumeCandidate) {
@@ -578,6 +620,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
       resumedFromPriorUpload: true, uploadReplayed: false });
   } else {
     await qualifyStaff('before-upload-dispatch');
+    await recheckCompanion('before-upload-dispatch', expectedDeploymentVersions, preuploadRaw);
     appendIntent(journalDirectory, 'native-version-upload', { sourceCommit, workerName, parentVersionId: baselineVersionId,
       mainSHA256: ordinaryPlan.release.main.sha256, mapSHA256: ordinaryPlan.release.sourceMap.sha256,
       ledgerSHA256: pinnedPlan.retentionLedgerSHA256, assetInventorySHA256: ordinaryPlan.browserProof.inventorySHA256 });
@@ -607,7 +650,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const inactiveRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: candidateExpected });
   const inactive = validateTransitionControlCapture(inactiveRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, heldOpsSyncCompanionWitness,
     opsSuccessorReaderContract: baselineOpsReaderContract });
   const expectedInactive = structuredClone(before); expectedInactive[app].latest = candidateId;
   for (const [name, value] of Object.entries(ordinaryPlan.canonicalBrowserRetirementTransition?.targetScalars ?? [])) {
@@ -621,6 +664,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const stageRows = [{ versionId: baselineVersionId, percentage: 100 }, { versionId: candidateId, percentage: 0 }];
   const stageExpectations = expectedForPhase(expectedDeploymentVersions, app, stageRows);
   await qualifyStaff('before-candidate-namespace-stage');
+  await recheckCompanion('before-candidate-namespace-stage', expectedDeploymentVersions, inactiveRaw);
   if (resumeCandidate) assertResumeControls(before, await captureFn(reader, { selectedApp: app, expectedDeploymentVersions }), {
     app, candidateId, profile, expectedDeploymentVersions });
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate namespace stage');
@@ -634,12 +678,14 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const stagedRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations });
   const staged = validateTransitionControlCapture(stagedRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, heldOpsSyncCompanionWitness,
     opsSuccessorReaderContract: baselineOpsReaderContract });
   needFn(equal(deploymentRows(staged, app), [...stageRows].sort((a, b) => a.versionId.localeCompare(b.versionId)))
     && sameExceptSelectedDeployment(inactive, staged, app), 'Candidate namespace stage did not produce exact baseline100/candidate0 with unchanged controls');
   await qualifyStaff('before-candidate-asset-verification');
+  await recheckCompanion('before-candidate-asset-verification', stageExpectations, stagedRaw);
   const candidateAssetBytes = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
+    concurrency: companionReceipt ? 3 : 1,
     entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-candidate-assets' });
   needFn(candidateAssetBytes.size === pinnedPlan.retentionLedger.assets.length && pinnedPlan.retentionLedger.assets.every(row => {
     const bytes = candidateAssetBytes.get(row.path); return Buffer.isBuffer(bytes) && bytes.length === row.size && sha(bytes) === row.sha256;
@@ -655,12 +701,13 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const preactivationRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations });
   const preactivation = validateTransitionControlCapture(preactivationRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, heldOpsSyncCompanionWitness,
     opsSuccessorReaderContract: baselineOpsReaderContract });
   needFn(equal(deploymentRows(preactivation, app), deploymentRows(staged, app))
     && equal(stableState(staged, app), stableState(preactivation, app)), 'Staged deployment or controls changed immediately before activation');
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before activation');
   const preactivationReadiness = await qualifyStaff('before-activation');
+  await recheckCompanion('before-activation', stageExpectations, preactivationRaw);
   if (preactivationReadiness) writePrivateJson(journalDirectory, 'staff-before-activation.private.json', preactivationReadiness);
 
   appendIntent(journalDirectory, 'native-version-activate', { sourceCommit, workerName, candidateVersionId: candidateId,
@@ -672,7 +719,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
   const after = validatePostActivationCapture(afterRaw, before, pinnedPlan, { profile, selectedApp: app,
     expectedDeploymentVersions: activationExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, heldOpsSyncCompanionWitness,
     opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
       : namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract,
     ...(operationsSuccessorPromotion ? { opsSuccessorReaderReleaseCandidateId: candidateId } : {}) });
@@ -693,14 +740,16 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(equal(rollbackVersion, before[app].version) && equal(rollbackModern, before[app].modern),
     'Exact baseline rollback version metadata changed; keep release held');
   await qualifyStaff('before-active-namespace-verification');
+  await recheckCompanion('before-active-namespace-verification', activationExpectations, afterRaw);
   const activeAssets = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
+    concurrency: companionReceipt ? 3 : 1,
     entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-active-assets' });
   const postNamespaceRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
   if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, postNamespaceRaw.operations.version, {
     sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
   const postNamespace = validatePostActivationCapture(postNamespaceRaw, before, pinnedPlan, {
     profile, selectedApp: app, expectedDeploymentVersions: activationExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, heldOpsSyncCompanionWitness,
     opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
       : namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract,
     ...(operationsSuccessorPromotion ? { opsSuccessorReaderReleaseCandidateId: candidateId } : {}) });
@@ -711,6 +760,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && equal(stableState(after, app), stableState(postNamespace, app)),
   'Production controls changed during post-cutover namespace byte verification');
   await qualifyStaff('after-active-namespace-verification');
+  await recheckCompanion('after-active-namespace-verification', activationExpectations, postNamespaceRaw);
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed during post-cutover verification');
   const providerCutoverAt = after[app].deployment.created_on, parsedCutover = parseProviderUtcTimestamp(providerCutoverAt);
   needFn(parsedCutover,
@@ -774,7 +824,8 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
   staffAuthorityContract = 'native-staff-cutover-v1', artifactSourceRoot, staffReviewPath,
   frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract,
-  canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
+  canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId, heldOpsSyncCompanionWitness,
+  reviewedCompanionExecutorCommit,
   journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
@@ -812,7 +863,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     installedOpsSuccessorReaderContract,
     opsSuccessorReaderPromotionContract,
     canonicalBrowserRetirementSelector,
-    canonicalBrowserRetirementClientVersionId,
+    canonicalBrowserRetirementClientVersionId, heldOpsSyncCompanionWitness, reviewedCompanionExecutorCommit,
     reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),

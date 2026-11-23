@@ -7,8 +7,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hash, canonical, validateInstallation, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+import { hash, canonical, validateInstallation, PROFILE, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ordinaryFrontendPreflightDescriptor,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } from './production-deploy.mjs';
+import { createHeldOpsSyncCompanionWitness } from './ops-sync-companion-witness.mjs';
 import { compileOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { compileOrdinaryFrontendRetainedPlan } from './ordinary-frontend-retained-plan.mjs';
 import { compileCanonicalBrowserRetirementTransition } from './ordinary-frontend-canonical-browser-retirement.mjs';
@@ -25,6 +27,9 @@ import { POST0226_LOGIN_TABLES, POST0226_STAFF_PRESERVATION_CONTRACT, createPost
 const fixturePath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_PRIVATE_FIXTURE;
 const opsBytePathsPath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_OPS_BYTE_PATHS;
 const opsSuccessorSnapshotPath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_OPS_SUCCESSOR_SNAPSHOT;
+const teamCompanionSnapshotPath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_TEAM_COMPANION_SNAPSHOT;
+const teamHeldSyncJournalPath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_TEAM_SYNC_JOURNAL;
+const teamImmutableSyncMapPath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_TEAM_SYNC_MAP;
 const opsAssetRoot = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_OPS_ASSET_ROOT
   ?? 'C:/Users/fstor/.codex/artifacts/ui-retained-packets-b0c99cdd-20261028-v3/operations-packet/assets';
 const HEX40 = /^[a-f0-9]{40}$/u;
@@ -170,18 +175,20 @@ async function syntheticPost0226StaffPreservation(sourceCommit) {
 async function harness(t, fixture, app, { failCandidateAssets = false, failStaff = false,
   frontendAuthority = false, driftFrontendAuthorityAt = 0, post0226Authority = false, driftPost0226At = 0,
   opsSuccessorPromotion = false, canonicalBrowserRetirement = false, canonicalBrowserRetirementClientVersionId,
-  canonicalClientDrift, snapshotOverride, candidateId: candidateIdOverride } = {}) {
+  canonicalClientDrift, snapshotOverride, candidateId: candidateIdOverride, heldOpsSyncCompanionWitness,
+  lateOperationsDrift, teamSyncMapProjection } = {}) {
   const before = clone(snapshotOverride ?? fixture.snapshot), artifact = assetFiles(t, app), sourceCommit = fixture.artifactSourceCommit;
   assert.ok(HEX40.test(sourceCommit)); artifact.release.sourceCommit = sourceCommit;
-  const expectedDeploymentVersions = opsSuccessorPromotion || canonicalBrowserRetirement
+  const expectedDeploymentVersions = opsSuccessorPromotion || canonicalBrowserRetirement || heldOpsSyncCompanionWitness
     ? undefined : { operations: clone(FIXED_OPS_WEIGHTS) };
+  const reviewedCompanionExecutorCommit = heldOpsSyncCompanionWitness ? fixture.executorSourceCommit : undefined;
   let previousLedger, previousAssetBytes, ordinaryPlan, retainedPlan;
   if (failStaff && app === 'operations') {
     ordinaryPlan = { application: app, sourceCommit, expectedDeploymentVersions, baselineSHA256: hash(canonical(before)) };
     retainedPlan = { schemaVersion: 2, contract: 'ordinary-frontend-retained-native-module-v2', sourceCommit,
       ordinaryPlan, retentionLedger: { observedAt: new Date().toISOString() } };
     previousAssetBytes = new Map();
-  } else if (app === 'operations' && opsSuccessorPromotion) {
+  } else if (app === 'operations' && (opsSuccessorPromotion || heldOpsSyncCompanionWitness)) {
     ({ ledger: previousLedger, bytes: previousAssetBytes } = syntheticClientPrior(before, app));
   } else if (app === 'operations') {
     const context = prepareOpsLegacyLedgerBootstrap(before);
@@ -191,13 +198,15 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
   } else ({ ledger: previousLedger, bytes: previousAssetBytes } = syntheticClientPrior(before, app));
   if (!(failStaff && app === 'operations')) {
     ordinaryPlan = compileOrdinaryFrontendReleasePlan(before, { app, release: artifact.release, profile: fixture.profile,
-      expectedDeploymentVersions, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
+      expectedDeploymentVersions, heldOpsSyncCompanionWitness, reviewedCompanionExecutorCommit,
+      ordinaryFrontendPreflightMode: heldOpsSyncCompanionWitness
+        ? ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE : ORDINARY_FRONTEND_PREFLIGHT_MODE,
       ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
       ...(canonicalBrowserRetirement ? { canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1',
         ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }
           : { canonicalBrowserRetirementClientVersionId }) } : {}) });
     retainedPlan = compileOrdinaryFrontendRetainedPlan(before, { ordinaryPlan, profile: fixture.profile,
-      previousLedger, previousAssetBytes, observedAt: new Date().toISOString(),
+      previousLedger, previousAssetBytes, observedAt: new Date().toISOString(), heldOpsSyncCompanionWitness,
       ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
       ...(canonicalBrowserRetirement ? { canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1',
         ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }
@@ -228,6 +237,8 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
       throw new Error('Unexpected candidate version GET');
     },
     async get(suffix) {
+      if (teamSyncMapProjection && suffix === '/workers/workers/ledgetop-ops-sync/versions/bc65f489-e8dd-4ef8-8411-abca3b3ef464?include=modules,sourcemaps')
+        return clone(teamSyncMapProjection);
       const versionId = suffix.match(/versions\/([^?]+)/)?.[1];
       if (suffix.includes('/workers/workers/')) return clone(versionId === candidateId ? candidateModern : before[app].modern);
       if (versionId === candidateId) return clone(candidateVersion);
@@ -236,7 +247,10 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
     },
   };
   const assetVerifierProvider = {
-    async createVerifier({ name, versionId }) { providerEvents.push(['create', versionId]); verifierVersions.set(name, versionId); },
+    async createVerifier({ name, versionId, workerName }) {
+      assert.equal(workerName, targetWorker);
+      providerEvents.push(['create', versionId]); verifierVersions.set(name, versionId);
+    },
     async fetchVerifierAsset({ name, path: assetPath, method }) {
       const versionId = verifierVersions.get(name), source = versionId === candidateId ? candidateAssets : previousAssetBytes;
       if (failCandidateAssets && versionId === candidateId) throw new Error('synthetic candidate asset failure');
@@ -310,6 +324,7 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
   const post0226Packet = post0226Authority ? await syntheticPost0226StaffPreservation(sourceCommit) : null;
   const post0226AuthorityPhases = [], post0226ReaderCalls = [];
   const frontendAuthorityPhases = [], options = { app, plan: retainedPlan, profile: fixture.profile, expectedDeploymentVersions,
+    heldOpsSyncCompanionWitness, reviewedCompanionExecutorCommit,
     ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
     ...(canonicalBrowserRetirement ? { canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1',
       ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }
@@ -332,6 +347,7 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
       post0226ReaderCalls.push(clone(args));
       post0226AuthorityPhases.push(post0226AuthorityPhases.length + 1);
       const observation = post0226Packet?.observation();
+      lateOperationsDrift?.(active.operations, post0226AuthorityPhases.length);
       if (driftPost0226At === post0226AuthorityPhases.length) {
         observation.baseSnapshotSha256 = 'c'.repeat(64);
         observation.baseTableCounts.roles += 1;
@@ -656,6 +672,120 @@ test('private captured fc9 baseline: post-0226 drift prevents successor promotio
     assert.equal(h.providerEvents.filter(row => row[0] === 'create').length,
       h.providerEvents.filter(row => row[0] === 'remove').length, 'temporary asset verifiers are removed after the held release');
   });
+
+const skipTeamCompanion = !fixturePath || !teamCompanionSnapshotPath || !teamHeldSyncJournalPath || !teamImmutableSyncMapPath;
+async function teamCompanionHarness(t, options = {}) {
+  const sourceCommit = '52d5a57d74814c821d8de39854b6a2a86b25ecab';
+  const fixture = {...JSON.parse(fs.readFileSync(fixturePath, 'utf8')), profile:PROFILE, artifactSourceCommit:sourceCommit};
+  const snapshot = JSON.parse(fs.readFileSync(teamCompanionSnapshotPath, 'utf8'));
+  const immutableMapEvidenceBytes = fs.readFileSync(teamImmutableSyncMapPath);
+  const heldOpsSyncCompanionWitness = createHeldOpsSyncCompanionWitness({
+    accountId:NATIVE_STAFF_PRODUCTION_TARGET.accountId, sourceCommit, snapshot,
+    heldJournalBytes:fs.readFileSync(teamHeldSyncJournalPath),
+    immutableMapEvidenceBytes,
+  });
+  const h = await harness(t, fixture, 'operations', {teamSyncMapProjection:JSON.parse(immutableMapEvidenceBytes),
+    ...options,snapshotOverride:snapshot,post0226Authority:true,heldOpsSyncCompanionWitness});
+  return {h,snapshot};
+}
+
+test('private Team companion: only Ops transitions from sole parent100 through candidate0 to candidate100',
+  { skip: skipTeamCompanion }, async t => {
+    const {h,snapshot} = await teamCompanionHarness(t);
+    const baselineId = snapshot.operations.version.id;
+    assert.deepEqual(h.before.operations.deployment.versions, [{version_id:baselineId, percentage:100}]);
+    assert.equal(h.ordinaryPlan.expectedDeploymentVersions, undefined);
+    for (const supplied of [{}, {operations:clone(FIXED_OPS_WEIGHTS)}]) {
+      await assert.rejects(executeOrdinaryFrontendRetainedRelease({...h.options, expectedDeploymentVersions:supplied}),
+        /pinned sole-active Operations baseline/u);
+    }
+    await assert.rejects(executeOrdinaryFrontendRetainedRelease({...h.options, heldOpsSyncCompanionWitness:Object.freeze({})}),
+      /held Ops Sync companion evidence refused/ui);
+    await assert.rejects(executeOrdinaryFrontendRetainedRelease({...h.options, reviewedCompanionExecutorCommit:'0'.repeat(40)}),
+      /reviewed Team executor checkout differs/u);
+    assert.deepEqual(h.nativeCalls, []);
+    assert.deepEqual(h.providerEvents, []);
+    const result = await executeOrdinaryFrontendRetainedRelease(h.options);
+    assert.equal(result.activated, true);
+    assert.deepEqual(h.nativeCalls.map(row=>row.phase), ['upload','namespace-stage','activate']);
+    assert.deepEqual(h.nativeCalls[1].args.slice(2,4), [`${baselineId}@100%`,`${h.candidateId}@0%`]);
+    assert.equal(h.nativeCalls[2].args[2], `${h.candidateId}@100%`);
+    assert.deepEqual(h.active.operations.deployment.versions, [{version_id:h.candidateId,percentage:100}]);
+    for (const call of h.nativeCalls) {
+      const config = JSON.parse(fs.readFileSync(call.args[call.args.indexOf('--config') + 1], 'utf8'));
+      assert.equal(config.name,'ledgetop-ops');
+    }
+    assert.deepEqual(h.active.client,snapshot.client);
+    assert.deepEqual(h.active['ops-sync'],snapshot['ops-sync']);
+  });
+
+function replaceSoleOperationsVersion(state) {
+  const otherVersion = '99999999-9999-4999-8999-999999999999';
+  state.deployment.versions = [{version_id:otherVersion, percentage:100}];
+  state.version.id = otherVersion;
+  state.modern.id = otherVersion;
+  state.latest = otherVersion;
+}
+
+test('private Team companion: fresh immutable map drift holds before creating any verifier',
+  {skip:skipTeamCompanion}, async t => {
+    const alteredMap = JSON.parse(fs.readFileSync(teamImmutableSyncMapPath, 'utf8'));
+    alteredMap.modules.find(row=>row.name === 'index.js.map').content_base64 = Buffer.from('synthetic drift').toString('base64');
+    const {h} = await teamCompanionHarness(t, {teamSyncMapProjection:alteredMap});
+    await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options), /held Ops Sync companion evidence refused/ui);
+    assert.deepEqual(h.nativeCalls,[]);
+    assert.deepEqual(h.providerEvents,[]);
+  });
+
+const teamLateDrifts = [
+  {phase:'before-prior-asset-verification', staffCheck:1, drift:replaceSoleOperationsVersion, native:[]},
+  {phase:'before-upload-dispatch', staffCheck:2, drift:replaceSoleOperationsVersion, native:[]},
+  {phase:'before-activation', staffCheck:5, drift:state=>{
+    state.deployment.id = '99999999-9999-4999-8999-999999999999';
+  }, native:['upload','namespace-stage']},
+  {phase:'before-activation', staffCheck:5, drift:state=>{
+    state.settings.annotations = {...state.settings.annotations, 'synthetic-drift':'changed'};
+  }, native:['upload','namespace-stage']},
+  {phase:'after-active-namespace-verification', staffCheck:8, drift:replaceSoleOperationsVersion,
+    native:['upload','namespace-stage','activate']},
+];
+for (const [index,{phase,staffCheck,drift,native}] of teamLateDrifts.entries()) {
+  test(`private Team companion: late Ops drift stops the ${phase} fence (case ${index + 1})`,
+    {skip:skipTeamCompanion}, async t => {
+      const {h,snapshot} = await teamCompanionHarness(t, {lateOperationsDrift:(state,count)=>{
+        if (count === staffCheck) drift(state);
+      }});
+      await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options),
+        {message:`Operations changed at the exact Team release fence (${phase})`});
+      assert.deepEqual(h.nativeCalls.map(row=>row.phase),native);
+      if (staffCheck === 1) assert.deepEqual(h.providerEvents,[]);
+      assert.equal(h.providerEvents.filter(row=>row[0] === 'create').length,
+        h.providerEvents.filter(row=>row[0] === 'remove').length);
+      assert.equal(fs.existsSync(path.join(h.journalDirectory,'verified-active.private.json')),false);
+      assert.deepEqual(h.active['ops-sync'],snapshot['ops-sync']);
+    });
+}
+
+test('a caller-made Team witness cannot reach a production adapter or weight transition', async t => {
+  const {root} = assetFiles(t, 'operations');
+  const sourceCommit = '52d5a57d74814c821d8de39854b6a2a86b25ecab';
+  const calls = [];
+  const unexpected = () => { calls.push('adapter'); throw Error('unexpected adapter invocation'); };
+  const mode = ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE;
+  const ordinaryPlan = {application:'operations', sourceCommit,
+    installationPreflight:ordinaryFrontendPreflightDescriptor(PROFILE,mode)};
+  await assert.rejects(executeOrdinaryFrontendRetainedRelease({
+    app:'operations', profile:PROFILE, reader:{get:unexpected},
+    plan:{schemaVersion:2, contract:'ordinary-frontend-retained-native-module-v2', sourceCommit, ordinaryPlan},
+    staffAuthorityContract:POST0226_STAFF_PRESERVATION_CONTRACT,
+    heldOpsSyncCompanionWitness:Object.freeze({}),
+    assetVerifierProvider:{createVerifier:unexpected, fetchVerifierAsset:unexpected,
+      removeVerifier:unexpected, verifierAbsent:unexpected},
+    artifactSourceRoot:root, journalDirectory:path.join(root,'journal'),
+    runNative:unexpected, captureFn:unexpected, sourceReader:unexpected,
+  }), /held Ops Sync companion evidence refused/ui);
+  assert.deepEqual(calls, []);
+});
 
 test('private sanitized fixture: post-0226 role/profile/login drift holds before activation without retry',
   { skip: !fixturePath || !opsBytePathsPath }, async t => {

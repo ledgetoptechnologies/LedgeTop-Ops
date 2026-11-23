@@ -46,7 +46,7 @@ export function validateInstalledRetainedLedger(snapshot, { app, workerName, acc
 
 function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, previousAssetBytes, observedAt,
   installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
-  canonicalBrowserRetirementClientVersionId } = {}) {
+  canonicalBrowserRetirementClientVersionId, heldOpsSyncCompanionWitness } = {}) {
   need(ordinaryPlan?.schemaVersion === 1 && ['operations', 'client'].includes(ordinaryPlan.application),
     'Version 1 pinned ordinary frontend plan required');
   need(installedOpsSuccessorReaderContract === ordinaryPlan.installedOpsSuccessorReaderContract
@@ -74,7 +74,8 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
   validateOrdinaryFrontendReleasePlan(snapshot, ordinaryPlan, { app: ordinaryPlan.application,
     release: ordinaryPlan.release, profile,
     ...(ordinaryPlan.expectedDeploymentVersions === undefined ? {} : { expectedDeploymentVersions: ordinaryPlan.expectedDeploymentVersions }),
-    ordinaryFrontendPreflightMode: preflightMode, installedOpsSuccessorReaderContract,
+    ordinaryFrontendPreflightMode: preflightMode, installedOpsSuccessorReaderContract, heldOpsSyncCompanionWitness,
+    reviewedCompanionExecutorCommit:ordinaryPlan.reviewedCompanionExecutorCommit,
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
     ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }),
     ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }) });

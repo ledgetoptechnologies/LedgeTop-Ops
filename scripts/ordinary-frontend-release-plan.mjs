@@ -5,6 +5,7 @@ import { canonical, hash, need, compileConfig, validateInstallation, validateRev
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT,
   ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { domainRecognitionProfile } from './production-domain-recognition.mjs';
+import { heldOpsSyncCompanionReceipt } from './ops-sync-companion-witness.mjs';
 import { compileCanonicalBrowserRetirementTransition, normalizeCanonicalBrowserRetirementPredecessor }
   from './ordinary-frontend-canonical-browser-retirement.mjs';
 
@@ -98,8 +99,19 @@ export function verifyOrdinaryFrontendArtifacts(release) {
 export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   profile = domainRecognitionProfile('portal-entry-canonical'), expectedDeploymentVersions, ordinaryFrontendPreflightMode,
   installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
-  canonicalBrowserRetirementClientVersionId } = {}) {
+  canonicalBrowserRetirementClientVersionId, heldOpsSyncCompanionWitness, reviewedCompanionExecutorCommit } = {}) {
   need(['operations', 'client'].includes(app) && release?.application === app, 'Exact frontend application required');
+  const companionReceipt = heldOpsSyncCompanionWitness === undefined ? undefined
+    : heldOpsSyncCompanionReceipt(heldOpsSyncCompanionWitness, release.sourceCommit);
+  need(companionReceipt ? /^[a-f0-9]{40}$/u.test(reviewedCompanionExecutorCommit ?? '')
+    : reviewedCompanionExecutorCommit === undefined, 'Exact independently reviewed Team executor commit is required with its witness');
+  if (companionReceipt) need(app === 'operations' && !canonicalBrowserRetirementSelector
+    && installedOpsSuccessorReaderContract === undefined && opsSuccessorReaderPromotionContract === undefined
+    && expectedDeploymentVersions === undefined
+    && snapshot?.operations?.version?.id === companionReceipt.opsBaselineVersionId
+    && snapshot.operations.deployment?.id === companionReceipt.opsDeploymentId
+    && snapshot.client?.latest === snapshot.client?.version?.id,
+  'Held Ops Sync companion requires its exact sole-active Operations baseline and no transition selector');
   const opsPromotion = opsSuccessorReaderPromotionContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT;
   need(opsSuccessorReaderPromotionContract === undefined || (opsPromotion && app === 'operations'
     && installedOpsSuccessorReaderContract === undefined && expectedDeploymentVersions === undefined),
@@ -118,6 +130,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
     ? normalizeCanonicalBrowserRetirementPredecessor(before, browserTransition) : before;
   validateInstallation(preflightSnapshot, { profile: beforeProfile, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
     ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
+    ...(companionReceipt ? {selectedApp:app, heldOpsSyncCompanionWitness} : {}),
     opsSuccessorReaderContract: opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract });
   const browserProof = verifyOrdinaryFrontendArtifacts(release);
   const state = before[app], bindings = state.version.resources.bindings;
@@ -134,7 +147,8 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   need(assets && equal(Object.keys(assets), ['config']) && assets.config.base_path === '/'
     && Object.keys(assets.config).every(key => ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first'].includes(key)), 'Unsupported installed asset configuration');
   const config = compileConfig(preflightSnapshot, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions,
-    ordinaryFrontendPreflightMode, opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract);
+    ordinaryFrontendPreflightMode, opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract,
+    heldOpsSyncCompanionWitness);
   config.find_additional_modules = false;
   config.keep_vars = false;
   config.unsafe.metadata.keep_bindings = [];
@@ -176,6 +190,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
     offlineOnly: true, deploymentEnabled: false, assetsUpload: true, historicalOrphanAssetsRetained: false,
     liveNamespaceVerified: false, nativeCompletionJwtMustRemainUnmodified: true,
     baselineSHA256: hash(canonical(before)), release: clone(release), browserProof, config,
+    ...(companionReceipt ? {heldOpsSyncCompanion:companionReceipt, reviewedCompanionExecutorCommit} : {}),
     ...(browserTransition ? { canonicalBrowserRetirementTransition: browserTransition } : {}),
     beforeProfile, expectedProfile, expectedAssetsConfiguration: assets,
     expectedBindings,
