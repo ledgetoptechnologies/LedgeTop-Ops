@@ -185,6 +185,8 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'PATCH') return json({ provider: { ...fixtures.providers[0], ...body } });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return json({ provider: fixtures.providers[0] });
+  // The fixture has one enabled node, so the Viewer refuses to remove it.
+  if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'DELETE') return json({ error: 'This is the only enabled node, so new tasks would have nowhere to run. Enable another node first, or disable this one, then remove it.', code: 'provider_last_enabled' }, 409);
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/capabilities/probe' && method === 'POST') return json({ capabilities: fixtures.providers[0].capabilities, fingerprint: 'browser-fingerprint' });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/capabilities/refresh' && method === 'POST') return json({ capabilities: fixtures.providers[0].capabilities, fingerprint: 'browser-fingerprint' });
   if (pathname === '/api/v1/processing/presets' && method === 'GET') return json({ presets: fixtures.presets });
@@ -995,6 +997,14 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await confirmAppAction(client, runtime, '[data-action="delete-preset"]', { title: 'Delete preset', cancelFirst: true });
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/presets/preset-fast');
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === false && document.querySelector('#provider-inline-detail') !== null", `${viewport.name}: preset deletion did not return to inline node detail`);
+    // Returning to the node starts a capability refresh; let it settle so the
+    // removal confirmation is the only mutation under test.
+    const presetDeleted = runtime.requests.findLastIndex(item => item.method === 'DELETE' && item.path === '/api/v1/processing/presets/preset-fast');
+    await waitForRequest(runtime, presetDeleted + 1, 'POST', '/api/v1/processing/providers/provider-nodeodm/capabilities/refresh');
+    await waitFor(client, "document.querySelector('.provider-detail [role=\"status\"]')?.textContent.startsWith('Capabilities refreshed')", `${viewport.name}: node capability refresh did not settle`);
+    await confirmAppAction(client, runtime, '[data-action="remove-provider"][data-id="provider-nodeodm"]', { title: 'Remove node', cancelFirst: true });
+    await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/providers/provider-nodeodm');
+    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('only enabled node') && document.querySelector('.provider-detail h3')?.textContent === 'TrueNAS NodeODM'", `${viewport.name}: a refused node removal must explain why and keep the node`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: provider workspace overflows horizontally`);
 
     await client.evaluate(`document.querySelector('[data-section="diagnostics"]').click()`);

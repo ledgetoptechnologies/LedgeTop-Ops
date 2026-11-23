@@ -133,7 +133,7 @@ test('migration 83 preserves populated schema 42 and refuses incompatible ledger
   const laterMigrations=MIGRATIONS.splice(laterStart);
   try{applyMigrations(db);}
   finally{MIGRATIONS.push(...laterMigrations);}
-  assert.deepEqual(laterMigrations.map(entry=>entry.version),[48,83]);
+  assert.deepEqual(laterMigrations.map(entry=>entry.version),[48,83,85]);
   const [folderMigration,migration]=laterMigrations;
   assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,42);
   const c={db,processing:new ProcessingRepository(db)};
@@ -166,9 +166,9 @@ test('a historical reference-protocol 51 stamp cannot satisfy the timer migratio
   const db=new DatabaseSync(':memory:');
   t.after(()=>db.close());
   db.exec('PRAGMA foreign_keys=ON');
-  const migration=MIGRATIONS.pop();
+  const index=MIGRATIONS.findIndex(item=>item.version===83),[migration]=MIGRATIONS.splice(index,1);
   try{applyMigrations(db);}
-  finally{MIGRATIONS.push(migration);}
+  finally{MIGRATIONS.splice(index,0,migration);}
   const oldIdentity='viewer_reference_protocol_identity';
   db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (51,?,?)')
     .run(oldIdentity,'2026-11-02T00:00:00Z');

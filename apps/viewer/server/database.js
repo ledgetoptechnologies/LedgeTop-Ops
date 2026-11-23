@@ -2209,6 +2209,15 @@ const MIGRATIONS = [
     ]) && database.prepare('PRAGMA foreign_key_list(processing_attempt_engine_timing)').all()
       .some(row=>row.table==='processing_attempts'&&row.from==='attempt_id'&&row.to==='id'&&row.on_delete==='CASCADE');
   }},
+  // Removing a provider archives its row so historical attempts keep their
+  // name and history; removed rows leave the list, new-task choices and polling.
+  {version:85,name:'processing_provider_removal',sql:`
+    ALTER TABLE processing_providers ADD COLUMN removed_at TEXT;
+    ALTER TABLE processing_providers ADD COLUMN removed_by TEXT;
+  `,verify(database){
+    const columns = new Set(database.prepare('PRAGMA table_info(processing_providers)').all().map(column=>column.name));
+    return columns.has('removed_at') && columns.has('removed_by');
+  }},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;

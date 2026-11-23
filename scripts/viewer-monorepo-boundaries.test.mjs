@@ -32,7 +32,9 @@ const reviewedAckMigrations = [
 const reviewedFolderMigration = { version: 48, name: 'project_organizational_folders' };
 const reviewedTimerMigration = { version: 83, name: 'provider_engine_processing_elapsed' };
 const reviewedTimerSqlSha256 = 'c8b8205fbcf5b066030223c1176527f347ffc1bf4861b6ccf32e5845000f3214';
-const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "83"';
+const reviewedProviderRemovalMigration = { version: 85, name: 'processing_provider_removal' };
+const reviewedProviderRemovalSqlSha256 = 'a916f9316bc0c2d332e599113b8bf8eee0657294bc6236270612b3902808a913';
+const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "85"';
 const reviewedConverter = {
   patchSha256: 'fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c',
   lockSetSha256: 'b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98',
@@ -45,8 +47,9 @@ const reviewedConverter = {
 // delivered, and prevents ACK deletion. Unknown or mismatched rows abort the
 // migration. Schema 48 adds project folders and same-project task placement;
 // schema 83 adds an attempt- and provider-task-bound engine elapsed
-// record. The candidate image verification and attestation pins advance from
-// the upstream 38 to 83; the other runtime, numerical, promotion and digest
+// record; schema 85 adds nullable removed_at/removed_by provider archive
+// columns. The candidate image verification and attestation pins advance from
+// the upstream 38 to 85; the other runtime, numerical, promotion and digest
 // guards remain fully compared.
 // The reviewed Obj2Tiles build updates its bounded-concurrency patch and adds
 // the ImageSharp 3.2.0 locked dependency/license notices. The image verifier pins
@@ -322,13 +325,15 @@ test('No script writes the Viewer image to a registry', () => {
   assert.deepEqual(writers.filter(file => !file.endsWith('.test.mjs')), []);
 });
 
-test('Viewer publication preserves the ACK and folder migrations and pins the exact timer schema', () => {
+test('Viewer publication preserves the ACK and folder migrations and pins the exact timer and provider-removal schemas', () => {
   const migrations = MIGRATIONS.filter(({ version }) => version >= reviewedAckMigrations[0].version);
   assert.deepEqual(migrations.map(({ version, name }) => ({ version, name })),
-    [...reviewedAckMigrations, reviewedFolderMigration, reviewedTimerMigration], 'another schema advance requires a new explicit gate review');
-  const timer = migrations.at(-1);
+    [...reviewedAckMigrations, reviewedFolderMigration, reviewedTimerMigration, reviewedProviderRemovalMigration], 'another schema advance requires a new explicit gate review');
+  const timer = migrations.find(({ version }) => version === reviewedTimerMigration.version);
   const sqlSha256 = createHash('sha256').update(timer.sql.replace(/\r\n/g, '\n')).digest('hex');
   assert.equal(sqlSha256, reviewedTimerSqlSha256, 'migration 83 SQL must match the reviewed timer schema');
+  const removal = migrations.at(-1);
+  assert.equal(createHash('sha256').update(removal.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedProviderRemovalSqlSha256, 'migration 85 SQL must match the reviewed provider-removal schema');
 });
 
 test('All upstream runtime and numerical-engine verification remains intact', () => {
