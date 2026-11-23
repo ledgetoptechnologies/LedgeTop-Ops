@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const path = require('node:path');
+const { GcpSourceOriginals, sourceText } = require('./gcpSourceOriginals');
 
 const now = () => new Date().toISOString();
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -22,7 +23,7 @@ function haversineMeters(latitude1, longitude1, latitude2, longitude2) {
 }
 
 class GcpRepository {
-  constructor(database) { this.database = database; }
+  constructor(database) { this.database = database; this.originals = new GcpSourceOriginals(database); }
 
   transaction(fn) {
     this.database.exec('BEGIN IMMEDIATE');
@@ -35,6 +36,7 @@ class GcpRepository {
       id: row.id, datasetId: row.dataset_id, displayName: row.display_name,
       sourceFormat: row.adapter || row.source_format, sourceFileId: row.source_file_id,
       sourceFilename: row.source_filename, sourceSha256: row.source_sha256,
+      sourceOriginal: row.source_original_id ? this.originals.describe(row.source_original_id, row.dataset_id) : null,
       crs: row.crs, elevationUnits: row.elevation_units,
       provenance: row.adapter ? { adapter: row.adapter, coordinateSystem: row.coordinate_system,
         verticalDatum: row.vertical_datum, linearUnit: row.linear_unit,
@@ -91,7 +93,7 @@ class GcpRepository {
 
   getPoint(id) { return this.point(this.database.prepare('SELECT * FROM gcp_points WHERE id=?').get(id)) || null; }
 
-  importSet({ datasetId, displayName, sourceFormat, sourceFileId = null, sourceFilename = null, sourceSha256, sourceContent, crs, elevationUnits, provenance, points, createdBy }) {
+  importSet({ datasetId, displayName, sourceFormat, sourceFileId = null, sourceFilename = null, sourceSha256, sourceContent, sourceOriginalId = null, sourceBytes = null, crs, elevationUnits, provenance, points, createdBy }) {
     provenance ||= { adapter: sourceFormat, coordinateSystem: crs, verticalDatum: 'unspecified', linearUnit: elevationUnits };
     const dataset = this.dataset(datasetId);
     if (!dataset || dataset.status !== 'finalized')
@@ -105,12 +107,28 @@ class GcpRepository {
     if(!sourceContent||sourceByteSize>2*1024*1024)throw Object.assign(new Error('GCP source content is invalid'),{code:'invalid_gcp_input'});
     if(crypto.createHash('sha256').update(sourceContent,'utf8').digest('hex')!==sourceSha256)
       throw Object.assign(new Error('GCP source checksum does not match its content'),{code:'invalid_gcp_input'});
+    let original;
+    if (sourceOriginalId) {
+      original = this.originals.get(sourceOriginalId, datasetId);
+      if (!original || original.fidelity !== 'original_bytes' || sourceText(original.bytes) !== sourceContent || original.sha256 !== sourceSha256)
+        throw Object.assign(new Error('retained source does not match this dataset and input'), { code: 'invalid_source_file' });
+    }
+    const bytes = original ? original.bytes : sourceBytes;
+    if (!Buffer.isBuffer(bytes) || sourceText(bytes) !== sourceContent || crypto.createHash('sha256').update(bytes).digest('hex') !== sourceSha256)
+      throw Object.assign(new Error('Reopen Viewer and upload the original source file before importing.'), { code: 'gcp_original_upload_required' });
+    // Historical text snapshots remain available, but NEW imports must supply
+    // original octets or a validated original from the dataset's raw files.
+    original = this.originals.retain({ datasetId, projectId: dataset.project_id,
+      sourceFileId, fileName: sourceFilename || 'gcp-source.csv',
+      bytes, fidelity: 'original_bytes', actorId: createdBy || null });
     const id = crypto.randomUUID(), timestamp = now();
     return this.transaction(() => {
+      if (this.dataset(datasetId)?.status !== 'finalized')
+        throw Object.assign(new Error('dataset is not available for GCP import'), { code: 'dataset_not_available' });
       this.database.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,source_format,source_file_id,source_filename,
-        source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at,source_original_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, datasetId, bounded(displayName, 160), sourceFormat === 'emlid-all-columns-v1' ? 'generic-csv-v1' : sourceFormat, sourceFileId,
-          bounded(sourceFilename, 240) || null, sourceSha256,sourceContent,sourceByteSize,crs, elevationUnits, createdBy || null, timestamp, timestamp);
+          bounded(sourceFilename, 240) || null, sourceSha256,sourceContent,sourceByteSize,crs, elevationUnits, createdBy || null, timestamp, timestamp, original.id);
       this.database.prepare(`INSERT INTO gcp_import_provenance(set_id,adapter,coordinate_system,vertical_datum,linear_unit,elevation_source,geographic_cross_check,source_sha256,confirmed_by,confirmed_at)
         VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id,provenance.adapter,provenance.coordinateSystem,provenance.verticalDatum,provenance.linearUnit,
           provenance.elevationSource||null,provenance.geographicCrossCheck||null,sourceSha256,createdBy||null,timestamp);
@@ -143,7 +161,20 @@ class GcpRepository {
   }
 
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
-  deleteSet(id) { return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
+  deleteSet(id) {
+    const row = this.database.prepare('SELECT * FROM gcp_sets WHERE id=?').get(id);
+    if (!row) return false;
+    const saved = row.source_original_id ? this.originals.get(row.source_original_id, row.dataset_id) : null;
+    if (!saved && !row.source_content)
+      throw Object.assign(new Error('original GCP source is unavailable; set was retained'), { code: 'gcp_original_missing' });
+    const dataset = this.dataset(row.dataset_id);
+    // Force a successful durability barrier even for a migrated/earlier row.
+    this.originals.retain({ datasetId: row.dataset_id, projectId: dataset?.project_id || null,
+      sourceFileId: row.source_file_id, fileName: saved?.fileName || row.source_filename || 'gcp-source.csv',
+      bytes: saved ? saved.bytes : Buffer.from(row.source_content, 'utf8'),
+      fidelity: saved ? saved.fidelity : 'legacy_utf8_snapshot', actorId: row.created_by });
+    return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1;
+  }
 
   listRankedImages(datasetId, selectedPointId, limit = 100) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id

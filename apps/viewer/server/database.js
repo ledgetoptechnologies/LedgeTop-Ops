@@ -2192,6 +2192,12 @@ const MIGRATIONS = [
   `},
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
+  // Ledger v11 reserves 46 for GCP original retention (47 is a separate
+  // Cadens point-role slot). A database already at 83 receives 46 as a gap;
+  // the publication schema pin stays at the highest version, 83.
+  {version:46,name:'viewer_gcp_permanent_source_originals',sql:'SELECT 1;',
+    after(database){require('./gcpSourceOriginals').migrateGcpSourceOriginals(database);},
+    verify(database){return require('./gcpSourceOriginals').gcpSourceOriginalsV46Present(database);}},
   {version:48,name:'project_organizational_folders',sql:'SELECT 1;',
     after(database){migrateProjectFoldersV48(database);},
     verify(database){return projectFoldersV48Present(database);}},
