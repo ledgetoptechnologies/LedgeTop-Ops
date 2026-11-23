@@ -1208,6 +1208,89 @@ test('Move to… picks a project, then a folder, and drag offers other projects 
   }
 });
 
+// A real mouse drag focuses the Move handle; repaints keep focused rows, so a move must release its own row.
+test('a moved task leaves its list at once even while its row has focus in a real browser', {timeout:60000,skip:manualFixture}, async t=>{
+  const executable=browserPath();if(!executable)return t.skip('Chromium-family browser required');
+  const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client,folderServer,folderDb,folderRoot;
+  try{
+    const express=require('express'),auth=require('../server/auth'),{openDatabase}=require('../server/database'),{ViewerRepository}=require('../server/repository'),{ProcessingRepository}=require('../server/processingRepository'),{createProcessingApi}=require('../server/processingApi');
+    folderRoot=mkdtempSync(path.join(tmpdir(),'viewer-move-focus-api-'));folderDb=openDatabase(path.join(folderRoot,'viewer.sqlite'));
+    const repository=new ViewerRepository(folderDb),processing=new ProcessingRepository(folderDb);
+    processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:browser-audit',permissions:['viewer.projects.read','viewer.projects.write','viewer.datasets.write','viewer.processing.read','viewer.processing.write','viewer.processing.publish'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+    processing.createProject({id:'project-johnson',displayName:'Johnson Road Survey'});processing.createProject({id:'project-quarry',displayName:'Alpha Quarry'});
+    const dataset=processing.createDataset({id:'dataset-johnson',projectId:'project-johnson',displayName:'Source',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});processing.finalizeDataset(dataset.id,[],'a'.repeat(64));
+    processing.createTask({id:'task-johnson',projectId:'project-johnson',datasetId:dataset.id,displayName:'Johnson reconstruction'});
+    const folder=processing.createProjectFolder('project-johnson',{displayName:'Client folder'},'staff');
+    const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));folderServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
+    ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
+    await client.command('Emulation.setDeviceMetricsOverride',{width:1280,height:860,deviceScaleFactor:1,mobile:false});
+    await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+    const handle='[data-folder-drag][data-id="task-johnson"]',row='[data-project-task="task-johnson"]';
+    const centre=selector=>client.evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.scrollIntoView({block:'center'});const box=element.getBoundingClientRect();return{x:box.left+box.width/2,y:box.top+box.height/2}})()`);
+    const settled=async(start,pathname,message)=>{
+      await waitForRequest(runtime,start,'PATCH',pathname);
+      await waitFor(client,`!document.querySelector('#workspace').hasAttribute('aria-busy')`,`${message}: move did not settle`);
+      // One repaint, not the next refresh or a blur: the moved row is already gone.
+      await waitFor(client,`!document.querySelector('[data-project-folder-view] ${row}')`,`${message}: moved row stayed in its old list`,300);
+    };
+    await waitFor(client,`Boolean(document.querySelector('${handle}'))&&Boolean(document.querySelector('[data-action="folder-open"][data-id="${folder.id}"]'))`,'task and folder unavailable');
+
+    // 1. A real mouse drag from the Move handle into a folder.
+    await client.command('Input.setInterceptDrags',{enabled:true});
+    const from=await centre(handle);
+    await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:from.x,y:from.y});
+    await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:from.x,y:from.y,button:'left',buttons:1,clickCount:1});
+    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('${handle}')`),true,'the mouse press focuses the Move handle');
+    const eventsBefore=client.events.length;
+    for(let step=1;step<=6;step++)await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:from.x+step*8,y:from.y+step*8,button:'left',buttons:1});
+    let intercepted=null;
+    for(const deadline=Date.now()+5000;!intercepted&&Date.now()<deadline;){intercepted=client.events.slice(eventsBefore).find(event=>event.method==='Input.dragIntercepted');if(!intercepted)await new Promise(resolve=>setTimeout(resolve,25));}
+    assert.ok(intercepted,'the browser started a real drag');
+    const dropSelector=`[data-folder-drop-destinations] [data-task-drop-folder="${folder.id}"]`;
+    await waitFor(client,`Boolean(document.querySelector('${dropSelector}')?.getClientRects().length)`,'drop destinations did not appear');
+    const to=await centre(dropSelector),data=intercepted.params.data,beforeDrag=runtime.requests.length;
+    for(const type of ['dragEnter','dragOver'])await client.command('Input.dispatchDragEvent',{type,x:to.x,y:to.y,data});
+    await client.command('Input.dispatchDragEvent',{type:'drop',x:to.x,y:to.y,data});
+    await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:to.x,y:to.y,button:'left',buttons:0,clickCount:1});
+    await client.command('Input.setInterceptDrags',{enabled:false});
+    await settled(beforeDrag,'/api/v1/tasks/task-johnson/folder','drag');
+    assert.equal(processing.getTask('task-johnson').folderId,folder.id);
+    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('.data-list [data-action="folder-open"][data-id="${folder.id}"]')`),true,'focus moves to the destination folder');
+
+    // 2. Undo while the moved row, now in the destination folder, holds focus.
+    await client.evaluate(`document.querySelector('[data-action="folder-open"][data-id="${folder.id}"]').click()`);
+    await waitFor(client,`Boolean(document.querySelector('${handle}'))&&Boolean(document.querySelector('#workspace-folder-undo button'))`,'moved task or Undo unavailable');
+    await client.evaluate(`document.querySelector('${handle}').focus()`);
+    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('${handle}')`),true);
+    const beforeUndo=runtime.requests.length;
+    await client.evaluate(`document.querySelector('#workspace-folder-undo button').click()`);
+    await settled(beforeUndo,'/api/v1/tasks/task-johnson/folder','undo');
+    assert.equal(processing.getTask('task-johnson').folderId,null);
+    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('.import-breadcrumb [data-action="folder-root"]')`),true,'focus moves to the destination (root) breadcrumb');
+
+    // 3. Move to… another project from a focused row: the source list keeps focus.
+    await client.evaluate(`document.querySelector('[data-action="folder-root"]').click()`);
+    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… unavailable at the project root');
+    await client.evaluate(`(()=>{document.querySelector('${handle}').focus();const menu=document.querySelector('${row} .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
+    await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
+    await client.evaluate(`(()=>{const select=document.querySelector('#folder-move-form').elements.projectId;select.value='project-quarry';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(client,`!document.querySelector('#folder-move-form').elements.folderId.disabled`,'destination folders unavailable');
+    const beforeProject=runtime.requests.length;
+    await client.evaluate(`(()=>{const f=document.querySelector('#folder-move-form');if(f.elements.confirmSharingChange)f.elements.confirmSharingChange.checked=true;f.requestSubmit();})()`);
+    await settled(beforeProject,'/api/v1/tasks/task-johnson/project','project move');
+    assert.equal(processing.getTask('task-johnson').projectId,'project-quarry');
+    assert.equal(await client.evaluate(`document.activeElement===document.querySelector('[data-project-folder-view] > .task-list')`),true,'focus stays in the source list');
+    assert.deepEqual(client.events.filter(event=>event.method==='Runtime.exceptionThrown'),[]);
+  }finally{
+    if(client)client.close();
+    if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}
+    if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}if(folderServer){folderServer.closeAllConnections?.();await new Promise(resolve=>folderServer.close(resolve));}folderDb?.close();if(folderRoot)rmSync(folderRoot,{recursive:true,force:true});try{await removeBrowserProfile(profile,t);}finally{release();}
+  }
+});
+
 test('project-first workspace is interactive and overflow-free in real desktop and mobile browsers', { timeout: 180_000, skip: manualFixture }, async t => {
   const executable = browserPath();
   if (!executable) {
