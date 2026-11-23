@@ -73,6 +73,15 @@ test('Viewer pages show the shared mark file, not an inline copy or another site
   }
 });
 
+test('the workspace mark has no frame, like the model viewer top bar', () => {
+  const rules = ['workspace.css', 'workspace-density.css', 'workspace-sidebar.css']
+    .flatMap(file => [...viewer(file).matchAll(/\.brand-mark\s*{([^}]*)}/g)].map(([, body]) => [file, body]));
+  assert.ok(rules.length >= 1, 'expected a .brand-mark rule');
+  for (const [file, body] of rules) {
+    assert.doesNotMatch(body, /border|background|box-shadow|outline/, `${file} .brand-mark adds a frame: ${body}`);
+  }
+});
+
 test('Viewer colour variables equal the shared brand values', () => {
   const expected = {
     '--brand-orange': BRAND_COLORS.orange, '--brand-orange-action': BRAND_COLORS.orangeAction, '--brand-orange-dark': BRAND_COLORS.orangeDark,
