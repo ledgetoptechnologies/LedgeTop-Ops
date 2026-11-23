@@ -262,3 +262,62 @@ test('a task whose source set is trashed without a restorable trash item is refu
   assert.equal((await context.request('POST', `/api/v1/storage/trash/${taskTrash.id}/restore`, {})).status, 409);
   assert.equal(context.processing.getTask(task.id).status, 'archived');
 });
+
+const photosInTrash = context => fs.readdirSync(context.config.trashMount, { recursive: true }).some(name => String(name).endsWith('photo.jpg'));
+
+test('purging one deleted task hands a shared source set to the other deleted task instead of deleting its photos', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Hand-off' }), shared = finalizedDataset(context, project, 'Shared photos');
+  const original = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original' }), copy = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original (copy)' });
+  const directory = path.join(context.config.datasetsMount, shared.relativePath);
+  let response = await context.request('DELETE', `/api/v1/tasks/${original.id}`, {}); const originalTrash = (await response.json()).trash;
+  response = await context.request('DELETE', `/api/v1/tasks/${copy.id}`, {}); const copyTrash = (await response.json()).trash;
+  const datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
+  assert.deepEqual(context.processing.listContainerTrashMembers(copyTrash.id).map(item => item.id), [datasetTrash.id]);
+  // Purge only the copy: the set moves into the original's Recycle Bin item; no photo is deleted.
+  assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${copyTrash.id}`, { typedId: copy.id })).status, 204);
+  assert.ok(context.processing.getTrash(copyTrash.id).permanentlyDeletedAt);
+  assert.equal(context.processing.getDataset(shared.id).status, 'trashed'); assert.equal(context.processing.getTrash(datasetTrash.id).permanentlyDeletedAt, null); assert.ok(photosInTrash(context));
+  assert.deepEqual(context.processing.listContainerTrashMembers(originalTrash.id).map(item => item.id), [datasetTrash.id]);
+  assert.equal(context.processing.getTrash(datasetTrash.id).purgeAfter, context.processing.getTrash(originalTrash.id).purgeAfter);
+  const moved = context.database.prepare("SELECT details_json FROM audit_events WHERE action='dataset.trash_moved'").all().map(row => JSON.parse(row.details_json));
+  assert.deepEqual(moved, [{ trashId: datasetTrash.id, fromContainerTrashId: copyTrash.id, toContainerTrashId: originalTrash.id }]);
+  // The original still restores with its photos.
+  response = await context.request('POST', `/api/v1/storage/trash/${originalTrash.id}/restore`, {}); assert.equal(response.status, 200);
+  assert.equal(context.processing.getDataset(shared.id).status, 'finalized'); assert.equal(fs.existsSync(path.join(directory, 'photo.jpg')), true);
+});
+
+test('with three deleted tasks on one source set, the photos are deleted only with the last of them', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Three tasks' }), shared = finalizedDataset(context, project, 'Shared photos');
+  const tasks = ['First', 'Second', 'Third'].map(displayName => context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName }));
+  const trash = [];
+  for (const task of tasks) { const response = await context.request('DELETE', `/api/v1/tasks/${task.id}`, {}); assert.equal(response.status, 200); trash.push((await response.json()).trash); }
+  const datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id), holder = () => context.database.prepare('SELECT container_trash_id FROM container_trash_members WHERE member_trash_id=?').all(datasetTrash.id).map(row => row.container_trash_id);
+  assert.deepEqual(holder(), [trash[2].id]);
+  // The third task's purge hands the set to the newest other deleted task (the second), and expiry of the second to the first.
+  assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${trash[2].id}`, { typedId: tasks[2].id })).status, 204);
+  assert.deepEqual(holder(), [trash[1].id]); assert.ok(photosInTrash(context));
+  context.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run(new Date(Date.now() - 1000).toISOString(), trash[1].id);
+  const expired = purgeExpiredTrash(context.processing, context.storage); assert.deepEqual(expired.map(item => [item.trashId, item.status]), [[trash[1].id, 'complete']]);
+  assert.deepEqual(holder(), [trash[0].id]); assert.ok(photosInTrash(context)); assert.equal(context.processing.getTrash(datasetTrash.id).permanentlyDeletedAt, null);
+  // The last deleted task takes the photos with it.
+  assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${trash[0].id}`, { typedId: tasks[0].id })).status, 204);
+  assert.ok(context.processing.getTrash(datasetTrash.id).permanentlyDeletedAt); assert.equal(photosInTrash(context), false);
+});
+
+test('restoring one task of a deleted project is refused before any shared source set leaves the Recycle Bin', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Deleted project' }), shared = finalizedDataset(context, project, 'Shared photos');
+  const original = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original' }), copy = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original (copy)' });
+  let response = await context.request('DELETE', `/api/v1/tasks/${original.id}`, {}); const originalTrash = (await response.json()).trash;
+  response = await context.request('DELETE', `/api/v1/tasks/${copy.id}`, {}); const copyTrash = (await response.json()).trash;
+  response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200); const projectTrash = (await response.json()).trash;
+  const datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
+  assert.equal((await context.request('POST', `/api/v1/storage/trash/${originalTrash.id}/restore`, {})).status, 409);
+  assert.equal(context.processing.getDataset(shared.id).status, 'trashed', 'the set was not taken out of the Recycle Bin');
+  assert.equal(context.processing.getTrash(datasetTrash.id).permanentlyDeletedAt, null); assert.ok(photosInTrash(context));
+  assert.equal(context.processing.getTask(original.id).status, 'archived');
+  // The project took both deleted tasks and the set into its Recycle Bin item; restoring it brings all of them back.
+  assert.deepEqual(context.processing.listContainerTrashMembers(projectTrash.id).map(item => item.id).sort(), [originalTrash.id, copyTrash.id, datasetTrash.id].sort());
+  assert.equal((await context.request('POST', `/api/v1/storage/trash/${projectTrash.id}/restore`, {})).status, 200);
+  assert.equal(context.processing.getDataset(shared.id).status, 'finalized'); assert.equal(fs.existsSync(path.join(context.config.datasetsMount, shared.relativePath, 'photo.jpg')), true);
+  assert.notEqual(context.processing.getTask(original.id).status, 'archived'); assert.notEqual(context.processing.getTask(copy.id).status, 'archived');
+});
