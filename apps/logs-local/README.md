@@ -35,8 +35,8 @@ Tags: every qualifying merge to main publishes immutable tags, `sha-<commit>-<ta
 passed, a `promote-latest` job moves `latest` (what the server stack in `apps/media-generation` pulls) to that exact full
 digest, never back to an older main commit (the same rule as the Viewer and the other images). The keyless image never
 becomes `latest`. The hand-run `promote-logs-local.yml` is the approved rollback and re-promotion path; both share the
-`latest-writer-logs-local` concurrency group. A rollback holds against builds already in flight, until the next
-qualifying merge to main moves `latest` forward again.
+`latest-writer-logs-local` concurrency group. A rollback lasts until the next automatic write;
+to keep one, set the repository variable `AUTO_PROMOTE_LATEST_PAUSED` to `true` first, or revert on main.
 The full native parser image requires an **amd64 NAS**. Verify the NAS architecture before activation; the service
 declares `platform: linux/amd64`, and emulated execution has not been qualified.
 

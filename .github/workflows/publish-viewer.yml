@@ -335,7 +335,6 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
-      actions: read
       packages: write
     steps:
       - name: Authenticate to GHCR to move latest
@@ -350,16 +349,18 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          MANUAL_WORKFLOW: promote-viewer.yml
+          AUTO_PROMOTE_LATEST_PAUSED: ${{ vars.AUTO_PROMOTE_LATEST_PAUSED }}
           IMAGE_NAME: ${{ needs.verify-and-build.outputs.image }}
           IMMUTABLE_TAG: ${{ needs.verify-and-build.outputs.image }}:sha-${{ github.sha }}
           PROMOTE_DIGEST: ${{ needs.verify-and-build.outputs.digest }}
         run: |
           set -euo pipefail
           # Like Project-Alpha, a main push moves latest in the same run that built the image, but only here: after the
-          # publishing job (every verify and test step) passed, to its exact digest, and never back to an older main
-          # commit. This job and the hand-run promote workflow share one writer concurrency group for this tag, so the
-          # reads, compare, write and read-back below never interleave with another writer of it.
+          # publishing job (every verify and test step) passed, to its exact digest, and only forward from whatever latest
+          # names at write time. This job and the hand-run promote workflow share one writer concurrency group for this
+          # tag, so the reads, compare, write and read-back below never interleave with another writer of it. A manual
+          # rollback lasts until the next automatic write; to keep one, revert on main or set the repository variable
+          # AUTO_PROMOTE_LATEST_PAUSED to true, which this job reads once it holds the lock.
           fail() { echo "::error::$1 latest was not changed."; exit 1; }
           digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"'; }
           revision_of() { docker buildx imagetools inspect "$1" --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}'; }
@@ -380,21 +381,20 @@ jobs:
           [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]] || fail "Only a push to main moves latest."
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ && "$PROMOTE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "No verified commit and digest."
           [[ "$IMMUTABLE_TAG" == "$IMAGE_NAME:sha-$COMMIT" || "$IMMUTABLE_TAG" == "$IMAGE_NAME:sha-$COMMIT-full" ]] || fail "Unexpected immutable tag $IMMUTABLE_TAG."
-          [[ "$MANUAL_WORKFLOW" =~ ^promote-[a-z-]+\.yml$ ]] || fail "Unexpected manual promotion workflow $MANUAL_WORKFLOW."
           [[ "$(digest_of "$IMMUTABLE_TAG")" == "$PROMOTE_DIGEST" ]] || fail "$IMMUTABLE_TAG does not name the verified $PROMOTE_DIGEST."
           [[ "$(revision_of "$IMAGE_NAME@$PROMOTE_DIGEST")" == "$COMMIT" ]] || fail "The verified digest does not carry commit $COMMIT."
-          # A manual promotion (rollback or re-promotion) that succeeded after this run was created wins over this build:
-          # it holds until the next merge to main, whose own run is created after it.
-          CREATED="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)" || fail "Cannot read when this run was created."
-          [[ "$CREATED" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || fail "Unexpected run creation time $CREATED."
-          MANUAL="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$MANUAL_WORKFLOW/runs?status=success&per_page=100&created=%3E%3D$CREATED" \
-            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')" || fail "Cannot list manual promotions."
-          [[ "$MANUAL" =~ ^[0-9]+$ ]] || fail "Unexpected manual promotion count $MANUAL."
+          # Hold switch, read under the lock: "true" pauses automatic promotion; unset or "false" runs; anything else stops.
+          case "$AUTO_PROMOTE_LATEST_PAUSED" in
+            true)
+              echo "- Automatic promotion of \`$IMAGE_NAME:latest\` is paused (AUTO_PROMOTE_LATEST_PAUSED=true); commit \`$COMMIT\`, digest \`$PROMOTE_DIGEST\` was not promoted." >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning::Automatic promotion is paused by AUTO_PROMOTE_LATEST_PAUSED; latest was not changed."
+              exit 0 ;;
+            ''|false) ;;
+            *) fail "AUTO_PROMOTE_LATEST_PAUSED must be true, false or unset, not '$AUTO_PROMOTE_LATEST_PAUSED'." ;;
+          esac
           PREVIOUS_DIGEST="$(read_latest)" || fail "Cannot read the current latest."
           PREVIOUS_COMMIT=none
-          if [[ "$MANUAL" != 0 ]]; then
-            DECISION=kept-manual
-          elif [[ "$PREVIOUS_DIGEST" == "$PROMOTE_DIGEST" ]]; then
+          if [[ "$PREVIOUS_DIGEST" == "$PROMOTE_DIGEST" ]]; then
             DECISION=already-latest
           elif [[ "$PREVIOUS_DIGEST" == absent ]]; then
             DECISION=create
@@ -418,7 +418,6 @@ jobs:
             echo "- Decision: $DECISION"
           } >> "$GITHUB_STEP_SUMMARY"
           case "$DECISION" in
-            kept-manual) echo "::warning::A manual promotion of latest succeeded after this build started; it holds until the next merge to main."; exit 0 ;;
             kept-newer) echo "::warning::latest already names $PREVIOUS_COMMIT, which is newer on main than $COMMIT; latest is never moved back automatically."; exit 0 ;;
             already-latest) exit 0 ;;
           esac

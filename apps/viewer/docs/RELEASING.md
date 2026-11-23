@@ -29,10 +29,11 @@ work). The hand-run, approved promotion below is for rollback and re-promotion.
    - it runs in the `latest-writer-viewer` concurrency group, which the manual
      `promote-viewer.yml` also uses, so the automatic and manual writers never
      interleave their reads, compare, write and read-back;
-   - a manual promotion (rollback or re-promotion) wins over builds already in
-     flight: if one succeeded after this run was created, `latest` is left
-     alone. The next merge to `main` moves it forward again;
-   - only forward: it reads the commit that `latest` names now and asks
+   - it can be paused: when the repository variable
+     `AUTO_PROMOTE_LATEST_PAUSED` is `true` (read once the job holds the lock),
+     it writes nothing and says so in the summary. Unset or `false` runs; any
+     other value fails the job without writing;
+   - only forward from whatever `latest` names at write time: it reads that commit and asks
      GitHub to compare it with this commit. If this commit descends from it,
      `latest` moves. If `latest` already names a newer `main` commit (an older
      build finishing late), it is left alone with a warning. Anything else
@@ -136,8 +137,11 @@ must not write `latest` during a release.
 
 Run the manual promotion with an earlier commit and its digest (the previous
 digest is in the publish run's summary and in the last promotion's receipt).
-A rollback holds against builds already in flight; the next qualifying merge
-to `main` after it moves `latest` forward again; merge the fix (or a revert) to move on. Rolling back
+A rollback lasts until the next automatic write: any `promote-latest` job that
+runs after it, including one already queued, moves `latest` forward again. To
+keep a rollback, set the repository variable `AUTO_PROMOTE_LATEST_PAUSED` to
+`true` first (it pauses every image's automatic promotion), or revert on
+`main`. Unset it (or set `false`) to resume. Rolling back
 the image does not prove the older image is compatible with a newer database
 schema; check that before rolling back. The
 attestation must still exist, so this works for 90 days after that candidate

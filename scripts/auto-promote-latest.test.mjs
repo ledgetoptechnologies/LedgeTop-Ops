@@ -1,9 +1,10 @@
 // Automatic promotion of `latest` by the four main publishers (Viewer, logs-local full, proxy generator, thumbnail
 // images). Like Project-Alpha, a push to main moves latest in the same run that built the image, but here only in a
 // `promote-latest` job that runs after the publishing job (every verify/test step) passed, only to the exact digest that
-// job verified, and never back to an older main commit. The automatic job and the hand-run, gated promote-*.yml
-// workflow (rollback and re-promotion) share ONE writer concurrency group per mutable tag, so their read, compare,
-// write and read-back never interleave. Static checks everywhere; the real step is also executed under bash with
+// job verified, and only forward from whatever latest names at write time. The automatic job and the hand-run, gated
+// promote-*.yml workflow (rollback and re-promotion) share ONE writer concurrency group per mutable tag, so their read,
+// compare, write and read-back never interleave. A manual rollback lasts until the next automatic write; the repository
+// variable AUTO_PROMOTE_LATEST_PAUSED=true, read under the lock, holds it. Static checks everywhere; the real step is also executed under bash with
 // stubbed docker and gh. Nothing is published.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -52,11 +53,11 @@ test('each publisher moves latest only in a promote-latest job after its publish
     assert.ok(job.includes("    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}\n"), `${name}: main pushes only`);
     assert.ok(job.includes(`    needs: ${needs}\n`), `${name}: only after ${needs} passed`);
     assert.ok(job.includes(`    concurrency:\n      group: ${group}\n      cancel-in-progress: false\n`), `${name}: the shared writer group`);
-    assert.ok(job.includes('    permissions:\n      contents: read\n      actions: read\n      packages: write\n    steps:\n'), `${name}: least privilege`);
+    assert.ok(job.includes('    permissions:\n      contents: read\n      packages: write\n    steps:\n'), `${name}: least privilege`);
     assert.ok(!/environment:|always\(\)|continue-on-error/.test(job), `${name}: no gated environment and no bypass`);
     const step = moveStepOf(text);
     assert.ok(!/\n      - name: /.test(step.slice(1)), `${name}: the move is the last step`);
-    assert.ok(step.startsWith(`      - name: ${MOVE_STEP}\n        if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n        shell: bash\n        env:\n          GH_TOKEN: \${{ github.token }}\n          MANUAL_WORKFLOW: ${manual}\n`), name);
+    assert.ok(step.startsWith(`      - name: ${MOVE_STEP}\n        if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n        shell: bash\n        env:\n          GH_TOKEN: \${{ github.token }}\n          AUTO_PROMOTE_LATEST_PAUSED: \${{ vars.AUTO_PROMOTE_LATEST_PAUSED }}\n`), name);
     for (const [key, value] of Object.entries(env)) assert.ok(step.includes(`\n          ${key}: ${value}\n`), `${name}: ${key}`);
     for (const line of job.split('\n').filter(l => l.includes('uses: '))) assert.match(line, /@[0-9a-f]{40} # v/, `${name}: pinned ${line.trim()}`);
     const before = text.slice(0, text.indexOf('\n  promote-latest:\n')).replace(/^\s*#.*$/gm, '');
@@ -73,6 +74,11 @@ test('each publisher moves latest only in a promote-latest job after its publish
   assert.equal(script.split('NOW="$(read_latest)" || fail').length - 1, 1, 'the final re-read uses the same classifier and fails closed');
   assert.equal(script.split('PREVIOUS_DIGEST="$(read_latest)" || fail').length - 1, 1, 'so does the first read');
   for (const word of ['Commit:', 'Digest:', 'Previous latest:', 'Decision:']) assert.ok(script.includes(word), `summary names ${word}`);
+  // The pause switch is read in this job (under the lock), before latest is read or written.
+  const pause = script.indexOf('case "$AUTO_PROMOTE_LATEST_PAUSED" in');
+  assert.ok(pause > 0 && pause < script.indexOf('PREVIOUS_DIGEST="$(read_latest)"') && pause < script.indexOf('imagetools create'));
+  // No suppression based on manual run history: forward-only from what latest names at write time is the whole rule.
+  assert.ok(!/actions\/runs|actions\/workflows|MANUAL_WORKFLOW|kept-manual/.test(script));
   for (const call of script.match(/gh api [^\n]*/g)) assert.ok(!/(-X|--method|-f |-F |--field|--raw-field|--input)\b/.test(call), `read-only API call: ${call}`);
 });
 
@@ -151,14 +157,12 @@ gh() {
   echo "$2" >> "$REG/api"
   case "$2" in
     */compare/*) cat "$REG/compare-status" ;;
-    */actions/workflows/*) cat "$REG/manual-count" ;;
-    */actions/runs/*) echo 2026-11-22T10:00:00Z ;;
     *) return 1 ;;
   esac
 }
 `;
   const run = ({ event = 'push', ref = 'refs/heads/main', commit = C(2), digest = D(2), tag, latest = D(1), latestCommit = C(1), status = 'ahead',
-    seq, manual = 0, built = { [D(2)]: C(2) }, immutable = D(2), workflow = 'promote-thumbnail-renderer.yml' } = {}) => {
+    seq, paused = '', built = { [D(2)]: C(2) }, immutable = D(2) } = {}) => {
     const reg = path.join(dir, 'reg');
     fs.rmSync(reg, { recursive: true, force: true });
     fs.mkdirSync(path.join(reg, 'tags'), { recursive: true });
@@ -168,13 +172,12 @@ gh() {
     if (latest) fs.writeFileSync(path.join(reg, 'tags', `${image}_latest`), latest);
     for (const [d, c] of Object.entries({ ...built, ...(latest ? { [latest]: latestCommit } : {}) })) fs.writeFileSync(path.join(reg, 'revisions', d.slice(7)), c);
     fs.writeFileSync(path.join(reg, 'compare-status'), `${status}\n`);
-    fs.writeFileSync(path.join(reg, 'manual-count'), `${manual}\n`);
     if (seq) fs.writeFileSync(path.join(reg, 'latest-seq'), `${seq.join('\n')}\n`);
     const summary = path.join(dir, 'summary');
     fs.writeFileSync(summary, '');
     const r = spawnSync('bash', ['-c', stub + script], { encoding: 'utf8', env: { ...process.env, GITHUB_EVENT_NAME: event, GITHUB_REF: ref, GITHUB_SHA: commit,
       GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '77', GITHUB_STEP_SUMMARY: posix(summary), RUNNER_TEMP: posix(dir), IMAGE_NAME: IMAGE, PROMOTE_DIGEST: digest,
-      IMMUTABLE_TAG: tag ?? `${IMAGE}:sha-${commit}`, MANUAL_WORKFLOW: workflow } });
+      IMMUTABLE_TAG: tag ?? `${IMAGE}:sha-${commit}`, AUTO_PROMOTE_LATEST_PAUSED: paused } });
     const file = f => fs.existsSync(path.join(reg, f)) ? fs.readFileSync(path.join(reg, f), 'utf8') : '';
     return { status: r.status, out: r.stdout + r.stderr, writes: file('writes'), api: file('api'), latest: file(`tags/${image}_latest`), summary: fs.readFileSync(summary, 'utf8') };
   };
@@ -187,16 +190,26 @@ gh() {
   assert.equal(ok.writes, `${IMAGE}:latest ${IMAGE}@${D(2)}\n`, 'latest moves to the exact verified digest');
   assert.equal(ok.latest, D(2));
   assert.ok(ok.api.includes(`repos/o/r/compare/${C(1)}...${C(2)}\n`), 'compared against the commit latest names now');
-  assert.ok(ok.api.includes('repos/o/r/actions/runs/77\n'));
-  assert.ok(ok.api.includes('repos/o/r/actions/workflows/promote-thumbnail-renderer.yml/runs?status=success&per_page=100&created=%3E%3D2026-11-22T10:00:00Z'));
+  assert.equal(ok.api, `repos/o/r/compare/${C(1)}...${C(2)}\n`, 'the compare is the only API call');
   for (const line of [`Commit: \`${C(2)}\``, `Digest: \`${D(2)}\``, `Previous latest: \`${D(1)}\` (commit \`${C(1)}\`)`, 'Decision: promote', `latest now names \`${D(2)}\``])
     assert.ok(ok.summary.includes(line), line);
 
   // Never backwards relative to what latest names now.
   assert.match(keeps({ status: 'behind' }, 'kept-newer', 'an older build finishing late').out, /never moved back automatically/);
-  // A pending automatic promotion after a manual rollback: the rollback holds until the next merge to main.
-  assert.match(keeps({ manual: 1, latest: D(0), latestCommit: C(0) }, 'kept-manual', 'a manual rollback after this build started').out, /holds until the next merge/);
-  keeps({ manual: 3 }, 'kept-manual', 'any successful manual promotion after this build started');
+  // A manual rollback lasts until the next automatic write: latest names an older commit now, so this build moves it forward.
+  const afterRollback = run({ latest: D(0), latestCommit: C(0) });
+  assert.equal(afterRollback.status, 0, afterRollback.out);
+  assert.equal(afterRollback.writes, `${IMAGE}:latest ${IMAGE}@${D(2)}\n`);
+  assert.ok(afterRollback.api.includes(`compare/${C(0)}...${C(2)}`), 'compared with what latest names at write time');
+  // The hold switch: paused means no read of latest, no API call, no write.
+  const paused = run({ paused: 'true', latest: D(0), latestCommit: C(0) });
+  assert.equal(paused.status, 0, paused.out);
+  assert.equal(paused.writes, '', 'paused: nothing written');
+  assert.equal(paused.api, '', 'paused: nothing compared');
+  assert.match(paused.out, /paused by AUTO_PROMOTE_LATEST_PAUSED/);
+  assert.match(paused.summary, /is paused \(AUTO_PROMOTE_LATEST_PAUSED=true\)/);
+  assert.equal(run({ paused: 'false' }).writes, `${IMAGE}:latest ${IMAGE}@${D(2)}\n`, 'false runs');
+  for (const value of ['yes', 'TRUE', '1', 'paused']) refuses({ paused: value }, `an unclear pause value (${value}) stops without writing`);
   // Overlapping writers: latest changes between the first read and the final re-read.
   refuses({ seq: [D(1), D(9)] }, 'another writer moved latest between the reads');
   refuses({ seq: [D(1), 'notfound'] }, 'latest disappeared between the reads');
@@ -224,7 +237,5 @@ gh() {
   refuses({ tag: `${IMAGE}:sha-${C(7)}` }, 'another commit\'s tag');
   refuses({ tag: `${IMAGE}:candidate-${C(2)}` }, 'an unexpected tag');
   refuses({ latestCommit: '' }, 'latest carries no commit label');
-  refuses({ manual: 'x' }, 'unreadable manual promotion history');
-  refuses({ workflow: 'evil.yml' }, 'unexpected manual workflow name');
   keeps({ latest: D(2), latestCommit: C(2) }, 'already-latest', 'already latest');
 });

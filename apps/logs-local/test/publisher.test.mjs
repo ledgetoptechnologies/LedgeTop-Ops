@@ -28,7 +28,7 @@ test('main-only push trigger: no manual, pull-request, tag, schedule or other-br
 test('least privilege: read-only by default, packages: write only for the two publishing jobs and promote-latest, one non-secret build arg', () => {
   assert.match(workflow, /\npermissions:\n  contents: read\n\njobs:/);
   assert.equal((workflow.match(/packages: write/g) ?? []).length, 3);
-  assert.ok(jobOf('promote-latest').includes('    permissions:\n      contents: read\n      actions: read\n      packages: write\n'));
+  assert.ok(jobOf('promote-latest').includes('    permissions:\n      contents: read\n      packages: write\n'));
   assert.ok(!jobOf('verify').includes('packages: write'));
   assert.ok(!/secret-files|secrets:/.test(workflow));
   // The only build argument anywhere is the immutable Rust base digest for the full image.
@@ -38,7 +38,7 @@ test('least privilege: read-only by default, packages: write only for the two pu
   assert.equal((workflow.match(/secrets\./g) ?? []).length, 3, 'only the workflow token, for each registry login');
   assert.ok(workflow.includes('password: ${{ secrets.GITHUB_TOKEN }}'));
   // Visibility is only OBSERVED (read-only helper); nothing sets or changes it.
-  // The only API calls are the promote-latest job's read-only GETs (run time, manual promotions, ancestry compare);
+  // The only API call is the promote-latest job's read-only ancestry compare;
   // nothing else calls the API (see auto-promote-latest.test.mjs).
   const outsideMove = workflow.slice(0, workflow.indexOf('\n  promote-latest:\n'));
   assert.ok(!/gh api|curl |-X (PATCH|PUT|POST|DELETE)|visibility=|"visibility":/i.test(outsideMove), 'package visibility is never changed');
