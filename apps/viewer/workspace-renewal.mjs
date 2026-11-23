@@ -394,7 +394,10 @@ export class WorkspaceSessionRenewal {
   fallbackToOpener(requestId) {
     if(this.controllerWindow&&!this.controllerWindow.closed){
       this.pendingRequestId=requestId;
-      if(this.requestOpener(requestId))return;
+      // requestOpener schedules the retry itself when the opener closes in between;
+      // a second one would count this single attempt twice.
+      this.requestOpener(requestId);
+      return;
     }
     this.scheduleRetry();
   }

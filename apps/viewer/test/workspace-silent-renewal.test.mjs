@@ -198,6 +198,35 @@ test('signing in to Operations elsewhere resumes the paused tab by itself', asyn
   context.renewal.dispose();
 });
 
+test('an opener that closes between the two closed checks counts as one failed attempt, not two', async () => {
+  for (const direct of [true, false]) {
+    const context = harness({ lifetime: 2 * MINUTE, respond: ({ url }) => { if (url.startsWith('https:')) throw new TypeError('Failed to fetch'); } });
+    await context.advance(MINUTE);
+    const { renewal } = context;
+    for (const timer of context.timers) timer.cleared = true; // Only this attempt's own timers from here on.
+    renewal.now = () => Date.parse(context.envelope.session.expiresAt) + 1;
+    let reads = 0, posted = 0;
+    // Open for the caller's check, closed by the time the message would be posted.
+    renewal.controllerWindow = { get closed() { reads += 1; return reads >= (direct ? 2 : 3); }, postMessage: () => { posted += 1; } };
+    renewal.pendingRequestId = null; renewal.retryAttempt = 0; renewal.expiredFailures = 0;
+    let confirmations = 0; renewal.confirmSignInRequired = () => { confirmations += 1; };
+    const before = context.timers.length;
+    if (direct) { renewal.retryAttempt = 1; renewal.fallbackToOpener(ID); }
+    else { renewal.requestRenewal('expiry'); await tick(); }
+    const label = direct ? 'fallback alone' : 'through a whole attempt';
+    assert.equal(posted, 0, label); assert.ok(reads >= 2, label);
+    assert.equal(renewal.retryAttempt, 1, label); assert.equal(renewal.expiredFailures, 1, label);
+    assert.equal(confirmations, 0, `${label}: one failure cannot reach the two-attempt sign-in check`);
+    assert.equal(context.timers.slice(before).filter(timer => timer.delay === 2_000 && !timer.cleared).length, 1, `${label}: exactly one retry`);
+    assert.equal(renewal.pendingRequestId, null, label);
+    // The next attempt, with the opener really gone, is the second failure.
+    renewal.controllerWindow = { closed: true };
+    renewal.requestRenewal('retry'); await tick();
+    assert.equal(renewal.expiredFailures, 2, label); assert.equal(confirmations, 1, label);
+    renewal.dispose();
+  }
+});
+
 test('an Operations outage it can read never turns into a sign-in prompt', async () => {
   const context = harness({ respond: ({ url }) => url.startsWith('https:') ? json(url, { error: 'Workspace renewal is temporarily unavailable' }, 503) : undefined });
   await context.advance(60 * MINUTE);
