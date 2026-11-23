@@ -22,7 +22,7 @@ import { resolveRenderedMeshBoundary, resolveRenderedPointBoundary, renderedPoin
 import { preflightBrowserRasterHeader } from './measurement-raster-header.mjs';
 import { mountViewerProductDownloads } from './viewer-product-downloads.mjs';
 import 'leaflet/dist/leaflet.css';
-import { fromUrl as openGeoTiff, Pool as GeoTiffPool } from 'geotiff';
+import { fromUrl as openGeoTiff, Pool as GeoTiffPool, writeArrayBuffer as writeGeoTiffArrayBuffer } from 'geotiff';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { TilesRenderer } from '3d-tiles-renderer';
 import { installLodKtx2Support } from './lod-ktx2.mjs';
@@ -86,6 +86,8 @@ import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { modelHorizontalDatum, verifiedUtmGeoref } from './property-lines.mjs';
 import { createPropertyLinesController } from './property-lines-layer.mjs';
+import { createContourController } from './contour-layer.mjs';
+import { exportOrthoPrint, mountOrthoPrintDialog } from './ortho-print-export.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
 import { renderProjectSwitcherOptions } from './project-switcher.mjs';
@@ -189,6 +191,8 @@ let SHARE_PERMISSIONS = { measure: true, cameras: true };
 let measurementWorkspace = null;
 let viewerProductDownloads = null;
 let propertyLines = null;
+let contourLines = null;
+let orthoPrintDialog = null;
 
 const state = {
   activeMode: null,
@@ -767,6 +771,7 @@ function init() {
   bindUI();
   installMeasurementWorkspace();
   installPropertyLines();
+  installContours();
   const available = applyAvailability();
   const requested = viewerModeFromUrl(location.href);
   const initialMode = chooseViewerMode(requested, available);
@@ -1434,6 +1439,8 @@ function syncMeasurementActionVisibility() {
   const setHidden = (id, hidden) => { const element = document.getElementById(id); if (element) element.hidden = hidden; };
   setHidden('measurement-report-actions', !measure);
   setHidden('btn-capture-float', !measure);
+  // The ortho print is a report-style rendering, like the measurement report.
+  setHidden('ortho-print-actions', !measure);
   // The original processing report follows download permission independently.
   setHidden('panel-model-report', !measure && !download);
 }
@@ -4112,6 +4119,77 @@ function installPropertyLines() {
   propertyLines.loadOffer();
 }
 
+// Contour lines from the published DTM on the map views (ortho, DSM, DTM).
+function installContours() {
+  if (contourLines) { contourLines.sync(); return; }
+  contourLines = createContourController({
+    L,
+    dom: {
+      panel: document.getElementById('panel-contours'),
+      button: document.getElementById('layer-contours'),
+      interval: document.getElementById('contour-interval'),
+      color: document.getElementById('contour-color'),
+      status: document.getElementById('contours-status'),
+    },
+    getMap: () => map || null,
+    isMapMode: () => isMapMode(state.activeMode),
+    hasDtm: () => Boolean(DTM_URL),
+    getDtm: (signal) => getDataset(DTM_URL, true, { signal }),
+    pool: () => ensureGeoTiffPool(),
+    units: () => DISPLAY_UNITS,
+    projection: () => ({ zoneLon0Deg: UTM_PROJECTION.zoneLon0Deg, hemisphere: UTM_PROJECTION.hemisphere }),
+    latLonToUtm: (lat, lon) => latLonToUtm(lat, lon),
+  });
+  orthoPrintDialog ||= mountOrthoPrintDialog({
+    documentRef: document,
+    openButton: document.getElementById('btn-export-image'),
+    defaults: () => ({
+      contoursAvailable: Boolean(DTM_URL), contoursOn: contourLines?.state.on === true,
+      propertyAvailable: propertyLinesForPrint().length > 0, propertyOn: true,
+      geotiffAvailable: printEpsg() !== null,
+    }),
+    run: (options, signal) => exportOrthoPrintFromViewer(options, signal),
+  });
+  contourLines.refresh();
+}
+
+function printEpsg() {
+  const crs = measurementCoordinateReference().crs;
+  return crs.startsWith('EPSG:') ? Number(crs.slice(5)) : null;
+}
+
+// Property lines exactly as drawn on the map (only when shown there).
+function propertyLinesForPrint() {
+  if (!map || !propertyLines?.state?.drawn?.map) return [];
+  const lines = [];
+  map.eachLayer((layer) => {
+    if (!(layer instanceof L.Polyline) || layer.options?.pane !== 'propertyLines' || layer.options?.color !== '#FFD60A') return;
+    const latLngs = layer.getLatLngs();
+    for (const ring of (L.LineUtil.isFlat(latLngs) ? [latLngs] : latLngs)) {
+      const flat = L.LineUtil.isFlat(ring) ? ring : ring.flat(Infinity);
+      if (flat.length > 1) lines.push(flat.map((ll) => latLonToUtm(ll.lat, ll.lng)));
+    }
+  });
+  return lines;
+}
+
+async function exportOrthoPrintFromViewer({ area, size, format, contours, property }, signal) {
+  if (!ORTHO_URL) throw Object.assign(new Error('This model has no orthophoto.'), { code: 'print_no_ortho' });
+  const ortho = await getDataset(ORTHO_URL, false, { signal });
+  let extent = { minE: ortho.minE, maxE: ortho.maxE, minN: ortho.minN, maxN: ortho.maxN };
+  if (area === 'view' && map && state.activeMode === 'ortho') {
+    const b = map.getBounds();
+    const corners = [b.getNorthWest(), b.getNorthEast(), b.getSouthWest(), b.getSouthEast()].map((c) => latLonToUtm(c.lat, c.lng));
+    extent = { minE: Math.min(...corners.map((c) => c[0])), maxE: Math.max(...corners.map((c) => c[0])), minN: Math.min(...corners.map((c) => c[1])), maxN: Math.max(...corners.map((c) => c[1])) };
+  }
+  return exportOrthoPrint({
+    ortho, extent, longEdge: size, format, epsg: printEpsg(), writeArrayBuffer: writeGeoTiffArrayBuffer,
+    traceContours: contours && DTM_URL ? (printExtent, targetCell) => contourLines.computeForExtent(printExtent, targetCell, { signal }) : null,
+    colors: contourLines?.colors(), propertyLines: property ? propertyLinesForPrint() : null, units: DISPLAY_UNITS,
+    createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal,
+  });
+}
+
 function pcApi() {
   const f = document.getElementById('pc-iframe');
   const w = f && f.contentWindow;
@@ -4655,6 +4733,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   }
   syncCameraLayer();
   propertyLines?.refresh();
+  contourLines?.refresh();
   return true;
 }
 

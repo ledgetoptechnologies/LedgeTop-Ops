@@ -228,6 +228,14 @@
     #property-lines-status:empty { display: none; }
     #property-lines-status { margin-top: 8px; }
     #layer-property-lines:disabled { cursor: not-allowed; opacity: 0.5; }
+    #contours-status:empty { display: none; }
+    .ortho-print-dialog { width: min(360px, calc(100vw - 32px)); background: var(--brand-panel); color: var(--brand-text); border: 1px solid var(--panel-border); border-radius: 12px; padding: 18px; }
+    .ortho-print-dialog::backdrop { background: #000a; }
+    .ortho-print-dialog h2 { font-size: 17px; margin: 0 60px 12px 0; }
+    .ortho-print-close { position: absolute; right: 14px; top: 12px; }
+    .ortho-print-check { display: flex; gap: 8px; align-items: center; margin: 8px 0; font-size: 13px; }
+    .ortho-print-check input:disabled + span { opacity: 0.5; }
+    .ortho-print-dialog .tool-btn { margin-top: 10px; }
     #floating-controls { position: absolute; top: 14px; right: 14px; z-index: 120; display: flex; gap: 8px; }
     .icon-btn {
       width: 38px; height: 38px; border-radius: 50%;
@@ -634,12 +642,25 @@
           </div>
         </div>
 
+         <div class="panel" id="panel-contours" hidden>
+           <h3><svg viewBox="0 0 24 24"><path d="M3 17c3-4 6-4 9-1s6 3 9-1M3 11c3-4 6-4 9-1s6 3 9-1M6 5c2-1.5 4-1.5 6 0s4 1.5 6 0" stroke="currentColor" stroke-width="2" fill="none"/></svg> Contours</h3>
+           <div class="tool-grid">
+             <button class="layer-btn full" id="layer-contours" aria-pressed="false" aria-label="Show contour lines">Show</button>
+           </div>
+           <label class="slider-row" for="contour-interval"><span>Interval</span><select id="contour-interval"><option value="auto">Auto</option></select></label>
+           <label class="slider-row" for="contour-color"><span>Color</span><select id="contour-color"><option value="brown" selected>Brown</option><option value="tan">Tan</option><option value="white">White</option></select></label>
+           <p class="hint" id="contours-status" role="status" aria-live="polite"></p>
+         </div>
+
          <div class="panel" id="panel-ortho" style="display:none;">
            <h3><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Orthophoto</h3>
            <div class="slider-row">
              <span>Opacity</span>
              <input type="range" id="ortho-opacity" min="0" max="100" step="5" value="100">
              <span class="val" id="ortho-opacity-val">100%</span>
+           </div>
+           <div id="ortho-print-actions" class="tool-grid" style="margin-top:10px;">
+             <button class="tool-btn full" id="btn-export-image">Export image</button>
            </div>
            <div class="hint" style="margin-top:10px;">Full-resolution tiles stream from the GeoTIFF as you zoom. Use Measurements for map distance and area. Volume uses the published DSM or DTM elevation raster; an orthophoto alone has no height data.</div>
          </div>
