@@ -1669,8 +1669,9 @@ function processModal(projectId,duplicate=null){
 // user reviews it and chooses Start processing. Outputs, publication, shares and client visibility are not copied.
 function duplicateTask(id){
   const task=state.tasks.find(item=>item.id===id);if(!task||task.status==='archived'||!can('viewer.processing.write'))return;
-  const attempt=task.latestAttempt||{},name=String(task.displayName||'Task');
-  return processModal(task.projectId,{sourceTaskId:task.id,displayName:`${name.slice(0,240-' (copy)'.length)} (copy)`,datasetId:task.datasetId,folderId:task.folderId??null,providerId:attempt.providerId||'',presetId:attempt.presetId||'',options:attempt.options||{}});
+  // Trim by whole characters (never half an emoji) so the name plus " (copy)" stays within the 240-unit limit.
+  const attempt=task.latestAttempt||{};let base='';for(const character of String(task.displayName||'Task')){if(base.length+character.length>240-' (copy)'.length)break;base+=character;}
+  return processModal(task.projectId,{sourceTaskId:task.id,displayName:`${base} (copy)`,datasetId:task.datasetId,folderId:task.folderId??null,providerId:attempt.providerId||'',presetId:attempt.presetId||'',options:attempt.options||{}});
 }
 async function editTask(id){const task=state.tasks.find(item=>item.id===id);if(!task)return;const input=await dialogs.form({title:'Edit task',submitLabel:'Save task',fields:[{name:'displayName',label:'Task name',value:task.displayName||'',required:true,maxLength:240},{name:'description',label:'Description',value:task.description||'',multiline:true,maxLength:4000}]});if(!input)return;await mutate(`/api/v1/tasks/${encodeURIComponent(id)}`,{method:'PATCH',body:input},'Task updated')}
 async function confirmCancelAttempt(id){if(!can('viewer.processing.write')||state.busy)return;const confirmed=await dialogs.confirm('Stop this processing run? Your source photos and previously published models will be kept.',{title:'Cancel processing run',submitLabel:'Cancel processing',destructive:true});if(!confirmed||state.busy||!can('viewer.processing.write'))return;return mutate(`/api/v1/attempts/${encodeURIComponent(id)}/cancel`,{method:'POST',body:{}},'Attempt cancelled')}

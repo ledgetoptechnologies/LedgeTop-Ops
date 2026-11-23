@@ -128,7 +128,10 @@ test('Duplicate needs task-creation permission and ready source photos, and pre-
   assert.deepEqual(opened,[['project',{sourceTaskId:'task',displayName:'Church <test> (copy)',datasetId:'dataset',folderId:'folder-a',providerId:'provider',presetId:'preset',options:{dsm:true,'pc-ept':true}}]]);
   assert.deepEqual(requests,[]);
   f.task.displayName='x'.repeat(240);f.context.duplicateTask('task');
-  assert.equal(opened.at(-1)[1].displayName.length,240);assert.match(opened.at(-1)[1].displayName,/x \(copy\)$/);
+  assert.equal(opened.at(-1)[1].displayName.length,240);
+  // An emoji straddling the limit is dropped whole, never split into half a surrogate pair.
+  f.task.displayName=`${'x'.repeat(232)}\u{1F4F7}tail`;f.context.duplicateTask('task');
+  assert.equal(opened.at(-1)[1].displayName,`${'x'.repeat(232)} (copy)`);assert.equal(opened.at(-1)[1].displayName.isWellFormed(),true);assert.match(opened.at(-1)[1].displayName,/x \(copy\)$/);
   // Archived (including deleted, Recycle Bin) tasks cannot be duplicated.
   opened.length=0;f.task.status='archived';f.context.duplicateTask('task');assert.deepEqual(opened,[]);
 });

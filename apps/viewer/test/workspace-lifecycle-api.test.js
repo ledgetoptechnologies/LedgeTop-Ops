@@ -207,3 +207,58 @@ test('expired task container trash automatically purges owned files once and pre
   const first = purgeExpiredTrash(context.processing, context.storage); assert.equal(first.length, 1); assert.equal(first[0].status, 'complete'); assert.ok(context.processing.getTrash(trash.id).permanentlyDeletedAt);
   assert.deepEqual(purgeExpiredTrash(context.processing, context.storage), [], 'automatic purge is idempotent'); assert.equal(fs.existsSync(directory), true);
 });
+
+// Duplicate (and Use saved source) let two tasks share one source set. Deleting both puts the set in the second task's
+// trash; restoring the first must bring the set back with it, and no purge may delete a set an active task still uses.
+test('a source set shared by two tasks is restored with either task and never purged while a task uses it', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Shared source' }), shared = finalizedDataset(context, project, 'Shared photos');
+  const original = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original' }), copy = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original (copy)' });
+  const directory = path.join(context.config.datasetsMount, shared.relativePath);
+  // 1-2. Delete the original: the copy still uses the set, so it stays.
+  let response = await context.request('DELETE', `/api/v1/tasks/${original.id}`, {}); assert.equal(response.status, 200); const originalTrash = (await response.json()).trash;
+  assert.equal(context.processing.getDataset(shared.id).status, 'finalized'); assert.equal(fs.existsSync(directory), true);
+  // 3. Delete the copy: it is now the last user, so the set goes into the copy's trash.
+  response = await context.request('DELETE', `/api/v1/tasks/${copy.id}`, {}); assert.equal(response.status, 200); const copyTrash = (await response.json()).trash;
+  assert.equal(context.processing.getDataset(shared.id).status, 'trashed'); assert.equal(fs.existsSync(directory), false);
+  const datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id); assert.ok(datasetTrash);
+  // Guards: while a task uses the set (forced here), neither a purge of the copy nor expiry deletes the photos.
+  context.database.prepare("UPDATE processing_tasks SET status='draft',archived_at=NULL WHERE id=?").run(original.id);
+  assert.equal(context.processing.beginPurgeMutation(datasetTrash.id, 'ops:lifecycle'), null);
+  assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${copyTrash.id}`, { typedId: copy.id })).status, 409);
+  context.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id IN (?,?)').run(new Date(Date.now() - 1000).toISOString(), copyTrash.id, datasetTrash.id);
+  assert.ok(purgeExpiredTrash(context.processing, context.storage).every(result => result.status === 'failed'));
+  assert.equal(context.processing.getDataset(shared.id).status, 'trashed'); assert.equal(context.processing.getTrash(datasetTrash.id).permanentlyDeletedAt, null);
+  assert.ok(fs.readdirSync(context.config.trashMount, { recursive: true }).some(name => String(name).endsWith('photo.jpg')), 'the photos are still in the Recycle Bin');
+  context.database.prepare("UPDATE processing_tasks SET status='archived',archived_at=? WHERE id=?").run(new Date().toISOString(), original.id);
+  // 4. Restore the original: the set comes back from the copy's trash with it.
+  response = await context.request('POST', `/api/v1/storage/trash/${originalTrash.id}/restore`, {}); assert.equal(response.status, 200);
+  assert.notEqual(context.processing.getTask(original.id).status, 'archived');
+  assert.equal(context.processing.getDataset(shared.id).status, 'finalized'); assert.equal(fs.existsSync(path.join(directory, 'photo.jpg')), true);
+  assert.ok(context.processing.getTrash(datasetTrash.id).permanentlyDeletedAt, 'the set left the Recycle Bin');
+  assert.equal(context.processing.getTask(copy.id).status, 'archived', 'the copy stays deleted');
+  // 5. Purging the copy (or its expiry) leaves the original's photos alone.
+  assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${copyTrash.id}`, { typedId: copy.id })).status, 204);
+  assert.equal(context.processing.getDataset(shared.id).status, 'finalized'); assert.equal(fs.existsSync(path.join(directory, 'photo.jpg')), true);
+  assert.deepEqual(purgeExpiredTrash(context.processing, context.storage), []);
+  assert.equal(fs.existsSync(path.join(directory, 'photo.jpg')), true);
+});
+
+test('a task whose source set is trashed without a restorable trash item is refused rather than restored onto missing photos', async t => {
+  const context = await fixture(t, { initializeStorage: false }), project = context.processing.createProject({ displayName: 'Refused restore' });
+  const dataset = context.processing.createDataset({ projectId: project.id, displayName: 'External photos', storageMode: 'external_reference', rootKey: 'imports', relativePath: 'flight' });
+  context.processing.finalizeDataset(dataset.id, [], 'c'.repeat(64));
+  const task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Uses external photos' });
+  const taskTrash = context.processing.trashTask(task.id, 'ops:lifecycle');
+  const datasetTrash = context.processing.trashDataset(dataset.id, { trashRelative: null, actor: 'ops:lifecycle' }); assert.ok(datasetTrash);
+  // The external set cannot be marked purged while a task uses it.
+  context.database.prepare("UPDATE processing_tasks SET status='draft',archived_at=NULL WHERE id=?").run(task.id);
+  assert.equal(context.processing.markTrashPurged(datasetTrash.id, 'ops:lifecycle'), null);
+  assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${datasetTrash.id}`, { typedId: dataset.id })).status, 409);
+  context.database.prepare("UPDATE processing_tasks SET status='archived',archived_at=? WHERE id=?").run(new Date().toISOString(), task.id);
+  assert.ok(context.processing.markTrashPurged(datasetTrash.id, 'ops:lifecycle'));
+  // With the set purged, the task cannot come back onto it.
+  assert.equal(context.processing.canRestoreMetadataEntity(taskTrash.id), false);
+  assert.equal(context.processing.restoreMetadataEntity(taskTrash.id, 'ops:lifecycle'), null);
+  assert.equal((await context.request('POST', `/api/v1/storage/trash/${taskTrash.id}/restore`, {})).status, 409);
+  assert.equal(context.processing.getTask(task.id).status, 'archived');
+});
