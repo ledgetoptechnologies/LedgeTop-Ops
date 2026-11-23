@@ -44,7 +44,7 @@ function dialog({ cached = ['p'], permissions = null, respond = null } = {}) {
   const submit = node({ disabled: true }), status = node({ hidden: true }), browser = node(), heading = node(), selection = node();
   const form = { isConnected: true, elements: { projectId: picker(), folderId: picker(), sourceRelativePath: { value: '', dataset: {} }, taskDisplayName: { value: 'Map' } } };
   submit.form = form;
-  form.querySelector = selector => ({ 'button[type="submit"]': submit, '[data-import-folder-status]': status })[selector];
+  form.querySelector = selector => ({ 'button[type="submit"]': submit, '[data-import-folder-status]': status, '#server-import-browser': browser })[selector];
   const upload = { elements: { datasetId: { value: '', innerHTML: '' } } };
   const tabs = ['device', 'server'].map(name => node({ dataset: { importTab: name } })), panels = ['device', 'server'].map(name => node({ dataset: { importPanel: name } }));
   const ui = { title: null, body: null, opened: 0, browsed: 0, closed: 0, form, upload, submit, status, browser, heading, tabs, panels, calls, toasts, operations };
@@ -178,6 +178,77 @@ test('a folder that is gone leaves nothing chosen instead of falling back to the
   assert.equal(ui.calls.length, before);
   ui.form.elements.folderId.choose('site');
   assert.equal(ui.submit.disabled, false);
+});
+
+// A POST whose answer the test releases when it wants.
+function pendingImport() {
+  const answer = {};
+  const ui = dialog({ cached: ['p', 'q'], respond: (url, options) => (options.method === 'POST' ? new Promise((resolve, reject) => { answer.resolve = () => resolve({ operation: { id: 'operation' } }); answer.reject = (message, code) => reject(Object.assign(new Error(message), code ? { code } : {})); }) : null) });
+  ui.context.importModal('p', null, 'maps');
+  ui.choose();
+  return { ui, answer, sent: ui.context.submitServerImport(ui.form) };
+}
+
+test('the target is held while the import is being sent and given back when it is refused', async () => {
+  const { ui, answer, sent } = pendingImport(), { projectId, folderId } = ui.form.elements;
+  assert.deepEqual([projectId.disabled, folderId.disabled, ui.submit.disabled], [true, true, true]);
+  assert.deepEqual({ ...ui.calls.at(-1)[1].body }, { projectId: 'p', folderId: 'maps', sourceRelativePath: 'incoming/map', taskDisplayName: 'Map' });
+  // Choosing another source meanwhile does not make the form sendable.
+  ui.choose('incoming/other');
+  assert.equal(ui.submit.disabled, true);
+  answer.reject('busy');
+  await sent;
+  assert.deepEqual([projectId.disabled, folderId.disabled, ui.submit.disabled], [false, false, false]);
+  assert.deepEqual(ui.target(), ['p', 'Site / Maps']);
+  assert.match(ui.browser.innerHTML, /busy/);
+});
+
+test('a late folder refusal never replaces a newer target', async () => {
+  const { ui, answer, sent } = pendingImport();
+  ui.form.elements.projectId.choose('q');
+  ui.form.elements.folderId.choose('quarry-maps');
+  const before = ui.calls.length;
+  answer.reject('The folder is no longer in this project.', 'invalid_folder');
+  await sent;
+  await settle();
+  assert.deepEqual(ui.target(), ['q', 'Quarry maps']);
+  assert.equal(ui.calls.length, before, 'the newer project is not reloaded with the old folder');
+  assert.equal(ui.status.hidden, true);
+  assert.equal(ui.submit.disabled, false);
+  assert.deepEqual(ui.toasts, [['The folder is no longer in this project.', true]]);
+});
+
+test('an unfinished folder list stays in charge of the folder field after a late refusal', async () => {
+  const { ui, answer, sent } = pendingImport();
+  ui.context.folderCache.delete('q');
+  let release;
+  ui.context.api = () => new Promise(resolve => { release = () => resolve({ folders: FOLDERS.q }); });
+  ui.form.elements.projectId.choose('q');
+  answer.reject('The folder is no longer in this project.', 'invalid_folder');
+  await sent;
+  assert.deepEqual([ui.form.elements.folderId.disabled, ui.submit.disabled], [true, true]);
+  release();
+  await settle();
+  assert.deepEqual(ui.form.elements.folderId.options.map(option => option.value), ['', 'quarry-maps']);
+  assert.deepEqual([ui.form.elements.folderId.disabled, ui.submit.disabled], [false, false]);
+});
+
+test('an answer for a replaced dialog leaves the new one alone', async () => {
+  for (const outcome of ['queued', 'invalid_folder', 'failed']) {
+    const { ui, answer, sent } = pendingImport();
+    ui.form.isConnected = false;
+    ui.browser.innerHTML = 'new dialog';
+    const before = [ui.calls.length, ui.submit.textContent];
+    if (outcome === 'queued') answer.resolve(); else answer.reject('refused', outcome === 'failed' ? undefined : outcome);
+    await sent;
+    await settle();
+    assert.equal(ui.closed, 0, outcome);
+    assert.equal(ui.browser.innerHTML, 'new dialog', outcome);
+    assert.deepEqual([ui.calls.length, ui.submit.textContent], before, outcome);
+    assert.equal(ui.toasts.length, 1, 'the result is still announced');
+    assert.equal(ui.operations.length, outcome === 'queued' ? 1 : 0);
+    assert.equal(ui.context.state.busy, false);
+  }
 });
 
 test('when folders cannot load, the root stays available and says why', async () => {

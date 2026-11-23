@@ -1678,7 +1678,6 @@ document.addEventListener('keydown',event=>{
     if(control){event.preventDefault();control.click();}
   }
 });
-function legacyImportModal(projectId,datasetId){const project=state.projects.find(item=>item.id===(projectId||state.datasets.find(dataset=>dataset.id===datasetId)?.projectId)),drafts=state.datasets.filter(dataset=>dataset.projectId===project?.id&&dataset.status==='draft');openModal(`Import into ${project?.displayName||'project'}`,`<div class="import-choice" role="tablist" aria-label="Import source"><button class="import-tab active" data-import-tab="device">This device</button><button class="import-tab" data-import-tab="server">Server import folder</button></div><section data-import-panel="device"><form id="upload-form" class="manage-form">${select('Draft dataset','datasetId',opts(drafts,'Select a draft'))}<label><span>Artifact role</span><select name="processingRole"><option value="auto">Detect automatically</option><option value="image">Source imagery</option><option value="provider_input">Model / orthophoto / point cloud</option><option value="gcp_source">GCP source</option></select></label>${field('Files','files','required type="file" multiple')}<button class="primary-button">Upload or resume</button><progress id="upload-progress" value="0" max="100"></progress></form><p class="form-note">Browser uploads are limited to 128 files, 64 MB each, and 256 MB total.</p></section><section data-import-panel="server" hidden><form id="server-import-form" class="manage-form"><input type="hidden" name="projectId" value="${esc(project?.id||'')}">${field('Task name','taskDisplayName','required maxlength="240"')}${field('Folder or backup ZIP','sourceRelativePath','required placeholder="incoming/task-folder or task.zip"')}<button class="primary-button">Queue structured task import</button></form><p class="form-note">This immediately queues a durable import from the managed server folder. The worker validates the folder or ZIP, detects supported task artifacts, and creates the task only after validation; there is no preview step.</p></section>`);modalContent.querySelectorAll('[data-import-tab]').forEach(tab=>tab.onclick=()=>{modalContent.querySelectorAll('[data-import-tab]').forEach(item=>item.classList.toggle('active',item===tab));modalContent.querySelectorAll('[data-import-panel]').forEach(panel=>panel.hidden=panel.dataset.importPanel!==tab.dataset.importTab)});const upload=modalContent.querySelector('#upload-form');if(datasetId)upload.elements.datasetId.value=datasetId;upload.onsubmit=event=>{event.preventDefault();uploadFiles(upload)};modalContent.querySelector('#server-import-form').onsubmit=event=>{event.preventDefault();modal.close();mutate('/api/v1/processing/server-task-imports',{method:'POST',body:values(event.currentTarget),headers:{'Idempotency-Key':crypto.randomUUID()}},'Server-folder import queued')}}
 async function renderServerImportBrowser(path=''){
   const browser=modalContent.querySelector('#server-import-browser'),selection=modalContent.querySelector('input[name="sourceRelativePath"]'),submit=modalContent.querySelector('#server-import-form button[type="submit"]');
   if(!browser)return;browser.setAttribute('aria-busy','true');browser.innerHTML='<p class="form-note">Loading import folder…</p>';
@@ -2182,19 +2181,27 @@ async function load(){const generation=++projectDataGeneration, token=state.toke
 }
 function access(){content.innerHTML='<div class="auth-state"><div><p class="eyebrow">Secure workspace</p><h2>Open Viewer from Ledge Top Operations</h2><p>This workspace reuses your Operations identity and has no separate login.</p></div></div>'}
 
+// The target is held while the request runs. The answer may arrive after the dialog was closed or replaced, so it only
+// touches the form that sent it, and only recovers the folder list for the target that was sent.
 async function submitServerImport(form){
   if(state.busy||!importTargetReady(form))return;
-  const submit=form.querySelector('button[type="submit"]'),browser=modalContent.querySelector('#server-import-browser'),endpoint=form.elements.sourceRelativePath.dataset.sourceKind==='zip'?'/api/v1/processing/webodm-task-imports':'/api/v1/processing/server-task-imports';
-  const {folderId,...body}=values(form),folder=folderId?form.elements.folderId.selectedOptions[0]?.textContent:'';
+  const {projectId,folderId:picker}=form.elements,submit=form.querySelector('button[type="submit"]'),endpoint=form.elements.sourceRelativePath.dataset.sourceKind==='zip'?'/api/v1/processing/webodm-task-imports':'/api/v1/processing/server-task-imports';
+  const {folderId,...body}=values(form),folder=folderId?picker.selectedOptions[0]?.textContent:'',request=form.importFolderRequest;
   if(folderId)body.folderId=folderId;
-  state.busy=true;submit.disabled=true;submit.textContent='Starting import…';
+  const sameTarget=()=>form.importFolderRequest===request&&projectId.value===body.projectId&&picker.value===(folderId||'');
+  state.busy=true;projectId.disabled=picker.disabled=true;submit.disabled=true;submit.textContent='Starting import…';
   try{
     const result=await api(endpoint,{method:'POST',body,headers:{'Idempotency-Key':crypto.randomUUID()}});
-    rememberOperation(result.operation);modal.close();toast(`Import queued${folder?` for ${folder}`:''}; progress will continue in Background work`);scheduleOperationRefresh(500);
+    rememberOperation(result.operation);if(form.isConnected)modal.close();toast(`Import queued${folder?` for ${folder}`:''}; progress will continue in Background work`);scheduleOperationRefresh(500);
   }catch(error){
-    submit.textContent='Try again';
-    if(error.code==='invalid_folder')void loadImportFolders(form,folderId,{refresh:true});
-    else{browser.innerHTML=`<div class="empty-state">${esc(error.message)}</div>`;submit.disabled=false;}
+    if(form.isConnected){
+      // A folder list that started loading meanwhile owns the folder field.
+      projectId.disabled=false;if(form.importFolderRequest===request)picker.disabled=false;
+      submit.textContent='Try again';
+      if(error.code!=='invalid_folder')form.querySelector('#server-import-browser').innerHTML=`<div class="empty-state">${esc(error.message)}</div>`;
+      else if(sameTarget())void loadImportFolders(form,folderId,{refresh:true});
+      syncImportSubmit(form);
+    }
     toast(error.message,true);
   }finally{state.busy=false}
 }

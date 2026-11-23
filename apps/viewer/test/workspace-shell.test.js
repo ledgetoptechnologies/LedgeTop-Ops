@@ -15,8 +15,7 @@ test('workspace redeems an Ops grant and removes it from the URL',()=>{
   assert.match(source,/sessionStorage\.setItem\(TOKEN_KEY,state\.token\)/);
 });
 test('workspace keeps imports and access modes explicit',()=>{
-  assert.match(source,/This immediately queues a durable import from the managed server folder/);
-  assert.match(source,/there is no preview step/);
+  assert.match(source,/Import copies and validates the source; it never removes the original automatically/);
   assert.match(source,/\/api\/v1\/processing\/server-task-imports/);
   assert.match(source,/\/api\/v1\/workspace\/client-grants/);
   assert.doesNotMatch(source,/Scan WebODM mount/);

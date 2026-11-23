@@ -91,9 +91,8 @@ test('project-first lifecycle exposes rename and recoverable delete without arch
   assert.match(source,/\/storage\/mutations\/\$\{encodeURIComponent\(id\)\}\/retry/);
 });
 
-test('server-folder copy is explicit about immediate durable import without a preview',()=>{
+test('server-folder copy is explicit about importing a validated copy',()=>{
   assert.match(source,/\/api\/v1\/processing\/server-task-imports/);
-  assert.match(source,/immediately queues a durable import/);
-  assert.match(source,/there is no preview step/);
+  assert.match(source,/Import copies and validates the source; it never removes the original automatically/);
   assert.doesNotMatch(source,/supported artifacts after confirmation/);
 });
