@@ -54,7 +54,7 @@ Syntax and whitespace checks pass.
 
 This is a durable handoff, not a general Engineering Hub task record.
 
-## Cadens source refresh — November 16, 2026
+## Source refresh — November 16, 2026
 
 The existing PR #594 branch now includes main `6d474071`; no unrelated private
 Viewer stack was imported. The new Hub task is

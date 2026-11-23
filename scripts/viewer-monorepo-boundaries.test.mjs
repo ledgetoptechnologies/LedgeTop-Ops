@@ -24,12 +24,13 @@ function steps(source) {
 }
 const migratedSteps = steps(workflow);
 const originalSteps = steps(upstream);
-const { MIGRATIONS } = createRequire(import.meta.url)('../apps/viewer/server/database.js');
+const { MIGRATIONS, openDatabase } = createRequire(import.meta.url)('../apps/viewer/server/database.js');
 const reviewedAckMigrations = [
   { version: 41, name: 'viewer_acceptance_ack_outbox' },
   { version: 42, name: 'viewer_acceptance_ack_outbox_schema_reconcile' },
 ];
 const reviewedGcpOriginalsMigration = { version: 46, name: 'viewer_gcp_permanent_source_originals' };
+const reviewedGcpOriginalsObjectsSha256 = '80a96521e20d6d1a7cb160777e4c57419c74dd6d0fe3186de64d36c3ce68af3a';
 const reviewedFolderMigration = { version: 48, name: 'project_organizational_folders' };
 const reviewedTimerMigration = { version: 83, name: 'provider_engine_processing_elapsed' };
 const reviewedTimerSqlSha256 = 'c8b8205fbcf5b066030223c1176527f347ffc1bf4861b6ccf32e5845000f3214';
@@ -336,6 +337,18 @@ test('Viewer publication preserves the ACK, GCP-original and folder migrations a
   const migrations = MIGRATIONS.filter(({ version }) => version >= reviewedAckMigrations[0].version);
   assert.deepEqual(migrations.map(({ version, name }) => ({ version, name })),
     [...reviewedAckMigrations, reviewedGcpOriginalsMigration, reviewedFolderMigration, reviewedTimerMigration, reviewedProviderRemovalMigration, reviewedTrashPurgeMigration], 'another schema advance requires a new explicit gate review');
+  // Both publisher pins follow the highest version of this release tree. 46 is
+  // a validated gap below it and never moves the pin.
+  assert.equal(reviewedCandidateSchemaPin, `EXPECTED_SCHEMA_VERSION: "${Math.max(...MIGRATIONS.map(({ version }) => version))}"`);
+  assert.equal(workflow.split(reviewedCandidateSchemaPin).length - 1, 2, 'both publisher pins match');
+  const gcpDatabase = openDatabase(':memory:');
+  try {
+    const gcpObjects = gcpDatabase.prepare("SELECT type, name, sql FROM sqlite_master WHERE tbl_name='viewer_gcp_source_originals' AND sql IS NOT NULL ORDER BY type, name").all()
+      .map(row => `${row.type} ${row.name} ${row.sql.replace(/\s+/g, ' ').trim()}`).join(String.fromCharCode(10));
+    assert.equal(createHash('sha256').update(gcpObjects).digest('hex'), reviewedGcpOriginalsObjectsSha256, 'migration 46 objects must match the reviewed GCP-original schema');
+    const gcpMigration = migrations.find(({ version }) => version === reviewedGcpOriginalsMigration.version);
+    assert.equal(gcpMigration.verify(gcpDatabase), true);
+  } finally { gcpDatabase.close(); }
   const timer = migrations.find(({ version }) => version === reviewedTimerMigration.version);
   const sqlSha256 = createHash('sha256').update(timer.sql.replace(/\r\n/g, '\n')).digest('hex');
   assert.equal(sqlSha256, reviewedTimerSqlSha256, 'migration 83 SQL must match the reviewed timer schema');

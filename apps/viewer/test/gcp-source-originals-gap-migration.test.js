@@ -13,17 +13,18 @@ const {GcpSourceOriginals,gcpSourceOriginalsV46Present}=require('../server/gcpSo
 const V46=MIGRATIONS.find(migration=>migration.version===46);
 const conflict={code:'viewer_migration_history_conflict'};
 
-// Build the schema a deployed main Viewer has (every version except 46, ending
-// at 83) from the unchanged migration SQL/hooks and its real ledger. The
+// Build the schema a deployed main Viewer has (every version up to `through`
+// except 46) from the unchanged migration SQL/hooks and its real ledger. The
 // exported migration list is never mutated.
-function databaseWithoutV46(t){
+const LATEST=MIGRATIONS.at(-1).version;
+function databaseWithoutV46(t,through=LATEST){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-gcp-v46-gap-'));
   const file=path.join(root,'viewer.sqlite');
   const state={database:new DatabaseSync(file),file};
   t.after(()=>{state.database?.close();fs.rmSync(root,{recursive:true,force:true});});
   state.database.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL');
   state.database.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
-  for(const migration of MIGRATIONS.filter(value=>value.version!==46)){
+  for(const migration of MIGRATIONS.filter(value=>value.version!==46&&value.version<=through)){
     state.database.exec('BEGIN IMMEDIATE');
     try{
       state.database.exec(migration.sql);migration.after?.(state.database);
@@ -37,7 +38,7 @@ function databaseWithoutV46(t){
 
 function populate(database){
   const processing=new ProcessingRepository(database);
-  const project=processing.createProject({displayName:'Synthetic schema 83 project'});
+  const project=processing.createProject({displayName:'Synthetic gap-upgrade project'});
   const dataset=processing.createDataset({projectId:project.id,displayName:'Flight',storageMode:'managed',
     rootKey:'datasets',relativePath:crypto.randomUUID()});
   processing.finalizeDataset(dataset.id,[{relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}],'b'.repeat(64));
@@ -51,9 +52,9 @@ function populate(database){
   return {project,dataset,task,source};
 }
 
-test('a populated schema 83 database receives 46 as a verified gap and reopens unchanged',t=>{
-  const state=databaseWithoutV46(t);
-  assert.equal(state.database.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v,83);
+for(const through of [83,85,86])test(`a populated schema ${through} database receives 46 as a verified gap and reopens unchanged`,t=>{
+  const state=databaseWithoutV46(t,through);
+  assert.equal(state.database.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v,through);
   assert.equal(state.database.prepare('SELECT COUNT(*) AS n FROM schema_migrations WHERE version=46').get().n,0);
   const fixture=populate(state.database);
   state.database.close();state.database=null;
@@ -61,7 +62,7 @@ test('a populated schema 83 database receives 46 as a verified gap and reopens u
   state.database=openDatabase(state.file);
   const db=state.database;
   assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=46').get().name,V46.name);
-  assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v,83);
+  assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v,LATEST);
   assert.equal(gcpSourceOriginalsV46Present(db),true);
   assert.equal(V46.verify(db),true);
   const linked=db.prepare("SELECT source_original_id FROM gcp_sets WHERE id='legacy'").get().source_original_id;
