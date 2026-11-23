@@ -5,7 +5,6 @@
 
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const express = require('express');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const store = require('./store');
@@ -21,6 +20,7 @@ const { scopedStorageRootKey } = require('./storageManager');
 const { validCameraFilename } = require('./cameraPhotos');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
+const { assetIntegrityCache } = require('./assetIntegrityCache');
 
 const router = trackedRouter();
 const productTickets = createDownloadCapabilities();
@@ -161,10 +161,11 @@ function publishedAssetMatch(model, rootKey, relPath, { review = false, publicOn
 }
 function publishedAssetAllows(model, rootKey, relPath) { return Boolean(publishedAssetMatch(model,rootKey,relPath)); }
 
-function sha256File(filePath) { return new Promise((resolve,reject)=>{const hash=crypto.createHash('sha256'),stream=fs.createReadStream(filePath);stream.on('data',(chunk)=>hash.update(chunk));stream.on('error',reject);stream.on('end',()=>resolve(hash.digest('hex')));}); }
 function requestedRange(header,size){const match=/^bytes=(\d*)-(\d*)$/.exec(String(header||''));if(!match)return null;let start=match[1]?Number(match[1]):null,end=match[2]?Number(match[2]):null;if(start===null&&end!==null){start=Math.max(0,size-end);end=size-1;}else{if(start===null)return null;if(end===null||end>=size)end=size-1;}return Number.isSafeInteger(start)&&Number.isSafeInteger(end)&&start>=0&&start<=end&&start<size?{start,end}:null;}
-async function verifyChunks(filePath,chunks,range,totalSize){const selected=range?chunks.filter((chunk)=>chunk.byteOffset<=range.end&&chunk.byteOffset+chunk.byteSize-1>=range.start):chunks;if(!selected.length)return false;if(!range){let offset=0;for(const chunk of chunks){if(chunk.byteOffset!==offset)return false;offset+=chunk.byteSize;}if(offset!==totalSize)return false;}const handle=await fs.promises.open(filePath,'r');try{for(const chunk of selected){const buffer=Buffer.allocUnsafe(chunk.byteSize),{bytesRead}=await handle.read(buffer,0,chunk.byteSize,chunk.byteOffset);if(bytesRead!==chunk.byteSize||crypto.createHash('sha256').update(buffer.subarray(0,bytesRead)).digest('hex')!==chunk.sha256)return false;}return true;}finally{await handle.close();}}
-async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null){const integrityRequired=project.provider==='ltds-processing'||Boolean(publishedAsset.sha256)||Boolean(publishedAsset.manifestSha256);if(!integrityRequired)return true;const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null,chunkPath='';if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return false;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return false;expected=repository.getModelAssetFile(publishedAsset.id,child);chunkPath=child;}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return false;const stat=fs.statSync(abs);if(stat.size!==expected.byteSize)return false;const chunks=repository.getModelAssetChunks?.(publishedAsset.id,chunkPath)||[];if(chunks.length)return verifyChunks(abs,chunks,requestedRange(rangeHeader,stat.size),stat.size);return await sha256File(abs)===expected.sha256;}
+// Registered chunk hashes are proven per 4 MiB region; positive results are
+// remembered per exact file identity (assetIntegrityCache.js).
+async function verifyChunks(filePath,stat,chunks,range,totalSize){const selected=range?chunks.filter((chunk)=>chunk.byteOffset<=range.end&&chunk.byteOffset+chunk.byteSize-1>=range.start):chunks;if(!selected.length)return false;if(!range){let offset=0;for(const chunk of chunks){if(chunk.byteOffset!==offset)return false;offset+=chunk.byteSize;}if(offset!==totalSize)return false;}for(const chunk of selected){if(!await assetIntegrityCache.verifyChunk(filePath,stat,chunk))return false;}return true;}
+async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null){const integrityRequired=project.provider==='ltds-processing'||Boolean(publishedAsset.sha256)||Boolean(publishedAsset.manifestSha256);if(!integrityRequired)return true;const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null,chunkPath='';if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return false;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return false;expected=repository.getModelAssetFile(publishedAsset.id,child);chunkPath=child;}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return false;const stat=await fs.promises.stat(abs,{bigint:true}),size=Number(stat.size);if(size!==expected.byteSize)return false;const chunks=repository.getModelAssetChunks?.(publishedAsset.id,chunkPath)||[];if(chunks.length)return verifyChunks(abs,stat,chunks,requestedRange(rangeHeader,size),size);return assetIntegrityCache.verifyWholeFile(abs,stat,expected.sha256);}
 
 async function pathTokenAuthorization(req, projectId) {
   if (!canonicalRepository) return false;
@@ -308,8 +309,8 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     if (!photo) return res.status(404).json({ error: 'photo not found' });
     const rootPath = canonicalAssetRoot(model, photo.rootKey), absolute = rootPath && safeExistingFile(rootPath, photo.relativePath);
     if (!absolute) return res.status(404).json({ error: 'photo not found' });
-    const stat = fs.statSync(absolute);
-    if (stat.size !== photo.byteSize || await sha256File(absolute) !== photo.sha256) return res.status(404).json({ error: 'photo not found' });
+    const stat = await fs.promises.stat(absolute, { bigint: true });
+    if (Number(stat.size) !== photo.byteSize || !await assetIntegrityCache.verifyWholeFile(absolute, stat, photo.sha256)) return res.status(404).json({ error: 'photo not found' });
     if(authorization.share){const current=await pathTokenAuthorization(req,req.params.id);if(!current?.cameras)return res.status(403).json({error:'not authorized'});}
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Content-Type', photo.contentType);
@@ -382,3 +383,4 @@ module.exports.xAccelLocation = xAccelLocation;
 module.exports.publishedAssetAllows = publishedAssetAllows;
 module.exports.publishedAssetMatch = publishedAssetMatch;
 module.exports.publishedAssetIntegrityAllows = publishedAssetIntegrityAllows;
+module.exports.assetIntegrityCache = assetIntegrityCache;

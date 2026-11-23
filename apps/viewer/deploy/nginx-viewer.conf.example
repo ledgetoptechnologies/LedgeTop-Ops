@@ -9,9 +9,11 @@ limit_req_zone $binary_remote_addr zone=viewer_share:10m rate=10r/s;
 limit_req_zone $binary_remote_addr zone=viewer_assets:10m rate=500r/s;
 limit_conn_zone $binary_remote_addr zone=viewer_asset_connections:10m;
 
+# An empty value (not "close") lets ordinary requests reuse the upstream
+# keepalive pool below; WebSocket upgrades still get "upgrade".
 map $http_upgrade $viewer_connection_upgrade {
     default upgrade;
-    '' close;
+    '' '';
 }
 
 upstream ltds_viewer_lan {
