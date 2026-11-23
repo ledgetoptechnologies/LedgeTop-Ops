@@ -153,6 +153,7 @@ function fakeCanvasFactory(log) {
       putImageData(image) { this.image = image; },
       getImageData(x, y, gw, gh) {
         const data = new Uint8ClampedArray(gw * gh * 4);
+        if (!('image' in this)) return { data: data.fill(255) }; // the note rows' own canvas
         for (let r = 0; r < gh; r++) data.set(this.image.data.subarray(((y + r) * w + x) * 4, ((y + r) * w + x + gw) * 4), r * gw * 4);
         return { data };
       },
@@ -202,7 +203,9 @@ test('export traces contours for the print extent and burns lines, ft labels and
   });
   assert.equal(tif.filename, 'orthophoto-contours-400px.tif');
   const geo = await (await fromArrayBuffer(await tif.blob.arrayBuffer())).getImage();
-  assert.deepEqual(geo.getBoundingBox(), [500000, 4700000, 500400, 4700200]);
+  // The note's rows lie below the map: the top-left corner and pixel size are the map's.
+  assert.deepEqual(geo.getBoundingBox(), [500000, 4700200 - geo.getHeight(), 500400, 4700200]);
+  assert.ok(geo.getHeight() > 200);
   // Index line at 800 ft is 100 m east of the west edge: x = 100 / gsd.
   const moves = ops.filter(o => o[0] === 'moveTo' || o[0] === 'lineTo').map(o => o[1]);
   assert.ok(moves.some(x => Math.abs(x - 100 * 2048 / 400) < 1), 'an 800 ft vertex lands at the right pixel column');
@@ -231,7 +234,8 @@ function pixelCanvasFactory(log) {
       [r, g, b].forEach((v, k) => { data[i + k] = Math.round(v * a + data[i + k] * (1 - a)); });
       data[i + 3] = Math.max(data[i + 3], Math.round(a * 255));
     };
-    const rect = (x, y, w, h, c) => { for (let yy = Math.round(y); yy < Math.round(y + h); yy++) for (let xx = Math.round(x); xx < Math.round(x + w); xx++) dot(xx, yy, c); };
+    const ready = () => { data ||= new Uint8ClampedArray(canvas.width * canvas.height * 4); };
+    const rect = (x, y, w, h, c) => { ready(); for (let yy = Math.round(y); yy < Math.round(y + h); yy++) for (let xx = Math.round(x); xx < Math.round(x + w); xx++) dot(xx, yy, c); };
     const px = () => Number(/([\d.]+)px/.exec(state.font)[1]);
     const width = text => text.length * px() * 0.55;
     const ctx = {
@@ -272,19 +276,19 @@ const printWith = async (options = {}) => {
 const joined = texts => texts.map(t => t.text).join(' ');
 const NOTE = `${PROPERTY_LINES_NOTE} ${ATTRIBUTION}`;
 
-test('property lines never print without the "not a survey" note and the source: PNG and GeoTIFF, text and pixels', async () => {
-  for (const format of ['png', 'tif']) {
-    const { result, texts, pixel } = await printWith({ format });
+test('a PNG with property lines carries the "not a survey" note and the source: text and pixels', async () => {
+  {
+    const { result, texts, pixel } = await printWith();
     const note = texts.filter(t => t.y > result.height - 36);
-    assert.equal(joined(note), NOTE, format);
+    assert.equal(joined(note), NOTE);
     for (const line of note) assert.ok(line.x >= 0 && line.x + line.width <= result.width && line.y + line.px / 2 <= result.height, 'whole text inside the image');
     // The band is opaque, edge to edge, with dark text on it; the parcel line under it does not show through.
     const y = Math.round(note[0].y), x = Math.round(note[0].x + note[0].width / 2);
-    assert.deepEqual(pixel(x, y), [27, 27, 27, 255], `${format}: text ink`);
+    assert.deepEqual(pixel(x, y), [27, 27, 27, 255], 'text ink');
     const bottom = result.height - 1, lineX = Math.round(200 / 400 * result.width);
-    for (const at of [0, lineX, result.width - 1]) assert.deepEqual(pixel(at, bottom), [255, 255, 255, 255], `${format}: band at ${at}`);
+    for (const at of [0, lineX, result.width - 1]) assert.deepEqual(pixel(at, bottom), [255, 255, 255, 255], `band at ${at}`);
     // The same lines are there above the band.
-    assert.deepEqual(pixel(lineX, Math.round(50 / 200 * result.height)), [0xee, 0x50, 0x07, 255], `${format}: line pixel`);
+    assert.deepEqual(pixel(lineX, Math.round(50 / 200 * result.height)), [0xee, 0x50, 0x07, 255], 'line pixel');
     assert.equal(result.propertyLines, 1);
   }
 });
@@ -300,7 +304,7 @@ test('the legend names the property lines and stays clear of the note', async ()
   assert.ok(others.some(t => /ft$/.test(t.text)), 'scale bar');
   for (const other of others) assert.ok(other.y + other.px / 2 < result.height - 36, other.text);
   const tif = await printWith({ format: 'tif' });
-  assert.equal(joined(tif.texts), NOTE, 'a GeoTIFF still has no legend');
+  assert.equal(joined(tif.texts), '', 'a GeoTIFF still has no legend, and no note over its map pixels');
 });
 
 test('no property lines, no note: the rest of the image is unchanged', async () => {
@@ -327,7 +331,7 @@ test('the note wraps on narrow prints, and an image too small for it is refused 
   const ctx = pixelCanvasFactory([])().getContext(), credit = Array(4).fill(ATTRIBUTION).join(' ');
   for (const [width, height] of [[2048, 1024], [4096, 4096], [6144, 4608], [1280, 720], [720, 1280], [375, 812]]) {
     const size = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
-    const note = layoutPropertyNote(ctx, { width, height, scale: size, attribution: credit });
+    const note = layoutPropertyNote(ctx, { width, maxHeight: height * 0.4, scale: size, attribution: credit });
     assert.equal(note.font.split('px')[0], `600 ${12 * size}`, `${width} x ${height}`);
     assert.equal(note.lines.join(' '), `${PROPERTY_LINES_NOTE} ${credit}`);
   }
@@ -341,16 +345,80 @@ test('export refuses property lines whose source is not known', async () => {
   }
 });
 
-test('GeoTIFF export carries the note in its pixels', async () => {
+test('blank attribution is no attribution: whitespace and invisible characters do not satisfy the source requirement', async () => {
+  for (const blank of ['   ', '\n\t', '\u00a0\u2003', '\u200b\ufeff', ' . ', null, 42]) {
+    const { ds, reads } = orthoFixture();
+    await assert.rejects(exportOrthoPrint({ ortho: ds, extent: FULL, longEdge: 400, propertyLines: PARCEL, propertyAttribution: blank, createCanvas: pixelCanvasFactory([]) }), { code: 'print_note' }, JSON.stringify(blank));
+    assert.equal(reads.length, 0);
+  }
+  for (const name of ['   ', '\u200b', '', null]) assert.equal(propertyLinesSourceText({ name, release: 'R1' }), '', JSON.stringify(name));
+  assert.equal(propertyLinesSourceText({ name: '  Synthetic \n Parcel Map ', release: ' ' }), 'Source: Synthetic Parcel Map.');
+  const log = [], { ds } = orthoFixture();
+  await exportOrthoPrint({ ortho: ds, extent: FULL, longEdge: 2048, propertyLines: PARCEL, propertyAttribution: `  ${ATTRIBUTION.replace(/ /g, '  ')}\n`, createCanvas: pixelCanvasFactory(log) });
+  assert.ok(joined(log[0].texts).endsWith(NOTE));
+});
+
+async function readTif(blob) {
+  const image = await (await fromArrayBuffer(await blob.arrayBuffer())).getImage();
+  const tag = name => image.getFileDirectory().getValue(name);
+  return { image, width: image.getWidth(), height: image.getHeight(), rgba: Array.from(await image.readRasters({ interleave: true })),
+    tiepoint: Array.from(tag('ModelTiepoint')), scale: Array.from(tag('ModelPixelScale')), geoKeys: Array.from(tag('GeoKeyDirectory')),
+    description: tag('ImageDescription') };
+}
+const exportTif = async (options = {}) => {
+  const log = [], { ds } = orthoFixture();
+  const out = await exportOrthoPrint({ ortho: ds, extent: FULL, longEdge: 800, format: 'tif', epsg: 32616, propertyLines: PARCEL, propertyAttribution: ATTRIBUTION, createCanvas: pixelCanvasFactory(log), ...options });
+  return { log, ...(await readTif(out.blob)) };
+};
+
+test('GeoTIFF with property lines: every map pixel and the georeference are untouched; the note is extra rows below and the description tag', async () => {
+  // The same picture without any note: what the map pixels must be.
+  const { result, pixel } = await printWith({ format: 'tif', longEdge: 800 });
+  const out = await exportTif();
+  assert.deepEqual([out.width, result.width, result.height], [800, 800, 400]);
+  assert.ok(out.height > 400, `${out.height} rows`);
+  const map = [];
+  for (let y = 0; y < 400; y++) for (let x = 0; x < 800; x++) map.push(...pixel(x, y));
+  assert.deepEqual(out.rgba.slice(0, 800 * 400 * 4), map, 'every original row, byte for byte');
+  assert.equal(out.rgba[(395 * 800 + 5) * 4 + 3], 0, 'nodata at the bottom of the map is still transparent');
+  const lineAt = (Math.round(400 - 1 / 0.5) * 800 + 400) * 4;
+  assert.deepEqual(out.rgba.slice(lineAt, lineAt + 3), [0xee, 0x50, 0x07], 'the parcel line along the bottom edge is not covered');
+  // The extra rows: opaque white with the text, nothing else.
+  const rows = out.rgba.slice(800 * 400 * 4);
+  assert.ok(rows.every((v, i) => i % 4 !== 3 || v === 255), 'opaque');
+  assert.ok(rows.some((v, i) => i % 4 === 0 && v === 27), 'text ink');
+  assert.deepEqual(rows.slice(-4), [255, 255, 255, 255]);
+  assert.equal(joined(out.log[1].texts), NOTE);
+  assert.equal(out.log[0].texts.length, 0, 'nothing written on the map canvas');
+  // Same corner, same pixel size: the map footprint is where it was, and the rows lie below it.
+  const plain = await exportTif({ propertyLines: null });
+  assert.deepEqual([out.tiepoint, out.scale, out.geoKeys], [plain.tiepoint, plain.scale, plain.geoKeys]);
+  assert.deepEqual(out.tiepoint, [0, 0, 0, 500000, 4700200, 0]);
+  assert.deepEqual(out.scale.slice(0, 2), [0.5, 0.5]);
+  assert.deepEqual(out.image.getBoundingBox(), [500000, 4700200 - out.height * 0.5, 500400, 4700200]);
+  assert.equal(String(out.description).replace(/\0+$/, ''), NOTE);
+});
+
+test('a plain GeoTIFF is unchanged: no extra rows, no description', async () => {
+  const { result, pixel } = await printWith({ format: 'tif', longEdge: 800, propertyLines: null });
+  const rgba = new Uint8ClampedArray(800 * 400 * 4);
+  for (let y = 0; y < 400; y++) for (let x = 0; x < 800; x++) rgba.set(pixel(x, y), (y * 800 + x) * 4);
   const { ds } = orthoFixture();
-  const corner = async propertyLines => {
-    const out = await exportOrthoPrint({ ortho: ds, extent: FULL, longEdge: 800, format: 'tif', epsg: 32616, propertyLines, propertyAttribution: ATTRIBUTION, createCanvas: pixelCanvasFactory([]) });
-    const image = await (await fromArrayBuffer(await out.blob.arrayBuffer())).getImage();
-    assert.deepEqual(image.getBoundingBox(), [500000, 4700000, 500400, 4700200], 'georeference unchanged');
-    return Array.from(await image.readRasters({ window: [0, image.getHeight() - 1, 1, image.getHeight()], interleave: true }));
-  };
-  assert.deepEqual(await corner(PARCEL), [255, 255, 255, 255]);
-  assert.equal((await corner(null))[3], 0, 'nodata stays transparent without property lines');
+  const out = await exportOrthoPrint({ ortho: ds, extent: FULL, longEdge: 800, format: 'tif', epsg: 32616, createCanvas: pixelCanvasFactory([]) });
+  const bytes = Buffer.from(await out.blob.arrayBuffer());
+  assert.ok(bytes.equals(Buffer.from(encodePrintGeoTiff({ rgba, width: result.width, height: result.height, extent: FULL, epsg: 32616 }))), 'byte for byte');
+  const tif = await readTif(out.blob);
+  assert.deepEqual([tif.width, tif.height, tif.description], [800, 400, undefined]);
+  assert.deepEqual(tif.image.getBoundingBox(), [500000, 4700000, 500400, 4700200]);
+});
+
+test('GeoTIFF note: a small map still gets its rows, plain characters go in the tag, and a blocked note canvas stops the export', async () => {
+  const small = await exportTif({ longEdge: 120, propertyAttribution: 'Source: State Cartographer’s Parcel Map – R1.' });
+  assert.equal(String(small.description).replace(/\0+$/, ''), `${PROPERTY_LINES_NOTE} Source: State Cartographer's Parcel Map - R1.`);
+  assert.ok(small.height > 60);
+  let made = 0;
+  const factory = pixelCanvasFactory([]);
+  await assert.rejects(exportTif({ createCanvas: () => (++made === 1 ? factory() : { width: 0, height: 0, getContext: () => null }) }), { code: 'print_too_large' });
 });
 
 test('the Viewer prints the same source as its on-screen notice, taken with the lines', () => {
