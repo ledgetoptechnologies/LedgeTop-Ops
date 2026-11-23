@@ -11,8 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import {
   LEDGER_INSERT_SQL, OPS_0227_0244_AUTHORITY_NOTE, OPS_0227_0244_FILES, OPS_0227_0244_FINAL_LEDGER,
-  OPS_0227_0244_FIXTURE_SHA256, OPS_0227_0244_PRE_READ_QUERY, OPS_0227_0244_PRIOR_LEDGER, OPS_PRODUCTION_DATABASE,
-  OPS_0227_0244_SCHEMA_ROWS_SQL, ops0227To0244ExistingSchema, isOps0227To0244ReadQuery, loadVerifiedOps0227To0244Plan, mainOps0227To0244, openOps0227To0244Receipt,
+  OPS_0227_0244_FIXTURE_SHA256, OPS_0227_0244_PRE_READ_QUERY, OPS_0227_0244_PRIOR_LEDGER, OPS_PRODUCTION_DATABASE, OPS_PRODUCTION_EXISTING_SCHEMA,
+  OPS_0227_0244_SCHEMA_ROWS_SQL, loadOps0227To0244BaselineReceipt, ops0227To0244ExistingSchema, isOps0227To0244ReadQuery, loadVerifiedOps0227To0244Plan, mainOps0227To0244, openOps0227To0244Receipt,
   parseOps0227To0244Args, parseOps0227To0244SnapshotResult, runOps0227To0244Ordered,
 } from './production-ops-0227-0244-ordered-once.mjs';
 import { createOps0227To0244CloudflareProvider } from './production-ops-0227-0244-cloudflare-provider.mjs';
@@ -654,11 +654,13 @@ test('production execute requires an approval reference and records it; rehearsa
   const receiptFile = receiptPath();
   const { result } = await cli(file, ['--execute', '--receipt', receiptFile, '--approval-ref', 'approval-0227-0244-synthetic', ...production],
     { extra: { sourceCheck: async () => 'f'.repeat(40) } });
-  assert.equal(result.status, 'complete');
+  // The synthetic chain is the source-built schema, not production's approved one, so the run is refused unwritten.
+  assert.equal(result.status, 'refused');
   const receipt = readReceipt(receiptFile);
   assert.equal(receipt.approvalRef, 'approval-0227-0244-synthetic');
   assert.equal(receipt.target.environment, 'production');
-  assert.equal(receipt.finalLedger.count, 236);
+  assert.equal(receipt.stop.code, 'approved_existing_schema_mismatch');
+  assert.equal(receipt.finalLedger.count, 226);
 });
 
 // --- Review follow-ups: non-atomic batches, row counts, sequence, targets ----
@@ -896,5 +898,213 @@ test('a change to an existing object between runs is refused as existing_schema_
   const refused = await cli(file, [...execArgs(receiptPath()), '--resume-from', '0231_owner_google_ads_summary.sql', '--baseline-receipt', baseline]);
   assert.equal(refused.result.status, 'reconciliation-required');
   assert.equal(refused.result.stop.code, 'reconciliation_required:existing_schema_changed');
+  assert.equal(refused.provider.calls.writes, 0);
+});
+
+// --- Approved production schema precondition --------------------------------
+
+const PRODUCTION_ARGS = ['--account-id', OPS_PRODUCTION_DATABASE.accountId, '--database-id', OPS_PRODUCTION_DATABASE.databaseId,
+  '--database-name', OPS_PRODUCTION_DATABASE.databaseName];
+const productionExec = (receiptFile, ...extra) => ['--execute', '--receipt', receiptFile, '--approval-ref', 'approval-synthetic', ...extra, ...PRODUCTION_ARGS];
+const SOURCE_OK = { sourceCheck: async () => 'f'.repeat(40) };
+
+function existingSchemaOf(file) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try { return ops0227To0244ExistingSchema({ schema: db.prepare(OPS_0227_0244_SCHEMA_ROWS_SQL).all() }, loadVerifiedOps0227To0244Plan()); }
+  finally { db.close(); }
+}
+function sqlOn(file, sql) { const db = new DatabaseSync(file); try { db.exec(sql); } finally { db.close(); } }
+
+test('the approved production schema is the pinned installed-schema observation, not the source-built schema', () => {
+  assert.deepEqual({ ...OPS_PRODUCTION_EXISTING_SCHEMA },
+    { objectCount: 2472, sha256: 'b05eb4958761549c7112518856970c010fe408dfb355d40d262595e012ab4e9b' });
+  assert.ok(Object.isFrozen(OPS_PRODUCTION_EXISTING_SCHEMA));
+  const profile = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/production-auto-migration-profile/installed-schema-preservation-v1/profile.json'), 'utf8'));
+  assert.equal(profile.databases.operations.databaseId, OPS_PRODUCTION_DATABASE.databaseId);
+  assert.equal(profile.databases.operations.schema.objectCount, OPS_PRODUCTION_EXISTING_SCHEMA.objectCount);
+  assert.notDeepEqual(existingSchemaOf(chains[226]), { ...OPS_PRODUCTION_EXISTING_SCHEMA });
+});
+
+test('production refuses an unapproved schema in every mode with zero writes and no confirmation prompt', async () => {
+  const observed = existingSchemaOf(chains[226]);
+  const noConfirm = async () => { throw new Error('a refused run must not ask for confirmation'); };
+  for (const [args, status, code] of [
+    [receipt => ['--receipt', receipt, ...PRODUCTION_ARGS], 'stopped', 'approved_existing_schema_mismatch'],
+    [receipt => productionExec(receipt), 'refused', 'approved_existing_schema_mismatch'],
+    [receipt => ['--reconcile', '--receipt', receipt, ...PRODUCTION_ARGS], 'reconciliation-required',
+      'reconciliation_required:approved_existing_schema_mismatch'],
+  ]) {
+    const file = freshDb(), before = fs.readFileSync(file), receiptFile = receiptPath();
+    const { result, provider } = await cli(file, args(receiptFile), { confirm: noConfirm, extra: SOURCE_OK });
+    assert.equal(result.status, status);
+    assert.equal(provider.calls.writes, 0);
+    assert.ok(fs.readFileSync(file).equals(before), 'database bytes unchanged');
+    const receipt = readReceipt(receiptFile);
+    assert.equal(receipt.stop.code, code);
+    assert.equal(receipt.writesPerformed, 0);
+    assert.deepEqual(receipt.approvedExistingSchema, { expected: { ...OPS_PRODUCTION_EXISTING_SCHEMA }, observed, ok: false });
+    assert.ok(receipt.stop.detail.includes(observed.sha256) && receipt.stop.detail.includes(OPS_PRODUCTION_EXISTING_SCHEMA.sha256));
+  }
+});
+
+test('production is identified by its database id, and the approved schema cannot be overridden there', async () => {
+  const plan = loadVerifiedOps0227To0244Plan(), file = freshDb();
+  for (const environment of ['production', 'non-production', undefined]) {
+    const provider = sqliteProvider(file), receipt = openOps0227To0244Receipt(receiptPath());
+    try {
+      const target = { ...OPS_PRODUCTION_DATABASE, environment };
+      const result = await runOps0227To0244Ordered({ plan, provider, mode: 'execute', target, receipt });
+      assert.equal(result.stop.code, 'approved_existing_schema_mismatch');
+      await assert.rejects(runOps0227To0244Ordered({ plan, provider, mode: 'execute', target, receipt, approvedExistingSchema: existingSchemaOf(file) }),
+        /approved_existing_schema_override_refused/u);
+      await assert.rejects(runOps0227To0244Ordered({ plan, provider, mode: 'execute', receipt }), /target_required/u);
+      assert.equal(provider.calls.writes, 0);
+    } finally { receipt.close(); provider.close(); }
+  }
+  await assert.rejects(cli(file, productionExec(receiptPath()), { extra: { ...SOURCE_OK, approvedExistingSchema: existingSchemaOf(file) } }),
+    /approved_existing_schema_override_refused/u);
+  for (const bad of [{}, { objectCount: 1, sha256: 'x' }, { ...existingSchemaOf(file), extra: 1 }]) {
+    await assert.rejects(cli(file, execArgs(receiptPath()), { extra: { approvedExistingSchema: bad } }), /approved_existing_schema_override_refused/u);
+  }
+  assert.equal(ledgerOf(file).length, 226);
+});
+
+test('an approved schema applies 226 -> 236 and the receipt records the match', async () => {
+  const file = freshDb(), approvedExistingSchema = existingSchemaOf(file), receiptFile = receiptPath();
+  const { result, provider } = await cli(file, execArgs(receiptFile), { extra: { approvedExistingSchema } });
+  assert.equal(result.status, 'complete');
+  assert.equal(provider.calls.writes, 10);
+  const receipt = readReceipt(receiptFile);
+  assert.deepEqual(receipt.approvedExistingSchema, { expected: approvedExistingSchema, observed: approvedExistingSchema, ok: true });
+  assert.ok(receipt.steps.every(step => step.preflight.checks.some(item => item.name === 'approved_existing_schema' && item.ok)));
+  assert.deepEqual(existingSchemaOf(file), approvedExistingSchema);
+});
+
+test('every kind of drift in the existing schema is refused before the first write', async () => {
+  for (const sql of ['CREATE TABLE unapproved_extra(x INTEGER)', 'DROP VIEW native_directory_existing_import_live_reviews',
+    'DROP TRIGGER native_staff_lifecycle_fence_insert']) {
+    const file = freshDb(), approvedExistingSchema = existingSchemaOf(file);
+    sqlOn(file, sql);
+    const { result, provider } = await cli(file, execArgs(receiptPath()), { extra: { approvedExistingSchema } });
+    assert.equal(result.status, 'refused', sql);
+    assert.equal(result.stop.code, 'approved_existing_schema_mismatch');
+    assert.equal(provider.calls.writes, 0);
+  }
+  // A one-character change in one definition, same object count.
+  const file = freshDb(), approvedExistingSchema = existingSchemaOf(file);
+  const { result, provider } = await cli(file, execArgs(receiptPath()), { extra: { approvedExistingSchema }, providerOptions: {
+    tamper: snapshot => ({ ...snapshot, schema: snapshot.schema.map((row, index) => index === 0 ? { ...row, sql: `${row.sql} ` } : row) }) } });
+  assert.equal(result.stop.code, 'approved_existing_schema_mismatch');
+  assert.equal(result.approvedExistingSchema.observed.objectCount, approvedExistingSchema.objectCount);
+  assert.equal(provider.calls.writes, 0);
+});
+
+test('drift after the confirmation stops before the first write; drift between files stops before the next one', async () => {
+  const file = freshDb(), approvedExistingSchema = existingSchemaOf(file);
+  const late = await cli(file, execArgs(receiptPath()), { extra: { approvedExistingSchema },
+    confirm: async () => { sqlOn(file, 'CREATE TABLE unapproved_late(x INTEGER)'); return true; } });
+  assert.equal(late.result.stop.code, 'approved_existing_schema_mismatch');
+  assert.equal(late.provider.calls.writes, 0);
+
+  const between = freshDb();
+  // Reads: dry run, execute start, after file 1, before file 2.
+  const { result, provider } = await cli(between, execArgs(receiptPath()), { extra: { approvedExistingSchema: existingSchemaOf(between) },
+    providerOptions: { tamper: (snapshot, calls) => calls.reads === 4
+      ? { ...snapshot, schema: [...snapshot.schema, { type: 'view', name: 'zz_unapproved', tbl_name: 'zz_unapproved', sql: 'CREATE VIEW zz_unapproved AS SELECT 1' }] }
+      : snapshot } });
+  assert.equal(result.stop.phase, 'preflight');
+  assert.equal(result.stop.code, 'preflight_failed:approved_existing_schema');
+  assert.equal(provider.calls.writes, 1);
+});
+
+test('reconcile and resume re-prove the approved schema, and a receipt cannot introduce another baseline', async () => {
+  const file = freshDb(), approvedExistingSchema = existingSchemaOf(file), extra = { approvedExistingSchema }, firstReceipt = receiptPath();
+  const next = '0230_app_release_pilot.sql';
+  const first = await cli(file, execArgs(firstReceipt), { extra, providerOptions: { ambiguousAt: '0229_owner_intel_source_feed.sql', landed: true } });
+  assert.equal(first.result.status, 'reconciliation-required');
+
+  // Drift plus a receipt rewritten to agree with it: the receipt's own baseline check would pass, the approved one does not.
+  const drifted = freshDb();
+  fs.copyFileSync(file, drifted);
+  sqlOn(drifted, 'CREATE TABLE unapproved_extra(x INTEGER)');
+  const forged = receiptPath();
+  fs.writeFileSync(forged, JSON.stringify({ ...readReceipt(firstReceipt), existingSchema: existingSchemaOf(drifted) }));
+  const unpinned = await cli(drifted, ['--reconcile', '--baseline-receipt', forged, ...rehearsalArgs]);
+  assert.equal(unpinned.result.status, 'reconciled', 'without the approved schema the forged receipt is accepted');
+  for (const args of [['--reconcile', '--baseline-receipt', forged, ...rehearsalArgs],
+    [...execArgs(receiptPath()), '--resume-from', next, '--baseline-receipt', forged]]) {
+    const { result, provider } = await cli(drifted, args, { extra });
+    assert.equal(result.status, 'reconciliation-required');
+    assert.equal(result.stop.code, 'reconciliation_required:approved_existing_schema_mismatch');
+    assert.equal(provider.calls.writes, 0);
+  }
+  // On production the receipt itself is refused unless it holds exactly the approved schema.
+  const plan = loadVerifiedOps0227To0244Plan(), productionReceipt = receiptPath();
+  const write = existingSchema => fs.writeFileSync(productionReceipt, JSON.stringify({ ...readReceipt(firstReceipt), target: { ...OPS_PRODUCTION_DATABASE }, existingSchema }));
+  write(approvedExistingSchema);
+  assert.throws(() => loadOps0227To0244BaselineReceipt(productionReceipt, { plan, target: OPS_PRODUCTION_DATABASE }), /baseline_receipt_existing_schema_not_approved/u);
+  let provider;
+  for (const args of [['--reconcile', '--baseline-receipt', productionReceipt, ...PRODUCTION_ARGS],
+    productionExec(receiptPath(), '--resume-from', next, '--baseline-receipt', productionReceipt)]) {
+    const refused = await cli(file, args, { extra: SOURCE_OK });
+    ({ provider } = refused);
+    assert.equal(refused.result.stop.code, 'ops_0227_0244:baseline_receipt_existing_schema_not_approved');
+    assert.equal(provider.calls.writes, 0);
+  }
+  write({ ...OPS_PRODUCTION_EXISTING_SCHEMA });
+  const loaded = loadOps0227To0244BaselineReceipt(productionReceipt, { plan, target: OPS_PRODUCTION_DATABASE });
+  assert.deepEqual({ ...loaded.existingSchema }, { ...OPS_PRODUCTION_EXISTING_SCHEMA });
+  // The right receipt does not excuse an unapproved live schema.
+  const live = await cli(file, productionExec(receiptPath(), '--resume-from', next, '--baseline-receipt', productionReceipt), { extra: SOURCE_OK });
+  assert.equal(live.result.stop.code, 'reconciliation_required:approved_existing_schema_mismatch');
+  assert.equal(live.provider.calls.writes, 0);
+
+  const resumeReceipt = receiptPath();
+  const resumed = await cli(file, [...execArgs(resumeReceipt), '--resume-from', next, '--baseline-receipt', firstReceipt], { extra });
+  assert.equal(resumed.result.status, 'complete');
+  assert.equal(readReceipt(resumeReceipt).approvedExistingSchema.ok, true);
+});
+
+// The exact production-shaped store holds raw production definitions, so it is never committed.
+const PRODUCTION_SHAPED = process.env.OPS_0227_0244_PRODUCTION_SHAPED_SQLITE;
+test('the exact production-shaped store passes as production: clean, interrupted and resumed; one missing object is refused', {
+  skip: !PRODUCTION_SHAPED && 'set OPS_0227_0244_PRODUCTION_SHAPED_SQLITE to the private production-shaped 226 store' }, async () => {
+  const copy = () => { const file = path.join(tmp, `db-${++counter}.sqlite`); fs.copyFileSync(PRODUCTION_SHAPED, file); return file; };
+  const finalSchema = file => {
+    const db = new DatabaseSync(file, { readOnly: true });
+    try {
+      const rows = db.prepare(OPS_0227_0244_SCHEMA_ROWS_SQL).all();
+      return { objectCount: rows.length, sha256: hash(JSON.stringify(rows.map(row => [row.type, row.name, row.tbl_name, row.sql]))) };
+    } finally { db.close(); }
+  };
+  const expectedFinal = { objectCount: 2600, sha256: 'a966601e35a43d6835fcd23c9acdb7cdcbe05fa5ea5486f1f5289243fc2e89bc' };
+  assert.deepEqual(existingSchemaOf(PRODUCTION_SHAPED), { ...OPS_PRODUCTION_EXISTING_SCHEMA });
+
+  const dry = await cli(copy(), PRODUCTION_ARGS);
+  assert.equal(dry.result.status, 'dry-run-passed');
+  assert.equal(dry.provider.calls.writes, 0);
+  assert.equal(dry.result.approvedExistingSchema.ok, true);
+
+  const clean = copy();
+  const applied = await cli(clean, productionExec(receiptPath()), { extra: SOURCE_OK });
+  assert.equal(applied.result.status, 'complete');
+  assert.deepEqual(existingSchemaOf(clean), { ...OPS_PRODUCTION_EXISTING_SCHEMA });
+  assert.deepEqual(finalSchema(clean), expectedFinal);
+
+  const interrupted = copy(), firstReceipt = receiptPath();
+  const first = await cli(interrupted, productionExec(firstReceipt), { extra: SOURCE_OK, providerOptions: { ambiguousAt: '0230_app_release_pilot.sql', landed: true } });
+  assert.equal(first.result.stop.code, 'reconciliation_required:apply_ambiguous_no_retry');
+  const reconciled = await cli(interrupted, ['--reconcile', '--baseline-receipt', firstReceipt, ...PRODUCTION_ARGS]);
+  assert.equal(reconciled.result.status, 'reconciled');
+  const resumed = await cli(interrupted, productionExec(receiptPath(), '--resume-from', reconciled.result.reconcile.nextStep, '--baseline-receipt', firstReceipt), { extra: SOURCE_OK });
+  assert.equal(resumed.result.status, 'complete');
+  assert.deepEqual(finalSchema(interrupted), expectedFinal);
+
+  const missing = copy();
+  const db = new DatabaseSync(missing);
+  try { db.exec(); } finally { db.close(); }
+  const refused = await cli(missing, productionExec(receiptPath()), { extra: SOURCE_OK });
+  assert.equal(refused.result.stop.code, 'approved_existing_schema_mismatch');
+  assert.equal(refused.result.approvedExistingSchema.observed.objectCount, 2471);
   assert.equal(refused.provider.calls.writes, 0);
 });

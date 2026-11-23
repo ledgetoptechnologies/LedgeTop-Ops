@@ -52,6 +52,42 @@ Client sections of the shared release profiles (`append-plan.json`,
 its ordering have their own owner and are out of scope here. The tool refuses
 the Client production database id in every mode.
 
+## Approved production schema
+
+On the production database the tool requires one exact existing schema: the 2472
+objects that none of the ten files creates, with digest
+`b05eb4958761549c7112518856970c010fe408dfb355d40d262595e012ab4e9b`
+(`OPS_PRODUCTION_EXISTING_SCHEMA`). Any other value stops the run with zero
+writes.
+
+- It is the schema observed in production on 2026-11-05 and recorded in
+  `installed-schema-preservation-v1/profile.json`. That profile hashes the same
+  rows in another form (`8e522095...`).
+- It is not the schema built from source (`e62e9bfe...`, 2465 objects).
+  Production also has seven objects that no numbered migration creates: the
+  auxiliary `production_native_authority_migrations` ledger, and two receipt
+  tables with two triggers each. They are kept as they are. Never drop or
+  normalise them to make a digest match.
+- Production is recognised by its database id, not by a label or a flag. No
+  command line option, receipt or environment variable can change the value. A
+  new value needs a reviewed source change.
+
+The check runs in every mode:
+
+- **Dry run:** stops with `approved_existing_schema_mismatch`.
+- **Execute:** refused before the confirmation prompt, checked again on a fresh
+  read after the prompt, and checked again before each file
+  (`preflight_failed:approved_existing_schema`).
+- **Reconcile and resume:** refused with
+  `reconciliation_required:approved_existing_schema_mismatch`, independently of
+  the baseline receipt. A production baseline receipt that holds any other
+  `existingSchema` is refused with `baseline_receipt_existing_schema_not_approved`.
+
+The receipt records `approvedExistingSchema` with the expected and observed count
+and digest. A change between a read and the write that follows it cannot be
+excluded, so the post-check still compares the schema after each file. Rehearsals
+on other databases do not use the production value.
+
 ## What each run checks
 
 A fresh run starts only from the exact observed production ledger: 226 rows, ids
@@ -440,10 +476,9 @@ to migrations 0001–0226.
 ### Comparing with production
 
 The pinned schema digest comes from the source files. It is not a reading of
-production. A dry run against production with `--receipt` records production's
-`existingSchema` digest in that receipt. If that value differs from this pin,
-production's schema has drifted from source, and the copy is not production's
-shape. Report that as a finding rather than adjusting the pin.
+production, and production is known to differ from it (see "Approved production
+schema" above). The copied-226 store is therefore not production's exact shape.
+Do not adjust this pin to match production.
 
 ## Tests
 
@@ -455,7 +490,9 @@ node --test scripts/production-ops-0227-0244-ordered-once.test.mjs
 node --test scripts/production-ops-0227-0244-copied-226-fixture.test.mjs
 ```
 
-The tests are offline. The synthetic D1 is a local SQLite file built from this
+The tests are offline. One test is skipped unless
+`OPS_0227_0244_PRODUCTION_SHAPED_SQLITE` names a private production-shaped 226
+store. That store holds raw production definitions, so it is never committed. The synthetic D1 is a local SQLite file built from this
 repository's migrations 0001–0226. The copied-226 tests also run the
 operator's dry run against the built copy, and it passes every preflight
 without writing.
