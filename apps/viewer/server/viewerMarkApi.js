@@ -4,14 +4,13 @@ const { trackedRouter } = require('./httpRequestLifecycle');
 const { getMeasurementPrincipal } = require('./measurementApi');
 const { ViewerMarkRepository, markError } = require('./viewerMarkRepository');
 
-// Same explicit bearer and live model access as personal measurements.
-// Clients read their own marks and staff marks shared with their portal
-// account, never another client's. A client session without a verified
-// individual identity (a shared company login) reads within its account but
+// Same explicit bearer and live model access as personal measurements, and the
+// same rule: each person reads and changes their own marks (OWNER_ONLY). A client
+// session without a verified individual identity (a shared company login)
 // cannot write: writes need a person to own them.
-function createViewerMarkApi(repository) {
+function createViewerMarkApi(repository, { visibility } = {}) {
   const router = trackedRouter();
-  const marks = new ViewerMarkRepository(repository.database);
+  const marks = new ViewerMarkRepository(repository.database, { visibility });
   router.use((req, res, next) => {
     res.set('Cache-Control', 'no-store');
     const principal = getMeasurementPrincipal(req, repository, { allowTransient: true });
@@ -34,7 +33,8 @@ function createViewerMarkApi(repository) {
     const principal = req.markPrincipal;
     res.json({
       marks: marks.list(principal), categories: marks.categories(principal),
-      capabilities: { write: principal.personalPersistence, staff: principal.audience === 'ops' },
+      capabilities: { write: principal.personalPersistence, staff: principal.audience === 'ops',
+        visibility: marks.visibility[principal.audience] },
     });
   });
   router.get('/audiences', (req, res) => res.json({ audiences: marks.audiences(req.markPrincipal) }));

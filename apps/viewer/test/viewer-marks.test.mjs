@@ -10,6 +10,7 @@ import express from 'express';
 import auth from '../server/auth.js';
 import api from '../server/viewerMarkApi.js';
 import schema from '../server/viewerMarkSchema.js';
+import marksRepository from '../server/viewerMarkRepository.js';
 import database from '../server/database.js';
 import { projectViewerMark } from '../viewer-mark-position.mjs';
 
@@ -22,7 +23,10 @@ const point = (changes = {}) => ({
   color: '#88AA22', icon: 'pin', note: 'Test only', ...changes,
 });
 
-async function openApi(t) {
+// The API serves OWNER_ONLY by default, as apiV1 mounts it. Tests marked [proposed
+// sharing] opt into the sharing rules that are kept in the code but not served.
+const SHARING = { visibility: marksRepository.PROPOSED_SHARING };
+async function openApi(t, options) {
   const db = new DatabaseSync(':memory:');
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE models(id TEXT PRIMARY KEY);
@@ -51,7 +55,7 @@ async function openApi(t) {
   };
   const app = express();
   app.use(express.json());
-  app.use('/marks', api.createViewerMarkApi(repository));
+  app.use('/marks', api.createViewerMarkApi(repository, options));
   const server = createServer(app);
   await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
   t.after(async () => {
@@ -64,13 +68,72 @@ async function openApi(t) {
     const text = await response.text();
     return { status: response.status, body: text ? JSON.parse(text) : null, headers: response.headers };
   };
-  return { session, request, sessions };
+  return { session, request, sessions, db };
 }
 
 const names = request => async token => (await request(token)).body.marks.map(mark => mark.name).sort();
 
-test('client privacy: two clients on one model never read each other\'s marks', async t => {
-  const { session, request } = await openApi(t);
+test('only the owner reads, changes or deletes a mark, whatever is asked for or already stored', async t => {
+  const { session, request, db } = await openApi(t);
+  const people = {
+    staff: session('ops', 'staff-person'), otherStaff: session('ops', 'staff-two'),
+    client: session('client', 'client-a'), colleague: session('client', 'client-a2'),
+    otherClient: session('client', 'client-b', ACCOUNT_B), association: session('client', 'client-c', SHARED_ASSOCIATION),
+    // Same subject text as the client, but staff: the audience is part of the owner.
+    sameName: session('ops', 'client-a'),
+  };
+  const made = {}, categories = {};
+  for (const [who, token] of Object.entries(people)) {
+    const omitted = await request(token, 'POST', '', point({ name: who }));
+    assert.equal(omitted.status, 201, who);
+    assert.equal(omitted.body.mark.visibility, 'private', who);
+    made[who] = omitted.body.mark;
+    categories[who] = { id: randomUUID(), name: 'Category', color: '#3366ff', icon: 'flag' };
+    assert.equal((await request(token, 'POST', 'categories', categories[who])).status, 201, who);
+    assert.deepEqual((await request(token)).body.capabilities.visibility, ['private'], who);
+    for (const visibility of ['staff', 'internal', 'client']) {
+      assert.equal((await request(token, 'POST', '', point({ visibility }))).status, 403, `${who} ${visibility}`);
+      assert.equal((await request(token, 'PUT', made[who].id, { ...point(), id: made[who].id, revision: 1, visibility })).status, 403, `${who} ${visibility}`);
+      assert.equal((await request(token, 'POST', 'batch', { marks: [point(), point({ visibility })] })).status, 403, `${who} ${visibility}`);
+    }
+    assert.equal((await request(token, 'POST', '', point({ shareAccount: 'direct_client_grant:grant-a' }))).status, 400, who);
+    assert.equal((await request(token, 'GET', 'audiences')).status, 403, who);
+  }
+  // Rows written by an older or different build are not shared either.
+  const insert = db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, share_account, document_json,
+    creation_hash, revision, created_at, updated_at, updated_by_audience, updated_by_subject)
+    VALUES (?, ?, ?, 'absent-person', ?, ?, ?, 'x', 1, ?, ?, ?, 'absent-person')`);
+  const stored = [['client', 'staff', null], ['ops', 'internal', null], ['ops', 'client', 'direct_client_grant:grant-a']].map(([audience, visibility, account]) => {
+    const id = randomUUID(), now = new Date().toISOString();
+    insert.run(id, modelId, audience, visibility, account, JSON.stringify({ ...point({ name: 'Stored' }), id, categoryId: categories.otherStaff.id }), now, now, audience);
+    return id;
+  });
+  for (const [who, token] of Object.entries(people)) {
+    const body = (await request(token)).body;
+    assert.deepEqual(body.marks.map(mark => mark.id), [made[who].id], who);
+    assert.deepEqual(body.categories.map(category => category.id), [categories[who].id], who);
+    for (const id of [...stored, ...Object.entries(made).filter(([other]) => other !== who).map(([, mark]) => mark.id)]) {
+      assert.equal((await request(token, 'GET', id)).status, 404, who);
+      assert.equal((await request(token, 'PUT', id, { ...point(), id, revision: 1 })).status, 404, who);
+      assert.equal((await request(token, 'DELETE', id, { revision: 1 })).status, 404, who);
+    }
+    for (const [other, category] of Object.entries(categories)) {
+      if (other === who) continue;
+      assert.equal((await request(token, 'PUT', 'categories/' + category.id, { ...category, revision: 1 })).status, 404, `${who} ${other}`);
+      assert.equal((await request(token, 'DELETE', 'categories/' + category.id, { revision: 1 })).status, 404, `${who} ${other}`);
+      assert.equal((await request(token, 'POST', '', point({ categoryId: category.id }))).status, 400, `${who} ${other}`);
+    }
+  }
+  assert.equal(db.prepare('SELECT count(*) n FROM viewer_mark_accounts').get().n, 0, 'no client grant is recorded for a picker that is not served');
+  assert.equal(db.prepare("SELECT count(*) n FROM viewer_marks WHERE deleted_at IS NOT NULL OR (revision<>1)").get().n, 0);
+  // The owner still works normally.
+  const renamed = await request(people.client, 'PUT', made.client.id, { ...point({ name: 'Renamed', categoryId: categories.client.id }), id: made.client.id, revision: 1 });
+  assert.equal(renamed.status, 200);
+  assert.equal((await request(people.client, 'DELETE', made.client.id, { revision: 2 })).status, 204);
+});
+
+test('[proposed sharing] two clients on one model never read each other\'s marks', async t => {
+  const { session, request } = await openApi(t, SHARING);
   const list = names(request);
   const staff = session('ops', 'staff-person');
   const clientA = session('client', 'client-a');
@@ -109,8 +172,8 @@ test('client privacy: two clients on one model never read each other\'s marks', 
   assert.equal((await request(clientA, 'GET', withStaff.id)).body.mark.ownerAccount, undefined);
 });
 
-test('staff share a mark with one named client account only', async t => {
-  const { session, request } = await openApi(t);
+test('[proposed sharing] staff share a mark with one named client account only', async t => {
+  const { session, request } = await openApi(t, SHARING);
   const list = names(request);
   const staff = session('ops', 'staff-person');
   const clientA = session('client', 'client-a');
@@ -143,7 +206,7 @@ test('staff share a mark with one named client account only', async t => {
   assert.equal(seenByA.shareAccount, undefined, 'clients do not see share targets');
   assert.equal((await request(clientA, 'PUT', toA.id, { ...point(), id: toA.id, revision: 1 })).status, 403);
   assert.equal((await request(companyA, 'POST', '', point())).status, 403, 'company logins stay read-only');
-  assert.deepEqual((await request(companyA)).body.capabilities, { write: false, staff: false });
+  assert.deepEqual((await request(companyA)).body.capabilities, { write: false, staff: false, visibility: ['private', 'staff'] });
 
   // Moving the share to B takes it away from A.
   const moved = await request(staff, 'PUT', toA.id, { ...point({ name: 'For B' }), id: toA.id, revision: 1, visibility: 'client',
@@ -153,8 +216,8 @@ test('staff share a mark with one named client account only', async t => {
   assert.deepEqual(await list(clientB), ['For B']);
 });
 
-test('two accounts on one model under the SAME association id never see each other\'s shares', async t => {
-  const { session, request } = await openApi(t);
+test('[proposed sharing] two accounts on one model under the SAME association id never see each other\'s shares', async t => {
+  const { session, request } = await openApi(t, SHARING);
   const list = names(request);
   const staff = session('ops', 'staff-person');
   const accountOne = session('client', 'client:identity-one', SHARED_ASSOCIATION);
@@ -188,8 +251,8 @@ test('two accounts on one model under the SAME association id never see each oth
   assert.equal((await request(staff, 'GET', toStaff.id)).body.mark.ownerAccount, null, 'no account key is recorded for associations');
 });
 
-test('clients edit their own marks; staff edit marks they can read; only owners change visibility', async t => {
-  const { session, request } = await openApi(t);
+test('[proposed sharing] clients edit their own marks; staff edit marks they can read; only owners change visibility', async t => {
+  const { session, request } = await openApi(t, SHARING);
   const staff = session('ops', 'staff-person');
   const otherStaff = session('ops', 'staff-two');
   const client = session('client', 'client-a');
@@ -239,8 +302,8 @@ test('lines, areas and typed values are validated', async t => {
   }
 });
 
-test('categories stay with their owner; clients see staff categories only on marks shared with them', async t => {
-  const { session, request } = await openApi(t);
+test('[proposed sharing] categories stay with their owner; clients see staff categories only on marks shared with them', async t => {
+  const { session, request } = await openApi(t, SHARING);
   const staff = session('ops', 'staff-person');
   const clientA = session('client', 'client-a');
   const clientB = session('client', 'client-b', ACCOUNT_B);

@@ -1,10 +1,10 @@
 'use strict';
 
-// Viewer schema 84 (shared-ledger ordinal for Marks; provisional until the
-// ledger records it). Marks belong to a model, not a version: a pin placed on
+// Viewer schema 84 (reserved for Marks in the shared ledger). Marks belong to a model, not a version: a pin placed on
 // the map stays when a new flight is published.
 //
-// Who reads a mark (visibility):
+// Who reads a mark (visibility). The API serves only `private` until the
+// sharing rules land (viewerMarkRepository OWNER_ONLY):
 //   private  - only the person who made it
 //   staff    - a client's mark shared with project staff (never other clients)
 //   internal - a staff mark for staff only

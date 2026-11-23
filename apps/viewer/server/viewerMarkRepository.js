@@ -9,9 +9,17 @@ const ACCOUNT = /^direct_client_grant:[A-Za-z0-9._:-]{1,200}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const NOTE_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const LIMITS = Object.freeze({ perOwner: 1000, perModel: 5000, categories: 100, vertices: 500, batch: 500, accounts: 200 });
-// The first entry is the default when a request omits visibility: a client mark
-// stays with its owner until the client explicitly shares it with staff.
-const VISIBILITY = Object.freeze({ client: ['private', 'staff'], ops: ['internal', 'client', 'private'] });
+// The sharing choices each audience may use. The first entry is the default when
+// a request omits visibility. What is not listed cannot be written, and a row
+// stored with it is read, changed and deleted by its owner only.
+//
+// OWNER_ONLY is what the API serves: the personal-measurements rule. Every mark
+// and category belongs to one person and nobody else reads or changes it.
+const OWNER_ONLY = Object.freeze({ client: Object.freeze(['private']), ops: Object.freeze(['private']) });
+// The full #695 sharing model. It is not served: staff could change and delete
+// client marks, and staff would pick clients by grant id. Only tests use it.
+const PROPOSED_SHARING = Object.freeze({ client: Object.freeze(['private', 'staff']), ops: Object.freeze(['internal', 'client', 'private']) });
+const VISIBILITIES = Object.freeze(['private', 'staff', 'internal', 'client']);
 const ACCOUNT_TOUCH_MS = 60 * 60 * 1000;
 
 function markError(code, status = 400) {
@@ -82,7 +90,7 @@ function validateMark(input, { update = false } = {}) {
     || (input.note !== undefined && (typeof input.note !== 'string' || input.note.length > 2000 || NOTE_CONTROL.test(input.note)))
     || (input.categoryId !== undefined && input.categoryId !== null && (typeof input.categoryId !== 'string' || !UUID.test(input.categoryId)))
     || (elevation !== undefined && elevation !== null && (!Number.isFinite(elevation) || elevation < -500 || elevation > 9000))
-    || (input.visibility !== undefined && !VISIBILITY.ops.concat(VISIBILITY.client).includes(input.visibility))
+    || (input.visibility !== undefined && !VISIBILITIES.includes(input.visibility))
     || (input.shareAccount !== undefined && input.shareAccount !== null && (typeof input.shareAccount !== 'string' || !ACCOUNT.test(input.shareAccount)))
     || (update && (!Number.isSafeInteger(input.revision) || input.revision < 1))) throw markError('invalid_mark');
   return {
@@ -109,21 +117,28 @@ function validateCategory(input, { update = false } = {}) {
 const isOwner = (principal, row) => row.owner_audience === principal.audience && row.owner_subject === principal.subject;
 const staff = principal => principal.audience === 'ops';
 
-// Staff read every mark except someone else's private one. A client reads
-// their own marks and staff marks shared with their account; never another
-// client's marks.
-function readable(principal, row) {
-  if (!row || row.deleted_at) return false;
-  if (isOwner(principal, row)) return true;
-  if (staff(principal)) return row.visibility !== 'private';
-  const account = principalAccount(principal);
-  return row.visibility === 'client' && account !== null && row.share_account === account;
-}
-
-const editable = (principal, row) => readable(principal, row) && (isOwner(principal, row) || staff(principal));
-
 class ViewerMarkRepository {
-  constructor(database) { this.database = database; }
+  constructor(database, { visibility = OWNER_ONLY } = {}) {
+    this.database = database;
+    this.visibility = visibility;
+  }
+
+  // The owner always reads. Anyone else needs a sharing choice that is being
+  // served: staff then read every mark except someone else's private one, and
+  // a client reads staff marks shared with their account, never another client's.
+  readable(principal, row) {
+    if (!row || row.deleted_at) return false;
+    if (isOwner(principal, row)) return true;
+    if (row.visibility === 'private' || !this.visibility[row.owner_audience].includes(row.visibility)) return false;
+    if (staff(principal)) return true;
+    const account = principalAccount(principal);
+    return row.visibility === 'client' && account !== null && row.share_account === account;
+  }
+
+  editable(principal, row) { return this.readable(principal, row) && (isOwner(principal, row) || staff(principal)); }
+
+  // Whether marks made by this audience can have readers besides their owner.
+  shares(audience) { return this.visibility[audience].some(choice => choice !== 'private'); }
 
   transaction(fn) {
     this.database.exec('BEGIN IMMEDIATE');
@@ -141,7 +156,7 @@ class ViewerMarkRepository {
   // one of them by name. Written at most hourly per account.
   touchAccount(principal) {
     const account = principalAccount(principal);
-    if (!account) return;
+    if (!account || !this.visibility.ops.includes('client')) return;
     const now = new Date();
     this.database.prepare(`INSERT INTO viewer_mark_accounts(model_id, account_key, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(model_id, account_key) DO UPDATE SET last_seen_at=excluded.last_seen_at WHERE last_seen_at < ?`)
@@ -149,7 +164,7 @@ class ViewerMarkRepository {
   }
 
   audiences(principal) {
-    if (!staff(principal)) throw markError('mark_audiences_forbidden', 403);
+    if (!staff(principal) || !this.visibility.ops.includes('client')) throw markError('mark_audiences_forbidden', 403);
     return this.database.prepare(`SELECT account_key, last_seen_at FROM viewer_mark_accounts WHERE model_id=?
       ORDER BY last_seen_at DESC LIMIT ?`).all(principal.modelId, LIMITS.accounts)
       .map(row => ({ account: row.account_key, lastSeenAt: row.last_seen_at }));
@@ -165,14 +180,14 @@ class ViewerMarkRepository {
   }
 
   view(principal, row, categories = this.liveCategoryIds(principal.modelId)) {
-    if (!readable(principal, row)) return null;
+    if (!this.readable(principal, row)) return null;
     const document = JSON.parse(row.document_json);
     return {
       ...document,
       categoryId: document.categoryId && categories.has(document.categoryId) ? document.categoryId : null,
       visibility: row.visibility, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at,
       author: row.owner_audience === 'ops' ? 'staff' : 'client',
-      mine: isOwner(principal, row), editable: editable(principal, row),
+      mine: isOwner(principal, row), editable: this.editable(principal, row),
       // Only staff see identities and share targets.
       ...(staff(principal) ? { shareAccount: row.share_account, owner: row.owner_subject, ownerAccount: row.owner_account,
         updatedBy: row.updated_by_subject } : {}),
@@ -185,7 +200,7 @@ class ViewerMarkRepository {
     return this.database.prepare(`SELECT * FROM viewer_marks WHERE model_id=? AND deleted_at IS NULL
       AND (${shared} OR (owner_audience=? AND owner_subject=?)) ORDER BY created_at,id LIMIT ?`)
       .all(principal.modelId, ...args, principal.audience, principal.subject, LIMITS.perModel)
-      .filter(row => readable(principal, row));
+      .filter(row => this.readable(principal, row));
   }
 
   list(principal) {
@@ -201,12 +216,12 @@ class ViewerMarkRepository {
     if (!categoryId || categoryId === existing) return;
     const category = this.categoryRow(principal, categoryId);
     const allowed = category && !category.deleted_at
-      && (staff(principal) ? category.owner_audience === 'ops' : isOwner(principal, category));
+      && (isOwner(principal, category) || (staff(principal) && category.owner_audience === 'ops' && this.shares('ops')));
     if (!allowed) throw markError('mark_category_not_found');
   }
 
   checkVisibility(principal, ownerAudience, visibility, shareAccount) {
-    if (!VISIBILITY[ownerAudience].includes(visibility)) throw markError('mark_visibility_forbidden', 403);
+    if (!this.visibility[ownerAudience].includes(visibility)) throw markError('mark_visibility_forbidden', 403);
     if (visibility !== 'client') {
       if (shareAccount) throw markError('invalid_mark');
       return null;
@@ -220,7 +235,7 @@ class ViewerMarkRepository {
 
   insert(principal, input) {
     const { document: mark, visibility: requested, shareAccount: requestedAccount } = validateMark(input);
-    const visibility = requested || VISIBILITY[principal.audience][0];
+    const visibility = requested || this.visibility[principal.audience][0];
     const shareAccount = this.checkVisibility(principal, principal.audience, visibility, requestedAccount);
     const document = JSON.stringify(mark);
     const hash = createHash('sha256').update(JSON.stringify([document, visibility, shareAccount])).digest('hex');
@@ -255,8 +270,8 @@ class ViewerMarkRepository {
     if (mark.id !== id) throw markError('mark_id_mismatch');
     return this.transaction(() => {
       const row = this.row(principal, id);
-      if (!readable(principal, row)) throw markError('mark_not_found', 404);
-      if (!editable(principal, row)) throw markError('mark_edit_forbidden', 403);
+      if (!this.readable(principal, row)) throw markError('mark_not_found', 404);
+      if (!this.editable(principal, row)) throw markError('mark_edit_forbidden', 403);
       if (row.revision !== input.revision) throw markError('mark_revision_conflict', 409);
       let visibility = row.visibility, shareAccount = row.share_account;
       const changing = (requested !== undefined && requested !== row.visibility)
@@ -280,8 +295,8 @@ class ViewerMarkRepository {
     if (!Number.isSafeInteger(revision) || revision < 1) throw markError('mark_revision_required', 428);
     return this.transaction(() => {
       const row = this.row(principal, id);
-      if (!readable(principal, row)) throw markError('mark_not_found', 404);
-      if (!editable(principal, row)) throw markError('mark_edit_forbidden', 403);
+      if (!this.readable(principal, row)) throw markError('mark_not_found', 404);
+      if (!this.editable(principal, row)) throw markError('mark_edit_forbidden', 403);
       if (row.revision !== revision) throw markError('mark_revision_conflict', 409);
       const now = new Date().toISOString();
       // Soft delete keeps the row (and its id) but drops the content.
@@ -295,8 +310,9 @@ class ViewerMarkRepository {
     return this.database.prepare('SELECT * FROM viewer_mark_categories WHERE model_id=? AND id=?').get(principal.modelId, id);
   }
 
-  // Staff read every category. A client reads their own, plus staff categories
-  // used by staff marks shared with their account (so those marks show a name).
+  // The owner reads a category. While sharing is served, staff read every
+  // category and a client reads staff categories used by staff marks shared with
+  // their account (so those marks show a name).
   categoryIdsUsedBySharedMarks(principal) {
     if (staff(principal)) return new Set();
     return new Set(this.rows(principal).filter(row => !isOwner(principal, row))
@@ -305,7 +321,9 @@ class ViewerMarkRepository {
 
   categoryReadable(principal, row, shared = null) {
     if (!row || row.deleted_at) return false;
-    if (staff(principal) || isOwner(principal, row)) return true;
+    if (isOwner(principal, row)) return true;
+    if (!this.shares(row.owner_audience)) return false;
+    if (staff(principal)) return true;
     return row.owner_audience === 'ops' && (shared || this.categoryIdsUsedBySharedMarks(principal)).has(row.id);
   }
 
@@ -383,4 +401,4 @@ class ViewerMarkRepository {
   }
 }
 
-module.exports = { ViewerMarkRepository, markError, validateMark, validateCategory, principalAccount, LIMITS };
+module.exports = { ViewerMarkRepository, OWNER_ONLY, PROPOSED_SHARING, markError, validateMark, validateCategory, principalAccount, LIMITS };

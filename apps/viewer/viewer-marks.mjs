@@ -5,7 +5,7 @@ import { elevationForDisplay, elevationToMetres, elevationUnit, formatDecimal, f
 import { geoJsonToMarks, marksToGeoJson } from './viewer-mark-geojson.mjs';
 
 const TYPE_LABEL = { Point: 'Pin', LineString: 'Line', Polygon: 'Area' };
-// Clients share with project staff, never with other clients. Staff share with one named client account.
+// The server says which of these a person may choose; with one choice the field is hidden.
 const VISIBILITY_LABEL = { staff: 'Me and project staff', private: 'Only me', internal: 'Staff only', client: 'A client account' };
 const ACCOUNT_TYPE = { model_association: 'Client association', direct_client_grant: 'Client grant' };
 const accountLabel = key => { const [type, id = ''] = String(key).split(/:(.*)/s); return `${ACCOUNT_TYPE[type] || 'Client'} …${id.slice(-6)}`; };
@@ -128,7 +128,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const canWrite = () => store.canWrite() && Boolean(view.map);
   const categoryById = id => store.state.categories.find(category => category.id === id) || null;
   const visibleMarks = () => store.state.marks.filter(mark => !filter || (filter === 'none' ? !mark.categoryId : mark.categoryId === filter));
-  const defaultVisibility = () => (store.state.capabilities.staff ? 'internal' : 'private');
+  const defaultVisibility = () => store.state.capabilities.visibility[0];
   const message = text => { store.state.message = text; render(); };
 
   function setMode(next) {
@@ -196,7 +196,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     colorInput.value = safeColor(draft.color);
     noteInput.value = draft.note || '';
     elevationInput.value = elevationForDisplay(draft.elevationNavd88M, units());
-    const options = store.state.capabilities.staff ? ['internal', 'client', 'private'] : ['private', 'staff'];
+    const options = store.state.capabilities.visibility;
     visibilitySelect.replaceChildren(...options.map(value => h(document, 'option', { value, text: VISIBILITY_LABEL[value] })));
     visibilitySelect.value = options.includes(draft.visibility) ? draft.visibility : options[0];
     const accounts = store.state.audiences.map(row => row.account);
@@ -275,7 +275,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       pointCoordsField.hidden = draft.geometry.type !== 'Point';
       coordReadout.textContent = readout(draft.geometry);
       elevationLabel.textContent = `NAVD88 Elevation (${elevationUnit(units())})`;
-      visibilityField.hidden = !sessionScope || !state.capabilities.write || Boolean(draft.id && !draft.mine);
+      visibilityField.hidden = !sessionScope || !state.capabilities.write || state.capabilities.visibility.length < 2 || Boolean(draft.id && !draft.mine);
       accountField.hidden = visibilityField.hidden || visibilitySelect.value !== 'client';
       deleteButton.hidden = !draft.id || !editable;
       deleteButton.textContent = armedDelete === draft.id ? 'Tap again to delete' : 'Delete';

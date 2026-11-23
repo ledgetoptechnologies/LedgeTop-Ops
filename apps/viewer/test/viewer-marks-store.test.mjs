@@ -7,11 +7,13 @@ import express from 'express';
 import auth from '../server/auth.js';
 import api from '../server/viewerMarkApi.js';
 import schema from '../server/viewerMarkSchema.js';
+import marksRepository from '../server/viewerMarkRepository.js';
 import { createMarksStore } from '../viewer-marks-store.mjs';
 
 // The store runs against the real Marks API so permission and revision rules
 // are exercised end to end, without a browser.
-async function openServer(t) {
+const SHARING = { visibility: marksRepository.PROPOSED_SHARING };
+async function openServer(t, options) {
   const database = new DatabaseSync(':memory:');
   database.exec(`CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('synthetic-model');`);
   database.exec(schema.VIEWER_MARKS_SQL);
@@ -25,7 +27,7 @@ async function openServer(t) {
   };
   const app = express();
   app.use(express.json());
-  app.use('/api/v1/marks', api.createViewerMarkApi(repository));
+  app.use('/api/v1/marks', api.createViewerMarkApi(repository, options));
   const server = createServer(app);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); database.close(); });
@@ -43,8 +45,33 @@ async function openServer(t) {
 
 const pin = (name, changes = {}) => ({ geometry: { type: 'Point', coordinates: [-87, 43] }, name, color: '#ee5007', icon: 'pin', note: '', ...changes });
 
-test('a client shares with staff, staff share back to the client account, and each undoes their own change', async t => {
+test('marks stay with their owner as served: no sharing choice, no audience request, undo works', async t => {
   const { request, scope } = await openServer(t);
+  const paths = [];
+  const recorded = (path, init) => { paths.push(path); return request(path, init); };
+  const client = createMarksStore({ request: recorded }), staff = createMarksStore({ request: recorded });
+  await client.setScope(scope('client', 'client-a'));
+  await staff.setScope(scope('ops', 'staff-person'));
+  assert.deepEqual(client.state.capabilities, { write: true, staff: false, visibility: ['private'] });
+  assert.deepEqual(staff.state.capabilities, { write: true, staff: true, visibility: ['private'] });
+  const mark = await client.create(pin('Mine'));
+  assert.equal(mark.visibility, 'private');
+  assert.equal(await client.create(pin('Shared', { visibility: 'staff' })), null);
+  assert.match(client.state.message, /not available/);
+  await staff.refresh();
+  assert.deepEqual(staff.state.marks, []);
+  assert.equal((await staff.create(pin('Staff pin'))).visibility, 'private');
+  await client.update(client.find(mark.id), { name: 'Moved' });
+  assert.equal(await client.undo(), true);
+  assert.equal(client.find(mark.id).name, 'Mine');
+  assert.equal(await client.remove(client.find(mark.id)), true);
+  assert.equal(await client.undo(), true);
+  assert.deepEqual(client.state.marks.map(row => row.name), ['Mine']);
+  assert.ok(!paths.some(path => path.endsWith('/audiences')));
+});
+
+test('[proposed sharing] a client shares with staff, staff share back to the client account, and each undoes their own change', async t => {
+  const { request, scope } = await openServer(t, SHARING);
   const client = createMarksStore({ request });
   const staff = createMarksStore({ request });
   await client.setScope(scope('client', 'client-a'));
@@ -88,8 +115,8 @@ test('a client shares with staff, staff share back to the client account, and ea
   assert.notEqual(staff.state.marks.find(mark => mark.name === 'Staff note').id, internal.id);
 });
 
-test('categories and GeoJSON import go through the API; company logins only read', async t => {
-  const { request, scope } = await openServer(t);
+test('[proposed sharing] categories and GeoJSON import go through the API; company logins only read', async t => {
+  const { request, scope } = await openServer(t, SHARING);
   const client = createMarksStore({ request });
   await client.setScope(scope('client', 'client-a'));
   const category = await client.saveCategory({ name: 'Survey point', color: '#1e88e5', icon: 'target' });

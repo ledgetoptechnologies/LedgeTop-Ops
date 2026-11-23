@@ -30,7 +30,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   let context = null, controller = null;
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
-    marks: [], categories: [], audiences: [], capabilities: { write: false, staff: false }, undo: [],
+    marks: [], categories: [], audiences: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
   };
   const emit = () => onChange(state);
   const temporary = () => context?.mode === 'temporary';
@@ -71,8 +71,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     state.marks = data.marks;
     state.categories = data.categories;
     state.capabilities = data.capabilities;
-    // Staff pick a named client account when sharing a mark.
-    state.audiences = data.capabilities.staff ? (await api('/audiences', 'GET', undefined, signal)).audiences : [];
+    // Staff pick a client account when sharing a mark, if the server serves that choice.
+    state.audiences = data.capabilities.staff && data.capabilities.visibility.includes('client') ? (await api('/audiences', 'GET', undefined, signal)).audiences : [];
     if (signal.aborted) return;
     state.ready = true;
   }
@@ -154,7 +154,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       context = next;
       Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], undo: [],
         ready: next?.mode === 'temporary', loading: next?.mode === 'session',
-        capabilities: { write: next?.mode === 'temporary', staff: false } });
+        capabilities: { write: next?.mode === 'temporary', staff: false, visibility: ['private'] } });
       emit();
       if (next?.mode !== 'session') return true;
       try {
