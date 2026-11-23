@@ -4221,6 +4221,7 @@ function installPropertyLines() {
     getPotreeApi: () => pcApi(),
     georefVerified: () => verifiedUtmGeoref(PROJECT?.georef, UTM_PROJECTION),
     modelDatum: () => modelHorizontalDatum(PROJECT?.georef),
+    units: () => DISPLAY_UNITS,
     getSceneExtentUtm: propertyLinesSceneExtent,
     getGroundGrid: propertyLinesGroundGrid,
     utmToLatLon: (e, n) => utmToLatLon(e, n),

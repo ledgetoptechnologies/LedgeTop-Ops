@@ -16,6 +16,7 @@ export const OWNER_LABEL_LIMITS = Object.freeze({
   snapMeters: 0.2,       // vertices closer than this are the same corner
   splitBudget: 2_000_000, // per parcel: edges x neighbouring corners checked for T-junctions
   minLabelZoom: 14,      // no owner names when zoomed out further
+  minAcreageZoom: 15,    // no acreage when zoomed out further
   minRadiusPx: 14,       // a circle this big must fit inside the shape
   fontMinPx: 10,
   fontMaxPx: 15,
@@ -66,6 +67,99 @@ function localFrame(lon0, lat0) {
   };
 }
 
+// ── Acreage ──────────────────────────────────────────────────────────────
+
+// GRS80, the ellipsoid of the NAD83 parcel data (WGS84 differs by 1e-10).
+const GRS80_A = 6378137, GRS80_F = 1 / 298.257222101;
+const GRS80_E2 = GRS80_F * (2 - GRS80_F), GRS80_E = Math.sqrt(GRS80_E2);
+const SQUARE_METERS_PER_ACRE = 4046.8564224;
+
+// Northing on the ellipsoid's equal-area cylinder (authalic latitude): with
+// easting a * longitude, plane areas equal true areas on the ellipsoid at any
+// latitude. The Web Mercator rings the state serves are about twice the true
+// size in Wisconsin, and the label frame above is about 0.7% small; neither
+// is ever used for an area that is shown.
+function equalAreaNorthing(lat) {
+  const s = Math.sin(lat * DEG), es = GRS80_E * s;
+  return GRS80_A * (1 - GRS80_E2) / 2 * (s / (1 - es * es) + Math.atanh(es) / GRS80_E);
+}
+
+// A parcel's area in square metres on the ellipsoid: outer rings less holes,
+// plus islands. Null when any ring is not closed: that is not a whole shape.
+export function parcelAreaM2(parcel) {
+  if (!parcel?.rings?.length) return null;
+  for (const ring of parcel.rings) {
+    const first = ring[0], last = ring[ring.length - 1];
+    if (ring.length < 4 || first[0] !== last[0] || first[1] !== last[1]) return null;
+  }
+  const [lon0, lat0] = parcel.rings[0][0], y0 = equalAreaNorthing(lat0);
+  const frame = { to: (lon, lat) => [GRS80_A * (lon - lon0) * DEG, equalAreaNorthing(lat) - y0] };
+  const area = orientedRings(parcel, frame).reduce((sum, { pts }) => sum + signedArea(pts), 0);
+  return area > 0 ? area : null;
+}
+
+// Two parcels with the same rings, whatever their start corner, direction or
+// order: stacked records (condominium units), one piece of land.
+function shapeKey(parcel) {
+  return parcel.rings.map(ring => {
+    const corners = ring.slice(0, -1).map(p => p.join(','));
+    let start = 0;
+    corners.forEach((corner, i) => { if (corner < corners[start]) start = i; });
+    const turned = [...corners.slice(start), ...corners.slice(0, start)];
+    const reversed = [turned[0], ...turned.slice(1).reverse()];
+    return [turned.join(';'), reversed.join(';')].sort()[0];
+  }).sort().join('|');
+}
+
+// An outline's whole area in square metres, or null when it cannot be stated:
+// a parcel the server clipped (`lines`) or left open, an owner's land that
+// may continue past the loaded tiles, or records stacked on each other in a
+// way that would count the same land twice.
+// covered(bounds): whether everything touching those lon/lat bounds is loaded.
+// Only needed for land that can be merged; a single parcel arrives whole.
+export function outlineAreaM2(outline, { merged = true, covered = null } = {}) {
+  if (outline.parcels.some(parcel => Array.isArray(parcel.lines))) return null;
+  if (merged && outline.ownerKey) {
+    if (!covered) return null;
+    for (const parcel of outline.parcels) for (const ring of parcel.rings) {
+      const { minX, minY, maxX, maxY } = bboxOf([ring]);
+      if (!covered({ west: minX, south: minY, east: maxX, north: maxY })) return null;
+    }
+  }
+  const parcels = outline.parcels.length > 1 ? [...new Map(outline.parcels.map(parcel => [shapeKey(parcel), parcel])).values()] : outline.parcels;
+  if (parcels.length > 1) {
+    // Different shapes of one owner over the same land: one's middle lies inside another.
+    for (const parcel of parcels) {
+      const middle = parcelLabelGeometry(parcel)?.lonLat;
+      if (!middle) return null;
+      for (const other of parcels) {
+        if (other !== parcel && other.rings.reduce((n, ring) => n + Number(pointInRing(...middle, ring)), 0) % 2) return null;
+      }
+    }
+  }
+  let total = 0;
+  for (const parcel of parcels) {
+    const area = parcelAreaM2(parcel);
+    if (area == null) return null;
+    total += area;
+  }
+  return total;
+}
+
+// "≈ 40.2 ac": one decimal from 1 acre, two below, square feet under 0.1
+// acre; hectares or square metres in metric. Always approximate.
+export function formatParcelArea(squareMeters, units = 'imperial') {
+  if (!Number.isFinite(squareMeters) || squareMeters <= 0) return '';
+  const metric = units === 'metric';
+  const value = squareMeters / (metric ? 10_000 : SQUARE_METERS_PER_ACRE);
+  if (value < 0.1) {
+    const small = metric ? squareMeters : squareMeters / SQUARE_METERS_PER_ACRE * 43560;
+    return `≈ ${Math.max(10, Math.round(small / 10) * 10).toLocaleString('en-US')} ${metric ? 'm²' : 'sq ft'}`;
+  }
+  const digits = value < 0.995 ? 2 : 1;
+  return `≈ ${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })} ${metric ? 'ha' : 'ac'}`;
+}
+
 function signedArea(points) {
   let sum = 0;
   for (let i = 0, j = points.length - 1; i < points.length; j = i++) sum += (points[j][0] - points[i][0]) * (points[j][1] + points[i][1]);
@@ -79,6 +173,18 @@ function pointInRing(x, y, ring) {
     if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
   }
   return inside;
+}
+
+// Whether most of one ring's corners and edge middles lie inside another, so
+// a hole that touches its outer ring at a corner is still a hole.
+function mostlyInside(pts, other) {
+  const step = Math.max(1, Math.floor(pts.length / 16));
+  let votes = 0, inside = 0;
+  for (let i = 1; i < pts.length; i += step) {
+    const [ax, ay] = pts[i - 1], [bx, by] = pts[i];
+    for (const [x, y] of [[ax, ay], [(ax + bx) / 2, (ay + by) / 2]]) { votes++; if (pointInRing(x, y, other)) inside++; }
+  }
+  return inside * 2 > votes;
 }
 
 // A parcel's rings in local metres, each closed, outer rings clockwise and
@@ -95,7 +201,7 @@ function orientedRings(parcel, frame) {
   // A ring inside an odd number of the parcel's other rings is a hole; an
   // island inside a hole (inside two) is an outer ring again.
   return rings.map((pts, index) => {
-    const depth = rings.filter((other, j) => j !== index && pointInRing(pts[0][0], pts[0][1], other)).length;
+    const depth = rings.filter((other, j) => j !== index && mostlyInside(pts, other)).length;
     const hole = depth % 2 === 1;
     const clockwise = signedArea(pts) > 0;
     return { hole, pts: clockwise === !hole ? pts : pts.slice().reverse() };
@@ -426,10 +532,14 @@ export function parcelLabelGeometry(parcel) {
 
 // One label candidate per outline with an owner: at the label point of its
 // roomiest parcel, with the outline's total area as its priority.
-export function ownerLabelCandidates(outlines) {
+// acreage: null for names only, or { merged, covered } (see outlineAreaM2) to
+// add the area shown under the name. Without merging, a parcel with no usable
+// owner name shows its area alone.
+export function ownerLabelCandidates(outlines, { acreage = null } = {}) {
   const out = [];
   for (const outline of outlines) {
-    if (!outline.owner) continue;
+    const shownArea = acreage ? outlineAreaM2(outline, acreage) : null;
+    if (!outline.owner && (shownArea == null || acreage.merged !== false)) continue;
     let best = null, area = 0;
     for (const parcel of outline.parcels) {
       const geometry = parcelLabelGeometry(parcel);
@@ -437,7 +547,7 @@ export function ownerLabelCandidates(outlines) {
       area += geometry.areaM2;
       if (!best || geometry.radiusMeters > best.radiusMeters) best = geometry;
     }
-    if (best) out.push({ text: outline.owner, ownerKey: outline.ownerKey, lon: best.lonLat[0], lat: best.lonLat[1], radiusMeters: best.radiusMeters, areaM2: area });
+    if (best) out.push({ text: outline.owner, ownerKey: outline.ownerKey, lon: best.lonLat[0], lat: best.lonLat[1], radiusMeters: best.radiusMeters, areaM2: area, ...(shownArea == null ? {} : { acreageM2: shownArea }) });
   }
   return out;
 }
@@ -464,33 +574,45 @@ export function metersPerPixel(zoom, lat) {
 // is shown only when its outline is big enough on screen to hold it, and
 // never on top of another: bigger outlines win. Text size follows the zoom.
 // project(lon, lat) -> [x, y]; measure(text, fontPx) -> width in pixels.
-export function placeOwnerLabels(candidates, { zoom, project, viewport, measure, limits = OWNER_LABEL_LIMITS } = {}) {
+// Names come first: they are placed exactly as without acreage. Then each
+// acreage line is added where the taller label still fits its outline and the
+// view and stays clear of every other label; labels that are acreage alone
+// (no owner name) come last.
+export function placeOwnerLabels(candidates, { zoom, project, viewport, measure, units = 'imperial', limits = OWNER_LABEL_LIMITS } = {}) {
   if (!Number.isFinite(zoom) || zoom < limits.minLabelZoom) return [];
   const fontPx = ownerLabelFontPx(zoom, limits);
   const lineHeight = Math.round(fontPx * 1.2);
-  const fitting = [];
-  for (const candidate of candidates) {
+  // The label for these lines, or null where it does not fit.
+  const fit = (candidate, lines) => {
     const mpp = metersPerPixel(zoom, candidate.lat);
     const radiusPx = candidate.radiusMeters / mpp, areaPx = candidate.areaM2 / (mpp * mpp);
-    const lines = wrapOwnerLabel(candidate.text, limits);
     const width = Math.ceil(Math.max(...lines.map(line => measure(line, fontPx))));
     const height = lines.length * lineHeight;
     // Too small on screen: the text would spill well past the outline.
-    if (radiusPx < Math.max(limits.minRadiusPx, height / 2 + 2) || width > radiusPx * 2.6 || areaPx < width * height * 1.5) continue;
+    if (radiusPx < Math.max(limits.minRadiusPx, height / 2 + 2) || width > radiusPx * 2.6 || areaPx < width * height * 1.5) return null;
     const [x, y] = project(candidate.lon, candidate.lat);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
     // Whole labels only: one cut by the map edge is left out until panned into view.
-    if (viewport && (x - width / 2 < 2 || y - height / 2 < 2 || x + width / 2 > viewport.width - 2 || y + height / 2 > viewport.height - 2)) continue;
-    fitting.push({ text: candidate.text, ownerKey: candidate.ownerKey, lines, x, y, width, height, fontPx, lineHeight, areaPx });
-  }
-  fitting.sort((a, b) => b.areaPx - a.areaPx);
-  const placed = [];
+    if (viewport && (x - width / 2 < 2 || y - height / 2 < 2 || x + width / 2 > viewport.width - 2 || y + height / 2 > viewport.height - 2)) return null;
+    return { text: candidate.text, ownerKey: candidate.ownerKey, lines, x, y, width, height, fontPx, lineHeight, areaPx, candidate };
+  };
   const pad = limits.paddingPx;
-  for (const label of fitting) {
-    if (placed.length >= limits.maxLabels) break;
-    const clash = placed.some(other => Math.abs(other.x - label.x) * 2 < other.width + label.width + pad * 2
-      && Math.abs(other.y - label.y) * 2 < other.height + label.height + pad * 2);
-    if (!clash) placed.push(label);
-  }
-  return placed;
+  const clear = (label, others) => !others.some(other => Math.abs(other.x - label.x) * 2 < other.width + label.width + pad * 2
+    && Math.abs(other.y - label.y) * 2 < other.height + label.height + pad * 2);
+  const place = (labels, placed) => {
+    for (const label of labels.filter(Boolean).sort((a, b) => b.areaPx - a.areaPx)) {
+      if (placed.length >= limits.maxLabels) break;
+      if (clear(label, placed)) placed.push(label);
+    }
+    return placed;
+  };
+  const acreage = candidate => (zoom >= limits.minAcreageZoom ? formatParcelArea(candidate.acreageM2, units) : '');
+  const placed = place(candidates.filter(c => c.text).map(c => fit(c, wrapOwnerLabel(c.text, limits))), []);
+  placed.forEach((label, i) => {
+    const line = acreage(label.candidate);
+    const taller = line && fit(label.candidate, [...label.lines, line]);
+    if (taller && clear(taller, placed.filter((_, j) => j !== i))) placed[i] = taller;
+  });
+  place(candidates.filter(c => !c.text && acreage(c)).map(c => fit(c, [acreage(c)])), placed);
+  return placed.map(({ candidate, ...label }) => label);
 }
