@@ -159,6 +159,24 @@ test('a missing token, a bad argument and an existing receipt stop before any re
   assert.deepEqual(usage.network, []);
 });
 
+test('a failed refusal receipt keeps the original error, adds its own line, and is never retried', () => {
+  const missing = file('write-fails-no-token.json');
+  const noToken = run([...PRODUCTION, '--receipt', missing], { token: null, extraEnv: { OPS_TEST_RECEIPT_FAILS: 'write' } });
+  assert.deepEqual([noToken.status, noToken.stderr], [1, 'ops_0227_0244:cloudflare_token_missing\nops_0227_0244:refusal_receipt_write_failed\n']);
+  assert.deepEqual(noToken.network, [{ kind: 'receipt-write' }], 'one receipt attempt, no request');
+  assert.equal(fs.statSync(missing).size, 0);
+
+  const blocked = run([...PRODUCTION, '--receipt', file('write-fails-network.json')], { extraEnv: { OPS_TEST_RECEIPT_FAILS: 'write' } });
+  assert.deepEqual([blocked.status, blocked.stderr], [1, `${BLOCKED}\nops_0227_0244:refusal_receipt_write_failed\n`]);
+  assert.deepEqual(blocked.network.map(entry => entry.kind), ['fetch', 'receipt-write']);
+
+  const closing = file('close-fails.json');
+  const closeFails = run([...PRODUCTION, '--receipt', closing], { token: null, extraEnv: { OPS_TEST_RECEIPT_FAILS: 'close' } });
+  assert.deepEqual([closeFails.status, closeFails.stderr], [1, 'ops_0227_0244:cloudflare_token_missing\nops_0227_0244:receipt_close_failed\n']);
+  assert.deepEqual(closeFails.network, [{ kind: 'receipt-close' }]);
+  assertRefusedReceipt(closing, 'dry-run', 'ops_0227_0244:cloudflare_token_missing');
+});
+
 test('a run that never settles exits 1 and says so; importing the module runs nothing', () => {
   const hung = run(PRODUCTION, { extraEnv: { OPS_TEST_FETCH_HANGS: '1' } });
   assert.equal(hung.status, 1);

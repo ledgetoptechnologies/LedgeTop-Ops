@@ -224,8 +224,13 @@ The receipt is a JSON file. The tool creates it exclusively and rewrites it in
 full after every phase, so a stop always leaves a complete partial receipt. An
 error before the ordered run starts (for example a missing token, or a failed
 target check) is recorded as `refused`, phase `command-line`, with zero writes.
-Only a process that ends without settling or is killed before its first receipt
-write leaves an empty file. The receipt contains:
+If that refusal cannot be written, or the receipt cannot be closed after an
+error, the original error stays first on stderr and a second line says
+`ops_0227_0244:refusal_receipt_write_failed` or
+`ops_0227_0244:receipt_close_failed`. The exit code stays 1 and the write is not
+tried again, so the file may be empty or incomplete. A process that ends without
+settling or is killed before its first receipt write also leaves an empty file.
+The receipt contains:
 
 - the plan hash and the fixture hash;
 - the target ids and the approval reference;

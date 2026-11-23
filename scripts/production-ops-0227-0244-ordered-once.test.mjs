@@ -1133,6 +1133,47 @@ test('an error after the ordered run has written the receipt never replaces it w
   assert.ok(written.every(value => value.stop?.phase !== 'command-line'));
 });
 
+test('a failing receipt never replaces the error that stopped the run', async () => {
+  const attempt = async ({ throwing, failWrite = false, failClose = false }) => {
+    const calls = { write: 0, close: 0 };
+    const opened = {
+      write() { calls.write++; if (failWrite) throw new Error('synthetic disk failure'); },
+      close() { calls.close++; if (failClose) throw new Error('synthetic close failure'); },
+    };
+    let caught;
+    await mainOps0227To0244(['--receipt', path.join(tmp, 'not-used.json'), ...rehearsalArgs], { env: TOKEN_ENV, out: () => {},
+      openReceipt: () => opened, providerFactory: () => ({ async assertTarget() { throw throwing; } }) }).catch(error => { caught = error; });
+    return { caught, calls };
+  };
+  const once = { write: 1, close: 1 };
+  const refusal = () => new Error('ops_0227_0244_provider:target_mismatch');
+  for (const [failure, expected] of [[{ failWrite: true }, 'ops_0227_0244:refusal_receipt_write_failed'],
+    [{ failClose: true }, 'ops_0227_0244:receipt_close_failed'],
+    [{ failWrite: true, failClose: true }, 'ops_0227_0244:refusal_receipt_write_failed'], [{}, undefined]]) {
+    const throwing = refusal();
+    const { caught, calls } = await attempt({ throwing, ...failure });
+    assert.equal(caught, throwing, 'the original error object is rethrown');
+    assert.equal(caught.message, 'ops_0227_0244_provider:target_mismatch');
+    assert.equal(caught.receiptFailure, expected);
+    assert.deepEqual(calls, once);
+  }
+  // An error that cannot carry the extra fact is wrapped with the same stable code and kept as the cause.
+  const frozen = Object.freeze(refusal());
+  const wrapped = (await attempt({ throwing: frozen, failWrite: true })).caught;
+  assert.deepEqual([wrapped.message, wrapped.receiptFailure, wrapped.cause === frozen],
+    ['ops_0227_0244_provider:target_mismatch', 'ops_0227_0244:refusal_receipt_write_failed', true]);
+
+  // After the ordered run has written the receipt: no refusal write, and a failing close still keeps the error.
+  const provider = sqliteProvider(freshDb());
+  const late = { write: 0, close: 0 };
+  await assert.rejects(mainOps0227To0244(execArgs(path.join(tmp, 'not-used-2.json')), { env: TOKEN_ENV, out: () => {},
+    openReceipt: () => ({ write() { if (++late.write === 3) throw new Error('synthetic disk failure'); }, close() { late.close++; throw new Error('synthetic close failure'); } }),
+    providerFactory: () => provider, confirm: async () => true }),
+  error => error.message === 'synthetic disk failure' && error.receiptFailure === 'ops_0227_0244:receipt_close_failed');
+  provider.close();
+  assert.deepEqual(late, { write: 3, close: 1 });
+});
+
 const PRODUCTION_SHAPED = process.env.OPS_0227_0244_PRODUCTION_SHAPED_SQLITE;
 test('the exact production-shaped store passes as production: clean, interrupted and resumed; one missing object is refused', {
   skip: !PRODUCTION_SHAPED && 'set OPS_0227_0244_PRODUCTION_SHAPED_SQLITE to the private production-shaped 226 store' }, async () => {

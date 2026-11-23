@@ -827,11 +827,21 @@ export async function mainOps0227To0244(args, dependencies = {}) {
   } catch (error) {
     // The ordered run writes the receipt before its first request. An untouched receipt therefore means that no
     // write was attempted, so the refusal can be recorded instead of leaving an empty file.
-    if (receipt && !receiptTouched) {
-      receipt.write({ schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
-        status: 'refused', stop: { step: null, phase: 'command-line', code: errorCode(error) }, writesPerformed: 0, at: new Date().toISOString() });
+    // A receipt failure here never replaces the error that stopped the run. Both are reported, and nothing is retried.
+    let receiptFailure = null;
+    const opened = receipt;
+    receipt = null;
+    if (opened && !receiptTouched) {
+      try {
+        opened.write({ schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
+          status: 'refused', stop: { step: null, phase: 'command-line', code: errorCode(error) }, writesPerformed: 0, at: new Date().toISOString() });
+      } catch { receiptFailure = 'ops_0227_0244:refusal_receipt_write_failed'; }
     }
-    throw error;
+    try { opened?.close(); } catch { receiptFailure ??= 'ops_0227_0244:receipt_close_failed'; }
+    if (receiptFailure === null) throw error;
+    const failure = error instanceof Error && Object.isExtensible(error) ? error : new Error(errorCode(error), { cause: error });
+    failure.receiptFailure = receiptFailure;
+    throw failure;
   } finally { receipt?.close(); }
 }
 
@@ -848,7 +858,8 @@ async function runCommandLine(args) {
     process.exitCode = ['complete', 'dry-run-passed', 'reconciled'].includes(result.status) ? 0 : result.status === 'cancelled' ? 2 : 1;
   } catch (error) {
     const code = errorCode(error);
-    process.stderr.write(`${code === 'unexpected_error' ? 'ops_0227_0244:unexpected_error' : code}\n${code === 'ops_0227_0244:usage' ? `${USAGE}\n` : ''}`);
+    process.stderr.write(`${code === 'unexpected_error' ? 'ops_0227_0244:unexpected_error' : code}\n${code === 'ops_0227_0244:usage' ? `${USAGE}\n` : ''}`
+      + (error?.receiptFailure ? `${error.receiptFailure}\n` : ''));
     process.exitCode = 1;
   }
 }

@@ -2,6 +2,7 @@
 // Every network attempt is recorded in OPS_TEST_NETWORK_LOG (method and kind only, never headers) and refused.
 // With OPS_TEST_D1_SQLITE, requests to the Cloudflare D1 API are answered from that local SQLite file instead, and
 // batches are applied only with OPS_TEST_D1_WRITES=1. OPS_TEST_FETCH_HANGS=1 makes a request that never settles.
+// OPS_TEST_RECEIPT_FAILS=write or close makes that receipt operation fail and records each attempt.
 import fs from 'node:fs';
 import net from 'node:net';
 import dns from 'node:dns';
@@ -17,6 +18,16 @@ dgram.Socket.prototype.send = refuse('datagram');
 dgram.Socket.prototype.connect = refuse('datagram');
 for (const target of [dns, dns.promises]) for (const name of Object.keys(target))
   if (/^(?:lookup|resolve|reverse)/u.test(name) && typeof target[name] === 'function') target[name] = refuse('dns');
+const failing = { write: 'ftruncateSync', close: 'closeSync' }[process.env.OPS_TEST_RECEIPT_FAILS];
+if (failing) {
+  const open = fs.openSync, real = fs[failing], receipts = new Set();
+  fs.openSync = (...args) => { const fd = open(...args); if (args[1] === 'wx') receipts.add(fd); return fd; };
+  fs[failing] = (fd, ...rest) => {
+    if (!receipts.has(fd)) return real(fd, ...rest);
+    record({ kind: `receipt-${process.env.OPS_TEST_RECEIPT_FAILS}` });
+    throw Object.assign(new Error('synthetic disk failure'), { code: 'ENOSPC' });
+  };
+}
 syncBuiltinESMExports();
 
 const API = /^https:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/[a-f0-9]{32}\/d1\/database\/([0-9a-f-]{36})(\/query)?$/u;
