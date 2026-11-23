@@ -42,7 +42,7 @@ function harness() {
     document: { querySelectorAll: () => [], getElementById: (id) => id === 'pc-iframe' ? ctx.iframe : elements[id] },
     disposeTiles() { ctx.calls.push('dispose-model'); ctx.tilesRenderer = null; },
     stopPointCloudIframe() { ctx.calls.push('stop-cloud'); ctx.iframe = null; },
-    stopDirectPointCloud() {}, loadPointCloudDirect() {}, removeMapOverlays() {},
+    stopDirectPointCloud() {}, loadPointCloudDirect() {}, removeMapOverlays() {}, syncViewerMarksView() {},
     ensureMap() {}, map: { invalidateSize() {} }, showOrtho() {}, showDEM() {},
     applyMeshLayer() {
       ctx.calls.push('load-model');

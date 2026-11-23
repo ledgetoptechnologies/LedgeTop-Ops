@@ -2602,7 +2602,8 @@ function syncViewerMarks() {
     if (VIEW_MODE === 'session' && sessionAccessState !== 'unavailable'
       && Date.parse(session?.expiresAt) > Date.now() && session?.subject && ['ops', 'client'].includes(session.audience)) {
       context = { mode: 'session', key: JSON.stringify([session.audience, session.subject, model.id]),
-        token: () => sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null };
+        token: () => sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null,
+      };
     } else if (['view', 'embed', 'project'].includes(VIEW_MODE)) {
       context = { mode: 'temporary', key: JSON.stringify(['public', model.id]) };
     }
