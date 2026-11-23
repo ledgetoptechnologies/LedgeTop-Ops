@@ -53,6 +53,14 @@ export const OPS_0227_0244_FINAL_LEDGER = Object.freeze({
 export const OPS_PRODUCTION_DATABASE = Object.freeze({
   accountId: '846c924bf17bf4f3dd15c97a4c5d1d51', databaseName: 'ltds-ops', databaseId: '6ebf7514-d306-4615-ae56-ad869c874dbd',
 });
+/**
+ * The approved production schema outside the ten files: every object none of them creates, by the digest of
+ * ops0227To0244ExistingSchema. It includes seven production-only receipt and ledger objects that are kept as they
+ * are. Production reads, writes, reconciles and resumes are refused on any other value.
+ */
+export const OPS_PRODUCTION_EXISTING_SCHEMA = Object.freeze({
+  objectCount: 2472, sha256: 'b05eb4958761549c7112518856970c010fe408dfb355d40d262595e012ab4e9b',
+});
 export const OPS_0227_0244_AUTHORITY_NOTE = 'recapture the post-0226 authority snapshot (role_permissions changed)';
 export const OPS_0244_AUTHORITY_NOTE = 'recapture the post-0226 authority snapshot (0244 added the staff_permission_overrides guards and the 15-row catalog seed)';
 /** Other production D1 ids already pinned in the repo; never a rehearsal target. */
@@ -303,6 +311,9 @@ export function loadOps0227To0244BaselineReceipt(filename, { plan, target } = {}
     || !exactKeys(value.existingSchema, ['objectCount', 'sha256']) || !Number.isSafeInteger(value.existingSchema.objectCount)
     || !SHA.test(value.existingSchema.sha256 ?? ''))
     fail('baseline_receipt_invalid');
+  // The approved fingerprint is a source constant; a receipt can never introduce another production baseline.
+  if (isProductionTarget(target) && canonical(value.existingSchema) !== canonical(OPS_PRODUCTION_EXISTING_SCHEMA))
+    fail('baseline_receipt_existing_schema_not_approved');
   return Object.freeze({ startCounts: Object.freeze({ ...start }), stopPhase: value.stop?.phase ?? null,
     stopCode: value.stop?.code ?? null, stopStep: value.stop?.step ?? null,
     existingSchema: Object.freeze({ ...value.existingSchema }),
@@ -316,7 +327,15 @@ export function ops0227To0244ExistingSchema(snapshot, plan) {
   return { objectCount: rows.length, sha256: schemaRowsSha256(rows) };
 }
 
-export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null) {
+/** Production is identified by its database id alone, never by a caller-supplied environment label. */
+const isProductionTarget = target => target?.databaseId === OPS_PRODUCTION_DATABASE.databaseId;
+
+const approvedSchemaCheck = (snapshot, plan, approved) =>
+  check('approved_existing_schema', approved, ops0227To0244ExistingSchema(snapshot, plan));
+const approvedSchemaMessage = item => `objects outside the plan are not the approved schema: expected ${item.expected.objectCount} `
+  + `(${item.expected.sha256}), observed ${item.observed.objectCount} (${item.observed.sha256})`;
+
+export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null, approvedSchema = null) {
   const prior = OPS_0227_0244_PRIOR_LEDGER.count, ledger = snapshot.ledger;
   const position = ops0227To0244LedgerPosition(snapshot, plan);
   const base = ledger.slice(0, prior), suffix = ledger.slice(prior);
@@ -348,6 +367,13 @@ export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null) 
   });
   const badObject = failed(checks);
   if (badObject) return { ok: false, code: `reconciliation_required:${badObject.name}`, appliedCount: applied, nextStep: null, ...position, checks };
+  // Independent of any receipt: the schema outside the plan must be the approved one before anything continues.
+  if (approvedSchema) {
+    const approved = approvedSchemaCheck(snapshot, plan, approvedSchema);
+    checks.push(approved);
+    if (!approved.ok) return { ok: false, code: 'reconciliation_required:approved_existing_schema_mismatch', appliedCount: applied, nextStep: null,
+      ...position, message: `${position.message}; ${approvedSchemaMessage(approved)}`, checks };
+  }
   if (applied > 0) {
     // Row-count invariants (M3) need the start counts of the run that wrote the recorded prefix.
     if (!baseline) return { ok: false, code: 'reconciliation_required:baseline_receipt_required', appliedCount: applied, nextStep: null,
@@ -388,11 +414,12 @@ export function reconcileOps0227To0244Snapshot(snapshot, plan, baseline = null) 
     nextStep: applied < plan.files.length ? plan.files[applied].name : null, checks };
 }
 
-function stepPreflightChecks(snapshot, file) {
+function stepPreflightChecks(snapshot, file, plan, approvedSchema) {
   const p = snapshot.probes, checks = [
     check('ledger_sequence', snapshot.ledger.at(-1)?.id ?? null, p.ledgerSequence),
     check('file_objects_absent', 0, fileObjectsRows(snapshot, file).length),
   ];
+  if (approvedSchema) checks.push(approvedSchemaCheck(snapshot, plan, approvedSchema));
   const short = file.name.slice(0, 4);
   if (short === '0240') checks.push(check('owner_admin_roles', 2, p.ownerAdminRoles), check('flight_logs_permissions_absent', 0, p.flightLogsPermissions));
   if (short === '0242') checks.push(check('claimed_onboarding', 0, p.claimedOnboarding));
@@ -487,15 +514,24 @@ const RECONCILE_NOTE = 'Do not retry. Run --reconcile (read-only); continue only
  *   provider.applyMigration({ name, sha256, statements, statementsSha256 }) -> one batch, never retried
  * mode 'dry-run' performs one read and never calls applyMigration; mode 'reconcile' performs one read and
  * only classifies the state. `startIndex` > 0 resumes after a reconciled prefix; the run re-proves it first.
+ * On the production database the approved existing schema is always required, in every mode.
+ * `approvedExistingSchema` exists only for offline tests on other targets and is refused on production.
  */
 export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run', target, receipt = null, startIndex = 0,
-  approvalRef = null, baseline = null, now = () => new Date(), log = () => {} } = {}) {
+  approvalRef = null, baseline = null, now = () => new Date(), log = () => {}, approvedExistingSchema = null } = {}) {
   if (!['dry-run', 'execute', 'reconcile'].includes(mode)) fail('mode_invalid');
   if (!plan || plan.contract !== OPS_0227_0244_CONTRACT || !Array.isArray(plan.files) || plan.files.length !== 10) fail('plan_invalid');
   if (!Number.isSafeInteger(startIndex) || startIndex < 0 || startIndex >= plan.files.length) fail('start_index_invalid');
   if (!provider || typeof provider.readSnapshot !== 'function' || (mode === 'execute' && typeof provider.applyMigration !== 'function'))
     fail('provider_contract_invalid');
   if (mode === 'execute' && !receipt) fail('receipt_required');
+  if (mode === 'execute' && typeof target?.databaseId !== 'string') fail('target_required');
+  const production = isProductionTarget(target);
+  if (approvedExistingSchema !== null && (production || !exactKeys(approvedExistingSchema, ['objectCount', 'sha256'])
+    || !Number.isSafeInteger(approvedExistingSchema.objectCount) || !SHA.test(approvedExistingSchema.sha256 ?? '')))
+    fail('approved_existing_schema_override_refused');
+  const approvedSchema = production ? OPS_PRODUCTION_EXISTING_SCHEMA : approvedExistingSchema;
+  if (production && baseline && canonical(baseline.existingSchema) !== canonical(approvedSchema)) fail('baseline_receipt_existing_schema_not_approved');
   const stamp = () => now().toISOString();
   const state = {
     schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode, planSha256: plan.planSha256, fixtureSha256: plan.fixtureSha256,
@@ -503,7 +539,9 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
     startedAt: stamp(), finishedAt: null, status: 'running', stop: null,
     files: plan.files.map(({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount }) =>
       ({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount })),
-    initial: null, reconcile: null, steps: [], notes: [], rowCounts: null, existingSchema: null, finalLedger: null, writesPerformed: 0,
+    initial: null, reconcile: null, steps: [], notes: [], rowCounts: null, existingSchema: null,
+    approvedExistingSchema: approvedSchema ? { expected: { ...approvedSchema }, observed: null, ok: false } : null,
+    finalLedger: null, writesPerformed: 0,
   };
   const noteSize = (where, snapshot) => {
     if (snapshot.snapshotBytes > OPS_0227_0244_SNAPSHOT_WARN_BYTES)
@@ -532,7 +570,9 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
     }
   }
   if (current) {
-    const rec = reconcileOps0227To0244Snapshot(current, plan, baseline);
+    const rec = reconcileOps0227To0244Snapshot(current, plan, baseline, approvedSchema);
+    const approved = approvedSchema ? approvedSchemaCheck(current, plan, approvedSchema) : null;
+    if (approved) state.approvedExistingSchema = { expected: approved.expected, observed: approved.observed, ok: approved.ok };
     state.reconcile = { ok: rec.ok, code: rec.code, appliedCount: rec.appliedCount, nextStep: rec.nextStep, ledgerCount: rec.ledgerCount,
       expectedNextFile: rec.expectedNextFile, message: rec.message, checks: rec.checks };
     state.initial = { observedAt: current.observedAt, snapshotBytes: current.snapshotBytes, ledger: ledgerSummary(current.ledger),
@@ -553,6 +593,7 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
       const bad = failed(state.initial.checks);
       if (bad && current.ledger.length > OPS_0227_0244_PRIOR_LEDGER.count) stop(null, 'initial-ledger', `reconciliation_required:${rec.code ?? 'ledger_beyond_0226'}`, rec.message);
       else if (bad) stop(null, 'initial-ledger', `prior_ledger_mismatch:${bad.name}`, rec.message);
+      else if (approved && !approved.ok) stop(null, 'approved-schema', 'approved_existing_schema_mismatch', approvedSchemaMessage(approved));
     } else if (!rec.ok) stop(null, 'reconcile', rec.code, rec.message);
     else if (rec.appliedCount !== startIndex) stop(null, 'reconcile', 'reconciliation_required:resume_from_is_not_next_step', rec.message);
   }
@@ -568,7 +609,7 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
       catch (error) { stop(file.name, 'preflight-read', errorCode(error)); persist(); break; }
     }
     const checks = [...(mode === 'execute' || index === startIndex ? ledgerChecks(current, baseLedger, plan, index) : []),
-      ...stepPreflightChecks(current, file)];
+      ...stepPreflightChecks(current, file, plan, approvedSchema)];
     step.preflight = { observedAt: current.observedAt, snapshotBytes: current.snapshotBytes, ledgerCount: current.ledger.length,
       ledgerDeferred: mode === 'dry-run' && index > startIndex, checks, recorded: recordedCounts(current, file) };
     const bad = failed(checks);
@@ -746,7 +787,8 @@ export async function mainOps0227To0244(args, dependencies = {}) {
         return refusal;
       }
     }
-    const common = { plan, target, log: out, approvalRef: options.approvalRef, baseline };
+    const common = { plan, target, log: out, approvalRef: options.approvalRef, baseline,
+      approvedExistingSchema: dependencies.approvedExistingSchema ?? null };
     if (options.mode === 'reconcile') return await runOps0227To0244Ordered({ ...common, provider: readOnly, mode: 'reconcile', receipt });
     let startIndex = 0;
     if (options.mode === 'execute' && options.resumeFrom !== null) {
