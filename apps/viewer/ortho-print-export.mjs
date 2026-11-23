@@ -161,7 +161,8 @@ export function assertOrthoPrintAllowed(policy, { area, format }) {
 }
 
 // Without download permission a "current view" export is held to what the
-// viewer can already see: the screen's pixels, and never more than 2048 px.
+// viewer can already see: the screen pixels covering the exported area (the
+// view clipped to the orthophoto), and never more than 2048 px.
 // Otherwise a zoomed-out view at 6144 px would equal the gated whole-ortho print.
 export const VIEW_EXPORT_MAX_EDGE = 2048;
 export function printLongEdge({ area, requested, policy, viewPixels }) {
@@ -183,7 +184,8 @@ export function verifyOrthoCrs(ortho, epsg, { requireDeclared = false } = {}) {
   const fd = image.getFileDirectory?.() || {};
   let transform;
   try { transform = typeof fd.getValue === 'function' ? fd.getValue('ModelTransformation') : fd.ModelTransformation; } catch { transform = undefined; }
-  if (transform) refuse('The orthophoto is rotated; export is only supported for north-up orthophotos.');
+  // A plain north-up affine (no rotation or shear terms) is fine; anything else is rotated.
+  if (transform && !(transform[1] === 0 && transform[4] === 0 && transform[0] > 0 && transform[5] < 0)) refuse('The orthophoto is rotated; export is only supported for north-up orthophotos.');
   const resolution = image.getResolution?.();
   if (resolution && !(resolution[0] > 0 && resolution[1] < 0)) refuse('The orthophoto orientation is unsupported for export.');
   const code = Number(image.getGeoKeys?.()?.ProjectedCSTypeGeoKey);
@@ -423,7 +425,7 @@ export function mountOrthoPrintDialog({ documentRef = document, openButton, defa
       const a = el('a', { href: url, download: result.filename });
       documentRef.body.append(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      status.textContent = `Saved ${result.filename}.`;
+      status.textContent = result.note || `Saved ${result.filename}.`;
     } catch (error) {
       if (error?.name === 'AbortError') return;
       status.textContent = error?.code ? error.message : 'Could not export the image. Try a smaller size.';

@@ -169,13 +169,17 @@ test('viewer wiring: Contours panel sits with the map layer panels; mode switche
   // \s* also spans CRLF in Windows checkouts.
   assert.match(main, /installPropertyLines\(\);\s*installContours\(\);/);
   assert.match(main, /propertyLines\?\.refresh\(\);\s*contourLines\?\.refresh\(\);\s*return true;/);
-  assert.match(main, /setHidden\('ortho-print-actions', !orthoPrintPermissions\(\)\.allowed\)/);
+  const sync = main.slice(main.indexOf('function syncMeasurementActionVisibility()'), main.indexOf('function sessionAccessLabel('));
+  assert.match(sync, /setHidden\('ortho-print-actions', !measure\)/);
+  assert.doesNotMatch(sync, /viewerAccessAvailable|orthoPrintPermissions|orthoPrintPolicy/, 'self-contained: other tests sandbox this function');
   assert.match(main, /download: SHARE_PERMISSIONS\.download === true/);
   const exporter = main.slice(main.indexOf('async function exportOrthoPrintFromViewer'), main.indexOf('function pcApi()'));
   assert.match(exporter, /^async function exportOrthoPrintFromViewer[^\n]*\s*(\/\/[^\n]*\s*)*assertOrthoPrintAllowed\(orthoPrintPermissions\(\), \{ area, format \}\);/, 'permission re-checked first');
   assert.match(exporter, /isMapMode\(state\.activeMode\)/, 'current view follows any map view');
-  assert.match(exporter, /printLongEdge\(\{ area, requested: size, policy, viewPixels:/, 'view exports capped without download');
-  assert.match(exporter, /assertOrthoPrintAllowed\(orthoPrintPermissions\(\), \{ area, format \}\);\s*return result;/, 'permission re-checked before the file is saved');
+  assert.match(exporter, /printLongEdge\(\{ area, requested: size, policy, viewPixels \}\)/, 'view exports capped without download');
+  assert.match(exporter, /clampExtent\(extent, ortho\)/, 'cap measured on the view clipped to the orthophoto');
+  assert.match(exporter, /limited by your access/);
+  assert.match(exporter, /await exportOrthoPrint\([\s\S]*assertOrthoPrintAllowed\(orthoPrintPermissions\(\), \{ area, format \}\);(?:(?!await)[\s\S])*return result;\s*\}\s*$/, 'permission re-checked after rendering, with nothing awaited before the file is saved');
   assert.match(main, /v \* toMeters > -1000 && v \* toMeters < 10000/, 'DEM range checked in metres');
   assert.doesNotMatch(main, /#FFD60A/, 'property lines found by pane, not colour');
 });

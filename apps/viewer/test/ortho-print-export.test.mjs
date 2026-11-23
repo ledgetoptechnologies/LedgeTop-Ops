@@ -110,7 +110,9 @@ test('orthophoto CRS must match the model and be north-up; mismatches are refuse
   const image = (keys, transform, resolution = [0.5, -0.5, 0]) => ({ getGeoKeys: () => keys, getResolution: () => resolution, getFileDirectory: () => ({ getValue: name => name === 'ModelTransformation' ? transform : undefined }) });
   assert.doesNotThrow(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32616 })] }, 32616, { requireDeclared: true }));
   assert.throws(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32617 })] }, 32616), { code: 'print_crs', message: /does not match/ });
-  assert.throws(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32616 }, [1, 0, 0, 0])] }, 32616), { code: 'print_crs', message: /rotated/ });
+  assert.throws(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32616 }, [0.5, 0.01, 0, 500000, 0.01, -0.5, 0, 4700000, 0, 0, 0, 0, 0, 0, 0, 1])] }, 32616), { code: 'print_crs', message: /rotated/ });
+  assert.throws(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32616 }, [0.5, 0, 0, 500000, 0, 0.5, 0, 4700000, 0, 0, 0, 0, 0, 0, 0, 1])] }, 32616), { code: 'print_crs' }, 'south-up');
+  assert.doesNotThrow(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32616 }, [0.5, 0, 0, 500000, 0, -0.5, 0, 4700000, 0, 0, 0, 0, 0, 0, 0, 1])] }, 32616), 'plain north-up transform is allowed');
   assert.throws(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32616 }, undefined, [0.5, 0.5, 0])] }, 32616), { code: 'print_crs' });
   assert.throws(() => verifyOrthoCrs({ images: [image({})] }, 32616, { requireDeclared: true }), { code: 'print_crs', message: /does not declare/ });
   assert.doesNotThrow(() => verifyOrthoCrs({ images: [image({})] }, 32616), 'undeclared is fine for a PNG');

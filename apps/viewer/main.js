@@ -87,7 +87,7 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { modelHorizontalDatum, verifiedUtmGeoref } from './property-lines.mjs';
 import { createPropertyLinesController } from './property-lines-layer.mjs';
 import { createContourController, dtmVerticalScale } from './contour-layer.mjs';
-import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, supportedPrintSizes } from './ortho-print-export.mjs';
+import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, supportedPrintSizes } from './ortho-print-export.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
 import { renderProjectSwitcherOptions } from './project-switcher.mjs';
@@ -1443,13 +1443,15 @@ function orthoPrintPermissions() {
 }
 
 function syncMeasurementActionVisibility() {
-  const accessAvailable = viewerAccessAvailable();
+  const accessAvailable = sessionAccessState !== 'unavailable'
+    && (VIEW_MODE !== 'session' || (activeViewerSession && Date.parse(activeViewerSession.expiresAt) > Date.now()));
   const measure = accessAvailable && SHARE_PERMISSIONS.measure !== false;
   const download = accessAvailable && SHARE_PERMISSIONS.download === true;
   const setHidden = (id, hidden) => { const element = document.getElementById(id); if (element) element.hidden = hidden; };
   setHidden('measurement-report-actions', !measure);
   setHidden('btn-capture-float', !measure);
-  setHidden('ortho-print-actions', !orthoPrintPermissions().allowed);
+  // Same rule as the print policy's `allowed`; the export re-checks the full policy.
+  setHidden('ortho-print-actions', !measure);
   // The original processing report follows download permission independently.
   setHidden('panel-model-report', !measure && !download);
 }
@@ -4215,8 +4217,14 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
   const drawnLines = property ? propertyLinesForPrint() : { lines: [], color: null };
   const policy = orthoPrintPermissions();
   assertOrthoPrintAllowed(policy, { area, format });
-  const mapSize = map.getSize();
-  const longEdge = printLongEdge({ area, requested: size, policy, viewPixels: Math.max(mapSize.x, mapSize.y) * (window.devicePixelRatio || 1) });
+  // Screen pixels the exported area actually covers: the view clipped to the
+  // orthophoto, not the whole map viewport.
+  let viewPixels = NaN;
+  if (area === 'view') {
+    const mapSize = map.getSize(), dpr = window.devicePixelRatio || 1, clipped = clampExtent(extent, ortho);
+    if (clipped) viewPixels = dpr * Math.max(mapSize.x * (clipped.maxE - clipped.minE) / (extent.maxE - extent.minE), mapSize.y * (clipped.maxN - clipped.minN) / (extent.maxN - extent.minN));
+  }
+  const longEdge = printLongEdge({ area, requested: size, policy, viewPixels });
   const result = await exportOrthoPrint({
     ortho, extent, longEdge, format, epsg: printEpsg(),
     traceContours: contours && DTM_URL ? (printExtent, targetCell) => contourLines.computeForExtent(printExtent, targetCell, { signal }) : null,
@@ -4227,6 +4235,7 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
   // Rendering takes a while: the session may have expired meanwhile. Check
   // again before the dialog saves anything.
   assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
+  if (result.width < size && result.height < size && longEdge < size) result.note = `Saved at ${Math.max(result.width, result.height)} px (limited by your access).`;
   return result;
 }
 
