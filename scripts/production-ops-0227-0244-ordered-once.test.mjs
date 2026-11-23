@@ -1102,7 +1102,10 @@ test('the exact production-shaped store passes as production: clean, interrupted
 
   const missing = copy();
   const db = new DatabaseSync(missing);
-  try { db.exec(); } finally { db.close(); }
+  try {
+    const { name } = db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name GLOB 'production_native_*' ORDER BY name").get();
+    db.exec('DROP TRIGGER ' + name);
+  } finally { db.close(); }
   const refused = await cli(missing, productionExec(receiptPath()), { extra: SOURCE_OK });
   assert.equal(refused.result.stop.code, 'approved_existing_schema_mismatch');
   assert.equal(refused.result.approvedExistingSchema.observed.objectCount, 2471);
