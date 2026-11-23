@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import { openMarksPanel } from './helpers/marks-panel.mjs';
+import { PROPERTY_LINE_STYLE } from '../property-lines-layer.mjs';
 
 const collection = name => JSON.stringify({ type: 'FeatureCollection', features: [{ type: 'Feature',
   geometry: { type: 'Point', coordinates: [-87, 43] }, properties: { name, category: name + ' category', 'marker-color': '#1e88e5' } }] });
@@ -185,4 +186,122 @@ test('expired or refused access clears the panel, and coming back with less iden
   await page.accept('client', 'client-a', REDUCED[0]);
   await page.sync(active);
   assert.deepEqual([panel.store.state.marks, panel.store.state.undo, panel.store.canWrite()], [[], [], false]);
+
+const add = (panel, name, changes = {}) => panel.store.create({ geometry: { type: 'Point', coordinates: [-87, 43] }, name, color: '#1e88e5', icon: 'pin', note: '', ...changes });
+const line = { type: 'LineString', coordinates: [[-87, 43], [-87.001, 43.001]] };
+const form = panel => panel.q('.viewer-mark-form');
+const bar = (panel, text) => form(panel).querySelectorAll('button').find(node => node.textContent === text);
+
+test('a saved mark moves only in Move mode, only on Save, and can be undone', async t => {
+  const { mount, scope, requests } = await openMarksPanel(t);
+  const panel = mount();
+  await panel.marks.setScope(scope('client', 'client-a'));
+  const pin = await add(panel, 'Pin'), path = await add(panel, 'Path', { geometry: line });
+  requests.length = 0;
+  // Not open, and open without Move: a drag does nothing.
+  assert.equal(panel.leaflet.pins()[0].drag(43.01, -87.01), false);
+  await panel.open('Pin');
+  assert.equal(panel.leaflet.pins()[0].drag(43.01, -87.01), false);
+  await panel.open('Path');
+  assert.deepEqual(panel.leaflet.corners(), []);
+  assert.deepEqual(requests, []);
+
+  await panel.open('Pin');
+  await bar(panel, 'Move').click();
+  assert.equal(bar(panel, 'Move').getAttribute('aria-pressed'), 'true');
+  assert.equal(panel.leaflet.pins().filter(layer => layer.options.draggable).length, 1, 'only the open mark');
+  assert.equal(panel.leaflet.pins().find(layer => layer.options.draggable).drag(43.01, -87.01), true);
+  assert.deepEqual(requests, [], 'a drag alone writes nothing');
+  await bar(panel, 'Close').click();
+  assert.deepEqual(panel.store.find(pin.id).geometry, pin.geometry, 'Close leaves it where it was');
+  await panel.open('Pin');
+  assert.equal(panel.leaflet.pins().some(layer => layer.options.draggable), false, 'Move does not stay on');
+  await bar(panel, 'Move').click();
+  panel.leaflet.pins().find(layer => layer.options.draggable).drag(43.01, -87.01);
+  await panel.save();
+  assert.deepEqual(panel.store.find(pin.id).geometry.coordinates, [-87.01, 43.01]);
+  assert.deepEqual(requests.map(([method]) => method), ['PUT']);
+  await panel.button('Undo').click();
+  assert.deepEqual(panel.store.find(pin.id).geometry, pin.geometry);
+
+  await panel.open('Path');
+  await bar(panel, 'Move').click();
+  assert.equal(panel.leaflet.corners()[1].drag(43.002, -87.002), true);
+  await panel.save();
+  assert.deepEqual(panel.store.find(path.id).geometry.coordinates, [[-87, 43], [-87.002, 43.002]]);
+  await panel.button('Undo').click();
+  assert.deepEqual(panel.store.find(path.id).geometry, path.geometry);
+});
+
+test('a new mark can be adjusted before its first save, and one that cannot be edited never moves', async t => {
+  const { mount, scope } = await openMarksPanel(t);
+  const client = mount(), staff = mount();
+  await client.marks.setScope(scope('client', 'client-a'));
+  await client.place('43.05, -87');
+  assert.equal(bar(client, 'Move').hidden, true);
+  assert.equal(client.leaflet.pins()[0].drag(43.06, -87.02), true);
+  await client.type('[name=name]', 'New');
+  client.q('[name=visibility]').value = 'staff';
+  await client.save();
+  assert.deepEqual(client.store.state.marks[0].geometry.coordinates, [-87.02, 43.06]);
+
+  await staff.marks.setScope(scope('ops', 'staff-person'));
+  await staff.open('New');
+  assert.match(staff.text(), /From a client/);
+  for (const text of ['Move', 'Save', 'Delete']) assert.equal(bar(staff, text).hidden, true, text);
+  for (const name of ['name', 'note', 'pointCoordinates']) assert.equal(staff.q(`[name=${name}]`).disabled, true, name);
+  assert.equal(staff.q('[name=visibility]').parent.hidden, true);
+  assert.equal(staff.leaflet.pins().some(layer => layer.options.draggable), false);
+  await bar(staff, 'Move').click();
+  assert.equal(staff.leaflet.pins().some(layer => layer.options.draggable), false);
+});
+
+test('an icon this build does not know survives an edit, undo, its category and GeoJSON', async t => {
+  const { mount, scope } = await openMarksPanel(t);
+  const panel = mount();
+  await panel.marks.setScope(scope('client', 'client-a'));
+  const category = await panel.store.saveCategory({ name: 'Future', color: '#1e88e5', icon: 'future-category' });
+  const mark = await add(panel, 'Mark', { icon: 'future-icon', categoryId: category.id });
+  await panel.open('Mark');
+  await panel.type('[name=name]', 'Renamed');
+  await panel.save();
+  assert.deepEqual([panel.store.find(mark.id).name, panel.store.find(mark.id).icon], ['Renamed', 'future-icon']);
+  await panel.button('Undo').click();
+  assert.deepEqual([panel.store.find(mark.id).name, panel.store.find(mark.id).icon], ['Mark', 'future-icon']);
+  await panel.q('[aria-label="Edit Future"]').click();
+  panel.q('[name=categoryName]').value = 'Future two';
+  await panel.q('.viewer-mark-category-form').fire('submit');
+  assert.deepEqual(panel.store.state.categories.map(row => [row.name, row.icon]), [['Future two', 'future-category']]);
+  // A new mark in that category takes the category's icon, known here or not.
+  panel.q('[aria-label="Show category"]').value = category.id;
+  await panel.q('[aria-label="Show category"]').fire('change');
+  await panel.place('43.05, -87');
+  await panel.save();
+  assert.equal(panel.store.state.marks.at(-1).icon, 'future-category');
+  await panel.open('Mark');
+  panel.q('[name=categoryId]').value = category.id;
+  await panel.q('[name=categoryId]').fire('change');
+  await panel.save();
+  assert.equal(panel.store.find(mark.id).icon, 'future-category');
+  // Choosing one is still possible.
+  await panel.open('Mark');
+  await panel.q('[data-icon="flag"]').click();
+  await panel.save();
+  assert.equal(panel.store.find(mark.id).icon, 'flag');
+});
+
+test('the default colour is not the property-line colour', async t => {
+  const { mount, scope } = await openMarksPanel(t);
+  const panel = mount();
+  await panel.marks.setScope(scope('client', 'client-a'));
+  await panel.place('43.05, -87');
+  await panel.save();
+  const slow = slowFile(JSON.stringify({ type: 'Point', coordinates: [-87, 43] }));
+  importInput(panel).files = [slow.file];
+  const done = importInput(panel).fire('change');
+  slow.release();
+  await done;
+  assert.equal(panel.store.state.marks.length, 2);
+  for (const mark of panel.store.state.marks) assert.notEqual(mark.color, PROPERTY_LINE_STYLE.color.toLowerCase());
+  assert.notEqual(panel.q('[aria-label="Category colour"]').value, PROPERTY_LINE_STYLE.color.toLowerCase());
 });

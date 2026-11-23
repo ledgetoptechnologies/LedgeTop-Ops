@@ -12,7 +12,7 @@ import { createMarksStore } from '../viewer-marks-store.mjs';
 
 // The store runs against the real Marks API so permission and revision rules
 // are exercised end to end, without a browser.
-const SHARING = { visibility: marksRepository.PROPOSED_SHARING };
+const SHARING = { visibility: marksRepository.HELD_SHARING };
 async function openServer(t, options) {
   const database = new DatabaseSync(':memory:');
   database.exec(`CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('synthetic-model');`);
@@ -45,77 +45,103 @@ async function openServer(t, options) {
 
 const pin = (name, changes = {}) => ({ geometry: { type: 'Point', coordinates: [-87, 43] }, name, color: '#ee5007', icon: 'pin', note: '', ...changes });
 
-test('marks stay with their owner as served: no sharing choice, no audience request, undo works', async t => {
+test('as served: a client shares with staff view-only, nobody asks for audiences, and undo restores', async t => {
   const { request, scope } = await openServer(t);
   const paths = [];
   const recorded = (path, init) => { paths.push(path); return request(path, init); };
   const client = createMarksStore({ request: recorded }), staff = createMarksStore({ request: recorded });
   await client.setScope(scope('client', 'client-a'));
   await staff.setScope(scope('ops', 'staff-person'));
-  assert.deepEqual(client.state.capabilities, { write: true, staff: false, visibility: ['private'] });
-  assert.deepEqual(staff.state.capabilities, { write: true, staff: true, visibility: ['private'] });
-  const mark = await client.create(pin('Mine'));
-  assert.equal(mark.visibility, 'private');
-  assert.equal(await client.create(pin('Shared', { visibility: 'staff' })), null);
-  assert.match(client.state.message, /not available/);
-  await staff.refresh();
-  assert.deepEqual(staff.state.marks, []);
+  assert.deepEqual(client.state.capabilities, { write: true, staff: false, visibility: ['private', 'staff'], recoveryDays: 30 });
+  assert.deepEqual(staff.state.capabilities, { write: true, staff: true, visibility: ['private'], recoveryDays: 30 });
+  assert.equal((await client.create(pin('Mine'))).visibility, 'private');
+  const shared = await client.create(pin('Shared', { visibility: 'staff' }));
   assert.equal((await staff.create(pin('Staff pin'))).visibility, 'private');
-  await client.update(client.find(mark.id), { name: 'Moved' });
+  assert.equal(await staff.create(pin('For a client', { visibility: 'client', shareAccount: 'direct_client_grant:grant-a' })), null);
+  assert.match(staff.state.message, /not available/);
+  await staff.refresh();
+  assert.deepEqual(staff.state.marks.map(mark => mark.name).sort(), ['Shared', 'Staff pin']);
+  const seen = staff.find(shared.id);
+  assert.equal(staff.editable(seen), false);
+  assert.equal(await staff.update(seen, { name: 'Changed' }), null);
+  assert.match(staff.state.message, /only change your own/);
+  assert.equal(await staff.remove(seen), false);
+
+  await client.update(client.find(shared.id), { name: 'Moved', geometry: { type: 'Point', coordinates: [-87.0001, 43.0001] } });
   assert.equal(await client.undo(), true);
-  assert.equal(client.find(mark.id).name, 'Mine');
-  assert.equal(await client.remove(client.find(mark.id)), true);
+  assert.deepEqual([client.find(shared.id).name, client.find(shared.id).geometry.coordinates], ['Shared', [-87, 43]]);
+  // Undoing a delete restores the same mark, with its id and sharing.
+  assert.equal(await client.remove(client.find(shared.id)), true);
+  await staff.refresh();
+  assert.equal(staff.find(shared.id), null);
+  assert.equal(await client.loadDeleted(), true);
+  assert.deepEqual(client.state.deleted.map(mark => mark.id), [shared.id]);
   assert.equal(await client.undo(), true);
-  assert.deepEqual(client.state.marks.map(row => row.name), ['Mine']);
+  assert.deepEqual([client.find(shared.id).name, client.find(shared.id).visibility, client.state.deleted.length], ['Shared', 'staff', 0]);
+  // So does Restore, after undo has been used up; undoing that deletes it again.
+  await client.remove(client.find(shared.id));
+  client.state.undo = [];
+  await client.loadDeleted();
+  assert.equal(await client.restore({ id: randomUUID(), revision: 1 }), null, 'only what the list shows');
+  assert.equal((await client.restore(client.state.deleted[0])).id, shared.id);
+  assert.deepEqual(client.state.deleted, []);
+  assert.equal(await client.undo(), true);
+  assert.equal(client.find(shared.id), null);
   assert.ok(!paths.some(path => path.endsWith('/audiences')));
 });
 
-test('[proposed sharing] a client shares with staff, staff share back to the client account, and each undoes their own change', async t => {
-  const { request, scope } = await openServer(t, SHARING);
-  const client = createMarksStore({ request });
-  const staff = createMarksStore({ request });
-  await client.setScope(scope('client', 'client-a'));
-  await staff.setScope(scope('ops', 'staff-person'));
-  assert.equal(client.canWrite(), true);
-  assert.equal(staff.state.capabilities.staff, true);
-
-  const privateByDefault = await client.create(pin('Mine only'));
-  assert.equal(privateByDefault.visibility, 'private', 'client marks default to Only me');
-  const created = await client.create(pin('Shared stand', { visibility: 'staff' }));
-  assert.equal(created.mine, true);
-  assert.equal(created.visibility, 'staff');
-  const moved = await client.update(created, { geometry: { type: 'Point', coordinates: [-87.0001, 43.0001] } });
-  assert.equal(moved.revision, 2);
-  assert.deepEqual(client.state.undo.map(entry => entry.type), ['create', 'create', 'update']);
-  assert.equal(await client.undo(), true);
-  assert.deepEqual(client.find(created.id).geometry.coordinates, [-87, 43], 'undo restores the old position');
-
-  await staff.refresh();
-  const seen = staff.find(created.id);
-  assert.equal(seen.editable, true);
-  await staff.update(seen, { name: 'Checked by staff' });
-  // The client still holds an older revision: the save fails, explains and reloads.
-  assert.equal(await client.update(client.find(created.id), { name: 'Late edit' }), null);
-  assert.match(client.state.message, /Someone else changed/);
-  assert.equal(client.find(created.id).name, 'Checked by staff');
-
-  const internal = await staff.create(pin('Staff note'));
-  assert.equal(internal.visibility, 'internal');
-  await client.refresh();
-  assert.equal(client.find(internal.id), null);
-  await staff.refresh();
-  assert.deepEqual(staff.state.audiences.map(row => row.account), ['direct_client_grant:grant-a']);
-  const forClient = await staff.create(pin('For the client', { visibility: 'client', shareAccount: staff.state.audiences[0].account }));
-  await client.refresh();
-  assert.equal(client.find(forClient.id).editable, false);
-  assert.equal(client.find(forClient.id).shareAccount, undefined);
-  assert.equal(await staff.remove(staff.find(internal.id)), true);
-  assert.equal(await staff.undo(), true, 'undo delete brings back a copy');
-  assert.equal(staff.state.marks.filter(mark => mark.name === 'Staff note').length, 1);
-  assert.notEqual(staff.state.marks.find(mark => mark.name === 'Staff note').id, internal.id);
+test('a change made in two tabs of one person is explained and reloaded', async t => {
+  const { request, scope } = await openServer(t);
+  const person = scope('client', 'client-a');
+  const one = createMarksStore({ request }), two = createMarksStore({ request });
+  await one.setScope(person);
+  const mark = await one.create(pin('Original'));
+  await two.setScope(person);
+  await two.update(two.find(mark.id), { name: 'Second tab' });
+  assert.equal(await one.update(one.find(mark.id), { name: 'Late edit' }), null);
+  assert.match(one.state.message, /Someone else changed/);
+  assert.equal(one.find(mark.id).name, 'Second tab');
 });
 
-test('[proposed sharing] categories and GeoJSON import go through the API; company logins see no marks', async t => {
+test('a renewed session keeps marks, undo and the deleted list, and uses the new token', async t => {
+  const { request, scope } = await openServer(t);
+  const first = scope('client', 'client-a'), renewed = scope('client', 'client-a');
+  let current = first;
+  const sent = [];
+  const store = createMarksStore({ request: (path, init) => { sent.push([path, init.headers.authorization]); return request(path, init); } });
+  const context = () => ({ mode: 'session', key: 'same person and model', token: () => current.token() });
+  await store.setScope(context());
+  const mark = await store.create(pin('Kept'));
+  const loads = sent.length;
+  current = renewed;
+  first.record.revoked = true;
+  await store.setScope(context());
+  assert.equal(sent.length, loads, 'nothing is reloaded');
+  assert.deepEqual(store.state.marks.map(row => row.id), [mark.id]);
+  assert.equal(store.state.undo.length, 1);
+  assert.equal((await store.update(store.find(mark.id), { name: 'After renewal' })).name, 'After renewal');
+  assert.equal(sent.at(-1)[1], 'Bearer ' + renewed.token());
+});
+
+test('losing the individual identity or the grant mid-session empties the store', async t => {
+  for (const lose of [record => { record.permissions = { view: true, measure: true }; }, record => { record.revoked = true; }]) {
+    const { request, scope } = await openServer(t);
+    const person = scope('client', 'client-a');
+    const store = createMarksStore({ request });
+    await store.setScope(person);
+    const mark = await store.create(pin('Mine'));
+    await store.saveCategory({ name: 'Mine', color: '#1e88e5', icon: 'target' });
+    await store.remove(mark);
+    await store.loadDeleted();
+    const second = await store.create(pin('Second'));
+    lose(person.record);
+    assert.equal(await store.update(second, { name: 'Changed' }), null);
+    assert.deepEqual([store.state.marks, store.state.categories, store.state.deleted, store.state.undo], [[], [], [], []]);
+    assert.equal(store.canWrite(), false);
+  }
+});
+
+test('[held sharing] categories and GeoJSON import go through the API; company logins see no marks', async t => {
   const { request, scope } = await openServer(t, SHARING);
   const client = createMarksStore({ request });
   await client.setScope(scope('client', 'client-a'));
@@ -181,7 +207,7 @@ function heldRequests(request, isHeld) {
   return { held, request: wrapped };
 }
 const settled = () => new Promise(resolve => setTimeout(resolve, 20));
-const visibleState = store => JSON.parse(JSON.stringify({ marks: store.state.marks, categories: store.state.categories, undo: store.state.undo,
+const visibleState = store => JSON.parse(JSON.stringify({ marks: store.state.marks, deleted: store.state.deleted, categories: store.state.categories, undo: store.state.undo,
   audiences: store.state.audiences, busy: store.state.busy, message: store.state.message, ready: store.state.ready }));
 
 const category = name => ({ id: randomUUID(), name, color: '#43a047', icon: 'gate' });
@@ -190,7 +216,9 @@ for (const [name, start, isHeld] of [
   ['create', store => store.create(first()), (path, init) => init.method === 'POST'],
   ['update', store => store.update(store.state.marks[0], { name: 'Late' }), (path, init) => init.method === 'PUT'],
   ['delete', store => store.remove(store.state.marks[0]), (path, init) => init.method === 'DELETE'],
-  ['undo of a delete', async store => { await store.remove(store.state.marks[0]); return store.undo(); }, (path, init) => init.method === 'POST' && path.endsWith('/marks')],
+  ['undo of a delete', async store => { await store.remove(store.state.marks[0]); return store.undo(); }, (path, init) => path.endsWith('/restore')],
+  ['restore', async store => { await store.remove(store.state.marks[0]); await store.loadDeleted(); return store.restore(store.state.deleted[0]); }, path => path.endsWith('/restore')],
+  ['deleted list', store => store.loadDeleted(), path => path.endsWith('/deleted')],
   ['new category', store => store.saveCategory({ name: 'Late', color: '#43a047', icon: 'gate' }), (path, init) => init.method === 'POST'],
   ['category edit', store => store.saveCategory({ ...store.state.categories[0], name: 'Late' }), (path, init) => init.method === 'PUT'],
   ['category delete', store => store.deleteCategory(store.state.categories[0]), (path, init) => init.method === 'DELETE'],

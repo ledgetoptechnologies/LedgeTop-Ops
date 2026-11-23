@@ -2,10 +2,11 @@
 
 const { trackedRouter } = require('./httpRequestLifecycle');
 const { getMeasurementPrincipal } = require('./measurementApi');
-const { ViewerMarkRepository, markError } = require('./viewerMarkRepository');
+const { ViewerMarkRepository, RECOVERY_DAYS, markError } = require('./viewerMarkRepository');
 
-// Same explicit bearer and live model access as personal measurements, and the
-// same rule: each person reads and changes their own marks (OWNER_ONLY). A client
+// Same explicit bearer and live model access as personal measurements. Each person
+// reads and changes their own marks; staff also read (never change) client marks
+// shared with project staff (SERVED_SHARING). A client
 // session without a verified individual identity (a shared company login) has no
 // person to own marks: it gets an empty list and everything else is refused.
 function createViewerMarkApi(repository, { visibility } = {}) {
@@ -39,9 +40,10 @@ function createViewerMarkApi(repository, { visibility } = {}) {
     res.json({
       marks: marks.list(principal), categories: marks.categories(principal),
       capabilities: { write: true, staff: principal.audience === 'ops',
-        visibility: marks.visibility[principal.audience] },
+        visibility: marks.visibility[principal.audience], recoveryDays: RECOVERY_DAYS },
     });
   });
+  router.get('/deleted', (req, res) => res.json({ marks: marks.deleted(req.markPrincipal) }));
   router.get('/audiences', (req, res) => res.json({ audiences: marks.audiences(req.markPrincipal) }));
   router.post('/batch', (req, res) => {
     if (!req.body || typeof req.body !== 'object' || Object.keys(req.body).some(key => key !== 'marks')) throw markError('invalid_mark_batch');
@@ -66,6 +68,7 @@ function createViewerMarkApi(repository, { visibility } = {}) {
     res.status(result.replayed ? 200 : 201).json(result);
   });
   router.put('/:id', (req, res) => res.json({ mark: marks.update(req.markPrincipal, req.params.id, req.body) }));
+  router.post('/:id/restore', (req, res) => res.json({ mark: marks.restore(req.markPrincipal, req.params.id, revisionOnly(req.body)) }));
   router.delete('/:id', (req, res) => {
     marks.delete(req.markPrincipal, req.params.id, revisionOnly(req.body));
     res.status(204).end();

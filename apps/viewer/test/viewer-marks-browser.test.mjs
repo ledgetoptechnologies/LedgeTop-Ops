@@ -26,7 +26,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const executable = () => [process.env.CHROME_PATH, process.env.EDGE_PATH,
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].filter(Boolean).find(existsSync) || null;
-const MODULES = ['viewer-marks.mjs', 'viewer-marks-store.mjs', 'viewer-mark-map-layer.mjs', 'viewer-mark-icons.mjs',
+const MODULES = ['viewer-marks.mjs', 'viewer-marks-store.mjs', 'viewer-mark-map-layer.mjs', 'viewer-mark-icons.mjs', 'viewer-mark-style.mjs', 'viewer-mark-draft-recovery.mjs',
   'viewer-mark-coordinates.mjs', 'viewer-mark-geojson.mjs', 'utm-conversion.mjs'];
 const SESSION_TOKEN = 'synthetic-browser-session-token-0001';
 
@@ -158,12 +158,24 @@ test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeou
   assert.equal(await client.evaluate("document.querySelector('.viewer-mark-label')?.textContent"), 'North <b>gate</b>', 'labels are text');
   assert.equal(await client.evaluate("document.querySelector('.viewer-mark-label b')"), null);
 
-  // Drag the pin; undo puts it back.
+  // A drag without Move pans the map and writes nothing.
+  await mouse('mousePressed', x, y);
+  for (let step = 1; step <= 5; step++) await mouse('mouseMoved', x + step * 4, y);
+  await mouse('mouseReleased', x + 20, y);
+  await delay(300);
+  assert.equal(await client.evaluate('marks.store.state.marks[0].revision'), 1);
+
+  // Move, drag and Save; undo puts it back.
+  await client.evaluate('map.setView([43.05, -87.0], 18, { animate: false }), 0');
+  if (await client.evaluate("document.querySelector('.viewer-mark-form').hidden")) await h.press('.viewer-mark-list-item');
+  await client.evaluate('map.setView([43.05, -87.0], 18, { animate: false }), 0');
+  await h.pressText('Move');
   const placedLon = saved.geometry.coordinates[0];
   await mouse('mousePressed', x, y);
   for (let step = 1; step <= 5; step++) await mouse('mouseMoved', x + step * 12, y + step * 8);
   await mouse('mouseReleased', x + 60, y + 40);
-  await waitFor('marks.store.state.marks[0].revision === 2', 'drag saved');
+  await h.pressText('Save');
+  await waitFor('marks.store.state.marks[0].revision === 2', 'move saved');
   saved = (await h.state())[0];
   assert.ok(saved.geometry.coordinates[0] > placedLon, 'moved east');
   await h.pressText('Undo');

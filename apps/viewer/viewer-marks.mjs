@@ -1,8 +1,9 @@
 import { createMarksStore } from './viewer-marks-store.mjs';
 import { createMarkMapLayer, geometryFrom, markPositions } from './viewer-mark-map-layer.mjs';
-import { MARK_ICONS, MARK_SWATCHES, markIconName, markIconSvg, safeColor } from './viewer-mark-icons.mjs';
+import { DEFAULT_STYLE, ICON_CHOICES, MARK_SWATCHES, categoryBadge, categoryStyle, iconMarkup, keepIcon, markBadge, markIconName, safeColor } from './viewer-mark-style.mjs';
 import { elevationForDisplay, elevationToMetres, elevationUnit, formatDecimal, formatDms, formatUtm, parseCoordinateInput } from './viewer-mark-coordinates.mjs';
 import { geoJsonToMarks, marksToGeoJson } from './viewer-mark-geojson.mjs';
+import { createMarkDraftRecovery, reconcileMarkDraft } from './viewer-mark-draft-recovery.mjs';
 
 const TYPE_LABEL = { Point: 'Pin', LineString: 'Line', Polygon: 'Area' };
 // The server says which of these a person may choose; with one choice the field is hidden.
@@ -38,11 +39,15 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   let view = { map: false }, mode = 'idle', drawing = null, draft = null, selectedId = null, preview = null;
   let labels = readLabelsPreference(window), filter = '', armedDelete = null, categoryDraft = null;
   let sessionScope = false, scopeKey, writtenCoords = null;
+  // Unsaved work, kept for this person and model. Nothing is kept or cleared until the stored draft was looked at.
+  const recovery = createMarkDraftRecovery({ storage: () => window.sessionStorage });
+  let draftChecked = false, draftBaseline = null;
+  // A saved mark moves only while this is on, and only on Save.
+  let moving = false;
 
   const store = createMarksStore({ request, newId, onChange: () => render() });
   const layer = createMarkMapLayer({ L, getMap,
     onSelect: id => select(id, { focus: false }),
-    onMove: (mark, geometry) => { void store.update(mark, { geometry }); },
     onDraftMove: geometry => { if (draft) { draft.geometry = geometry; writeCoords(); render(); } },
   });
 
@@ -70,9 +75,9 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const categorySelect = h(document, 'select', { name: 'categoryId' });
   const colorInput = h(document, 'input', { name: 'color', type: 'color', 'aria-label': 'Custom colour' });
   const swatches = MARK_SWATCHES.map(color => h(document, 'button', { type: 'button', class: 'viewer-mark-swatch', 'data-color': color, 'aria-label': 'Colour ' + color, style: `background:${color}` }));
-  const iconButtons = Object.entries(MARK_ICONS).map(([name, icon]) => {
-    const button = h(document, 'button', { type: 'button', class: 'viewer-mark-icon', 'data-icon': name, 'aria-label': icon.label, title: icon.label });
-    button.innerHTML = markIconSvg(name, '#555555', 22);
+  const iconButtons = ICON_CHOICES.map(({ name, label }) => {
+    const button = h(document, 'button', { type: 'button', class: 'viewer-mark-icon', 'data-icon': name, 'aria-label': label, title: label });
+    button.innerHTML = iconMarkup(name, '#555555', 22);
     return button;
   });
   const iconField = h(document, 'fieldset', { class: 'viewer-mark-icons' }, h(document, 'legend', { text: 'Icon' }), ...iconButtons);
@@ -89,12 +94,13 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const noteInput = h(document, 'textarea', { name: 'note', maxlength: '2000', rows: '3' });
   const saveButton = h(document, 'button', { type: 'submit', class: 'viewer-mark-primary', text: 'Save' });
   const deleteButton = h(document, 'button', { type: 'button', text: 'Delete' });
+  const moveButton = h(document, 'button', { type: 'button', text: 'Move', 'aria-pressed': 'false' });
   const closeButton = h(document, 'button', { type: 'button', text: 'Close' });
   const editor = h(document, 'form', { class: 'viewer-mark-form', hidden: true }, editorTitle,
     field('Label', nameInput), field('Category', categorySelect),
     h(document, 'fieldset', { class: 'viewer-mark-colors' }, h(document, 'legend', { text: 'Colour' }), ...swatches, colorInput),
     iconField, pointCoordsField, coordReadout, elevationField, visibilityField, accountField, field('Notes', noteInput),
-    h(document, 'div', { class: 'viewer-mark-row' }, saveButton, deleteButton, closeButton));
+    h(document, 'div', { class: 'viewer-mark-row' }, saveButton, moveButton, deleteButton, closeButton));
 
   // List
   const filterSelect = h(document, 'select', { 'aria-label': 'Show category' });
@@ -107,9 +113,16 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   // Categories
   const categoryList = h(document, 'ul', { class: 'viewer-mark-list viewer-mark-categories' });
   const categoryName = h(document, 'input', { name: 'categoryName', maxlength: '60', autocomplete: 'off', 'aria-label': 'Category name', placeholder: 'Name' });
-  const categoryColor = h(document, 'input', { type: 'color', value: MARK_SWATCHES[0], 'aria-label': 'Category colour' });
+  const categoryColor = h(document, 'input', { type: 'color', value: DEFAULT_STYLE.color, 'aria-label': 'Category colour' });
+  const iconOptions = ICON_CHOICES.map(({ name, label }) => h(document, 'option', { value: name, text: label }));
   const categoryIcon = h(document, 'select', { 'aria-label': 'Category icon' },
-    ...Object.entries(MARK_ICONS).map(([name, icon]) => h(document, 'option', { value: name, text: icon.label })));
+    ...iconOptions);
+  // An icon this build does not know stays selectable while its category is edited.
+  function showCategoryIcon(icon) {
+    const extra = ICON_CHOICES.some(choice => choice.name === icon) ? [] : [h(document, 'option', { value: icon, text: 'Current icon' })];
+    categoryIcon.replaceChildren(...[...iconOptions, ...extra]);
+    categoryIcon.value = icon;
+  }
   const categorySave = h(document, 'button', { type: 'submit', text: 'Add' });
   const categoryCancel = h(document, 'button', { type: 'button', text: 'Cancel', hidden: true });
   const categoryForm = h(document, 'form', { class: 'viewer-mark-row viewer-mark-category-form' }, categoryName, categoryColor, categoryIcon, categorySave, categoryCancel);
@@ -122,7 +135,11 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const exchange = h(document, 'details', { class: 'viewer-mark-section' }, h(document, 'summary', { text: 'Import / export' }),
     h(document, 'div', { class: 'viewer-mark-row' }, exportButton, importButton, importInput));
 
-  root.replaceChildren(status, tools, drawBar, coordForm, editor, listHead, list, categories, exchange);
+  // Recently deleted
+  const deletedList = h(document, 'ul', { class: 'viewer-mark-list viewer-mark-deleted', 'aria-label': 'Recently deleted marks' });
+  const deletedSection = h(document, 'details', { class: 'viewer-mark-section' }, h(document, 'summary', { text: 'Recently deleted' }), deletedList);
+
+  root.replaceChildren(status, tools, drawBar, coordForm, editor, listHead, list, categories, deletedSection, exchange);
 
   // ---- helpers --------------------------------------------------------------
   const canWrite = () => store.canWrite() && Boolean(view.map);
@@ -142,16 +159,17 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
 
   function lastStyle() {
     const category = categoryById(filter) || null;
-    return { color: category?.color || MARK_SWATCHES[0], icon: category?.icon || 'pin', categoryId: category?.id || null };
+    return { ...categoryStyle(category), categoryId: category?.id || null };
   }
 
   function startDraft(geometry) {
     const style = lastStyle();
     const category = categoryById(style.categoryId);
-    draft = { id: null, geometry, name: category?.name || TYPE_LABEL[geometry.type], note: '', categoryId: style.categoryId,
+    draft = { id: null, newId: newId(), geometry, name: category?.name || TYPE_LABEL[geometry.type], note: '', categoryId: style.categoryId,
       color: style.color, icon: style.icon, elevationNavd88M: null, visibility: defaultVisibility() };
     selectedId = null;
     armedDelete = null;
+    moving = false;
     setMode('idle');
     writeEditor();
     render();
@@ -164,8 +182,10 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     if (!mark || mode !== 'idle') return;
     selectedId = id;
     armedDelete = null;
+    moving = false;
     draft = { ...mark, geometry: structuredClone(mark.geometry) };
     writeEditor();
+    draftBaseline = JSON.stringify(snapshot());
     if (focus) layer.focus(mark.geometry);
     render();
   }
@@ -174,7 +194,50 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     draft = null;
     selectedId = null;
     armedDelete = null;
+    moving = false;
     render();
+  }
+
+  // ---- unsaved work ---------------------------------------------------------
+  function snapshot() {
+    if (drawing) return drawing.positions.length ? { kind: 'drawing', type: drawing.type, positions: structuredClone(drawing.positions) } : null;
+    if (!draft || (draft.id && !store.find(draft.id)?.editable)) return null;
+    return { kind: 'editor', id: draft.id, newId: draft.newId || null, revision: draft.id ? draft.revision : null, geometry: structuredClone(draft.geometry),
+      name: nameInput.value, note: noteInput.value, categoryId: categorySelect.value || null, color: safeColor(colorInput.value), icon: keepIcon(draft.icon),
+      elevation: elevationInput.value, units: units() === 'metric' ? 'metric' : 'imperial', visibility: visibilitySelect.value,
+      coordinates: draft.geometry.type === 'Point' && pointCoords.value !== writtenCoords ? pointCoords.value : null };
+  }
+
+  function keepDraft() {
+    if (!sessionScope || !draftChecked || !store.canWrite()) return;
+    const current = snapshot();
+    if (current && JSON.stringify(current) !== (draft?.id ? draftBaseline : null)) recovery.save(scopeKey, current);
+    else recovery.clear();
+  }
+
+  // Once per scope, when marks are loaded and the map is open.
+  function restoreDraft() {
+    if (!sessionScope || draftChecked || !store.state.ready || !view.map) return;
+    const saved = recovery.read(scopeKey);
+    if (!store.canWrite()) recovery.clear();
+    draftChecked = true;
+    if (!saved || !store.canWrite() || draft || mode !== 'idle') return;
+    if (saved.kind === 'drawing') {
+      setMode(saved.type);
+      drawing.positions = saved.positions;
+      message('Your unfinished drawing was restored.');
+      return;
+    }
+    const { kind, units: savedUnits, elevation, coordinates, changedElsewhere, ...fields } = reconcileMarkDraft(saved, store.find, newId);
+    const metres = elevationToMetres(elevation, savedUnits);
+    const current = fields.id ? store.find(fields.id) : null;
+    draft = { ...(current || {}), ...fields, color: safeColor(fields.color), elevationNavd88M: Number.isFinite(metres) ? metres : null };
+    selectedId = draft.id;
+    draftBaseline = null;
+    writeEditor();
+    if (savedUnits === (units() === 'metric' ? 'metric' : 'imperial') || Number.isNaN(metres)) elevationInput.value = elevation;
+    if (coordinates !== null && draft.geometry.type === 'Point') pointCoords.value = coordinates;
+    message(changedElsewhere ? 'That mark changed elsewhere. Your unsaved edit opened as a new mark.' : 'Your unsaved mark was restored.');
   }
 
   // A mark can use your own categories (staff: any staff category), or keep the one it has.
@@ -261,7 +324,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     // Editor
     const existing = draft?.id ? store.find(draft.id) : null;
     const editable = draft && (draft.id ? store.editable(existing) : writable);
-    editor.hidden = !draft;
+    editor.hidden = !draft || !state.ready;
     if (draft) {
       editorTitle.textContent = draft.id ? (editable ? 'Edit ' : '') + TYPE_LABEL[draft.geometry.type].toLowerCase() : 'New ' + TYPE_LABEL[draft.geometry.type].toLowerCase();
       for (const control of [nameInput, categorySelect, colorInput, noteInput, elevationInput, visibilitySelect, accountSelect, pointCoords, saveButton, ...swatches, ...iconButtons])
@@ -269,7 +332,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       for (const swatch of swatches) swatch.setAttribute('aria-pressed', String(swatch.dataset.color === safeColor(colorInput.value)));
       for (const button of iconButtons) {
         button.setAttribute('aria-pressed', String(button.dataset.icon === markIconName(draft.icon)));
-        button.innerHTML = markIconSvg(button.dataset.icon, button.dataset.icon === markIconName(draft.icon) ? colorInput.value : '#555555', 22);
+        button.innerHTML = iconMarkup(button.dataset.icon, button.dataset.icon === markIconName(draft.icon) ? colorInput.value : '#555555', 22);
       }
       iconField.hidden = draft.geometry.type !== 'Point';
       pointCoordsField.hidden = draft.geometry.type !== 'Point';
@@ -277,6 +340,9 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       elevationLabel.textContent = `NAVD88 Elevation (${elevationUnit(units())})`;
       visibilityField.hidden = !sessionScope || !state.capabilities.write || state.capabilities.visibility.length < 2 || Boolean(draft.id && !draft.mine);
       accountField.hidden = visibilityField.hidden || visibilitySelect.value !== 'client';
+      moveButton.hidden = !draft.id || !editable;
+      moveButton.disabled = state.busy;
+      moveButton.setAttribute('aria-pressed', String(moving));
       deleteButton.hidden = !draft.id || !editable;
       deleteButton.textContent = armedDelete === draft.id ? 'Tap again to delete' : 'Delete';
       deleteButton.disabled = state.busy;
@@ -293,11 +359,10 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     undoButton.title = lastUndo ? 'Undo ' + lastUndo.label : '';
     const rows = visibleMarks().map(mark => {
       const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
-      icon.innerHTML = mark.geometry.type === 'Point' ? markIconSvg(mark.icon, mark.color, 18)
-        : `<svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true"><path d="${mark.geometry.type === 'Polygon' ? 'M3 14L5 4l9 2 1 8z' : 'M2 14l5-8 4 5 5-8'}" fill="${mark.geometry.type === 'Polygon' ? safeColor(mark.color) + '55' : 'none'}" stroke="${safeColor(mark.color)}" stroke-width="2"/></svg>`;
+      icon.innerHTML = markBadge(mark);
       const category = categoryById(mark.categoryId);
       const text = h(document, 'span', { class: 'viewer-mark-list-name' }, h(document, 'span', { text: mark.name }),
-        h(document, 'small', { text: [category?.name, !mark.mine && mark.author === 'staff' && !state.capabilities.staff ? 'From project staff'
+        h(document, 'small', { text: [category?.name, !mark.mine ? (mark.author === 'staff' ? 'From project staff' : 'From a client')
           : mark.visibility === 'client' && mark.shareAccount ? accountLabel(mark.shareAccount)
             : mark.visibility !== defaultVisibility() && VISIBILITY_LABEL[mark.visibility]].filter(Boolean).join(' · ') }));
       const button = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'aria-current': mark.id === selectedId ? 'true' : false }, icon, text);
@@ -312,7 +377,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     categoryForm.hidden = !writable;
     categoryList.replaceChildren(...state.categories.map(category => {
       const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
-      icon.innerHTML = markIconSvg(category.icon, category.color, 18);
+      icon.innerHTML = categoryBadge(category);
       const row = h(document, 'li', {}, icon, h(document, 'span', { class: 'viewer-mark-list-name', text: category.name }));
       if (writable && category.editable) {
         const rename = h(document, 'button', { type: 'button', text: 'Edit', 'aria-label': 'Edit ' + category.name });
@@ -321,7 +386,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
           categoryDraft = category;
           categoryName.value = category.name;
           categoryColor.value = safeColor(category.color);
-          categoryIcon.value = markIconName(category.icon);
+          showCategoryIcon(category.icon);
           render();
         });
         on(remove, 'click', async () => {
@@ -334,14 +399,24 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       }
       return row;
     }));
+    deletedSection.hidden = !sessionScope || !state.ready || !state.capabilities.write;
+    deletedList.replaceChildren(...(state.deleted.length ? state.deleted.map(mark => {
+      const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
+      icon.innerHTML = markBadge(mark);
+      const restore = h(document, 'button', { type: 'button', text: 'Restore', 'aria-label': 'Restore ' + mark.name, disabled: state.busy });
+      on(restore, 'click', () => store.restore(mark));
+      return h(document, 'li', {}, icon, h(document, 'span', { class: 'viewer-mark-list-name' }, h(document, 'span', { text: mark.name }),
+        h(document, 'small', { text: new Date(mark.deletedAt).toLocaleDateString() })), restore);
+    }) : [h(document, 'li', { class: 'hint', text: `None in the last ${state.capabilities.recoveryDays} days.` })]));
     categorySave.textContent = categoryDraft ? 'Save' : 'Add';
     categoryCancel.hidden = !categoryDraft;
     exchange.hidden = !state.ready;
     importButton.hidden = !writable;
     exportButton.disabled = !state.marks.length;
 
-    layer.render({ visible: Boolean(view.map && state.ready && !state.blocked), marks: visibleMarks(), draft: editable ? { ...draft, ...(draft.id ? {} : { id: '__draft__' }) } : null,
-      selectedId, labels, preview, drawing, editable: mark => mode === 'idle' && store.editable(mark) });
+    layer.render({ visible: Boolean(view.map && state.ready && !state.blocked), marks: visibleMarks(), draft: editable ? { ...draft, movable: !draft.id || moving, ...(draft.id ? {} : { id: '__draft__' }) } : null,
+      selectedId, labels, preview, drawing });
+    keepDraft();
   }
 
 
@@ -408,9 +483,8 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     if (!draft) return;
     draft.categoryId = category?.id || null;
     if (category) {
-      draft.color = category.color;
-      draft.icon = category.icon;
-      colorInput.value = safeColor(category.color);
+      Object.assign(draft, categoryStyle(category));
+      colorInput.value = draft.color;
       if (!nameInput.value.trim() || Object.values(TYPE_LABEL).includes(nameInput.value.trim())) nameInput.value = category.name;
     }
     render();
@@ -420,13 +494,18 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   for (const button of iconButtons) on(button, 'click', () => { if (draft) { draft.icon = button.dataset.icon; render(); } });
   on(nameInput, 'input', () => { if (draft) draft.name = nameInput.value; });
   on(closeButton, 'click', closeEditor);
+  on(moveButton, 'click', () => { if (draft?.id && store.editable(store.find(draft.id))) { moving = !moving; render(); } });
+  // Fields that do not redraw anything while typing.
+  for (const type of ['input', 'change']) on(editor, type, keepDraft);
   on(visibilitySelect, 'change', () => render());
+  const readDeleted = () => (deletedSection.open ? store.loadDeleted() : null);
+  on(deletedSection, 'toggle', readDeleted);
   on(deleteButton, 'click', async () => {
     const current = draft?.id ? store.find(draft.id) : null;
     if (!current) return;
     if (armedDelete !== current.id) { armedDelete = current.id; render(); return; }
     armedDelete = null;
-    if (await store.remove(current)) closeEditor();
+    if (await store.remove(current)) { closeEditor(); await readDeleted(); }
   });
   on(editor, 'submit', async event => {
     event.preventDefault();
@@ -438,32 +517,31 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     if (!values.name) { message('Give the mark a label.'); return; }
     if (Number.isNaN(values.elevationNavd88M)) { message('NAVD88 Elevation must be a number.'); return; }
     if (values.visibility === 'client' && !values.shareAccount) { message('Choose a client account to share with.'); return; }
-    const changes = { ...values, icon: markIconName(draft.icon), geometry: draft.geometry };
-    if (draft.id) {
-      const current = store.find(draft.id);
-      if (!current) { closeEditor(); return; }
-      if (!current.mine) { delete changes.visibility; delete changes.shareAccount; }
-      if (await store.update(current, changes)) closeEditor();
-    } else if (await store.create(changes)) closeEditor();
+    const changes = { ...values, icon: keepIcon(draft.icon), geometry: draft.geometry };
+    // A new mark keeps one id, so saving again after a lost answer updates it instead of adding a copy.
+    const current = store.find(draft.id || draft.newId);
+    if (draft.id && !current) { message('That mark is no longer there.'); return; }
+    if (current ? await store.update(current, changes) : await store.create({ ...changes, id: draft.newId })) closeEditor();
   });
 
   on(filterSelect, 'change', () => { filter = filterSelect.value; render(); });
   on(labelsToggle, 'change', () => { labels = labelsToggle.checked; writeLabelsPreference(window, labels); render(); });
-  on(undoButton, 'click', async () => { closeEditor(); await store.undo(); });
+  on(undoButton, 'click', async () => { closeEditor(); if (await store.undo()) await readDeleted(); });
 
   on(categoryForm, 'submit', async event => {
     event.preventDefault();
     const name = categoryName.value.trim();
     if (!name) return;
     const saved = await store.saveCategory({ ...(categoryDraft ? { id: categoryDraft.id, revision: categoryDraft.revision } : {}),
-      name, color: safeColor(categoryColor.value), icon: categoryIcon.value });
+      name, color: safeColor(categoryColor.value), icon: keepIcon(categoryIcon.value) });
     if (saved) {
       categoryDraft = null;
       categoryName.value = '';
+      showCategoryIcon(DEFAULT_STYLE.icon);
       render();
     }
   });
-  on(categoryCancel, 'click', () => { categoryDraft = null; categoryName.value = ''; render(); });
+  on(categoryCancel, 'click', () => { categoryDraft = null; categoryName.value = ''; showCategoryIcon(DEFAULT_STYLE.icon); render(); });
 
   on(exportButton, 'click', () => {
     const data = marksToGeoJson(visibleMarks(), store.state.categories);
@@ -487,7 +565,7 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
       const text = await file.text();
       if (!held.live()) return;
       const parsed = geoJsonToMarks(JSON.parse(text), { categories: store.state.categories, newId,
-        visibility: defaultVisibility(), defaultColor: MARK_SWATCHES[0] });
+        visibility: defaultVisibility(), defaultColor: DEFAULT_STYLE.color });
       if (!parsed.marks.length) { message('No points, lines or areas were found in that file.'); return; }
       const count = await store.importMarks(parsed);
       if (count && held.live()) message(`Imported ${count} mark${count === 1 ? '' : 's'}${parsed.skipped ? `; skipped ${parsed.skipped} unsupported` : ''}.`);
@@ -508,22 +586,30 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
 
   return {
     store,
-    async setScope(next) {
+    // keepDraft is false when access was refused rather than expired: unsaved work goes too.
+    async setScope(next, { keepDraft: mayReturn = true } = {}) {
       sessionScope = next?.mode === 'session';
+      if (!mayReturn) recovery.clear();
       if (!next || next.key !== scopeKey) {
+        draftChecked = false;
         // Nothing one person typed or picked stays in the panel for the next one.
         draft = null; selectedId = null; mode = 'idle'; drawing = null;
-        preview = null; filter = ''; armedDelete = null; categoryDraft = null;
+        preview = null; filter = ''; armedDelete = null; categoryDraft = null; moving = false;
+        showCategoryIcon(DEFAULT_STYLE.icon);
+        categoryColor.value = DEFAULT_STYLE.color;
         for (const input of [coordInput, nameInput, noteInput, elevationInput, pointCoords, categoryName]) input.value = '';
         for (const choice of [categorySelect, accountSelect]) choice.replaceChildren();
         for (const shown of [coordDetected, coordReadout]) shown.textContent = '';
       }
       scopeKey = next?.key;
-      return store.setScope(next);
+      const result = await store.setScope(next);
+      restoreDraft();
+      return result;
     },
     setView(next) {
       view = next || { map: false };
       if (!view.map && mode !== 'idle') setMode('idle');
+      restoreDraft();
       render();
     },
     mapClick({ lat, lng }) {

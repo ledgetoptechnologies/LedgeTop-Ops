@@ -23,9 +23,9 @@ const point = (changes = {}) => ({
   color: '#88AA22', icon: 'pin', note: 'Test only', ...changes,
 });
 
-// The API serves OWNER_ONLY by default, as apiV1 mounts it. Tests marked [proposed
+// The API serves SERVED_SHARING by default, as apiV1 mounts it. Tests marked [held
 // sharing] opt into the sharing rules that are kept in the code but not served.
-const SHARING = { visibility: marksRepository.PROPOSED_SHARING };
+const SHARING = { visibility: marksRepository.HELD_SHARING };
 async function openApi(t, options) {
   const db = new DatabaseSync(':memory:');
   db.exec(`PRAGMA foreign_keys=ON;
@@ -73,7 +73,7 @@ async function openApi(t, options) {
 
 const names = request => async token => (await request(token)).body.marks.map(mark => mark.name).sort();
 
-test('only the owner reads, changes or deletes a mark, whatever is asked for or already stored', async t => {
+test('marks nobody shared stay with their owner, whatever else is asked for or already stored', async t => {
   const { session, request, db } = await openApi(t);
   const people = {
     staff: session('ops', 'staff-person'), otherStaff: session('ops', 'staff-two'),
@@ -90,8 +90,9 @@ test('only the owner reads, changes or deletes a mark, whatever is asked for or 
     made[who] = omitted.body.mark;
     categories[who] = { id: randomUUID(), name: 'Category', color: '#3366ff', icon: 'flag' };
     assert.equal((await request(token, 'POST', 'categories', categories[who])).status, 201, who);
-    assert.deepEqual((await request(token)).body.capabilities.visibility, ['private'], who);
-    for (const visibility of ['staff', 'internal', 'client']) {
+    const client = !['staff', 'otherStaff', 'sameName'].includes(who);
+    assert.deepEqual((await request(token)).body.capabilities.visibility, client ? ['private', 'staff'] : ['private'], who);
+    for (const visibility of client ? ['internal', 'client'] : ['staff', 'internal', 'client']) {
       assert.equal((await request(token, 'POST', '', point({ visibility }))).status, 403, `${who} ${visibility}`);
       assert.equal((await request(token, 'PUT', made[who].id, { ...point(), id: made[who].id, revision: 1, visibility })).status, 403, `${who} ${visibility}`);
       assert.equal((await request(token, 'POST', 'batch', { marks: [point(), point({ visibility })] })).status, 403, `${who} ${visibility}`);
@@ -103,7 +104,7 @@ test('only the owner reads, changes or deletes a mark, whatever is asked for or 
   const insert = db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, share_account, document_json,
     creation_hash, revision, created_at, updated_at, updated_by_audience, updated_by_subject)
     VALUES (?, ?, ?, 'absent-person', ?, ?, ?, 'x', 1, ?, ?, ?, 'absent-person')`);
-  const stored = [['client', 'staff', null], ['ops', 'internal', null], ['ops', 'client', 'direct_client_grant:grant-a']].map(([audience, visibility, account]) => {
+  const stored = [['client', 'private', null], ['ops', 'private', null], ['ops', 'internal', null], ['ops', 'client', 'direct_client_grant:grant-a']].map(([audience, visibility, account]) => {
     const id = randomUUID(), now = new Date().toISOString();
     insert.run(id, modelId, audience, visibility, account, JSON.stringify({ ...point({ name: 'Stored' }), id, categoryId: categories.otherStaff.id }), now, now, audience);
     return id;
@@ -163,7 +164,7 @@ test('without a verified individual identity a client reads nothing, even under 
   }
 });
 
-test('[proposed sharing] two clients on one model never read each other\'s marks', async t => {
+test('[held sharing] two clients on one model never read each other\'s marks', async t => {
   const { session, request } = await openApi(t, SHARING);
   const list = names(request);
   const staff = session('ops', 'staff-person');
@@ -198,12 +199,10 @@ test('[proposed sharing] two clients on one model never read each other\'s marks
     assert.equal((await request(token, 'DELETE', id, { revision: 1 })).status, 404);
   }
   const seenByStaff = (await request(staff, 'GET', withStaff.id)).body.mark;
-  assert.equal(seenByStaff.owner, 'client-a');
-  assert.equal(seenByStaff.ownerAccount, 'direct_client_grant:grant-a');
-  assert.equal((await request(clientA, 'GET', withStaff.id)).body.mark.ownerAccount, undefined);
+  for (const key of ['owner', 'ownerAccount', 'updatedBy']) assert.equal(seenByStaff[key], undefined, 'no identity is sent');
 });
 
-test('[proposed sharing] staff share a mark with one named client account only', async t => {
+test('[held sharing] staff share a mark with one named client account only', async t => {
   const { session, request } = await openApi(t, SHARING);
   const list = names(request);
   const staff = session('ops', 'staff-person');
@@ -247,7 +246,7 @@ test('[proposed sharing] staff share a mark with one named client account only',
   assert.deepEqual(await list(clientB), ['For B']);
 });
 
-test('[proposed sharing] two accounts on one model under the SAME association id never see each other\'s shares', async t => {
+test('[held sharing] two accounts on one model under the SAME association id never see each other\'s shares', async t => {
   const { session, request } = await openApi(t, SHARING);
   const list = names(request);
   const staff = session('ops', 'staff-person');
@@ -279,37 +278,184 @@ test('[proposed sharing] two accounts on one model under the SAME association id
   assert.deepEqual((await request(accountTwo)).body.categories, []);
   assert.deepEqual((await request(accountOne)).body.categories.map(row => row.name), ['One category']);
   assert.equal((await request(accountTwo, 'PUT', 'categories/' + categoryOne.id, { ...categoryOne, revision: 1 })).status, 404);
-  assert.equal((await request(staff, 'GET', toStaff.id)).body.mark.ownerAccount, null, 'no account key is recorded for associations');
+  assert.equal((await request(staff, 'GET', toStaff.id)).body.mark.editable, false);
 });
 
-test('[proposed sharing] clients edit their own marks; staff edit marks they can read; only owners change visibility', async t => {
+test('[held sharing] staff read each other\'s staff-wide marks and change only their own', async t => {
   const { session, request } = await openApi(t, SHARING);
-  const staff = session('ops', 'staff-person');
-  const otherStaff = session('ops', 'staff-two');
+  const staff = session('ops', 'staff-person'), otherStaff = session('ops', 'staff-two');
+  const mark = (await request(staff, 'POST', '', point())).body.mark;
+  assert.equal(mark.visibility, 'internal');
+  assert.equal((await request(otherStaff, 'GET', mark.id)).body.mark.editable, false);
+  assert.equal((await request(otherStaff, 'PUT', mark.id, { ...point(), id: mark.id, revision: 1 })).status, 403);
+  assert.equal((await request(otherStaff, 'DELETE', mark.id, { revision: 1 })).status, 403);
+});
+
+const bodyOf = (mark, changes) => ({ id: mark.id, geometry: mark.geometry, name: mark.name, color: mark.color, icon: mark.icon,
+  note: mark.note, categoryId: mark.categoryId, elevationNavd88M: mark.elevationNavd88M, revision: mark.revision, ...changes });
+
+test('a client mark shared with project staff is view-only to staff and unseen by every other client', async t => {
+  const { session, request, db } = await openApi(t);
+  const list = names(request);
   const client = session('client', 'client-a');
-  const shared = (await request(client, 'POST', '', point({ visibility: 'staff' }))).body.mark;
-  const body = (mark, changes) => ({ id: mark.id, geometry: mark.geometry, name: mark.name, color: mark.color, icon: mark.icon,
-    note: mark.note, categoryId: mark.categoryId, elevationNavd88M: mark.elevationNavd88M, revision: mark.revision, ...changes });
+  const staff = [session('ops', 'staff-person'), session('ops', 'staff-two'), session('ops', 'client-a')];
+  const others = [session('client', 'client-a2'), session('client', 'client-b', ACCOUNT_B), session('client', 'client-a', { modelId: 'other-model', modelVersionId: 'other-v1' }),
+    session('client', 'client-c', SHARED_ASSOCIATION), session('ops', 'staff-person', { modelId: 'other-model', modelVersionId: 'other-v1' })];
+  const used = { id: randomUUID(), name: 'Stands', color: '#3366ff', icon: 'ladder' };
+  const unused = { id: randomUUID(), name: 'Private list', color: '#e53935', icon: 'flag' };
+  for (const category of [used, unused]) assert.equal((await request(client, 'POST', 'categories', category)).status, 201);
+  const hidden = (await request(client, 'POST', '', point({ name: 'Only me', categoryId: unused.id }))).body.mark;
+  const shared = (await request(client, 'POST', '', point({ name: 'With staff', visibility: 'staff', categoryId: used.id, note: 'North side' }))).body.mark;
 
-  const moved = await request(staff, 'PUT', shared.id, body(shared, { geometry: { type: 'Point', coordinates: [-87.001, 43.051] } }));
-  assert.equal(moved.status, 200);
-  assert.equal(moved.body.mark.revision, 2);
-  assert.equal((await request(staff, 'PUT', shared.id, body(moved.body.mark, { visibility: 'private' }))).status, 403);
-  assert.equal((await request(client, 'PUT', shared.id, body(shared, { name: 'Stale' }))).status, 409);
-  const renamed = await request(client, 'PUT', shared.id, body(moved.body.mark, { name: 'Renamed', elevationNavd88M: 251.25 }));
-  assert.equal(renamed.status, 200);
-  assert.equal(renamed.body.mark.elevationNavd88M, 251.25);
-  assert.equal(renamed.body.mark.visibility, 'staff');
-  const hidden = await request(client, 'PUT', shared.id, body(renamed.body.mark, { visibility: 'private' }));
-  assert.equal(hidden.body.mark.visibility, 'private');
-  assert.equal((await request(staff, 'GET', shared.id)).status, 404, 'a client can take a mark back');
+  for (const token of staff) {
+    assert.deepEqual(await list(token), ['With staff']);
+    const { marks: [seen], categories } = (await request(token)).body;
+    assert.deepEqual([seen.mine, seen.editable, seen.author, seen.note, seen.categoryId], [false, false, 'client', 'North side', used.id]);
+    for (const key of ['owner', 'ownerAccount', 'updatedBy', 'shareAccount']) assert.ok(!(key in seen), key + ' is not sent');
+    assert.deepEqual(categories.map(row => [row.id, row.mine, row.editable]), [[used.id, false, false]], 'only the category a shared mark uses');
+    assert.equal((await request(token, 'GET', hidden.id)).status, 404);
+    // Reading is all: every change is refused, and nothing is written.
+    assert.equal((await request(token, 'PUT', shared.id, bodyOf(shared, { name: 'Changed' }))).status, 403);
+    assert.equal((await request(token, 'PUT', shared.id, bodyOf(shared, { visibility: 'private' }))).status, 403);
+    assert.equal((await request(token, 'DELETE', shared.id, { revision: 1 })).status, 403);
+    assert.equal((await request(token, 'POST', shared.id + '/restore', { revision: 1 })).status, 404);
+    assert.equal((await request(token, 'POST', '', bodyOf(shared, { revision: undefined }))).status, 409);
+    assert.equal((await request(token, 'POST', '', point({ categoryId: used.id }))).status, 400, 'staff do not use a client category');
+    assert.equal((await request(token, 'PUT', 'categories/' + used.id, { ...used, name: 'Changed', revision: 1 })).status, 403);
+    assert.equal((await request(token, 'DELETE', 'categories/' + used.id, { revision: 1 })).status, 403);
+    assert.equal((await request(token, 'PUT', 'categories/' + unused.id, { ...unused, revision: 1 })).status, 404);
+    assert.equal((await request(token, 'DELETE', 'categories/' + unused.id, { revision: 1 })).status, 404);
+  }
+  for (const token of others) {
+    assert.deepEqual((await request(token)).body.marks, []);
+    assert.deepEqual((await request(token)).body.categories, []);
+    assert.equal((await request(token, 'GET', shared.id)).status, 404);
+    assert.equal((await request(token, 'PUT', shared.id, bodyOf(shared))).status, 404);
+    assert.equal((await request(token, 'DELETE', shared.id, { revision: 1 })).status, 404);
+  }
+  assert.equal(db.prepare('SELECT count(*) n FROM viewer_marks WHERE revision<>1 OR deleted_at IS NOT NULL').get().n, 0);
+  assert.equal(db.prepare('SELECT count(*) n FROM viewer_mark_accounts').get().n, 0);
 
-  const staffMark = (await request(staff, 'POST', '', point())).body.mark;
-  assert.equal((await request(otherStaff, 'PUT', staffMark.id, body(staffMark, { name: 'Team edit' }))).status, 200);
-  assert.equal((await request(client, 'GET', staffMark.id)).status, 404);
-  assert.equal((await request(otherStaff, 'DELETE', staffMark.id, { revision: 2 })).status, 204);
-  assert.equal((await request(staff, 'GET', staffMark.id)).status, 404);
-  assert.equal((await request(staff, 'POST', '', { ...point(), id: staffMark.id })).status, 409, 'deleted ids stay used');
+  // The client's own edit reaches staff, and the client can take the mark back.
+  const renamed = (await request(client, 'PUT', shared.id, bodyOf(shared, { name: 'Renamed', visibility: undefined }))).body.mark;
+  assert.equal(renamed.visibility, 'staff', 'an edit that does not mention sharing keeps it');
+  assert.deepEqual(await list(staff[0]), ['Renamed']);
+  const taken = (await request(client, 'PUT', shared.id, bodyOf(renamed, { visibility: 'private' }))).body.mark;
+  assert.equal(taken.visibility, 'private');
+  for (const token of staff) {
+    assert.deepEqual((await request(token)).body, { ...(await request(token)).body, marks: [], categories: [] });
+    assert.equal((await request(token, 'GET', shared.id)).status, 404);
+  }
+});
+
+test('two clients on one whole-project share: no shared reads, and a revoked grant or identity ends access', async t => {
+  const { session, request, sessions } = await openApi(t);
+  const list = names(request);
+  const tokens = { one: session('client', 'client:identity-one', SHARED_ASSOCIATION), two: session('client', 'client:identity-two', SHARED_ASSOCIATION) };
+  const staff = session('ops', 'staff-person');
+  for (const [name, token] of Object.entries(tokens)) {
+    await request(token, 'POST', '', point({ name: name + ' only me' }));
+    await request(token, 'POST', '', point({ name: name + ' with staff', visibility: 'staff' }));
+    await request(token, 'POST', 'categories', { id: randomUUID(), name, color: '#3366ff', icon: 'flag' });
+  }
+  assert.deepEqual(await list(tokens.one), ['one only me', 'one with staff']);
+  assert.deepEqual(await list(tokens.two), ['two only me', 'two with staff']);
+  assert.deepEqual(await list(staff), ['one with staff', 'two with staff']);
+  assert.deepEqual((await request(tokens.one)).body.categories.map(row => row.name), ['one']);
+
+  const record = sessions.get(auth.hashToken(tokens.one));
+  record.permissions = { view: true, measure: true };
+  assert.deepEqual((await request(tokens.one)).body.marks, [], 'personalMeasurements revoked: nothing is read');
+  assert.equal((await request(tokens.one, 'GET', 'deleted')).status, 403);
+  assert.equal((await request(tokens.one, 'POST', '', point())).status, 403);
+  record.permissions = { view: true, measure: true, personalMeasurements: true };
+  record.revoked = true;
+  for (const route of ['', 'deleted']) assert.equal((await request(tokens.one, 'GET', route)).status, 403, 'grant revoked');
+  assert.deepEqual(await list(tokens.two), ['two only me', 'two with staff'], 'the other client is unaffected');
+  assert.deepEqual(await list(staff), ['one with staff', 'two with staff'], 'what was shared with staff stays with staff');
+});
+
+test('a deleted mark can be restored by its owner for 30 days', async t => {
+  const { session, request, db } = await openApi(t);
+  const client = session('client', 'client-a'), staff = session('ops', 'staff-person');
+  const others = [staff, session('client', 'client-a2'), session('client', 'client-b', ACCOUNT_B), session('ops', 'client-a'),
+    session('client', 'client-a', { modelId: 'other-model', modelVersionId: 'other-v1' })];
+  assert.equal((await request(client)).body.capabilities.recoveryDays, 30);
+  const category = { id: randomUUID(), name: 'Stands', color: '#3366ff', icon: 'ladder' };
+  await request(client, 'POST', 'categories', category);
+  const mark = (await request(client, 'POST', '', point({ name: 'Kept', visibility: 'staff', note: 'Note', categoryId: category.id, elevationNavd88M: 250 }))).body.mark;
+  assert.equal((await request(client, 'DELETE', mark.id, { revision: 1 })).status, 204);
+  assert.deepEqual((await request(client)).body.marks, []);
+  assert.deepEqual((await request(staff)).body.marks, [], 'staff lose it at once');
+  assert.deepEqual((await request(staff)).body.categories, []);
+  for (const method of ['GET', 'PUT', 'DELETE']) {
+    const payload = method === 'GET' ? undefined : method === 'PUT' ? bodyOf(mark) : { revision: 1 };
+    assert.equal((await request(client, method, mark.id, payload)).status, 404, 'a deleted mark is only restored, never edited');
+  }
+  const [listed] = (await request(client, 'GET', 'deleted')).body.marks;
+  assert.deepEqual([listed.id, listed.name, listed.note, listed.revision, listed.visibility], [mark.id, 'Kept', 'Note', 1, 'staff']);
+  assert.ok(Date.parse(listed.deletedAt));
+  for (const token of others) {
+    assert.deepEqual((await request(token, 'GET', 'deleted')).body.marks, []);
+    assert.equal((await request(token, 'POST', mark.id + '/restore', { revision: 1 })).status, 404);
+  }
+  assert.equal((await request(client, 'POST', mark.id + '/restore', { revision: 2 })).status, 409);
+  assert.equal((await request(client, 'POST', mark.id + '/restore', {})).status, 428);
+  assert.equal((await request(client, 'POST', mark.id + '/restore', { revision: 1, visibility: 'private' })).status, 400);
+  const restored = (await request(client, 'POST', mark.id + '/restore', { revision: 1 })).body.mark;
+  const { updatedAt, ...kept } = restored;
+  assert.deepEqual(kept, { ...Object.fromEntries(Object.entries(mark).filter(([key]) => key !== 'updatedAt')), revision: 2 }, 'it comes back exactly, one revision on');
+  assert.deepEqual((await request(client, 'GET', 'deleted')).body.marks, []);
+  assert.deepEqual((await request(staff)).body.marks.map(row => row.name), ['Kept']);
+  assert.equal((await request(client, 'POST', mark.id + '/restore', { revision: 2 })).status, 404, 'not deleted any more');
+
+  // 30 days to the millisecond, then the content is gone and the id stays used.
+  const repository = new marksRepository.ViewerMarkRepository(db);
+  const person = { modelId, modelVersionId: 'synthetic-v1', audience: 'client', subject: 'client-a', session: {}, personalPersistence: true };
+  const deletedAt = Date.parse('2026-11-01T00:00:00.000Z'), limit = deletedAt + 30 * 86_400_000;
+  db.prepare('UPDATE viewer_marks SET deleted_at=? WHERE id=?').run(new Date(deletedAt).toISOString(), mark.id);
+  assert.equal(repository.deleted(person, limit).length, 1);
+  assert.equal(repository.purgeDeleted(limit), 0);
+  assert.equal(repository.deleted(person, limit + 1).length, 0);
+  assert.throws(() => repository.restore(person, mark.id, 2, limit + 1), { code: 'mark_not_found' });
+  assert.equal(repository.restore(person, mark.id, 2, limit).name, 'Kept');
+  db.prepare('UPDATE viewer_marks SET deleted_at=? WHERE id=?').run(new Date(deletedAt).toISOString(), mark.id);
+  const live = (await request(client, 'POST', '', point({ name: 'Live' }))).body.mark;
+  assert.equal(repository.purgeDeleted(limit + 1), 1);
+  assert.equal(repository.purgeDeleted(limit + 1), 0);
+  assert.equal(db.prepare('SELECT document_json d FROM viewer_marks WHERE id=?').get(mark.id).d, '{}');
+  assert.throws(() => repository.restore(person, mark.id, 3, limit), { code: 'mark_not_found' }, 'purged content never comes back empty');
+  assert.equal(repository.get(person, live.id).name, 'Live', 'live marks are never purged');
+  assert.equal((await request(client, 'POST', '', point({ id: mark.id }))).status, 409, 'deleted ids stay used');
+});
+
+test('deleted marks are bounded, and restoring respects the mark limits and a removed category', async t => {
+  const { session, request, db } = await openApi(t);
+  const client = session('client', 'client-a');
+  const category = { id: randomUUID(), name: 'Gone', color: '#3366ff', icon: 'flag' };
+  await request(client, 'POST', 'categories', category);
+  const mark = (await request(client, 'POST', '', point({ name: 'Mine', categoryId: category.id }))).body.mark;
+  const insert = db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, document_json, creation_hash, revision,
+    created_at, updated_at, updated_by_audience, updated_by_subject, deleted_at) VALUES (?, ?, 'client', ?, 'private', ?, 'x', 1, ?, ?, 'client', ?, ?)`);
+  const fill = (subject, count, deletedAt) => {
+    for (let i = 0; i < count; i += 1) {
+      const id = randomUUID(), at = '2026-01-01T00:00:00.000Z';
+      insert.run(id, modelId, subject, JSON.stringify({ ...point(), id }), at, at, subject, deletedAt && new Date(Date.now() - 1000 - i).toISOString());
+    }
+  };
+  fill('client-a', marksRepository.LIMITS.deleted, true);
+  fill('client-b', 5, true);
+  assert.equal((await request(client, 'DELETE', mark.id, { revision: 1 })).status, 204);
+  const kept = subject => db.prepare("SELECT count(*) n FROM viewer_marks WHERE owner_subject=? AND deleted_at IS NOT NULL AND document_json<>'{}'").get(subject).n;
+  assert.equal(kept('client-a'), marksRepository.LIMITS.deleted, 'the oldest one gave way');
+  assert.equal(kept('client-b'), 5, 'nobody else\'s');
+  assert.equal((await request(client, 'GET', 'deleted')).body.marks[0].id, mark.id);
+  assert.equal((await request(client, 'DELETE', 'categories/' + category.id, { revision: 1 })).status, 204);
+  fill('client-a', marksRepository.LIMITS.perOwner, null);
+  assert.equal((await request(client, 'POST', mark.id + '/restore', { revision: 1 })).status, 429);
+  db.prepare("DELETE FROM viewer_marks WHERE owner_subject='client-a' AND deleted_at IS NULL").run();
+  const restored = (await request(client, 'POST', mark.id + '/restore', { revision: 1 })).body.mark;
+  assert.deepEqual([restored.name, restored.categoryId, restored.color], ['Mine', null, '#88aa22']);
 });
 
 test('lines, areas and typed values are validated', async t => {
@@ -333,7 +479,7 @@ test('lines, areas and typed values are validated', async t => {
   }
 });
 
-test('[proposed sharing] categories stay with their owner; clients see staff categories only on marks shared with them', async t => {
+test('[held sharing] categories stay with their owner; clients see staff categories only on marks shared with them', async t => {
   const { session, request } = await openApi(t, SHARING);
   const staff = session('ops', 'staff-person');
   const clientA = session('client', 'client-a');
@@ -363,10 +509,10 @@ test('[proposed sharing] categories stay with their owner; clients see staff cat
   assert.deepEqual(await categoryIds(clientA), [category.id, staffCategory.id].sort(), 'a shared mark brings its category name');
   assert.deepEqual(await categoryIds(clientB), [categoryB.id]);
   assert.equal((await request(clientA)).body.categories.find(row => row.id === staffCategory.id).editable, false);
-  assert.equal((await request(staff)).body.categories.length, 4);
+  assert.deepEqual((await request(staff)).body.categories.map(row => row.name).sort(), ['Gate', 'Internal review'], 'no client category, as no client mark is shared');
 
-  const renamed = await request(staff, 'PUT', 'categories/' + category.id, { ...category, name: 'Gate post', revision: 1 });
-  assert.equal(renamed.status, 200);
+  assert.equal((await request(staff, 'PUT', 'categories/' + category.id, { ...category, name: 'Gate post', revision: 1 })).status, 404);
+  assert.equal((await request(clientA, 'PUT', 'categories/' + category.id, { ...category, name: 'Gate post', revision: 1 })).status, 200);
   assert.equal((await request(clientA, 'DELETE', 'categories/' + category.id, { revision: 1 })).status, 409);
   assert.equal((await request(clientA, 'DELETE', 'categories/' + category.id, { revision: 2 })).status, 204);
   const after = (await request(clientA)).body;

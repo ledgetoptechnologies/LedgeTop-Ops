@@ -1,4 +1,4 @@
-import { MARK_ICONS, safeColor } from './viewer-mark-icons.mjs';
+import { DEFAULT_STYLE, isIconKey, safeColor } from './viewer-mark-style.mjs';
 
 // GeoJSON (RFC 7946, WGS84 lon/lat) is the lossless exchange format for marks.
 // Style uses simplestyle-spec names so other tools keep colours. Heights travel
@@ -66,7 +66,7 @@ function simpleGeometries(geometry) {
 
 // Returns marks ready to send and the categories the file names that the
 // project does not have yet (matched by name, case-insensitive).
-export function geoJsonToMarks(input, { categories = [], newId, visibility = 'private', defaultColor = '#ee5007' } = {}) {
+export function geoJsonToMarks(input, { categories = [], newId, visibility = 'private', defaultColor = DEFAULT_STYLE.color } = {}) {
   const features = input?.type === 'FeatureCollection' ? input.features
     : input?.type === 'Feature' ? [input]
       : input?.type ? [{ type: 'Feature', geometry: input, properties: {} }] : null;
@@ -82,8 +82,7 @@ export function geoJsonToMarks(input, { categories = [], newId, visibility = 'pr
     const categoryName = text(properties.category, 60);
     let category = categoryName ? known.get(categoryName.toLowerCase()) || added.get(categoryName.toLowerCase()) : null;
     const featureColor = color(properties['marker-color']) || color(properties.stroke) || color(properties.fill) || color(properties.color);
-    const symbol = typeof properties['marker-symbol'] === 'string' && Object.hasOwn(MARK_ICONS, properties['marker-symbol'])
-      ? properties['marker-symbol'] : null;
+    const symbol = isIconKey(properties['marker-symbol']) ? properties['marker-symbol'] : null;
     if (categoryName && !category) {
       category = { id: newId(), name: categoryName, color: featureColor || defaultColor, icon: symbol || 'pin' };
       added.set(categoryName.toLowerCase(), category);

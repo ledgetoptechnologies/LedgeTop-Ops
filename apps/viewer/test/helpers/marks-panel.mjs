@@ -7,6 +7,7 @@ import api from '../../server/viewerMarkApi.js';
 import schema from '../../server/viewerMarkSchema.js';
 import { mountViewerMarks } from '../../viewer-marks.mjs';
 import { createMiniDocument } from './mini-dom.mjs';
+import { createMiniLeaflet } from './mini-leaflet.mjs';
 
 // The real Marks panel on a mini DOM, against the real API on an in-memory database.
 export async function openMarksPanel(t, options) {
@@ -33,16 +34,17 @@ export async function openMarksPanel(t, options) {
     const record = { audience, subject, modelId, modelVersionId: 'synthetic-v1', permissions,
       sourceAuthorization: audience === 'client' ? { type: 'direct_client_grant', id: 'grant-a', version: 1 } : null };
     sessions.set(auth.hashToken(token), record);
-    return { mode: 'session', key: JSON.stringify([audience, subject, modelId]), token: () => token, record };
+    return { mode: 'session', key: JSON.stringify([audience, subject, modelId, permissions.personalMeasurements === true]), token: () => token, record };
   };
   const requests = [];
-  const mount = ({ dom = createMiniDocument(), units = () => 'imperial', request = null } = {}) => {
+  const mount = ({ dom = createMiniDocument(), units = () => 'imperial', map = true, request = null, georef = () => null } = {}) => {
     const panel = dom.document.createElement('div');
-    const marks = mountViewerMarks({ panel, L: {}, getMap: () => null, units,
+    const leaflet = createMiniLeaflet(dom.document);
+    const marks = mountViewerMarks({ panel, L: leaflet.L, getMap: () => leaflet.map, units, georef,
       request: (path, init) => { requests.push([init.method, path]); return (request || fetch)(base + path, { ...init, redirect: 'follow' }); } });
-    marks.setView({ map: true });
+    if (map) marks.setView({ map: true });
     const q = selector => panel.querySelector(selector);
-    return { dom, panel, marks, store: marks.store, q,
+    return { dom, panel, marks, leaflet, store: marks.store, q,
       button: text => panel.querySelectorAll('button').find(node => node.textContent === text),
       text: () => panel.textContent,
       values: () => [...panel.querySelectorAll('input'), ...panel.querySelectorAll('textarea')].map(node => node.value).join('\n'),

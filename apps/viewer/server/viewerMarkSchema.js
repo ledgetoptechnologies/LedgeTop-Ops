@@ -3,8 +3,8 @@
 // Viewer schema 84 (reserved for Marks in the shared ledger). Marks belong to a model, not a version: a pin placed on
 // the map stays when a new flight is published.
 //
-// Who reads a mark (visibility). The API serves only `private` until the
-// sharing rules land (viewerMarkRepository OWNER_ONLY):
+// Who reads a mark (visibility). The API serves the first two
+// (viewerMarkRepository SERVED_SHARING):
 //   private  - only the person who made it
 //   staff    - a client's mark shared with project staff (never other clients)
 //   internal - a staff mark for staff only

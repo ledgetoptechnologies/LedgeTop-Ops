@@ -34,6 +34,7 @@ async function runMaintenance(){maintenanceActive=true;try{
   await maintenanceStep('processing-log-prune',()=>processing.pruneLogs(config.processingLogRetentionDays));
   await maintenanceStep('operation-receipt-prune',()=>processing.pruneSubjectOperationReceipts(7));
   await maintenanceStep('abuse-window-prune',()=>repository.pruneAbuseWindows());
+  await maintenanceStep('deleted-viewer-mark-purge',()=>new (require('./viewerMarkRepository').ViewerMarkRepository)(db).purgeDeleted());
   await maintenanceStep('temporary-measurement-prune',()=>new (require('./ephemeralMeasurementRepository').EphemeralMeasurementRepository)(db).prune());
 }finally{maintenanceActive=false;}}
 const delay=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));async function lane(name,run){while(!stopped){try{if(!await run())await delay(2000);}catch(error){console.error(`${name} lane error:`,error.code||error.name||'worker_error');await delay(2000);}}}

@@ -47,7 +47,13 @@ test('import splits multi-geometries, adds unknown categories and skips what it 
   assert.deepEqual(result.marks[0].geometry.coordinates, [-87, 43], 'third value dropped');
   assert.equal(result.marks[0].elevationNavd88M, null);
   assert.equal(result.marks[2].name, 'a b');
-  assert.equal(result.marks[2].icon, 'pin');
+  assert.equal(result.marks[2].icon, 'not-an-icon', 'an icon this build does not know is kept');
+  for (const bad of ['Not An Icon', '"><script>', '', 7, null]) {
+    const { marks } = geoJsonToMarks({ type: 'Feature', geometry: { type: 'Point', coordinates: [-87, 43] }, properties: { 'marker-symbol': bad } }, { newId });
+    assert.equal(marks[0].icon, 'pin');
+  }
+  const exported = marksToGeoJson([{ id: 'x', geometry: { type: 'Point', coordinates: [-87, 43] }, name: 'x', note: '', color: '#1e88e5', icon: 'future-icon' }]);
+  assert.equal(geoJsonToMarks(exported, { newId }).marks[0].icon, 'future-icon');
   assert.throws(() => geoJsonToMarks({ type: 'FeatureCollection', features: Array.from({ length: IMPORT_LIMIT + 1 },
     () => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [0, 0] }, properties: {} })) }, { newId }), /up to 500/);
   assert.throws(() => geoJsonToMarks({ hello: 1 }, { newId }), /not GeoJSON/);
@@ -56,7 +62,7 @@ test('import splits multi-geometries, adds unknown categories and skips what it 
 test('icon markup only uses the fixed table and a validated colour', () => {
   const svg = markIconSvg('"><script>', 'red" onload="x');
   assert.doesNotMatch(svg, /script|onload/);
-  assert.match(svg, /fill="#ee5007"/);
+  assert.match(svg, /fill="#212121"/);
   assert.equal(glyphColor('#ffffff'), '#111111');
   assert.equal(glyphColor('#212121'), '#ffffff');
 });

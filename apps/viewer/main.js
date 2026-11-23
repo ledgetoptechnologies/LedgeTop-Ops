@@ -2611,7 +2611,9 @@ function syncViewerMarks() {
       context = { mode: 'temporary', key: JSON.stringify(['public', model.id]) };
     }
   }
-  void viewerMarks.setScope(context);
+  // Unsaved work survives an expired session, not refused access.
+  void viewerMarks.setScope(context, { keepDraft: SHARE_PERMISSIONS.measure !== false
+    && (sessionAccessState !== 'unavailable' || sessionAccessReason === 'session-expired') });
 }
 
 function syncViewerMarksView() {

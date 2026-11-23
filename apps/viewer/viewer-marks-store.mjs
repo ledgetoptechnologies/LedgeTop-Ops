@@ -15,7 +15,7 @@ const MESSAGES = {
   mark_rate_limited: 'Too many changes at once. Wait a minute and try again.',
   mark_edit_forbidden: 'You can only change your own marks.',
   mark_category_edit_forbidden: 'You can only change categories you made.',
-  mark_identity_required: 'This login can view marks but not add them.',
+  mark_identity_required: 'This login cannot keep marks.',
   mark_share_account_unknown: 'Choose a client account to share with.',
   mark_visibility_forbidden: 'That sharing choice is not available for this mark.',
   invalid_mark: 'Check the label, colour and coordinates.',
@@ -32,7 +32,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   let context = null, controller = null;
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
-    marks: [], categories: [], audiences: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
+    marks: [], categories: [], audiences: [], deleted: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
   };
   const emit = () => onChange(state);
   const temporary = () => context?.mode === 'temporary';
@@ -87,6 +87,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     // Staff pick a client account when sharing a mark, if the server serves that choice.
     const audiences = data.capabilities.staff && data.capabilities.visibility.includes('client') ? (await scope.api('/audiences')).audiences : [];
     scope.check();
+    if (!data.capabilities.write) Object.assign(state, { undo: [], deleted: [] });
     Object.assign(state, { marks: data.marks, categories: data.categories, capabilities: data.capabilities, audiences, ready: true });
   }
 
@@ -106,11 +107,12 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         state.message = 'Marks are hidden until access is restored.';
         state.marks = [];
         state.categories = [];
+        state.deleted = [];
         state.ready = false;
         state.undo = [];
       } else {
         state.message = MESSAGES[error.code] || 'Could not save the change. Try again.';
-        if (error.status === 409 || error.status === 404) await load(scope).catch(() => {});
+        if (error.status === 409 || error.status === 404 || error.code === 'mark_identity_required') await load(scope).catch(() => {});
       }
       return false;
     } finally {
@@ -145,6 +147,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     state.marks = state.marks.filter(mark => mark.id !== current.id);
   }
 
+  // Back from the server's deleted list, with the id it had.
+  async function restoreRaw(deleted, scope) {
+    const { mark } = await scope.api('/' + encodeURIComponent(deleted.id) + '/restore', 'POST', { revision: deleted.revision });
+    scope.check();
+    if (!find(mark.id)) state.marks = [...state.marks, mark];
+    state.deleted = state.deleted.filter(item => item.id !== mark.id);
+    return mark;
+  }
+
   const store = {
     state,
     canWrite: () => Boolean(context && state.ready && !state.blocked && state.capabilities.write),
@@ -168,7 +179,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       controller = new AbortController();
       context = next;
       const scope = currentScope();
-      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], undo: [],
+      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], undo: [],
         ready: next?.mode === 'temporary', loading: next?.mode === 'session',
         capabilities: { write: next?.mode === 'temporary', staff: false, visibility: ['private'] } });
       emit();
@@ -222,8 +233,27 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       });
     },
 
-    // Undo the last change made in this tab. A deleted mark comes back as a
-    // copy with a new id (the server never reuses a deleted id).
+    // The owner's own recently deleted marks, read when asked for.
+    async loadDeleted() {
+      if (!context || temporary()) return false;
+      return run(async scope => {
+        const { marks } = await scope.api('/deleted');
+        scope.check();
+        state.deleted = marks;
+      });
+    },
+    async restore(deleted) {
+      if (!state.deleted.some(item => item.id === deleted?.id)) return null;
+      let saved = null;
+      const ok = await run(async scope => {
+        saved = await restoreRaw(deleted, scope);
+        scope.check();
+        remember({ type: 'create', id: saved.id, label: 'restore ' + saved.name });
+      });
+      return ok ? saved : null;
+    },
+
+    // Undo the last change made in this tab.
     async undo() {
       const entry = state.undo.at(-1);
       if (!entry) return false;
@@ -240,7 +270,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           if (!current) throw new MarksError('mark_revision_conflict', 409);
           await updateRaw(current, body(entry.before), scope);
         } else if (entry.type === 'delete') {
-          await createRaw({ ...entry.before, id: scope.temporary ? entry.before.id : newId() }, scope);
+          if (scope.temporary) await createRaw(entry.before, scope);
+          else await restoreRaw(entry.before, scope);
         }
       });
       if (!held.live()) return false;

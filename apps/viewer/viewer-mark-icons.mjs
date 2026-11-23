@@ -22,13 +22,15 @@ export const MARK_ICONS = Object.freeze({
   square: { label: 'Square', path: 'M6 6h12v12H6z' },
 });
 
-export const MARK_SWATCHES = Object.freeze(['#ee5007', '#f8cb2e', '#e53935', '#43a047', '#1e88e5',
-  '#8e24aa', '#00acc1', '#6d4c41', '#ffffff', '#212121']);
+export const MARK_SWATCHES = Object.freeze(['#212121', '#ffffff', '#f8cb2e', '#e53935', '#43a047', '#1e88e5',
+  '#8e24aa', '#00acc1', '#6d4c41', '#ee5007']);
 
 export const markIconName = name => (Object.hasOwn(MARK_ICONS, name) ? name : 'pin');
 
 const SAFE_COLOR = /^#[0-9a-f]{6}$/i;
-export const safeColor = color => (SAFE_COLOR.test(color || '') ? color.toLowerCase() : '#ee5007');
+// The default is not the property-line orange, so a mark never reads as a boundary.
+export const DEFAULT_COLOR = '#212121';
+export const safeColor = color => (SAFE_COLOR.test(color || '') ? color.toLowerCase() : DEFAULT_COLOR);
 
 // Dark glyph on light colours so a white or yellow marker still reads.
 export function glyphColor(color) {
