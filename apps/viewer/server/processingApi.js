@@ -537,6 +537,35 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       return error(res,conflict?409:400,e.code||'invalid_folder',conflict?e.message:undefined);
     }
   });
+  // Cross-project move. It moves the task's dataset and outputs too, so it also needs project and dataset write
+  // permission (and publish permission when the task is published). Sharing rules: ProcessingRepository.moveTaskToProject.
+  router.patch('/api/v1/tasks/:id/project',stampFolderResponse,authorize('viewer.processing.write'),(req,res,next)=>{
+    const granted=req.adminPrincipal.permissions;
+    if(!['viewer.projects.write','viewer.datasets.write'].every(permission=>granted.includes(permission)))return error(res,403,'permission_denied','permission denied');
+    next();
+  },mutate,(req,res)=>{
+    const b=req.body||{};
+    if(!onlyKeys(b,['projectId','folderId','expectedProjectId','expectedFolderId','expectedFolderRevision','confirmSharingChange','undo'])||
+       typeof b.projectId!=='string'||!Object.hasOwn(b,'folderId')||(b.folderId!==null&&typeof b.folderId!=='string')||
+       typeof b.expectedProjectId!=='string'||(b.expectedFolderId!==null&&typeof b.expectedFolderId!=='string')||
+       !Number.isSafeInteger(b.expectedFolderRevision)||b.expectedFolderRevision<0||
+       (Object.hasOwn(b,'confirmSharingChange')&&typeof b.confirmSharingChange!=='boolean')||(Object.hasOwn(b,'undo')&&b.undo!==true)){
+      return error(res,400,'invalid_task_move');
+    }
+    try{
+      const result=processing.moveTaskToProject(req.params.id,b.projectId,b.folderId,req.actorId,{
+        expectedProjectId:b.expectedProjectId,expectedFolderId:b.expectedFolderId,expectedFolderRevision:b.expectedFolderRevision,
+        confirmSharingChange:b.confirmSharingChange===true,undo:b.undo===true,
+        canChangePublished:req.adminPrincipal.permissions.includes('viewer.processing.publish')});
+      if(!result)return error(res,404,'task_not_found');
+      const {undoExpiresAt,sharing,...task}=result;
+      return res.json({task,sharing,...(undoExpiresAt?{undoExpiresAt}:{})});
+    }catch(e){
+      const status=e.code==='publish_permission_required'?403
+        :['task_move_conflict','task_move_undo_conflict','task_busy','dataset_shared','task_has_historical_datasets','dataset_referenced_by_other_task','dataset_name_conflict','sharing_change_unconfirmed','same_project'].includes(e.code)?409:400;
+      return error(res,status,e.code||'invalid_task_move',e.code?e.message:undefined,e.details);
+    }
+  });
   router.get('/api/v1/tasks/:id/attempts',authorize('viewer.processing.read'),(req,res)=>{const page=pageQuery(req);if(!page)return error(res,400,'invalid_page');const result=processing.listAttemptsPage(req.params.id,page);if(!result)return error(res,404,'task_not_found');const timings=req.query.timing==='engine'?engineTimings(result.items):null;const attempts=timings?result.items.map(attempt=>({...attempt,...engineTimingMetrics(attempt,timings)})):result.items;return res.json({attempts,nextCursor:result.nextCursor});});
   router.get('/api/v1/tasks/:id/storage',authorize('viewer.processing.read'),(req,res)=>{const page=pageQuery(req);if(!page)return error(res,400,'invalid_page');const result=processing.taskStorage(req.params.id,page);return result?res.json(result):error(res,404,'task_not_found');});
   router.patch('/api/v1/tasks/:id',authorize('viewer.processing.write'),mutate,(req,res)=>{if(!onlyKeys(req.body,['displayName','description','metadata']))return error(res,400,'invalid_patch_fields');const task=processing.auditedMutation({actorId:req.actorId,action:'processing_task.updated',entityType:'processing_task',entityId:req.params.id},()=>processing.updateTaskMetadata(req.params.id,req.body));return task?res.json({task}):error(res,404,'task_not_found');});

@@ -603,8 +603,8 @@ function datasetActions(dataset,projectActive){if(!projectActive)return'';const 
 function lodJobForOutput(output){return state.derivativeJobs.find(job=>job.attemptId===output.attemptId&&['mesh_tiles','lod_audit'].includes(job.type))||null}
 function recoveryOperationForOutput(outputId){return[...state.operations].filter(operation=>operation.type==='lod_recovery'&&operation.status!=='cancelled'&&(operation.sourceOutputId===outputId||operation.result?.recovery?.sourceOutputId===outputId)).sort((left,right)=>Date.parse(right.updatedAt||right.createdAt||0)-Date.parse(left.updatedAt||left.createdAt||0))[0]||null}
 function lodAction(output){if(!can('viewer.processing.write'))return'';const repair=companionRepairAction(output);if(repair)return repair;const job=lodJobForOutput(output),lod=output.lod||{},recovery=lod.recoveryAction,feedStatus=job?.status==='pending'?'queued':job?.status==='leased'?'running':job?.status,status=feedStatus||lod.status,id=job?.id||lod.jobId||output.id,retryable=Boolean(lod.canRetry||(status==='failed'&&job?.optional&&(Number(job.manualRetryCount)||0)<1));if(recovery?.kind==='new_version'&&recovery.eligible){const existing=recoveryOperationForOutput(output.id);if(existing?.status==='failed')return existing.retryable===false?button('derivative-status',existing.id,'Recovery retry exhausted',false,'disabled title="The one authorized manual recovery retry has already failed."'):button('retry-operation',existing.id,'Retry recovery',false,'title="Retry the existing recovery version without changing the current model."');if(existing){const label=existing.status==='queued'?'Recovery queued':existing.status==='leased'?'Creating recovery…':existing.status==='awaiting_derivatives'?'Generating 3D tiles…':'Recovery complete';return button('derivative-status',existing.id,label,false,'disabled')}return button('create-lod-recovery',output.id,'Create recovery version',false,`data-endpoint="${esc(recovery.endpoint)}" title="The current version remains safe while a new recovery version is built."`)}if(lod.disabledByPolicy)return button('derivative-status',id,'3D tiles disabled by server',false,`disabled title="${esc(lod.reason||'3D tile generation is disabled on this Viewer deployment.')}"`);if(['failed','fallback'].includes(status)&&retryable)return button('retry-derivative',id,'Retry 3D tiles');if(status==='queued')return button('derivative-status',id,'3D tiles queued',false,'disabled');if(status==='running')return button('derivative-status',id,'Generating 3D tiles…',false,'disabled');if(status==='available'||(status==='complete'&&job?.result?.verified))return button('derivative-status',id,'3D tiles ready',false,'disabled');if(status==='fallback')return button('derivative-status',id,'Using full mesh fallback',false,`disabled title="${esc(lod.reason||'Verified streaming tiles are unavailable.')}"`);if(lod.canGenerate)return button('generate-tiles',output.id,'Generate 3D tiles');return''}
-function taskQuickActions(task){const outputs=state.outputs.filter(item=>item.taskId===task.id),output=outputs.find(item=>item.activePublished&&item.status==='published')||outputs.find(item=>item.status==='ready'&&item.attemptId),readOnly=task.status==='archived'||state.projects.find(project=>project.id===task.projectId)?.status!=='active',items=[],more=[];if(output){const kinds=new Set(Array.isArray(output.assetKinds)?output.assetKinds:[]),published=output.activePublished&&output.status==='published';if(published&&output.viewSessionUrl)items.push(button('view-output',output.id,'View',true));else if(!readOnly&&output.status==='ready'&&output.attemptId&&can('viewer.processing.publish'))items.push(button('open-review',output.attemptId,'View',true));if(output.reportUrl&&kinds.has('report'))items.push(button('download-report',output.id,'Model report',false,`data-url="${esc(output.reportUrl)}"`));if(!readOnly&&canShareOutput(output))items.push(button('share-output',output.id,'Share'));if(output.downloadProducts?.length||output.downloadUrl&&kinds.size)more.push(button('download-output',output.id,'Download model files',false,`data-url="${esc(output.downloadUrl)}"`))}if(!readOnly&&can('viewer.processing.write')){more.unshift(button('edit-task',task.id,'Rename'));more.push(folderState.projectId===task.projectId&&Array.isArray(folderState.folders)?button('folder-move-task',task.id,'Move to folder'):button('folder-move-task',task.id,'Move to folder',false,'disabled title="Folders are still loading."'));}more.push(button('task-settings',task.id,'Details & processing'),button('task-files',task.id,'Files & versions'),button('task-history',task.id,'Processing history'));if(!readOnly&&can('viewer.gcp.read'))more.push(button('task-gcp',task.id,'Ground control points'));items.push(`<details class="project-more-actions task-more-actions"><summary aria-label="More task actions" title="More task actions">⋯</summary><div class="project-more-menu">${more.join('')}</div></details>`);return items.join('')}
-function taskPanel(task){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task);return`<article class="task-panel ${expanded?'expanded':''}" data-project-task="${esc(task.id)}"><div class="task-summary"><button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-chevron" aria-hidden="true">›</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${canDragFolderTask(task)? button('folder-move-task',task.id,'Move',false,'draggable="true" data-folder-drag aria-label="Move task. Drag or choose a folder."'):''}${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="region" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
+function taskQuickActions(task){const outputs=state.outputs.filter(item=>item.taskId===task.id),output=outputs.find(item=>item.activePublished&&item.status==='published')||outputs.find(item=>item.status==='ready'&&item.attemptId),readOnly=task.status==='archived'||state.projects.find(project=>project.id===task.projectId)?.status!=='active',items=[],more=[];if(output){const kinds=new Set(Array.isArray(output.assetKinds)?output.assetKinds:[]),published=output.activePublished&&output.status==='published';if(published&&output.viewSessionUrl)items.push(button('view-output',output.id,'View',true));else if(!readOnly&&output.status==='ready'&&output.attemptId&&can('viewer.processing.publish'))items.push(button('open-review',output.attemptId,'View',true));if(output.reportUrl&&kinds.has('report'))items.push(button('download-report',output.id,'Model report',false,`data-url="${esc(output.reportUrl)}"`));if(!readOnly&&canShareOutput(output))items.push(button('share-output',output.id,'Share'));if(output.downloadProducts?.length||output.downloadUrl&&kinds.size)more.push(button('download-output',output.id,'Download model files',false,`data-url="${esc(output.downloadUrl)}"`))}if(!readOnly&&can('viewer.processing.write')){more.unshift(button('edit-task',task.id,'Rename'));more.push(folderState.projectId===task.projectId&&Array.isArray(folderState.folders)?button('folder-move-task',task.id,'Move to…'):button('folder-move-task',task.id,'Move to…',false,'disabled title="Folders are still loading."'));}more.push(button('task-settings',task.id,'Details & processing'),button('task-files',task.id,'Files & versions'),button('task-history',task.id,'Processing history'));if(!readOnly&&can('viewer.gcp.read'))more.push(button('task-gcp',task.id,'Ground control points'));items.push(`<details class="project-more-actions task-more-actions"><summary aria-label="More task actions" title="More task actions">⋯</summary><div class="project-more-menu">${more.join('')}</div></details>`);return items.join('')}
+function taskPanel(task){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task);return`<article class="task-panel ${expanded?'expanded':''}" data-project-task="${esc(task.id)}"><div class="task-summary"><button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-chevron" aria-hidden="true">›</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${canDragFolderTask(task)? button('folder-move-task',task.id,'Move',false,'draggable="true" data-folder-drag aria-label="Move task. Drag to a folder, or choose a folder or project."'):''}${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="region" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
 function taskFact(label,value){const display=label==='Reconstructed points'&&value!==null&&value!==undefined?groupedNumber(value):value;return`<div><dt>${esc(label)}</dt><dd>${available(display)}</dd></div>`}
 function disclosureAttributes(taskId,name){return`data-task-id="${esc(taskId)}" data-task-disclosure="${esc(name)}" ${state.taskDisclosures[taskId]?.[name]?'open':''}`}
 function taskDisclosurePanel(taskId,name,label,body,meta=''){return`<details class="task-subsection task-disclosure" ${disclosureAttributes(taskId,name)}><summary><span>${esc(label)}</span>${meta?`<small>${esc(meta)}</small>`:''}</summary><div class="task-disclosure-body">${body}</div></details>`}
@@ -918,7 +918,7 @@ function clearFolderUndo(){
   document.querySelector('#workspace-folder-undo')?.replaceChildren();
 }
 
-function offerFolderUndo(task,previousFolderId,undoExpiresAt,serverTime){
+function offerMoveUndo(message,undoExpiresAt,serverTime,available,perform){
   clearFolderUndo();
   const target=document.querySelector('#workspace-folder-undo');
   const expiry=Date.parse(undoExpiresAt);
@@ -928,14 +928,17 @@ function offerFolderUndo(task,previousFolderId,undoExpiresAt,serverTime){
   const control=document.createElement('button');
   control.type='button';control.className='toast-action';control.textContent='Undo';
   control.onclick=()=>{
-    if(folderUndo!==undo||performance.now()>=undo.deadline||!canDragFolderTask(task)){clearFolderUndo();return;}
+    if(folderUndo!==undo||performance.now()>=undo.deadline||!available()){clearFolderUndo();return;}
     if(state.busy)return;
     clearFolderUndo();
-    void moveFolderTask(task,previousFolderId,{}, {undo:true});
+    void perform();
   };
-  target.replaceChildren(document.createTextNode('Task moved'),control);
+  target.replaceChildren(document.createTextNode(message),control);
   folderUndo=undo;
   folderUndoTimer=setTimeout(clearFolderUndo,remaining);
+}
+function offerFolderUndo(task,previousFolderId,undoExpiresAt,serverTime){
+  offerMoveUndo('Task moved',undoExpiresAt,serverTime,()=>canDragFolderTask(task),()=>moveFolderTask(task,previousFolderId,{}, {undo:true}));
 }
 
 async function moveFolderTask(task,folderId,receipt,{undo=false,originActive=()=>true,onSuccess}={}){
@@ -987,27 +990,125 @@ function beginTaskDrag(event){
     target.textContent=folder.id?folderPath(folderState.folders,folder.id).map(item=>item.displayName).join(' / '):folder.displayName;
     destinations.append(target);
   }
+  const otherProjects=canMoveTaskAcrossProjects()?state.projects.filter(project=>project.status==='active'&&project.id!==task.projectId):[];
+  if(otherProjects.length){
+    const projectLabel=document.createElement('strong');projectLabel.textContent='Or another project';destinations.append(projectLabel);
+    for(const project of otherProjects){
+      const target=document.createElement('span');
+      target.dataset.taskDropProject=project.id;
+      target.textContent=project.displayName;
+      destinations.append(target);
+    }
+  }
   view.append(destinations);
 }
 
 function taskDropTarget(event){
+  const project=event.target.closest('[data-task-drop-project]');
+  if(project&&draggedFolderTask&&canDragFolderTask(draggedFolderTask)&&canMoveTaskAcrossProjects()&&
+    project.dataset.taskDropProject!==draggedFolderTask.projectId&&state.projects.some(item=>item.id===project.dataset.taskDropProject&&item.status==='active'))return project;
   const dest=event.target.closest('[data-task-drop-folder]');
   const task=draggedFolderTask,folderId=dest?.dataset.taskDropFolder||null;
   return dest&&task&&canDragFolderTask(task)&&task.folderId!==folderId&&
     (folderId===null||folderState.folders.some(folder=>folder.id===folderId))?dest:null;
 }
 
-function moveTaskFolderModal(taskId){
+function canMoveTaskAcrossProjects(){
+  return can('viewer.processing.write')&&can('viewer.projects.write')&&can('viewer.datasets.write');
+}
+function taskHasPublishedOutput(task){
+  return state.outputs.some(output=>output.taskId===task.id&&output.status==='published');
+}
+function folderPickerOptions(folders,selectedId){
+  return`<option value="">Project root</option>${folders.map(folder=>`<option value="${esc(folder.id)}" ${folder.id===selectedId?'selected':''}>${esc(folderPath(folders,folder.id).map(item=>item.displayName).join(' / '))}</option>`).join('')}`;
+}
+function moveTaskFolderModal(taskId,{projectId:initialProjectId=null}={}){
   const task=state.tasks.find(item=>item.id===taskId),folders=folderState.folders;
   if(!task||!folders||!canDragFolderTask(task))return;
   const authorized=folderAuthorizationGuard(task.projectId,'viewer.processing.write');if(!authorized())return;
-  const options=folders.map(folder=>`<option value="${esc(folder.id)}" ${folder.id===task.folderId?'selected':''}>${esc(folderPath(folders,folder.id).map(item=>item.displayName).join(' / '))}</option>`).join('');
-  openModal('Move task',`<form id="folder-move-form" class="manage-form"><p>Move ${esc(task.displayName)} within this project.</p><label><span>Destination</span><select name="folderId"><option value="">Project root</option>${options}</select></label><button class="primary-button">Move task</button></form>`);
-  const form=modalContent.querySelector('#folder-move-form'),receipt={};
+  const projects=canMoveTaskAcrossProjects()?state.projects.filter(project=>project.status==='active'):state.projects.filter(project=>project.id===task.projectId);
+  const startProject=projects.some(project=>project.id===initialProjectId)?initialProjectId:task.projectId,published=taskHasPublishedOutput(task);
+  const projectField=projects.length>1
+    ?`<label><span>Project</span><select name="projectId">${projects.map(project=>`<option value="${esc(project.id)}" ${project.id===startProject?'selected':''}>${esc(project.displayName)}${project.id===task.projectId?' (current)':''}</option>`).join('')}</select></label>`
+    :`<input type="hidden" name="projectId" value="${esc(task.projectId)}">`;
+  openModal('Move task',`<form id="folder-move-form" class="manage-form task-move-form"><p>Choose where <strong>${esc(task.displayName)}</strong> should go.</p>${projectField}<label><span>Folder</span><select name="folderId">${folderPickerOptions(folders,task.folderId)}</select></label><p class="form-note" data-move-folder-status role="status" hidden></p><div class="task-move-project-note" data-move-project-note hidden><p class="form-note">Its source photos, processing history and outputs move with it.</p>${published?`<label class="task-move-confirm"><input type="checkbox" name="confirmSharingChange"><span>This task is published. Clients who see it through the current project's shares lose access, and clients of the new project gain it.</span></label>`:''}</div><button class="primary-button">Move task</button></form>`);
+  const form=modalContent.querySelector('#folder-move-form'),receipt={},folderCache=new Map([[task.projectId,folders]]);
+  const folderSelect=form.elements.folderId,submit=form.querySelector('button.primary-button'),status=form.querySelector('[data-move-folder-status]'),note=form.querySelector('[data-move-project-note]');
+  let folderRequest=0;
   const current=()=>authorized()&&form.isConnected&&state.tasks.some(value=>value.id===taskId&&value.projectId===task.projectId&&value.status!=='archived')&&state.projects.some(project=>project.id===task.projectId&&project.status==='active');
-  form.onsubmit=async event=>{event.preventDefault();if(!current())return;const folderId=event.currentTarget.elements.folderId.value||null;
-    if(folderId===task.folderId){modal.close();return;}
-    await moveFolderTask(task,folderId,receipt,{originActive:current,onSuccess:()=>modal.close()});};
+  const showProject=async projectId=>{
+    const request=++folderRequest,other=projectId!==task.projectId;
+    // A sharing confirmation covers one destination only; changing the project asks again.
+    if(form.elements.confirmSharingChange)form.elements.confirmSharingChange.checked=false;
+    note.hidden=!other;status.hidden=true;
+    if(folderCache.has(projectId)){folderSelect.innerHTML=folderPickerOptions(folderCache.get(projectId),other?null:task.folderId);folderSelect.disabled=false;submit.disabled=false;return;}
+    folderSelect.disabled=true;submit.disabled=true;folderSelect.innerHTML='<option value="">Loading folders…</option>';
+    try{
+      const response=await api(`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,{recoveryGuard:current});
+      if(request!==folderRequest||!current())return;
+      if(!Array.isArray(response.folders))throw Error('Invalid folder response.');
+      folderCache.set(projectId,response.folders.filter(folder=>folder.projectId===projectId));
+      folderSelect.innerHTML=folderPickerOptions(folderCache.get(projectId),null);folderSelect.disabled=false;submit.disabled=false;
+    }catch(error){
+      if(request!==folderRequest||!current())return;
+      folderSelect.innerHTML='<option value="">Project root</option>';folderSelect.disabled=false;submit.disabled=false;
+      status.hidden=false;status.textContent=`Folders could not be loaded (${error.message}). You can still move the task to the project root.`;
+    }
+  };
+  if(form.elements.projectId.tagName==='SELECT')form.elements.projectId.onchange=event=>void showProject(event.currentTarget.value);
+  if(startProject!==task.projectId)void showProject(startProject);
+  form.onsubmit=async event=>{event.preventDefault();if(!current()||folderSelect.disabled)return;
+    const projectId=form.elements.projectId.value||task.projectId,folderId=folderSelect.value||null;
+    if(projectId===task.projectId){
+      if(folderId===task.folderId){modal.close();return;}
+      await moveFolderTask(task,folderId,receipt,{originActive:current,onSuccess:()=>modal.close()});return;
+    }
+    const confirmSharingChange=Boolean(form.elements.confirmSharingChange?.checked);
+    if(published&&!confirmSharingChange){status.hidden=false;status.textContent='Confirm the client access change to move this published task.';form.elements.confirmSharingChange.focus();return;}
+    await moveProjectTask(task,projectId,folderId,receipt,{confirmSharingChange,originActive:current,onSuccess:()=>modal.close()});
+  };
+}
+async function moveProjectTask(task,projectId,folderId,receipt,{undo=false,confirmSharingChange=false,originActive=()=>true,onSuccess}={}){
+  const viewProjectId=state.selectedProjectId;
+  if(!viewProjectId||!canMoveTaskAcrossProjects()||task.status==='archived'||!Number.isSafeInteger(task.folderRevision)||projectId===task.projectId)return;
+  const authorized=folderAuthorizationGuard(viewProjectId,'viewer.processing.write',false);
+  const current=()=>authorized()&&originActive()&&canMoveTaskAcrossProjects()&&state.tasks.some(value=>value.id===task.id&&value.projectId===task.projectId&&value.status!=='archived');
+  const body={projectId,folderId,expectedProjectId:task.projectId,expectedFolderId:task.folderId??null,expectedFolderRevision:task.folderRevision,...(undo?{undo:true}:{}),confirmSharingChange};
+  const destination=state.projects.find(project=>project.id===projectId)?.displayName||'the other project';
+  let moved=null;
+  const result=await mutateFolder(viewProjectId,`/api/v1/tasks/${encodeURIComponent(task.id)}/project`,folderRequestOptions('PATCH',body,receipt),
+    undo?'Task moved back':null,current,({task:updated,undoExpiresAt,serverTime}={})=>{
+      if(updated?.id!==task.id||updated.projectId!==projectId||(updated.folderId??null)!==folderId||updated.folderRevision!==task.folderRevision+1){
+        throw Error('Task move could not be confirmed. Check which project the task is in.');
+      }
+      projectDataGeneration++;
+      state.tasks=state.tasks.map(value=>value.id===updated.id?{...value,...updated}:value);
+      state.outputs=state.outputs.map(output=>output.taskId===updated.id?{...output,projectId}:output);
+      state.datasets=state.datasets.map(dataset=>dataset.id===updated.datasetId?{...dataset,projectId}:dataset);
+      if(state.expandedTaskId===updated.id&&state.selectedProjectId!==projectId){state.expandedTaskId=null;state.taskPage=null;syncWorkspaceView('replace');}
+      moved={updated,undoExpiresAt,serverTime};
+      onSuccess?.();
+    },false);
+  if(moved){
+    render();
+    if(!undo){
+      const previousProjectId=task.projectId,previousFolderId=task.folderId??null,updated=moved.updated;
+      offerMoveUndo(`Task moved to ${destination}`,moved.undoExpiresAt,moved.serverTime,
+        ()=>canMoveTaskAcrossProjects()&&state.tasks.some(value=>value.id===updated.id&&value.projectId===updated.projectId&&value.folderRevision===updated.folderRevision),
+        async()=>{
+          // Moving a published task back changes its audience again, so Undo asks the same question as the move.
+          let confirmSharingChange=false;
+          if(taskHasPublishedOutput(updated)){
+            const origin=state.projects.find(project=>project.id===previousProjectId)?.displayName||'the previous project';
+            if(!await dialogs.confirm(`This task is published. Moving it back to ${origin} removes it from the shares of ${destination} and shows it to clients of ${origin}.`,{title:'Move published task back',submitLabel:'Move back'}))return;
+            confirmSharingChange=true;
+          }
+          return moveProjectTask(updated,previousProjectId,previousFolderId,{}, {undo:true,confirmSharingChange});
+        });
+    }
+  }
+  scheduleProjectRefresh(0);
+  return result;
 }
 function legacyImportModal(projectId,datasetId){const project=state.projects.find(item=>item.id===(projectId||state.datasets.find(dataset=>dataset.id===datasetId)?.projectId)),drafts=state.datasets.filter(dataset=>dataset.projectId===project?.id&&dataset.status==='draft');openModal(`Import into ${project?.displayName||'project'}`,`<div class="import-choice" role="tablist" aria-label="Import source"><button class="import-tab active" data-import-tab="device">This device</button><button class="import-tab" data-import-tab="server">Server import folder</button></div><section data-import-panel="device"><form id="upload-form" class="manage-form">${select('Draft dataset','datasetId',opts(drafts,'Select a draft'))}<label><span>Artifact role</span><select name="processingRole"><option value="auto">Detect automatically</option><option value="image">Source imagery</option><option value="provider_input">Model / orthophoto / point cloud</option><option value="gcp_source">GCP source</option></select></label>${field('Files','files','required type="file" multiple')}<button class="primary-button">Upload or resume</button><progress id="upload-progress" value="0" max="100"></progress></form><p class="form-note">Browser uploads are limited to 128 files, 64 MB each, and 256 MB total.</p></section><section data-import-panel="server" hidden><form id="server-import-form" class="manage-form"><input type="hidden" name="projectId" value="${esc(project?.id||'')}">${field('Task name','taskDisplayName','required maxlength="240"')}${field('Folder or backup ZIP','sourceRelativePath','required placeholder="incoming/task-folder or task.zip"')}<button class="primary-button">Queue structured task import</button></form><p class="form-note">This immediately queues a durable import from the managed server folder. The worker validates the folder or ZIP, detects supported task artifacts, and creates the task only after validation; there is no preview step.</p></section>`);modalContent.querySelectorAll('[data-import-tab]').forEach(tab=>tab.onclick=()=>{modalContent.querySelectorAll('[data-import-tab]').forEach(item=>item.classList.toggle('active',item===tab));modalContent.querySelectorAll('[data-import-panel]').forEach(panel=>panel.hidden=panel.dataset.importPanel!==tab.dataset.importTab)});const upload=modalContent.querySelector('#upload-form');if(datasetId)upload.elements.datasetId.value=datasetId;upload.onsubmit=event=>{event.preventDefault();uploadFiles(upload)};modalContent.querySelector('#server-import-form').onsubmit=event=>{event.preventDefault();modal.close();mutate('/api/v1/processing/server-task-imports',{method:'POST',body:values(event.currentTarget),headers:{'Idempotency-Key':crypto.randomUUID()}},'Server-folder import queued')}}
 async function renderServerImportBrowser(path=''){
@@ -1463,6 +1564,8 @@ content.addEventListener('drop',event=>{
   if(!target)return;
   event.preventDefault();
   clearTaskDrag();
+  // A project drop opens the picker on that project: the folder choice and any sharing confirmation stay explicit.
+  if(target.dataset.taskDropProject)return moveTaskFolderModal(task.id,{projectId:target.dataset.taskDropProject});
   void moveFolderTask(task,target.dataset.taskDropFolder||null,{});
 });
 content.addEventListener('dragend',()=>{

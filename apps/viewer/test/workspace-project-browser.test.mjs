@@ -174,11 +174,12 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
   if (pathname === '/api/v1/tasks') {
     const projectId=url.searchParams.get('projectId');
-    const tasks=fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)&&(!projectId||item.projectId===projectId))
+    const tasks=fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id))
       .map(item=>{
         const stored=runtime.folderProcessing?.getTask(item.id);
-        return stored?{...item,folderId:stored.folderId,folderRevision:stored.folderRevision,status:stored.status}:item;
-      });
+        return stored?{...item,projectId:stored.projectId,folderId:stored.folderId,folderRevision:stored.folderRevision,status:stored.status}:item;
+      })
+      .filter(item=>!projectId||item.projectId===projectId);
     return json({tasks,nextCursor:null});
   }
   if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
@@ -439,7 +440,7 @@ function startFixtureServer() {
           await runtime.taskDetailResponseGate;
         }
         if (manualFixture && request.method !== 'GET') console.log(`Synthetic mutation: ${request.method} ${url.pathname}`);
-        if(runtime.folderBackend&&(/^\/api\/v1\/projects\/[^/]+\/folders(?:\/[^/]+)?$/.test(url.pathname)||/^\/api\/v1\/tasks\/[^/]+\/folder$/.test(url.pathname))){
+        if(runtime.folderBackend&&(/^\/api\/v1\/projects\/[^/]+\/folders(?:\/[^/]+)?$/.test(url.pathname)||/^\/api\/v1\/tasks\/[^/]+\/(?:folder|project)$/.test(url.pathname))){
           const upstream=await fetch(`${runtime.folderBackend}${url.pathname}`,{method:request.method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':request.headers['idempotency-key']||'folder-browser-fixture-key'},...(raw?{body:raw}:{})});
           result={status:upstream.status,type:'application/json',body:Buffer.from(await upstream.arrayBuffer())};
         }else result = url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.failOrthophotoResponse
@@ -752,7 +753,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['View', 'Model report', 'Share'], `${viewport.name}: published task shortcuts must remain focused on viewing and sharing`);
     await client.evaluate(`document.querySelector('.task-more-actions > summary').click()`);
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Move to folder','Details & processing','Files & versions','Processing history','Ground control points']);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Move to…','Details & processing','Files & versions','Processing history','Ground control points']);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
@@ -1124,6 +1125,80 @@ test('project folders navigate and survive browser history in a real browser', {
     processing.moveTaskToFolder('task-johnson',null,'another-staff-actor');
     await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')`,'background move never appeared',12000);
     assert.equal(await client.evaluate(`document.activeElement===window.folderTestFilter&&document.querySelector('#project-filter')===window.folderTestFilter&&window.folderTestFilter.value==='Johnson'`),true);
+  }finally{
+    if(client)client.close();
+    if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}
+    if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}if(folderServer){folderServer.closeAllConnections?.();await new Promise(resolve=>folderServer.close(resolve));}folderDb?.close();if(folderRoot)rmSync(folderRoot,{recursive:true,force:true});try{await removeBrowserProfile(profile,t);}finally{release();}
+  }
+});
+
+test('Move to… picks a project, then a folder, and drag offers other projects in a real browser', {timeout:60000,skip:manualFixture}, async t=>{
+  const executable=browserPath();if(!executable)return t.skip('Chromium-family browser required');
+  const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client,folderServer,folderDb,folderRoot;
+  try{
+    const express=require('express'),auth=require('../server/auth'),{openDatabase}=require('../server/database'),{ViewerRepository}=require('../server/repository'),{ProcessingRepository}=require('../server/processingRepository'),{createProcessingApi}=require('../server/processingApi');
+    folderRoot=mkdtempSync(path.join(tmpdir(),'viewer-move-api-'));folderDb=openDatabase(path.join(folderRoot,'viewer.sqlite'));
+    const repository=new ViewerRepository(folderDb),processing=new ProcessingRepository(folderDb);
+    processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:browser-audit',permissions:['viewer.projects.read','viewer.projects.write','viewer.datasets.write','viewer.processing.read','viewer.processing.write','viewer.processing.publish'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+    processing.createProject({id:'project-johnson',displayName:'Johnson Road Survey'});processing.createProject({id:'project-quarry',displayName:'Alpha Quarry'});
+    const dataset=processing.createDataset({id:'dataset-johnson',projectId:'project-johnson',displayName:'Source',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});processing.finalizeDataset(dataset.id,[],'a'.repeat(64));
+    processing.createTask({id:'task-johnson',projectId:'project-johnson',datasetId:dataset.id,displayName:'Johnson reconstruction'});
+    processing.createProjectFolder('project-johnson',{displayName:'Client folder'},'staff');
+    const quarryFolder=processing.createProjectFolder('project-quarry',{displayName:'2026 reprocess'},'staff');
+    const app=express();app.use(express.json());app.use(createProcessingApi({repository,processing,storage:{}}));folderServer=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
+    ({server,runtime,origin}=await startFixtureServer());runtime.folderProcessing=processing;runtime.folderBackend=`http://127.0.0.1:${folderServer.address().port}`;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const devTools=await waitForDevTools(profile),target=await createDevToolsTarget(devTools);client=await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
+    await client.command('Emulation.setDeviceMetricsOverride',{width:1280,height:860,deviceScaleFactor:1,mobile:false});
+    await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+    await waitFor(client,`Boolean(document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]:not([disabled])'))`,'Move to… menu action unavailable');
+    assert.equal(await client.evaluate(`document.querySelector('.task-more-actions [data-action="folder-move-task"][data-id="task-johnson"]').textContent`),'Move to…');
+    await client.evaluate(`(()=>{const menu=document.querySelector('[data-project-task="task-johnson"] .task-more-actions');menu.open=true;menu.querySelector('[data-action="folder-move-task"]').click();})()`);
+    await waitFor(client,`Boolean(document.querySelector('#folder-move-form select[name="projectId"]'))`,'project picker unavailable');
+    assert.deepEqual(await client.evaluate(`[...document.querySelector('#folder-move-form').elements.projectId.options].map(option=>[option.value,option.textContent])`),
+      [['project-johnson','Johnson Road Survey (current)'],['project-quarry','Alpha Quarry']]);
+    await client.evaluate(`(()=>{const select=document.querySelector('#folder-move-form').elements.projectId;select.value='project-quarry';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(client,`(()=>{const f=document.querySelector('#folder-move-form');return !f.elements.folderId.disabled&&[...f.elements.folderId.options].some(option=>option.value==='${quarryFolder.id}')})()`,'destination project folders unavailable');
+    assert.deepEqual(await client.evaluate(`[...document.querySelector('#folder-move-form').elements.folderId.options].map(option=>option.textContent)`),['Project root','2026 reprocess']);
+    assert.equal(await client.evaluate(`document.querySelector('[data-move-project-note]').hidden`),false,'the cross-project note is shown');
+    // A confirmation given for one destination is cleared when the destination project changes.
+    await client.evaluate(`(()=>{const f=document.querySelector('#folder-move-form');f.elements.confirmSharingChange.checked=true;f.elements.projectId.value='project-johnson';f.elements.projectId.dispatchEvent(new Event('change',{bubbles:true}));f.elements.projectId.value='project-quarry';f.elements.projectId.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(client,`!document.querySelector('#folder-move-form').elements.folderId.disabled`,'destination folders did not reload');
+    assert.equal(await client.evaluate(`document.querySelector('#folder-move-form').elements.confirmSharingChange.checked`),false,'switching projects clears the sharing confirmation');
+    await client.evaluate(`document.querySelector('#folder-move-form').elements.folderId.value='${quarryFolder.id}'`);
+    if(process.env.LTDS_MOVE_PICKER_SCREENSHOT){const shot=await client.command('Page.captureScreenshot',{format:'png'});writeFileSync(process.env.LTDS_MOVE_PICKER_SCREENSHOT,Buffer.from(shot.data,'base64'));}
+    // The fixture output is published, so the picker requires the sharing confirmation before any request.
+    const beforeUnconfirmed=runtime.requests.length;
+    await client.evaluate(`document.querySelector('#folder-move-form').requestSubmit()`);
+    await waitFor(client,`!document.querySelector('[data-move-folder-status]').hidden`,'sharing confirmation was not requested');
+    assert.equal(runtime.requests.slice(beforeUnconfirmed).some(request=>request.path==='/api/v1/tasks/task-johnson/project'),false);
+    await client.evaluate(`(()=>{const f=document.querySelector('#folder-move-form');f.elements.confirmSharingChange.checked=true;f.requestSubmit();})()`);
+    await waitFor(client,`!document.querySelector('[data-project-task="task-johnson"]')&&document.querySelector('#workspace-folder-undo')?.textContent.includes('Task moved to Alpha Quarry')`,'task did not leave the source project');
+    const before=processing.getTask('task-johnson');
+    assert.equal(before.projectId,'project-quarry');assert.equal(before.folderId,quarryFolder.id);assert.equal(processing.getDataset('dataset-johnson').projectId,'project-quarry');
+    const moves=runtime.requests.filter(request=>request.path==='/api/v1/tasks/task-johnson/project');
+    assert.deepEqual(moves.map(request=>request.body),[{projectId:'project-quarry',folderId:quarryFolder.id,expectedProjectId:'project-johnson',expectedFolderId:null,expectedFolderRevision:0,confirmSharingChange:true}]);
+    // The fixture output is published, so Undo asks the same sharing question before it sends a confirmed request.
+    const beforeUndo=runtime.requests.length;
+    await confirmAppAction(client,runtime,'#workspace-folder-undo button',{title:'Move published task back'});
+    await waitFor(client,`Boolean(document.querySelector('[data-folder-drag][data-id="task-johnson"]'))`,'Undo did not bring the task back');
+    assert.deepEqual(runtime.requests.slice(beforeUndo).filter(request=>request.path==='/api/v1/tasks/task-johnson/project').map(request=>request.body),
+      [{projectId:'project-johnson',folderId:null,expectedProjectId:'project-quarry',expectedFolderId:quarryFolder.id,expectedFolderRevision:1,undo:true,confirmSharingChange:true}]);
+    assert.equal(processing.getTask('task-johnson').projectId,'project-johnson');assert.equal(processing.getTask('task-johnson').folderId,null);
+    // Dragging offers other projects; dropping on one opens the picker on that project.
+    await waitFor(client,`!document.querySelector('#workspace').hasAttribute('aria-busy')`,'workspace stayed busy');
+    await client.evaluate(`(()=>{
+      const transfer=new DataTransfer(),handle=document.querySelector('[data-folder-drag][data-id="task-johnson"]');
+      handle.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+      const target=document.querySelector('[data-folder-drop-destinations] [data-task-drop-project="project-quarry"]');
+      if(!target?.getClientRects().length||target.textContent!=='Alpha Quarry')throw Error('Project drop destination unavailable');
+      target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+      if(!target.classList.contains('folder-drop-active'))throw Error('Project destination did not highlight');
+      target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+    })()`);
+    await waitFor(client,`document.querySelector('#folder-move-form')?.elements.projectId.value==='project-quarry'&&!document.querySelector('#folder-move-form').elements.folderId.disabled`,'project drop did not open the picker on that project');
+    assert.equal(processing.getTask('task-johnson').projectId,'project-johnson','a drop alone never moves across projects');
   }finally{
     if(client)client.close();
     if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}

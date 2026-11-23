@@ -191,8 +191,11 @@ function indexedFileMetadata(file) {
 
 // Control characters (C0, DEL, C1), zero-width, line/paragraph separators and bidi controls are refused in new folder names; stored names are not rewritten.
 const UNSAFE_FOLDER_NAME=/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
-// Each audited move advances the revision inside the same write transaction.
-const FOLDER_MOVE_REVISION = "(SELECT COUNT(*) FROM audit_events WHERE entity_type='processing_task' AND entity_id=processing_tasks.id AND action='processing_task.folder_changed')";
+// Each audited placement change (folder or project) advances the revision inside the same write transaction.
+const TASK_PLACEMENT_ACTIONS = "('processing_task.folder_changed','processing_task.project_changed')";
+const FOLDER_MOVE_REVISION = `(SELECT COUNT(*) FROM audit_events WHERE entity_type='processing_task' AND entity_id=processing_tasks.id AND action IN ${TASK_PLACEMENT_ACTIONS})`;
+// A task cannot change project while any of its processing, derivative, dataset or output storage work is in flight.
+const LIVE_ATTEMPT_STATUSES_SQL = "('pending','admitted','initializing','uploading','committed','queued_upstream','running','ingesting','derivatives')";
 const FOLDER_UNDO_WINDOW_MS = 10_000;
 
 class ProcessingRepository {
@@ -491,9 +494,9 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     }
     const timestamp=now();
     if(guard?.undo){
-      const previous=this.database.prepare("SELECT actor_id,created_at,details_json FROM audit_events WHERE entity_type='processing_task' AND entity_id=? AND action='processing_task.folder_changed' ORDER BY rowid DESC LIMIT 1").get(taskId);
+      const previous=this.database.prepare(`SELECT action,actor_id,created_at,details_json FROM audit_events WHERE entity_type='processing_task' AND entity_id=? AND action IN ${TASK_PLACEMENT_ACTIONS} ORDER BY rowid DESC LIMIT 1`).get(taskId);
       const details=json(previous?.details_json);
-      if(!previous||previous.actor_id!==actorId||details?.undo||details?.previousFolderId!==folderId||
+      if(!previous||previous.action!=='processing_task.folder_changed'||previous.actor_id!==actorId||details?.undo||details?.previousFolderId!==folderId||
           details?.folderId!==task.folderId||!(Date.parse(timestamp)<Date.parse(previous.created_at)+FOLDER_UNDO_WINDOW_MS)){
         throw Object.assign(new Error('This move can no longer be undone.'),{code:'folder_undo_conflict'});
       }
@@ -506,6 +509,88 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     if(!guard||guard.undo)return updated;
     const audit=this.database.prepare('SELECT created_at FROM audit_events WHERE id=?').get(auditId);
     return {...updated,undoExpiresAt:new Date(Date.parse(audit.created_at)+FOLDER_UNDO_WINDOW_MS).toISOString()};
+  }); }
+  /**
+   * Moves a task, its source dataset and every output/import row that names its project to another active project.
+   * Rules (all checked inside one write transaction with the data changes and audit row; the HTTP idempotency receipt is
+   * completed after this commits, so the request as a whole is not crash-atomic):
+   * - the caller must present the task's current project, folder and placement revision (optimistic concurrency);
+   * - nothing for the task may be processing, ingesting, building derivatives or mid storage mutation (task_busy);
+   * - the source dataset must belong to this task alone, and its name must be free in the target (dataset_shared/_name_conflict);
+   * - a task with a published output changes which clients can see it, so the caller must confirm that (sharing_change_unconfirmed).
+   * Grants are never edited: project shares and project-scoped client grants resolve tasks by project on every request,
+   * so the task leaves the old project's shares and joins the new project's shares. Task-scoped client grants that named
+   * the old project stop resolving (fail closed). Model-level links stay valid; they are not project-scoped.
+   * Undo (10 s, same actor, last placement change only) reverses an unchanged move. If the task is published when the Undo
+   * runs, it needs current publish permission and a fresh confirmation, exactly like a forward move.
+   */
+  moveTaskToProject(taskId,targetProjectId,folderId,actorId,guard) { return this.transaction(()=>{
+    const fail=(code,message,extra={})=>{throw Object.assign(new Error(message),{code,...extra});};
+    const task=this.getTask(taskId);if(!task)return null;
+    const source=this.getProject(task.projectId);
+    if(!source||source.status!=='active'||task.status==='archived')fail('task_unavailable','task is unavailable');
+    if(!guard||guard.expectedProjectId!==task.projectId||guard.expectedFolderId!==task.folderId||guard.expectedFolderRevision!==task.folderRevision)
+      fail('task_move_conflict','The task has moved. Check its current project and folder and try again.');
+    const target=typeof targetProjectId==='string'?this.getProject(targetProjectId):null;
+    if(!target||target.status!=='active')fail('target_project_unavailable','The destination project is unavailable.');
+    if(target.id===task.projectId)fail('same_project','The task is already in this project; move it between folders instead.');
+    const timestamp=now();
+    if(guard.undo){
+      const previous=this.database.prepare(`SELECT action,actor_id,created_at,details_json FROM audit_events WHERE entity_type='processing_task' AND entity_id=? AND action IN ${TASK_PLACEMENT_ACTIONS} ORDER BY rowid DESC LIMIT 1`).get(taskId);
+      const details=json(previous?.details_json);
+      if(!previous||previous.action!=='processing_task.project_changed'||previous.actor_id!==actorId||details?.undo||
+          details?.projectId!==task.projectId||details?.folderId!==task.folderId||details?.previousProjectId!==target.id||details?.previousFolderId!==folderId||
+          !(Date.parse(timestamp)<Date.parse(previous.created_at)+FOLDER_UNDO_WINDOW_MS))
+        fail('task_move_undo_conflict','This move can no longer be undone.');
+    }
+    if(folderId!==null&&(typeof folderId!=='string'||!this.database.prepare('SELECT 1 FROM project_folders WHERE id=? AND project_id=?').get(folderId,target.id)))
+      fail('invalid_folder','The destination folder is unavailable.');
+    const attemptIds=this.database.prepare('SELECT id FROM processing_attempts WHERE task_id=?').all(taskId).map(row=>row.id);
+    const outputs=this.database.prepare('SELECT * FROM model_outputs WHERE task_id=?').all(taskId).map(row=>this.modelOutput(row));
+    const marks=list=>list.map(()=>'?').join(',');
+    const busy=['queued','processing'].includes(task.status)
+      ||Boolean(this.database.prepare(`SELECT 1 FROM processing_attempts WHERE task_id=? AND status IN ${LIVE_ATTEMPT_STATUSES_SQL} LIMIT 1`).get(taskId))
+      ||(attemptIds.length>0&&Boolean(this.database.prepare(`SELECT 1 FROM processing_jobs WHERE attempt_id IN (${marks(attemptIds)}) AND status IN ('pending','leased') LIMIT 1`).get(...attemptIds)))
+      ||(attemptIds.length>0&&Boolean(this.database.prepare(`SELECT 1 FROM derivative_jobs WHERE attempt_id IN (${marks(attemptIds)}) AND status IN ('pending','leased') LIMIT 1`).get(...attemptIds)))
+      ||this.activeDatasetOperations(task.datasetId)>0
+      ||(outputs.length>0&&Boolean(this.database.prepare(`SELECT 1 FROM storage_mutations WHERE entity_type='output' AND entity_id IN (${marks(outputs)}) AND status IN ('intent','fs_applied','failed') LIMIT 1`).get(...outputs.map(output=>output.id))))
+      ||outputs.some(output=>this.retryableLodRecoveryUsesOutput(output));
+    if(busy)fail('task_busy','This task is processing or its files are being changed. Move it after that work finishes.');
+    const dataset=this.getDataset(task.datasetId);
+    if(!dataset||dataset.projectId!==task.projectId||['finalizing','trashed'].includes(dataset.status))fail('dataset_unavailable','The task source dataset cannot move with it.');
+    if(this.database.prepare('SELECT 1 FROM processing_tasks WHERE dataset_id=? AND id<>? AND purged_at IS NULL LIMIT 1').get(dataset.id,taskId))
+      fail('dataset_shared','Another task uses the same source photos, so this task cannot move to another project on its own.');
+    // Attempts and imports can name a dataset other than the task's primary one. Moving only the primary would strand those
+    // runs (a retry would be refused) or carry another task's dataset away, so both shapes are refused for now.
+    if(this.database.prepare('SELECT 1 FROM processing_attempts WHERE task_id=? AND dataset_id IS NOT NULL AND dataset_id<>? UNION ALL SELECT 1 FROM webodm_task_imports WHERE task_id=? AND dataset_id<>? LIMIT 1').get(taskId,dataset.id,taskId,dataset.id))
+      fail('task_has_historical_datasets','Earlier runs of this task used other source photos, so it cannot move to another project yet.');
+    if(this.database.prepare('SELECT 1 FROM processing_attempts WHERE dataset_id=? AND task_id<>? UNION ALL SELECT 1 FROM webodm_task_imports WHERE dataset_id=? AND task_id<>? LIMIT 1').get(dataset.id,taskId,dataset.id,taskId))
+      fail('dataset_referenced_by_other_task','A run of another task uses these source photos, so this task cannot move to another project on its own.');
+    if(this.database.prepare("SELECT 1 FROM datasets WHERE id<>? AND project_id=? AND status<>'trashed' AND display_name=? COLLATE NOCASE").get(dataset.id,target.id,dataset.displayName))
+      fail('dataset_name_conflict','The destination project already has a source dataset with this name. Rename one of them first.');
+    const liveShares=projectId=>Number(this.database.prepare('SELECT COUNT(*) AS n FROM public_project_shares WHERE project_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)').get(projectId,timestamp).n);
+    const publishedOutputs=outputs.filter(output=>output.status==='published').length;
+    const sharing={published:publishedOutputs>0,publishedOutputs,sourceLiveProjectShares:liveShares(task.projectId),targetLiveProjectShares:liveShares(target.id)};
+    // Any move that changes a published task's audience, Undo included, needs current publish permission and a fresh,
+    // affirmative confirmation: share counts cannot show which people, links or client grants are affected.
+    const sharingConfirmed=guard.confirmSharingChange===true;
+    if(sharing.published){
+      if(!guard.canChangePublished)fail('publish_permission_required','Moving a published task changes who can see it and requires publishing permission.');
+      if(!sharingConfirmed)fail('sharing_change_unconfirmed','This task is published. Confirm that clients of the old project lose access and clients of the new project gain it.',{details:sharing});
+    }
+    // One statement moves task and folder together so the folder trigger sees the new project.
+    this.database.prepare('UPDATE processing_tasks SET project_id=?,folder_id=?,updated_at=? WHERE id=? AND project_id=?').run(target.id,folderId,timestamp,taskId,task.projectId);
+    this.database.prepare('UPDATE datasets SET project_id=?,updated_at=? WHERE id=? AND project_id=?').run(target.id,timestamp,dataset.id,task.projectId);
+    const movedOutputs=this.database.prepare('UPDATE model_outputs SET project_id=?,updated_at=? WHERE task_id=?').run(target.id,timestamp,taskId).changes;
+    this.database.prepare('UPDATE webodm_task_imports SET project_id=? WHERE task_id=?').run(target.id,taskId);
+    const auditId=this.insertAudit({actorId,action:'processing_task.project_changed',entityType:'processing_task',entityId:taskId,details:{
+      projectId:target.id,previousProjectId:task.projectId,folderId,previousFolderId:task.folderId,datasetId:dataset.id,movedOutputs,
+      ...sharing,sharingChangeConfirmed:sharing.published&&sharingConfirmed,undo:guard.undo===true}});
+    const updated=this.getTask(taskId);
+    if(updated?.projectId!==target.id)fail('task_move_conflict','The task move could not be confirmed.');
+    if(guard.undo)return{...updated,sharing};
+    const audit=this.database.prepare('SELECT created_at FROM audit_events WHERE id=?').get(auditId);
+    return {...updated,sharing,undoExpiresAt:new Date(Date.parse(audit.created_at)+FOLDER_UNDO_WINDOW_MS).toISOString()};
   }); }
   task(row) { return row && { id:row.id,projectId:row.project_id,folderId:row.folder_id??null,...(row.folder_revision===undefined?{}:{folderRevision:row.folder_revision}),datasetId:row.dataset_id,displayName:row.display_name,description:row.description,status:row.status,activeAttemptId:row.active_attempt_id,publishedModelId:row.published_model_id,metadata:json(row.metadata_json),createdBy:row.created_by,createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,purgedAt:row.purged_at }; }
   createTask(input) { const project=this.getProject(input.projectId),dataset=this.getDataset(input.datasetId);if(!project||project.status!=='active'||!dataset||dataset.status!=='finalized'||dataset.projectId!==project.id)throw Object.assign(new Error('task project and finalized dataset must match'),{code:'invalid_project_or_dataset'});const id=input.id||crypto.randomUUID(),t=now();this.database.prepare(`INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,description,status,metadata_json,created_by,created_at,updated_at) VALUES (?,?,?,?,?,'draft',?,?,?,?)`).run(id,input.projectId,input.datasetId,bounded(input.displayName),bounded(input.description,4000)||null,JSON.stringify(input.metadata||{}),input.createdBy||null,t,t);return this.getTask(id); }
