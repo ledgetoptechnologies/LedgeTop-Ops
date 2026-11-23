@@ -46,6 +46,11 @@ export function propertyLinesModeKind(mode, cloudMode) {
   return null;
 }
 
+// "Source: ...": which parcel data the lines come from, on the view and in print.
+export function propertyLinesSourceText(source) {
+  return source?.name ? `Source: ${[source.name, source.release].filter(Boolean).join(' ')}.` : '';
+}
+
 // Heights for UTM polylines: the published DTM when it agrees with the scene,
 // otherwise one flat height (the scene's lowest level), with the reason.
 export function drapePolylines(lines, { grid = null, minAlt, maxAlt, lift = PROPERTY_LINE_STYLE.liftMeters } = {}) {
@@ -262,7 +267,7 @@ export function createPropertyLinesController(deps) {
     dom.status.dataset.state = disabled ? av.reason : (on ? status : 'off');
     if (dom.notice) {
       dom.notice.hidden = !drawn;
-      if (drawn && source) dom.notice.textContent = `Property lines are approximate, not a survey. Source: ${source.name} ${source.release}.`;
+      if (drawn && source) dom.notice.textContent = `Property lines are approximate, not a survey. ${propertyLinesSourceText(source)}`;
     }
   }
 
@@ -635,6 +640,8 @@ export function createPropertyLinesController(deps) {
   return {
     loadOffer,
     refresh,
+    // The source of the lines drawn now and its credit line, for prints.
+    attribution: () => (offered && source?.name ? [propertyLinesSourceText(source), source.credit].filter(Boolean).join(' ') : ''),
     toggle,
     setMerge,
     wake,

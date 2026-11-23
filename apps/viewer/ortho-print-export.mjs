@@ -2,12 +2,15 @@
 // orthophoto with contour lines (and optionally property lines) burned in.
 // PNG for printing (white background, small legend and scale bar) or a
 // georeferenced RGBA GeoTIFF in the orthophoto's own projected CRS.
+import { BRAND_COLORS } from './brand-colors.mjs';
 import { CONTOUR_COLORS, CONTOUR_INDEX_EVERY, drawContours, unitMeters, unitSuffix } from './contours.mjs';
 import { isRgbNoData } from './orthophoto-mask.mjs';
 
 export const PRINT_SIZES = Object.freeze([2048, 4096, 6144]);
 export const PRINT_STRIP_SOURCE_PIXELS = 12_000_000;
-const PROPERTY_LINE = Object.freeze({ color: '#FFD60A', halo: 'rgba(17,17,17,0.55)', width: 2.5, haloWidth: 5 });
+// Burned into every export that shows property lines, PNG and GeoTIFF alike.
+export const PROPERTY_LINES_NOTE = 'Property lines are approximate, not a survey.';
+const PROPERTY_LINE = Object.freeze({ color: BRAND_COLORS.orange, halo: 'rgba(17,17,17,0.55)', width: 2.5, haloWidth: 5 });
 
 const cancelled = () => new DOMException('Export cancelled.', 'AbortError');
 const abortIf = (signal) => { if (signal?.aborted) throw cancelled(); };
@@ -105,19 +108,59 @@ function niceLength(target) {
   return p;
 }
 
-function drawLegend(ctx, { width, height, gsdE, units, contours, scale, colors }) {
+/**
+ * The property-line note as wrapped lines for a band across the bottom of the
+ * image: legend-size text, smaller where space is tight. An image too small to
+ * carry it legibly is refused, so the lines never leave without the note.
+ */
+export function layoutPropertyNote(ctx, { width, height, scale, attribution = '' }) {
+  const words = [PROPERTY_LINES_NOTE, attribution].join(' ').split(/\s+/).filter(Boolean);
+  const pad = 6 * scale, room = width - pad * 2;
+  ctx.save();
+  try {
+    for (let px = 12 * scale; px >= 9; px -= 1) {
+      const font = `600 ${px}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+      ctx.font = font;
+      const fits = text => ctx.measureText(text).width <= room;
+      if (!words.every(fits)) continue;
+      const lines = [];
+      for (const word of words) {
+        const longer = lines.length ? `${lines[lines.length - 1]} ${word}` : '';
+        if (longer && fits(longer)) lines[lines.length - 1] = longer; else lines.push(word);
+      }
+      const lineHeight = Math.ceil(px * 1.3), bandHeight = Math.ceil(lines.length * lineHeight + pad * 2);
+      if (bandHeight <= height * 0.4) return { lines, font, lineHeight, bandHeight, pad };
+    }
+  } finally { ctx.restore(); }
+  throw Object.assign(new Error('This image is too small to carry the property line note. Choose a larger area, or export without property lines.'), { code: 'print_note' });
+}
+
+// Opaque, and drawn last: nothing in the image covers it.
+function drawPropertyNote(ctx, { lines, font, lineHeight, bandHeight, pad }, { width, height }) {
+  const top = height - bandHeight;
+  ctx.save();
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, top, width, bandHeight);
+  ctx.font = font; ctx.fillStyle = '#1b1b1b'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  lines.forEach((line, i) => ctx.fillText(line, pad, top + pad + lineHeight * (i + 0.5)));
+  ctx.restore();
+}
+
+// bottom: height of the note band the legend stays above.
+function drawLegend(ctx, { width, height, gsdE, units, contours, propertyColor = null, bottom = 0, scale, colors }) {
   const pad = 10 * scale, line = 18 * scale;
   const u = unitMeters(units), suffix = unitSuffix(units);
   const barUnits = niceLength((width * 0.18) * gsdE / u);
   const barPx = barUnits * u / gsdE;
   const rows = [];
   if (contours) rows.push(`Contours ${contours.interval} ${suffix} · index every ${+(contours.interval * CONTOUR_INDEX_EVERY).toFixed(3)} ${suffix}`);
+  if (propertyColor) rows.push('Property lines');
   rows.push('Grid north up');
+  const swatch = contours || propertyColor ? 34 * scale : 0;
   ctx.save();
   ctx.font = `600 ${12 * scale}px system-ui, -apple-system, "Segoe UI", sans-serif`;
   const textW = Math.max(...rows.map(t => ctx.measureText(t).width), barPx + 70 * scale);
-  const boxW = textW + pad * 2 + (contours ? 34 * scale : 0), boxH = pad * 2 + line * (rows.length + 1) + 6 * scale;
-  const x = 14 * scale, y = height - boxH - 14 * scale;
+  const boxW = textW + pad * 2 + swatch, boxH = pad * 2 + line * (rows.length + 1) + 6 * scale;
+  const x = 14 * scale, y = height - bottom - boxH - 14 * scale;
   ctx.fillStyle = 'rgba(255,255,255,0.88)'; ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1 * scale;
   ctx.beginPath(); ctx.rect(x, y, boxW, boxH); ctx.fill(); ctx.stroke();
   ctx.fillStyle = '#1b1b1b'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
@@ -128,7 +171,13 @@ function drawLegend(ctx, { width, height, gsdE, units, contours, scale, colors }
     ctx.strokeStyle = colors.minor; ctx.lineWidth = 1 * scale;
     ctx.beginPath(); ctx.moveTo(x + pad, cy + 3 * scale); ctx.lineTo(x + pad + 26 * scale, cy + 3 * scale); ctx.stroke();
   }
-  const tx = x + pad + (contours ? 34 * scale : 0);
+  if (propertyColor) {
+    const py = cy + (contours ? line : 0);
+    ctx.beginPath(); ctx.moveTo(x + pad, py); ctx.lineTo(x + pad + 26 * scale, py);
+    ctx.strokeStyle = PROPERTY_LINE.halo; ctx.lineWidth = PROPERTY_LINE.haloWidth * scale; ctx.stroke();
+    ctx.strokeStyle = propertyColor; ctx.lineWidth = PROPERTY_LINE.width * scale; ctx.stroke();
+  }
+  const tx = x + pad + swatch;
   for (const row of rows) { ctx.fillText(row, tx, cy); cy += line; }
   // scale bar
   const by = cy + 2 * scale;
@@ -239,11 +288,12 @@ function putPixels(ctx, rgba, width, height) {
  *   extent: UTM extent, longEdge, format: 'png'|'tif',
  *   contours: { features: [{coords:[E,N...], isIndex, label}], interval, units } | null,
  *   colors, propertyLines: [[[E,N],...], ...] | null, propertyStyle: { color } | null,
+ *   propertyAttribution: the parcel source and its credit, printed after the "not a survey" note,
  *   units, createCanvas, pool, signal
  * }
  */
 export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 4096, format = 'png', contours = null,
-  colors = CONTOUR_COLORS.brown, propertyLines = null, propertyStyle = null, units = 'imperial', createCanvas, pool, signal,
+  colors = CONTOUR_COLORS.brown, propertyLines = null, propertyStyle = null, propertyAttribution = '', units = 'imperial', createCanvas, pool, signal,
   maxStripPixels } = {}) {
   abortIf(signal);
   const extent = clampExtent(requested, ortho);
@@ -258,18 +308,20 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
   } catch { throw tooLarge(); }
   const release = () => { canvas.width = 0; canvas.height = 0; };
   if (!ctx || canvas.width !== width || canvas.height !== height) { release(); throw tooLarge(); }
+  const scale = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
+  let note = null;
   try {
+    if (propertyLines?.length) note = layoutPropertyNote(ctx, { width, height, scale, attribution: propertyAttribution });
     const { rgba } = await renderOrthoPixels({ ds: ortho, extent, width, height, signal, pool, maxStripPixels, background: print ? [255, 255, 255] : null });
     putPixels(ctx, rgba, width, height);
   } catch (error) { release(); if (error instanceof RangeError) throw tooLarge(); throw error; }
-  const scale = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
   const project = (e, n) => [(e - extent.minE) / gsdE, (extent.maxN - n) / gsdN];
   let drawn = null;
   if (contours?.features?.length) drawn = drawContours(ctx, contours.features, project, { colors, scale, width, height });
   let propertyCount = 0;
+  const lineColor = propertyStyle?.color || PROPERTY_LINE.color;
   if (propertyLines?.length) {
     ctx.save(); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-    const lineColor = propertyStyle?.color || PROPERTY_LINE.color;
     for (const [style, w] of [[PROPERTY_LINE.halo, PROPERTY_LINE.haloWidth], [lineColor, PROPERTY_LINE.width]]) {
       ctx.beginPath();
       for (const line of propertyLines) {
@@ -281,7 +333,10 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
     propertyCount = propertyLines.length;
   }
   if (print) {
-    drawLegend(ctx, { width, height, gsdE, units: contours?.units || units, contours, scale, colors });
+    drawLegend(ctx, { width, height, gsdE, units: contours?.units || units, contours, propertyColor: propertyCount ? lineColor : null, bottom: note?.bandHeight || 0, scale, colors });
+  }
+  if (note) drawPropertyNote(ctx, note, { width, height });
+  if (print) {
     // A canvas the browser could not back reads as blank: the print's
     // corner is always opaque (white or imagery).
     const corner = ctx.getImageData(width - 1, height - 1, 1, 1).data;
@@ -347,6 +402,7 @@ export function encodePrintGeoTiff({ rgba, width, height, extent, epsg }) {
 export async function exportOrthoPrint({ format = 'png', epsg = null, traceContours = null, checkpoint = null, ...opts }) {
   const extent = clampExtent(opts.extent, opts.ortho);
   if (!extent) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
+  if (opts.propertyLines?.length && !opts.propertyAttribution) throw Object.assign(new Error('The property line source is not available. Export without property lines.'), { code: 'print_note' });
   if (format === 'tif' && !(Number.isInteger(epsg) && epsg > 0)) throw Object.assign(new Error('GeoTIFF needs a verified coordinate reference. Export PNG instead.'), { code: 'print_crs' });
   if (format === 'tif' || (epsg && (traceContours || opts.propertyLines?.length))) verifyOrthoCrs(opts.ortho, epsg, { requireDeclared: format === 'tif' });
   const { width, gsdE } = printLayout(extent, opts.longEdge ?? 4096);

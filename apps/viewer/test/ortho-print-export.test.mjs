@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { fromArrayBuffer } from 'geotiff';
 import { buildContours, contourLevels, CONTOUR_COLORS, METERS_PER_FOOT } from '../contours.mjs';
-import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, canvasWorks, printLongEdge, verifyOrthoCrs, clampExtent, encodePrintGeoTiff, exportOrthoPrint, orthoPrintPolicy, pickOrthoLevel, printLayout, renderOrthoPixels, renderOrthoPrint, supportedPrintSizes } from '../ortho-print-export.mjs';
+import { BRAND_COLORS } from '../brand-colors.mjs';
+import { propertyLinesSourceText } from '../property-lines-layer.mjs';
+import { PROPERTY_LINES_NOTE, VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, canvasWorks, printLongEdge, verifyOrthoCrs, clampExtent, encodePrintGeoTiff, exportOrthoPrint, layoutPropertyNote, orthoPrintPolicy, pickOrthoLevel, printLayout, renderOrthoPixels, renderOrthoPrint, supportedPrintSizes } from '../ortho-print-export.mjs';
+
+const ATTRIBUTION = 'Source: Synthetic Parcel Map R1. Product of the synthetic parcel project.';
 
 // Synthetic orthophoto: 400 x 200 m at 0.5 m (level 0) and 1 m (level 1).
 // Red encodes the column, green the row; a 4th band is alpha with a hole.
@@ -120,7 +125,7 @@ test('orthophoto CRS must match the model and be north-up; mismatches are refuse
   for (const img of ds.images) img.getGeoKeys = () => ({ ProjectedCSTypeGeoKey: 32617 });
   const extent = { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200 };
   await assert.rejects(exportOrthoPrint({ ortho: ds, extent, longEdge: 400, format: 'tif', epsg: 32616, createCanvas: fakeCanvasFactory([]) }), { code: 'print_crs' });
-  await assert.rejects(exportOrthoPrint({ ortho: ds, extent, longEdge: 400, format: 'png', epsg: 32616, propertyLines: [[[500050, 4700050], [500060, 4700060]]], createCanvas: fakeCanvasFactory([]) }), { code: 'print_crs' }, 'overlays would misalign');
+  await assert.rejects(exportOrthoPrint({ ortho: ds, extent, longEdge: 400, format: 'png', epsg: 32616, propertyLines: [[[500050, 4700050], [500060, 4700060]]], propertyAttribution: ATTRIBUTION, createCanvas: fakeCanvasFactory([]) }), { code: 'print_crs' }, 'overlays would misalign');
   assert.equal(reads.length, 0);
 });
 
@@ -178,7 +183,7 @@ test('export traces contours for the print extent and burns lines, ft labels and
   const result = await exportOrthoPrint({
     ortho: ds, extent: { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200 }, longEdge: 2048, format: 'png',
     traceContours, colors: CONTOUR_COLORS.brown, units: 'imperial', createCanvas: fakeCanvasFactory(log),
-    propertyLines: [[[500050, 4700050], [500350, 4700050], [500350, 4700150], [500050, 4700050]]],
+    propertyLines: [[[500050, 4700050], [500350, 4700050], [500350, 4700150], [500050, 4700050]]], propertyAttribution: ATTRIBUTION,
   });
   assert.equal(result.filename, 'orthophoto-contours-2048px.png');
   assert.deepEqual([result.width, result.height], [2048, 1024]);
@@ -190,10 +195,10 @@ test('export traces contours for the print extent and burns lines, ft labels and
   assert.ok(texts.includes('750ft') && texts.includes('800ft'), texts.join(','));
   assert.ok(texts.some(t => /Contours 10 ft · index every 50 ft/.test(t)), 'legend states interval and index');
   assert.ok(ops.some(o => o[0] === 'set' && o[1] === 'strokeStyle' && o[2] === CONTOUR_COLORS.brown.index), 'index colour used');
-  assert.ok(ops.some(o => o[0] === 'set' && o[1] === 'strokeStyle' && o[2] === '#FFD60A'), 'property lines drawn');
+  assert.ok(ops.some(o => o[0] === 'set' && o[1] === 'strokeStyle' && o[2] === BRAND_COLORS.orange), 'property lines drawn, brand orange by default');
   const tif = await exportOrthoPrint({
     ortho: ds, extent: { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200 }, longEdge: 400, format: 'tif', epsg: 32616,
-    traceContours, units: 'imperial', createCanvas: fakeCanvasFactory([]), propertyLines: [[[500050, 4700050], [500350, 4700050]]], propertyStyle: { color: '#F97316' },
+    traceContours, units: 'imperial', createCanvas: fakeCanvasFactory([]), propertyLines: [[[500050, 4700050], [500350, 4700050]]], propertyStyle: { color: '#F97316' }, propertyAttribution: ATTRIBUTION,
   });
   assert.equal(tif.filename, 'orthophoto-contours-400px.tif');
   const geo = await (await fromArrayBuffer(await tif.blob.arrayBuffer())).getImage();
@@ -207,4 +212,152 @@ test('GeoTIFF export refuses an unverified CRS before reading pixels', async () 
   const { ds, reads } = orthoFixture();
   await assert.rejects(exportOrthoPrint({ ortho: ds, extent: { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200 }, format: 'tif', epsg: null, createCanvas: fakeCanvasFactory([]) }), { code: 'print_crs' });
   assert.equal(reads.length, 0);
+});
+
+// A small software canvas: rectangles, strokes and text boxes become real
+// pixels, so what covers what can be checked without a browser.
+function pixelCanvasFactory(log) {
+  return () => {
+    let data = null, path = [], state = { fillStyle: '#000000', strokeStyle: '#000000', font: '10px x', lineWidth: 1 };
+    const stack = [], texts = [], canvas = { width: 0, height: 0 };
+    const colour = style => {
+      if (style.startsWith('#')) return [1, 3, 5].map(i => parseInt(style.slice(i, i + 2), 16)).concat(1);
+      const [r, g, b, a = 1] = style.match(/[\d.]+/g).map(Number);
+      return [r, g, b, a];
+    };
+    const dot = (x, y, [r, g, b, a]) => {
+      if (!data || x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return;
+      const i = (y * canvas.width + x) * 4;
+      [r, g, b].forEach((v, k) => { data[i + k] = Math.round(v * a + data[i + k] * (1 - a)); });
+      data[i + 3] = Math.max(data[i + 3], Math.round(a * 255));
+    };
+    const rect = (x, y, w, h, c) => { for (let yy = Math.round(y); yy < Math.round(y + h); yy++) for (let xx = Math.round(x); xx < Math.round(x + w); xx++) dot(xx, yy, c); };
+    const px = () => Number(/([\d.]+)px/.exec(state.font)[1]);
+    const width = text => text.length * px() * 0.55;
+    const ctx = {
+      save() { stack.push({ ...state }); }, restore() { state = stack.pop(); },
+      measureText: text => ({ width: width(text) }),
+      putImageData(image) { data = new Uint8ClampedArray(image.data); },
+      createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
+      getImageData(x, y, w, h) { const out = new Uint8ClampedArray(w * h * 4); for (let r = 0; r < h; r++) out.set(data.subarray(((y + r) * canvas.width + x) * 4, ((y + r) * canvas.width + x + w) * 4), r * w * 4); return { data: out }; },
+      fillRect(x, y, w, h) { rect(x, y, w, h, colour(state.fillStyle)); },
+      fillText(text, x, y) { texts.push({ text, x, y, px: px(), width: width(text) }); rect(x, y - px() * 0.35, width(text), px() * 0.7, colour(state.fillStyle)); },
+      beginPath() { path = []; }, moveTo(x, y) { path.push([x, y, true]); }, lineTo(x, y) { path.push([x, y, false]); }, rect(x, y, w, h) { path.box = [x, y, w, h]; },
+      fill() { if (path.box) rect(...path.box, colour(state.fillStyle)); },
+      stroke() {
+        const half = state.lineWidth / 2, c = colour(state.strokeStyle);
+        for (let i = 1; i < path.length; i++) {
+          if (path[i][2]) continue;
+          const [x0, y0] = path[i - 1], [x1, y1] = path[i], steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0));
+          for (let s = 0; s <= steps; s++) rect(x0 + (x1 - x0) * s / steps - half, y0 + (y1 - y0) * s / steps - half, half * 2, half * 2, c);
+        }
+      },
+    };
+    for (const key of ['lineJoin', 'lineCap', 'textBaseline', 'textAlign']) ctx[key] = '';
+    for (const key of Object.keys(state)) Object.defineProperty(ctx, key, { get: () => state[key], set: value => { state[key] = value; } });
+    canvas.getContext = () => ctx;
+    canvas.toBlob = cb => cb(new Blob(['png'], { type: 'image/png' }));
+    log.push({ texts, ctx, pixel: (x, y) => { const i = (y * canvas.width + x) * 4; return Array.from(data.slice(i, i + 4)); } });
+    return canvas;
+  };
+}
+const FULL = { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200 };
+// A parcel running along the bottom edge, under where the note goes.
+const PARCEL = [[[500050, 4700001], [500350, 4700001], [500350, 4700150], [500050, 4700150], [500050, 4700001]]];
+const printWith = async (options = {}) => {
+  const log = [], { ds } = orthoFixture();
+  const result = await renderOrthoPrint({ ortho: ds, extent: FULL, longEdge: 2048, propertyLines: PARCEL, propertyAttribution: ATTRIBUTION, createCanvas: pixelCanvasFactory(log), ...options });
+  return { result, ...log[0] };
+};
+const joined = texts => texts.map(t => t.text).join(' ');
+const NOTE = `${PROPERTY_LINES_NOTE} ${ATTRIBUTION}`;
+
+test('property lines never print without the "not a survey" note and the source: PNG and GeoTIFF, text and pixels', async () => {
+  for (const format of ['png', 'tif']) {
+    const { result, texts, pixel } = await printWith({ format });
+    const note = texts.filter(t => t.y > result.height - 36);
+    assert.equal(joined(note), NOTE, format);
+    for (const line of note) assert.ok(line.x >= 0 && line.x + line.width <= result.width && line.y + line.px / 2 <= result.height, 'whole text inside the image');
+    // The band is opaque, edge to edge, with dark text on it; the parcel line under it does not show through.
+    const y = Math.round(note[0].y), x = Math.round(note[0].x + note[0].width / 2);
+    assert.deepEqual(pixel(x, y), [27, 27, 27, 255], `${format}: text ink`);
+    const bottom = result.height - 1, lineX = Math.round(200 / 400 * result.width);
+    for (const at of [0, lineX, result.width - 1]) assert.deepEqual(pixel(at, bottom), [255, 255, 255, 255], `${format}: band at ${at}`);
+    // The same lines are there above the band.
+    assert.deepEqual(pixel(lineX, Math.round(50 / 200 * result.height)), [0xee, 0x50, 0x07, 255], `${format}: line pixel`);
+    assert.equal(result.propertyLines, 1);
+  }
+});
+
+test('the legend names the property lines and stays clear of the note', async () => {
+  const { result, texts, pixel } = await printWith();
+  const row = texts.find(t => t.text === 'Property lines');
+  assert.ok(row, 'legend row');
+  // The swatch beside it is the line colour.
+  assert.deepEqual(pixel(Math.round(row.x - 20 * 1.28), Math.round(row.y)), [0xee, 0x50, 0x07, 255]);
+  const others = texts.filter(t => t.y <= result.height - 36);
+  assert.deepEqual(others.map(t => t.text).slice(0, 2), ['Property lines', 'Grid north up']);
+  assert.ok(others.some(t => /ft$/.test(t.text)), 'scale bar');
+  for (const other of others) assert.ok(other.y + other.px / 2 < result.height - 36, other.text);
+  const tif = await printWith({ format: 'tif' });
+  assert.equal(joined(tif.texts), NOTE, 'a GeoTIFF still has no legend');
+});
+
+test('no property lines, no note: the rest of the image is unchanged', async () => {
+  for (const propertyLines of [null, []]) {
+    const { texts, result, pixel } = await printWith({ propertyLines });
+    assert.doesNotMatch(joined(texts), /survey|Source|Property lines/);
+    assert.notDeepEqual(pixel(result.width - 1, result.height - 1), [255, 255, 255, 255], 'imagery at the bottom edge');
+  }
+});
+
+test('the note wraps on narrow prints, and an image too small for it is refused rather than printed without it', async () => {
+  const narrow = await printWith({ extent: { ...FULL, minE: 500200, maxE: 500230 }, propertyLines: [[[500210, 4700010], [500220, 4700190]]] });
+  const scale = 2048 / 1600, start = narrow.texts.findIndex(t => t.text.startsWith('Property lines are'));
+  const lines = narrow.texts.slice(start);
+  assert.ok(start > 0 && lines.length >= 2, `${lines.length} lines at ${narrow.result.width} px`);
+  assert.equal(joined(lines), NOTE);
+  for (const line of lines) assert.ok(line.x + line.width <= narrow.result.width && line.px >= 9 && line.y + line.px / 2 <= narrow.result.height, 'legible and inside');
+  for (const other of narrow.texts.slice(0, start)) assert.ok(other.y < lines[0].y - 14 * scale, 'legend above the note');
+  const { ds, reads } = orthoFixture();
+  await assert.rejects(renderOrthoPrint({ ortho: ds, extent: FULL, longEdge: 120, propertyLines: PARCEL, propertyAttribution: ATTRIBUTION, createCanvas: pixelCanvasFactory([]) }), { code: 'print_note' });
+  assert.equal(reads.length, 0, 'refused before reading pixels');
+  await renderOrthoPrint({ ortho: ds, extent: FULL, longEdge: 120, createCanvas: pixelCanvasFactory([]) });
+  // The sizes people print all take the note at legend size, even with a long credit.
+  const ctx = pixelCanvasFactory([])().getContext(), credit = Array(4).fill(ATTRIBUTION).join(' ');
+  for (const [width, height] of [[2048, 1024], [4096, 4096], [6144, 4608], [1280, 720], [720, 1280], [375, 812]]) {
+    const size = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
+    const note = layoutPropertyNote(ctx, { width, height, scale: size, attribution: credit });
+    assert.equal(note.font.split('px')[0], `600 ${12 * size}`, `${width} x ${height}`);
+    assert.equal(note.lines.join(' '), `${PROPERTY_LINES_NOTE} ${credit}`);
+  }
+});
+
+test('export refuses property lines whose source is not known', async () => {
+  for (const format of ['png', 'tif']) {
+    const { ds, reads } = orthoFixture();
+    await assert.rejects(exportOrthoPrint({ ortho: ds, extent: FULL, longEdge: 400, format, epsg: 32616, propertyLines: PARCEL, createCanvas: fakeCanvasFactory([]) }), { code: 'print_note' });
+    assert.equal(reads.length, 0);
+  }
+});
+
+test('GeoTIFF export carries the note in its pixels', async () => {
+  const { ds } = orthoFixture();
+  const corner = async propertyLines => {
+    const out = await exportOrthoPrint({ ortho: ds, extent: FULL, longEdge: 800, format: 'tif', epsg: 32616, propertyLines, propertyAttribution: ATTRIBUTION, createCanvas: pixelCanvasFactory([]) });
+    const image = await (await fromArrayBuffer(await out.blob.arrayBuffer())).getImage();
+    assert.deepEqual(image.getBoundingBox(), [500000, 4700000, 500400, 4700200], 'georeference unchanged');
+    return Array.from(await image.readRasters({ window: [0, image.getHeight() - 1, 1, image.getHeight()], interleave: true }));
+  };
+  assert.deepEqual(await corner(PARCEL), [255, 255, 255, 255]);
+  assert.equal((await corner(null))[3], 0, 'nodata stays transparent without property lines');
+});
+
+test('the Viewer prints the same source as its on-screen notice, taken with the lines', () => {
+  assert.equal(propertyLinesSourceText({ name: 'Synthetic Parcel Map', release: 'R1' }), 'Source: Synthetic Parcel Map R1.');
+  assert.equal(propertyLinesSourceText(null), '');
+  const layer = readFileSync(new URL('../property-lines-layer.mjs', import.meta.url), 'utf8'), main = readFileSync(new URL('../main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.ok(layer.includes('`' + PROPERTY_LINES_NOTE + ' ${propertyLinesSourceText(source)}`'), 'one wording on screen and in print');
+  assert.match(main, /function propertyLinesForPrint\(\)[\s\S]*?return \{ lines, color: [^\n]*attribution: propertyLines\.attribution\(\) \};\n\}/);
+  assert.match(main, /propertyAttribution: drawnLines\.attribution \|\| ''/);
 });
