@@ -46,11 +46,13 @@ export function childFolders(folders, parentId) {
 }
 
 // Folder ids from the top level down to folderId; stops at unknown ids and cycles.
-// Keeps the most recently opened projects (insertion order), never dropping `keep`.
-export function limitOpenProjects(projects, keep = null, limit = MAX_OPEN_PROJECTS) {
+// Keeps the most recently opened projects (insertion order: re-opening moves a project to the
+// end), never dropping a project in `keep` (one id or a list).
+export function limitOpenProjects(projects, keep = [], limit = MAX_OPEN_PROJECTS) {
+  const kept = new Set([keep].flat().filter(Boolean));
   for (const id of [...projects]) {
     if (projects.size <= limit) break;
-    if (id !== keep) projects.delete(id);
+    if (!kept.has(id)) projects.delete(id);
   }
   return projects;
 }

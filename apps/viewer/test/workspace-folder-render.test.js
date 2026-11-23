@@ -108,6 +108,7 @@ test('URLs name the project and task only; an old folder link and the open task 
     URL, URLSearchParams, location: { href: 'https://viewer.example/workspace', origin: 'https://viewer.example' }, WORKSPACE_SECTIONS: new Set(['dashboard', 'providers']), projectDataGeneration: 0,
     state: { section: 'dashboard', selectedProjectId: 'p', expandedTaskId: null, taskPage: null, tasks: [{ id: 'task', projectId: 'p', folderId: 'f' }] },
     treeState: { projects: new Set(), folders: new Set() }, treeReveals: new Map(), saveTreeState: () => saved.push(1),
+    touchOpenProject: id => { context.treeState.projects.delete(id); context.treeState.projects.add(id); },
     folderCache: new Map([['p', { folders: [{ id: 'top', projectId: 'p', parentId: null }, { id: 'f', projectId: 'p', parentId: 'top' }] }]]),
   };
   vm.createContext(context);
@@ -306,4 +307,70 @@ test('Delete and F2 follow the task menu rules: nothing for a read-only project 
   // F2 on a task or project row uses the same write rules as the menus.
   assert.match(source, /kind==='t'&&taskWritable\(state\.tasks\.find\(task=>task\.id===id\)\)\)editTask\(id\)/);
   assert.match(source, /kind==='p'&&canWriteFolders\(state\.projects\.find\(project=>project\.id===id\)\)\)editProject\(id\)/);
+});
+
+test('re-opening a project makes it the newest; one dropped past ten closes on the page at once', async () => {
+  const { limitOpenProjects } = await treeModule();
+  const start = source.indexOf('// Opening (or re-opening) a project makes it the newest'), end = source.indexOf('\nfunction invalidateFolderAuthorization(', start);
+  const removed = [], heads = [], focused = [];
+  const section = id => ({ id, contains: () => id === 'p0', remove() { removed.push(id); }, closest: () => ({ classList: { remove: name => removed.push(`${id}:${name}`) } }) });
+  const writes = [];
+  const context = {
+    limitOpenProjects, writeTreeState: (_storage, _subject, tree) => writes.push([...tree.projects]), globalThis: {},
+    state: { section: 'dashboard', selectedProjectId: 'p5', projects: Array.from({ length: 12 }, (_, index) => ({ id: `p${index}` })) },
+    treeState: { projects: new Set(Array.from({ length: 10 }, (_, index) => `p${index}`)), folders: new Set() }, treeSubject: 'ops:alice', draggedFolderTask: null,
+    CSS: { escape: String }, document: { activeElement: {} },
+    content: { querySelector: selector => section(selector.match(/"([^"]+)"/)[1]) },
+    syncProjectHead: project => heads.push(project.id), focusTreeRow: key => focused.push(key),
+  };
+  vm.createContext(context);
+  vm.runInContext('function isProjectOpen(projectId){return state.section===\'dashboard\'&&(projectId===state.selectedProjectId||treeState.projects.has(projectId))}\n' + source.slice(start, end), context);
+  // p0 is re-opened, so p1 is now the oldest and the one that closes when p10 opens.
+  context.touchOpenProject('p0'); context.touchOpenProject('p10'); context.saveTreeState();
+  assert.equal(context.treeState.projects.has('p0'), true);
+  assert.equal(context.treeState.projects.has('p1'), false);
+  assert.deepEqual(removed, ['p1:selected', 'p1']); assert.deepEqual(heads, ['p1']);
+  assert.deepEqual(writes.at(-1).slice(-2), ['p0', 'p10']);
+  // A dropped project that held focus hands it to its own row; the drag's project is never dropped.
+  context.draggedFolderTask = { projectId: 'p2' };
+  context.touchOpenProject('p11'); context.saveTreeState();
+  assert.equal(context.treeState.projects.has('p2'), true);
+  assert.equal(context.treeState.projects.has('p3'), false);
+  context.draggedFolderTask = null;
+  context.treeState.projects = new Set(['p0', ...Array.from({ length: 9 }, (_, index) => `p${index + 3}`), 'p11']);
+  context.treeState.projects.delete('p0'); context.treeState.projects = new Set(['p0', ...context.treeState.projects]);
+  context.touchOpenProject('p1'); context.saveTreeState();
+  assert.equal(context.treeState.projects.has('p0'), false);
+  assert.deepEqual(focused, ['p:p0']);
+});
+
+test('an Undo that lands late leaves focus where the user went meanwhile', () => {
+  const start = source.indexOf('function captureUndoFocus('), end = source.indexOf('\nasync function deleteTaskWithUndo(', start);
+  const focused = [];
+  const element = (name, inTree = false) => ({ name, isConnected: true, closest: () => (inTree ? {} : null), focus() { context.document.activeElement = this; } });
+  const body = { name: 'body', isConnected: true, closest: () => null };
+  const context = { document: { body, activeElement: body }, focusTreeRow: key => focused.push(key), focusLocator: () => null };
+  vm.createContext(context); vm.runInContext(source.slice(start, end), context);
+  // Undo clicked: its control (then gone) had focus, so the restored row may take it ...
+  let focus = context.captureUndoFocus();
+  assert.equal(focus.mode, 'tree');
+  // ... but not after the user clicks into the search box while the restore and reload run.
+  context.document.activeElement = element('search');
+  context.settleUndoFocus(focus, 't:one');
+  assert.deepEqual(focused, []);
+  assert.equal(context.document.activeElement.name, 'search');
+  // Focus still in the tree, or on nothing, is taken over.
+  context.document.activeElement = element('row', true);
+  context.settleUndoFocus(focus, 't:one');
+  context.document.activeElement = body;
+  context.settleUndoFocus(focus, 't:two');
+  assert.deepEqual(focused, ['t:one', 't:two']);
+  // A control the user had chosen before Undo keeps focus or gets it back after a render.
+  const chosen = element('filter');
+  context.document.activeElement = chosen;
+  focus = context.captureUndoFocus();
+  context.document.activeElement = body;
+  context.settleUndoFocus(focus, 't:three');
+  assert.equal(context.document.activeElement, chosen);
+  assert.deepEqual(focused, ['t:one', 't:two']);
 });

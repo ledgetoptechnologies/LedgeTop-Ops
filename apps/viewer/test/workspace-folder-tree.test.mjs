@@ -96,3 +96,8 @@ test('at most ten projects stay open: the most recently opened, never the select
   assert.equal(open.size, 10); assert.ok(open.has('p0'), 'the selected project stays open'); assert.ok(open.has('p13'));
   assert.equal(open.has('p1'), false);
 });
+
+test('the open-project limit keeps every protected project', () => {
+  const open = limitOpenProjects(new Set(Array.from({ length: 12 }, (_, index) => `p${index}`)), ['p0', 'p1', null]);
+  assert.deepEqual([...open], ['p0', 'p1', ...Array.from({ length: 8 }, (_, index) => `p${index + 4}`)]);
+});

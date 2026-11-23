@@ -67,10 +67,29 @@ function loadTreeState(){
   const subject=state.adminSession?.subject||null;
   if(subject===treeSubject)return;
   treeSubject=subject;treeState=readTreeState(globalThis.localStorage,subject);
-  if(state.selectedProjectId)treeState.projects.add(state.selectedProjectId);
+  if(state.selectedProjectId)touchOpenProject(state.selectedProjectId);
 }
-// Saved only once the signed-in user is known; before that the tree lives in memory.
-function saveTreeState(){limitOpenProjects(treeState.projects,state.selectedProjectId);if(treeSubject)writeTreeState(globalThis.localStorage,treeSubject,treeState)}
+// Opening (or re-opening) a project makes it the newest of the open projects.
+function touchOpenProject(projectId){treeState.projects.delete(projectId);treeState.projects.add(projectId)}
+// Saved only once the signed-in user is known; before that the tree lives in memory. Only the ten
+// newest open projects stay open; one dropped here closes on the page at once (the selected
+// project and the one a task is being dragged from are kept).
+function saveTreeState(){
+  const before=[...treeState.projects];
+  limitOpenProjects(treeState.projects,[state.selectedProjectId,draggedFolderTask?.projectId]);
+  for(const projectId of before)if(!treeState.projects.has(projectId))closeDroppedProject(projectId);
+  if(treeSubject)writeTreeState(globalThis.localStorage,treeSubject,treeState);
+}
+function closeDroppedProject(projectId){
+  if(isProjectOpen(projectId))return;
+  const section=content.querySelector(`[data-tree-body="${CSS.escape(projectId)}"]`),project=state.projects.find(item=>item.id===projectId);
+  if(!section||!project)return;
+  const hadFocus=section.contains(document.activeElement);
+  section.closest('.project-row')?.classList.remove('selected');
+  section.remove();
+  syncProjectHead(project);
+  if(hadFocus)focusTreeRow(`p:${projectId}`,{scroll:false});
+}
 function invalidateFolderAuthorization(){
   folderAuthorizationGeneration++;folderCache.clear();
   projectDataGeneration++;
@@ -131,7 +150,7 @@ function revealTreeFolder(projectId){
   const folderId=treeReveals.get(projectId);treeReveals.delete(projectId);
   const path=folderAncestry(folders,folderId);
   if(!path.length&&folderId)return false;
-  treeState.projects.add(projectId);path.forEach(id=>treeState.folders.add(id));saveTreeState();
+  touchOpenProject(projectId);path.forEach(id=>treeState.folders.add(id));saveTreeState();
   return true;
 }
 function folderPath(folders, folderId) {
@@ -277,7 +296,7 @@ function applyWorkspaceView(view){
   state.section=nextSection;state.selectedProjectId=nextProject;
   if(nextProject){
     // A project in the URL is open in the tree; an old ?folder= link opens that folder's path.
-    if(!treeState.projects.has(nextProject)){treeState.projects.add(nextProject);saveTreeState();}
+    touchOpenProject(nextProject);saveTreeState();
     if(view?.selectedFolderId)treeReveals.set(nextProject,view.selectedFolderId);
   }
   state.expandedTaskId=state.selectedProjectId&&view?.expandedTaskId?view.expandedTaskId:null;
@@ -906,7 +925,7 @@ async function action(element){
   if(action==='project-process')return processModal(id);
   if(action==='project-share')return openShareModal(id);
   if(action==='trash-dataset')return trashMutation('Delete this dataset? It will remain recoverable in the Recycle Bin for 14 days.',`/api/v1/datasets/${encodeURIComponent(id)}`,'Dataset moved to Recycle Bin');
-  if(action==='toggle-task'){if(state.expandedTaskId===id)return collapseTask(id);if(state.expandedTaskId)releaseGcpImage(gcpWorkspace(state.expandedTaskId));const opened=state.tasks.find(item=>item.id===id);if(opened&&opened.projectId!==state.selectedProjectId){state.selectedProjectId=opened.projectId;treeState.projects.add(opened.projectId);saveTreeState();}state.expandedTaskId=id;state.taskDetails[id]={loading:true};syncWorkspaceView('push');render();animateOpenedTask(id);return refreshTaskDetails(id)}
+  if(action==='toggle-task'){if(state.expandedTaskId===id)return collapseTask(id);if(state.expandedTaskId)releaseGcpImage(gcpWorkspace(state.expandedTaskId));const opened=state.tasks.find(item=>item.id===id);if(opened&&opened.projectId!==state.selectedProjectId){state.selectedProjectId=opened.projectId;touchOpenProject(opened.projectId);saveTreeState();}state.expandedTaskId=id;state.taskDetails[id]={loading:true};syncWorkspaceView('push');render();animateOpenedTask(id);return refreshTaskDetails(id)}
   if(action==='gcp-open-image')return openGcpImage(taskId,id);
   if(action==='gcp-edit-mark')return editGcpMark(taskId,id);
   if(action==='gcp-delete-mark')return deleteGcpMark(taskId,id);
@@ -1052,7 +1071,7 @@ function toggleTreeProject(projectId,open=!isProjectOpen(projectId)){
   if(!state.projects.some(project=>project.id===projectId))return;
   treeCurrentKey=`p:${projectId}`;
   if(open){
-    treeState.projects.add(projectId);saveTreeState();
+    touchOpenProject(projectId);saveTreeState();
     // An open task keeps the URL; otherwise the project just opened becomes the selected one.
     if(state.expandedTaskId&&state.selectedProjectId&&state.selectedProjectId!==projectId)return render();
     return navigateWorkspace({section:'dashboard',selectedProjectId:projectId,expandedTaskId:null},'push');
@@ -1095,7 +1114,7 @@ function startNewFolder(projectId,parentId=null){
   if(!folders)return toast('Folders are still loading.',true);
   if(parentId&&!folders.some(folder=>folder.id===parentId))return;
   treeRenaming=null;treePending={projectId,parentId};
-  treeState.projects.add(projectId);if(parentId)folderAncestry(folders,parentId).forEach(id=>treeState.folders.add(id));saveTreeState();
+  touchOpenProject(projectId);if(parentId)folderAncestry(folders,parentId).forEach(id=>treeState.folders.add(id));saveTreeState();
   if(content.querySelector(`[data-tree-body="${CSS.escape(projectId)}"]`))patchProjectTree(projectId);else render();
   focusInlineName(projectId);
 }
@@ -1184,7 +1203,7 @@ function canDragFolderTask(task){
 }
 // A move shows where the task went: its destination project and folders open.
 function revealTaskDestination(projectId,folderId){
-  treeState.projects.add(projectId);
+  touchOpenProject(projectId);
   const folders=folderCache.get(projectId)?.folders;
   if(folderId&&folders)folderAncestry(folders,folderId).forEach(id=>treeState.folders.add(id));
   else if(folderId)treeReveals.set(projectId,folderId);
@@ -1342,7 +1361,7 @@ function expandDuringDrag(element){
   if(!project)return;
   if(key.startsWith('f:')){treeState.folders.add(key.slice(2));saveTreeState();projectPaintPending=patchProjectTree(projectId)||projectPaintPending;return;}
   const article=element.closest('.project-row');
-  treeState.projects.add(projectId);saveTreeState();
+  touchOpenProject(projectId);saveTreeState();
   if(!article||article.querySelector('[data-tree-body]'))return;
   article.classList.add('selected');
   article.insertAdjacentHTML('beforeend',projectTree(project));
@@ -1478,6 +1497,9 @@ function captureUndoFocus(){
   return{mode:'other',element,locate:focusLocator(element)};
 }
 function settleUndoFocus(focus,key){
+  // Re-checked when the restore lands: a control the user went to meanwhile keeps focus.
+  const active=document.activeElement;
+  if(active&&active!==document.body&&active.isConnected&&!active.closest?.('#project-list')&&active!==focus.element)return;
   if(focus.mode==='tree'){focusTreeRow(key);return;}
   const target=focus.element.isConnected?focus.element:focus.locate?.();
   if(target&&document.activeElement!==target)target.focus({preventScroll:true});
