@@ -8,6 +8,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {acquireBrowserHarnessLock} from './browser-lock.mjs';
+import {FINE_POINTER_SWITCH,assertFinePointer} from './fine-pointer.mjs';
 
 // Real shipped header/CSS and navigation/workspace modules in a fresh hidden
 // browser. The surface, session, recovery flag and destination spy are local
@@ -80,10 +81,10 @@ test('shipped Viewer header and same-tab measurement leave guard in an isolated 
   try{
     server=createServer(serve);await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const origin=`http://127.0.0.1:${server.address().port}`;
     profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-header-'));
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',FINE_POINTER_SWITCH,`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);await client.command('Runtime.enable');await client.command('Page.enable');
     async function open(variant='ops',width=1280){
-      await client.command('Emulation.setDeviceMetricsOverride',{width,height:912,deviceScaleFactor:1,mobile:false});const url=`${origin}/?variant=${variant}&width=${width}`;await client.command('Page.navigate',{url});const until=Date.now()+8000;while(Date.now()<until){if(await client.evaluate(`location.href===${JSON.stringify(url)}&&document.body?.dataset.ready==='true'`))return;await delay(25);}throw new Error(`Fixture did not become ready: ${variant}/${width}`);
+      await client.command('Emulation.setDeviceMetricsOverride',{width,height:912,deviceScaleFactor:1,mobile:false});const url=`${origin}/?variant=${variant}&width=${width}`;await client.command('Page.navigate',{url});const until=Date.now()+8000;while(Date.now()<until){if(await client.evaluate(`location.href===${JSON.stringify(url)}&&document.body?.dataset.ready==='true'`)){await assertFinePointer(expression=>client.evaluate(expression),`${width}px ${variant}`);return;}await delay(25);}throw new Error(`Fixture did not become ready: ${variant}/${width}`);
     }
     async function click(selector){const r=await client.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);await client.command('Input.dispatchMouseEvent',{type:'mousePressed',...r,button:'left',clickCount:1});await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',...r,button:'left',clickCount:1});}
     for(const width of [375,768,1024,1280])for(const variant of ['ops','admin','public'])await t.test(`${width}px ${variant} header`,async()=>{

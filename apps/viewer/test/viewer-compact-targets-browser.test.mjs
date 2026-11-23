@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
+import { FINE_POINTER_SWITCH, assertFinePointer } from './fine-pointer.mjs';
 
 // Compact density keeps 32px controls only for a desktop fine pointer. Narrow
 // viewports and coarse pointers must get 44px targets. Both pages use the
@@ -65,7 +66,7 @@ test('compact Viewer targets are 32px on a desktop fine pointer and 44px on phon
     server = createServer(serve); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-targets-'));
-    browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+    browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', FINE_POINTER_SWITCH, `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
     const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     client = await BoundedTestCdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
@@ -77,6 +78,7 @@ test('compact Viewer targets are 32px on a desktop fine pointer and 44px on phon
       const until = Date.now() + 8000;
       while (Date.now() < until) { if (await evaluate(`location.pathname==='/${page}'&&document.readyState==='complete'`)) break; await delay(25); }
       assert.equal(await evaluate(`matchMedia('(pointer: coarse)').matches`), mode.touch, `${mode.name}: pointer emulation`);
+      if (!mode.touch) await assertFinePointer(evaluate, mode.name);
     };
     const measure = selectors => evaluate(`(${JSON.stringify(selectors)}).flatMap(selector=>[...document.querySelectorAll(selector)].filter(element=>element.getClientRects().length).map(element=>{const r=element.getBoundingClientRect();return {target:element.dataset.t||element.id||selector,width:r.width,height:r.height};}))`);
 
