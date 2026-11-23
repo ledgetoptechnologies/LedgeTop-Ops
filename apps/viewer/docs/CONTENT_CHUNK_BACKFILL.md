@@ -11,6 +11,9 @@ have none yet: rasters, camera photos, point clouds, meshes and large EPT or
 - One read pass feeds the whole-file hash and the chunk hashes from the same
   buffer. A set is stored only if that pass reproduces the recorded hash and
   size exactly, so a changed file never gets one.
+- The file is hashed through one descriptor whose path is the registered path
+  inside its root, that ends exactly at the recorded size, and that did not change
+  (device, inode, size, mtime, ctime) during the read.
 - EPT and 3D Tiles children also need their tree digest to follow from the
   registered file rows.
 - A file with no recorded hash is never hashed. It is counted under `skipped`.
@@ -37,7 +40,11 @@ a 64 KB row. `content_chunk_failures` is the retry list.
 It is always on in the processing worker: one file at a time, 1 MiB sequential
 reads, at most 50 MiB/s, read-only. It waits while an import, processing step,
 conversion or measurement runs. A stop or crash loses at most the current file's
-progress; nothing partial is stored.
+progress; nothing partial is stored. Stop and pause are checked again in the
+transaction that records a result.
+
+One scan returns at most 500 digests with 8 places each (4,000 rows). A digest
+with more places moves on to the next 8 at each retry.
 
     node scripts/content-chunk-backfill.js status
     node scripts/content-chunk-backfill.js pause

@@ -13,7 +13,7 @@ const { ViewerRepository } = require('../server/repository');
 const { collectRecoveryCompanions } = require('../server/lodRecoveryCompanions');
 const { recoveryRegistrationIdentity } = require('../server/outputPreservation');
 const { scopedStorageRootKey } = require('../server/storageManager');
-const { ContentChunkBackfill, backfillRoot, contentChunkReport, createByteBudget, scanCandidates, setPaused } = require('../server/contentChunkBackfill');
+const { ContentChunkBackfill, backfillRoot, contentChunkReport, createByteBudget, LOCATIONS_PER_DIGEST, scanCandidates, setPaused } = require('../server/contentChunkBackfill');
 
 const MIB = 1024 * 1024, HOUR = 3600000, DAY = 24 * HOUR;
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -138,14 +138,158 @@ for (const [label, swap, reason] of [
   assert.equal(c.audits().length, 1);
 });
 
-test('bytes written over an already hashed chunk cannot leave a set for the new bytes', async t => {
-  const c = fixture(t), asset = raster(c), original = fs.readFileSync(asset.file);
+test('bytes written over an already hashed chunk leave no set, although the pass read the recorded bytes', async t => {
+  const c = fixture(t), asset = raster(c);
   c.register([asset]);
   let reads = 0;
   await c.run({ budget: async () => { reads += 1; if (reads === 3) { const fd = fs.openSync(asset.file, 'r+'); fs.writeSync(fd, Buffer.from('tampered'), 0, 8, 0); fs.closeSync(fd); } } });
-  // The pass read the recorded bytes, so the set describes those and only those.
-  assert.deepEqual(Buffer.from(c.sets()[0].digests), expectedDigests(original));
-  assert.notDeepEqual(Buffer.from(c.sets()[0].digests), expectedDigests(fs.readFileSync(asset.file)));
+  assertNothingBlessed(c, asset, 'read_error');
+  c.clock += HOUR + 1;
+  await c.run();
+  assertNothingBlessed(c, asset, 'digest_mismatch');
+});
+
+test('a file that grew and shrank back during the read gets no set', async t => {
+  const c = fixture(t), asset = raster(c);
+  c.register([asset]);
+  let reads = 0;
+  await c.run({ budget: async () => { reads += 1; if (reads === 3) { fs.appendFileSync(asset.file, 'x'); fs.truncateSync(asset.file, asset.byteSize); } } });
+  assertNothingBlessed(c, asset, 'read_error');
+});
+
+// Wraps the next matching open so a test can act around it.
+function onOpen(t, file, { before = () => {}, beforeClose = () => {}, afterClose = () => {} }) {
+  const open = fs.promises.open;
+  t.after(() => { fs.promises.open = open; });
+  fs.promises.open = async (target, ...rest) => {
+    if (target !== file) return open.call(fs.promises, target, ...rest);
+    before();
+    const handle = await open.call(fs.promises, target, ...rest), close = handle.close.bind(handle);
+    handle.close = async () => { beforeClose(); await close(); afterClose(); };
+    return handle;
+  };
+}
+
+test('a directory swapped for a link to outside between the checks and the open is refused', linux, async t => {
+  const c = fixture(t), asset = raster(c, 'tree/ortho.tif'), outside = path.join(c.root, 'outside'), tree = path.join(c.config.modelsMount, 'tree');
+  c.register([asset]);
+  let read = 0;
+  onOpen(t, asset.file, { before: () => { fs.renameSync(tree, outside); fs.symlinkSync(outside, tree); } });
+  await c.run({ budget: async bytes => { read += bytes; } });
+  assertNothingBlessed(c, asset, 'unsafe_path');
+  assert.equal(read, 0, 'the recorded bytes outside the root are not read');
+});
+
+test('a file replaced between the checks and the open is hashed from the opened file only', async t => {
+  const c = fixture(t), asset = raster(c);
+  c.register([asset]);
+  onOpen(t, asset.file, { before: () => { fs.rmSync(asset.file); fs.writeFileSync(asset.file, Buffer.alloc(asset.byteSize, 1)); } });
+  await c.run();
+  assertNothingBlessed(c, asset, 'digest_mismatch');
+});
+
+for (const [label, prepare, reason] of [
+  ['a verified set', () => {}, null],
+  ['a mismatch', file => { const bytes = fs.readFileSync(file); bytes[0] ^= 1; fs.writeFileSync(file, bytes); }, 'digest_mismatch'],
+]) for (const edge of ['beforeClose', 'afterClose']) {
+  test(`a stop ${edge === 'beforeClose' ? 'before' : 'after'} the final close does not record ${label}`, async t => {
+    const c = fixture(t), asset = raster(c), stop = new AbortController();
+    c.register([asset]);
+    prepare(asset.file);
+    onOpen(t, asset.file, { [edge]: () => stop.abort() });
+    const lane = c.backfill({ signal: stop.signal });
+    assert.equal(await lane.runOne(), false);
+    assert.deepEqual([c.sets(), c.failures(), c.audits()], [[], [], []]);
+    assert.deepEqual([lane.status().stored, lane.status().failed], [0, 0]);
+    assert.doesNotMatch(c.log.join('\n'), /sha256=/);
+  });
+
+  test(`a pause ${edge === 'beforeClose' ? 'before' : 'after'} the final close holds back ${label} until it is released`, async t => {
+    const c = fixture(t), asset = raster(c);
+    c.register([asset]);
+    prepare(asset.file);
+    let polls = 0;
+    onOpen(t, asset.file, { [edge]: () => setPaused(c.database, true) });
+    // The clock does not move: the gate must not trust a cached pause state.
+    await c.run({ hold: async () => {
+      polls += 1;
+      assert.deepEqual([c.sets(), c.failures(), c.audits()], [[], [], []]);
+      if (polls === 3) setPaused(c.database, false);
+    } });
+    assert.equal(polls, 3);
+    assert.deepEqual([c.sets().length, c.failures().map(row => row.reason)], reason ? [0, [reason]] : [1, []]);
+  });
+}
+
+test('a stop while a missing file is being looked up records nothing', async t => {
+  const c = fixture(t), asset = raster(c), stop = new AbortController(), lstat = fs.promises.lstat;
+  c.register([asset]);
+  fs.rmSync(asset.file);
+  t.after(() => { fs.promises.lstat = lstat; });
+  fs.promises.lstat = async target => { stop.abort(); return lstat.call(fs.promises, target); };
+  assert.equal(await c.run({ signal: stop.signal }), 0);
+  assert.deepEqual([c.sets(), c.failures()], [[], []]);
+});
+
+for (const [label, spoil, reason, audits] of [
+  ['tampered', file => { const bytes = fs.readFileSync(file); bytes[0] ^= 1; fs.writeFileSync(file, bytes); }, 'digest_mismatch', 1],
+  ['missing', file => fs.rmSync(file), 'unavailable', 0],
+]) for (const first of ['good', 'bad']) test(`two workers, one ${label} copy, ${first} result first: the proven set wins and no retry record survives`, async t => {
+  const c = fixture(t), bad = raster(c, 'bad/ortho.tif'), bytes = fs.readFileSync(bad.file), good = { kind: 'ortho', ...c.write('good/ortho.tif', bytes) };
+  const badVersion = c.register([bad]), goodVersion = c.register([good]);
+  spoil(bad.file);
+  const other = openDatabase(c.databasePath);
+  const item = (asset, versionId) => ({ sha256: asset.sha256, byteSize: asset.byteSize, kind: 'ortho', locations: [{ versionId, rootKey: 'models', relativePath: asset.relativePath, assetId: null }] });
+  let go = {};
+  const gate = { good: new Promise(resolve => { go.good = resolve; }), bad: new Promise(resolve => { go.bad = resolve; }) };
+  const lane = (name, database, value) => {
+    const worker = c.backfill({ database });
+    worker.queue = [value];
+    const publish = worker.publish.bind(worker);
+    // Both have finished reading before either may publish.
+    worker.publish = async record => { go[`${name}Ready`](); await gate[name]; return publish(record); };
+    return worker;
+  };
+  const ready = Promise.all(['good', 'bad'].map(name => new Promise(resolve => { go[`${name}Ready`] = resolve; })));
+  const runs = { good: lane('good', c.database, item(good, goodVersion)).runOne(), bad: lane('bad', other, item(bad, badVersion)).runOne() };
+  await ready;
+  go[first]();
+  await runs[first];
+  assert.deepEqual([c.sets().length, c.failures().map(row => row.reason)], first === 'good' ? [1, []] : [0, [reason]]);
+  go[first === 'good' ? 'bad' : 'good']();
+  await Promise.all(Object.values(runs));
+  assert.equal(c.sets().length, 1);
+  assert.deepEqual(c.failures(), []);
+  assert.equal(c.audits().length, audits, 'a tampered copy is audited whoever finishes first');
+  c.clock += 30 * DAY;
+  assert.equal(await c.run(), 0);
+  other.close();
+});
+
+test('a batch is bounded by digests and by places, and one file linked by many versions is one place', t => {
+  const c = fixture(t), shared = { filename: 'A.JPG', rootKey: 'datasets', relativePath: 'd/A.JPG', contentType: 'image/jpeg', byteSize: 5 * MIB, sha256: 'a'.repeat(64) };
+  for (let index = 0; index < 40; index += 1) c.register([], { cameraPhotos: [shared, { ...shared, filename: 'B.JPG', relativePath: `copy-${index}/B.JPG`, sha256: 'b'.repeat(64) }] });
+  const { items, totalFiles } = scanCandidates(c.database);
+  assert.equal(totalFiles, 2);
+  assert.deepEqual(items.map(item => [item.sha256[0], item.locations.length]), [['a', 1], ['b', LOCATIONS_PER_DIGEST]]);
+});
+
+test('retries move through every place, so a good copy beyond the first eight is found', async t => {
+  const c = fixture(t), bytes = crypto.randomBytes(4 * MIB), total = 3 * LOCATIONS_PER_DIGEST + 3;
+  const copies = Array.from({ length: total }, (_, index) => ({ kind: 'ortho', ...c.write(`copy-${String(index).padStart(2, '0')}/ortho.tif`, bytes) }));
+  for (const copy of copies) c.register([copy]);
+  for (const copy of copies.slice(0, -1)) fs.rmSync(copy.file);
+  const seen = new Set();
+  let passes = 0;
+  while (!c.sets().length && passes < 10) {
+    for (const location of scanCandidates(c.database, { at: c.clock }).items[0].locations) seen.add(location.relativePath);
+    await c.run();
+    passes += 1;
+    c.clock += DAY + 1;
+  }
+  assert.equal(passes, 4);
+  assert.equal(seen.size, total);
+  assert.equal(c.sets().length, 1);
 });
 
 test('a tampered copy is audited even when another location of the same digest is good', async t => {
