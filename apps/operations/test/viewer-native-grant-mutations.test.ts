@@ -42,7 +42,7 @@ async function fixture(){
       details_json TEXT,created_at TEXT DEFAULT (datetime('now')))`,
     `INSERT INTO role_permissions VALUES('viewer-admin','viewer.view'),('viewer-admin','viewer.manage')`,
     `INSERT INTO staff_role_assignments VALUES('staff-one','viewer-admin','global',NULL)`,
-    `INSERT INTO portal_v2_workspaces VALUES('workspace-one','project-alpha:primary',NULL,'active','Greenwood')`,
+    `INSERT INTO portal_v2_workspaces VALUES('workspace-one','project-alpha:primary',NULL,'active','Example Client')`,
     `INSERT INTO projects VALUES('project-one','project-alpha:primary','pa-project-one','source-v1',1)`,
     `INSERT INTO viewer_model_associations VALUES('association-one','project-one','pa-project-one','source-v1','Church model','ready','active',NULL,7,datetime('now'))`,
     `INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-one','generation-one')`,

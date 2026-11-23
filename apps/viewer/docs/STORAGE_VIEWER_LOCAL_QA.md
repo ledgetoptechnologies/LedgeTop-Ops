@@ -33,7 +33,7 @@ Neither silent openerless renewal nor private-ready client activation is claimed
 - Runtime image: `ltds-viewer:storage-workspace-local-candidate`.
 - Image config ID: `sha256:14dc2912ad85c5c7e6157b574a3547d6c91a8dc92f4039902a1ad2109b578510`.
 - Revision label/file: `storage-workspace-local-candidate`. This deliberately identifies an **uncommitted local candidate**, not a Git commit or published release.
-- Original dirty main checkout, production services, real shares and stored models were not changed by these checks. No production bytes were deleted. Greenwood processing remains protected.
+- Original dirty main checkout, production services, real shares and stored models were not changed by these checks. No production bytes were deleted. Active client processing remains protected.
 
 ## Tests and image checks
 
@@ -91,14 +91,14 @@ Linux suite above; the review itself is not proof of current Rome eligibility.
 Automatic retirement is deliberately limited to proven superseded outputs from
 successful recovery. It is **not** a general age-based deletion policy for failed
 runs: failed/retryable dependencies and unknown originals remain protected.
-Greenwood's active-work guard cooperatively defers maintenance (including checks
+The active-work guard cooperatively defers maintenance (including checks
 during hashing); it is not an exclusive system-wide maintenance lock.
 
 ## Release/retest order
 
 - Resolve the two Operations integration boundaries above before calling the entire request complete.
 - Once approved code is committed, rebuild using the actual commit revision and rerun image gates. This local label must not be promoted as a commit attestation.
-- Deploy only when Greenwood and any other active processing can safely tolerate the release; do not interrupt the import for UI QA.
+- Deploy only when that import and any other active processing can safely tolerate the release; do not interrupt the import for UI QA.
 - In fresh Viewer sessions test close-surface priority, cloud orbit after prolonged navigation, model/cloud pose transfer, live DEM settings and GCP flow.
 - Test normal expiry and sleep/wake with and without the Operations opener; confirm pose/content survives valid renewal and genuine revocation remains enforced.
 - Inspect Rome cleanup decisions and recoverable trash before any expiry purge. Verify originals, photos and all products remain available. Do not delete merely because an output is old.
