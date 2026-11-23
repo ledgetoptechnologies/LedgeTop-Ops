@@ -1,9 +1,45 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test as base, type Page } from "@playwright/test";
+import { isolatedBrowserArgs, startProxySink, unexpectedHosts, type ProxySink } from "../browser-network-guard";
 
 // The fixture server sends the Worker's own opener policy for each path, so this
-// proves in a real browser what the header lets Viewer keep. Viewer is cross-site.
-const viewer = "https://viewer.ledgetopdroneservices.com";
+// proves in a real browser what the header lets Viewer keep. Operations reads the
+// Viewer address from its API, so a reserved cross-site name stands in for it. The
+// browser cannot resolve or reach any other host, and trying to fails the test.
+const viewerHost = "viewer.example.test", viewer = `https://${viewerHost}`;
+// Never fulfilled: proves the guard is live.
+const controlHost = "blocked.example.test";
+const declared = [viewerHost, controlHost];
 const session = { version: 1, sessionId: "session-workspace-one", subject: "ops:staff-one", expiresAt: new Date(Date.now() + 60_000).toISOString() };
+
+interface NetworkGuard {
+  /** Hosts this test asked for, by page request and by any browser connection. */
+  hosts(): string[];
+}
+
+const test = base.extend<{ network: NetworkGuard }, { sink: ProxySink }>({
+  sink: [async ({}, use) => {
+    const sink = await startProxySink();
+    await use(sink);
+    await sink.close();
+    // Connections made after the last test's own check.
+    const unexpected = unexpectedHosts(sink.hosts, declared);
+    if (unexpected.length) throw new Error(`The browser tried to reach: ${unexpected.join(", ")}`);
+  }, { scope: "worker" }],
+  launchOptions: [async ({ launchOptions, sink }, use) => {
+    await use({ ...launchOptions, args: [...(launchOptions.args ?? []), ...isolatedBrowserArgs(sink.port)] });
+  }, { scope: "worker" }],
+  network: [async ({ context, sink }, use) => {
+    const requested: string[] = [], start = sink.hosts.length;
+    context.on("request", request => {
+      const url = new URL(request.url());
+      if (/^https?:$/u.test(url.protocol)) requested.push(url.hostname);
+    });
+    context.on("page", page => page.on("websocket", socket => requested.push(new URL(socket.url()).hostname)));
+    const hosts = () => [...requested, ...sink.hosts.slice(start)];
+    await use({ hosts });
+    expect(unexpectedHosts(hosts(), declared), "no host except loopback and the declared reserved names").toEqual([]);
+  }, { auto: true }],
+});
 
 async function mock(page: Page) {
   let grants = 0;
@@ -43,6 +79,12 @@ async function mock(page: Page) {
   });
 }
 
+test("the network guard is live: an unfulfilled host is recorded and unreachable", async ({ page, network }) => {
+  await expect(page.goto(`https://${controlHost}/`)).rejects.toThrow(/net::ERR_/u);
+  // Once as the page's request and at least once as a connection at the sink.
+  await expect.poll(() => network.hosts().filter(host => host === controlHost).length).toBeGreaterThanOrEqual(2);
+});
+
 test("the Operations shell keeps the Viewer tab it opened and renews it through that opener", async ({ page, context }) => {
   await mock(page);
   const response = await page.goto("/viewer");
@@ -71,5 +113,5 @@ for (const path of ["/r/public-link", "/unknown"])
 test("static assets keep the strict policy", async ({ page, request }) => {
   await page.goto("/viewer");
   const source = await page.locator("script[src]").first().getAttribute("src");
-  expect((await request.get(source!)).headers()["cross-origin-opener-policy"]).toBe("same-origin");
+  expect((await request.get(new URL(source!, page.url()).pathname)).headers()["cross-origin-opener-policy"]).toBe("same-origin");
 });
