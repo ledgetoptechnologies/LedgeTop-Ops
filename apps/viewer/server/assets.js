@@ -21,7 +21,8 @@ const { validCameraFilename } = require('./cameraPhotos');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 const { assetIntegrityCache } = require('./assetIntegrityCache');
-const { deliverVerified, openForDelivery } = require('./verifiedDelivery');
+const { deliverVerified } = require('./verifiedDelivery');
+const { safeResolve, safeExistingFile, openAssetFile } = require('./assetPath');
 
 const router = trackedRouter();
 const productTickets = createDownloadCapabilities();
@@ -35,14 +36,6 @@ function setProcessingRepository(repository) {
   processingRepository = repository;
 }
 function setSourceAuthorizationValidator(validator){sourceAuthorizationValidator=validator;}
-
-// Resolve `relPath` under `root`, refusing anything that escapes it.
-function safeResolve(root, relPath) {
-  const resolvedRoot = path.resolve(root);
-  const resolved = path.resolve(resolvedRoot, `.${path.sep}${relPath}`);
-  if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + path.sep)) return null;
-  return resolved;
-}
 
 // Authorized if the caller is an admin, OR has a valid share session for
 // THIS exact project. The referenced share is looked up live on every
@@ -80,25 +73,6 @@ async function isAuthorizedForProject(req, projectId) {
   if (payload.viewerProjectId !== projectId) return false;
   const legacyShare = shareStore.getById(payload.shareId);
   return shareStore.isLive(legacyShare) && legacyShare.viewerProjectId === projectId;
-}
-
-function safeExistingFile(root, relPath) {
-  const lexical = safeResolve(root, relPath);
-  if (!lexical) return null;
-  let realRoot;
-  try { realRoot = fs.realpathSync(root); } catch { return null; }
-  const relative = path.relative(path.resolve(root), lexical);
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null;
-  let cursor = realRoot;
-  try {
-    for (const segment of relative.split(path.sep)) {
-      cursor = path.join(cursor, segment);
-      if (fs.lstatSync(cursor).isSymbolicLink()) return null;
-    }
-    const real = fs.realpathSync(cursor);
-    if (!real.startsWith(`${realRoot}${path.sep}`) || !fs.statSync(real).isFile()) return null;
-    return real;
-  } catch { return null; }
 }
 
 function canonicalAssetRoot(model, rootKey) {
@@ -265,8 +239,9 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   }
   if (publishedAsset?.kind === 'shots' && !cameras) return res.status(403).json({ error: 'not authorized' });
   if (share && (!publishedAsset || !assetAllowed(share,publishedAsset.kind)))return res.status(403).json({error:'not authorized'});
-  const abs = safeExistingFile(rootPath, rel);
-  if (!abs) return res.status(404).json({ error: 'asset not found' });
+  const opened = await openAssetFile(rootPath, rel);
+  if (!opened) return res.status(404).json({ error: 'asset not found' });
+  const abs = opened.filePath;
 
   // Authorization/revocation is evaluated for every request, and again after
   // the (possibly slow) integrity check, right before any byte is sent.
@@ -276,6 +251,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   const requested = String(rel).replaceAll('\\', '/');
   const accelerated = xAccelLocation(abs);
   if (!project.activeVersion || accelerated) {
+    await opened.handle.close();
     // Legacy unmanaged projects carry no integrity metadata. X-Accel-Redirect
     // (only with X_ACCEL_REDIRECT_PREFIX, empty in the shipped compose file)
     // hands the path to the proxy, which reopens it after this check.
@@ -292,11 +268,8 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
       }
     });
   }
-  let opened;
-  try { opened = await openForDelivery(abs); } catch { return res.status(404).json({ error: 'asset not found' }); }
   return deliverVerified(req, res, {
     ...opened,
-    filePath: abs,
     headers: { 'Cache-Control': 'private, no-store' },
     ...integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened),
     onFailure: () => res.status(404).json({ error: 'asset not found' }),
@@ -335,10 +308,9 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     if (!filename || !shots) return res.status(404).json({ error: 'photo not found' });
     const photo = canonicalRepository.getCameraPhoto(model.activeVersion.id, filename);
     if (!photo) return res.status(404).json({ error: 'photo not found' });
-    const rootPath = canonicalAssetRoot(model, photo.rootKey), absolute = rootPath && safeExistingFile(rootPath, photo.relativePath);
-    if (!absolute) return res.status(404).json({ error: 'photo not found' });
-    let opened;
-    try { opened = await openForDelivery(absolute); } catch { return res.status(404).json({ error: 'photo not found' }); }
+    const rootPath = canonicalAssetRoot(model, photo.rootKey), opened = rootPath && await openAssetFile(rootPath, photo.relativePath);
+    if (!opened) return res.status(404).json({ error: 'photo not found' });
+    const absolute = opened.filePath;
     if (Number(opened.stat.size) !== photo.byteSize) { await opened.handle.close(); return res.status(404).json({ error: 'photo not found' }); }
     const headers = { 'Cache-Control': 'private, no-store', 'Content-Type': photo.contentType, 'X-Content-Type-Options': 'nosniff' };
     // Share access is re-checked after the (possibly slow) integrity check.
@@ -353,7 +325,6 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     }
     return deliverVerified(req, res, {
       ...opened,
-      filePath: absolute,
       headers,
       verify: (_range, signal, carry) => assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle, signal, carry }),
       regions: () => (assetIntegrityCache.canBuffer(photo.byteSize + 1) ? [{ kind: 'file', offset: 0, size: photo.byteSize, sha256: photo.sha256, toEof: true }] : null),
@@ -406,12 +377,11 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
   try {
     const admitted=await productTickets.acquire(req.params.token),selected=admitted?.value;
     if(!selected)return res.status(403).json({error:'Download expired or access revoked. Open Downloads to try again.'});
-    const {model,asset,product}=selected,root=canonicalAssetRoot(model,asset.rootKey),absolute=root&&safeExistingFile(root,asset.relativePath);
-    if(!absolute)return res.sendStatus(404);
-    let opened;try{opened=await openForDelivery(absolute);}catch{return res.sendStatus(404);}
-    return deliverVerified(req,res,{...opened,filePath:absolute,
+    const {model,asset,product}=selected,root=canonicalAssetRoot(model,asset.rootKey),opened=root&&await openAssetFile(root,asset.relativePath);
+    if(!opened)return res.sendStatus(404);
+    return deliverVerified(req,res,{...opened,
       headers:{'Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${product.fileName}"`},
-      ...integrityDelivery(canonicalRepository,model,asset,asset.relativePath,absolute,opened),
+      ...integrityDelivery(canonicalRepository,model,asset,asset.relativePath,opened.filePath,opened),
       onFailure:()=>res.sendStatus(409),
       // Integrity verification may be slow: honor revocation that happened while it ran.
       beforeSend:async()=>{if(await admitted.revalidate())return true;res.sendStatus(403);return false;},
