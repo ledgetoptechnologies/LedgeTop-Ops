@@ -131,7 +131,7 @@ class AssetIntegrityCache {
     this.bytesCacheMaxBytes = Math.max(0, Number(bytesCacheMaxBytes) || 0);
     this.bytes = new Map(); // region key -> { buffer, until }
     this.bytesTotal = 0;
-    this.stats = { bytesHits: 0, bytesMisses: 0, hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0, busy: 0, cancelled: 0 };
+    this.stats = { legacy: 0, bytesHits: 0, bytesMisses: 0, hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0, busy: 0, cancelled: 0 };
   }
 
   clear() {
@@ -149,6 +149,14 @@ class AssetIntegrityCache {
   }
 
   canBuffer(size) { return size <= this.bufferedHashMaxBytes; }
+
+  // A whole file too large to hold in memory, i.e. a legacy asset registered
+  // without chunk records. OUTSIDE THE BYTE-INTEGRITY GUARANTEE of this module:
+  // it keeps the behaviour inherited from before this cache (hash the whole
+  // file on every request, then stream it), with none of the optimisations
+  // here: no remembered result, no shared in-flight check, no kept bytes.
+  // Backfilling chunk records moves such assets onto the guaranteed path.
+  isLegacyWholeFile(size) { return !this.canBuffer(Number(size) + 1); }
 
   storeBytes(key, buffer) {
     if (!buffer || buffer.length > this.bytesCacheMaxBytes || this.ttlMs <= 0) return;
@@ -416,10 +424,15 @@ class AssetIntegrityCache {
   async verifyWholeFile(filePath, stat, expectedSha256, { handle = null, signal = null } = {}) {
     const identity = fileIdentity(stat);
     const key = this.regionKey(filePath, identity, { kind: 'file', sha256: expectedSha256 });
-    return this.check(filePath, stat, key, async (activeSignal) => {
+    const verify = async (activeSignal) => {
       const result = await this.hashRegion(filePath, identity, 0, Number(stat.size), { toEof: true, handle, signal: activeSignal });
       return { ok: Boolean(result) && result.digest === expectedSha256, cacheable: Boolean(result?.cacheable), buffer: result?.buffer || null };
-    }, signal);
+    };
+    if (this.isLegacyWholeFile(stat.size)) {
+      this.stats.legacy += 1;
+      return this.verifyAlone(verify, signal);
+    }
+    return this.check(filePath, stat, key, verify, signal);
   }
 
   // Exact registered-chunk check for one 4 MiB (or shorter tail) region.

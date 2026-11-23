@@ -274,7 +274,7 @@ test('a shared check whose owner request closed is redone for the remaining requ
   fs.writeFileSync(file, body);
   let opens = 0, release;
   const gate = new Promise((resolve) => { release = resolve; });
-  const cache = new AssetIntegrityCache({ ...localPosix, wallNow: () => Date.now() + 60_000, bufferedHashMaxBytes: 0,
+  const cache = new AssetIntegrityCache({ ...localPosix, wallNow: () => Date.now() + 60_000,
     openFile: async (p) => { opens += 1; if (opens === 1) await gate; return fs.promises.open(p, 'r'); } });
   const s = fs.statSync(file, { bigint: true });
   const owner = new AbortController();
@@ -285,6 +285,7 @@ test('a shared check whose owner request closed is redone for the remaining requ
   release();
   await assert.rejects(first, { name: 'AbortError' });
   assert.equal(await second, true);
+  assert.equal(opens, 2, 'the remaining request ran its own check');
 });
 
 test('session asset requests get a fast 503 when the queue is full and leave it when the client goes away', async (t) => {
@@ -409,3 +410,86 @@ for (const [label, chunkSize, range] of [
     }
   });
 }
+
+test('legacy large files are outside the guarantee and behave like main: whole-file hash per request, no reuse', async (t) => {
+  const f = await managedFixture(t, { aged: false });
+  const hashed = [];
+  const hashRegion = f.integrity.hashRegion.bind(f.integrity);
+  f.integrity.hashRegion = async (...args) => { hashed.push({ offset: args[2], size: args[3] }); return hashRegion(...args); };
+  t.after(() => { delete f.integrity.hashRegion; });
+  const before = { ...f.integrity.stats };
+  for (const range of [[1000, 1999], [1000, 1999], null]) {
+    const result = await attempt(`${f.base}/dsm.tif`, range ? { range: `bytes=${range[0]}-${range[1]}` } : {});
+    assert.equal(result.status, range ? 206 : 200);
+    assert.deepEqual(result.body, range ? f.bodies.dsm.subarray(range[0], range[1] + 1) : f.bodies.dsm);
+  }
+  assert.deepEqual(hashed, [0, 1, 2].map(() => ({ offset: 0, size: f.bodies.dsm.length })), 'the whole file is hashed for every request, even a 1000-byte range');
+  assert.equal(f.integrity.stats.legacy - before.legacy, 3);
+  assert.equal(f.integrity.stats.hits - before.hits, 0, 'no remembered result');
+  assert.equal(f.integrity.stats.bytesHits - before.bytesHits, 0, 'no kept bytes');
+  assert.ok([...f.integrity.bytes.keys()].every((key) => !key.includes('dsm.tif')));
+  // A same-size rewrite immediately after a good response is caught next time.
+  const tampered = Buffer.from(f.bodies.dsm); tampered[1500] ^= 0xff;
+  fs.writeFileSync(f.files.dsm, tampered);
+  assert.equal((await attempt(`${f.base}/dsm.tif`, { range: 'bytes=1000-1999' })).status, 404);
+});
+
+async function busyHarness(t, { onSecondSlice = null } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-delivery-busy-'));
+  const filePath = path.join(root, 'asset.bin');
+  const body = crypto.randomBytes(2 * 64 * 1024);
+  fs.writeFileSync(filePath, body);
+  const chunks = [0, 64 * 1024].map((offset) => ({ byteOffset: offset, byteSize: 64 * 1024, sha256: sha256(body.subarray(offset, offset + 64 * 1024)) }));
+  const cache = new AssetIntegrityCache({ ...localPosix, wallNow: () => Date.now() + 60_000, bufferedBudgetBytes: 128 * 1024, maxQueuedStreams: 0 });
+  if (onSecondSlice) {
+    const original = cache.verifiedSlice.bind(cache);
+    let calls = 0;
+    cache.verifiedSlice = async (...args) => { calls += 1; if (calls === 2) await onSecondSlice(cache); return original(...args); };
+  }
+  const app = express();
+  app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); next(); });
+  app.get('/asset', async (req, res) => {
+    const opened = await openForDelivery(filePath);
+    await deliverVerified(req, res, {
+      ...opened, filePath, cache, headers: { 'Cache-Control': 'private, no-store' },
+      verify: async (_range, signal) => { for (const chunk of chunks) if (!await cache.verifyChunk(filePath, opened.stat, chunk, { handle: opened.handle, signal })) return false; return true; },
+      regions: () => chunks.map((c) => ({ kind: 'chunk', offset: c.byteOffset, size: c.byteSize, sha256: c.sha256 })),
+      onFailure: () => res.sendStatus(404),
+      onError: (error) => res.sendStatus(error.status || 500),
+    });
+  });
+  const server = await listen(app);
+  t.after(async () => { await close(server); fs.rmSync(root, { recursive: true, force: true }); });
+  return { cache, body, filePath, url: `http://127.0.0.1:${server.address().port}/asset` };
+}
+
+test('buffer budget exhausted before any body byte: 503 with Retry-After and no file headers', async (t) => {
+  const h = await busyHarness(t);
+  await h.cache.reserve(h.cache.bufferedBudgetBytes); // the whole budget is in use
+  t.after(() => h.cache.unreserve(h.cache.bufferedBudgetBytes));
+  const response = await fetch(h.url);
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get('retry-after'), '1');
+  assert.deepEqual(await response.json(), { error: 'asset delivery busy', code: 'integrity_busy' });
+  for (const name of ['last-modified', 'accept-ranges', 'content-range', 'cache-control']) assert.equal(response.headers.get(name), null, `${name} is not left on the 503`);
+  const fileStat = fs.statSync(h.filePath);
+  assert.notEqual(response.headers.get('etag'), `W/"${fileStat.size.toString(16)}-${fileStat.mtime.getTime().toString(16)}"`, 'the file ETag is not left on the 503 (express may add its own for the JSON body)');
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff', 'headers from other middleware are kept');
+});
+
+test('buffer budget exhausted after the body started: the response is aborted, never completed', async (t) => {
+  const h = await busyHarness(t, { onSecondSlice: async (cache) => {
+    const free = cache.bufferedBudgetBytes - cache.bufferedBytes;
+    if (free > 0) await cache.reserve(free);
+    t.after(() => cache.unreserve(free));
+  } });
+  let status = null, completed = false;
+  try {
+    const response = await fetch(h.url);
+    status = response.status;
+    await response.arrayBuffer();
+    completed = true;
+  } catch { /* aborted */ }
+  assert.equal(status, 200, 'the status line was already committed');
+  assert.equal(completed, false, 'a busy rejection mid-body aborts the response');
+});

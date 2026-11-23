@@ -15,12 +15,21 @@
 //   hashed: each region is read once into memory through the descriptor,
 //   hashed, and that buffer (sliced to the range) is what gets written. A
 //   region whose bytes no longer match aborts the response.
-// - Large whole-file assets with no chunk records (legacy rasters) cannot be
-//   held in memory. They are verified through the descriptor, streamed from it,
-//   and the final piece is withheld until a last fstat proves the file did not
-//   change; otherwise the socket is destroyed. This is no weaker than before
-//   (verify by path, then sendFile reopening the path); the real fix is to
-//   backfill chunk records for those assets so they take the first path.
+// - Large whole-file assets with no chunk records (legacy rasters) are
+//   OUTSIDE the byte-integrity guarantee above, by decision: they keep the
+//   behaviour inherited from before (the whole file is hashed on every
+//   request, then the bytes are streamed, so streamed bytes are not the hashed
+//   bytes). None of the new optimisations apply to them (no remembered result,
+//   no shared check, no kept bytes; see assetIntegrityCache.isLegacyWholeFile).
+//   The stream reads the descriptor that was hashed and a closing fstat aborts
+//   on a visible change, which is no weaker than res.sendFile reopening the
+//   path. Backfilling chunk records is the fix and a separate follow-up.
+//
+// Busy handling: when buffer budget or the check queue is exhausted
+// (integrity_busy), a request that has not sent any body byte gets 503 with
+// Retry-After: 1 and none of the response headers set for the file. Once body
+// bytes have been sent, the status line is committed, so the response is
+// aborted (socket destroyed) and the client retries the request.
 //
 // Response headers and statuses mirror send@0.19 (what res.sendFile uses):
 // Accept-Ranges, Cache-Control default, Last-Modified, weak ETag, Content-Type
@@ -231,6 +240,7 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
     if (beforeSend && !await beforeSend()) return;
     if (controller.signal.aborted || res.headersSent) return;
 
+    const setHeaderNames = [...[...routeHeaders.values()].map(([name]) => name), ...defaults.map(([name]) => name), 'Content-Range', 'Content-Length'];
     for (const [name, value] of routeHeaders.values()) res.setHeader(name, value);
     for (const [name, value] of defaults) res.setHeader(name, value);
     if (outcome === 412) return onError(httpError(412));
@@ -257,6 +267,12 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
       if (plan) await sendRegions(res, cache, filePath, stat, handle, plan, start, start + len - 1, controller.signal);
       else await pump(res, handle, identity, start, len, controller.signal);
     } catch (error) {
+      if (busyError(error) && !res.headersSent && !controller.signal.aborted) {
+        for (const name of setHeaderNames) res.removeHeader(name);
+        res.statusCode = 200;
+        res.set('Retry-After', '1').status(503).json({ error: 'asset delivery busy', code: 'integrity_busy' });
+        return;
+      }
       res.destroy(error);
     }
   } finally {

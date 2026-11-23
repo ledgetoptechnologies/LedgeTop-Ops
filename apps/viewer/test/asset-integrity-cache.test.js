@@ -156,7 +156,7 @@ test('an identity change while the bytes are read fails closed and is not rememb
   assert.equal(cache.verified.size, 0);
 });
 
-test('large files stream from the verified descriptor and fail closed if it changes mid-stream', async (t) => {
+test('large whole files without chunk records keep main-equivalent behaviour: full hash every time, nothing cached or shared', async (t) => {
   const root = tempDir(t, 'ltds-integrity-unit-');
   const file = path.join(root, 'dsm.tif');
   const body = crypto.randomBytes(1024 * 1024);
@@ -164,9 +164,16 @@ test('large files stream from the verified descriptor and fail closed if it chan
   const cache = countingCache({ wallNow: aged, bufferedHashMaxBytes: 1024 });
   assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(body)), true);
   assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(body)), true);
-  assert.equal(cache.verifications, 1);
-  assert.equal(cache.stats.streamed, 1);
+  assert.deepEqual(await Promise.all([1, 2, 3].map(() => cache.verifyWholeFile(file, stat(file), sha256(body)))), [true, true, true]);
+  assert.equal(cache.verifications, 5, 'every request hashes the whole file itself');
+  assert.equal(cache.stats.legacy, 5);
+  assert.equal(cache.stats.hits, 0);
+  assert.equal(cache.verified.size + cache.pending.size + cache.bytes.size, 0, 'nothing remembered, shared or kept');
+  assert.equal(cache.stats.streamed, 5);
   assert.equal(cache.stats.peakBufferedBytes, 0, 'streaming never allocates the whole file');
+  const tampered = Buffer.from(body); tampered[12345] ^= 0xff;
+  fs.writeFileSync(file, tampered);
+  assert.equal(await cache.verifyWholeFile(file, stat(file), sha256(body)), false, 'any change is caught on the next request, same tick or not');
 
   let appended = false;
   const changing = countingCache({ wallNow: aged, bufferedHashMaxBytes: 1024, openFile: hookedOpen(async (filePath, reads) => { if (reads === 2 && !appended) { appended = true; fs.appendFileSync(filePath, 'x'); } }) });
