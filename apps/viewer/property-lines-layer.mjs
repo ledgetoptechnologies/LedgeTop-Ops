@@ -145,6 +145,9 @@ export function createPropertyLinesController(deps) {
   const fetcher = createParcelFetcher({ fetchImpl: deps.fetchImpl, headers: deps.headers, model: () => deps.projectId(), ...(deps.fetcherOptions || {}) });
   const { cacheEntries: _siteCacheEntries, ...tileOptions } = deps.fetcherOptions || {};
   const tiles = createParcelTileLoader({ fetchImpl: deps.fetchImpl, headers: deps.headers, model: () => deps.projectId(), ...tileOptions });
+  // Parcels for a print come through a loader of their own, so choosing a
+  // property never disturbs what the map is loading.
+  const printTiles = createParcelTileLoader({ fetchImpl: deps.fetchImpl, headers: deps.headers, model: () => deps.projectId(), ...tileOptions });
   const preferences = deps.preferences || createPropertyLinesPreferences(deps.storage);
   const measure = deps.measureText || createTextMeasure();
   const hiddenByProject = new Map();
@@ -190,6 +193,7 @@ export function createPropertyLinesController(deps) {
     if (tileRetryTimer) { clearTimeout(tileRetryTimer); tileRetryTimer = null; }
     fetcher.cancel();
     tiles.cancel();
+    printTiles.cancel();
     groundAbort?.abort();
     groundAbort = null;
   }
@@ -201,6 +205,7 @@ export function createPropertyLinesController(deps) {
     retries = 0;
     fetcher.clear();
     tiles.clear();
+    printTiles.clear();
     siteBounds = null; current = null; viewTilesKey = null; count = 0; partial = false; failedTiles = false; tileRetries = 0; tileRetryKey = null; heightNote = ''; heightDraped = false; draped.clear();
     clearDrawings();
   }
@@ -570,6 +575,24 @@ export function createPropertyLinesController(deps) {
     settle('ready');
   }
 
+  // Every parcel touching these bounds, for a print: the same offer, access,
+  // coverage and lifecycle as the map. Hide is a display choice and does not matter.
+  async function loadPrintParcels(bounds) {
+    const refuse = status => ({ status, parcels: [], loaded: new Set(), failed: false, partial: false });
+    if (!offered || suspended || lifeKey !== lifecycleKey().key) return refuse('unavailable');
+    if (source?.kind === 'upload') return refuse('upload');
+    if (!deps.georefVerified()) return refuse('georef');
+    ensureSiteBounds();
+    if (!siteBounds || !availability().available) return refuse('unavailable');
+    const plan = propertyLinesTilesForView({ modelBounds: siteBounds, viewBounds: bounds });
+    if (plan.status !== 'ok') return refuse('none');
+    const myLife = life, myKey = lifeKey;
+    const result = await printTiles.load(plan.tiles, { area: bounds, immediate: true });
+    if (myLife !== life || myKey !== lifecycleKey().key || !offered || suspended) return refuse('unavailable');
+    return { status: ['ok', 'none', 'too_many'].includes(result.status) ? result.status : 'unavailable', parcels: result.parcels,
+      loaded: new Set(result.loaded || []), failed: Boolean(result.failed) || result.status === 'unavailable', partial: Boolean(result.partial || plan.partial) };
+  }
+
   // "Merge parcels by owner": redraws from the parcels already fetched.
   function setMerge(value) {
     const next = value !== false;
@@ -655,6 +678,7 @@ export function createPropertyLinesController(deps) {
   return {
     loadOffer,
     refresh,
+    loadPrintParcels,
     // The source of the lines drawn now and its credit line, for prints.
     attribution: () => (offered && propertyLinesSourceText(source) ? [propertyLinesSourceText(source), source.credit].filter(Boolean).join(' ') : ''),
     toggle,

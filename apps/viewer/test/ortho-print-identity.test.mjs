@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { CONTOUR_COLORS } from '../contours.mjs';
+import * as printProperty from '../print-property.mjs';
+import { formatParcelArea } from '../property-lines-owners.mjs';
 import { assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge } from '../ortho-print-export.mjs';
 
 const source = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -24,7 +26,7 @@ function region(from, to) {
 }
 // viewerAccessAvailable, orthoPrintPermissions and the export fence (the in-flight set, identity and cancel hook).
 const SHIPPED = [region('function viewerAccessAvailable()', 'function syncMeasurementActionVisibility()'),
-  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()',
+  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()', 'async function choosePrintProperty(', 'function propertyClipper(',
     'async function exportOrthoPrintFromViewer('].map(extract)].join('\n');
 
 const tick = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve)); };
@@ -113,6 +115,7 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissio
       colors: () => CONTOUR_COLORS.brown,
     },
     propertyLinesForPrint: () => ({ lines: [], color: null }),
+    ...printProperty, PRINT_METERS_PER_FOOT: printProperty.METERS_PER_FOOT, formatParcelArea,
     measurementCoordinateReference: () => ({ crs: 'EPSG:32616' }), ensureGeoTiffPool: () => null,
     // applyViewerSession / setSessionAccessState collaborators, inert here.
     setDisplayUnits() {}, sessionStorageKey: 'k', SESSION_STORAGE_PREFIX: 'p:', sessionCapabilities: { write() {} },
@@ -288,4 +291,121 @@ test('download revoked immediately before the dialog saves: no file', async () =
   kept.dialog.controls.size.value = '2048';
   await kept.dialog.controls.exportButton.fire('click');
   assert.deepEqual(kept.doc.downloads, ['orthophoto-2048px.png']);
+});
+
+// ── One property ─────────────────────────────────────────────────────────
+
+const IDENTITY = (subject = 'person-one', version = 'v1') => JSON.stringify(['client', subject, 'model-one', version]);
+const chosenProperty = (identity = IDENTITY()) => ({ identity, label: 'EXAMPLE OWNER', attribution: 'Source: Synthetic Parcel Map R1.',
+  parcels: [{ rings: [[[500100, 4700050], [500100, 4700150], [500300, 4700150], [500300, 4700050], [500100, 4700050]]] }],
+  boundary: [[[500100, 4700050], [500300, 4700050]]], neighbours: [] });
+const exportProperty = (p, selection = chosenProperty(), options = {}) => {
+  const controller = new AbortController();
+  return p.context.exportOrthoPrintFromViewer({ area: 'property', size: 2048, format: 'png', contours: false, property: true, selection, ...options }, controller.signal);
+};
+// Cross-realm: the VM throws its own DOMException-likes; match by name or code.
+const rejects = (promise, key, value) => assert.rejects(promise, error => { assert.equal(error[key], value, String(error)); return true; });
+
+test('property: a choice made by another viewer, or for another version, is refused before anything is opened', async () => {
+  for (const selection of [null, chosenProperty(IDENTITY('person-two')), chosenProperty(IDENTITY('person-one', 'v0'))]) {
+    const p = page();
+    await rejects(exportProperty(p, selection), 'code', 'print_property');
+    assert.equal(p.log.opens.length, 0);
+    assert.equal(p.inFlight(), 0);
+  }
+  const p = page();
+  await rejects(exportProperty(p, chosenProperty(), { format: 'tif' }), 'code', 'print_not_permitted');
+});
+
+test('property: without download it is held to the screen fitted to its frame; with download the chosen size', async () => {
+  const p = page();
+  const result = await exportProperty(p);
+  // 215 m frame across a 720 x 320 screen: limited by the height (119 m over 320 px).
+  const frame = printProperty.propertyFrame(chosenProperty().parcels, 25 * 0.3048), expected = Math.round(320 / (frame.maxN - frame.minN) * (frame.maxE - frame.minE));
+  assert.ok(Math.abs(result.width - expected) <= 1 && result.width < 720, `${result.width} vs ${expected}`);
+  assert.match(result.note, /limited by your access/);
+  assert.equal(result.filename, `property-${result.width}px.png`);
+  const full = page({ permissions: WITH_DOWNLOAD });
+  assert.equal((await exportProperty(full)).width, 2048);
+});
+
+test('property: a viewer, version or access change while the capture is read ends it with no file', async () => {
+  for (const change of [c => c.applyViewerSession(session({ subject: 'person-two' })), c => { c.PROJECT = model('v2'); }, c => c.setSessionAccessState('unavailable', 'session-expired')]) {
+    const p = page(), reading = deferred();
+    p.context.readCaptureMask = async () => { await reading.promise; return { captured: () => true, inside: () => 100 }; };
+    const done = exportProperty(p);
+    await tick();
+    assert.equal(p.inFlight(), 1);
+    change(p.context);
+    reading.resolve();
+    await rejects(done, 'name', 'AbortError');
+    assert.equal(p.log.canvases.length, 0, 'nothing rendered');
+    assert.equal(p.inFlight(), 0);
+  }
+  const none = page();
+  none.context.readCaptureMask = async () => ({ captured: () => false, inside: () => 0 });
+  await rejects(exportProperty(none), 'code', 'print_property');
+  assert.equal(none.log.canvases.length, 0);
+});
+
+test('choosing a property belongs to the viewer who chose: a change while picking or loading gives nothing', async () => {
+  const ring = [[500100, 4700050], [500100, 4700150], [500300, 4700150], [500300, 4700050], [500100, 4700050]];
+  const lines = extra => ({ state: { merge: true }, attribution: () => 'Source: Synthetic Parcel Map R1.', loadPrintParcels: () => null, sync() {}, suspend() {}, resume() {}, ...extra });
+  const found = { outline: { owner: 'EXAMPLE OWNER', parcels: [{ rings: [ring] }], lines: [ring] }, outlines: [], areaM2: 20000 };
+  const open = (pick, resolve) => {
+    const p = page();
+    p.context.propertyLines = lines();
+    p.context.pickMapPoint = pick; p.context.resolvePrintProperty = resolve;
+    return p;
+  };
+  const p = open(async () => [500200, 4700100], async () => found);
+  const selection = await p.context.choosePrintProperty();
+  assert.equal(selection.identity, IDENTITY());
+  assert.equal(selection.label, 'EXAMPLE OWNER ≈ 2.0 ha');
+  assert.deepEqual(selection.parcels[0].rings[0][0], [500100, 4700050]);
+  assert.equal(await open(async () => null, async () => found).context.choosePrintProperty(), null, 'nothing picked');
+  for (const stage of ['pick', 'load']) {
+    const gate = deferred();
+    const q = open(async () => { if (stage === 'pick') await gate.promise; return [500200, 4700100]; }, async () => { if (stage === 'load') await gate.promise; return found; });
+    const choosing = q.context.choosePrintProperty();
+    await tick();
+    q.context.applyViewerSession(session({ subject: 'person-two' }));
+    gate.resolve();
+    await rejects(choosing, 'name', 'AbortError');
+  }
+  const denied = open(async () => [1, 1], async () => found);
+  denied.context.SHARE_PERMISSIONS = { view: true, measure: false };
+  await rejects(denied.context.choosePrintProperty(), 'name', 'AbortError');
+});
+
+test('dialog: My property needs a choice, shows it, sends it, and drops it when the dialog opens again', async () => {
+  const doc = fakeDocument(), runs = [];
+  const opener = doc.createElement('button');
+  let next = { label: 'EXAMPLE OWNER ≈ 40.0 ac' };
+  const { controls } = mountOrthoPrintDialog({ documentRef: doc, openButton: opener, defaults: () => ({ chooseAvailable: true }), chooseProperty: async () => { if (next instanceof Error) throw next; return next; },
+    run: async options => { runs.push(options); return { blob: new Blob(['x']), filename: 'x.png' }; } });
+  await opener.fire('click');
+  controls.area.value = 'property';
+  await controls.area.fire('change');
+  assert.deepEqual([controls.exportButton.disabled, controls.format.disabled, controls.format.value], [true, true, 'png']);
+  await controls.choose.fire('click');
+  assert.deepEqual([controls.chosen.textContent, controls.exportButton.disabled], ['EXAMPLE OWNER ≈ 40.0 ac', false]);
+  next = null;
+  await controls.choose.fire('click');
+  assert.equal(controls.chosen.textContent, 'EXAMPLE OWNER ≈ 40.0 ac', 'a cancelled pick keeps the choice');
+  await controls.exportButton.fire('click');
+  assert.equal(runs[0].selection.label, 'EXAMPLE OWNER ≈ 40.0 ac');
+  assert.equal(controls.exportButton.disabled, false);
+  next = printProperty.printPropertyError('clipped');
+  await controls.choose.fire('click');
+  assert.deepEqual([controls.chosen.textContent, controls.exportButton.disabled, controls.status.textContent], ['', true, printProperty.PRINT_PROPERTY_MESSAGES.clipped]);
+  next = new TypeError('internal detail');
+  await controls.choose.fire('click');
+  assert.equal(controls.status.textContent, 'Could not load the property. Try again.');
+  await opener.fire('click');
+  controls.area.value = 'view';
+  await controls.area.fire('change');
+  assert.deepEqual([controls.exportButton.disabled, controls.format.disabled], [false, false]);
+  await controls.exportButton.fire('click');
+  assert.equal('selection' in runs[1], false);
 });

@@ -244,6 +244,11 @@
     .ortho-print-check { display: flex; gap: 8px; align-items: center; margin: 8px 0; font-size: 13px; }
     .ortho-print-check input:disabled + span { opacity: 0.5; }
     .ortho-print-dialog .tool-btn { margin-top: 10px; }
+    .ortho-print-property { display: flex; gap: 10px; align-items: center; margin: 8px 0; font-size: 13px; }
+    .ortho-print-property[hidden] { display: none; }
+    .ortho-print-property .tool-btn { margin-top: 0; flex-shrink: 0; }
+    #print-property-pick { position: absolute; inset: 0; z-index: 1200; cursor: crosshair; }
+    #print-property-pick p { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); margin: 0; padding: 6px 12px; border-radius: 8px; background: rgba(10,10,12,0.9); color: #f2f2f2; font-size: 13px; white-space: nowrap; }
     #floating-controls { position: absolute; top: 14px; right: 14px; z-index: 120; display: flex; gap: 8px; }
     .icon-btn {
       width: 38px; height: 38px; border-radius: 50%;
