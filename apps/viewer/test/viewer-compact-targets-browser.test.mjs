@@ -2,7 +2,7 @@ import { waitForDevToolsPort } from './devtools-port.mjs';
 import { BoundedTestCdp } from './bounded-test-cdp.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -74,7 +74,7 @@ test('compact Viewer targets are 32px on a desktop fine pointer and 44px on phon
     server = createServer(serve); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-targets-'));
-    browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', FINE_POINTER_SWITCH, `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+    browser = spawnBrowser(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', FINE_POINTER_SWITCH, `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
     const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     client = await BoundedTestCdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
@@ -128,7 +128,7 @@ test('compact Viewer targets are 32px on a desktop fine pointer and 44px on phon
     });
   } finally {
     client?.close();
-    if (browser) { const exited = new Promise(resolve => browser.once('exit', resolve)); browser.kill(); await Promise.race([exited, delay(3000)]); }
+    if (browser) { const exited = new Promise(resolve => browser.once('exit', resolve)); stopBrowser(browser); await Promise.race([exited, delay(3000)]); }
     if (server) { server.closeAllConnections?.(); await new Promise(resolve => server.close(resolve)); }
     unlock();
     if (profile) { const absolute = path.resolve(profile); assert.ok(absolute.startsWith(path.resolve(tmpdir(), 'ltds-viewer-targets-'))); try { rmSync(absolute, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch (error) { if (process.platform !== 'win32' || !['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY'].includes(error.code)) throw error; } }

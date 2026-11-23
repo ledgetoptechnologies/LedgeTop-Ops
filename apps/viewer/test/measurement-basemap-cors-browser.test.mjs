@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawnBrowser,stopBrowser} from './browser-launch.mjs';
 import {createServer} from 'node:http';
 import {existsSync,mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -47,7 +47,7 @@ test('shipped Leaflet basemap CORS permits approved canvas export and rejects de
     const tileOrigin=await listen(tiles);
     web=createServer((req,res)=>{const url=new URL(req.url,'http://fixture.invalid');if(['/leaflet.js','/leaflet.css'].includes(url.pathname)){res.setHeader('Content-Type',url.pathname.endsWith('.js')?'application/javascript':'text/css');return res.end(readFileSync(path.join(root,'node_modules/leaflet/dist',url.pathname.slice(1))));}res.setHeader('Content-Type','text/html');res.end(page(tileOrigin,url.searchParams.get('mode')||'approved'));});
     const origin=await listen(web);profile=mkdtempSync(path.join(tmpdir(),'ltds-basemap-cors-'));
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');
     const inspect=async mode=>{const url=`${origin}/?mode=${mode}`;await client.command('Page.navigate',{url});const until=Date.now()+8000;while(Date.now()<until){if(await client.evaluate(`location.href===${JSON.stringify(url)}&&document.body?.dataset.ready==='true'`))return client.evaluate('check()');await delay(25);}throw new Error(`Tiles never settled: ${mode}`);};
@@ -57,7 +57,7 @@ test('shipped Leaflet basemap CORS permits approved canvas export and rejects de
     await t.test('denied CORS never loads or exposes remote image pixels',async()=>{const out=await inspect('denied');assert.equal(out.loaded,0);assert.ok(out.failed>0);assert.ok(out.crossOrigin.every(v=>v==='anonymous'));assert.ok(out.error||out.onlyBlankBackground,'denied images must fail or leave only the blank background, never expose remote pixels');const read=requests.filter(r=>r.url.startsWith('/denied/'));assert.ok(read.length);assert.ok(read.every(r=>r.origin===origin&&r.cookie===null));});
     await t.test('legacy no-CORS control loads but shipped capture rejects tainted canvas',async()=>{const out=await inspect('legacy');assert.ok(out.loaded>0);assert.equal(out.failed,0);assert.equal(out.exported,null);assert.match(out.error?.message||'',/basemap prevents browser image export/);});
   }finally{
-    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}await stop(web);await stop(tiles);unlock();
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));stopBrowser(browser);await Promise.race([exited,delay(3000)]);}await stop(web);await stop(tiles);unlock();
     if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-basemap-cors-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Browser retained isolated temporary profile lock: ${absolute}`);}}
   }
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
@@ -167,7 +167,7 @@ test(`published session renews ${proactive ? 'proactively without denied tiles' 
       await new Promise(resolve => portServer.listen(0, '127.0.0.1', resolve));
       const port = portServer.address().port;
       await new Promise(resolve => portServer.close(resolve));
-      browser = spawn(executable, ['--headless=new', '--disable-gpu', '--disable-dev-shm-usage',
+      browser = spawnBrowser(executable, ['--headless=new', '--disable-gpu', '--disable-dev-shm-usage',
         '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-address=127.0.0.1',
         `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore', windowsHide: true });
       const devtools = `http://127.0.0.1:${port}`, deadline = Date.now() + 30_000;
@@ -279,7 +279,7 @@ test(`published session renews ${proactive ? 'proactively without denied tiles' 
       throw error;
     } finally {
       if (viewer) { try { await viewer.command('Browser.close'); } catch {} }
-      viewer?.close(); controller?.close(); browser?.kill();
+      viewer?.close(); controller?.close(); stopBrowser(browser);
       fixture?.server.closeAllConnections?.();
       if (fixture?.server) await new Promise(resolve => fixture.server.close(resolve));
       await fixture?.vite.close();

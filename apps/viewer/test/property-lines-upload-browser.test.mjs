@@ -4,7 +4,7 @@
 // drawing an uploaded boundary outside Wisconsin. Stubbed API, no live service.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -133,8 +133,8 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
       res.end(readFileSync(path.join(root, url.pathname.slice(1))));
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    profile = mkdtempSync(path.join(tmpdir(), 'parcel3-browser-'));
-    browser = spawn(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-parcel3-browser-'));
+    browser = spawnBrowser(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
     const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     client = await Cdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
@@ -201,7 +201,8 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
     assert.equal(await client.evaluate('window.pwned'), undefined);
   } finally {
     client?.close();
-    if (browser && browser.exitCode === null) { browser.kill(); await new Promise(resolve => browser.once('exit', resolve)); }
+    stopBrowser(browser);
+    if (browser && browser.exitCode === null) { await new Promise(resolve => browser.once('exit', resolve)); }
     server?.close();
     if (profile) { try { rmSync(profile, { recursive: true, force: true }); } catch { /* browser may still hold files */ } }
     await unlock();

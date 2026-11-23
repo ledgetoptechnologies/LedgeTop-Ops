@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawnBrowser,stopBrowser} from './browser-launch.mjs';
 import {createServer} from 'node:http';
 import {existsSync,mkdtempSync,mkdirSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -77,7 +77,7 @@ test('map outline renders on actual mesh and point geometry across all views wit
   const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-crossview-rendered-browser-'));
-    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:1150,height:750,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:`${f.origin}?rendered=1`});
     await waitFor(client,"document.body?.dataset.ready==='true'&&document.querySelectorAll('#view .measurement-overlay circle').length===4");
@@ -119,7 +119,7 @@ test('map outline renders on actual mesh and point geometry across all views wit
     await client.evaluate('renderedFixture.deny()');assert.equal(await client.evaluate("document.querySelector('#view .measurement-overlay').innerHTML"),'');
     assert.deepEqual(f.requests,[],'display placement creates no server jobs');assert.deepEqual(client.errors,[]);
   }finally{
-    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));stopBrowser(browser);await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
     if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-crossview-rendered-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Isolated profile retained: ${absolute}`);}}
   }
 });
@@ -129,7 +129,7 @@ test('real measurement overlay preserves original visible edges across close zoo
   const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-measurement-closezoom-browser-'));
-    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:1150,height:750,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:f.origin});
     await waitFor(client,`location.href===${JSON.stringify(f.origin)}&&document.body?.dataset.ready==='true'&&document.querySelectorAll('#view .measurement-overlay line').length===4`);
@@ -152,7 +152,7 @@ test('real measurement overlay preserves original visible edges across close zoo
     await client.evaluate("document.querySelector('[data-camera=\"8\"]').click()");await waitFor(client,"document.querySelectorAll('#view .measurement-overlay line').length===4");assert.equal(await client.evaluate('fixtureSnapshot()'),original);
     assert.ok(f.requests.every(request=>request.method==='GET'),'zoom never mutates source records');assert.deepEqual(client.errors,[]);
   }finally{
-    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));stopBrowser(browser);await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
     if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-measurement-closezoom-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Browser retained an isolated temporary profile lock: ${absolute}`);}}
   }
 });
@@ -182,7 +182,7 @@ test('real sidebar CSS supports desktop drag, keyboard and mobile collapsed layo
   const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-sidebar-layout-browser-'));
-    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort'),{pollMs:30}),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:`${f.origin}?sidebar=1`});await waitFor(client,"document.body?.dataset.ready==='true'");
     assert.equal((await client.evaluate('sidebarFixture.state()')).width,300);
@@ -195,7 +195,7 @@ test('real sidebar CSS supports desktop drag, keyboard and mobile collapsed layo
     await client.evaluate('sidebarFixture.collapse()');await waitFor(client,'sidebarFixture.state().width<=1');assert.equal((await client.evaluate('sidebarFixture.state()')).view,390);
     await client.evaluate('sidebarFixture.dispose()');assert.deepEqual(client.errors,[]);
   }finally{
-    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));stopBrowser(browser);await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
     if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-sidebar-layout-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Isolated sidebar profile retained: ${absolute}`);}}
   }
 });
@@ -205,7 +205,7 @@ test('real editor inserts midpoint, moves/deletes selected vertices and retains 
   const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-measurement-editor-browser-'));const downloads=path.join(profile,'downloads');mkdirSync(downloads);
-    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort'),{pollMs:30}),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloads});await client.command('Emulation.setDeviceMetricsOverride',{width:1150,height:850,deviceScaleFactor:1,mobile:false});
     const mouse=async(type,x,y,extra={})=>client.command('Input.dispatchMouseEvent',{type,x,y,button:'left',clickCount:1,...extra});
@@ -280,7 +280,7 @@ test('real editor inserts midpoint, moves/deletes selected vertices and retains 
     await button('[data-close]');await button('#tool-volume');await click(400,200);const checkpoint=await client.evaluate('editorFixture.checkpoint()');await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});await waitFor(client,'editorFixture.draft()===null');assert.equal(await client.evaluate('editorFixture.count()'),2,'Escape never saves an unfinished Volume draft');assert.equal(await client.evaluate(`editorFixture.restore(${JSON.stringify(checkpoint)})`),true);await click(550,200);await click(550,350);await button('[data-m=finish]');await waitFor(client,"document.querySelector('dialog.surface-inspector')?.open===true");assert.equal(await client.evaluate('editorFixture.count()'),3,'renewed Volume draft retains inspector intent');
     assert.deepEqual(client.errors,[]);
   }finally{
-    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));stopBrowser(browser);await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
     if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-measurement-editor-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Isolated editor profile retained: ${absolute}`);}}
   }
 });

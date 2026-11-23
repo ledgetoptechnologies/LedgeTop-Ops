@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawnBrowser,stopBrowser} from './browser-launch.mjs';
 import {createServer} from 'node:http';
 import {existsSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -54,7 +54,7 @@ test('real native-profile browser lifecycle and inspector integration',{timeout:
   const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
   try{
     const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-native-profile-browser-'));
-    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');
     let visit=0;const navigate=async(mode='panel',width=1200,source='raster')=>{await client.command('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});const url=`${f.origin}?mode=${mode}&source=${source}&visit=${++visit}`;await client.command('Page.navigate',{url});await waitFor(client,`location.href===${JSON.stringify(url)}&&document.body?.dataset.ready==='true'&&document.querySelector('[data-update]')`);};
@@ -115,7 +115,7 @@ test('real native-profile browser lifecycle and inspector integration',{timeout:
     });
     assert.deepEqual(client.errors,[]);
   }finally{
-    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));stopBrowser(browser);await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
     if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-native-profile-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Browser retained isolated temporary profile lock: ${absolute}`);}}
   }
 });

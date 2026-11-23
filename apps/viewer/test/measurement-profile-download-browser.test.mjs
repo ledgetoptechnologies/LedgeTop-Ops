@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawnBrowser,stopBrowser} from './browser-launch.mjs';
 import {createServer} from 'node:http';
 import {existsSync,mkdtempSync,mkdirSync,readFileSync,readdirSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -49,7 +49,7 @@ test('native profile exports create real CSV and PNG files using browser downloa
     temporary=mkdtempSync(path.join(tmpdir(),'ltds-profile-download-test-'));const downloads=path.join(temporary,'downloads'),profile=path.join(temporary,'profile');mkdirSync(downloads);mkdirSync(profile);
     server=createServer((req,res)=>{const pathname=new URL(req.url,'http://fixture.invalid').pathname;if(pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(page);}if(!/^\/[a-z0-9-]+\.(mjs|css)$/.test(pathname)){res.statusCode=404;return res.end();}const file=path.join(root,pathname.slice(1));if(!existsSync(file)){res.statusCode=404;return res.end();}res.setHeader('Content-Type',file.endsWith('.css')?'text/css':'application/javascript');res.end(readFileSync(file));});
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort'),{pollMs:30,label:'Timed out: browser startup'}),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(x=>x.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloads});await client.command('Emulation.setDeviceMetricsOverride',{width:1200,height:1100,deviceScaleFactor:1,mobile:false});
     await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});await waitUntil(()=>client.evaluate("document.body?.dataset.ready==='true'"),'fixture mount');
@@ -60,7 +60,7 @@ test('native profile exports create real CSV and PNG files using browser downloa
     assert.deepEqual(readdirSync(downloads).sort(),['elevation-profile.csv','elevation-profile.png']);assert.equal(await client.evaluate('fixture.unchanged()'),true);await client.evaluate('fixture.dispose()');assert.equal(await client.evaluate("document.querySelectorAll('[data-profile-csv],[data-profile-png]').length"),0);assert.deepEqual(client.errors,[]);
     t.diagnostic(`Real downloaded CSV ${Buffer.byteLength(csv)} bytes; PNG ${png.length} bytes, ${dimensions.width}x${dimensions.height}; source measurement unchanged.`);
   }finally{
-    client?.close();if(browser){const exited=new Promise(r=>browser.once('exit',r));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(r=>server.close(r));}unlock();
+    client?.close();if(browser){const exited=new Promise(r=>browser.once('exit',r));stopBrowser(browser);await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(r=>server.close(r));}unlock();
     if(temporary){const absolute=path.resolve(temporary);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-profile-download-test-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Isolated browser temporary lock retained: ${absolute}`);}}
   }
 });

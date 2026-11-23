@@ -3,7 +3,7 @@
 // drawer reports its state, moves focus in and closes on Escape. No API or data.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawnBrowser, stopBrowser } from './browser-launch.mjs';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -54,7 +54,7 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-workspace-sidebar-'));
-    browser = spawn(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', FINE_POINTER_SWITCH, `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+    browser = spawnBrowser(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', FINE_POINTER_SWITCH, `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
     const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     client = await Cdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
@@ -135,9 +135,9 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
   } finally {
     client?.close();
     // Wait for the browser this test started to exit (force it if needed) before releasing the lock.
+    stopBrowser(browser);
     if (browser && browser.exitCode === null && browser.signalCode === null) {
       const exited = new Promise(resolve => browser.once('exit', resolve));
-      browser.kill();
       if (await Promise.race([exited.then(() => true), delay(5000).then(() => false)]) === false) { browser.kill('SIGKILL'); await Promise.race([exited, delay(5000)]); }
       assert.ok(browser.exitCode !== null || browser.signalCode !== null, 'isolated browser exited');
     }

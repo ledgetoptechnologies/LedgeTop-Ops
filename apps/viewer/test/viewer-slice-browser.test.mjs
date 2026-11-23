@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawnBrowser,stopBrowser} from './browser-launch.mjs';
 import {createServer} from 'node:http';
 import {existsSync,mkdtempSync,readFileSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -36,7 +36,7 @@ test('real WebGL mesh and direct points follow slice controls, streamed arrivals
     server=createServer((req,res)=>{const url=new URL(req.url,'http://fixture.invalid');if(url.pathname==='/'){res.setHeader('Content-Type','text/html');res.end(page());return;}const relative=url.pathname==='/viewer-slice.mjs'?'viewer-slice.mjs':url.pathname.startsWith('/three/')?'node_modules/three/'+url.pathname.slice(7):null;const file=relative&&path.resolve(root,relative);if(!file||!file.startsWith(root+path.sep)||!existsSync(file)){res.statusCode=404;res.end();return;}res.setHeader('Content-Type','application/javascript');res.end(readFileSync(file));});
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
     const profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-slice-browser-'));
-    browser=spawn(binary,['--headless=new','--enable-unsafe-swiftshader','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browser=spawnBrowser(binary,['--headless=new','--enable-unsafe-swiftshader','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
     const port=await waitForDevToolsPort(path.join(profile,'DevToolsActivePort')),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
     await client.command('Page.enable');await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});
     const ready=Date.now()+10000;while(Date.now()<ready&&!await client.evaluate("document.body?.dataset.ready==='true'"))await delay(50);
@@ -55,5 +55,5 @@ test('real WebGL mesh and direct points follow slice controls, streamed arrivals
       await click('reset');assert.deepEqual(await pixels(),[255,255],`${kind}: reset restores full geometry`);
     }
     await click('enabled');await client.evaluate('fixture.unsupported()');assert.deepEqual(await pixels(),[255,255]);assert.equal(await client.evaluate('fixture.active'),false);assert.equal(await client.evaluate("document.querySelector('[data-slice=enabled]').disabled"),true);
-  }finally{client?.close();browser?.kill();if(server)await new Promise(resolve=>server.close(resolve));await unlock();}
+  }finally{client?.close();stopBrowser(browser);if(server)await new Promise(resolve=>server.close(resolve));await unlock();}
 });
