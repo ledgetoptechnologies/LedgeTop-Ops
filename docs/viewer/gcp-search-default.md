@@ -16,13 +16,21 @@ renewal changing display preferences cannot reinterpret an unsubmitted value.
 Custom radius values remain authoritative. Fractional metric values such as15.24
 use unrestricted numeric stepping, and invalid/zero/oversized values reject.
 
-This change does not implement automatic Emlid CSV discovery, permanent raw-file
+Import validation also rejects blank numeric cells rather than turning them into
+zero coordinates or heights; explicit numeric zeros remain valid. A declaration
+cannot override even one explicit contrary m/ftUS annotation. A single matching
+annotation still requires manual unit confirmation rather than guessing the
+units of all axes.
+
+This change does not qualify horizontal/vertical datum export or geoid
+transformations. It does not implement automatic Emlid CSV discovery, permanent raw-file
 retention, full candidate pagination/map browsing, new upload limits or a new GCP
 editor. Existing import/provenance/permissions/pixel marking/ODM serialization
 are preserved. Those remaining parts of the requested GCP workflow still need
 their own implementation and real dataset acceptance.
 
-Validation:25focused tests passed, covering exact unit conversion, API default
+Validation:27focused tests passed, covering blank numeric and unit-contradiction
+regressions, explicit-zero preservation, exact unit conversion, API default
 and explicit filtering/Auto/Nearest, invalid inputs, actual GCP renderer and form
 submission functions, existing Emlid import, source association, marking and
 NodeODM snapshot serialization. Renderer tests use light dependency stubs and
