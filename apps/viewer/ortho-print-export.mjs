@@ -11,7 +11,7 @@ export const PRINT_STRIP_SOURCE_PIXELS = 12_000_000;
 // Goes with every export that shows property lines: a band on a PNG, the
 // description tag in a GeoTIFF (whose pixels and bounds are map data).
 export const PROPERTY_LINES_NOTE = 'Property lines are approximate, not a survey.';
-const PROPERTY_LINE = Object.freeze({ color: BRAND_COLORS.orange, halo: 'rgba(17,17,17,0.55)', width: 2.5, haloWidth: 5 });
+export const PROPERTY_LINE_STYLE_PRINT = Object.freeze({ color: BRAND_COLORS.orange, halo: 'rgba(17,17,17,0.55)', width: 2.5, haloWidth: 5 });
 
 const cancelled = () => new DOMException('Export cancelled.', 'AbortError');
 const abortIf = (signal) => { if (signal?.aborted) throw cancelled(); };
@@ -106,7 +106,7 @@ export async function renderOrthoPixels({ ds, extent, width, height, signal, poo
   return { rgba: out, level };
 }
 
-function niceLength(target) {
+export function niceLength(target) {
   const p = 10 ** Math.floor(Math.log10(target));
   for (const m of [5, 2, 1]) if (m * p <= target) return m * p;
   return p;
@@ -161,27 +161,36 @@ function drawPropertyNote(ctx, { lines, font, lineHeight, bandHeight, pad }, { w
 export const UNCAPTURED_LABEL = 'No imagery captured here';
 const HATCH = Object.freeze({ color: '#9a9a9a', rgb: [154, 154, 154], period: 12, width: 1.5 });
 
+// The same hatch as a legend swatch.
+export function drawHatch(ctx, { x, y, width, height, scale }) {
+  ctx.strokeStyle = HATCH.color; ctx.lineWidth = HATCH.width * scale;
+  ctx.beginPath();
+  for (let k = 0; k <= width - height; k += HATCH.period / 2 * scale) { ctx.moveTo(x + k, y + height); ctx.lineTo(x + k + height, y); }
+  ctx.stroke();
+}
+
 // Hide everything the clip leaves out (white) and hatch uncaptured ground, in
 // strips so a large print never reads the whole canvas at once.
-// mask: 0 hide, 1 show, 2 uncaptured (print-property.mjs).
-export function applyClip(ctx, { mask, width, height, scale, stripRows = 256 }) {
+// mask: 0 hide, 1 show, 2 uncaptured (print-property.mjs), for the width x
+// height part of the canvas at (x, y).
+export function applyClip(ctx, { mask, width, height, scale, x: left = 0, y: top = 0, stripRows = 256 }) {
   const period = HATCH.period * scale, line = HATCH.width * scale * Math.SQRT2;
   for (let y0 = 0; y0 < height; y0 += stripRows) {
     const rows = Math.min(stripRows, height - y0);
-    const image = ctx.getImageData(0, y0, width, rows), data = image.data;
+    const image = ctx.getImageData(left, top + y0, width, rows), data = image.data;
     for (let y = 0; y < rows; y++) for (let x = 0; x < width; x++) {
       const kind = mask[(y0 + y) * width + x];
       if (kind === 1) continue;
       const o = (y * width + x) * 4, hatch = kind === 2 && (x + y0 + y) % period < line;
       data[o] = hatch ? HATCH.rgb[0] : 255; data[o + 1] = hatch ? HATCH.rgb[1] : 255; data[o + 2] = hatch ? HATCH.rgb[2] : 255; data[o + 3] = 255;
     }
-    ctx.putImageData(image, 0, y0);
+    ctx.putImageData(image, left, top + y0);
   }
 }
 
-function drawPropertyLines(ctx, lines, { color, scale, project }) {
+export function drawPropertyLines(ctx, lines, { color, scale, project }) {
   ctx.save(); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-  for (const [style, w] of [[PROPERTY_LINE.halo, PROPERTY_LINE.haloWidth], [color, PROPERTY_LINE.width]]) {
+  for (const [style, w] of [[PROPERTY_LINE_STYLE_PRINT.halo, PROPERTY_LINE_STYLE_PRINT.haloWidth], [color, PROPERTY_LINE_STYLE_PRINT.width]]) {
     ctx.beginPath();
     for (const line of lines) {
       line.forEach(([e, n], i) => { const [x, y] = project(e, n); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
@@ -221,15 +230,12 @@ function drawLegend(ctx, { width, height, gsdE, units, contours, propertyColor =
   if (propertyColor) {
     const py = cy + (contours ? line : 0);
     ctx.beginPath(); ctx.moveTo(x + pad, py); ctx.lineTo(x + pad + 26 * scale, py);
-    ctx.strokeStyle = PROPERTY_LINE.halo; ctx.lineWidth = PROPERTY_LINE.haloWidth * scale; ctx.stroke();
-    ctx.strokeStyle = propertyColor; ctx.lineWidth = PROPERTY_LINE.width * scale; ctx.stroke();
+    ctx.strokeStyle = PROPERTY_LINE_STYLE_PRINT.halo; ctx.lineWidth = PROPERTY_LINE_STYLE_PRINT.haloWidth * scale; ctx.stroke();
+    ctx.strokeStyle = propertyColor; ctx.lineWidth = PROPERTY_LINE_STYLE_PRINT.width * scale; ctx.stroke();
   }
   if (uncaptured) {
     const uy = cy + (Number(Boolean(contours)) + Number(Boolean(propertyColor))) * line, h = 10 * scale;
-    ctx.strokeStyle = HATCH.color; ctx.lineWidth = HATCH.width * scale;
-    ctx.beginPath();
-    for (let k = 0; k <= 26 * scale - h; k += HATCH.period / 2 * scale) { ctx.moveTo(x + pad + k, uy + h / 2); ctx.lineTo(x + pad + k + h, uy - h / 2); }
-    ctx.stroke();
+    drawHatch(ctx, { x: x + pad, y: uy - h / 2, width: 26 * scale, height: h, scale });
   }
   const tx = x + pad + swatch;
   for (const row of rows) { ctx.fillText(row, tx, cy); cy += line; }
@@ -381,7 +387,7 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
   let drawn = null;
   if (contours?.features?.length) drawn = drawContours(ctx, contours.features, project, { colors, scale, width, height });
   let propertyCount = 0;
-  const lineColor = propertyStyle?.color || PROPERTY_LINE.color;
+  const lineColor = propertyStyle?.color || PROPERTY_LINE_STYLE_PRINT.color;
   // The clip covers imagery, contours and neighbours' lines alike; only the
   // chosen property's own boundary is drawn over its edge.
   const strokeLines = lines => {
