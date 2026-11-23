@@ -92,10 +92,85 @@ export function parcelAreaM2(parcel) {
     const first = ring[0], last = ring[ring.length - 1];
     if (ring.length < 4 || first[0] !== last[0] || first[1] !== last[1]) return null;
   }
-  const [lon0, lat0] = parcel.rings[0][0], y0 = equalAreaNorthing(lat0);
-  const frame = { to: (lon, lat) => [GRS80_A * (lon - lon0) * DEG, equalAreaNorthing(lat) - y0] };
-  const area = orientedRings(parcel, frame).reduce((sum, { pts }) => sum + signedArea(pts), 0);
+  const area = orientedRings(parcel, equalAreaFrame(parcel.rings[0][0])).reduce((sum, { pts }) => sum + signedArea(pts), 0);
   return area > 0 ? area : null;
+}
+
+function equalAreaFrame([lon0, lat0]) {
+  const y0 = equalAreaNorthing(lat0);
+  return { to: (lon, lat) => [GRS80_A * (lon - lon0) * DEG, equalAreaNorthing(lat) - y0] };
+}
+
+// The area covered by any of the parcels, so land under two of them counts
+// once. The plane is cut into horizontal slabs at every corner and every edge
+// crossing; inside a slab no edges cross, so its covered width at mid-height
+// times its height is exact. Null past the work budget: no total rather than
+// a guess.
+const UNION_WORK = 8_000_000;
+function unionAreaM2(parcels, budget = UNION_WORK) {
+  const frame = equalAreaFrame(parcels[0].rings[0][0]);
+  const edges = [], levels = [];
+  parcels.forEach((parcel, owner) => {
+    for (const ring of parcel.rings) {
+      const pts = ring.map(([lon, lat]) => frame.to(lon, lat));
+      for (let i = 1; i < pts.length; i++) {
+        const [a, b] = pts[i - 1][1] <= pts[i][1] ? [pts[i - 1], pts[i]] : [pts[i], pts[i - 1]];
+        levels.push(a[1]);
+        if (a[1] < b[1]) edges.push({ owner, x0: a[0], y0: a[1], x1: b[0], y1: b[1], minX: Math.min(a[0], b[0]), maxX: Math.max(a[0], b[0]), slope: (b[0] - a[0]) / (b[1] - a[1]) });
+        levels.push(b[1]);
+      }
+    }
+  });
+  edges.sort((a, b) => a.y0 - b.y0);
+  let work = 0, active = [];
+  for (const edge of edges) {
+    const still = [];
+    for (const other of active) {
+      work++;
+      if (other.y1 <= edge.y0) continue;
+      still.push(other);
+      if (other.maxX < edge.minX || other.minX > edge.maxX || other.slope === edge.slope) continue;
+      const y = (edge.x0 - other.x0 + other.slope * other.y0 - edge.slope * edge.y0) / (other.slope - edge.slope);
+      if (y > edge.y0 && y < Math.min(edge.y1, other.y1)) levels.push(y);
+    }
+    still.push(edge);
+    active = still;
+    if (work > budget) return null;
+  }
+  levels.sort((a, b) => a - b);
+  let area = 0, next = 0;
+  active = [];
+  for (let i = 1; i < levels.length; i++) {
+    const low = levels[i - 1], high = levels[i];
+    if (!(high > low)) continue;
+    const mid = (low + high) / 2;
+    active = active.filter(edge => edge.y1 > low);
+    while (next < edges.length && edges[next].y0 <= low) { if (edges[next].y1 > low) active.push(edges[next]); next++; }
+    work += active.length;
+    if (work > budget) return null;
+    const crossings = active.map(edge => [edge.x0 + edge.slope * (mid - edge.y0), edge.owner]).sort((a, b) => a[0] - b[0]);
+    // Inside a parcel after an odd number of its own edges; covered while inside any.
+    const inside = new Set();
+    let start = 0;
+    for (const [x, owner] of crossings) {
+      if (!inside.size) start = x;
+      if (!inside.delete(owner)) inside.add(owner);
+      if (!inside.size) area += (x - start) * (high - low);
+    }
+  }
+  return area > 0 ? area : null;
+}
+
+// One parcel's area when its rings are sound: the signed ring sum and the area
+// actually covered agree. Crossed, doubled or overlapping rings do not, and
+// have no area to state. Cached per parcel object, like the label geometry.
+const soundAreaCache = new WeakMap();
+function soundAreaM2(parcel) {
+  if (!soundAreaCache.has(parcel)) {
+    const signed = parcelAreaM2(parcel), covered = signed == null ? null : unionAreaM2([parcel]);
+    soundAreaCache.set(parcel, covered != null && Math.abs(signed - covered) <= 0.5 + signed * 1e-5 ? signed : null);
+  }
+  return soundAreaCache.get(parcel);
 }
 
 // Two parcels with the same rings, whatever their start corner, direction or
@@ -113,8 +188,8 @@ function shapeKey(parcel) {
 
 // An outline's whole area in square metres, or null when it cannot be stated:
 // a parcel the server clipped (`lines`) or left open, an owner's land that
-// may continue past the loaded tiles, or records stacked on each other in a
-// way that would count the same land twice.
+// may continue past the loaded tiles, or land too intricate to add up. Land
+// under two of the owner's records counts once.
 // covered(bounds): whether everything touching those lon/lat bounds is loaded.
 // Only needed for land that can be merged; a single parcel arrives whole.
 export function outlineAreaM2(outline, { merged = true, covered = null } = {}) {
@@ -127,23 +202,8 @@ export function outlineAreaM2(outline, { merged = true, covered = null } = {}) {
     }
   }
   const parcels = outline.parcels.length > 1 ? [...new Map(outline.parcels.map(parcel => [shapeKey(parcel), parcel])).values()] : outline.parcels;
-  if (parcels.length > 1) {
-    // Different shapes of one owner over the same land: one's middle lies inside another.
-    for (const parcel of parcels) {
-      const middle = parcelLabelGeometry(parcel)?.lonLat;
-      if (!middle) return null;
-      for (const other of parcels) {
-        if (other !== parcel && other.rings.reduce((n, ring) => n + Number(pointInRing(...middle, ring)), 0) % 2) return null;
-      }
-    }
-  }
-  let total = 0;
-  for (const parcel of parcels) {
-    const area = parcelAreaM2(parcel);
-    if (area == null) return null;
-    total += area;
-  }
-  return total;
+  if (parcels.some(parcel => soundAreaM2(parcel) == null)) return null;
+  return parcels.length === 1 ? soundAreaM2(parcels[0]) : unionAreaM2(parcels);
 }
 
 // "≈ 40.2 ac": one decimal from 1 acre, two below, square feet under 0.1

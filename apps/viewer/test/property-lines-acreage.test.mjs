@@ -160,7 +160,7 @@ test('a parcel clipped by the server shows no acreage, and neither does a total 
   assert.deepEqual(candidates(false).map(c => [c.text, text(c.acreageM2)]), [['SAMPLE FARMS LLC', '≈ 40.0 ac'], ['SAMPLE FARMS LLC', ''], ['EXAMPLE OWNER', '≈ 40.0 ac']]);
 });
 
-test('stacked records count once; different shapes over the same land give no total', () => {
+test('stacked records and shapes over the same land count once', () => {
   const base = forty(1, 'SAMPLE FARMS LLC', 0, 0), next = forty(2, 'SAMPLE FARMS LLC', 1, 0);
   const ring = base.rings[0], turned = [...ring.slice(2, -1), ...ring.slice(0, 3)];
   for (const stacked of [ring, ring.slice().reverse(), turned]) {
@@ -168,13 +168,68 @@ test('stacked records count once; different shapes over the same land give no to
     assert.equal(text(outlineAreaM2(outline, { covered: all })), '≈ 80.0 ac');
   }
   const unit = { id: 8, owner: 'SAMPLE FARMS LLC', rings: [layout(box(50, 50, 60))] };
-  assert.equal(outlineAreaM2({ ownerKey: 'SAMPLE FARMS LLC', parcels: [base, next, unit] }, { covered: all }), null);
+  assert.equal(text(outlineAreaM2({ ownerKey: 'SAMPLE FARMS LLC', parcels: [base, next, unit] }, { covered: all })), '≈ 80.0 ac');
   // Land inside the hole of its neighbour is not stacked.
   const ringed = { id: 7, owner: 'SAMPLE FARMS LLC', rings: [layout(box(0, 0, 400)), layout(box(100, 100, 200))] };
   const filled = { id: 6, owner: 'SAMPLE FARMS LLC', rings: [layout(box(100, 100, 200))] };
   const joined = dissolveParcelsByOwner([ringed, filled]);
   assert.equal(joined.length, 1);
   assert.ok(Math.abs(outlineAreaM2(joined[0], { covered: all }) / 160000 - 1) < 0.0005);
+});
+
+test('partial overlap: parcels joined through a third never count shared land twice', () => {
+  // Two parcels over each other by 4 m x 22.62 m, each next to a third below;
+  // neither one's middle lies inside the other.
+  const low = layout(box(0, 0, 200, 50)), left = layout(box(0, 50, 104, 100)), right = layout(box(100, 50, 100, 22.62));
+  const known = 200 * 50 + 104 * 100 + 100 * 22.62 - 4 * 22.62;
+  for (const turn of [0, 1]) {
+    const rings = turn ? [right, low, left] : [low, left, right];
+    const outlines = dissolveParcelsByOwner(rings.map((ring, i) => ({ id: i + 1, owner: 'SAMPLE FARMS LLC', rings: [ring] })));
+    assert.equal(outlines.length, 1, 'joined through the third');
+    const middles = outlines[0].parcels.map(p => parcelLabelGeometry(p).lonLat), [a, b] = [left, right].map(r => middles[rings.indexOf(r)]);
+    const inside = ([x, y], r) => x > Math.min(...r.map(p => p[0])) && x < Math.max(...r.map(p => p[0])) && y > Math.min(...r.map(p => p[1])) && y < Math.max(...r.map(p => p[1]));
+    assert.deepEqual([inside(a, right), inside(b, left)], [false, false]);
+    const total = outlineAreaM2(outlines[0], { covered: all });
+    assert.ok(Math.abs(total - known) < 5, `${total} vs ${known}: 90.5 m2 of overlap`);
+  }
+});
+
+test('union area matches known areas: crossing shapes, holes, nesting, duplicates, rounding slivers, dense edges', () => {
+  const at = rings => outlineAreaM2({ ownerKey: 'A', parcels: rings.map((r, i) => ({ id: i, rings: Array.isArray(r[0][0]) ? r : [r] })) }, { covered: all });
+  const near = (rings, known, tolerance = 0.0005) => { const got = at(rings); assert.ok(Math.abs(got / known - 1) < tolerance, `${got} vs ${known}`); };
+  // A plus sign, two crossing triangles (hexagram), and a hole partly covered by another parcel.
+  near([layout(box(0, 100, 300, 100)), layout(box(100, 0, 100, 300))], 30000 + 30000 - 10000);
+  const R = 200, star = k => layout([0, 1, 2, 3].map(i => [R * Math.sin((i * 120 + k) * RAD), R * Math.cos((i * 120 + k) * RAD)]));
+  near([star(0), star(60)], Math.sqrt(3) * R * R);   // hexagram of circumradius R
+  near([[layout(box(0, 0, 400)), layout(box(100, 100, 200))], layout(box(50, 150, 100, 50))], 160000 - 40000 + 50 * 50);
+  near([layout(box(0, 0, 400)), layout(box(100, 100, 50)), layout(box(0, 0, 400))], 160000);
+  near([layout(box(0, 0, 400)), layout(box(390, 390, 400))], 320000 - 100);
+  // Neighbours that only touch: the plain sum, at any angle, with corners on one side only.
+  for (const turn of [0, 17, 45]) {
+    const o = { turn }, rings = [layout([[0, 0], [0, 400], [400, 400], [400, 250], [400, 120], [400, 0], [0, 0]], o), layout(box(400, 0, 300, 120), o), layout(box(400, 120, 300, 280), o)];
+    const sum = rings.reduce((n, r) => n + parcelAreaM2({ rings: [r] }), 0);
+    assert.ok(Math.abs(at(rings) - sum) < 10, `turn ${turn}: ${at(rings) - sum} m2 of rounding`);
+  }
+  // Wavy shared boundary, 2000 corners a side.
+  const wave = Array.from({ length: 2000 }, (_, i) => [i, 100 + 20 * Math.sin(i / 9)]);
+  const upper = layout([...wave, [1999, 500], [0, 500], wave[0]]), lower = layout([...wave, [1999, 0], [0, 0], wave[0]]);
+  const started = performance.now();
+  near([upper, lower], 1999 * 500);
+  assert.ok(performance.now() - started < 3000, 'bounded time');
+});
+
+test('one record with crossed, doubled or overlapping rings shows no acreage', () => {
+  const alone = rings => outlineAreaM2({ ownerKey: '', parcels: [{ id: 1, rings }] }, { merged: false });
+  assert.equal(text(alone([layout(box(0, 0, 400)), layout(box(500, 0, 400))])), '≈ 79.1 ac', 'two sound parts');
+  assert.equal(alone([layout([[0, 0], [400, 400], [400, 0], [0, 400], [0, 0]])]), null, 'bow tie');
+  assert.equal(alone([layout([[0, 0], [500, 400], [400, 0], [0, 300], [0, 0]])]), null, 'crossed ring');
+  assert.equal(alone([layout(box(0, 0, 400)), layout(box(0, 0, 400))]), null, 'ring twice');
+  assert.equal(alone([layout(box(0, 0, 400)), layout(box(300, 300, 400))]), null, 'overlapping parts');
+});
+
+test('land too intricate to add up within the work budget shows no total', () => {
+  const comb = (dy, n) => layout([[0, dy], ...Array.from({ length: n }, (_, i) => [i + 0.5, dy + (i % 2 ? 0 : 1000)]), [n, dy], [0, dy]]);
+  assert.equal(outlineAreaM2({ ownerKey: 'A', parcels: [{ id: 1, rings: [comb(0, 4000)] }, { id: 2, rings: [comb(1, 4000)] }] }, { covered: all }), null);
 });
 
 test('tiles: bounds count as loaded only when every tile they touch is, counting split tiles', () => {
