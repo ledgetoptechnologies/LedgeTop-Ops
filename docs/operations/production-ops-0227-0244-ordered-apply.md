@@ -224,13 +224,8 @@ The receipt is a JSON file. The tool creates it exclusively and rewrites it in
 full after every phase, so a stop always leaves a complete partial receipt. An
 error before the ordered run starts (for example a missing token, or a failed
 target check) is recorded as `refused`, phase `command-line`, with zero writes.
-If that refusal cannot be written, or the receipt cannot be closed after an
-error, the original error stays first on stderr and a second line says
-`ops_0227_0244:refusal_receipt_write_failed` or
-`ops_0227_0244:receipt_close_failed`. The exit code stays 1 and the write is not
-tried again, so the file may be empty or incomplete. A process that ends without
-settling or is killed before its first receipt write also leaves an empty file.
-The receipt contains:
+A process that is killed, or ends without settling, can leave an empty or
+unfinished file. The receipt contains:
 
 - the plan hash and the fixture hash;
 - the target ids and the approval reference;
@@ -263,6 +258,32 @@ apply step records one of these outcomes:
 
 A failed read after an apply is treated the same way as an ambiguous apply. The
 tool never retries a batch, and it never sends a file twice in one process.
+
+## When the receipt cannot be saved
+
+A receipt write counts only after every byte is written, flushed and read back
+equal. After a failure the process never writes that file again, so it may be
+empty or cut off. A receipt that was not saved is never reported as a success:
+the exit code is 1, whatever the run reached, and stderr has its own line.
+
+| What failed | stdout summary | stderr | Exit |
+|---|---|---|---|
+| A receipt write in the ordered run, before any file was sent in this run | `stopped`, `receipt_write_failed` | `ops_0227_0244:receipt_write_failed` | 1 |
+| A receipt write in the ordered run, after a file was sent | `reconciliation-required`, `reconciliation_required:receipt_write_failed`, with `writesPerformed` | `ops_0227_0244:receipt_write_failed` | 1 |
+| A receipt write after the run had already stopped | the stop's own status and code | `ops_0227_0244:receipt_write_failed` | 1 |
+| The receipt of a refusal or a cancelled run | the refusal's own status and code | `ops_0227_0244:refusal_receipt_write_failed` | 1 |
+| The receipt of an error | none | the error, then `ops_0227_0244:refusal_receipt_write_failed` | 1 |
+| Closing the receipt after a result | the result's own status | `ops_0227_0244:receipt_close_failed` | 1 |
+| Closing the receipt after an error | none | the error, then `ops_0227_0244:receipt_close_failed` | 1 |
+
+The run stops at the failure: no later file is read or sent. After a file was
+sent, the database holds at least the confirmed files (`writesPerformed`) and the
+saved receipt may not say so. That includes a failure on the last write of a run
+that reached 236. Do not retry. The exit code and stderr
+decide, not the file: a receipt that failed its check can still be readable, even
+with status `complete`. An unreadable or unfinished receipt is not accepted as a
+baseline, so reconcile and resume refuse it. This needs a reviewed
+manual reconciliation from a read-only look at the ledger and schema.
 
 ## Reconcile and resume
 

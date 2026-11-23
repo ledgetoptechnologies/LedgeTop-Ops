@@ -177,6 +177,20 @@ test('a failed refusal receipt keeps the original error, adds its own line, and 
   assertRefusedReceipt(closing, 'dry-run', 'ops_0227_0244:cloudflare_token_missing');
 });
 
+test('a settled refusal keeps its code when its receipt cannot be written', () => {
+  const root = copyTree(file('not-a-repository'));
+  const code = 'ops_0227_0244:source_check_failed:production_ops_0226_runner_git_source_unavailable';
+  for (const fails of ['write', 'enospc:100', 'edquot:100', 'zero:100', 'fsync', 'readback']) {
+    const result = run(executeArgs(file('refused.json')), { root, extraEnv: { GIT_CEILING_DIRECTORIES: tmp, OPS_TEST_RECEIPT_FAILS: fails } });
+    assert.deepEqual([result.status, result.stderr], [1, 'ops_0227_0244:refusal_receipt_write_failed\n'], fails);
+    assert.equal(JSON.parse(result.stdout.trim().split('\n').at(-1)).stop.code, code, fails);
+    assert.deepEqual(result.network, [{ kind: `receipt-${fails.split(':')[0]}` }], fails);
+  }
+  const short = file('short.json');
+  assert.equal(run(executeArgs(short), { root, extraEnv: { GIT_CEILING_DIRECTORIES: tmp, OPS_TEST_RECEIPT_FAILS: 'short' } }).stderr, '');
+  assertRefusedReceipt(short, 'execute', code, 'source-check');
+});
+
 test('a run that never settles exits 1 and says so; importing the module runs nothing', () => {
   const hung = run(PRODUCTION, { extraEnv: { OPS_TEST_FETCH_HANGS: '1' } });
   assert.equal(hung.status, 1);

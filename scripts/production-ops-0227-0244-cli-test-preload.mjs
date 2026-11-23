@@ -2,7 +2,9 @@
 // Every network attempt is recorded in OPS_TEST_NETWORK_LOG (method and kind only, never headers) and refused.
 // With OPS_TEST_D1_SQLITE, requests to the Cloudflare D1 API are answered from that local SQLite file instead, and
 // batches are applied only with OPS_TEST_D1_WRITES=1. OPS_TEST_FETCH_HANGS=1 makes a request that never settles.
-// OPS_TEST_RECEIPT_FAILS=write or close makes that receipt operation fail and records each attempt.
+// OPS_TEST_RECEIPT_FAILS makes receipt operations fail and records each failure: write (truncate), fsync, readback,
+// close, enospc:<bytes>, edquot:<bytes> and zero:<bytes> (a file that takes only that many bytes), or short (writes
+// of at most 100 bytes, which must still succeed).
 import fs from 'node:fs';
 import net from 'node:net';
 import dns from 'node:dns';
@@ -18,14 +20,26 @@ dgram.Socket.prototype.send = refuse('datagram');
 dgram.Socket.prototype.connect = refuse('datagram');
 for (const target of [dns, dns.promises]) for (const name of Object.keys(target))
   if (/^(?:lookup|resolve|reverse)/u.test(name) && typeof target[name] === 'function') target[name] = refuse('dns');
-const failing = { write: 'ftruncateSync', close: 'closeSync' }[process.env.OPS_TEST_RECEIPT_FAILS];
+const [failing, limit] = (process.env.OPS_TEST_RECEIPT_FAILS ?? '').split(':');
 if (failing) {
-  const open = fs.openSync, real = fs[failing], receipts = new Set();
-  fs.openSync = (...args) => { const fd = open(...args); if (args[1] === 'wx') receipts.add(fd); return fd; };
-  fs[failing] = (fd, ...rest) => {
-    if (!receipts.has(fd)) return real(fd, ...rest);
-    record({ kind: `receipt-${process.env.OPS_TEST_RECEIPT_FAILS}` });
-    throw Object.assign(new Error('synthetic disk failure'), { code: 'ENOSPC' });
+  const { openSync, writeSync, readFileSync } = fs, receipts = new Set(), paths = new Set();
+  const broken = code => { record({ kind: `receipt-${failing}` }); throw Object.assign(new Error('synthetic disk failure'), { code }); };
+  fs.openSync = (...args) => { const fd = openSync(...args); if (args[1] === 'wx') { receipts.add(fd); paths.add(args[0]); } return fd; };
+  const name = { write: 'ftruncateSync', close: 'closeSync', fsync: 'fsyncSync' }[failing];
+  if (name) { const real = fs[name]; fs[name] = (fd, ...rest) => (receipts.has(fd) ? broken('EIO') : real(fd, ...rest)); }
+  if (failing === 'readback') fs.readFileSync = (file, ...rest) => {
+    const bytes = readFileSync(file, ...rest);
+    if (!paths.has(file)) return bytes;
+    record({ kind: 'receipt-readback' });
+    return bytes.subarray(0, -1);
+  };
+  if (['short', 'zero', 'enospc', 'edquot'].includes(failing)) fs.writeSync = (fd, bytes, offset, length, position) => {
+    if (!receipts.has(fd)) return writeSync(fd, bytes, offset, length, position);
+    if (failing === 'short') return writeSync(fd, bytes, offset, Math.min(length, 100), position);
+    const room = Number(limit) - position;
+    if (room > 0) return writeSync(fd, bytes, offset, Math.min(length, room), position);
+    if (failing === 'zero') { record({ kind: 'receipt-zero' }); return 0; }
+    return broken(failing.toUpperCase());
   };
 }
 syncBuiltinESMExports();

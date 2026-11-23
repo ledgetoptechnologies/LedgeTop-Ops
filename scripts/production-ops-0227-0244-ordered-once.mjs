@@ -481,7 +481,19 @@ const ledgerSummary = ledger => ({ count: ledger.length, lastMigration: ledger.a
 // ---------------------------------------------------------------------------
 // Receipt
 
-/** Exclusive receipt file. It is rewritten in full after every step, so a stop leaves a complete partial receipt. */
+const RECEIPT_WRITE_FAILED = 'ops_0227_0244:receipt_write_failed';
+const REFUSAL_RECEIPT_WRITE_FAILED = 'ops_0227_0244:refusal_receipt_write_failed';
+const RECEIPT_CLOSE_FAILED = 'ops_0227_0244:receipt_close_failed';
+/** Raised inside the ordered run only; it carries the run state that could not be saved. */
+class ReceiptWriteFailure extends Error {
+  constructor(state, cause) { super(RECEIPT_WRITE_FAILED, { cause }); this.state = state; }
+}
+
+/**
+ * Exclusive receipt file. It is rewritten in full after every step, so a stop leaves a complete partial receipt.
+ * A write returns only after every byte is written, flushed and read back equal from the same path. Anything else is
+ * `receipt_write_failed`, and the file is never written again by this process.
+ */
 export function openOps0227To0244Receipt(filename) {
   if (typeof filename !== 'string' || !path.isAbsolute(filename)) fail('receipt_path_invalid');
   let fd;
@@ -489,10 +501,25 @@ export function openOps0227To0244Receipt(filename) {
     if (error?.code === 'EEXIST') fail('receipt_exists_no_replay');
     fail('receipt_create_failed');
   }
+  let broken = false;
   return {
     write(receipt) {
-      const bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
-      fs.ftruncateSync(fd, 0); fs.writeSync(fd, bytes, 0, bytes.length, 0); fs.fsyncSync(fd);
+      if (broken) fail('receipt_write_failed');
+      broken = true;
+      try {
+        const bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+        fs.ftruncateSync(fd, 0);
+        for (let offset = 0; offset < bytes.length;) {
+          const written = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
+          if (!Number.isSafeInteger(written) || written < 1 || written > bytes.length - offset) throw new Error('short write');
+          offset += written;
+        }
+        fs.fsyncSync(fd);
+        const stored = fs.readFileSync(filename);
+        if (!stored.equals(bytes)) throw new Error('read back differs');
+        JSON.parse(stored.toString('utf8'));
+      } catch (cause) { throw new Error(RECEIPT_WRITE_FAILED, { cause }); }
+      broken = false;
     },
     close() { fs.closeSync(fd); },
   };
@@ -517,7 +544,26 @@ const RECONCILE_NOTE = 'Do not retry. Run --reconcile (read-only); continue only
  * On the production database the approved existing schema is always required, in every mode.
  * `approvedExistingSchema` exists only for offline tests on other targets and is refused on production.
  */
-export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run', target, receipt = null, startIndex = 0,
+export async function runOps0227To0244Ordered(options = {}) {
+  try { return await runOrdered(options); }
+  catch (error) {
+    if (!(error instanceof ReceiptWriteFailure)) throw error;
+    // The run ends here: nothing more is read or sent. An earlier stop keeps its own code. 'sending' is saved before
+    // the request, so a step that could not save it was never sent.
+    const { state } = error;
+    const sent = state.steps.some(step => ['acknowledged', 'ambiguous'].includes(step.apply?.outcome));
+    if (!state.stop) {
+      const code = sent ? 'reconciliation_required:receipt_write_failed' : 'receipt_write_failed';
+      state.status = sent ? 'reconciliation-required' : 'stopped';
+      state.stop = { step: state.steps.at(-1)?.name ?? null, phase: 'receipt', code };
+      options.log?.(`STOP at ${state.stop.step ?? 'start'} (receipt): ${code}`);
+    }
+    state.receiptFailure = RECEIPT_WRITE_FAILED;
+    return state;
+  }
+}
+
+async function runOrdered({ plan, provider, mode = 'dry-run', target, receipt = null, startIndex = 0,
   approvalRef = null, baseline = null, now = () => new Date(), log = () => {}, approvedExistingSchema = null } = {}) {
   if (!['dry-run', 'execute', 'reconcile'].includes(mode)) fail('mode_invalid');
   if (!plan || plan.contract !== OPS_0227_0244_CONTRACT || !Array.isArray(plan.files) || plan.files.length !== 10) fail('plan_invalid');
@@ -547,7 +593,7 @@ export async function runOps0227To0244Ordered({ plan, provider, mode = 'dry-run'
     if (snapshot.snapshotBytes > OPS_0227_0244_SNAPSHOT_WARN_BYTES)
       state.notes.push(`Snapshot at ${where} is ${snapshot.snapshotBytes} bytes, near the D1 per-value limit.`);
   };
-  const persist = () => { if (receipt) receipt.write(state); };
+  const persist = () => { if (receipt) try { receipt.write(state); } catch (cause) { throw new ReceiptWriteFailure(state, cause); } };
   const stop = (step, phase, code, detail = null) => {
     state.status = code.startsWith('reconciliation_required') ? 'reconciliation-required' : 'stopped';
     state.stop = { step, phase, code, ...(detail ? { detail } : {}) };
@@ -751,14 +797,18 @@ export async function mainOps0227To0244(args, dependencies = {}) {
     const opened = (dependencies.openReceipt ?? openOps0227To0244Receipt)(options.receiptPath);
     receipt = { write(value) { receiptTouched = true; opened.write(value); }, close() { opened.close(); } };
   }
-  try {
+  // A settled result keeps its own code when its receipt cannot be written; the receipt failure is reported beside it.
+  const record = result => {
+    try { receipt?.write(result); } catch { result.receiptFailure = REFUSAL_RECEIPT_WRITE_FAILED; }
+    return result;
+  };
+  const settle = async () => {
     let plan;
     try { plan = loadVerifiedOps0227To0244Plan({ root: dependencies.root ?? ROOT }); }
     catch (error) {
       const refusal = { schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
         status: 'refused', stop: { step: null, phase: 'local-verification', code: errorCode(error) }, writesPerformed: 0, at: new Date().toISOString() };
-      receipt?.write(refusal);
-      return refusal;
+      return record(refusal);
     }
     out(`Ordered plan ${plan.planSha256} (prior ledger ${plan.priorLedger.count} -> ${plan.finalLedger.count}):\n${describeOps0227To0244Plan(plan)}`);
     if (options.mode === 'execute' && options.environment === 'production') {
@@ -768,8 +818,7 @@ export async function mainOps0227To0244(args, dependencies = {}) {
         const refusal = { schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
           status: 'refused', stop: { step: null, phase: 'source-check', code: code === 'unexpected_error' ? 'ops_0227_0244:source_check_failed' : code },
           writesPerformed: 0, at: new Date().toISOString() };
-        receipt?.write(refusal);
-        return refusal;
+        return record(refusal);
       }
     }
     const token = env.CLOUDFLARE_API_TOKEN;
@@ -786,8 +835,7 @@ export async function mainOps0227To0244(args, dependencies = {}) {
         const refusal = { schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
           status: 'reconciliation-required', stop: { step: null, phase: 'baseline-receipt', code: errorCode(error) },
           writesPerformed: 0, at: new Date().toISOString() };
-        receipt?.write(refusal);
-        return refusal;
+        return record(refusal);
       }
     }
     const common = { plan, target, log: out, approvalRef: options.approvalRef, baseline,
@@ -801,8 +849,7 @@ export async function mainOps0227To0244(args, dependencies = {}) {
         const refused = { ...rec, mode: 'execute', resumeFrom: options.resumeFrom, status: 'reconciliation-required',
           stop: rec.stop ?? { step: null, phase: 'reconcile', code: 'reconciliation_required:resume_from_is_not_next_step',
             detail: `${rec.reconcile.message}; --resume-from was ${options.resumeFrom}` } };
-        receipt?.write(refused);
-        return refused;
+        return record(refused);
       }
       startIndex = rec.reconcile.appliedCount;
     }
@@ -812,37 +859,37 @@ export async function mainOps0227To0244(args, dependencies = {}) {
       if (options.mode === 'execute') {
         const status = rehearsal.status === 'reconciliation-required' ? rehearsal.status : 'refused';
         const refused = { ...rehearsal, mode: 'execute', status };
-        receipt?.write(refused);
-        return refused;
+        return record(refused);
       }
       return rehearsal;
     }
     const phrase = OPS_0227_0244_CONFIRMATION(options.databaseName);
     if (!await (dependencies.confirm ?? promptConfirmation)(phrase)) {
       const cancelled = { ...rehearsal, mode: 'execute', status: 'cancelled', writesPerformed: 0 };
-      receipt?.write(cancelled);
-      return cancelled;
+      return record(cancelled);
     }
     return await runOps0227To0244Ordered({ ...common, provider, mode: 'execute', receipt, startIndex });
-  } catch (error) {
+  };
+  let result;
+  try { result = await settle(); } catch (error) {
     // The ordered run writes the receipt before its first request. An untouched receipt therefore means that no
     // write was attempted, so the refusal can be recorded instead of leaving an empty file.
     // A receipt failure here never replaces the error that stopped the run. Both are reported, and nothing is retried.
     let receiptFailure = null;
-    const opened = receipt;
-    receipt = null;
-    if (opened && !receiptTouched) {
+    if (receipt && !receiptTouched) {
       try {
-        opened.write({ schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
+        receipt.write({ schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
           status: 'refused', stop: { step: null, phase: 'command-line', code: errorCode(error) }, writesPerformed: 0, at: new Date().toISOString() });
-      } catch { receiptFailure = 'ops_0227_0244:refusal_receipt_write_failed'; }
+      } catch { receiptFailure = REFUSAL_RECEIPT_WRITE_FAILED; }
     }
-    try { opened?.close(); } catch { receiptFailure ??= 'ops_0227_0244:receipt_close_failed'; }
+    try { receipt?.close(); } catch { receiptFailure ??= RECEIPT_CLOSE_FAILED; }
     if (receiptFailure === null) throw error;
     const failure = error instanceof Error && Object.isExtensible(error) ? error : new Error(errorCode(error), { cause: error });
     failure.receiptFailure = receiptFailure;
     throw failure;
-  } finally { receipt?.close(); }
+  }
+  try { receipt?.close(); } catch { result.receiptFailure ??= RECEIPT_CLOSE_FAILED; }
+  return result;
 }
 
 async function defaultSourceCheck() {
@@ -855,7 +902,10 @@ async function runCommandLine(args) {
     const result = await mainOps0227To0244(args);
     process.stdout.write(`${JSON.stringify({ status: result.status, mode: result.mode, stop: result.stop ?? null,
       nextStep: result.reconcile?.nextStep ?? null, finalLedger: result.finalLedger ?? null, writesPerformed: result.writesPerformed ?? 0 })}\n`);
-    process.exitCode = ['complete', 'dry-run-passed', 'reconciled'].includes(result.status) ? 0 : result.status === 'cancelled' ? 2 : 1;
+    // A receipt that could not be saved or closed is never a success, whatever the run itself reached.
+    if (result.receiptFailure) process.stderr.write(`${result.receiptFailure}\n`);
+    process.exitCode = result.receiptFailure ? 1
+      : ['complete', 'dry-run-passed', 'reconciled'].includes(result.status) ? 0 : result.status === 'cancelled' ? 2 : 1;
   } catch (error) {
     const code = errorCode(error);
     process.stderr.write(`${code === 'unexpected_error' ? 'ops_0227_0244:unexpected_error' : code}\n${code === 'ops_0227_0244:usage' ? `${USAGE}\n` : ''}`

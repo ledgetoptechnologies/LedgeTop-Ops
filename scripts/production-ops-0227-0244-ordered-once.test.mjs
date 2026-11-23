@@ -1070,17 +1070,19 @@ test('reconcile and resume re-prove the approved schema, and a receipt cannot in
 // --- The real command and the real provider, answered from a local SQLite file -------
 
 /** Starts the real command as a child process. Cloudflare requests are answered from `file`; writes are refused there. */
-function realCommand(file, args, databaseName) {
+function realCommand(file, args, databaseName, extraEnv = {}, fileBlocks = 0) {
   const log = path.join(tmp, `network-${++counter}.log`);
   fs.writeFileSync(log, '');
-  const env = { ...TOKEN_ENV, OPS_TEST_NETWORK_LOG: log, OPS_TEST_D1_SQLITE: file, OPS_TEST_D1_NAME: databaseName };
+  const env = { ...TOKEN_ENV, OPS_TEST_NETWORK_LOG: log, OPS_TEST_D1_SQLITE: file, OPS_TEST_D1_NAME: databaseName, ...extraEnv };
   for (const key of ['PATH', 'Path', 'SystemRoot', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE']) if (process.env[key]) env[key] = process.env[key];
-  const child = spawnSync(process.execPath, ['--import', pathToFileURL(path.join(ROOT, 'scripts/production-ops-0227-0244-cli-test-preload.mjs')).href,
-    path.join(ROOT, 'scripts/production-ops-0227-0244-ordered-once.mjs'), ...args],
-    { cwd: ROOT, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
+  const command = [process.execPath, '--import', pathToFileURL(path.join(ROOT, 'scripts/production-ops-0227-0244-cli-test-preload.mjs')).href,
+    path.join(ROOT, 'scripts/production-ops-0227-0244-ordered-once.mjs'), ...args];
+  const limited = fileBlocks ? ['/bin/sh', '-c', `trap '' XFSZ; ulimit -f ${fileBlocks}; exec "$@"`, 'sh', ...command] : command;
+  const child = spawnSync(limited[0], limited.slice(1), {
+    cwd: ROOT, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
   assert.equal(child.error, undefined);
   const network = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
-  assert.ok(network.every(entry => ['fetch', 'read'].includes(entry.kind)), 'only answered reads: no socket and no write batch');
+  assert.ok(network.every(entry => ['fetch', 'read'].includes(entry.kind) || entry.kind.startsWith('receipt-')), 'only answered reads: no socket and no write batch');
   return { status: child.status, stdout: child.stdout, stderr: child.stderr, reads: network.filter(entry => entry.kind === 'read').length,
     last: child.stdout.trim().split('\n').at(-1) };
 }
@@ -1121,16 +1123,195 @@ test('real command on the production ids: a source-built schema is refused with 
   assert.deepEqual([wrongName.status, wrongName.stderr, wrongName.reads], [1, 'ops_0227_0244_provider:target_mismatch\n', 0]);
 });
 
-test('an error after the ordered run has written the receipt never replaces it with a refusal', async () => {
-  const file = freshDb();
-  const written = [];
-  const provider = sqliteProvider(file);
-  const opened = { write(value) { written.push(structuredClone(value)); if (written.length === 3) throw new Error('synthetic disk failure'); }, close() {} };
-  await assert.rejects(mainOps0227To0244(execArgs(path.join(tmp, 'not-used.json')), { env: TOKEN_ENV, out: () => {},
-    openReceipt: () => opened, providerFactory: () => provider, confirm: async () => true }), /synthetic disk failure/u);
+test('a run that cannot save its receipt stops at once and is never reported as a success', async () => {
+  // Every receipt write of a full execute run fails once, in turn.
+  const total = { writes: 0 };
+  const attempt = async failAt => {
+    const provider = sqliteProvider(freshDb());
+    const calls = { write: 0, close: 0 };
+    let applied = 0;
+    const result = await mainOps0227To0244(execArgs(path.join(tmp, 'not-used.json')), { env: TOKEN_ENV, out: () => {},
+      openReceipt: () => ({ write() { if (++calls.write === failAt) { applied = provider.calls.writes; throw new Error('synthetic disk failure'); } }, close() { calls.close++; } }),
+      providerFactory: () => provider, confirm: async () => true });
+    const sent = provider.calls.writes, reads = provider.calls.reads;
+    provider.close();
+    return { result, calls, sent, reads, applied };
+  };
+  const clean = await attempt(0);
+  assert.equal(clean.result.status, 'complete');
+  assert.equal(clean.result.receiptFailure, undefined);
+  total.writes = clean.calls.write;
+  assert.equal(total.writes, 23);
+  const seen = new Set();
+  for (let failAt = 1; failAt <= total.writes; failAt++) {
+    const { result, calls, sent, applied } = await attempt(failAt);
+    assert.deepEqual(calls, { write: failAt, close: 1 }, 'no second receipt write');
+    assert.equal(sent, applied, 'nothing is sent after the failure');
+    assert.equal(result.receiptFailure, 'ops_0227_0244:receipt_write_failed');
+    assert.equal(result.writesPerformed, sent);
+    assert.equal(result.stop.phase, 'receipt');
+    assert.deepEqual([result.status, result.stop.code], sent > 0
+      ? ['reconciliation-required', 'reconciliation_required:receipt_write_failed'] : ['stopped', 'receipt_write_failed']);
+    seen.add(sent);
+  }
+  assert.deepEqual([...seen], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 'before the first file, after each file, and after the last');
+
+  // A stop that came first keeps its own code.
+  const provider = sqliteProvider(freshDb(), { ambiguousAt: OPS_0227_0244_ORDERED_NAMES[0], landed: true });
+  let writes = 0;
+  const ambiguous = await mainOps0227To0244(execArgs(path.join(tmp, 'not-used.json')), { env: TOKEN_ENV, out: () => {},
+    openReceipt: () => ({ write(value) { writes++; if (value.stop) throw new Error('synthetic disk failure'); }, close() {} }),
+    providerFactory: () => provider, confirm: async () => true });
   provider.close();
-  assert.equal(written.length, 3);
-  assert.ok(written.every(value => value.stop?.phase !== 'command-line'));
+  assert.deepEqual([ambiguous.status, ambiguous.stop.code, ambiguous.receiptFailure, writes],
+    ['reconciliation-required', 'reconciliation_required:apply_ambiguous_no_retry', 'ops_0227_0244:receipt_write_failed', 4]);
+
+  // Dry run and reconcile: no write, and not a success.
+  for (const mode of [[], ['--reconcile']]) for (const failAt of [1, 2]) {
+    const readOnly = sqliteProvider(freshDb());
+    let count = 0;
+    const result = await mainOps0227To0244([...mode, '--receipt', path.join(tmp, 'not-used.json'), ...rehearsalArgs], { env: TOKEN_ENV, out: () => {},
+      openReceipt: () => ({ write() { if (++count === failAt) throw new Error('synthetic disk failure'); }, close() {} }), providerFactory: () => readOnly });
+    assert.deepEqual([result.status, result.stop.code, result.receiptFailure, readOnly.calls.writes],
+      ['stopped', 'receipt_write_failed', 'ops_0227_0244:receipt_write_failed', 0]);
+    readOnly.close();
+  }
+});
+
+test('the receipt writer proves every byte, and never writes again after a failure', () => {
+  const real = { writeSync: fs.writeSync, fsyncSync: fs.fsyncSync, readFileSync: fs.readFileSync, ftruncateSync: fs.ftruncateSync };
+  const value = { text: 'x'.repeat(5000) }, bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+  const disk = code => Object.assign(new Error('synthetic'), { code });
+  const limited = (limit, end) => (fd, buffer, offset, length, position) => {
+    const room = limit - position;
+    return room > 0 ? real.writeSync(fd, buffer, offset, Math.min(length, room), position) : end();
+  };
+  const attempt = (patch, next = {}) => {
+    const name = receiptPath(), receipt = openOps0227To0244Receipt(name);
+    try {
+      Object.assign(fs, patch(name));
+      let error = null;
+      try { receipt.write(value); } catch (caught) { error = caught; }
+      Object.assign(fs, real);
+      const after = fs.readFileSync(name);
+      let again = null;
+      try { receipt.write({ ...value, again: true }); } catch (caught) { again = caught; }
+      if (error) assert.ok(fs.readFileSync(name).equals(after), 'a failed receipt is never written again');
+      return { error, again, after };
+    } finally { Object.assign(fs, real); receipt.close(); }
+  };
+  // Short writes that make progress end with the whole receipt.
+  for (const patch of [() => ({}), () => ({ writeSync: (fd, b, o, n, p) => real.writeSync(fd, b, o, Math.min(n, 7), p) })]) {
+    const { error, again, after } = attempt(patch);
+    assert.deepEqual([error, again], [null, null]);
+    assert.ok(after.equals(bytes));
+  }
+  const failures = {
+    ENOSPC: () => ({ writeSync: limited(4096, () => { throw disk('ENOSPC'); }) }),
+    EDQUOT: () => ({ writeSync: limited(4096, () => { throw disk('EDQUOT'); }) }),
+    EFBIG: () => ({ writeSync: limited(0, () => { throw disk('EFBIG'); }) }),
+    zero: () => ({ writeSync: limited(4096, () => 0) }),
+    negative: () => ({ writeSync: () => -1 }),
+    tooMany: () => ({ writeSync: (fd, b, o, n) => n + 1 }),
+    notANumber: () => ({ writeSync: () => undefined }),
+    lying: () => ({ writeSync: (fd, b, o, n) => n }),
+    EIO: () => ({ fsyncSync: () => { throw disk('EIO'); } }),
+    truncate: () => ({ ftruncateSync: () => { throw disk('EROFS'); } }),
+    cutOff: name => ({ readFileSync: (file, ...rest) => (file === name ? real.readFileSync(file).subarray(0, 100) : real.readFileSync(file, ...rest)) }),
+    changed: name => ({ readFileSync: (file, ...rest) => { const b = real.readFileSync(file, ...rest); if (file === name) b[20] ^= 1; return b; } }),
+    unreadable: name => ({ readFileSync: (file, ...rest) => { if (file === name) throw disk('EACCES'); return real.readFileSync(file, ...rest); } }),
+  };
+  for (const [name, patch] of Object.entries(failures)) {
+    const { error, again } = attempt(patch);
+    assert.equal(error?.message, 'ops_0227_0244:receipt_write_failed', name);
+    assert.ok(error.cause instanceof Error, name);
+    if (/^E[A-Z]+$/u.test(name)) assert.equal(error.cause.code, name);
+    assert.equal(again?.message, 'ops_0227_0244:receipt_write_failed', name);
+  }
+});
+
+test('a settled refusal or cancelled run keeps its own code when its receipt cannot be written, and a result survives a failed close', async () => {
+  const run = async (args, dependencies, { failWrite = true, failClose = false } = {}) => {
+    const calls = { write: 0, close: 0 };
+    const result = await mainOps0227To0244(args, { env: TOKEN_ENV, out: () => {}, ...dependencies, openReceipt: () => ({
+      write() { calls.write++; if (failWrite) throw new Error('synthetic disk failure'); },
+      close() { calls.close++; if (failClose) throw new Error('synthetic close failure'); } }) });
+    return { result, calls };
+  };
+  const name = path.join(tmp, 'not-used.json'), empty = path.join(tmp, 'empty-root');
+  fs.mkdirSync(empty, { recursive: true });
+  const using = async (file, body) => { const provider = sqliteProvider(file); try { return await body(provider); } finally { provider.close(); } };
+  const expectRefusal = ({ result, calls }, status, code) => {
+    assert.equal(result.status, status);
+    if (code) assert.equal(result.stop.code, code);
+    assert.equal(result.receiptFailure, 'ops_0227_0244:refusal_receipt_write_failed');
+    assert.equal(result.writesPerformed, 0);
+    assert.deepEqual(calls, { write: 1, close: 1 });
+  };
+  const local = await run(['--receipt', name, ...rehearsalArgs], { root: empty });
+  expectRefusal(local, 'refused');
+  assert.equal(local.result.stop.phase, 'local-verification');
+  expectRefusal(await run(productionExec(name), { sourceCheck: async () => { throw new Error('production_ops_0226_runner_main_branch_stale'); } }),
+    'refused', 'ops_0227_0244:source_check_failed:production_ops_0226_runner_main_branch_stale');
+  await using(freshDb(), async provider => expectRefusal(await run(['--reconcile', '--baseline-receipt', path.join(tmp, 'missing.json'), '--receipt', name, ...rehearsalArgs],
+    { providerFactory: () => provider }), 'reconciliation-required', 'ops_0227_0244:baseline_receipt_unreadable'));
+  await using(freshDb(225), async provider => expectRefusal(await run(execArgs(name), { providerFactory: () => provider }), 'refused', 'prior_ledger_mismatch:ledger_count'));
+  await using(freshDb(), async provider => expectRefusal(await run([...execArgs(name), '--resume-from', OPS_0227_0244_ORDERED_NAMES[2], '--baseline-receipt', baselineFor()],
+    { providerFactory: () => provider }), 'reconciliation-required', 'reconciliation_required:resume_from_is_not_next_step'));
+  await using(freshDb(), async provider => {
+    expectRefusal(await run(execArgs(name), { providerFactory: () => provider, confirm: async () => false }), 'cancelled');
+    assert.equal(provider.calls.writes, 0);
+  });
+
+  const closing = { failWrite: false, failClose: true };
+  await using(freshDb(), async provider => {
+    const { result, calls } = await run(['--receipt', name, ...rehearsalArgs], { providerFactory: () => provider }, closing);
+    assert.deepEqual([result.status, result.receiptFailure, calls.close], ['dry-run-passed', 'ops_0227_0244:receipt_close_failed', 1]);
+  });
+  await using(freshDb(), async provider => {
+    const { result, calls } = await run(execArgs(name), { providerFactory: () => provider, confirm: async () => true }, closing);
+    assert.deepEqual([result.status, result.writesPerformed, result.receiptFailure, calls.close], ['complete', 10, 'ops_0227_0244:receipt_close_failed', 1]);
+  });
+});
+
+test('real command: a receipt that cannot be saved or closed is exit 1 with its own line, even when the run passed', () => {
+  const file = freshDb(), before = fs.readFileSync(file);
+  const dry = fails => {
+    const receiptFile = receiptPath();
+    return { receiptFile, ...realCommand(file, [...rehearsalArgs, '--receipt', receiptFile], REHEARSAL.databaseName, { OPS_TEST_RECEIPT_FAILS: fails }) };
+  };
+  for (const fails of ['enospc:4096', 'edquot:4096', 'zero:4096', 'fsync', 'readback', 'write']) {
+    const run = dry(fails);
+    assert.deepEqual([run.status, run.stderr], [1, 'ops_0227_0244:receipt_write_failed\n'], fails);
+    const summary = JSON.parse(run.last);
+    assert.deepEqual([summary.status, summary.stop.phase, summary.stop.code, summary.writesPerformed], ['stopped', 'receipt', 'receipt_write_failed', 0], fails);
+    if (/:/u.test(fails)) assert.ok(fs.statSync(run.receiptFile).size <= 4096, fails);
+  }
+  const short = dry('short');
+  assert.deepEqual([short.status, short.stderr, JSON.parse(short.last).status, readReceipt(short.receiptFile).status], [0, '', 'dry-run-passed', 'dry-run-passed']);
+  const closing = dry('close');
+  assert.deepEqual([closing.status, closing.stderr, JSON.parse(closing.last).status, readReceipt(closing.receiptFile).status],
+    [1, 'ops_0227_0244:receipt_close_failed\n', 'dry-run-passed', 'dry-run-passed']);
+  assert.ok(fs.readFileSync(file).equals(before), 'database bytes unchanged');
+});
+
+test('real command: an operating system file-size limit is a failed receipt, not a success', {
+  skip: process.platform === 'win32' && 'a per-process file-size limit needs a POSIX shell' }, () => {
+  const receiptFile = receiptPath();
+  // dash counts 512-byte blocks: 4096 bytes. The receipt of a dry run is larger.
+  const run = realCommand(freshDb(), [...rehearsalArgs, '--receipt', receiptFile], REHEARSAL.databaseName, {}, 8);
+  assert.deepEqual([run.status, run.stderr, JSON.parse(run.last).stop.code], [1, 'ops_0227_0244:receipt_write_failed\n', 'receipt_write_failed']);
+  assert.ok(fs.statSync(receiptFile).size <= 4096);
+});
+
+test('an unexpected error after the run has written its receipt leaves that receipt as it is', async () => {
+  const provider = sqliteProvider(freshDb());
+  const receiptFile = receiptPath();
+  await assert.rejects(mainOps0227To0244(execArgs(receiptFile), { env: TOKEN_ENV, providerFactory: () => provider, confirm: async () => true,
+    out: line => { if (line.startsWith('applied and verified: ')) throw new Error('synthetic output failure'); } }), /synthetic output failure/u);
+  provider.close();
+  const receipt = readReceipt(receiptFile);
+  assert.deepEqual([receipt.status, receipt.stop, receipt.writesPerformed, receipt.steps.at(-1).apply.outcome], ['running', null, 1, 'acknowledged']);
 });
 
 test('a failing receipt never replaces the error that stopped the run', async () => {
@@ -1163,14 +1344,14 @@ test('a failing receipt never replaces the error that stopped the run', async ()
   assert.deepEqual([wrapped.message, wrapped.receiptFailure, wrapped.cause === frozen],
     ['ops_0227_0244_provider:target_mismatch', 'ops_0227_0244:refusal_receipt_write_failed', true]);
 
-  // After the ordered run has written the receipt: no refusal write, and a failing close still keeps the error.
+  // After the ordered run has written the receipt: no refusal write, and a failing close does not hide the first failure.
   const provider = sqliteProvider(freshDb());
   const late = { write: 0, close: 0 };
-  await assert.rejects(mainOps0227To0244(execArgs(path.join(tmp, 'not-used-2.json')), { env: TOKEN_ENV, out: () => {},
+  const result = await mainOps0227To0244(execArgs(path.join(tmp, 'not-used-2.json')), { env: TOKEN_ENV, out: () => {},
     openReceipt: () => ({ write() { if (++late.write === 3) throw new Error('synthetic disk failure'); }, close() { late.close++; throw new Error('synthetic close failure'); } }),
-    providerFactory: () => provider, confirm: async () => true }),
-  error => error.message === 'synthetic disk failure' && error.receiptFailure === 'ops_0227_0244:receipt_close_failed');
+    providerFactory: () => provider, confirm: async () => true });
   provider.close();
+  assert.deepEqual([result.status, result.stop.code, result.receiptFailure], ['stopped', 'receipt_write_failed', 'ops_0227_0244:receipt_write_failed']);
   assert.deepEqual(late, { write: 3, close: 1 });
 });
 
