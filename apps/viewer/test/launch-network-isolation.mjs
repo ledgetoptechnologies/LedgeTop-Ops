@@ -1,10 +1,14 @@
-// No Viewer test may reach a live host, in anyone's local run or in CI. A test that
-// answers requests itself is not enough: the browser still resolves and preconnects to
-// the names it sees. So every browser these tests start gets this list, and a caller
-// cannot replace, weaken or drop any of it.
+// Defense in depth, not proof of no egress. A test that answers its own requests is not
+// enough: the browser still resolves and preconnects to the names it sees. So every
+// browser these tests start gets this list, and a caller cannot replace, weaken or drop it.
 //
-// Nothing but loopback resolves. IP literals are covered too: Chromium applies these
-// rules to every host, which is why loopback itself has to be excluded.
+// What these arguments do: ask Chromium's network service to resolve only loopback, to
+// use no proxy, and to skip prediction, updates and background services.
+// What they do not prove: that nothing left the machine. Managed browser policy (for
+// example Edge ProxySettings) overrides command-line proxy options; WebRTC, updaters,
+// crash reporting and the Node process running the test are outside these rules; and no
+// test observes the traffic. A run that still uses real host names needs egress denied
+// outside the browser as well (a container with no network, or a network namespace).
 const LOOPBACK_RULES = Object.freeze(['MAP * ~NOTFOUND', 'EXCLUDE localhost', 'EXCLUDE 127.0.0.1', 'EXCLUDE [::1]']);
 
 // Prediction, speculative loading and the services that call home on their own.
@@ -12,7 +16,7 @@ const DISABLED_FEATURES = Object.freeze(['PreconnectToSearch', 'NavigationPredic
   'MediaRouter', 'DialMediaRouteProvider', 'Translate', 'AutofillServerCommunication', 'InterestFeedContentSuggestions']);
 
 const FIXED = Object.freeze([
-  '--proxy-server=direct://', // a system proxy would resolve names itself, past the rules above
+  '--proxy-server=direct://', // a system proxy would resolve names itself; managed policy still wins
   '--disable-background-networking',
   '--disable-component-update',
   '--disable-default-apps',
@@ -23,6 +27,11 @@ const FIXED = Object.freeze([
   '--no-pings',
 ]);
 const FEATURES = `--disable-features=${DISABLED_FEATURES.join(',')}`;
+
+// Playwright passes these itself, with its own --disable-features list. A second copy
+// would replace that list, so a Playwright launch keeps Playwright's.
+const PLAYWRIGHT_PASSES = new Set(['disable-background-networking', 'disable-component-update', 'disable-default-apps',
+  'disable-client-side-phishing-detection', 'disable-sync', 'disable-features']);
 
 // Reviewed exceptions only: name -> { reason, hosts }. Each host is one exact name that
 // the browser may then resolve; every other rule still applies. There are none. Adding
@@ -52,13 +61,27 @@ export function networkIsolationArguments(networkException, exceptions = REVIEWE
   return [`--host-resolver-rules=${[...LOOPBACK_RULES, ...hosts.map((host) => `EXCLUDE ${host}`)].join(', ')}`, ...FIXED, FEATURES];
 }
 
-/** The caller's arguments behind the isolation ones, or an error if it tries to set any of them itself. */
+/** The caller's arguments behind the isolation ones, each switch once, or an error if it tries to set any of those itself. */
 export function isolatedBrowserArguments(args, { networkException } = {}, exceptions = REVIEWED_NETWORK_EXCEPTIONS) {
-  const isolation = networkIsolationArguments(networkException, exceptions);
+  return withoutOverrides(networkIsolationArguments(networkException, exceptions), args);
+}
+
+/** For a Playwright launch: the same isolation, less what Playwright already passes. */
+export function playwrightIsolationArguments(args) {
+  return withoutOverrides(networkIsolationArguments().filter((arg) => !PLAYWRIGHT_PASSES.has(switchName(arg))), args);
+}
+
+function withoutOverrides(isolation, args) {
+  const seen = new Set();
   for (const value of args) {
-    const text = String(value);
+    const text = String(value), name = switchName(text);
     if (text.trim() === '--') throw new Error('Browser arguments may not end option parsing with "--"');
-    if (OWNED.has(switchName(text))) throw new Error(`The browser launcher owns ${text.split('=', 1)[0].trim()}: tests may not reach a live host`);
+    if (OWNED.has(name)) throw new Error(`The browser launcher owns ${text.split('=', 1)[0].trim()}: outside hosts stay blocked`);
+    // Which copy of a repeated switch wins is not something a test should depend on.
+    if (/^--?/.test(text.trim()) && name) {
+      if (seen.has(name)) throw new Error(`Browser argument given twice: --${name}`);
+      seen.add(name);
+    }
   }
   return [...isolation, ...args];
 }

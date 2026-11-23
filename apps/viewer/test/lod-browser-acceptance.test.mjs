@@ -4270,8 +4270,8 @@ test('built routes load the same-origin brand mark and the basemap tiles under t
     await client.command('Page.addScriptToEvaluateOnNewDocument', { source: `window.__cspViolations = [];
       document.addEventListener('securitypolicyviolation', event => window.__cspViolations.push({
         directive: event.effectiveDirective, blocked: event.blockedURI }));` });
-    // The basemap host is answered here, before any connection: the CSP still decides
-    // whether the page may ask for it, and the browser can reach nothing but loopback.
+    // The basemap host is answered here, at the request stage: the CSP still decides
+    // whether the page may ask for it, and no real tile is needed.
     const tilePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
     const tileFailures = [];
     client.socket.addEventListener('message', (event) => {

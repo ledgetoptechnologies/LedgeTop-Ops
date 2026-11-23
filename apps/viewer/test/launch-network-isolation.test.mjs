@@ -7,12 +7,32 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchBrowser, spawnBrowser, stopBrowser } from './browser-launch.mjs';
-import { REVIEWED_NETWORK_EXCEPTIONS, isolatedBrowserArguments, networkIsolationArguments } from './launch-network-isolation.mjs';
+import { REVIEWED_NETWORK_EXCEPTIONS, isolatedBrowserArguments, networkIsolationArguments, playwrightIsolationArguments } from './launch-network-isolation.mjs';
 
 const RULES = '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE [::1]';
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-test('every launch resolves only loopback and turns off background networking, updates and prediction', () => {
+const switches = (args) => args.filter((arg) => arg.startsWith('-')).map((arg) => arg.replace(/^-+/, '').split('=', 1)[0]);
+const usedByTests = ['--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+  '--enable-unsafe-swiftshader', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', '--user-data-dir=/tmp/ltds-x', 'about:blank'];
+
+test('the final list has exactly one of each switch, and a repeated one is refused', () => {
+  const final = isolatedBrowserArguments(usedByTests), names = switches(final);
+  assert.deepEqual(names, [...new Set(names)]);
+  for (const name of ['host-resolver-rules', 'proxy-server', 'disable-features', 'disable-background-networking', 'disable-component-update', 'dns-prefetch-disable', 'no-pings'])
+    assert.equal(names.filter((value) => value === name).length, 1, name);
+  for (const args of [['--disable-gpu', '--disable-gpu'], ['--headless=new', '--headless'], ['--no-sandbox', '-no-sandbox'], ['--Headless', '--headless']])
+    assert.throws(() => isolatedBrowserArguments(args), /given twice/, args.join(' '));
+});
+
+test('a Playwright launch keeps the isolation but none of what Playwright passes itself', () => {
+  const final = playwrightIsolationArguments(['--disable-gpu']), names = switches(final);
+  assert.equal(final[0], RULES); assert.deepEqual(names, [...new Set(names)]);
+  assert.deepEqual(names, ['host-resolver-rules', 'proxy-server', 'disable-domain-reliability', 'dns-prefetch-disable', 'no-pings', 'disable-gpu']);
+  for (const flag of ['--disable-features=X', '--enable-features=X', '--proxy-server=x', '--host-resolver-rules=x', '--disable-sync']) assert.throws(() => playwrightIsolationArguments([flag]), /launcher owns/, flag);
+});
+
+test('every launch asks for loopback-only resolution, no proxy, and no background networking, updates or prediction', () => {
   const args = isolatedBrowserArguments(['--headless=new', 'about:blank']);
   assert.equal(args[0], RULES);
   for (const flag of ['--proxy-server=direct://', '--disable-background-networking', '--disable-component-update', '--dns-prefetch-disable',
@@ -35,8 +55,7 @@ test('a caller cannot override, weaken or repeat what the launcher owns, however
   for (const flag of refused) assert.throws(() => isolatedBrowserArguments(['--headless=new', flag, 'about:blank']), /launcher owns/, flag);
   for (const end of ['--', ' -- ']) assert.throws(() => isolatedBrowserArguments([end, 'about:blank']), /end option parsing/);
   // What the tests really pass is untouched.
-  const used = ['--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
-    '--enable-unsafe-swiftshader', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', '--user-data-dir=/tmp/ltds-x', '/tmp/page.html', 'about:blank'];
+  const used = [...usedByTests.slice(0, -1), '/tmp/page.html', 'about:blank'];
   assert.deepEqual(isolatedBrowserArguments(used).slice(-used.length), used);
 });
 
@@ -83,7 +102,7 @@ test('no Viewer test starts a browser past the launcher', () => {
   assert.ok(files.includes('browser-launch.mjs'));
   for (const name of files) {
     const source = readFileSync(path.join(here, name), 'utf8');
-    for (const [launch] of source.matchAll(/chromium\.launch(?:PersistentContext)?\([^\n]*/g)) assert.match(launch, /args: isolatedBrowserArguments\(/, `${name}: ${launch}`);
+    for (const [launch] of source.matchAll(/chromium\.launch(?:PersistentContext)?\([^\n]*/g)) assert.match(launch, /args: playwrightIsolationArguments\(/, `${name}: ${launch}`);
     if (name !== 'browser-launch.mjs') assert.doesNotMatch(source, /networkException/, name);
     for (const [, command] of source.matchAll(/(?<![\w.])spawn\(\s*([\w.]+)/g)) {
       assert.ok(!/^(?:executable|edge|chrome|browser|browserPath|chromium)$/i.test(command), `${name} spawns ${command} directly`);

@@ -17,8 +17,8 @@ import { isolatedBrowserArguments } from './launch-network-isolation.mjs';
 // after() hook, process exit, SIGINT/SIGTERM and uncaught errors. It only
 // ever matches this run's own profile directories.
 //
-// Every launch is also cut off from the network except loopback, whatever the
-// caller asks for: see launch-network-isolation.mjs.
+// Every launch also asks the browser to resolve only loopback, whatever the caller
+// passes. What that does and does not prove: see launch-network-isolation.mjs.
 
 const registry = new Map(); // resolved profile dir -> { child, removeProfile }
 const profileOf = new WeakMap(); // ChildProcess -> resolved profile dir
