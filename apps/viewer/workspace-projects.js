@@ -231,7 +231,8 @@ function storageUsageCards(usage){
   return rows.join('');
 }
 const dateTime=value=>value?new Date(value).toLocaleString():'Unavailable';
-const duration=(attempt,metrics=attempt)=>attempt?.id&&metrics?.processingDurationAttemptId===attempt.id?durationFromMs(metrics.processingDurationMs):'Unavailable';
+// Runtime rule for every runtime display (task row, task settings, processing history): the engine's own elapsed time for this attempt wins; without one, use the attempt's startedAt to upstreamCompletedAt; otherwise Unavailable.
+const duration=(attempt,metrics=attempt)=>{if(!attempt?.id)return'Unavailable';const engineMs=metrics?.processingDurationAttemptId===attempt.id?metrics.processingDurationMs:null;if(Number.isSafeInteger(engineMs)&&engineMs>=0)return durationFromMs(engineMs);const stamp=value=>typeof value==='string'&&value?Date.parse(value):NaN,start=stamp(attempt.startedAt),end=stamp(attempt.upstreamCompletedAt);return Number.isFinite(start)&&Number.isFinite(end)&&end>=start?durationFromMs(end-start):'Unavailable'};
 const available=value=>value===undefined||value===null||value===''?'Unavailable':esc(value);
 const opts=(items,label='Select')=>`<option value="">${esc(label)}</option>${items.map(item=>`<option value="${esc(item.id)}">${esc(item.displayName||item.name||item.id)}</option>`).join('')}`;
 const empty=message=>`<div class="empty-state">${esc(message)}</div>`;
