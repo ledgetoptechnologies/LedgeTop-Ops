@@ -22,36 +22,40 @@ test('main-only push trigger: no manual, pull-request, tag, schedule or other-br
   for (const banned of ['workflow_dispatch', 'pull_request', 'pull_request_target', 'tags:', 'schedule', 'workflow_run', 'repository_dispatch', 'release'])
     assert.ok(!onBlock.includes(banned), banned);
   assert.ok(!workflow.includes('workflow_dispatch') && !workflow.includes('pull_request'));
-  assert.equal((workflow.match(/if: \$\{\{ github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' \}\}/g) ?? []).length, 3, 'every job is guarded');
+  assert.equal((workflow.match(/if: \$\{\{ github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' \}\}/g) ?? []).length, 4, 'every job is guarded');
 });
 
-test('least privilege: read-only by default, packages: write only for the two publishing jobs, one non-secret build arg', () => {
+test('least privilege: read-only by default, packages: write only for the two publishing jobs and promote-latest, one non-secret build arg', () => {
   assert.match(workflow, /\npermissions:\n  contents: read\n\njobs:/);
-  assert.equal((workflow.match(/packages: write/g) ?? []).length, 2);
+  assert.equal((workflow.match(/packages: write/g) ?? []).length, 3);
+  assert.ok(jobOf('promote-latest').includes('    permissions:\n      contents: read\n      actions: read\n      packages: write\n'));
   assert.ok(!jobOf('verify').includes('packages: write'));
   assert.ok(!/secret-files|secrets:/.test(workflow));
   // The only build argument anywhere is the immutable Rust base digest for the full image.
   assert.equal((workflow.match(/build-args:/g) ?? []).length, 1);
   assert.ok(jobOf('publish-full').includes(`build-args: |\n            RUST_IMAGE=${RUST}\n`));
   assert.ok(!jobOf('publish-keyless').includes('build-args'));
-  assert.equal((workflow.match(/secrets\./g) ?? []).length, 2, 'only the workflow token, for each registry login');
+  assert.equal((workflow.match(/secrets\./g) ?? []).length, 3, 'only the workflow token, for each registry login');
   assert.ok(workflow.includes('password: ${{ secrets.GITHUB_TOKEN }}'));
   // Visibility is only OBSERVED (read-only helper); nothing sets or changes it.
-  // The one API call is the move step's read-only ancestry compare; nothing else calls the API.
-  const compare = 'STATUS="$(gh api "repos/$GITHUB_REPOSITORY/compare/$PREVIOUS_COMMIT...$COMMIT" --jq .status)"';
-  assert.equal(workflow.split(compare).length - 1, 1);
-  assert.ok(!/gh api|curl |-X (PATCH|PUT|POST|DELETE)|visibility=|"visibility":/i.test(workflow.replace(compare, '')), 'package visibility is never changed');
+  // The only API calls are the promote-latest job's read-only GETs (run time, manual promotions, ancestry compare);
+  // nothing else calls the API (see auto-promote-latest.test.mjs).
+  const outsideMove = workflow.slice(0, workflow.indexOf('\n  promote-latest:\n'));
+  assert.ok(!/gh api|curl |-X (PATCH|PUT|POST|DELETE)|visibility=|"visibility":/i.test(outsideMove), 'package visibility is never changed');
+  for (const call of workflow.match(/gh api [^\n]*/g)) assert.ok(!/(-X|--method|-f |-F |--field|--input)\b/.test(call), call);
   const helper = fs.readFileSync(fileURLToPath(new URL('../scripts/package-visibility.mjs', import.meta.url)), 'utf8');
   assert.ok(!/method:\s*['"](PATCH|PUT|POST|DELETE)/i.test(helper) && !/method:/.test(helper), 'the helper only reads (GET)');
   for (const line of workflow.split('\n').filter(l => l.includes('uses: '))) assert.match(line, /@[0-9a-f]{40} # v/, line.trim());
 });
 
-test('two independent images, each with immutable commit and candidate tags after an exact-digest smoke; only full moves latest, last', () => {
+test('two independent images, each with immutable commit and candidate tags after an exact-digest smoke; only full moves latest, after it', () => {
   const moveAt = workflow.indexOf('      - name: Move latest to this verified main build (never to an older commit)\n');
-  assert.ok(moveAt > workflow.indexOf('\n  publish-full:\n'), 'the move step is in the full job');
-  assert.ok(!/:latest|latest"/.test(workflow.slice(0, moveAt).replace(/^\s*#.*$/gm, '')), 'nothing before the full job\'s last step writes latest');
-  assert.ok(!/\n      - name: /.test(workflow.slice(moveAt + 1)), 'the move is the last step of the full job');
-  assert.ok(workflow.slice(moveAt).includes('          IMMUTABLE_TAG: ${{ steps.names.outputs.tag }}\n'), 'moves only to the smoke-tested full digest');
+  const promoteJob = jobOf('promote-latest');
+  assert.ok(moveAt > workflow.indexOf('\n  promote-latest:\n') && promoteJob.includes('\n    needs: publish-full\n'), 'the move runs only after the full job passed');
+  assert.ok(promoteJob.includes('\n    concurrency:\n      group: latest-writer-logs-local\n      cancel-in-progress: false\n'), 'shared writer group');
+  assert.ok(!/:latest|latest"/.test(workflow.slice(0, workflow.indexOf('\n  promote-latest:\n')).replace(/^\s*#.*$/gm, '')), 'nothing before promote-latest writes latest');
+  assert.ok(promoteJob.includes('          IMMUTABLE_TAG: ${{ needs.publish-full.outputs.image }}:sha-${{ github.sha }}-full\n'), 'moves only to the smoke-tested full digest');
+  assert.ok(promoteJob.includes('          PROMOTE_DIGEST: ${{ needs.publish-full.outputs.digest }}\n'));
   assert.ok(!jobOf('publish-keyless').includes(':latest'), 'keyless never moves latest');
   assert.equal((workflow.match(/imagetools create/g) ?? []).length, 3);
   for (const target of ['keyless', 'full']) {

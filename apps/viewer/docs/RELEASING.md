@@ -21,21 +21,36 @@ work). The hand-run, approved promotion below is for rollback and re-promotion.
    existing tag;
 5. writes and uploads the release attestation
    (`viewer-image-attestation-<commit>`, kept 90 days);
-6. as its last step, moves `latest` to that exact digest:
+6. once that job has passed, a separate `promote-latest` job moves `latest` to
+   that exact digest:
    - only on a push to `main`, never for a pull request, tag or other branch;
    - only if `sha-<commit>` still names the verified digest and the image
      carries this commit's revision label;
-   - only forward: it reads the commit that `latest` currently names and asks
+   - it runs in the `latest-writer-viewer` concurrency group, which the manual
+     `promote-viewer.yml` also uses, so the automatic and manual writers never
+     interleave their reads, compare, write and read-back;
+   - a manual promotion (rollback or re-promotion) wins over builds already in
+     flight: if one succeeded after this run was created, `latest` is left
+     alone. The next merge to `main` moves it forward again;
+   - only forward: it reads the commit that `latest` names now and asks
      GitHub to compare it with this commit. If this commit descends from it,
      `latest` moves. If `latest` already names a newer `main` commit (an older
      build finishing late), it is left alone with a warning. Anything else
      (diverged history, a missing revision label, a registry error) fails the
-     step and writes nothing. A missing `latest` (GHCR's exact "not found") is
-     created;
-   - it re-reads `latest` just before the write and stops if it changed. This
-     is not an atomic compare-and-swap;
+     job and writes nothing. A missing `latest` is created only when the
+     registry answers exactly "not found" or `MANIFEST_UNKNOWN` for that tag;
+   - it re-reads `latest` just before the write, with the same strict absence
+     rule, and stops on any change or any read error (auth, network, server).
+     The registry has no atomic compare-and-swap, so a package admin writing
+     by hand could still race it;
    - the run summary records the commit, the new digest, the previous `latest`
      digest and its commit, and the decision.
+
+   GitHub keeps at most one pending job per concurrency group. A newer pending
+   writer replaces an older pending one, so if a manual promotion is still
+   waiting (for example for approval) when another build's `promote-latest`
+   queues behind it, check that the manual run completed, and dispatch it again
+   if it was cancelled.
 
 A failed gate stops the run before the `sha-` tag, the attestation and `latest`
 are written. The run summary shows the commit and digest.
@@ -110,9 +125,10 @@ Run it only after the approvals the release requires. It does not rebuild. It:
    **not** restore `latest`. A `viewer-promotion-result-<run>-<attempt>` record
    is still uploaded.
 
-Promotions never run in parallel. Promoting the digest `latest` already names
-is a no-op. A test fails if any workflow or script other than this one and the
-publisher's last step writes the Viewer `latest`, or anything but the publisher
+Writers of `latest` never run in parallel: this workflow and the publisher's
+`promote-latest` job share the `latest-writer-viewer` concurrency group.
+Promoting the digest `latest` already names is a no-op. A test fails if any
+workflow or script other than this one and `promote-latest` writes the Viewer `latest`, or anything but the publisher
 writes `sha-` tags. None of this is a registry-wide lock, so package admins
 must not write `latest` during a release.
 
@@ -120,8 +136,8 @@ must not write `latest` during a release.
 
 Run the manual promotion with an earlier commit and its digest (the previous
 digest is in the publish run's summary and in the last promotion's receipt).
-A rollback holds only until the next qualifying merge to `main`, whose build
-moves `latest` forward again; merge the fix (or a revert) to move on. Rolling back
+A rollback holds against builds already in flight; the next qualifying merge
+to `main` after it moves `latest` forward again; merge the fix (or a revert) to move on. Rolling back
 the image does not prove the older image is compatible with a newer database
 schema; check that before rolling back. The
 attestation must still exist, so this works for 90 days after that candidate

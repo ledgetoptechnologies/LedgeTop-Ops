@@ -31,11 +31,12 @@ On the NAS, nothing is built: `compose.service.yaml` runs the image published by
 digest (`pull_policy: missing`). `compose.dev.yaml` is a development/pilot build example only.
 
 Tags: every qualifying merge to main publishes immutable tags, `sha-<commit>-<target>` and
-`candidate-<commit>-<run>-<attempt>-<target>`, plus a deployment receipt. Then, as the full job's last step and only
-after its smoke passed, `latest` (what the server stack in `apps/media-generation` pulls) moves to that exact full
+`candidate-<commit>-<run>-<attempt>-<target>`, plus a deployment receipt. Then, only after the full job and its smoke
+passed, a `promote-latest` job moves `latest` (what the server stack in `apps/media-generation` pulls) to that exact full
 digest, never back to an older main commit (the same rule as the Viewer and the other images). The keyless image never
-becomes `latest`. The hand-run `promote-logs-local.yml` is the approved rollback and re-promotion path; a rollback holds
-until the next qualifying merge to main moves `latest` forward again.
+becomes `latest`. The hand-run `promote-logs-local.yml` is the approved rollback and re-promotion path; both share the
+`latest-writer-logs-local` concurrency group. A rollback holds against builds already in flight, until the next
+qualifying merge to main moves `latest` forward again.
 The full native parser image requires an **amd64 NAS**. Verify the NAS architecture before activation; the service
 declares `platform: linux/amd64`, and emulated execution has not been qualified.
 

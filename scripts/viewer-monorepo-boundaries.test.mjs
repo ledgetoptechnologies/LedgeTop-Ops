@@ -158,7 +158,7 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   const promoteSteps = steps(promote);
   assert.match(promote, /^on:\n  workflow_dispatch:\n    inputs:\n      commit:\n[\s\S]*?\n      digest:\n/m);
   assert.doesNotMatch(promote, /^  (?:push|pull_request|pull_request_target|schedule|workflow_run|repository_dispatch|workflow_call):/m);
-  assert.match(promote, /^permissions:\n  contents: read\n\nconcurrency:\n  group: promote-viewer-latest\n  cancel-in-progress: false$/m);
+  assert.match(promote, /^permissions:\n  contents: read\n\nconcurrency:\n  group: latest-writer-viewer\n  cancel-in-progress: false$/m);
   assert.match(promote, /^    if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}$/m);
   assert.match(promote, /^    permissions:\n      contents: read\n      actions: read\n      packages: write$/m);
   assert.doesNotMatch(promote, /\$\{\{ (?:inputs|github\.event\.inputs)\.[a-z]+ \}\}"|run: .*\$\{\{ inputs\./, 'inputs reach shell only through env');
@@ -268,7 +268,7 @@ test('Viewer latest-writer detection covers both the literal image and an alias,
   assert.equal(writesViewerLatest('      - run: docker buildx imagetools create --tag "$IMAGE_NAME:latest-old" x\n', true), false);
 });
 
-test('Only publish-viewer writes Viewer candidate and sha tags; latest is written only by promote-viewer and the build\'s last step', () => {
+test('Only publish-viewer writes Viewer candidate and sha tags; latest is written only by promote-viewer and promote-latest, in one writer group', () => {
   const viewerWriters = [];
   for (const name of fs.readdirSync(path.join(root, '.github/workflows')).filter(file => /\.ya?ml$/.test(file)).sort()) {
     // A workflow is in scope when it names the Viewer image anywhere (job, step or
@@ -279,25 +279,27 @@ test('Only publish-viewer writes Viewer candidate and sha tags; latest is writte
       const viewer = viewerWorkflow;
       if (viewer && jobWritesRegistry(block)) viewerWriters.push(`${name}#${job}`);
       if (writesViewerLatest(block, viewer)) {
-        assert.ok(['promote-viewer.yml#promote', 'publish-viewer.yml#verify-and-build'].includes(`${name}#${job}`), `${name}#${job} may not write the Viewer latest tag`);
+        assert.ok(['promote-viewer.yml#promote', 'publish-viewer.yml#promote-latest'].includes(`${name}#${job}`), `${name}#${job} may not write the Viewer latest tag`);
       }
       if (viewer && /imagetools create --tag (?:"\$tag"|[^\n]*:sha-)/.test(block)) {
         assert.equal(`${name}#${job}`, 'publish-viewer.yml#verify-and-build', 'only the main build may write Viewer sha tags');
       }
     }
   }
-  assert.deepEqual(viewerWriters.sort(), ['promote-viewer.yml#promote', 'publish-viewer.yml#verify-and-build']);
+  assert.deepEqual(viewerWriters.sort(), ['promote-viewer.yml#promote', 'publish-viewer.yml#promote-latest', 'publish-viewer.yml#verify-and-build']);
   // Another image's promotion that writes its own latest stays out of scope.
   assert.ok(!read('.github/workflows/promote-logs-local.yml').includes('ledgetop-ops-viewer'));
   assert.doesNotMatch(beforeMove, /:latest\b/);
-  // In the build, only the last step writes latest: once, after every verify step, forward only.
+  // In the publisher, only the promote-latest job writes latest: once, after the build job passed, forward only,
+  // in the same writer concurrency group as promote-viewer.yml.
   assert.equal((workflow.match(/imagetools create --prefer-index=false --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1);
   assert.equal([...migratedSteps.keys()].at(-1), moveStep);
+  assert.match(workflow, /\n  promote-latest:\n[^]*?\n    needs: verify-and-build\n[^]*?\n    concurrency:\n      group: latest-writer-viewer\n      cancel-in-progress: false\n/);
   assert.match(migratedSteps.get(moveStep), /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'\n/);
   const promote = read('.github/workflows/promote-viewer.yml');
   assert.equal((promote.match(/docker buildx imagetools create --prefer-index=false --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1);
-  // Writers are serialized: promotions never overlap; builds never cancel mid-run.
-  assert.match(promote, /^concurrency:\n  group: promote-viewer-latest\n  cancel-in-progress: false$/m);
+  // Writers are serialized: the manual and automatic writers share one group; builds never cancel mid-run.
+  assert.match(promote, /^concurrency:\n  group: latest-writer-viewer\n  cancel-in-progress: false$/m);
   assert.match(workflow, /^concurrency:\n  group: publish-viewer-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false$/m);
 });
 
@@ -343,7 +345,7 @@ test('All upstream runtime and numerical-engine verification remains intact', ()
 
 test('Attestation retains exact verified digest semantics', () => {
   // The upstream "Promote verified digest to release tags" step is replaced by the
-  // reviewed write-once sha tag step above; `latest` moves in the build's last step (promote-viewer.yml for rollback).
+  // reviewed write-once sha tag step above; `latest` moves in the promote-latest job (promote-viewer.yml for rollback).
   for (const name of ['Write verified release attestation']) {
     const actual = migratedSteps.get(name).replace(`if: ${releaseGuard}`, "if: github.event_name == 'push'");
     assert.equal(actual, reviewedUpstreamStep(name), `${name} must retain the upstream digest/attestation checks`);

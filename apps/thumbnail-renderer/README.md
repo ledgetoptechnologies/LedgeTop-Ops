@@ -52,13 +52,14 @@ TrueNAS thumbnail renderer images** GitHub workflow builds the `decoder`,
 `broker`, and `queue-worker` targets for `linux/amd64` on relevant changes pushed
 to `main`. It publishes immutable commit (`sha-<commit>`) and candidate
 (`candidate-<commit>-<run>-<attempt>`) tags without overwriting them and records
-a digest receipt. As each image's last step, after its checks passed (for the queue
-worker, the media canary too), it moves that image's `:latest` to the exact verified
+a digest receipt. After every image's checks passed (for the queue worker, the media
+canary too), a `promote-latest` job moves each image's `:latest` to the exact verified
 digest, never back to an older `main` commit. It never moves `:stable`.
 
 With `pull_policy: always`, the next redeploy pulls the new `:latest`. The hand-run
-`promote-thumbnail-renderer.yml` is the approved rollback and re-promotion path; a rollback
-holds until the next qualifying merge to `main` moves `:latest` forward again. To hold a
+`promote-thumbnail-renderer.yml` is the approved rollback and re-promotion path; both share the per-image
+`latest-writer-thumbnail-<target>` concurrency group. A rollback (of any thumbnail image) holds against builds
+already in flight, until the next qualifying merge to `main` moves `:latest` forward again. To hold a
 service on one build, pin its **immutable digest** from the run's deployment receipt,
 `image: ghcr.io/ledgetoptechnologies/<package>@sha256:<digest from the receipt>`, never the
 `sha-<commit>` tag. A plain container restart does not pull images; this configuration

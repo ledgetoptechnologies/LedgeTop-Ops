@@ -20,7 +20,7 @@ test('manual and main-only, one promotion at a time, least privilege', () => {
   assert.match(on, /\n  workflow_dispatch:\n/);
   for (const banned of ['push:', 'pull_request', 'schedule', 'workflow_run', 'repository_dispatch']) assert.ok(!on.includes(banned), banned);
   assert.match(promote, /\n    if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}\n/);
-  assert.match(promote, /\nconcurrency:\n  group: promote-logs-local-latest\n  cancel-in-progress: false\n/);
+  assert.match(promote, /\nconcurrency:\n  group: latest-writer-logs-local\n  cancel-in-progress: false\n/);
   assert.match(promote, /\npermissions:\n  contents: read\n\nconcurrency:/);
   assert.equal((promote.match(/packages: write/g) ?? []).length, 1);
   for (const line of promote.split('\n').filter(l => l.includes('uses: '))) assert.match(line, /@[0-9a-f]{40} # v/, line.trim());
@@ -70,8 +70,8 @@ test('fail closed: read latest, persist the rollback receipt, re-read, and only 
 test('no other workflow writes the logs-local latest tag', () => {
   for (const name of fs.readdirSync(workflows).filter(n => /\.ya?ml$/.test(n))) {
     let text = read(name).replace(/^\s*#.*$/gm, '');
-    // The publisher's last step moves latest forward to the build it verified (auto-promote-latest.test.mjs).
-    if (name === 'publish-logs-local.yml') text = text.slice(0, text.indexOf('- name: Move latest to this verified main build (never to an older commit)'));
+    // The publisher's promote-latest job moves latest forward to the build it verified (auto-promote-latest.test.mjs).
+    if (name === 'publish-logs-local.yml') text = text.slice(0, text.indexOf('\n  promote-latest:\n'));
     if (name === 'promote-logs-local.yml' || !text.includes('logs-local')) continue;
     assert.ok(!/:latest\b/.test(text), `${name} must not touch a logs-local latest tag`);
   }

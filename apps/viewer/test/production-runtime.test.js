@@ -257,7 +257,7 @@ test('runtime image is rootless as the TrueNAS Apps service identity', () => {
   assert.doesNotMatch(dockerfile, /ENTRYPOINT|USER root/);
 });
 
-test('only a verified main push moves latest, as the last step, and never to an older commit', () => {
+test('only a verified main push moves latest, in promote-latest after the build, and never to an older commit', () => {
   const full = fs.readFileSync(path.resolve(repositoryRoot, '../../.github/workflows/publish-viewer.yml'), 'utf8').replace(/\r\n/g, '\n');
   const moveStart = full.indexOf('- name: Move latest to this verified main build (never to an older commit)');
   const move = full.slice(moveStart);
@@ -265,11 +265,18 @@ test('only a verified main push moves latest, as the last step, and never to an 
   const workflow = full.slice(0, moveStart);
   assert.ok(moveStart > full.indexOf('- name: Upload release attestation'), 'latest moves only after the attestation is stored');
   assert.doesNotMatch(move.slice(1), /\n      - name: /, 'the move is the last step');
+  const job = full.slice(full.indexOf('\n  promote-latest:\n'));
+  assert.ok(job.length < full.length && job.indexOf('- name: Move latest to this verified main build (never to an older commit)') > 0);
+  assert.match(job, /\n    needs: verify-and-build\n/);
+  assert.match(job, /\n    concurrency:\n      group: latest-writer-viewer\n      cancel-in-progress: false\n/);
+  assert.doesNotMatch(job, /environment:/);
   assert.match(move, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
   assert.match(move, /compare\/\$PREVIOUS_COMMIT\.\.\.\$COMMIT/);
   assert.match(move, /behind\) DECISION=kept-newer/);
   assert.match(move, /imagetools create --prefer-index=false --tag "\$IMAGE_NAME:latest" "\$IMAGE_NAME@\$PROMOTE_DIGEST"/);
-  assert.match(move, /PROMOTE_DIGEST: \$\{\{ steps\.build\.outputs\.digest \}\}/);
+  assert.match(move, /PROMOTE_DIGEST: \$\{\{ needs\.verify-and-build\.outputs\.digest \}\}/);
+  assert.match(full, /\n    outputs:\n      image: \$\{\{ steps\.image\.outputs\.name \}\}\n      digest: \$\{\{ steps\.build\.outputs\.digest \}\}\n/);
+  assert.match(move, /NOW="\$\(read_latest\)" \|\| fail/);
   const buildStart = workflow.indexOf('- name: Build isolated candidate');
   const verifyStart = workflow.indexOf('- name: Verify exact candidate image');
   const promoteStart = workflow.indexOf('- name: Publish immutable sha tag for verified digest');

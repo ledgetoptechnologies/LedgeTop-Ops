@@ -35,7 +35,7 @@ alter the Jobs dataset, or stop any existing app.
 
 1. The supplied YAML uses each package's `:latest` tag with `pull_policy:
    always`. Each `main` build publishes immutable `sha-<commit>` and
-   `candidate-…` tags and, as its last step after every check passed, moves
+   `candidate-…` tags and, in a `promote-latest` job after every check passed, moves
    `:latest` to that exact digest (never back to an older commit), so the next
    redeploy picks it up. To hold a service on a specific build instead, pin
    `image: ghcr.io/ledgetoptechnologies/<package>@sha256:<receipt digest>`, never
