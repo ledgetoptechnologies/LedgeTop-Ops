@@ -160,6 +160,38 @@ export function assertOrthoPrintAllowed(policy, { area, format }) {
   if (format === 'tif' && !policy.geotiff) deny('GeoTIFF export needs download permission.');
 }
 
+// Without download permission a "current view" export is held to what the
+// viewer can already see: the screen's pixels, and never more than 2048 px.
+// Otherwise a zoomed-out view at 6144 px would equal the gated whole-ortho print.
+export const VIEW_EXPORT_MAX_EDGE = 2048;
+export function printLongEdge({ area, requested, policy, viewPixels }) {
+  if (area !== 'view' || policy?.whole === true) return requested;
+  const screen = Number.isFinite(viewPixels) && viewPixels > 0 ? Math.round(viewPixels) : VIEW_EXPORT_MAX_EDGE;
+  return Math.max(16, Math.min(requested, VIEW_EXPORT_MAX_EDGE, screen));
+}
+
+/**
+ * The print places overlays and georeferencing in the project's UTM frame
+ * using the orthophoto file's extent, so the file must be north-up and in
+ * that same CRS (as the measurement report requires). An ortho that does
+ * not declare its CRS is refused for GeoTIFF.
+ */
+export function verifyOrthoCrs(ortho, epsg, { requireDeclared = false } = {}) {
+  const refuse = message => { throw Object.assign(new Error(message), { code: 'print_crs' }); };
+  const image = ortho?.images?.[0];
+  if (!image) refuse('The orthophoto could not be read.');
+  const fd = image.getFileDirectory?.() || {};
+  let transform;
+  try { transform = typeof fd.getValue === 'function' ? fd.getValue('ModelTransformation') : fd.ModelTransformation; } catch { transform = undefined; }
+  if (transform) refuse('The orthophoto is rotated; export is only supported for north-up orthophotos.');
+  const resolution = image.getResolution?.();
+  if (resolution && !(resolution[0] > 0 && resolution[1] < 0)) refuse('The orthophoto orientation is unsupported for export.');
+  const code = Number(image.getGeoKeys?.()?.ProjectedCSTypeGeoKey);
+  const declared = Number.isInteger(code) && code > 0 && code < 32767;
+  if (declared && code !== epsg) refuse('The orthophoto coordinate reference does not match this model. Export is unavailable.');
+  if (!declared && requireDeclared) refuse('The orthophoto does not declare its coordinate reference. Export PNG instead.');
+}
+
 // iOS Safari caps a canvas at 16,777,216 pixels (4096 x 4096).
 export function isIosLike(navigatorRef = globalThis.navigator) {
   const ua = String(navigatorRef?.userAgent || '');
@@ -308,20 +340,26 @@ export async function exportOrthoPrint({ format = 'png', epsg = null, traceConto
   const extent = clampExtent(opts.extent, opts.ortho);
   if (!extent) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
   if (format === 'tif' && !(Number.isInteger(epsg) && epsg > 0)) throw Object.assign(new Error('GeoTIFF needs a verified coordinate reference. Export PNG instead.'), { code: 'print_crs' });
+  if (format === 'tif' || (epsg && (traceContours || opts.propertyLines?.length))) verifyOrthoCrs(opts.ortho, epsg, { requireDeclared: format === 'tif' });
   const { width, gsdE } = printLayout(extent, opts.longEdge ?? 4096);
   // Trace about one DTM cell per 2.5 output pixels: smooth at print size.
   const contours = traceContours ? await traceContours(extent, gsdE * 2.5) : null;
   const result = await renderOrthoPrint({ ...opts, extent, format, contours });
   let blob;
+  const release = () => { result.canvas.width = 0; result.canvas.height = 0; };
   try {
     if (format === 'tif') {
       let rgba;
       try { rgba = result.ctx.getImageData(0, 0, result.width, result.height).data; } catch { throw tooLarge(); }
-      blob = new Blob([encodePrintGeoTiff({ rgba, width: result.width, height: result.height, extent: result.extent, epsg })], { type: 'image/tiff' });
+      release(); // the pixels are copied out; free the canvas before encoding
+      let buffer = encodePrintGeoTiff({ rgba, width: result.width, height: result.height, extent: result.extent, epsg });
+      rgba = null; // drop the read-back copy before the Blob takes its own
+      blob = new Blob([buffer], { type: 'image/tiff' });
+      buffer = null;
     } else {
       blob = await new Promise((resolve, reject) => result.canvas.toBlob(b => b ? resolve(b) : reject(tooLarge()), 'image/png'));
     }
-  } finally { result.canvas.width = 0; result.canvas.height = 0; } // release the backing store
+  } finally { release(); }
   return { blob, width: result.width, height: result.height, extent: result.extent, contours: result.contours, propertyLines: result.propertyLines,
     filename: `orthophoto${contours?.features?.length ? '-contours' : ''}-${result.width}px.${format === 'tif' ? 'tif' : 'png'}`, gsd: width ? gsdE : null };
 }

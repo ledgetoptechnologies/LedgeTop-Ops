@@ -174,5 +174,8 @@ test('viewer wiring: Contours panel sits with the map layer panels; mode switche
   const exporter = main.slice(main.indexOf('async function exportOrthoPrintFromViewer'), main.indexOf('function pcApi()'));
   assert.match(exporter, /^async function exportOrthoPrintFromViewer[^\n]*\s*(\/\/[^\n]*\s*)*assertOrthoPrintAllowed\(orthoPrintPermissions\(\), \{ area, format \}\);/, 'permission re-checked first');
   assert.match(exporter, /isMapMode\(state\.activeMode\)/, 'current view follows any map view');
+  assert.match(exporter, /printLongEdge\(\{ area, requested: size, policy, viewPixels:/, 'view exports capped without download');
+  assert.match(exporter, /assertOrthoPrintAllowed\(orthoPrintPermissions\(\), \{ area, format \}\);\s*return result;/, 'permission re-checked before the file is saved');
+  assert.match(main, /v \* toMeters > -1000 && v \* toMeters < 10000/, 'DEM range checked in metres');
   assert.doesNotMatch(main, /#FFD60A/, 'property lines found by pane, not colour');
 });

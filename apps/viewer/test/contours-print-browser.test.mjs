@@ -1,13 +1,13 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
-import test, { after } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
+import { launchBrowser, stopBrowser } from './browser-launch.mjs';
 
 // Real-canvas checks for the contour overlay: the print export burns index
 // and minor contours, ft labels, property lines and a legend into the
@@ -16,27 +16,6 @@ import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const executable = () => [process.env.CHROME_PATH, process.env.EDGE_PATH, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/chromium', '/usr/bin/google-chrome'].filter(Boolean).find(existsSync);
-// Edge's launcher pid can exit after handing off to the real browser, and a
-// timed-out test may never reach its finally block. Kill every process that
-// uses this run's private profile, synchronously, from finally, after() and
-// process exit, so no headless browser outlives the test.
-const launched = new Map(); // child -> profile dir
-function killTree(child) {
-  const profile = launched.get(child);
-  if (!launched.delete(child)) return;
-  if (process.platform === 'win32') {
-    const shell = path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const marker = path.basename(profile).replace(/[^A-Za-z0-9_-]/g, '');
-    spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command',
-      `Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" | Where-Object { $_.CommandLine -like '*${marker}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`],
-      { stdio: 'ignore', windowsHide: true, timeout: 20000 });
-  } else { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
-  try { child.kill('SIGKILL'); } catch {}
-}
-const killAll = () => { for (const child of [...launched.keys()]) killTree(child); };
-after(killAll);
-process.on('exit', killAll);
-
 const SERVED = new Map([
   ['/contours.mjs', 'contours.mjs'], ['/contour-layer.mjs', 'contour-layer.mjs'], ['/contour-worker.mjs', 'contour-worker.mjs'],
   ['/utm-conversion.mjs', 'utm-conversion.mjs'], ['/raster-vertical-units.mjs', 'raster-vertical-units.mjs'], ['/ortho-print-export.mjs', 'ortho-print-export.mjs'], ['/orthophoto-mask.mjs', 'orthophoto-mask.mjs'],
@@ -146,9 +125,8 @@ test('print export burns contours, ft labels, property lines and legend into rea
       res.end(readFileSync(file));
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    const profile = mkdtempSync(path.join(tmpdir(), 'ltds-contours-browser-'));
-    browser = spawn(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore', detached: process.platform !== 'win32' });
-    launched.set(browser, profile);
+    let profile;
+    ({ child: browser, profile } = launchBrowser(binary, dir => ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${dir}`, 'about:blank'], { prefix: 'ltds-contours-browser-' }));
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
     const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     client = await Cdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
@@ -171,8 +149,8 @@ test('print export burns contours, ft labels, property lines and legend into rea
     let indexHits = 0, widthIndex = 0, widthMinor = 0;
     for (let k = 0; k < 16; k++) {
       const angle = (k + 0.25) * Math.PI / 8;
-      const profile = await client.evaluate(`radial(${cx},${cy},${angle},96.5,101.5,${gsd})`);
-      const run = (lo, hi) => profile.filter(p => p[0] >= lo && p[0] <= hi && isLine(p)).length;
+      const samples = await client.evaluate(`radial(${cx},${cy},${angle},96.5,101.5,${gsd})`);
+      const run = (lo, hi) => samples.filter(p => p[0] >= lo && p[0] <= hi && isLine(p)).length;
       if (run(99.4, 100.6) > 0) indexHits++;
       widthIndex += run(99.2, 100.8); widthMinor += run(97.2, 98.8);
     }
@@ -206,7 +184,7 @@ test('print export burns contours, ft labels, property lines and legend into rea
       t.diagnostic(`Sample: ${process.env.LTDS_CONTOUR_SAMPLE}`);
     }
   } finally {
-    client?.close(); killTree(browser);
+    client?.close(); stopBrowser(browser);
     if (server) await new Promise(resolve => server.close(resolve));
     await unlock();
   }

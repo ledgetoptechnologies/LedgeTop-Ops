@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fromArrayBuffer } from 'geotiff';
 import { buildContours, contourLevels, CONTOUR_COLORS, METERS_PER_FOOT } from '../contours.mjs';
-import { assertOrthoPrintAllowed, canvasWorks, clampExtent, encodePrintGeoTiff, exportOrthoPrint, orthoPrintPolicy, pickOrthoLevel, printLayout, renderOrthoPixels, renderOrthoPrint, supportedPrintSizes } from '../ortho-print-export.mjs';
+import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, canvasWorks, printLongEdge, verifyOrthoCrs, clampExtent, encodePrintGeoTiff, exportOrthoPrint, orthoPrintPolicy, pickOrthoLevel, printLayout, renderOrthoPixels, renderOrthoPrint, supportedPrintSizes } from '../ortho-print-export.mjs';
 
 // Synthetic orthophoto: 400 x 200 m at 0.5 m (level 0) and 1 m (level 1).
 // Red encodes the column, green the row; a 4th band is alpha with a hole.
@@ -10,6 +10,7 @@ function orthoFixture() {
   const reads = [];
   const makeImage = (w, h) => ({
     getWidth: () => w, getHeight: () => h,
+    getGeoKeys: () => ({ ProjectedCSTypeGeoKey: 32616 }), getResolution: () => [400 / w, -200 / h, 0], getFileDirectory: () => ({ getValue: () => undefined }),
     async readRasters({ window }) {
       reads.push({ w, window });
       const [x0, y0, x1, y1] = window, ww = x1 - x0, wh = y1 - y0;
@@ -92,6 +93,33 @@ test('export policy: measure-only viewers get current-view PNG; whole orthophoto
   assert.deepEqual(expired, { allowed: false, whole: false, geotiff: false });
   assert.throws(() => assertOrthoPrintAllowed(expired, { area: 'view', format: 'png' }), { code: 'print_not_permitted' });
   assert.equal(orthoPrintPolicy({ accessAvailable: true, measure: false, download: true }).allowed, false);
+});
+
+test('without download permission a current-view export is capped at the screen size and 2048 px', () => {
+  const measureOnly = orthoPrintPolicy({ accessAvailable: true, measure: true, download: false });
+  const full = orthoPrintPolicy({ accessAvailable: true, measure: true, download: true });
+  assert.equal(VIEW_EXPORT_MAX_EDGE, 2048);
+  assert.equal(printLongEdge({ area: 'view', requested: 6144, policy: measureOnly, viewPixels: 3840 }), 2048, 'never above 2048 px');
+  assert.equal(printLongEdge({ area: 'view', requested: 6144, policy: measureOnly, viewPixels: 1280 }), 1280, 'never above the screen');
+  assert.equal(printLongEdge({ area: 'view', requested: 2048, policy: measureOnly, viewPixels: NaN }), 2048);
+  assert.equal(printLongEdge({ area: 'view', requested: 6144, policy: full, viewPixels: 1280 }), 6144, 'download permission keeps the chosen size');
+  assert.equal(printLongEdge({ area: 'full', requested: 6144, policy: full, viewPixels: 1280 }), 6144);
+});
+
+test('orthophoto CRS must match the model and be north-up; mismatches are refused before reading pixels', async () => {
+  const image = (keys, transform, resolution = [0.5, -0.5, 0]) => ({ getGeoKeys: () => keys, getResolution: () => resolution, getFileDirectory: () => ({ getValue: name => name === 'ModelTransformation' ? transform : undefined }) });
+  assert.doesNotThrow(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32616 })] }, 32616, { requireDeclared: true }));
+  assert.throws(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32617 })] }, 32616), { code: 'print_crs', message: /does not match/ });
+  assert.throws(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32616 }, [1, 0, 0, 0])] }, 32616), { code: 'print_crs', message: /rotated/ });
+  assert.throws(() => verifyOrthoCrs({ images: [image({ ProjectedCSTypeGeoKey: 32616 }, undefined, [0.5, 0.5, 0])] }, 32616), { code: 'print_crs' });
+  assert.throws(() => verifyOrthoCrs({ images: [image({})] }, 32616, { requireDeclared: true }), { code: 'print_crs', message: /does not declare/ });
+  assert.doesNotThrow(() => verifyOrthoCrs({ images: [image({})] }, 32616), 'undeclared is fine for a PNG');
+  const { ds, reads } = orthoFixture();
+  for (const img of ds.images) img.getGeoKeys = () => ({ ProjectedCSTypeGeoKey: 32617 });
+  const extent = { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200 };
+  await assert.rejects(exportOrthoPrint({ ortho: ds, extent, longEdge: 400, format: 'tif', epsg: 32616, createCanvas: fakeCanvasFactory([]) }), { code: 'print_crs' });
+  await assert.rejects(exportOrthoPrint({ ortho: ds, extent, longEdge: 400, format: 'png', epsg: 32616, propertyLines: [[[500050, 4700050], [500060, 4700060]]], createCanvas: fakeCanvasFactory([]) }), { code: 'print_crs' }, 'overlays would misalign');
+  assert.equal(reads.length, 0);
 });
 
 test('6144 px is offered only where a canvas that large works; never on iOS', () => {

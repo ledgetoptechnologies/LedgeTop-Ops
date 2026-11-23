@@ -86,8 +86,8 @@ import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { modelHorizontalDatum, verifiedUtmGeoref } from './property-lines.mjs';
 import { createPropertyLinesController } from './property-lines-layer.mjs';
-import { createContourController } from './contour-layer.mjs';
-import { assertOrthoPrintAllowed, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, supportedPrintSizes } from './ortho-print-export.mjs';
+import { createContourController, dtmVerticalScale } from './contour-layer.mjs';
+import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, supportedPrintSizes } from './ortho-print-export.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
 import { renderProjectSwitcherOptions } from './project-switcher.mjs';
@@ -3249,14 +3249,17 @@ async function getDataset(url, isDem, { signal = null } = {}) {
     _ovCache: null                                    // cached overview raster for recolor w/o refetch
   };
   if (isDem) {
-    // stats from the smallest overview
+    // stats from the smallest overview, in stored units; the plausibility
+    // range is checked in metres so a DTM stored in feet above 10,000 ft
+    // keeps its true range (undeclared units are metres, as displayed)
     const smallest = images[images.length - 1];
     const raster = await smallest.readRasters({ pool: geoPool, signal });
     let min = Infinity, max = -Infinity;
     const band = raster[0];
+    const toMeters = await dtmVerticalScale(ds).catch(() => 1);
     for (let i = 0; i < band.length; i++) {
       const v = band[i];
-      if (isFinite(v) && v > -1000 && v < 10000 && v !== ds.nodata) {
+      if (isFinite(v) && v !== ds.nodata && v * toMeters > -1000 && v * toMeters < 10000) {
         if (v < min) min = v;
         if (v > max) max = v;
       }
@@ -4158,7 +4161,9 @@ function installContours() {
       return {
         contoursAvailable: Boolean(DTM_URL), contoursOn: contourLines?.state.on === true,
         propertyAvailable: propertyLinesForPrint().lines.length > 0, propertyOn: true,
-        geotiffAvailable: policy.geotiff && printEpsg() !== null, wholeAvailable: policy.whole, sizes: printSizes,
+        geotiffAvailable: policy.geotiff && printEpsg() !== null, wholeAvailable: policy.whole,
+        // Without download permission a view export is capped at the screen size (at most 2048 px).
+        sizes: policy.whole ? printSizes : printSizes.filter((s) => s <= VIEW_EXPORT_MAX_EDGE),
       };
     },
     run: (options, signal) => exportOrthoPrintFromViewer(options, signal),
@@ -4208,14 +4213,21 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
     extent = { minE: Math.min(...corners.map((c) => c[0])), maxE: Math.max(...corners.map((c) => c[0])), minN: Math.min(...corners.map((c) => c[1])), maxN: Math.max(...corners.map((c) => c[1])) };
   }
   const drawnLines = property ? propertyLinesForPrint() : { lines: [], color: null };
-  assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
-  return exportOrthoPrint({
-    ortho, extent, longEdge: size, format, epsg: printEpsg(),
+  const policy = orthoPrintPermissions();
+  assertOrthoPrintAllowed(policy, { area, format });
+  const mapSize = map.getSize();
+  const longEdge = printLongEdge({ area, requested: size, policy, viewPixels: Math.max(mapSize.x, mapSize.y) * (window.devicePixelRatio || 1) });
+  const result = await exportOrthoPrint({
+    ortho, extent, longEdge, format, epsg: printEpsg(),
     traceContours: contours && DTM_URL ? (printExtent, targetCell) => contourLines.computeForExtent(printExtent, targetCell, { signal }) : null,
     colors: contourLines?.colors(), propertyLines: drawnLines.lines.length ? drawnLines.lines : null,
     propertyStyle: drawnLines.color ? { color: drawnLines.color } : null, units: DISPLAY_UNITS,
     createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal,
   });
+  // Rendering takes a while: the session may have expired meanwhile. Check
+  // again before the dialog saves anything.
+  assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
+  return result;
 }
 
 function pcApi() {
