@@ -109,9 +109,9 @@ already-published viewing.
    docker compose --env-file "$VIEWER_ENV" ps
    ```
 
-   `latest` moves only when a verified `main` candidate is promoted by hand;
-   see [docs/RELEASING.md](docs/RELEASING.md) for candidates, promotion,
-   rollback and digest pinning.
+   `latest` moves to each verified `main` build automatically, never back to
+   an older commit; see [docs/RELEASING.md](docs/RELEASING.md) for candidates,
+   the manual rollback promotion and digest pinning.
 
    For subsequent updates, use `scripts/update-truenas.sh . auto`. It derives
    the processing mode from the persistent environment, pulls the fixed

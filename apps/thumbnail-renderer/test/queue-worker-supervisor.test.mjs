@@ -81,7 +81,9 @@ test("publish is blocked on source checks and proves the exact published all-med
   const candidate = publishWorkflow.indexOf("Tag the verified digest as an immutable candidate (never latest)");
   assert.ok(candidate > smoke);
   assert.ok(receipt > candidate);
-  assert.doesNotMatch(publishWorkflow, /:stable"|:latest"/, "main never moves a mutable tag");
+  const lastStep = publishWorkflow.indexOf("- name: Move latest to this verified main build (never to an older commit)");
+  assert.ok(lastStep > receipt, "latest moves only in the last step, after the receipt");
+  assert.doesNotMatch(publishWorkflow.slice(0, lastStep), /:stable"|:latest"/, "before its last step main never moves a mutable tag");
   assert.match(publishWorkflow, /docker buildx imagetools inspect "\$\{TAG\}"/);
   assert.match(publishWorkflow, /inspect "\$\{TAG\}" --format '\{\{json \.Manifest\}\}' > commit-manifest\.json/);
   assert.match(publishWorkflow, /readFileSync\("commit-manifest\.json", "utf8"\)/);
@@ -104,7 +106,9 @@ test("proxy main publication writes only immutable sha and candidate tags of the
   assert.match(block, /docker tag proxy-generator:canary "\$tag"/);
   assert.match(block, /candidate="\$\{image\}:candidate-\$\{GITHUB_SHA\}-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"/);
   assert.match(block, /"\$candidate_digest" != "\$digest"/);
-  assert.doesNotMatch(proxyPublishWorkflow.replace(/^\s*#.*$/gm, ""), /:latest\b/, "main never moves proxy-generator:latest");
+  const proxyMove = proxyPublishWorkflow.indexOf("- name: Move latest to this verified main build (never to an older commit)");
+  assert.ok(proxyMove > proxyPublishWorkflow.indexOf("Upload immutable deployment receipt"), "latest moves only in the last step");
+  assert.doesNotMatch(proxyPublishWorkflow.slice(0, proxyMove).replace(/^\s*#.*$/gm, ""), /:latest\b/, "before its last step main never moves proxy-generator:latest");
   assert.match(proxyPublishWorkflow, /cancel-in-progress: false/);
 });
 

@@ -1,11 +1,12 @@
 # Releasing the Viewer image
 
 The Viewer API and worker share one image,
-`ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer`. Releasing it is two separate
-steps: every qualifying merge to `main` builds and verifies an immutable
-candidate, and a person later promotes one verified candidate to `latest`.
+`ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer`. Every qualifying merge to
+`main` builds and verifies an immutable candidate and, once every check has
+passed, moves `latest` to it in the same run (the way Project-Alpha's images
+work). The hand-run, approved promotion below is for rollback and re-promotion.
 
-## 1. Every merge to main: build an immutable candidate
+## 1. Every merge to main: build, verify, then move latest
 
 `.github/workflows/publish-viewer.yml` runs on pushes to `main` that touch
 `apps/viewer/**`, the workflow itself or the monorepo boundary test. It:
@@ -19,15 +20,29 @@ candidate, and a person later promotes one verified candidate to `latest`.
    tag already names a different digest the run fails; it never moves an
    existing tag;
 5. writes and uploads the release attestation
-   (`viewer-image-attestation-<commit>`, kept 90 days).
+   (`viewer-image-attestation-<commit>`, kept 90 days);
+6. as its last step, moves `latest` to that exact digest:
+   - only on a push to `main`, never for a pull request, tag or other branch;
+   - only if `sha-<commit>` still names the verified digest and the image
+     carries this commit's revision label;
+   - only forward: it reads the commit that `latest` currently names and asks
+     GitHub to compare it with this commit. If this commit descends from it,
+     `latest` moves. If `latest` already names a newer `main` commit (an older
+     build finishing late), it is left alone with a warning. Anything else
+     (diverged history, a missing revision label, a registry error) fails the
+     step and writes nothing. A missing `latest` (GHCR's exact "not found") is
+     created;
+   - it re-reads `latest` just before the write and stops if it changed. This
+     is not an atomic compare-and-swap;
+   - the run summary records the commit, the new digest, the previous `latest`
+     digest and its commit, and the decision.
 
-It never moves `latest`. A failed gate stops the run before the `sha-` tag and
-the attestation are written, so the build cannot be promoted. The run summary
-shows the commit and digest to promote.
+A failed gate stops the run before the `sha-` tag, the attestation and `latest`
+are written. The run summary shows the commit and digest.
 
 Builds are not cancelled once started. If several merges land while a build
 runs, GitHub keeps only the newest queued build, so intermediate commits may
-have no candidate. That is expected: promote the commit you tested.
+have no candidate. That is expected, and `latest` simply skips them.
 
 ## 2. Staging smoke of a candidate
 
@@ -41,9 +56,11 @@ ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer@sha256:<digest>
 tag in addition to `latest`. To pin a stack, add a
 `docker-compose.override.yml` next to `docker-compose.yml` that sets `image:`
 to the digest for both `viewer-api` and `viewer-worker`; Compose loads it
-automatically. Remove the override to follow `latest` again.
+automatically. Remove the override to follow `latest` again. Because `latest`
+now follows `main`, pin a digest on any host that must not change with the
+next merge.
 
-## 3. Promote to latest (explicit approval)
+## 3. Manual promotion: rollback or re-promotion (explicit approval)
 
 Promotion is `.github/workflows/promote-viewer.yml`, run by hand from `main`
 (Actions > "Promote Operations Viewer candidate to latest" > Run workflow) with:
@@ -94,14 +111,17 @@ Run it only after the approvals the release requires. It does not rebuild. It:
    is still uploaded.
 
 Promotions never run in parallel. Promoting the digest `latest` already names
-is a no-op. A test fails if any other workflow or script writes the Viewer
-`latest` or `sha-` tags. None of this is a registry-wide lock, so package admins
+is a no-op. A test fails if any workflow or script other than this one and the
+publisher's last step writes the Viewer `latest`, or anything but the publisher
+writes `sha-` tags. None of this is a registry-wide lock, so package admins
 must not write `latest` during a release.
 
 ## Rollback
 
-Run the same promotion with an earlier commit and its digest (the previous
-digest is in the last promotion's receipt artifact and summary). Rolling back
+Run the manual promotion with an earlier commit and its digest (the previous
+digest is in the publish run's summary and in the last promotion's receipt).
+A rollback holds only until the next qualifying merge to `main`, whose build
+moves `latest` forward again; merge the fix (or a revert) to move on. Rolling back
 the image does not prove the older image is compatible with a newer database
 schema; check that before rolling back. The
 attestation must still exist, so this works for 90 days after that candidate
@@ -109,15 +129,15 @@ was built. For older images, pin the digest on the host instead (section 2).
 
 ## Updating the production host
 
-After a promotion, update with the guarded helper as before:
+After `latest` moves, update with the guarded helper as before:
 `scripts/update-truenas.sh . auto` pulls `latest`, keeps the previous image as
 `ltds-viewer-rollback:previous`, waits for health and runs the readiness check.
 Pinning a digest (section 2) is the stricter option: the host then changes only
 when someone edits the pin.
 
 The Compose file uses `pull_policy: always`. Any `docker compose up` or app
-redeploy on the host pulls `latest` again, so a redeploy after a promotion picks
-up the promoted image even without the helper.
+redeploy on the host pulls `latest` again, so a redeploy after a merge to `main`
+picks up the newest verified image even without the helper.
 
 ## Candidate tag retention
 

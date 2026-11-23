@@ -37,15 +37,23 @@ test('least privilege: read-only by default, packages: write only for the two pu
   assert.equal((workflow.match(/secrets\./g) ?? []).length, 2, 'only the workflow token, for each registry login');
   assert.ok(workflow.includes('password: ${{ secrets.GITHUB_TOKEN }}'));
   // Visibility is only OBSERVED (read-only helper); nothing sets or changes it.
-  assert.ok(!/gh api|curl |-X (PATCH|PUT|POST|DELETE)|visibility=|"visibility":/i.test(workflow), 'package visibility is never changed');
+  // The one API call is the move step's read-only ancestry compare; nothing else calls the API.
+  const compare = 'STATUS="$(gh api "repos/$GITHUB_REPOSITORY/compare/$PREVIOUS_COMMIT...$COMMIT" --jq .status)"';
+  assert.equal(workflow.split(compare).length - 1, 1);
+  assert.ok(!/gh api|curl |-X (PATCH|PUT|POST|DELETE)|visibility=|"visibility":/i.test(workflow.replace(compare, '')), 'package visibility is never changed');
   const helper = fs.readFileSync(fileURLToPath(new URL('../scripts/package-visibility.mjs', import.meta.url)), 'utf8');
   assert.ok(!/method:\s*['"](PATCH|PUT|POST|DELETE)/i.test(helper) && !/method:/.test(helper), 'the helper only reads (GET)');
   for (const line of workflow.split('\n').filter(l => l.includes('uses: '))) assert.match(line, /@[0-9a-f]{40} # v/, line.trim());
 });
 
-test('two independent images, each with immutable commit and candidate tags after an exact-digest smoke; never latest', () => {
-  assert.ok(!/:latest|latest"/.test(workflow.replace(/^#.*$/gm, '')), 'the main publisher never writes latest (promotion only)');
-  assert.equal((workflow.match(/imagetools create/g) ?? []).length, 2);
+test('two independent images, each with immutable commit and candidate tags after an exact-digest smoke; only full moves latest, last', () => {
+  const moveAt = workflow.indexOf('      - name: Move latest to this verified main build (never to an older commit)\n');
+  assert.ok(moveAt > workflow.indexOf('\n  publish-full:\n'), 'the move step is in the full job');
+  assert.ok(!/:latest|latest"/.test(workflow.slice(0, moveAt).replace(/^\s*#.*$/gm, '')), 'nothing before the full job\'s last step writes latest');
+  assert.ok(!/\n      - name: /.test(workflow.slice(moveAt + 1)), 'the move is the last step of the full job');
+  assert.ok(workflow.slice(moveAt).includes('          IMMUTABLE_TAG: ${{ steps.names.outputs.tag }}\n'), 'moves only to the smoke-tested full digest');
+  assert.ok(!jobOf('publish-keyless').includes(':latest'), 'keyless never moves latest');
+  assert.equal((workflow.match(/imagetools create/g) ?? []).length, 3);
   for (const target of ['keyless', 'full']) {
     const job = jobOf(`publish-${target}`), other = target === 'full' ? 'keyless' : 'full';
     assert.ok(job.includes(`          target: ${target}\n`), target);

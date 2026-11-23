@@ -1,9 +1,9 @@
 name: Promote Operations Viewer candidate to latest
 
 # Manual, main-only promotion. publish-viewer.yml builds and verifies every
-# qualifying merge to main and publishes only immutable tags
+# qualifying merge to main and publishes immutable tags
 # (`candidate-<commit>-<run>-<attempt>` and `sha-<commit>`). This workflow moves
-# `latest` to one of those verified digests, and nothing else moves it. It does
+# `latest` to one of those verified digests, and is the rollback and re-promotion path: the main publisher also moves it forward automatically, as its last step, to each newly verified main build (never to an older commit). It does
 # not rebuild or deploy anything. Rollback is a promotion of an older candidate.
 #
 # Approval (enforced): the job runs in the protected GitHub Environment `image-promotion`, so GitHub holds it until a
@@ -14,7 +14,7 @@ name: Promote Operations Viewer candidate to latest
 # approved_by / approval_reference stay as typed notes only. The environment and the variable are repository security
 # settings that only the owner creates (Settings > Environments / Variables); this workflow never creates or changes them.
 #
-# Exclusion: this is the only workflow that writes `latest` (a test fails if
+# Exclusion: this and the main publisher's last step are the only workflows that write `latest` (a test fails if
 # another writer appears). The `promote-viewer-latest` concurrency group stops two
 # promotions overlapping. Neither is a registry-wide lock: a package admin or an
 # older in-flight run could still write the tag, so the job re-reads `latest`

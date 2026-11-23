@@ -12,8 +12,10 @@ permissions:
   contents: read
   packages: write
 
-# A main build publishes only immutable candidate tags. Moving `latest` is the
-# separate, manually dispatched promote-viewer.yml workflow. Builds are never
+# A main build publishes immutable candidate and sha tags, and only after every
+# verify step has passed does its last step move `latest` to that exact digest,
+# never back to an older main commit. The manually dispatched, approved
+# promote-viewer.yml stays the rollback and re-promotion path. Builds are never
 # cancelled mid-run, so a tag step cannot be interrupted; a newer merge queued
 # behind a running build replaces any older queued build.
 concurrency:
@@ -271,7 +273,7 @@ jobs:
           set -euo pipefail
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]
-          # This build never moves `latest`; only the one write-once sha tag is published.
+          # This step never moves `latest`; only the one write-once sha tag is published here.
           tag="$IMAGE_NAME:sha-$EXPECTED_REVISION"
           test "$FINAL_TAGS" = "$tag"
           if EXISTING_DIGEST="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' 2>inspect-error.txt)"; then
@@ -284,7 +286,7 @@ jobs:
           rm -f inspect-error.txt
           PROMOTED_DIGEST="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           test "$PROMOTED_DIGEST" = "$IMAGE_DIGEST"
-          printf 'Candidate for promotion: commit `%s`, digest `%s` (tag `%s`). `latest` was not changed.\n\n' "$EXPECTED_REVISION" "$IMAGE_DIGEST" "$tag" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Candidate for promotion: commit `%s`, digest `%s` (tag `%s`). `latest` moves to it in the last step, once the attestation is stored.\n\n' "$EXPECTED_REVISION" "$IMAGE_DIGEST" "$tag" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Write verified release attestation
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -317,3 +319,69 @@ jobs:
             apps/viewer/viewer-image-attestation.json.sha256
           if-no-files-found: error
           retention-days: 90
+
+      - name: Move latest to this verified main build (never to an older commit)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMMUTABLE_TAG: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+          PROMOTE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Like Project-Alpha, a main push moves latest in the same run that built the image, but only here: after
+          # every verify and test step above passed, to this exact digest, and never back to an older main commit.
+          # Rollback or re-promotion is the hand-run promote workflow. The re-read below is not an atomic swap.
+          fail() { echo "::error::$1 latest was not changed."; exit 1; }
+          digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"'; }
+          revision_of() { docker buildx imagetools inspect "$1" --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}'; }
+          COMMIT="$GITHUB_SHA"
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]] || fail "Only a push to main moves latest."
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ && "$PROMOTE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "No verified commit and digest."
+          [[ "$IMMUTABLE_TAG" == "$IMAGE_NAME:sha-$COMMIT" || "$IMMUTABLE_TAG" == "$IMAGE_NAME:sha-$COMMIT-full" ]] || fail "Unexpected immutable tag $IMMUTABLE_TAG."
+          [[ "$(digest_of "$IMMUTABLE_TAG")" == "$PROMOTE_DIGEST" ]] || fail "$IMMUTABLE_TAG does not name the verified $PROMOTE_DIGEST."
+          [[ "$(revision_of "$IMAGE_NAME@$PROMOTE_DIGEST")" == "$COMMIT" ]] || fail "The verified digest does not carry commit $COMMIT."
+          if ! PREVIOUS_DIGEST="$(digest_of "$IMAGE_NAME:latest" 2>"$RUNNER_TEMP/latest-error.txt")"; then
+            # Absent only on GHCR's exact one-line answer for this tag; any other error stops here.
+            [[ "$(tr -d '\r' < "$RUNNER_TEMP/latest-error.txt" | grep .)" == "ERROR: $IMAGE_NAME:latest: not found" ]] ||
+              { cat "$RUNNER_TEMP/latest-error.txt" >&2; fail "Cannot read the current latest."; }
+            PREVIOUS_DIGEST=absent
+          fi
+          PREVIOUS_COMMIT=none
+          if [[ "$PREVIOUS_DIGEST" == "$PROMOTE_DIGEST" ]]; then
+            DECISION=already-latest
+          elif [[ "$PREVIOUS_DIGEST" == absent ]]; then
+            DECISION=create
+          else
+            [[ "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "The current latest digest is malformed: $PREVIOUS_DIGEST."
+            PREVIOUS_COMMIT="$(revision_of "$IMAGE_NAME@$PREVIOUS_DIGEST")" || fail "Cannot read the commit of the current latest."
+            [[ "$PREVIOUS_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "The current latest carries no commit label; promote it once by hand."
+            # ahead: this commit descends from the one latest names. behind: latest is already newer on main.
+            STATUS="$(gh api "repos/$GITHUB_REPOSITORY/compare/$PREVIOUS_COMMIT...$COMMIT" --jq .status)" || fail "Cannot compare $PREVIOUS_COMMIT with $COMMIT."
+            case "$STATUS" in
+              ahead) DECISION=promote ;;
+              behind) DECISION=kept-newer ;;
+              *) fail "latest names $PREVIOUS_COMMIT, which is not an older main commit than $COMMIT ($STATUS)." ;;
+            esac
+          fi
+          {
+            echo "### Automatic promotion of \`$IMAGE_NAME:latest\`"
+            echo "- Commit: \`$COMMIT\`"
+            echo "- Digest: \`$PROMOTE_DIGEST\`"
+            echo "- Previous latest: \`$PREVIOUS_DIGEST\` (commit \`$PREVIOUS_COMMIT\`)"
+            echo "- Decision: $DECISION"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$DECISION" == kept-newer ]]; then
+            echo "::warning::latest already names $PREVIOUS_COMMIT, which is newer on main than $COMMIT; latest is never moved back automatically."
+            exit 0
+          fi
+          if [[ "$DECISION" == already-latest ]]; then exit 0; fi
+          NOW="$(digest_of "$IMAGE_NAME:latest" 2>/dev/null || echo absent)"
+          [[ "$NOW" == "$PREVIOUS_DIGEST" ]] || fail "latest changed while this step ran (was $PREVIOUS_DIGEST, now $NOW)."
+          docker buildx imagetools create --prefer-index=false --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"
+          if [[ "$(digest_of "$IMAGE_NAME:latest")" != "$PROMOTE_DIGEST" ]]; then
+            echo "::error::latest could not be confirmed as $PROMOTE_DIGEST. Roll back with the manual promote workflow (previous: $PREVIOUS_DIGEST, commit $PREVIOUS_COMMIT)."
+            exit 1
+          fi
+          echo "- Result: latest now names \`$PROMOTE_DIGEST\`" >> "$GITHUB_STEP_SUMMARY"

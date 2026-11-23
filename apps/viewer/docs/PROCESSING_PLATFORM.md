@@ -366,7 +366,7 @@ source.
 
 Before maintenance:
 
-1. Stop new processing admission in Ops and keep it paused for the entire update; wait for active operations or attempts to settle. The updater pulls the fixed official `latest` image first (`latest` changes only when a verified candidate is promoted; see [RELEASING.md](RELEASING.md)), then rechecks durable work immediately before replacement, but the paused admission boundary is what prevents new work from entering that final interval.
+1. Stop new processing admission in Ops and keep it paused for the entire update; wait for active operations or attempts to settle. The updater pulls the fixed official `latest` image first (`latest` changes when a verified `main` build passes, or by a manual rollback promotion; see [RELEASING.md](RELEASING.md)), then rechecks durable work immediately before replacement, but the paused admission boundary is what prevents new work from entering that final interval.
 2. Stop the worker, then the API.
 3. Run `PRAGMA wal_checkpoint(TRUNCATE)` through a SQLite client, then back up
    the complete `/mnt/Plugins/App_Data/Model-Viewer/Storage` dataset before

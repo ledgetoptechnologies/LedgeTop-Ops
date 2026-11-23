@@ -69,7 +69,9 @@ test('fail closed: read latest, persist the rollback receipt, re-read, and only 
 
 test('no other workflow writes the logs-local latest tag', () => {
   for (const name of fs.readdirSync(workflows).filter(n => /\.ya?ml$/.test(n))) {
-    const text = read(name).replace(/^\s*#.*$/gm, '');
+    let text = read(name).replace(/^\s*#.*$/gm, '');
+    // The publisher's last step moves latest forward to the build it verified (auto-promote-latest.test.mjs).
+    if (name === 'publish-logs-local.yml') text = text.slice(0, text.indexOf('- name: Move latest to this verified main build (never to an older commit)'));
     if (name === 'promote-logs-local.yml' || !text.includes('logs-local')) continue;
     assert.ok(!/:latest\b/.test(text), `${name} must not touch a logs-local latest tag`);
   }

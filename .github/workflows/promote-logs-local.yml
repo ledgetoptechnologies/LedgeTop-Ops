@@ -1,9 +1,9 @@
 name: Promote Logs local host candidate to latest
 
 # Manual, main-only promotion (Beau's decision: the logs latest moves by promotion only, like the Viewer).
-# publish-logs-local.yml builds, smoke-tests and publishes every qualifying merge to main with immutable tags only
+# publish-logs-local.yml builds, smoke-tests and publishes every qualifying merge to main with immutable tags
 # (`sha-<commit>-<target>` and `candidate-<commit>-<run>-<attempt>-<target>`) plus a deployment receipt. This workflow
-# moves `latest` (what the NAS stack pulls) to one verified FULL candidate digest, and nothing else moves it. It does
+# moves `latest` (what the NAS stack pulls) to one verified FULL candidate digest, and is the rollback and re-promotion path: the main publisher also moves it forward automatically, as its last step, to each newly verified main build (never to an older commit). It does
 # not rebuild or deploy anything. Rollback is a promotion of an older candidate. A keyless image is never promotable.
 #
 # Approval (enforced): the job runs in the protected GitHub Environment `image-promotion`, so GitHub holds it until a
@@ -14,7 +14,7 @@ name: Promote Logs local host candidate to latest
 # approved_by / approval_reference stay as typed notes only. The environment and the variable are repository security
 # settings that only the owner creates (Settings > Environments / Variables); this workflow never creates or changes them.
 #
-# Exclusion: this is the only workflow that writes the logs-local `latest` (a test fails if another writer appears).
+# Exclusion: this and the main publisher's last step are the only workflows that write the logs-local `latest` (a test fails if another writer appears).
 # The `promote-logs-local-latest` concurrency group stops two promotions overlapping. Neither is a registry-wide lock:
 # a package admin or an older in-flight run could still write the tag, so the job re-reads `latest` immediately before
 # writing and aborts if it changed. That re-read narrows the window but is NOT an atomic compare-and-swap.
