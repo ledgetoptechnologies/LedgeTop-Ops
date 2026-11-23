@@ -216,7 +216,7 @@ it("looks up an exact staff-authorized directory target without returning profil
       INSERT INTO native_directory_grants VALUES ('staff:onboarding','directory.profile.view',1,'allow','global',NULL,NULL,NULL),
         ('staff:onboarding','directory.profile.edit',1,'allow','global',NULL,NULL,NULL);
       INSERT INTO operations_directory_client_organizations VALUES ('local:client','local:org',2);`);
-    for (const [kind, recordId, id] of [["client", "local:client", publicId], ["organization", "local:org", "3".repeat(32)]]) {
+    for (const [kind, recordId, id] of [["client", "local:client", publicId], ["organization", "local:org", "3".repeat(32)]] as const) {
       sqlite.prepare("INSERT INTO operations_directory_records VALUES (?,1,?)").run(recordId, kind);
       sqlite.prepare("INSERT INTO operations_directory_lifecycle_state VALUES (?,'active')").run(recordId);
       sqlite.prepare("INSERT INTO operations_directory_revisions VALUES (?,1,'{\"name\":\"Sensitive fixture\"}')").run(recordId);
@@ -254,9 +254,13 @@ it("looks up an exact staff-authorized directory target without returning profil
     expect(success.status).toBe(200);
     const original = await success.json();
     expect(original).toEqual({ choice: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    if (typeof original !== "object" || original === null || !("choice" in original) || typeof original.choice !== "string") {
+      throw Error("missing target choice in response");
+    }
+    const { choice } = original;
     const context = { origin, auth: actor, binding: { ...binding, sourceId: "project-alpha:secondary" as const },
       source: { instance: sourceInstanceId, application: applicationId, epoch: historyEpoch }, lookup: { kind: "client" as const, publicId } };
-    const verify = (candidate = context) => verifyInviteTargetChoice(fixtureDatabase, candidate, original.choice,
+    const verify = (candidate = context) => verifyInviteTargetChoice(fixtureDatabase, candidate, choice,
       async message => createHmac("sha256", environment.OPERATIONS_SESSION_SECRET!).update(message).digest("hex"));
     expect(await verify()).toMatchObject([{ recordId: "local:client", recordVersion: 1 }, { recordId: "local:org" }]);
     expect(await verify({ ...context, origin: canonicalOrigin })).toBeNull();
@@ -269,7 +273,7 @@ it("looks up an exact staff-authorized directory target without returning profil
     const pin = await verify();
     if (!pin) throw Error("synthetic target pin unavailable");
     const command = { commandId: "22222222-2222-4222-8222-222222222222", expiresAt: "2099-01-01T00:00:00.000Z",
-      destinationSourceIds: [sourceId], targetChoices: [{ ...request, choice: original.choice }] };
+      destinationSourceIds: [sourceId], targetChoices: [{ ...request, choice }] };
     const enabledIssue = { ...environment, CLIENT_ONBOARDING_INVITE_TARGET_CHOICES_ENABLED: "true",
       CLIENT_ONBOARDING_INVITE_TARGET_ISSUANCE_ENABLED: "true" };
     expect((await send("/api/client-onboarding/staff/create", "POST", command, csrf, enabledIssue)).status).toBe(200);
@@ -428,7 +432,7 @@ it("looks up an exact staff-authorized directory target without returning profil
     expect((await lookup()).status).toBe(503);
     expect((await send("/api/client-onboarding/staff/create", "POST", {
       commandId: "22222222-2222-4222-8222-222222222222", expiresAt: "2099-01-01T00:00:00.000Z",
-      destinationSourceIds: [sourceId], targetChoices: [{ ...request, choice: original.choice }],
+      destinationSourceIds: [sourceId], targetChoices: [{ ...request, choice }],
     }, csrf, environment)).status).toBe(404);
     expect(calls.issue).not.toHaveBeenCalled();
   } finally { sqlite.close(); }
@@ -680,7 +684,9 @@ describe("native client onboarding staff route", () => {
     const plan = await vi.importActual<typeof import("../src/worker/client-onboarding-shared-company-plan")>("../src/worker/client-onboarding-shared-company-plan");
     const shared = await vi.importActual<typeof import("../src/worker/client-onboarding-shared-company-approval")>("../src/worker/client-onboarding-shared-company-approval");
     const withSession = vi.fn(unavailable);
-    const environment = { ...env(), OPS_DB: { ...database, withSession } };
+    const guardedDatabase: D1Database = { prepare: unavailable, batch: unavailable, exec: unavailable,
+      withSession, dump: unavailable };
+    const environment = { ...env(), OPS_DB: guardedDatabase };
     const csrf = await session(environment), submissionId = "33333333-3333-4333-8333-333333333333";
     const decision = { submissionId, fieldsSha256: "e".repeat(64) };
     calls.review.mockResolvedValue({ ...decision, targetClientRecordId: null, targetApprovalPending: true, fields: { clientType: "business" } });

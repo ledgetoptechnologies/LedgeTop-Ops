@@ -4,8 +4,9 @@ import { inviteDestinationsStillBound, resolveInviteDestinations } from "../src/
 const technology = { sourceId: "project-alpha:secondary", businessAreaId: "area:t", divisionId: "division:t" };
 const drone = { sourceId: "project-alpha:primary", businessAreaId: "area:d", divisionId: "division:d" };
 const config = JSON.stringify([drone, technology]);
-const scopes = [technology, drone].map(binding => ({ businessAreaId: binding.businessAreaId,
-  name: "Same label", allowAreaWide: true, divisions: [{ divisionId: binding.divisionId, name: "Same label" }] }));
+const scope = (binding: typeof technology) => ({ businessAreaId: binding.businessAreaId,
+  name: "Same label", allowAreaWide: true, divisions: [{ divisionId: binding.divisionId, name: "Same label" }] });
+const scopes = [scope(technology), scope(drone)];
 
 it("maps independent and joint choices to canonical exact pairs", () => {
   for (const binding of [technology, drone]) expect(resolveInviteDestinations(config, { scopes }, [binding.sourceId])).toEqual([binding]);
@@ -22,7 +23,7 @@ it("fails closed for omitted, malformed, duplicate or missing exact bindings", (
     expect(resolveInviteDestinations(config, { scopes }, selection)).toBeNull();
   }
   expect(resolveInviteDestinations(JSON.stringify([technology]), { scopes }, [technology.sourceId, drone.sourceId])).toBeNull();
-  expect(resolveInviteDestinations(config, { scopes: [{ ...scopes[0], divisions: [] }] }, [technology.sourceId])).toBeNull();
+  expect(resolveInviteDestinations(config, { scopes: [{ ...scope(technology), divisions: [] }] }, [technology.sourceId])).toBeNull();
 });
 
 it("rejects a formerly allowed intent after remapping or lost division authority", () => {
@@ -30,5 +31,5 @@ it("rejects a formerly allowed intent after remapping or lost division authority
   const changed = JSON.stringify([{ ...drone, sourceId: technology.sourceId }]);
   expect(inviteDestinationsStillBound(config, { scopes }, intent)).toBe(true);
   expect(inviteDestinationsStillBound(changed, { scopes }, intent)).toBe(false);
-  expect(inviteDestinationsStillBound(config, { scopes: [scopes[1]] }, intent)).toBe(false);
+  expect(inviteDestinationsStillBound(config, { scopes: [scope(drone)] }, intent)).toBe(false);
 });

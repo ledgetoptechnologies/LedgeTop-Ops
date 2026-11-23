@@ -26,7 +26,8 @@ export function resolveInviteTargetSelections(sources: readonly SourceIdentity[]
     const find = (kind: AuthorizedTarget["kind"], ref?: TargetRef) => {
       if (!ref) return null;
       const matches = authorizedTargets.filter(row => sameSource(row, source) && row.kind === kind && row.publicId === ref.publicId);
-      return matches.length === 1 && matches[0].recordVersion === ref.recordVersion ? matches[0] : null;
+      const [match] = matches;
+      return matches.length === 1 && match && match.recordVersion === ref.recordVersion ? match : null;
     };
     const client = find("client", pick?.client);
     const organization = find("organization", pick?.organization);

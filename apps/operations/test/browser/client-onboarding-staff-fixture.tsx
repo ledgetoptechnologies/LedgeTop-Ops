@@ -1,13 +1,17 @@
 import { createRoot } from "react-dom/client";
+import { useEffect, useState } from "react";
 import "@ltds/ui/styles.css";
 import "../../src/client/styles.css";
 import { ClientOnboardingStaff } from "../../src/client/ClientOnboardingStaff";
-import { OnboardClientButton } from "../../src/client/OnboardClientButton";
+import { ClientOnboardingDialogProvider, OnboardClientButton } from "../../src/client/OnboardClientButton";
 
 type Call = { path: string; body: unknown };
 const calls: Call[] = [];
 let createdFixture: { commandId: string; expiresAt: string } | null = null;
-const fixtureWindow = window as Window & { onboardingCalls?: Call[]; onboardingMode?: string; copied?: string[]; opened?: string[]; release?: () => void };
+const fixtureActor = "fixture-staff";
+const fixtureExpiry = "2099-01-01T00:00:00.000Z";
+const fixtureWindow = window as Window & { onboardingCalls?: Call[]; onboardingMode?: string; copied?: string[]; opened?: string[]; release?: () => void;
+  onboardingActor?: string; onboardingSessionExpiry?: string };
 fixtureWindow.onboardingCalls = calls;
 fixtureWindow.copied = [];
 fixtureWindow.opened = [];
@@ -37,6 +41,8 @@ window.fetch = async (input, init) => {
   const path = String(input);
   const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
   calls.push({ path, body });
+  if (path === "/api/session/status") return Response.json({ userId: fixtureWindow.onboardingActor ?? fixtureActor,
+    serverTime: new Date().toISOString(), expiresAt: fixtureWindow.onboardingSessionExpiry ?? fixtureExpiry });
   const route = path.split("/").at(-1);
   if (route === "session") {
     sessionReads += 1;
@@ -48,7 +54,7 @@ window.fetch = async (input, init) => {
     if (mode === "refresh-unavailable" && sessionReads > 1) return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     return Response.json({ csrfToken: String(sessionReads % 10).repeat(64),
       verifiedUntil: mode === "short-session" ? new Date(Date.now() + 60_000).toISOString()
-        : mode === "advancing-session" ? new Date(Date.now() + 60 * 60_000).toISOString() : "2099-01-01T00:00:00.000Z" });
+        : mode === "advancing-session" ? new Date(Date.now() + 60 * 60_000).toISOString() : fixtureWindow.onboardingSessionExpiry ?? fixtureExpiry });
   }
   if (route === "inbox") {
     if (mode === "inbox-denied") return Response.json({ error: "client_onboarding_denied" }, { status: 403 });
@@ -158,5 +164,18 @@ window.fetch = async (input, init) => {
   return Response.json({ error: "not_found" }, { status: 404 });
 };
 
-createRoot(document.getElementById("root")!).render(location.search === "?dialog=1"
-  ? <main><h1>Client Hub</h1><OnboardClientButton /></main> : <ClientOnboardingStaff />);
+function RoutedOnboardingFixture() {
+  const [showHub, setShowHub] = useState(() => location.search === "?dialog=route");
+  useEffect(() => {
+    const onRoute = () => setShowHub(location.search === "?dialog=route");
+    window.addEventListener("popstate", onRoute);
+    return () => window.removeEventListener("popstate", onRoute);
+  }, []);
+  return showHub ? <main><h1>Client Hub</h1><OnboardClientButton /></main>
+    : <main><h1>Review submissions</h1><ClientOnboardingStaff /></main>;
+}
+
+createRoot(document.getElementById("root")!).render(<ClientOnboardingDialogProvider key={fixtureActor} actorId={fixtureActor}>
+  {location.search === "?dialog=route" ? <RoutedOnboardingFixture /> : location.search === "?dialog=1"
+    ? <main><h1>Client Hub</h1><OnboardClientButton /></main> : <ClientOnboardingStaff />}
+</ClientOnboardingDialogProvider>);

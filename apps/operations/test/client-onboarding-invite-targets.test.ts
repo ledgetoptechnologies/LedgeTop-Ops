@@ -28,10 +28,12 @@ it("allows blank targets and organization-only selections within a chosen source
 
 it("rejects unauthorized, stale, ambiguous, and mismatched client/organization results", () => {
   const picks = { [technology.sourceId]: pick };
+  const [first] = authorized;
+  if (!first) throw Error("missing authorized target fixture");
   for (const candidates of [authorized.slice(2),
     authorized.map(row => ({ ...row, historyEpoch: "changed" })),
     authorized.map(row => ({ ...row, recordVersion: row.recordVersion + 1 })),
-    [...authorized, { ...authorized[0], recordVersion: 3 }],
+    [...authorized, { ...first, recordVersion: 3 }],
     authorized.map(row => ({ ...row, organizationRecordId: "another-organization" }))]) {
     expect(resolveInviteTargetSelections([technology], picks, candidates)).toBeNull();
   }

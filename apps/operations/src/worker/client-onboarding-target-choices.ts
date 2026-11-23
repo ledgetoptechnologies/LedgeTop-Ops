@@ -193,8 +193,9 @@ export async function readInviteTargetChoice(db: D1Database, auth: Authenticated
   const { results } = await db.withSession("first-primary").prepare(currentTargetSql)
     .bind(...targetBindings({ auth, binding, source, lookup }, true)).all<Result & { orgRecordId: string | null; orgRecordVersion: number | null;
         orgMappingId: string | null; orgEnrollmentId: string | null }>();
-  if (results.length !== 1 || !(Date.parse(auth.verifiedUntil) > Date.now())) return null;
-  const { orgRecordId, orgRecordVersion, orgMappingId, orgEnrollmentId, ...target } = results[0];
+  const [result] = results;
+  if (results.length !== 1 || !result || !(Date.parse(auth.verifiedUntil) > Date.now())) return null;
+  const { orgRecordId, orgRecordVersion, orgMappingId, orgEnrollmentId, ...target } = result;
   if (!Number.isSafeInteger(target.recordVersion) || target.recordVersion < 1
     || (lookup.kind === "client" && (!Number.isSafeInteger(target.relationshipVersion) || target.relationshipVersion! < 1))) return null;
   if (target.organizationId === null) return [target, null];

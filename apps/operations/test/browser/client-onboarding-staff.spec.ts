@@ -109,6 +109,82 @@ test("closing and reopening preserves an uncopied one-time link in memory", asyn
   expect(await bodies(page, "reveal")).toHaveLength(1);
 });
 
+test("returning from review preserves an uncopied one-time link without reissuing it", async ({ page }) => {
+  await render(page, "success", "?dialog=route");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  await trigger.click();
+  await chooseScope(page);
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await page.getByRole("button", { name: "Create one-time link" }).click();
+  await expect(page.getByRole("button", { name: "Copy link" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
+  await page.getByRole("link", { name: "Review submissions" }).click();
+  await expect(page.getByRole("heading", { name: "Review submissions" })).toBeVisible();
+  await expect(trigger).toHaveCount(0);
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await page.goBack();
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await trigger.click();
+  await page.getByRole("button", { name: "Copy link" }).click();
+  expect(await page.evaluate(() => (window as Window & { copied?: string[] }).copied)).toEqual([
+    `https://portal.example.test/onboarding/11111111-1111-4111-8111-111111111111#${"d".repeat(64)}`,
+  ]);
+  expect(await bodies(page, "create")).toHaveLength(1);
+  expect(await bodies(page, "reveal")).toHaveLength(1);
+});
+
+test("navigation closes the dialog and stops an in-flight reveal from copying off-route", async ({ page }) => {
+  await render(page, "destination-copy-expiry-delayed", "?dialog=route");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  await trigger.click();
+  await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await page.getByRole("button", { name: "Generate and Copy" }).click();
+  await expect.poll(async () => (await bodies(page, "reveal")).length).toBe(1);
+  await page.evaluate(() => {
+    history.pushState(null, "", "/administration/client-onboarding");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await expect(page.getByRole("heading", { name: "Review submissions" })).toBeVisible();
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  // Observe that the retained issuer has received the reply before checking for clipboard side effects.
+  await expect(page.locator("dialog")).toContainText("One-time link ready");
+  expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+  await page.goBack();
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await trigger.click();
+  await expect(page.getByRole("button", { name: "Copy link" })).toBeVisible();
+  expect(await bodies(page, "create")).toHaveLength(1);
+  expect(await bodies(page, "reveal")).toHaveLength(1);
+});
+
+for (const change of ["actor", "session"] as const) {
+  test(`returning after ${change === "actor" ? "an actor" : "a session"} change discards the retained link`, async ({ page }) => {
+    await render(page, "success", "?dialog=route");
+    const trigger = page.getByRole("button", { name: "Onboard client" });
+    await trigger.click();
+    await chooseScope(page);
+    await page.getByRole("button", { name: "Create invitation" }).click();
+    await page.getByRole("button", { name: "Create one-time link" }).click();
+    await expect(page.getByRole("button", { name: "Copy link" })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
+    await page.getByRole("link", { name: "Review submissions" }).click();
+    await expect(page.getByRole("heading", { name: "Review submissions" })).toBeVisible();
+    await page.evaluate(change => {
+      const fixture = window as Window & { onboardingActor?: string; onboardingSessionExpiry?: string };
+      if (change === "actor") fixture.onboardingActor = "other-fixture-staff";
+      else fixture.onboardingSessionExpiry = "2099-01-02T00:00:00.000Z";
+    }, change);
+    await page.goBack();
+    await trigger.click();
+    await expect(page.getByRole("alert")).toContainText("Onboarding access could not be verified");
+    await expect(page.locator("dialog")).toHaveCount(0);
+    expect(await bodies(page, "create")).toHaveLength(1);
+    expect(await bodies(page, "reveal")).toHaveLength(1);
+  });
+}
+
 test("capability remains hidden when the dedicated administrator session is disabled", async ({ page }) => {
   await render(page, "disabled");
   await expect(page.getByRole("heading", { name: "Client onboarding unavailable" })).toBeVisible();
@@ -131,12 +207,14 @@ test("an ambiguous destination Copy result preserves the original invitation aft
   await expect.poll(async () => (await bodies(page, "session")).length).toBe(sessionReadsBeforeCreate + 1);
   const issued = await bodies(page, "create");
   expect(issued).toHaveLength(1);
-  expect(issued[0].destinationSourceIds).toEqual(["project-alpha:primary"]);
-  await expect(reference).toHaveText(String(issued[0].commandId));
+  const [issuedCommand] = issued;
+  if (!issuedCommand) throw new Error("Expected one recorded create command");
+  expect(issuedCommand.destinationSourceIds).toEqual(["project-alpha:primary"]);
+  await expect(reference).toHaveText(String(issuedCommand.commandId));
   await dialog.getByRole("button", { name: "Close" }).click();
   await expect(dialog).toHaveCount(0);
   await trigger.click();
-  await expect(reference).toHaveText(String(issued[0].commandId));
+  await expect(reference).toHaveText(String(issuedCommand.commandId));
   await expect(drone).toBeChecked();
   await expect(drone).toBeDisabled();
   await expect(technologies).not.toBeChecked();
@@ -217,7 +295,11 @@ for (const [mode, message] of [
       await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
       await expect(dialog.getByRole("radio", { name: "Copy a link" })).toBeDisabled();
       await expect.poll(async () => (await bodies(page, "create-email")).length).toBe(1);
-      await page.evaluate(() => (window as Window & { release: () => void }).release());
+      await page.evaluate(() => {
+        const release = (window as Window & { release?: () => void }).release;
+        if (typeof release !== "function") throw new Error("Missing delayed mail fixture release");
+        release();
+      });
     }
     await expect(dialog.getByText(message, { exact: false })).toBeVisible();
     await dialog.getByRole("button", { name: "Close" }).click();
@@ -285,7 +367,11 @@ test("changing destinations discards a delayed target proof", async ({ page }) =
   await expect.poll(async () => (await bodies(page, "target-choices")).length).toBe(1);
   await business.uncheck();
   await business.check();
-  await page.evaluate(() => (window as Window & { release: () => void }).release());
+  await page.evaluate(() => {
+    const release = (window as Window & { release?: () => void }).release;
+    if (typeof release !== "function") throw new Error("Missing delayed target fixture release");
+    release();
+  });
   await expect(picker.getByRole("searchbox")).toHaveValue("");
   await expect(picker.getByText(/Selected/)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Create invitation" })).toBeDisabled();
@@ -331,7 +417,7 @@ test("targeted denial keeps the original command on dialog reopen", async ({ pag
 test("a targeted submission can be read without offering ordinary approval", async ({ page }) => {
   await render(page, "target-review-held");
   await openSubmission(page, "Reviewed Client");
-  await expect(page.getByRole("heading", { name: "Review Client" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review Reviewed Client", exact: true })).toBeVisible();
   await expect(page.getByText("Needs existing-record review.")).toBeVisible();
   await expect(page.getByRole("button", { name: /approve/i })).toHaveCount(0);
   expect(await bodies(page, "enrollment-choices")).toEqual([]);

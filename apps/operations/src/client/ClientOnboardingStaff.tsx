@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Card, Loading, Skeleton } from "@ltds/ui";
 import { ClientOnboardingInbox } from "./ClientOnboardingReview";
 import { ClientOnboardingTargetPicker, type TargetKind, type TargetProof } from "./ClientOnboardingTargetPicker";
@@ -75,7 +75,9 @@ export function safeRecipientLink(value: unknown, invitationId: string, invitati
       && url.pathname === `/onboarding/${invitationId}` && url.hash === `#${invitationSecret}` ? url.href : null;
   } catch { return null; }
 }
-export function ClientOnboardingStaff({ embedded = false, onBusyChange }: { embedded?: boolean; onBusyChange?: (busy: boolean) => void } = {}) {
+export function ClientOnboardingStaff({ embedded = false, onBusyChange, canUseDialog }: {
+  embedded?: boolean; onBusyChange?: (busy: boolean) => void; canUseDialog?: () => boolean;
+} = {}) {
   // One stable session object: a refresh rotates the token in place, so open reviews,
   // inbox pages and in-flight retries are not reloaded or remounted.
   const sessionRef = useRef<StaffSession | null>(null);
@@ -90,9 +92,15 @@ export function ClientOnboardingStaff({ embedded = false, onBusyChange }: { embe
     let checking = false, pending = false;
     const load = (first: boolean) => { checking = true; return json(`${endpoint}/session`, { method: "GET", signal: controller.signal, headers: { "X-Native-Staff-Request": "1" } })
       .then(value => {
+        if (controller.signal.aborted) return;
         if (!validSession(value)) throw new Error("invalid_response");
-        if (!first && !sessionRef.current) return;
-        if (sessionRef.current) Object.assign(sessionRef.current, { csrfToken: value.csrfToken, verifiedUntil: value.verifiedUntil });
+        const current = sessionRef.current;
+        if (!first && !current) return;
+        if (current && embedded && current.verifiedUntil !== value.verifiedUntil) {
+          close("Your onboarding access changed. Reload the page to continue.");
+          return;
+        }
+        if (current) Object.assign(current, { csrfToken: value.csrfToken, verifiedUntil: value.verifiedUntil });
         else sessionRef.current = { csrfToken: value.csrfToken, verifiedUntil: value.verifiedUntil };
         setVerifiedUntil(value.verifiedUntil);
       })
@@ -112,8 +120,8 @@ export function ClientOnboardingStaff({ embedded = false, onBusyChange }: { embe
     verify.current = () => { if (checking) pending = true; else void load(false); };
     // The request token rotates every ten minutes; refresh it so long reviews keep working.
     const timer = window.setInterval(() => void load(false), SESSION_REFRESH_MS);
-    return () => { controller.abort(); window.clearInterval(timer); verify.current = null; };
-  }, [close]);
+    return () => { controller.abort(); window.clearInterval(timer); verify.current = null; sessionRef.current = null; };
+  }, [close, embedded]);
   useEffect(() => {
     if (!verifiedUntil) return;
     const remaining = Date.parse(verifiedUntil) - Date.now();
@@ -137,14 +145,21 @@ export function ClientOnboardingStaff({ embedded = false, onBusyChange }: { embe
   const session = sessionRef.current;
   if (accessError) return <Card><h2>Client onboarding unavailable</h2><p role="alert">{accessError}</p></Card>;
   if (!session || !verifiedUntil) return <Loading />;
-  if (embedded) return <ClientOnboardingIssuer session={session} onRefused={refused} onBusyChange={onBusyChange} />;
+  const canUseSession = () => sessionRef.current === session && Date.parse(session.verifiedUntil) > Date.now();
+  if (embedded) return <ClientOnboardingIssuer session={session} onRefused={refused} onBusyChange={onBusyChange}
+    canUseSession={canUseSession} canUseDialog={canUseDialog} />;
   return <div className="onboarding-review-surface">
     <ClientOnboardingInbox session={session} onRefused={refused} onAuthorityLost={lost} />
-    <ClientOnboardingIssuer session={session} onRefused={refused} />
+    <ClientOnboardingIssuer session={session} onRefused={refused} canUseSession={canUseSession} />
   </div>;
 }
 
-export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { session: StaffSession; onRefused: (caught: unknown) => void; onBusyChange?: (busy: boolean) => void }) {
+export function ClientOnboardingIssuer({ session, onRefused, onBusyChange, canUseSession, canUseDialog }: {
+  session: StaffSession; onRefused: (caught: unknown) => void; onBusyChange?: (busy: boolean) => void;
+  canUseSession: () => boolean; canUseDialog?: () => boolean;
+}) {
+  const inviteTitle = useId();
+  const canUseControls = () => canUseSession() && (canUseDialog?.() ?? true);
   const [commandId] = useState(uuid);
   const [expiresAt, setExpiresAt] = useState(defaultExpiry);
   const [choices, setChoices] = useState<ScopeChoice[] | null | "unavailable">(null);
@@ -243,7 +258,7 @@ export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { s
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (frozen || issuanceInFlight.current || !Array.isArray(choices)) return;
+    if (!canUseControls() || frozen || issuanceInFlight.current || !Array.isArray(choices)) return;
     if (emailMode && (!canEmail || !offeredDestinations?.length || !recipient.trim() || !recipientConfirmed)) return;
     const parsedExpiry = new Date(expiresAt);
     const invalid = !Number.isFinite(parsedExpiry.valueOf()) || parsedExpiry <= new Date() ? "Choose a future expiration time."
@@ -292,7 +307,7 @@ export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { s
     } finally { if (retryAllowed) issuanceInFlight.current = false; setBusy(null); onBusyChange?.(false); }
   };
   const copyValue = async (value: string, isLink: boolean) => {
-    if (stopIfExpired()) return;
+    if (!canUseControls() || stopIfExpired()) return;
     try {
       await navigator.clipboard.writeText(value);
       setError("");
@@ -305,14 +320,14 @@ export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { s
     }
   };
   const reveal = async (copyOnSuccess = false) => {
-    if (!created || busy || revealed || uncertain || revealAttempted.current || stopIfExpired()) return;
+    if (!canUseControls() || !created || busy || revealed || uncertain || revealAttempted.current || stopIfExpired()) return;
     revealAttempted.current = true; onBusyChange?.(true); setBusy("reveal"); setError("");
     try {
       const value = await post(session, "reveal", { commandId });
       if (!record(value) || value.commandId !== commandId || value.invitationId !== created.invitationId
         || typeof value.invitationSecret !== "string" || !/^[0-9a-f]{64}$/.test(value.invitationSecret) || value.expiresAt !== created.expiresAt)
         throw new Error("invalid_response");
-      if (stopIfExpired()) return;
+      if (!canUseSession() || stopIfExpired()) return;
       const link = safeRecipientLink(value.recipientUrl, created.invitationId, value.invitationSecret);
       setRevealed({ invitationId: created.invitationId, link, secret: value.invitationSecret });
       if (copyOnSuccess && link) await copyValue(link, true);
@@ -326,7 +341,7 @@ export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { s
     await copyValue(revealed.link ?? revealed.secret, Boolean(revealed.link));
   };
   const openForm = (currentTab: boolean) => {
-    if (!revealed?.link || stopIfExpired()) return;
+    if (!canUseControls() || !revealed?.link || stopIfExpired()) return;
     if (currentTab) { window.location.assign(revealed.link); return; }
     const opened = window.open(revealed.link, "_blank", "noopener,noreferrer");
     // With noopener the handle is usually null even on success; a blocked popup is
@@ -335,8 +350,8 @@ export function ClientOnboardingIssuer({ session, onRefused, onBusyChange }: { s
     if (opened) opened.opener = null;
   };
 
-  return <Card><section className="onboarding-created" aria-labelledby="onboarding-invite-title">
-    <h2 id="onboarding-invite-title">Invite a new client</h2>
+  return <Card><section className="onboarding-created" aria-labelledby={inviteTitle}>
+    <h2 id={inviteTitle}>Invite a new client</h2>
     <form className="onboarding-staff-form" onSubmit={submit}>
       <label>Link expires<input type="datetime-local" value={expiresAt} min={localDateTime(new Date(Date.now() + 60_000))} disabled={frozen} onChange={event => setExpiresAt(event.target.value)} required /></label>
       {offeredDestinations !== null && <fieldset className="wide onboarding-destinations"><legend>Businesses</legend>

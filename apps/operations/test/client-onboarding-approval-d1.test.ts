@@ -188,7 +188,7 @@ describe("native-only client onboarding approval against migrated D1", () => {
     const intent = [
       {sourceId:secondSourceId,businessAreaId:"area:drone",divisionId:"division:south"},
       {sourceId:selectedSourceId,businessAreaId:"area:drone",divisionId:"division:north"},
-    ];
+    ] as const;
     const scopes=intent.map(({businessAreaId,divisionId})=>({businessAreaId,divisionId}));
     const request={commandId:uuid(),expiresAt:actor.verifiedUntil,targetClientRecordId:null,scopes,destinationIntent:intent};
     const authenticatedNativeStaff={identity:actor.identity,verifiedUntil:actor.verifiedUntil};
