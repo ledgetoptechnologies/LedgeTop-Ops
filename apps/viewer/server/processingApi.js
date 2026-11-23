@@ -271,6 +271,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       return res.json({removed:true,provider:providerView(removed)});
     }catch(e){
       if(e.code==='provider_in_use')return error(res,409,e.code,`This node still has ${e.activeAttempts} queued or running job${e.activeAttempts===1?'':'s'}. Wait for ${e.activeAttempts===1?'it':'them'} to finish or cancel ${e.activeAttempts===1?'it':'them'}, then remove the node.`,{activeAttempts:e.activeAttempts});
+      if(e.code==='provider_pending_acks')return error(res,409,e.code,`This node still has ${e.pendingAcks} result acknowledgement${e.pendingAcks===1?'':'s'} waiting to be delivered to it. Keep the node reachable until delivery finishes, then remove it.`,{pendingAcks:e.pendingAcks});
       if(e.code==='provider_last_enabled')return error(res,409,e.code,'This is the only enabled node, so new tasks would have nowhere to run. Enable another node first, or disable this one, then remove it.');
       throw e;
     }

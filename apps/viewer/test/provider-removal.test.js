@@ -13,6 +13,7 @@ const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { ProviderCredentials } = require('../server/providerCredentials');
 const { createProcessingApi } = require('../server/processingApi');
+const { deliverOneViewerAcceptanceAck } = require('../server/viewerAcceptanceAckDelivery');
 
 const KEY = '7c'.repeat(32);
 
@@ -169,11 +170,11 @@ test('removal returns not found for unknown providers and denies callers without
   assert.equal(unkeyed.status, 428, 'removal requires the mutation idempotency guard');
 });
 
-test('health polling and acceptance delivery ignore removed providers', async (t) => {
+test('health polling ignores removed providers', async (t) => {
   const c = await fixture(t);
   const old = c.provider('Polled Node');
   c.provider('Live Node');
-  const { task, attempt } = c.attemptOn(old.id, 'published');
+  c.attemptOn(old.id, 'published');
   assert.ok(c.processing.removeProvider(old.id, { actorId: 'ops:admin' }));
 
   // Even if a stale write re-enabled the archived row, no poller picks it up.
@@ -185,9 +186,76 @@ test('health polling and acceptance delivery ignore removed providers', async (t
   }
   assert.ok(!claimed.includes(old.id));
   assert.equal(claimed.length, 1);
+});
 
+// A real delivery path whose provider call can be paused while it holds the lease.
+function ackDelivery(c, provider) {
+  const { task, attempt } = c.attemptOn(provider.id, 'ready_for_review');
+  const result = { resultModelId: crypto.randomUUID(), resultModelVersionId: crypto.randomUUID(), ingestedAt: new Date().toISOString() };
+  const archive = { attemptId: attempt.id, providerTaskId: attempt.providerTaskId, archiveSha256: 'c'.repeat(64) };
+  const processing = Object.create(c.processing);
+  processing.getAttempt = (id) => ({ ...c.processing.getAttempt(id), ...result });
+  processing.getAttemptTransferProvenance = () => ({ archive });
+  const eventId = `viewer-acceptance-${attempt.id}`;
+  const payload = { eventId, providerTaskId: attempt.providerTaskId, attemptId: attempt.id, archiveSha256: archive.archiveSha256, ...result };
   const t0 = new Date(Date.now() - 1000).toISOString();
   c.database.prepare(`INSERT INTO viewer_acceptance_ack_outbox(event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json,status,available_at,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,'{}','pending',?,?,?)`).run(`viewer-acceptance-${attempt.id}`, attempt.id, task.id, old.id, old.endpoint, attempt.providerTaskId, t0, t0, t0);
-  assert.equal(c.processing.claimViewerAcceptanceAck('ack-owner'), null);
+    VALUES (?,?,?,?,?,?,?,'pending',?,?,?)`).run(eventId, attempt.id, task.id, provider.id, provider.endpoint, attempt.providerTaskId, JSON.stringify(payload), t0, t0, t0);
+  let entered, release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const fetchImpl = async () => { entered(); const outcome = await gate; if (outcome === 'fail') throw Object.assign(new Error('offline'), { code: 'ECONNREFUSED' }); return new Response(JSON.stringify({ accepted: true, eventId, replayed: false }), { status: 202, headers: { 'content-type': 'application/json' } }); };
+  const status = () => c.database.prepare('SELECT status FROM viewer_acceptance_ack_outbox WHERE event_id=?').get(eventId).status;
+  const deliver = () => deliverOneViewerAcceptanceAck(processing, c.credentials, 'ack-worker', fetchImpl);
+  return { reached, release, status, deliver, eventId };
+}
+
+test('removal is refused while an acceptance acknowledgement is pending or in flight, then succeeds after delivery', async (t) => {
+  const c = await fixture(t);
+  const old = c.provider('Acking Node');
+  c.provider('Live Node');
+  const ack = ackDelivery(c, old);
+  const remove = (key) => c.request(removeRoute(old.id), { method: 'DELETE', body: {}, key });
+
+  const pending = await remove('provider-ack-0001');
+  assert.equal(pending.status, 409);
+  const pendingBody = await pending.json();
+  assert.equal(pendingBody.code, 'provider_pending_acks');
+  assert.match(pendingBody.error, /1 result acknowledgement waiting to be delivered.*Keep the node reachable until delivery finishes/);
+
+  // The worker claims the ACK and is mid-send when removal is attempted.
+  const delivering = ack.deliver();
+  await ack.reached;
+  assert.equal(ack.status(), 'leased');
+  const inFlight = await remove('provider-ack-0002');
+  assert.equal(inFlight.status, 409);
+  assert.equal((await inFlight.json()).code, 'provider_pending_acks');
+  assert.throws(() => c.processing.removeProvider(old.id, { actorId: 'ops:admin' }), { code: 'provider_pending_acks' });
+  const kept = c.database.prepare('SELECT removed_at,credential_ciphertext FROM processing_providers WHERE id=?').get(old.id);
+  assert.equal(kept.removed_at, null);
+  assert.notEqual(kept.credential_ciphertext, null, 'the in-flight delivery keeps its token');
+
+  ack.release('ok');
+  assert.equal(await delivering, true);
+  assert.equal(ack.status(), 'delivered');
+  const removed = await remove('provider-ack-0003');
+  assert.equal(removed.status, 200);
+  assert.equal(c.processing.claimViewerAcceptanceAck('ack-worker'), null);
+});
+
+test('a failed delivery returns the acknowledgement to pending and removal stays refused', async (t) => {
+  const c = await fixture(t);
+  const old = c.provider('Offline Node');
+  c.provider('Live Node');
+  const ack = ackDelivery(c, old);
+
+  const delivering = ack.deliver();
+  await ack.reached;
+  ack.release('fail');
+  assert.equal(await delivering, true);
+  assert.equal(ack.status(), 'pending', 'a failed send is retried, never discarded');
+  const refused = await c.request(removeRoute(old.id), { method: 'DELETE', body: {}, key: 'provider-ack-0004' });
+  assert.equal(refused.status, 409);
+  assert.equal((await refused.json()).code, 'provider_pending_acks');
+  assert.equal(c.processing.getProvider(old.id).removedAt, null);
 });
