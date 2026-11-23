@@ -166,5 +166,5 @@ body{font-size:14px;line-height:1.45}
   .share-legacy>summary,.quick-action,.task-disclosure>summary,.import-tab,.gcp-import-disclosure summary,
   .project-open,.task-summary-toggle,.provider-list-item,.project-search input,
   .manage-form input:not([type=checkbox]):not([type=radio]),.manage-form select{min-height:44px}
-  .project-more-actions>summary,.modal-heading .icon-button{min-width:44px}
+  .project-more-actions>summary,.icon-button{min-width:44px}
 }

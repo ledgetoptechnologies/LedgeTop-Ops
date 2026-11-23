@@ -115,6 +115,8 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
     await size(390, 760, true);
     await load();
     for (const [id, height] of await client.evaluate(headerButtons)) assert.ok(height >= 44, `phone: ${id} is ${height}px`);
+    const toggle = await client.evaluate("(() => { const r = document.querySelector('#nav-toggle').getBoundingClientRect(); return { width: r.width, height: r.height }; })()");
+    assert.ok(toggle.width >= 44 && toggle.height >= 44, `phone: menu toggle is ${toggle.width}x${toggle.height}px, below 44x44`);
     assert.equal(await client.evaluate("getComputedStyle(document.querySelector('#nav-collapse')).display"), 'none');
     assert.equal(await client.evaluate("document.querySelector('#nav-toggle').getAttribute('aria-expanded')"), 'false');
     await client.evaluate("document.querySelector('#nav-toggle').focus(); document.querySelector('#nav-toggle').click()");

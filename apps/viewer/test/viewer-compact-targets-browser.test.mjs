@@ -121,7 +121,7 @@ test('compact Viewer targets are 32px on a desktop fine pointer and 44px on phon
       if (mode.width <= 720) expected.push('nav-toggle');
       for (const target of expected) assert.ok(sizes.some(size => size.target === target), `${mode.name}: ${target} is not visible`);
       for (const size of sizes) assert.ok(size.height >= mode.minimum - 0.5, `${mode.name}: ${size.target} is ${size.height}px, below ${mode.minimum}px`);
-      if (!mode.compact) for (const target of ['more-summary', 'modal-close']) assert.ok(sizes.find(size => size.target === target).width >= 43.5, `${mode.name}: ${target} is narrower than 44px`);
+      if (!mode.compact) for (const target of ['more-summary', 'modal-close', ...(mode.width <= 720 ? ['nav-toggle'] : [])]) assert.ok(sizes.find(size => size.target === target).width >= 43.5, `${mode.name}: ${target} is narrower than 44px`);
       if (mode.compact) for (const target of ['primary-button', 'secondary-button', 'quick-view']) assert.ok(sizes.find(size => size.target === target).height < 36, `${mode.name}: ${target} is not compact`);
       // Header buttons share one stretched row, so the Background count badge must not make it taller than 32px.
       if (mode.compact) for (const target of ['background-button', 'secondary-button', 'primary-button']) assert.equal(sizes.find(size => size.target === target).height, 32, `${mode.name}: ${target} header button height`);
