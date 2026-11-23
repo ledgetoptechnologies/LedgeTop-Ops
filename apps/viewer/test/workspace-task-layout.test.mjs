@@ -94,9 +94,9 @@ test('task toolbar keeps View, Model report and Share primary with every seconda
   const f=fixture();f.state.outputs=[{id:'output',taskId:'task',status:'published',activePublished:true,viewSessionUrl:'/view',downloadUrl:'/download',reportUrl:'/report',assetKinds:['tiles','report']}];
   const html=f.context.taskQuickActions(f.task),[primary,menu]=html.split('<details');
   assert.deepEqual([...primary.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['view-output','download-report','share-output']);
-  // The menu holds the rest, in this order; Duplicate is a disabled follow-up for now.
+  // The menu holds the rest, in this order.
   assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['edit-task','folder-move-task','duplicate-task','download-output','task-settings','task-files','task-history','task-gcp','delete-task']);
-  assert.match(menu,/<button[^>]*data-action="duplicate-task"[^>]*aria-disabled="true" title="Coming soon"[^>]*>Duplicate</);
+  assert.doesNotMatch(menu.match(/<button[^>]*data-action="duplicate-task"[^>]*>/)[0],/disabled/);
   assert.doesNotMatch(primary,/folder-move-task|>Move</,'no separate Move button on the row');
   assert.match(primary,/tabindex="-1"/,'row buttons are reached with the arrow keys, not Tab');
   const move=()=>f.context.taskQuickActions(f.task).match(/<button[^>]*data-action="folder-move-task"[^>]*>/)?.[0];
@@ -109,6 +109,31 @@ test('task toolbar keeps View, Model report and Share primary with every seconda
   f.task.status='archived';assert.doesNotMatch(f.context.taskQuickActions(f.task),/edit-task|share-output|task-gcp|folder-move-task|delete-task|duplicate-task/);
   const readOnly=fixture(['viewer.processing.read']);
   assert.doesNotMatch(readOnly.context.taskQuickActions(readOnly.task),/data-action="folder-move-task"/);
+});
+
+test('Duplicate needs task-creation permission and ready source photos, and pre-fills a copy without starting it',()=>{
+  const f=fixture(),duplicate=()=>f.context.taskQuickActions(f.task).match(/<button[^>]*data-action="duplicate-task"[^>]*>/)?.[0];
+  assert.doesNotMatch(duplicate(),/disabled/);
+  f.dataset.status='finalizing';assert.match(duplicate(),/aria-disabled="true" title="Its source photos are not ready\."/);
+  f.state.datasets=[];assert.match(duplicate(),/disabled/,'a missing source set cannot be reused');
+  f.state.datasets=[f.dataset];f.dataset.status='finalized';
+  assert.equal(fixture(['viewer.processing.read']).context.taskQuickActions(f.task).includes('duplicate-task'),false,'same permission as creating a task');
+  // Clicking it opens the New task dialog pre-filled; it never posts a submission itself.
+  const opened=[],requests=[];
+  vm.runInContext(`${sourceBetween('function duplicateTask(','\n}')}\n}`,f.context);
+  f.context.processModal=(projectId,prefill)=>opened.push([projectId,JSON.parse(JSON.stringify(prefill))]);
+  f.context.api=(...args)=>requests.push(args);f.context.mutate=(...args)=>requests.push(args);
+  Object.assign(f.task,{folderId:'folder-a',latestAttempt:{id:'run',status:'published',providerId:'provider',presetId:'preset',options:{dsm:true,'pc-ept':true}}});
+  f.context.duplicateTask('task');
+  assert.deepEqual(opened,[['project',{sourceTaskId:'task',displayName:'Church <test> (copy)',datasetId:'dataset',folderId:'folder-a',providerId:'provider',presetId:'preset',options:{dsm:true,'pc-ept':true}}]]);
+  assert.deepEqual(requests,[]);
+  f.task.displayName='x'.repeat(240);f.context.duplicateTask('task');
+  assert.equal(opened.at(-1)[1].displayName.length,240);
+  // An emoji straddling the limit is dropped whole, never split into half a surrogate pair.
+  f.task.displayName=`${'x'.repeat(232)}\u{1F4F7}tail`;f.context.duplicateTask('task');
+  assert.equal(opened.at(-1)[1].displayName,`${'x'.repeat(232)} (copy)`);assert.equal(opened.at(-1)[1].displayName.isWellFormed(),true);assert.match(opened.at(-1)[1].displayName,/x \(copy\)$/);
+  // Archived (including deleted, Recycle Bin) tasks cannot be duplicated.
+  opened.length=0;f.task.status='archived';f.context.duplicateTask('task');assert.deepEqual(opened,[]);
 });
 
 test('specialist task sections retain context and direct navigation rather than dead-end pages',()=>{

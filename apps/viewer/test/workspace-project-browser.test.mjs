@@ -178,7 +178,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
   if (pathname === '/api/v1/tasks') {
     const projectId=url.searchParams.get('projectId');
-    const tasks=fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id))
+    const tasks=[...fixtures.tasks.map(item=>runtime.taskOverrides?.[item.id]?{...item,...runtime.taskOverrides[item.id]}:item),...runtime.submittedTasks].filter(item=>!runtime.archivedTasks.has(item.id))
       .map(item=>{
         const stored=runtime.folderProcessing?.getTask(item.id);
         return stored?{...item,projectId:stored.projectId,folderId:stored.folderId,folderRevision:stored.folderRevision,status:stored.status}:item;
@@ -186,7 +186,17 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       .filter(item=>!projectId||item.projectId===projectId);
     return json({tasks,nextCursor:null});
   }
-  if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
+  // A submission (New task or Duplicate) adds a queued task to the list; nothing processes.
+  if (pathname === '/api/v1/task-submissions' && method === 'POST') {
+    const createdAt=new Date().toISOString(),attempt={id:`attempt-submitted-${runtime.submittedTasks.length+1}`,attemptNumber:1,providerId:body.providerId,presetId:body.presetId||null,options:body.options||{},status:'pending',createdAt,updatedAt:createdAt};
+    const task={id:`task-submitted-${runtime.submittedTasks.length+1}`,projectId:body.projectId,folderId:body.folderId??null,folderRevision:0,datasetId:body.datasetId,displayName:body.taskDisplayName,status:'queued',createdAt,metrics:{},latestAttempt:attempt};
+    runtime.submittedTasks.push(task);return json({task,attempt,replayed:false},201);
+  }
+  const submitted=runtime.submittedTasks.find(item=>pathname===`/api/v1/tasks/${item.id}`);
+  if (submitted) return json({task:submitted});
+  const fixtureDataset=fixtures.datasets.find(item=>pathname===`/api/v1/datasets/${item.id}`);
+  if (fixtureDataset && method === 'GET') return json({dataset:fixtureDataset});
+  if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: runtime.providers || fixtures.providers });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'PATCH') return json({ provider: { ...fixtures.providers[0], ...body } });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return json({ provider: fixtures.providers[0] });
   // The fixture has one enabled node, so the Viewer refuses to remove it.
@@ -418,7 +428,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 }
 
 function startFixtureServer() {
-  const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
+  const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), submittedTasks: [], failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
   const builtRoot = path.resolve(process.env.VIEWER_BROWSER_DIST || path.join(root, 'dist'));
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
@@ -791,8 +801,8 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['View', 'Model report', 'Share'], `${viewport.name}: published task shortcuts must remain focused on viewing and sharing`);
     await client.evaluate(`document.querySelector('.task-more-actions > summary').click()`);
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
-    // "⋯" holds the rest: Rename (F2), Move to…, Duplicate (a disabled follow-up), the task pages, then Delete.
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>[button.firstChild.textContent,button.getAttribute('aria-disabled')==='true'])`),[['Rename',false],['Move to…',false],['Duplicate',true],['Download model files',false],['Details & processing',false],['Files & versions',false],['Processing history',false],['Ground control points',false],['Delete',true]]);
+    // "⋯" holds the rest: Rename (F2), Move to…, Duplicate, the task pages, then Delete.
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>[button.firstChild.textContent,button.getAttribute('aria-disabled')==='true'])`),[['Rename',false],['Move to…',false],['Duplicate',false],['Download model files',false],['Details & processing',false],['Files & versions',false],['Processing history',false],['Ground control points',false],['Delete',true]]);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
@@ -1399,9 +1409,9 @@ test('several projects stay open together and load their folders only when opene
 test('Delete moves a task to the Recycle Bin with Undo and no confirmation', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-delete',width:1440,height:900,quarryInJohnson:true},async({client,runtime,origin})=>{
   await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
   await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))&&Boolean(document.querySelector('${treeRow('t:task-johnson')}'))`,'tasks unavailable');
-  // Live processing disables Delete; the menu shows Duplicate as a disabled follow-up.
+  // Live processing disables Delete, not Duplicate.
   assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-johnson')} [data-action="delete-task"]').getAttribute('aria-disabled')`),'true');
-  assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="duplicate-task"]').title`),'Coming soon');
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-johnson')} [data-action="duplicate-task"]').getAttribute('aria-disabled')`),null);
   await client.evaluate(`(()=>{const menu=document.querySelector('${treeRow('t:task-quarry')} details.task-more-actions');menu.open=true;menu.querySelector('[data-action="delete-task"]').focus();})()`);
   await treeScreenshot(client,'desktop-1440-task-menu.png');
   let start=runtime.requests.length;
@@ -1422,6 +1432,41 @@ test('Delete moves a task to the Recycle Bin with Undo and no confirmation', {ti
   await pressKey(client,'Delete');
   await waitForRequest(runtime,start,'DELETE','/api/v1/tasks/task-quarry');
   await waitFor(client,`!document.querySelector('${treeRow('t:task-quarry')}')`,'the Delete key did not delete the task');
+}));
+
+test('Duplicate opens a pre-filled task dialog and creates the copy in the same folder only when started', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-duplicate',width:1440,height:900,
+  seed:processing=>{const folder=processing.createProjectFolder('project-quarry',{displayName:'Benches'},'staff');processing.moveTaskToFolder('task-quarry',folder.id,'staff');return{folder};},
+  configure:runtime=>{
+    // A node that can take a submission now: Viewer outputs supported and a fresh health check.
+    const node=structuredClone(fixtures.providers[0]);node.runtimeHealthAt=new Date().toISOString();node.capabilities.options.push(...['pc-ept','gltf','3d-tiles'].map(name=>({name,type:'bool',value:true})));runtime.providers=[node];
+    runtime.taskOverrides={'task-quarry':{latestAttempt:{id:'attempt-quarry',attemptNumber:1,providerId:'provider-nodeodm',presetId:'preset-fast',status:'ready_for_review',options:{dsm:true,'feature-quality':'medium','pc-ept':true,gltf:true,'3d-tiles':true},createdAt:'2026-08-18T12:00:00.000Z',updatedAt:'2026-08-18T12:05:00.000Z'}}};}},
+  async({client,runtime,origin,folder})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-quarry&folder=${folder.id}`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))`,'task unavailable');
+  const parentOf=key=>client.evaluate(`document.querySelector('${treeRow(key)}')?.dataset.treeParent||null`);
+  const originalParent=await parentOf('t:task-quarry');assert.match(String(originalParent),/^f:/,'the original sits in a folder');
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} details.task-more-actions').open=true`);
+  const start=runtime.requests.length;
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="duplicate-task"]').click()`);
+  await waitFor(client,`document.querySelector('dialog.new-task-modal[open] h2')?.textContent==='Duplicate task'`,'Duplicate did not open the task dialog');
+  await waitFor(client,`document.querySelector('dialog.new-task-modal [name="providerId"]')?.value==='provider-nodeodm'`,'the original node was not selected');
+  const form=await client.evaluate(`(()=>{const dialog=document.querySelector('dialog.new-task-modal'),form=dialog.querySelector('form');
+    const modified=[...dialog.querySelectorAll('.task-options-list fieldset')].filter(row=>row.querySelector('span.form-note')?.textContent).map(row=>{const control=row.querySelector('select,input');return[row.querySelector('legend').textContent,control.type==='checkbox'?control.checked:control.value]});
+    return{name:form.elements.taskDisplayName.value,source:[...form.elements.existingDataset.options].map(option=>option.value),sourceVisible:!dialog.querySelector('[data-source-panel="existing"]').hidden,
+      otherSourcesHidden:[...dialog.querySelectorAll('[data-source-panel="pc"],[data-source-panel="server"],.task-source-actions')].every(element=>element.hidden),
+      selection:dialog.querySelector('[data-selection]').textContent,sharedNote:dialog.querySelector('[data-shared-source-note]')?.textContent,preset:form.elements.presetId.value,modified,submit:form.querySelector('button[type="submit"]').textContent}})()`);
+  assert.deepEqual(form,{name:'Quarry reconstruction (copy)',source:['dataset-quarry'],sourceVisible:true,otherSourcesHidden:true,selection:'Uses the same source photos as the original task. Nothing is copied.',sharedNote:'Tasks that share source photos can’t be moved to another project.',preset:'preset-fast',modified:[['dsm',true],['feature-quality','medium']],submit:'Start processing'});
+  // Opening the dialog creates nothing and starts nothing.
+  assert.deepEqual(runtime.requests.slice(start).filter(item=>item.method!=='GET'&&!item.path.endsWith('/capabilities/refresh')),[]);
+  await client.evaluate(`document.querySelector('dialog.new-task-modal button[type="submit"]').click()`);
+  await waitForRequest(runtime,start,'POST','/api/v1/task-submissions');
+  const submission=runtime.requests.slice(start).find(item=>item.method==='POST'&&item.path==='/api/v1/task-submissions');
+  assert.deepEqual({...submission.body,submissionId:typeof submission.body.submissionId},{submissionId:'string',projectId:'project-quarry',datasetId:'dataset-quarry',taskDisplayName:'Quarry reconstruction (copy)',providerId:'provider-nodeodm',presetId:'preset-fast',options:{dsm:true,'feature-quality':'medium'},folderId:folder.id,duplicateOfTaskId:'task-quarry'});
+  assert.equal(runtime.requests.slice(start).filter(item=>item.method==='POST'&&item.path==='/api/v1/datasets').length,0,'no source set is created');
+  // The copy appears beside the original, in the same folder, and opens.
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-submitted-1')}'))&&!document.querySelector('dialog.new-task-modal')`,'the copy did not appear');
+  assert.equal(await parentOf('t:task-submitted-1'),originalParent);
+  await waitFor(client,`new URL(location.href).searchParams.get('task')==='task-submitted-1'`,'the copy did not open');
 }));
 
 test('on a phone, rows are 44px touch targets, drag is not offered and Move to… opens as a bottom sheet', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-phone',width:390,height:844,mobile:true,seed:processing=>{const folders=nestedFolders(processing);processing.moveTaskToFolder('task-quarry',folders.site.id,'staff');return folders;},quarryInJohnson:true},async({client,origin,top,site})=>{

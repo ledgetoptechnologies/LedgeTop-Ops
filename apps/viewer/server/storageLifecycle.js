@@ -71,6 +71,15 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
       const dataset=item.entityType==='dataset'?processing.getDataset(item.entityId):null;
       const output=item.entityType==='output'?processing.getModelOutput(item.entityId):null;
       if(!dataset&&!output){results.push({trashId:item.id,status:'failed',errorCode:'entity_not_found'});continue;}
+      // An expired source set that a deleted, still-restorable task uses goes with that task's Recycle Bin item instead
+      // of being purged now; one an active task uses is refused by the purge guard below.
+      if(dataset&&processing.datasetReferences(dataset.id)===0){
+        const heir=processing.datasetTrashHeir(dataset.id,null);
+        if(heir){
+          if(!processing.moveContainerTrashMember(null,heir.id,item.id,null)){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
+          results.push({trashId:item.id,status:'transferred',containerTrashId:heir.id});continue;
+        }
+      }
       if(dataset?.storageMode==='external_reference'){
         const purged=processing.markTrashPurged(item.id);
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}

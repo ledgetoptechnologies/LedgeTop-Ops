@@ -84,7 +84,12 @@ export function createTaskOptionsModel({ provider = null, presetOptions = {} } =
     if (new TextEncoder().encode(JSON.stringify(result)).length > 64 * 1024) throw new Error('Task options exceed the request size limit.');
     return result;
   }
-  return { update, setOverride, validate, getOptions, entries: () => [
+  // Restores another task's one-time changes (Duplicate). Unsupported names stay visible as retained changes for review.
+  function seed(values = {}) {
+    overrides = new Map();
+    for (const [name, value] of Object.entries(values || {})) if (!REQUIRED.has(name) && overrides.size < 200) overrides.set(name, value);
+  }
+  return { update, setOverride, seed, validate, getOptions, entries: () => [
     ...specs.map(spec => ({ spec, restriction: taskOptionRestriction(spec), inherited: REQUIRED.has(spec.name) ? true : Object.hasOwn(inherited, spec.name) ? inherited[spec.name] : spec.value, inheritedFrom: REQUIRED.has(spec.name) ? 'Viewer requirement' : Object.hasOwn(inherited, spec.name) ? 'Preset' : 'Node default', overridden: overrides.has(spec.name), value: overrides.has(spec.name) ? overrides.get(spec.name) : undefined })),
     ...[...overrides].filter(([name])=>!specs.some(spec=>spec.name===name)).map(([name,value])=>({spec:{name,type:'string'},restriction:'This node no longer supports this option. Your draft is retained until you explicitly remove it.',missing:true,overridden:true,value,inheritedFrom:'Previous draft'}))
   ] };
@@ -133,5 +138,5 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
     filter();
   }
   search.addEventListener('input', filter); render();
-  return { getOptions: model.getOptions, validate() { const result = model.validate(); status.textContent = result.errors.map(error => `${error.name}: ${error.message}`).join(' '); return result; }, update(next) { if (!disposed && model.update(next)) render(); }, setDisabled(value) { if (!disposed) { disabled = Boolean(value); search.disabled = disabled; render(); } }, dispose() { disposed = true; root.remove(); } };
+  return { getOptions: model.getOptions, validate() { const result = model.validate(); status.textContent = result.errors.map(error => `${error.name}: ${error.message}`).join(' '); return result; }, update(next) { if (!disposed && model.update(next)) render(); }, setOverrides(values) { if (!disposed) { model.seed(values); render(); } }, setDisabled(value) { if (!disposed) { disabled = Boolean(value); search.disabled = disabled; render(); } }, dispose() { disposed = true; root.remove(); } };
 }
