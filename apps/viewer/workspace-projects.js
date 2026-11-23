@@ -1996,7 +1996,12 @@ async function createOutputShare(form,projectId,onlyOutputId){
     form.shareSaved=true;if(state.shareContext)state.shareContext.mode='public';
     state.shares[output.id]=[result.share,...(state.shares[output.id]||[]).filter(share=>share.id!==result.share.id)];
     state.sharePreflight[output.id]={...state.sharePreflight[output.id],publicationRequired:false,existingAccessUpdateRequired:false,error:null};
-    output.activePublished=true;output.status='published';
+    // Opening a published model needs the server's view address, and a list read while the link was
+    // being made may have replaced these rows: complete the current row, then read the project again.
+    for(const row of new Set([output,...state.outputs.filter(item=>item.id===output.id)])){
+      row.activePublished=true;row.status='published';row.viewSessionUrl||=`/api/v1/processing/outputs/${encodeURIComponent(row.id)}/view-sessions`;
+    }
+    if(body.publishIfReady){projectDataGeneration++;void refreshProjectWorkspace(true);}
     delete form.shareRequest;
     toast('Public link created. Use Copy to share it.');
     // Clipboard is a separate explicit action, never part of creation success.

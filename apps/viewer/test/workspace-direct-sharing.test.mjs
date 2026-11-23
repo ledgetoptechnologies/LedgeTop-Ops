@@ -45,6 +45,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     openModal:(title,html)=>{rendered.push({title,html});modal.open=true},injectProjectShareCard:()=>{},
     values:form=>({label:form.elements.label?.value||'',password:form.elements.password?.value||'',expiresAt:form.elements.expiresAt.value}),
     api:async(path,options={})=>{calls.push({path,options:JSON.parse(JSON.stringify(options))});return path.startsWith('/api/v1/workspace/direct-client-grants')?directRespond(path,options):path.endsWith('/native-client-grants')?nativeRespond(path,options):respond(path,options)},
+    projectDataGeneration:0,refreshProjectWorkspace:async includeArtifacts=>{calls.refreshes=[...(calls.refreshes||[]),includeArtifacts]},
     mutate:async(...args)=>calls.push({mutation:args}),toast:(...args)=>notices.push(args),navigator:{clipboard:{writeText:async()=>{throw new Error('clipboard denied')}}},
     dialogs:{confirm:async()=>{decisions.push('confirm');return true},form:async()=>null},
   });
@@ -224,6 +225,37 @@ test('cancelled exposure confirmation sends nothing; accepted confirmation carri
   assert.equal(f.calls[0].options.body.allowExistingAccessUpdate,true);assert.equal(f.calls[0].options.body.permissions.download,false);
   assert.equal(f.state.lastShareUrl,'https://viewer.test/view/capability');assert.match(f.html(),/New public link/);
   assert.equal(f.notices.some(item=>/clipboard|failed/i.test(item[0])),false,'creation must not attempt clipboard');
+});
+
+// The row actions a task shows in the project tree, as shipped.
+function rowActions(f){
+  for(const [name,value] of Object.entries({LIVE_ATTEMPT_STATUSES:new Set(),MENU_SEPARATOR:'',folderCache:new Map(),menuItem:()=>'',treeMenu:()=>''}))f.context[name]=value;
+  vm.runInContext(declaration('taskQuickActions'),f.context);
+  return [...f.context.taskQuickActions(f.state.tasks[0]).matchAll(/data-action="([^"]+)" data-id="[^"]*">([^<]+)</g)].map(match=>`${match[2]}:${match[1]}`);
+}
+test('a task keeps its View button after a public link publishes its ready model',async()=>{
+  const f=fixture();f.state.projects[0].status='active';f.state.tasks[0].status='ready_for_review';
+  assert.deepEqual(rowActions(f),['View:open-review','Share:share-output']);
+  await f.context.createOutputShare(f.form,'project','output');
+  // The next tree repaint (the open project polls every 8 s) must still offer View, now of the published model.
+  f.state.tasks[0].status='published';
+  assert.deepEqual(rowActions(f),['View:view-output','Share:share-output']);
+  // The rest of the row (older version, report, download) comes from the server, and an older in-flight read is dropped.
+  assert.deepEqual(f.calls.refreshes,[true]);assert.equal(f.context.projectDataGeneration,1);
+});
+test('a model list read while the public link was being made cannot leave the row without View',async()=>{
+  const f=fixture();f.state.projects[0].status='active';f.state.tasks[0].status='ready_for_review';
+  f.respond(async()=>{f.state.outputs=[{...f.output}];return{share:{id:'share'},viewUrl:'https://viewer.test/view/capability'}});
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.deepEqual(rowActions(f),['View:view-output','Share:share-output']);
+});
+test('a public link for an already published model keeps its View address and reads nothing again',async()=>{
+  const f=fixture();f.state.projects[0].status='active';f.state.tasks[0].status='published';
+  Object.assign(f.output,{status:'published',activePublished:true,viewSessionUrl:'/server/view-sessions'});
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.deepEqual(rowActions(f),['View:view-output','Share:share-output']);
+  assert.equal(f.output.viewSessionUrl,'/server/view-sessions');
+  assert.equal(f.calls.refreshes,undefined);assert.equal(f.context.projectDataGeneration,0);
 });
 
 test('raced consent retry uses new key, uncertain retry retains exact consent payload even if output refreshes as published',async()=>{
