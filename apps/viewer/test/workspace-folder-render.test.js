@@ -166,6 +166,7 @@ test('Undo follows the server window after a slow response despite browser clock
       accept(result);return result;
     },
     scheduleProjectRefresh:()=>{},patchProjectFolderView:()=>false,syncSelectedTaskFolder:()=>{},
+    captureTaskMoveFocus:()=>({mode:'none'}),settleTaskMoveFocus:()=>{},
   };
   vm.createContext(context);vm.runInContext(source.slice(start,end),context);
   const pending=context.moveFolderTask(task,'folder',{});
