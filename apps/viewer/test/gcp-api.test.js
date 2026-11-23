@@ -113,8 +113,9 @@ test('auto candidates adapt to camera spacing, accuracy and footprint metadata w
 
 test('omitted GCP search settings use 50 feet and never silently expand for fewer candidates',async(t)=>{
   const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'fixed-control'};
+  const original=await uploadOriginal(base,dataset.id,Buffer.from('point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'));
   const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,
-    body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
+    body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',sourceOriginalId:original.id})});
   const pointId=(await imported.json()).points[0].id,timestamp=new Date().toISOString(),sha='a'.repeat(64);
   const insert=database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude)
     VALUES (?,?,?,?,?,?,'{}',?,?,?,?)`);
@@ -137,4 +138,43 @@ test('omitted GCP search settings use 50 feet and never silently expand for fewe
   for(const radius of ['0','-1','NaN','Infinity','100001']) {
     const response=await fetch(`${route}&radiusM=${radius}`,{headers:auth});assert.equal(response.status,400);
   }
+});
+
+test('a retained original with a missing coordinate is refused, creates no set and keeps its bytes',async(t)=>{
+  const {base,dataset,database}=await fixture(t),auth={authorization:'Bearer admin'};
+  const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets`;
+  const header='point_id,label,latitude,longitude,elevation_m';
+  for(const [index,row] of ['A,A,,-88.1,250','A,A,44.5,   ,250','A,A,44.5,-88.1,'].entries()){
+    const bytes=Buffer.from(`${header}\r\n${row}\r\n`),original=await uploadOriginal(base,dataset.id,bytes);
+    for(const action of ['import-preview','import']){
+      const response=await fetch(`${route}/${action}`,{method:'POST',
+        headers:{...auth,'content-type':'application/json','idempotency-key':`missing-${index}-${action}`},
+        body:JSON.stringify({format:'generic-csv-v1',sourceOriginalId:original.id,
+          ...(action==='import'?{displayName:'Control',fileName:'control.csv'}:{})})});
+      assert.equal(response.status,400,`${action} row ${index}`);
+      assert.equal((await response.json()).code,'invalid_gcp_input');
+    }
+    const download=await fetch(`${base}/api/v1/gcp-source-originals/${original.id}/content`,{headers:auth});
+    assert.deepEqual(Buffer.from(await download.arrayBuffer()),bytes);
+  }
+  for(const table of ['gcp_sets','gcp_points','gcp_import_provenance'])
+    assert.equal(database.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,0,table);
+});
+
+test('a retained Emlid original with one unit marker cannot be relabelled through preview or import',async(t)=>{
+  const {base,dataset,database}=await fixture(t),auth={authorization:'Bearer admin'};
+  const bytes=Buffer.from('Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1,2,3,44,-88,2,Projected CRS (ftUS)\n');
+  const original=await uploadOriginal(base,dataset.id,bytes);
+  const send=(action,declarations,extra={})=>fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/${action}`,{method:'POST',
+    headers:{...auth,'content-type':'application/json','idempotency-key':crypto.randomUUID()},
+    body:JSON.stringify({format:'emlid-all-columns-v1',sourceOriginalId:original.id,declarations,...extra})});
+  const refused=await send('import-preview',{linearUnit:'m'});
+  assert.equal(refused.status,400);assert.match((await refused.json()).error,/does not match/);
+  const matching=await send('import-preview',{linearUnit:'ftUS'});
+  assert.equal(matching.status,200);const {confirmationToken:token}=await matching.json();
+  assert.equal((await send('import',{linearUnit:'m'},{displayName:'Control',fileName:'control.csv',confirmationToken:token})).status,400);
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM gcp_sets').get().n,0);
+  const imported=await send('import',{linearUnit:'ftUS'},{displayName:'Control',fileName:'control.csv',confirmationToken:token});
+  assert.equal(imported.status,201);
+  assert.equal(database.prepare('SELECT linear_unit FROM gcp_import_provenance').get().linear_unit,'ftUS');
 });
