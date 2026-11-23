@@ -57,7 +57,7 @@ function asModelAsset(asset) {
   };
 }
 
-function asModel(row, version, assets = [], lodVerifierReceipt = null, lodVerificationAssets = assets) {
+function asModel(row, version, assets = [], loadLodVerifierReceipt = () => null, lodVerificationAssets = assets) {
   if (!row) return null;
   const activeVersion = version ? {
     id: version.id,
@@ -74,11 +74,16 @@ function asModel(row, version, assets = [], lodVerifierReceipt = null, lodVerifi
   if (activeVersion) {
     // The durable receipt is server-only authority. Keep it accessible to the
     // Viewer serializer without allowing generic repository responses to emit
-    // audit-event identifiers or receipt contents.
+    // audit-event identifiers or receipt contents. Only the Viewer serializer
+    // reads it, so it is looked up on first use (once per model object): asset
+    // delivery resolves the model for every tile and must not pay for it.
+    let receipt;
     Object.defineProperty(activeVersion, 'lodVerifierReceipt', {
-      value: lodVerifierReceipt,
+      get() {
+        if (receipt === undefined) receipt = loadLodVerifierReceipt();
+        return receipt;
+      },
       enumerable: false,
-      writable: false,
       configurable: false,
     });
     Object.defineProperty(activeVersion, 'lodVerificationAssets', {
@@ -132,10 +137,14 @@ class ViewerRepository {
   }
 
   lodVerifierReceipt(versionId) {
+    // CROSS JOIN fixes the join order: start at the attempt(s) that produced
+    // this version, then their derivative jobs, then only those jobs' audit
+    // events. Starting at audit_events reads every derivative_job event ever
+    // recorded, which grows without bound.
     const row = this.database.prepare(`SELECT e.id,e.entity_id,e.details_json,e.created_at
-      FROM audit_events e
-      JOIN derivative_jobs j ON j.id=e.entity_id
-      JOIN processing_attempts a ON a.id=j.attempt_id
+      FROM processing_attempts a
+      CROSS JOIN derivative_jobs j ON j.attempt_id=a.id
+      CROSS JOIN audit_events e ON e.entity_id=j.id
       WHERE e.action='derivative.tiles_verified'
         AND e.entity_type='derivative_job'
         AND e.actor_type='system'
@@ -189,7 +198,7 @@ class ViewerRepository {
       ? this.database.prepare('SELECT * FROM model_assets WHERE version_id=? ORDER BY kind').all(version.id)
       : [];
     const assets = lodVerificationAssets.filter((asset) => Boolean(asset.published));
-    return asModel(row, version, assets, version ? this.lodVerifierReceipt(version.id) : null, lodVerificationAssets);
+    return asModel(row, version, assets, version ? () => this.lodVerifierReceipt(version.id) : undefined, lodVerificationAssets);
   }
 
   listModels({ includeUnregistered = false } = {}) {
@@ -204,7 +213,7 @@ class ViewerRepository {
     const version = this.database.prepare('SELECT * FROM model_versions WHERE id=? AND model_id=?').get(versionId, modelId);
     if (!model || !version) return null;
     const assets = this.database.prepare('SELECT * FROM model_assets WHERE version_id=? ORDER BY kind').all(versionId);
-    return asModel(model, version, assets, this.lodVerifierReceipt(version.id));
+    return asModel(model, version, assets, () => this.lodVerifierReceipt(version.id));
   }
 
   listMissingOdmGeorefCandidates(limit = 5, reconciliationRevision = 1) {
