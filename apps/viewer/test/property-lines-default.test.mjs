@@ -5,6 +5,7 @@
 // model version or access lifecycle being dropped.
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import * as THREE from 'three';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
@@ -441,4 +442,108 @@ test('3D scene not ready: bounded wait, then the mesh or cloud readiness signal 
   await ctx.controller.wake();
   await flush();
   assertShownOn(ctx, 'three');
+});
+
+test('cutoff: map and 3D layers never stroke the segments the server cut along its envelope', async () => {
+  const { clipParcels } = createRequire(import.meta.url)('../server/propertyLines.js');
+  // The envelope ends at lon -89.4008; two same-owner parcels and a neighbour reach past it.
+  const cutLon = -89.4008;
+  const envelope = { west: -89.42, south: 43.06, east: cutLon, north: 43.09 };
+  const box = (w, s, e, n) => [[w, s], [w, n], [e, n], [e, s], [w, s]];
+  const body = clipParcels({ status: 'ok', parcels: [
+    { id: 1, owner: 'SAMPLE FARMS LLC', rings: [box(-89.4013, 43.0742, -89.4003, 43.0745)] },
+    { id: 2, owner: 'Sample Farms LLC', rings: [box(-89.4013, 43.0745, -89.4003, 43.0748)] },
+    { id: 3, owner: 'EXAMPLE OWNER', rings: [box(-89.4013, 43.0748, -89.4003, 43.0749)] },
+  ] }, envelope);
+  const alongCut = (a, b) => Math.abs(a - cutLon) < 1e-9 && Math.abs(b - cutLon) < 1e-9;
+  const ctx = await open(page({ parcels: () => reply(JSON.parse(JSON.stringify(body))) }));
+  assertShownOn(ctx, 'map');
+  const mapSegments = () => [...ctx.layers].flatMap(layer => layer.rings.flatMap(line => line.slice(1).map((p, k) => [line[k], p])));
+  for (const merge of [true, false]) {
+    ctx.controller.setMerge(merge);
+    await flush();
+    assert.equal(ctx.controller.state.outlines, merge ? 2 : 3);
+    const segments = mapSegments();
+    assert.ok(segments.length > 0);
+    assert.equal(segments.filter(([[, lonA], [, lonB]]) => alongCut(lonA, lonB)).length, 0, `map, ${merge ? 'merged' : 'raw'}`);
+  }
+  // 3D (Potree): the same stroke lines, in UTM.
+  const three = await open(page({ mode: 'cloud', cloudMode: 'potree', parcels: () => reply(JSON.parse(JSON.stringify(body))) }));
+  assertShownOn(three, 'potree');
+  const potreeSegments = three.potree.lines.flatMap(line => line.slice(1).map((p, k) => [line[k], p]));
+  const lonOf = ([e, n]) => projection.utmToLatLon(e, n)[1];
+  assert.equal(potreeSegments.filter(([a, b]) => Math.abs(lonOf(a) - cutLon) < 1e-7 && Math.abs(lonOf(b) - cutLon) < 1e-7).length, 0, '3D');
+});
+
+test('cutoff: map and 3D layers keep a real edge lying on the cutoff and never draw the closing segment', async () => {
+  const { clipParcels } = createRequire(import.meta.url)('../server/propertyLines.js');
+  const cutLon = -89.4008;
+  const envelope = { west: -89.42, south: 43.06, east: cutLon, north: 43.09 };
+  // Real east edge on the cutoff for lat 43.0742..43.0745; past it for 43.0745..43.0748.
+  const stepped = [[-89.4013, 43.0742], [cutLon, 43.0742], [cutLon, 43.0745], [-89.4003, 43.0745], [-89.4003, 43.0748], [-89.4013, 43.0748], [-89.4013, 43.0742]];
+  const above = [[-89.4013, 43.0748], [-89.4013, 43.0749], [-89.4003, 43.0749], [-89.4003, 43.0748], [-89.4013, 43.0748]];
+  const body = clipParcels({ status: 'ok', parcels: [
+    { id: 1, owner: 'SAMPLE FARMS LLC', rings: [stepped] }, { id: 2, owner: 'Sample Farms LLC', rings: [above] },
+  ] }, envelope);
+  const onCut = (lonA, lonB) => Math.abs(lonA - cutLon) < 1e-9 && Math.abs(lonB - cutLon) < 1e-9;
+  const inRange = (latA, latB, lo, hi) => Math.min(latA, latB) >= lo - 1e-9 && Math.max(latA, latB) <= hi + 1e-9 && latA !== latB;
+  const realLength = segments => segments.filter(([[latA, lonA], [latB, lonB]]) => onCut(lonA, lonB) && inRange(latA, latB, 43.0742, 43.0745))
+    .reduce((sum, [[latA], [latB]]) => sum + Math.abs(latA - latB), 0);
+  const closing = segments => segments.filter(([[latA, lonA], [latB, lonB]]) => onCut(lonA, lonB) && inRange(latA, latB, 43.0745, 43.0749));
+  const ctx = await open(page({ parcels: () => reply(JSON.parse(JSON.stringify(body))) }));
+  assertShownOn(ctx, 'map');
+  // The orange line layer (the halo draws the same lines underneath).
+  const mapSegments = () => [...ctx.layers].filter(layer => layer.options.color !== '#111111').flatMap(layer => layer.rings.flatMap(line => line.slice(1).map((p, k) => [line[k], p])));
+  for (const merge of [true, false]) {
+    ctx.controller.setMerge(merge);
+    await flush();
+    const segments = mapSegments();
+    assert.ok(Math.abs(realLength(segments) - 0.0003) < 1e-9, `map ${merge ? 'merged' : 'raw'}: the real edge on the cutoff is drawn`);
+    assert.equal(closing(segments).length, 0, `map ${merge ? 'merged' : 'raw'}: the closing segment is not drawn`);
+  }
+  const three = await open(page({ mode: 'cloud', cloudMode: 'potree', parcels: () => reply(JSON.parse(JSON.stringify(body))) }));
+  assertShownOn(three, 'potree');
+  const potree = three.potree.lines.flatMap(line => line.slice(1).map((p, k) => [projection.utmToLatLon(line[k][0], line[k][1]), projection.utmToLatLon(p[0], p[1])]));
+  const nearCut = (lonA, lonB) => Math.abs(lonA - cutLon) < 1e-7 && Math.abs(lonB - cutLon) < 1e-7;
+  assert.ok(potree.some(([[latA, lonA], [latB, lonB]]) => nearCut(lonA, lonB) && Math.min(latA, latB) < 43.07445), '3D: the real edge on the cutoff is drawn');
+  assert.equal(potree.filter(([[latA, lonA], [latB, lonB]]) => nearCut(lonA, lonB) && Math.min(latA, latB) > 43.07451).length, 0, '3D: the closing segment is not drawn');
+});
+
+test('tiles the server could not answer: "retrying" (not "zoom in"), asked again with back-off, then drawn', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let busy = true;
+    // A view across two map tiles; the western tile is busy (429) until it is not.
+    const ctx = page({ parcels: (_project, url) => (url.includes('4122%2F6015') && busy ? reply({ status: 'unavailable', parcels: [], code: 'busy' }, 429) : reply(PARCELS)) });
+    ctx.map.getBounds = () => ({ getWest: () => -89.4075, getSouth: () => 43.0741, getEast: () => -89.4060, getNorth: () => 43.0749 });
+    await open(ctx);
+    let state = ctx.controller.state;
+    assert.equal(state.status, 'ready', 'what did load is drawn');
+    assert.deepEqual([state.failedTiles, state.retryingTiles, state.partial], [true, true, false]);
+    assert.equal(ctx.dom.status.textContent, 'Some property lines could not load. Retrying…');
+    const tilesAsked = () => ctx.requests.map(r => new URL(r.url, 'http://x').searchParams.get('tile'));
+    assert.deepEqual(tilesAsked().sort(), ['14/4122/6015', '14/4123/6015'].sort());
+    // First retry after 2 s: still busy; only the failed tile is asked again.
+    mock.timers.tick(2000); await flush();
+    assert.deepEqual(tilesAsked().slice(2), ['14/4122/6015'], 'answered tiles come from the cache');
+    assert.equal(ctx.controller.state.tileRetries, 2);
+    // Then it answers: drawn, and the card is quiet again.
+    busy = false;
+    mock.timers.tick(4000); await flush();
+    state = ctx.controller.state;
+    assert.deepEqual([state.status, state.failedTiles, state.retryingTiles], ['ready', false, false]);
+    assert.equal(ctx.dom.status.textContent, '');
+    // Never more than the retry budget while a tile stays down.
+    busy = true;
+    const other = page({ parcels: (_project, url) => (url.includes('4122%2F6015') ? reply({}, 502) : reply(PARCELS)) });
+    other.map.getBounds = ctx.map.getBounds;
+    await open(other);
+    for (const wait of [2000, 4000, 8000, 16000, 30000, 30000]) { mock.timers.tick(wait); await flush(); }
+    const westAsked = other.requests.filter(r => r.url.includes('4122%2F6015')).length;
+    assert.equal(westAsked, 1 + 5, 'first try plus five retries');
+    assert.equal(other.controller.state.retryingTiles, false);
+    assert.equal(other.dom.status.textContent, 'Some property lines could not load.');
+  } finally {
+    mock.timers.reset();
+  }
 });

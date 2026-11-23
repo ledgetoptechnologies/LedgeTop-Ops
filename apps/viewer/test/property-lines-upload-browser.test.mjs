@@ -79,7 +79,8 @@ const [e, n] = projection.latLonToUtm(39.7392, -104.9903);
 const controller = createPropertyLinesController({
   L, fetchImpl: (url, options) => fetch(url, options), headers: () => ({ Authorization: 'Bearer viewer-session-token' }), fetcherOptions: { debounceMs: 50 },
   dom: { panel: document.getElementById('panel-property-lines'), button: document.getElementById('layer-property-lines'),
-    status: document.getElementById('property-lines-status'), about: document.getElementById('property-lines-about'), notice: document.getElementById('property-lines-notice') },
+    status: document.getElementById('property-lines-status'), notice: document.getElementById('property-lines-notice'),
+    merge: document.getElementById('property-lines-merge'), mergeRow: document.getElementById('property-lines-merge-row') },
   projectId: () => 'model-co', getMode: () => 'ortho', getCloudMode: () => 'none', getMap: () => map, getScene: () => null, getPotreeApi: () => null,
   georefVerified: () => true, modelDatum: () => 'NAD83', getSceneExtentUtm: () => ({ minE: e - 120, minN: n - 90, maxE: e + 120, maxN: n + 90 }), getGroundGrid: async () => null,
   utmToLatLon: projection.utmToLatLon, latLonToUtm: projection.latLonToUtm, utmToWorld: () => null,
@@ -127,7 +128,7 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
       if (url.pathname === '/api/v1/property-lines/parcels') {
         return json(200, { status: 'ok', parcels: [{ id: 1, rings: [[[-104.9910, 39.7388], [-104.9896, 39.7388], [-104.9896, 39.7396], [-104.9910, 39.7396], [-104.9910, 39.7388]]] }] });
       }
-      const allowed = new Set(['/workspace-property-lines.mjs', '/property-lines.mjs', '/property-lines-layer.mjs', '/utm-conversion.mjs', '/node_modules/leaflet/dist/leaflet-src.esm.js', '/node_modules/leaflet/dist/leaflet.css']);
+      const allowed = new Set(['/workspace-property-lines.mjs', '/property-lines.mjs', '/property-lines-layer.mjs', '/property-lines-owners.mjs', '/brand-colors.mjs', '/utm-conversion.mjs', '/node_modules/leaflet/dist/leaflet-src.esm.js', '/node_modules/leaflet/dist/leaflet.css']);
       if (!allowed.has(url.pathname)) { res.statusCode = 404; res.end(); return; }
       res.setHeader('Content-Type', url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript');
       res.end(readFileSync(path.join(root, url.pathname.slice(1))));
@@ -194,9 +195,10 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
     // Shown by default: no click needed.
     await waitFor("document.getElementById('property-lines-status').dataset.state === 'ready'", 'drawn');
     assert.equal(await client.evaluate('Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && typeof l.getLatLngs === "function").length'), 2, 'halo and line');
-    const about = await client.evaluate("document.getElementById('property-lines-about').textContent");
-    assert.ok(about.includes(`Uploaded boundary file ${XSS}, uploaded 2026-11-19.`), about);
-    assert.match(about, /no datum shift/);
+    // The card carries no source or disclaimer text; the on-view note names the upload, as text.
+    assert.equal(await client.evaluate("document.getElementById('property-lines-about')"), null);
+    const notice = await client.evaluate("document.getElementById('property-lines-notice').textContent");
+    assert.ok(notice.includes(`Source: Uploaded boundary file ${XSS} uploaded 2026-11-19.`), notice);
     assert.equal(await client.evaluate('document.querySelectorAll("img:not(.leaflet-tile)").length'), 0);
     assert.equal(await client.evaluate('window.pwned'), undefined);
   } finally {

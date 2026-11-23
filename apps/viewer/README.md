@@ -629,10 +629,35 @@ WGS84 UTM 16N
   Positions, with one Show/Hide toggle for the map,
   model and point cloud views draws parcel outlines from the Wisconsin
   Statewide Parcel Map (release V12). The browser calls this server
-  (`GET /api/v1/property-lines/parcels?bbox=west,south,east,north&model=id`), which
-  asks the state's public ArcGIS service with fixed parameters for geometry
-  only (no owner, address or value fields), with a size, record, time and
-  rate limit and a ten-minute cache. The third party never sees the viewer's
+  (`GET /api/v1/property-lines/parcels?tile=z/x/y&model=id` for map views,
+  `?bbox=west,south,east,north&model=id` for 3D views), which asks the
+  state's public ArcGIS service with fixed parameters for geometry and
+  exactly the fields approved for that source in `APPROVED_PARCEL_FIELDS`
+  (Wisconsin: `OBJECTID` and the first owner name `OWNERNME1`; no address,
+  value or other fields),
+  with a size, record, time and rate limit and a ten-minute cache. Lines are
+  the Viewer's orange accent. Placeholder owners that name nobody (NOT
+  AVAILABLE, on about 90,000 Wisconsin parcels, UNKNOWN OWNER, REDACTED and
+  the like) never merge or label. Parcels whose owner names match (case,
+  punctuation spacing and whitespace ignored) are joined where they share a
+  boundary: an edge one parcel has and another has in the opposite direction
+  (corners within 0.2 m) is removed and the parcels draw as one outline.
+  Corners present on one side only are inserted first, within a per-parcel
+  work budget; past that budget (very dense same-owner land), or where the
+  two sides have no common corners, that stretch stays drawn and parcels
+  joined by nothing else stay separate outlines. Map views label each outline with the owner's
+  name from zoom 14, only where the name fits and never overlapping another;
+  "Merge parcels by owner" in the card turns merging off to show every parcel
+  (remembered in `ltds-viewer:property-lines-merge`). Map views fetch fixed
+  map tiles (Web Mercator zoom 14, split down to 16 where a tile is dense)
+  covering the visible map up to 4 km around the model, at most 48 tiles per
+  view, and nothing below map zoom 13 ("Zoom in to see property lines"); 3D
+  views use the model's extent. The card is only its title and controls (no
+  parcel count, source credit, disclaimer or data date); a status line appears
+  only while loading or when the viewer must act (unavailable, zoom in, too
+  many, lines showing through the surface). The loaded release and vintage
+  live in the registry (`server/parcelSources.js`: V12, 2025 tax roll, data
+  last edited 2026-06-30) and the offer response. The third party never sees the viewer's
   session, link or browser, and the page's content security policy is
   unchanged. The state confirmed in writing on 2026-11-18 that the data is public domain,
   so staff, client sessions and public links with live access to the model all
@@ -640,22 +665,43 @@ WGS84 UTM 16N
   do not show the layer and make no property-lines request; models outside Wisconsin
   show the toggle as unavailable with the reason. In 3D the lines follow the
   published DTM when its heights agree with the scene, otherwise they are drawn
-  flat at the site's lowest level and show through the surface; the panel says
-  which. Lines are approximate and not a survey; the panel and an on-view note
-  say so whenever lines are drawn. The layer is on by default wherever it is
+  flat at the site's lowest level and show through the surface; the card says
+  so. Lines are approximate and not a survey; an on-view note says so whenever
+  lines are drawn. The layer is on by default wherever it is
   offered and available; a viewer's Hide is kept per project for later views
   and reloads in that browser (localStorage key `ltds-viewer:property-lines-hidden`,
   project ids only), and another project starts at its own default. Results
   from an earlier project, model version or access state are dropped, and
   losing access removes the lines until access returns. The state data is NAD83-based: against a
   model in a WGS84 or ITRF-based frame expect roughly 1 to 1.5 m of offset in
-  Wisconsin, within the parcel map's own accuracy (the panel says this too).
+  Wisconsin, within the parcel map's own accuracy.
   Each request names the model; the server checks live access to that model
   (session, admin, or a live share at its current revision) and accepts only
-  boxes inside the model's site window (verified centre plus a half-size from
-  the surveyed area, default 1.5 km, plus margin). The service URL changes with each yearly
-  release: update `WISCONSIN_PARCELS` in `server/propertyLines.js` (URL,
-  release and credit together).
+  two request types. A 3D `bbox` must lie inside the model's site window (a
+  verified centre plus a half-size from the surveyed area, default 1.5 km,
+  plus margin). A map `tile` must be on the fixed grid (zoom 14 to 16), touch
+  the coverage window (the site window widened by 4 km) and lie inside it
+  widened by one zoom-14 tile (2 km). For both, the query to the state uses
+  the window's lon/lat bounds (a little larger than the window: grid
+  convergence, up to about 0.5 km at the edge of a UTM zone), and every
+  returned ring, line and uploaded feature is then clipped to the UTM window
+  itself, so nothing past it is served. Uploaded features are cut as lines. Where a parcel crosses that limit, the server returns two
+  things: its `rings` clipped and closed along the limit (shape only, for
+  labels and merging) and `lines`, its real boundary inside the limit, each
+  original edge clipped on its own. The Viewer strokes only real boundary
+  (raw, merged, map and 3D): a real edge lying on the limit stays drawn, and
+  the closing segment along the limit never is. When merging, each segment
+  carries where it came from through snapping and splitting. A caller is one
+  viewer session, the admin login, or one public link from one client
+  address (a hash of the address, kept in memory only). Each caller has 3
+  calls in flight, 150 requests a minute and 60 calls a minute to the state
+  (cache hits do not count); the whole server makes at most 240 calls a
+  minute to the state. Tiles the state could not answer (busy or down) are
+  asked for again after 2, 4, 8, 16 and 30 s, and the card says "Some
+  property lines could not load. Retrying…" meanwhile. The service URL changes with each yearly release: update
+  the Wisconsin entry in `server/parcelSources.js` (URL, release, vintage,
+  dataUpdated and credit together); the monthly release check reports a newer
+  release and newer layer data.
 - **Uploaded boundary file** (fallback property-lines source): staff with
   `viewer.projects.write` open a project's "Property lines source" in the
   workspace, upload one GeoJSON or KML file (20 MB, 5,000 features, 200,000

@@ -1,21 +1,28 @@
 // Property lines layer controller: one "Property lines" toggle that draws the
 // same parcel outlines on the Leaflet map views, in the three.js 3D views and
 // in the Potree point cloud. Main.js supplies everything model-specific.
+// Touching parcels of one owner are drawn as one outline, and map views label
+// each outline with its owner's name (property-lines-owners.mjs).
+import { BRAND_COLORS } from './brand-colors.mjs';
 import {
   boundsKey,
   createParcelFetcher,
+  createParcelTileLoader,
   groundHeightsConsistent,
   parcelsToUtmPolylines,
   propertyLinesAvailability,
-  propertyLinesDatumNote,
   propertyLinesMessage,
   propertyLinesRequestBounds,
+  propertyLinesTilesForView,
   sampleGrid,
   utmExtentToLonLatBounds,
 } from './property-lines.mjs';
+import { dissolveParcelsByOwner, ownerLabelCandidates, placeOwnerLabels } from './property-lines-owners.mjs';
 
+// The Viewer's orange accent (--brand-orange in index.html, generated from
+// packages/ui/src/brand.ts) with a dark halo for contrast on imagery.
 export const PROPERTY_LINE_STYLE = Object.freeze({
-  color: '#FFD60A',
+  color: BRAND_COLORS.orange,
   halo: '#111111',
   mapWeight: 2.5,
   mapHaloWeight: 5,
@@ -25,6 +32,11 @@ export const PROPERTY_LINE_STYLE = Object.freeze({
 });
 
 const RETRY_MS = 1500;
+// Tiles the server could not answer (busy or down) are asked for again,
+// backing off: 2 s, 4 s, 8 s, 16 s, 30 s, then the card says so and stops.
+const TILE_RETRY_MS = 2000;
+const TILE_RETRY_MAX_MS = 30_000;
+const TILE_RETRIES = 5;
 const MAX_RETRIES = 40;
 
 export function propertyLinesModeKind(mode, cloudMode) {
@@ -65,6 +77,8 @@ export function drapePolylines(lines, { grid = null, minAlt, maxAlt, lift = PROP
 // windows, sandboxed embeds) simply means nothing is remembered after reload.
 export const PROPERTY_LINES_HIDDEN_KEY = 'ltds-viewer:property-lines-hidden';
 export const PROPERTY_LINES_HIDDEN_LIMIT = 100;
+// "Merge parcels by owner" is on unless this browser turned it off ('0').
+export const PROPERTY_LINES_MERGE_KEY = 'ltds-viewer:property-lines-merge';
 
 export function createPropertyLinesPreferences(storage) {
   const store = () => { try { return storage === undefined ? globalThis.localStorage ?? null : storage; } catch { return null; } };
@@ -86,6 +100,31 @@ export function createPropertyLinesPreferences(storage) {
         else store()?.removeItem(PROPERTY_LINES_HIDDEN_KEY);
       } catch { /* The choice still holds for this page. */ }
     },
+    merged() { try { return store()?.getItem(PROPERTY_LINES_MERGE_KEY) !== '0'; } catch { return true; } },
+    setMerged(value) {
+      try { if (value) store()?.removeItem(PROPERTY_LINES_MERGE_KEY); else store()?.setItem(PROPERTY_LINES_MERGE_KEY, '0'); } catch { /* kept for this page */ }
+    },
+  };
+}
+
+// Label text width for the label font, measured once per text and size.
+function createTextMeasure() {
+  const widths = new Map();
+  let context = null;
+  return (text, px) => {
+    const key = `${px}|${text}`;
+    if (widths.has(key)) return widths.get(key);
+    let width = text.length * px * 0.62;
+    try {
+      context ||= document.createElement('canvas').getContext('2d');
+      if (context) {
+        const family = getComputedStyle(document.documentElement).getPropertyValue('--font').trim() || 'sans-serif';
+        context.font = `600 ${px}px ${family}`;
+        width = context.measureText(text).width;
+      }
+    } catch { /* estimate */ }
+    widths.set(key, width);
+    return width;
   };
 }
 
@@ -96,14 +135,21 @@ export function createPropertyLinesPreferences(storage) {
 export function createPropertyLinesController(deps) {
   const { L, THREE, LineSegments2, LineSegmentsGeometry, LineMaterial, dom } = deps;
   const fetcher = createParcelFetcher({ fetchImpl: deps.fetchImpl, headers: deps.headers, model: () => deps.projectId(), ...(deps.fetcherOptions || {}) });
+  const { cacheEntries: _siteCacheEntries, ...tileOptions } = deps.fetcherOptions || {};
+  const tiles = createParcelTileLoader({ fetchImpl: deps.fetchImpl, headers: deps.headers, model: () => deps.projectId(), ...tileOptions });
   const preferences = deps.preferences || createPropertyLinesPreferences(deps.storage);
+  const measure = deps.measureText || createTextMeasure();
   const hiddenByProject = new Map();
-  let offered = false, source = null, hidden = false, suspended = false, status = 'off', count = 0;
+  let merge = true;
+  try { merge = preferences.merged?.() !== false; } catch { merge = true; }
+  let offered = false, source = null, hidden = false, suspended = false, status = 'off', count = 0, partial = false;
+  let failedTiles = false, tileRetries = 0, tileRetryTimer = null, tileRetryKey = null;
+  let labelsEl = null, labelsMap = null, labelKey = null;
   let life = 0, lifeKey = null, lifeProject = null, offerSeq = 0;
   let siteBounds = null, retryTimer = null, retries = 0, seq = 0;
   // One canvas renderer per Leaflet map, reused for every redraw.
   let mapRenderer = null, rendererMap = null, drawnMapKey = null;
-  let current = null, mapLayers = null, threeGroup = null, threeKey = null, potreeKey = null, potreeShown = false, heightNote = '', groundAbort = null;
+  let current = null, mapLayers = null, threeGroup = null, threeKey = null, potreeKey = null, potreeShown = false, heightNote = '', heightDraped = false, groundAbort = null;
   const draped = new Map();
 
   function kind() { return propertyLinesModeKind(deps.getMode(), deps.getCloudMode()); }
@@ -133,7 +179,9 @@ export function createPropertyLinesController(deps) {
   function stopWork() {
     seq++;
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    if (tileRetryTimer) { clearTimeout(tileRetryTimer); tileRetryTimer = null; }
     fetcher.cancel();
+    tiles.cancel();
     groundAbort?.abort();
     groundAbort = null;
   }
@@ -144,9 +192,21 @@ export function createPropertyLinesController(deps) {
     stopWork();
     retries = 0;
     fetcher.clear();
-    siteBounds = null; current = null; count = 0; heightNote = ''; draped.clear();
+    tiles.clear();
+    siteBounds = null; current = null; count = 0; partial = false; failedTiles = false; tileRetries = 0; tileRetryKey = null; heightNote = ''; heightDraped = false; draped.clear();
     clearDrawings();
   }
+
+  // Outlines for the current parcels: merged by owner, or one per parcel.
+  // Worked out once per parcel set and merge choice.
+  function outlines() {
+    if (!current) return [];
+    const mode = merge ? 'merged' : 'raw';
+    if (current.outlines?.mode !== mode) current.outlines = { mode, list: dissolveParcelsByOwner(current.parcels, { merge }) };
+    return current.outlines.list;
+  }
+
+  function drawKey() { return current ? `${current.key}#${current.parcels.length}#${merge ? 'm' : 'r'}` : null; }
 
   // True when the project or model version changed since the last call.
   // The Hide choice follows the project only, never the version or view.
@@ -176,33 +236,39 @@ export function createPropertyLinesController(deps) {
     dom.panel.hidden = !panelShown;
     if (!panelShown) {
       if (dom.notice) dom.notice.hidden = true;
-      if (dom.about) dom.about.hidden = true;
+      if (dom.mergeRow) dom.mergeRow.hidden = true;
       return;
     }
     const on = isOn();
     const av = availability();
     const disabled = !av.available;
     const shown = on && !disabled;
-    // The source note and the "not a survey" notice belong to drawn lines only.
+    // The "not a survey" notice on the view belongs to drawn lines only. The
+    // card itself is the title and its controls: no count, source or
+    // disclaimer text, only a status line while loading or when something
+    // needs the viewer (unavailable, zoom in, too many, lines show through).
     const drawn = shown && status === 'ready';
     dom.button.disabled = disabled;
     dom.button.classList.toggle('active', shown);
     dom.button.textContent = shown ? 'Hide' : 'Show';
     dom.button.setAttribute('aria-pressed', String(shown));
     dom.button.setAttribute('aria-label', shown ? 'Hide property lines' : 'Show property lines');
-    let message = disabled ? propertyLinesMessage(av.reason) : (on ? propertyLinesMessage(status, { count, threeD: kind() !== 'map' }) : '');
-    if (drawn && kind() !== 'map' && heightNote) message += ` ${heightNote}`;
+    // The merge choice, where the source has owner names.
+    if (dom.mergeRow) dom.mergeRow.hidden = !(shown && source?.owners === 'yes');
+    if (dom.merge && dom.merge.checked !== merge) dom.merge.checked = merge;
+    let message = disabled ? propertyLinesMessage(av.reason) : (on ? propertyLinesMessage(status, { count, partial, failed: failedTiles, retrying: Boolean(tileRetryTimer), threeD: kind() !== 'map' }) : '');
+    if (drawn && kind() !== 'map' && heightNote && !heightDraped) message = [message, heightNote].filter(Boolean).join(' ');
     if (dom.status.textContent !== message) dom.status.textContent = message;
     dom.status.dataset.state = disabled ? av.reason : (on ? status : 'off');
-    if (dom.about) dom.about.hidden = !drawn;
-    if (drawn && source && dom.about) {
-      dom.about.querySelector('[data-pl="source"]').textContent = source.kind === 'upload' ? `${source.name}, ${source.release}. ${source.credit}` : `${source.name}, release ${source.release}. ${source.credit}`;
-      dom.about.querySelector('[data-pl="disclaimer"]').textContent = [source.disclaimer, propertyLinesDatumNote(deps.modelDatum?.(), source.datum) || source.datumNote].filter(Boolean).join(' ');
-    }
     if (dom.notice) {
       dom.notice.hidden = !drawn;
       if (drawn && source) dom.notice.textContent = `Property lines are approximate, not a survey. Source: ${source.name} ${source.release}.`;
     }
+  }
+
+  function clearLabels() {
+    labelKey = null;
+    if (labelsEl) labelsEl.replaceChildren?.();
   }
 
   function clearMap() {
@@ -210,6 +276,50 @@ export function createPropertyLinesController(deps) {
     if (mapLayers && map) for (const layer of mapLayers) map.removeLayer(layer);
     mapLayers = null;
     drawnMapKey = null;
+    clearLabels();
+  }
+
+  // Owner names in the middle of each outline, in their own pane above the
+  // lines. Laid out again after every move or zoom (hidden while zooming);
+  // only labels that fit their outline and clear each other are shown.
+  function renderLabels() {
+    const map = deps.getMap();
+    if (!map || !current || kind() !== 'map' || typeof document === 'undefined'
+      || typeof map.latLngToContainerPoint !== 'function' || typeof map.getZoom !== 'function') { clearLabels(); return; }
+    if (!labelsEl || labelsMap !== map) {
+      let pane = map.getPane('propertyLineLabels');
+      if (!pane) {
+        pane = map.createPane('propertyLineLabels');
+        pane.style.zIndex = 465;
+        pane.style.pointerEvents = 'none';
+      }
+      labelsEl?.remove?.();
+      labelsEl = document.createElement('div');
+      labelsEl.className = 'property-line-labels';
+      pane.appendChild(labelsEl);
+      map.on?.('zoomstart', () => { if (labelsEl) labelsEl.style.visibility = 'hidden'; });
+      labelsMap = map;
+      labelKey = null;
+    }
+    const zoom = map.getZoom(), size = map.getSize(), center = map.getCenter();
+    const key = `${drawKey()}|${zoom}|${size.x}x${size.y}|${center.lat.toFixed(6)},${center.lng.toFixed(6)}`;
+    labelsEl.style.visibility = '';
+    if (key === labelKey) return;
+    labelKey = key;
+    if (!current.candidates || current.candidates.mode !== current.outlines?.mode) current.candidates = { mode: current.outlines?.mode, list: ownerLabelCandidates(outlines()) };
+    const placed = placeOwnerLabels(current.candidates.list, {
+      zoom, measure, viewport: { width: size.x, height: size.y },
+      project: (lon, lat) => { const p = map.latLngToContainerPoint([lat, lon]); return [p.x, p.y]; },
+    });
+    labelsEl.replaceChildren(...placed.map(label => {
+      const node = document.createElement('div');
+      node.className = 'property-line-label';
+      node.textContent = label.lines.join('\n');   // text only, never HTML
+      const point = map.containerPointToLayerPoint([label.x, label.y]);
+      Object.assign(node.style, { width: `${label.width + 2}px`, fontSize: `${label.fontPx}px`, lineHeight: `${label.lineHeight}px`,
+        transform: `translate(${Math.round(point.x - label.width / 2 - 1)}px, ${Math.round(point.y - label.height / 2)}px)` });
+      return node;
+    }));
   }
 
   function clearThree() {
@@ -249,7 +359,10 @@ export function createPropertyLinesController(deps) {
   function drawMap() {
     const map = deps.getMap();
     if (!map || !current) return;
-    if (drawnMapKey === current.key && mapLayers && mapLayers.every(layer => map.hasLayer(layer))) return;
+    // Thinner lines when zoomed out, where parcels are dense.
+    const thin = typeof map.getZoom === 'function' && map.getZoom() < 15;
+    const mapKey = `${drawKey()}#${thin ? 'thin' : 'full'}`;
+    if (drawnMapKey === mapKey && mapLayers && mapLayers.every(layer => map.hasLayer(layer))) { renderLabels(); return; }
     clearMap();
     if (!map.getPane('propertyLines')) {
       const pane = map.createPane('propertyLines');
@@ -261,22 +374,23 @@ export function createPropertyLinesController(deps) {
       rendererMap = map;
     }
     const renderer = mapRenderer;
-    const rings = current.parcels.flatMap(parcel => parcel.rings.map(ring => ring.map(([lon, lat]) => [lat, lon])));
+    const lines = outlines().flatMap(outline => outline.lines.map(line => line.map(([lon, lat]) => [lat, lon])));
     const common = { pane: 'propertyLines', renderer, interactive: false, lineJoin: 'round', lineCap: 'round', smoothFactor: 0.5 };
     mapLayers = [
-      L.polyline(rings, { ...common, color: PROPERTY_LINE_STYLE.halo, weight: PROPERTY_LINE_STYLE.mapHaloWeight, opacity: 0.55 }),
-      L.polyline(rings, { ...common, color: PROPERTY_LINE_STYLE.color, weight: PROPERTY_LINE_STYLE.mapWeight, opacity: 1 }),
+      L.polyline(lines, { ...common, color: PROPERTY_LINE_STYLE.halo, weight: PROPERTY_LINE_STYLE.mapHaloWeight * (thin ? 0.6 : 1), opacity: 0.55 }),
+      L.polyline(lines, { ...common, color: PROPERTY_LINE_STYLE.color, weight: PROPERTY_LINE_STYLE.mapWeight * (thin ? 0.6 : 1), opacity: 1 }),
     ];
     for (const layer of mapLayers) layer.addTo(map);
-    drawnMapKey = current.key;
+    drawnMapKey = mapKey;
+    renderLabels();
   }
 
   async function drapedLines(mySeq) {
     const extent = deps.getSceneExtentUtm();
     if (!extent || !Number.isFinite(extent.minAlt)) return null;
-    const key = `${current.key}|${deps.getMode()}|${extent.minAlt.toFixed(1)}|${extent.maxAlt.toFixed(1)}`;
+    const key = `${drawKey()}|${deps.getMode()}|${extent.minAlt.toFixed(1)}|${extent.maxAlt.toFixed(1)}`;
     if (draped.has(key)) return { key, ...draped.get(key) };
-    const { lines, truncated } = parcelsToUtmPolylines(current.parcels, deps.latLonToUtm);
+    const { lines, truncated } = parcelsToUtmPolylines(outlines().map(outline => ({ rings: outline.lines })), deps.latLonToUtm);
     if (truncated) return { key, tooMany: true };
     let minE = Infinity, minN = Infinity, maxE = -Infinity, maxN = -Infinity;
     for (const line of lines) for (const [e, n] of line) { minE = Math.min(minE, e); maxE = Math.max(maxE, e); minN = Math.min(minN, n); maxN = Math.max(maxN, n); }
@@ -360,32 +474,91 @@ export function createPropertyLinesController(deps) {
     if (!active) { stopWork(); clearDrawings(); settle('idle'); return; }
     if (av.reason === 'pending') { status = 'pending'; render(); scheduleRetry(); return; }
     const myLife = life, myKey = lifeKey;
-    const request = propertyLinesRequestBounds({ modelBounds: siteBounds, viewBounds: active === 'map' ? mapViewBounds() : null });
     const mySeq = ++seq;
     // Also compare the live project/version/authority, in case it changed without a sync yet.
     const stillCurrent = () => mySeq === seq && myLife === life && myKey === lifecycleKey().key;
+    if (active === 'map') return refreshMap({ immediate, stillCurrent });
+    // Map tiles' retry state belongs to the map view only.
+    failedTiles = false;
+    if (tileRetryTimer) { clearTimeout(tileRetryTimer); tileRetryTimer = null; }
+    const request = propertyLinesRequestBounds({ modelBounds: siteBounds, viewBounds: null });
     if (request.status !== 'ok') {
       fetcher.cancel(); clearDrawings();
       if (request.status === 'unknown') { status = 'pending'; render(); scheduleRetry(); } else settle(request.status);
       return;
     }
-    const key = boundsKey(request.bounds);
+    const key = `site:${boundsKey(request.bounds)}`;
     if (!(current && current.key === key)) { status = 'loading'; render(); }
     const result = current && current.key === key ? { status: 'ok', parcels: current.parcels } : await fetcher.request(request.bounds, { immediate });
     if (result.status === 'aborted' || !stillCurrent() || !isOn()) { if (lifeKey !== lifecycleKey().key) void refresh(); return; }
-    if (result.status !== 'ok') { clearDrawings(); current = null; count = 0; settle(result.status); return; }
-    current = { key, parcels: result.parcels };
-    count = result.parcels.length;
-    if (active === 'map') { drawMap(); settle('ready'); return; }
+    if (result.status !== 'ok') { clearDrawings(); current = null; count = 0; partial = false; settle(result.status); return; }
+    if (!(current && current.key === key)) current = { key, parcels: result.parcels };
+    count = result.parcels.length; partial = false;
     status = 'loading'; render();
     const lines = await drapedLines(mySeq);
     if (!stillCurrent() || !isOn()) { if (lifeKey !== lifecycleKey().key) void refresh(); return; }
     if (!lines) { status = 'pending'; render(); scheduleRetry(); return; }
     if (lines.tooMany) { clearDrawings(); settle('too_many'); return; }
-    heightNote = lines.note;
+    heightNote = lines.note; heightDraped = lines.draped === true;
     if (active === 'three') drawThree(lines);
     else if (!drawPotree(lines)) { status = 'pending'; render(); scheduleRetry(); return; }
     settle('ready');
+  }
+
+  // Map views: the tiles covering the visible map near the model. Lines from
+  // the previous view stay until the new tiles arrive; tiles are drawn as
+  // they come in, and already-cached tiles draw at once.
+  async function refreshMap({ immediate, stillCurrent }) {
+    const map = deps.getMap();
+    const zoom = typeof map?.getZoom === 'function' ? map.getZoom() : null;
+    const plan = propertyLinesTilesForView({ modelBounds: siteBounds, viewBounds: mapViewBounds(), zoom });
+    if (plan.status !== 'ok') {
+      tiles.cancel(); clearDrawings(); current = null; count = 0; partial = false; failedTiles = false;
+      if (plan.status === 'unknown') { status = 'pending'; render(); scheduleRetry(); } else settle(plan.status);
+      return;
+    }
+    const key = `tiles:${plan.tiles.map(tile => tile.key).join(';')}`;
+    if (key !== tileRetryKey) { tileRetryKey = key; tileRetries = 0; }
+    if (current && current.key === key && current.complete && !current.failed) {
+      tiles.cancel();
+      drawMap(); settle('ready'); return;
+    }
+    if (status !== 'ready' || !current) { status = 'loading'; render(); }
+    // Lay the names out for the new view now; the new tiles redraw them as they arrive.
+    renderLabels();
+    const onProgress = parcels => {
+      if (!stillCurrent() || !isOn() || !parcels.length) return;
+      current = { key, parcels, complete: false };
+      drawMap();
+    };
+    const result = await tiles.load(plan.tiles, { area: plan.area, immediate: immediate || tiles.cached(plan.tiles), onProgress });
+    if (result.status === 'aborted' || !stillCurrent() || !isOn()) { if (lifeKey !== lifecycleKey().key) void refresh(); return; }
+    if (result.status !== 'ok') { clearDrawings(); current = null; count = 0; partial = false; failedTiles = false; settle(result.status); return; }
+    current = { key, parcels: result.parcels, complete: true, failed: Boolean(result.failed) };
+    count = result.parcels.length;
+    partial = Boolean(result.partial || plan.partial);
+    failedTiles = Boolean(result.failed);
+    if (tileRetryTimer) { clearTimeout(tileRetryTimer); tileRetryTimer = null; }
+    if (!failedTiles) tileRetries = 0;
+    else if (tileRetries < TILE_RETRIES) {
+      // Ask again for the tiles that failed; the ones already answered come from the cache.
+      const wait = Math.min(TILE_RETRY_MAX_MS, TILE_RETRY_MS * 2 ** tileRetries);
+      tileRetries++;
+      tileRetryTimer = setTimeout(() => { tileRetryTimer = null; void refresh(); }, wait);
+    }
+    drawMap();
+    settle('ready');
+  }
+
+  // "Merge parcels by owner": redraws from the parcels already fetched.
+  function setMerge(value) {
+    const next = value !== false;
+    if (next === merge) return;
+    merge = next;
+    try { preferences.setMerged?.(merge); } catch { /* kept for this page */ }
+    draped.clear();
+    clearDrawings();
+    if (isOn()) refresh({ immediate: true }); else render();
   }
 
   function toggle() {
@@ -414,7 +587,7 @@ export function createPropertyLinesController(deps) {
       const body = response.ok ? await response.json() : null;
       nextOffered = body?.offered === true && Boolean(body.source);
       // Plain strings only; they are shown with textContent, never as HTML.
-      nextSource = nextOffered ? Object.fromEntries(['kind', 'name', 'release', 'credit', 'disclaimer', 'datumNote', 'datum', 'region']
+      nextSource = nextOffered ? Object.fromEntries(['kind', 'name', 'release', 'credit', 'disclaimer', 'datumNote', 'datum', 'region', 'owners']
         .filter(key => typeof body.source[key] === 'string').map(key => [key, body.source[key].slice(0, 600)])) : null;
     } catch { nextOffered = false; nextSource = null; }
     if (stale()) return;
@@ -457,19 +630,22 @@ export function createPropertyLinesController(deps) {
   }
 
   dom.button?.addEventListener('click', toggle);
+  dom.merge?.addEventListener?.('change', () => setMerge(dom.merge.checked));
 
   return {
     loadOffer,
     refresh,
     toggle,
+    setMerge,
     wake,
     sync,
     suspend,
     resume,
     get state() {
-      return { offered, on: isOn(), hidden, suspended, status, count, siteBounds, heightNote, retries,
+      return { offered, on: isOn(), hidden, suspended, status, count, partial, failedTiles, tileRetries, retryingTiles: Boolean(tileRetryTimer), merge, outlines: current ? outlines().length : 0,
+        labels: labelsEl?.childElementCount ?? 0, siteBounds, heightNote, retries,
         drawn: { map: Boolean(mapLayers), three: Boolean(threeGroup?.visible), potree: potreeShown } };
     },
-    stats: () => fetcher.stats(),
+    stats: () => ({ ...fetcher.stats(), tiles: tiles.stats() }),
   };
 }

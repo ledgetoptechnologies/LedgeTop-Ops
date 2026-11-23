@@ -3,7 +3,8 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.LtdsPointCloudParcels = api;
 }(typeof globalThis !== 'undefined' ? globalThis : this, function createPointCloudParcelModule() {
-  const PARCEL_LINE_COLOR = 0xFFD60A;
+  // The Viewer's orange accent (BRAND_COLORS.orange, --brand-orange).
+  const PARCEL_LINE_COLOR = 0xEE5007;
   const MAX_VERTICES = 120000;
 
   // Lines arrive in UTM metres [[e, n, alt], ...]. Store them relative to a
