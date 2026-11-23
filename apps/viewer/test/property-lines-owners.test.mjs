@@ -80,15 +80,41 @@ test('merge by owner: touching parcels of one owner become one outline; differen
   assert.ok(raw.every(o => o.parcelIds.length === 1));
 });
 
-test('merge by owner: a shared boundary with an extra corner on one side (T-junction) still dissolves', () => {
+test('merge by owner: a corner on one side only (T-junction) is reconciled within the budget, not beyond it', () => {
   // Parcel B's left edge has a midpoint vertex that parcel A's right edge lacks.
   const a = square(0, 0);
   const b = [corner(1, 0), [corner(1, 0)[0], (corner(1, 0)[1] + corner(1, 1)[1]) / 2], corner(1, 1), corner(2, 1), corner(2, 0), corner(1, 0)];
-  b.reverse(); // clockwise like Esri: (1,0) -> (1,1) -> (2,1) -> (2,0)
-  const [outline] = dissolveParcelsByOwner([parcel(1, 'SAMPLE FARMS LLC', a), parcel(2, 'Sample Farms LLC', b)]);
+  const pair = [parcel(1, 'SAMPLE FARMS LLC', a), parcel(2, 'Sample Farms LLC', b)];
+  const [outline] = dissolveParcelsByOwner(pair);
   assert.deepEqual(outline.parcelIds, [1, 2]);
   assert.equal(outline.lines.length, 1);
   assert.equal(segments(outline), 6);
+  // Without reconciliation the shared stretch has no matching opposite edge:
+  // it stays drawn, and these two parcels (joined by nothing else) stay apart.
+  const unreconciled = dissolveParcelsByOwner(pair, { splitBudget: 0 });
+  assert.equal(unreconciled.length, 2);
+  assert.equal(unreconciled.reduce((n, o) => n + segments(o), 0), 4 + 5, 'every edge of both parcels still drawn');
+  // Shared corners that already match need no reconciliation and still dissolve.
+  assert.equal(dissolveParcelsByOwner([pair[0], parcel(3, 'SAMPLE FARMS LLC', square(1, 0))], { splitBudget: 0 }).length, 1);
+});
+
+test('merge by owner: dense same-owner land over the default budget falls back to matching corners only', () => {
+  // Two parcels with 1,600-point bottom edges (edges x neighbouring corners
+  // about 2.6 million, over the 2 million budget) and a T-junction between them.
+  // 630 m edges, so the 1,600 corners are about 0.4 m apart (more than the 0.2 m snap).
+  const dense = (i, j) => {
+    const [x0, y0] = corner(i, j), [x1] = corner(i + 4, j);
+    return Array.from({ length: 1600 }, (_, k) => [x0 + (x1 - x0) * k / 1600, y0]);
+  };
+  const a = [...dense(0, 0), corner(4, 0), corner(4, 4), corner(0, 4), corner(0, 0)];
+  const b = [...dense(4, 0), corner(8, 0), corner(8, 4), corner(4, 4), [corner(4, 0)[0], (corner(4, 0)[1] + corner(4, 4)[1]) / 2], corner(4, 0)];
+  const pair = [parcel(1, 'SAMPLE FARMS LLC', a), parcel(2, 'SAMPLE FARMS LLC', b)];
+  const started = performance.now();
+  const fallback = dissolveParcelsByOwner(pair);
+  assert.ok(performance.now() - started < 2000, 'bounded work');
+  assert.equal(fallback.length, 2, 'over budget: the T-junction is not reconciled, so the stretch stays drawn');
+  assert.ok(fallback.every(o => o.lines.length === 1));
+  assert.equal(dissolveParcelsByOwner(pair, { splitBudget: Infinity }).length, 1, 'with an unlimited budget the same pair dissolves');
 });
 
 test('merge by owner: orientation of the source rings does not matter; an L of three parcels merges into one', () => {
@@ -180,8 +206,10 @@ test('tile loader: parcels once across tiles, cached tiles reused, dense tiles s
   const calls = [];
   const loader = createParcelTileLoader({ debounceMs: 0, model: () => 'model-1', fetchImpl: async url => {
     calls.push(url);
-    const box = decodeURIComponent(new URL(url, 'http://x').searchParams.get('bbox'));
-    const is = tile => box === [tile.bounds.west, tile.bounds.south, tile.bounds.east, tile.bounds.north].map(v => v.toFixed(6)).join(',');
+    const params = new URL(url, 'http://x').searchParams;
+    assert.deepEqual([...params.keys()], ['tile', 'model'], 'tile key and model only, never a box');
+    const box = params.get('tile');
+    const is = tile => box === tile.key;
     if (is(tileA)) return reply({ status: 'ok', parcels: [shared, parcel(8, 'EXAMPLE OWNER', square(1, 0))] });
     if (is(tileB)) return reply({ status: 'ok', parcels: [shared] });
     if (is(tileC)) return reply({ status: 'too_many', parcels: [] });

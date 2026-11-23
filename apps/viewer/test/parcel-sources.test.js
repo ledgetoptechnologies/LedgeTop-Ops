@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
 const auth = require('../server/auth');
-const { PARCEL_SOURCES, WISCONSIN, selectParcelSource, validateParcelSource, validateRegistry } = require('../server/parcelSources');
+const { APPROVED_PARCEL_FIELDS, PARCEL_SOURCES, WISCONSIN, selectParcelSource, validateParcelSource, validateRegistry } = require('../server/parcelSources');
 const {
   WISCONSIN_PARCELS, createParcelSource, createPropertyLinesApi, parcelSourceForModel, parseBoundingBox, sourceDescription, upstreamQueryUrl,
 } = require('../server/propertyLines');
@@ -34,6 +34,8 @@ const NORTH = Object.freeze({
   layerUrl: 'https://parcels.example.invalid/arcgis/rest/services/Test/FeatureServer/0',
   extent: Object.freeze({ west: -92.0, south: 47.5, east: -89.0, north: 48.5 }),
 });
+// The test source's own field approval, passed explicitly; never in the real allowlist.
+const TEST_APPROVED = Object.freeze({ ...APPROVED_PARCEL_FIELDS, 'test-north': Object.freeze({ idField: 'OBJECTID', ownerField: 'OWNERNME1' }) });
 
 function modelAt(id, lat, lon, zoneLon0) {
   const [e, n] = createUtmProjection({ zoneLon0Deg: zoneLon0, hemisphere: 'N' }).latLonToUtm(lat, lon);
@@ -87,19 +89,37 @@ test('registry: Wisconsin is the only source and keeps its config', () => {
   assert.match(WISCONSIN.release, /^V12 /);
 });
 
+test('registry: fields are an exact per-source allowlist', () => {
+  assert.deepEqual(APPROVED_PARCEL_FIELDS, { 'wi-statewide-parcels': { idField: 'OBJECTID', ownerField: 'OWNERNME1' } }, 'WI: OBJECTID, OWNERNME1 and geometry only');
+  assert.equal(Object.isFrozen(APPROVED_PARCEL_FIELDS) && Object.isFrozen(APPROVED_PARCEL_FIELDS['wi-statewide-parcels']), true);
+  assert.doesNotThrow(() => validateParcelSource(WISCONSIN));
+  // A source with no approved entry is refused, whatever it asks for.
+  assert.throws(() => validateParcelSource(NORTH), /approved fields/);
+  assert.throws(() => validateParcelSource({ ...WISCONSIN, id: 'wi-copy' }), /approved fields/);
+  assert.throws(() => validateRegistry([WISCONSIN, NORTH]), /approved fields/);
+  // Anything but the exact approved list is refused, including fields that look harmless.
+  const wiQuery = WISCONSIN.query;
+  for (const query of [
+    { ...wiQuery, outFields: 'OBJECTID,OWNERNME1,OWNERNME2' }, { ...wiQuery, outFields: 'OBJECTID,OWNERNME1,SITEADRESS' },
+    { ...wiQuery, ownerField: 'OWNERNME2', outFields: 'OBJECTID,OWNERNME2' }, { ...wiQuery, ownerField: 'TAXROLLYEAR', outFields: 'OBJECTID,TAXROLLYEAR' },
+    { ...wiQuery, outFields: '*' }, { ...wiQuery, outFields: 'OWNERNME1,OBJECTID' }, { ...wiQuery, idField: 'PARCELID', outFields: 'PARCELID,OWNERNME1' },
+    { ...wiQuery, ownerField: null, outFields: 'OBJECTID' },
+  ]) assert.throws(() => validateParcelSource({ ...WISCONSIN, query }), /query\./, JSON.stringify(query));
+  // A geometry-only approval allows exactly the id field.
+  const plain = { ...TEST_APPROVED, 'test-north': Object.freeze({ idField: 'OBJECTID' }) };
+  assert.doesNotThrow(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, ownerField: undefined, outFields: 'OBJECTID' } }, plain));
+  assert.throws(() => validateParcelSource(NORTH, plain), /ownerField/);
+});
+
 test('registry: invalid or unsafe configs are refused', () => {
-  assert.doesNotThrow(() => validateParcelSource(NORTH));
-  assert.doesNotThrow(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, ownerField: null, outFields: 'OBJECTID' } }), 'owner names are optional');
-  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, outFields: 'OBJECTID,OWNERNME1,SITEADRESS' } }), /outFields/);
-  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, ownerField: null, outFields: 'OBJECTID,OWNERNME1' } }), /outFields/);
-  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, ownerField: 'SITEADRESS', outFields: 'OBJECTID,SITEADRESS' } }), /ownerField/);
-  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, outFields: '*' } }), /outFields/);
-  assert.throws(() => validateParcelSource({ ...NORTH, dataUpdated: 'June 2026' }), /dataUpdated/);
-  assert.throws(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, wkid: 4269 } }), /wkid/);
-  assert.throws(() => validateParcelSource({ ...NORTH, layerUrl: 'http://parcels.example.invalid/x/FeatureServer/0' }), /layerUrl/);
-  assert.throws(() => validateParcelSource({ ...NORTH, layerUrl: `${NORTH.layerUrl}?token=x` }), /layerUrl/);
-  assert.throws(() => validateParcelSource({ ...NORTH, extent: { west: 1, south: 2, east: 0, north: 3 } }), /extent/);
-  assert.throws(() => validateParcelSource({ ...NORTH, datum: 'WGS84' }), /datum/);
+  const check = source => validateParcelSource(source, TEST_APPROVED);
+  assert.doesNotThrow(() => check(NORTH));
+  assert.throws(() => check({ ...NORTH, dataUpdated: 'June 2026' }), /dataUpdated/);
+  assert.throws(() => check({ ...NORTH, query: { ...NORTH.query, wkid: 4269 } }), /wkid/);
+  assert.throws(() => check({ ...NORTH, layerUrl: 'http://parcels.example.invalid/x/FeatureServer/0' }), /layerUrl/);
+  assert.throws(() => check({ ...NORTH, layerUrl: `${NORTH.layerUrl}?token=x` }), /layerUrl/);
+  assert.throws(() => check({ ...NORTH, extent: { west: 1, south: 2, east: 0, north: 3 } }), /extent/);
+  assert.throws(() => check({ ...NORTH, datum: 'WGS84' }), /datum/);
   assert.throws(() => validateRegistry([WISCONSIN, WISCONSIN]), /duplicate/);
 });
 
@@ -162,7 +182,7 @@ test('API: a model outside every extent gets no state source, as before', async 
 
 test('API: each registered source serves its own models with its own fetcher', async () => {
   const seen = [];
-  await withApi({ sources: [WISCONSIN, NORTH], fetchImpl: async url => { seen.push(url); return okResponse(); } }, async get => {
+  await withApi({ sources: [WISCONSIN, NORTH], approvedFields: TEST_APPROVED, fetchImpl: async url => { seen.push(url); return okResponse(); } }, async get => {
     const offer = await (await get('/api/v1/property-lines?model=north', 'north')).json();
     assert.equal(offer.source.id, 'test-north');
     assert.equal(offer.source.region, 'Test North');

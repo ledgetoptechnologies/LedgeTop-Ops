@@ -283,7 +283,8 @@ export function createParcelTileLoader({ fetchImpl, endpoint = '/api/v1/property
   }
 
   async function fetchTile(tile, signal) {
-    const url = `${endpoint}?bbox=${encodeURIComponent(boundsKey(tile.bounds))}&model=${encodeURIComponent(String(model() || ''))}`;
+    // The server accepts only on-grid tiles (`tile=z/x/y`), and works out their bounds itself.
+    const url = `${endpoint}?tile=${encodeURIComponent(tile.key)}&model=${encodeURIComponent(String(model() || ''))}`;
     stats.requests++;
     const response = await fetchImpl(url, { headers: headers(), signal, credentials: 'same-origin', cache: 'no-store' });
     if (response.status === 401 || response.status === 403) {

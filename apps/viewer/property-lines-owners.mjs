@@ -12,6 +12,7 @@ const EARTH_CIRCUMFERENCE = 40075016.686;
 
 export const OWNER_LABEL_LIMITS = Object.freeze({
   snapMeters: 0.2,       // vertices closer than this are the same corner
+  splitBudget: 2_000_000, // per parcel: edges x neighbouring corners checked for T-junctions
   minLabelZoom: 14,      // no owner names when zoomed out further
   minRadiusPx: 14,       // a circle this big must fit inside the shape
   fontMinPx: 10,
@@ -112,7 +113,8 @@ const bboxTouch = (a, b, pad) => a.minX - pad <= b.maxX && a.maxX + pad >= b.min
 
 // Vertices of neighbouring parcels that lie on an edge (a T-junction, where
 // one side of a shared boundary has a corner the other does not) are inserted
-// into the edge, so the shared stretch cancels on both sides.
+// into the edge, so the shared stretch can cancel on both sides. This is
+// bounded work (splitBudget); a parcel over the budget is not reconciled.
 function splitAtVertices(ids, verts, candidates, snap) {
   if (!candidates.length) return ids;
   const out = [ids[0]];
@@ -158,7 +160,7 @@ function chainEdges(edges) {
   return lines;
 }
 
-function mergeGroup(group, frame, snap) {
+function mergeGroup(group, frame, snap, splitBudget) {
   const index = vertexIndex(snap);
   const items = group.map(parcel => {
     const rings = orientedRings(parcel, frame).map(({ pts }) => {
@@ -168,12 +170,14 @@ function mergeGroup(group, frame, snap) {
     }).filter(ids => ids.length >= 4);
     return { parcel, rings, bbox: bboxOf(rings.map(ids => ids.map(id => index.verts[id]))), vertexIds: [...new Set(rings.flat())] };
   });
-  // Insert neighbours' corners into edges (bounded work per parcel).
+  // Insert neighbours' corners into edges, within the per-parcel budget. Over
+  // it (very dense same-owner land), only edges whose corners already match
+  // cancel, and a shared stretch with unmatched corners stays drawn.
   for (const item of items) {
     const candidates = [];
     for (const other of items) if (other !== item && bboxTouch(item.bbox, other.bbox, snap)) candidates.push(...other.vertexIds);
     const edges = item.rings.reduce((n, ids) => n + ids.length, 0);
-    if (candidates.length && edges * candidates.length <= 2_000_000)
+    if (candidates.length && edges * candidates.length <= splitBudget)
       item.rings = item.rings.map(ids => splitAtVertices(ids, index.verts, candidates, snap));
   }
   // Directed edges; an edge also present in the opposite direction from
@@ -218,11 +222,16 @@ function mergeGroup(group, frame, snap) {
 }
 
 // One outline per owner area. With merge on, parcels whose normalized owner
-// names match and that share a boundary become one outline (shared internal
-// lines removed); same-owner parcels that do not touch stay separate. With
-// merge off, or without an owner name, every parcel is its own outline.
+// names match are joined where they share a boundary: an edge one parcel
+// has in one direction and another has in the opposite direction (same
+// corners within snapMeters) is removed, and the parcels become one outline.
+// Corners present on one side only are reconciled first within splitBudget;
+// beyond it, or where the two sides were drawn without common corners at all,
+// that stretch stays drawn (and parcels joined by nothing else stay
+// separate outlines). Same-owner parcels that do not touch stay separate.
+// With merge off, or without an owner name, every parcel is its own outline.
 // Returns [{ ownerKey, owner, parcels, parcelIds, lines: [[[lon, lat], ...]] }].
-export function dissolveParcelsByOwner(parcels, { merge = true, snapMeters = OWNER_LABEL_LIMITS.snapMeters } = {}) {
+export function dissolveParcelsByOwner(parcels, { merge = true, snapMeters = OWNER_LABEL_LIMITS.snapMeters, splitBudget = OWNER_LABEL_LIMITS.splitBudget } = {}) {
   const list = Array.isArray(parcels) ? parcels.filter(p => Array.isArray(p?.rings) && p.rings.length) : [];
   if (!list.length) return [];
   const [lon0, lat0] = list[0].rings[0][0];
@@ -241,7 +250,7 @@ export function dissolveParcelsByOwner(parcels, { merge = true, snapMeters = OWN
   });
   for (const { ownerKey, parcels: group } of groups.values()) {
     if (group.length === 1) { outlines.push(describe(ownerKey, group, group[0].rings)); continue; }
-    for (const component of mergeGroup(group, frame, snapMeters))
+    for (const component of mergeGroup(group, frame, snapMeters, splitBudget))
       if (component.lines.length) outlines.push(describe(ownerKey, component.members, component.lines));
   }
   return outlines;

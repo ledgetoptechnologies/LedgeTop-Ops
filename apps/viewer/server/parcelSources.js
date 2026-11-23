@@ -14,18 +14,19 @@
 //      Feature Layer whose native spatial reference is Web Mercator
 //      (102100 / 3857); the fetcher inverts spherical Mercator itself and
 //      never asks the service to reproject. Note its id field and extent.
-//   3. Fill every field below. `query.outFields` must be the id field,
-//      optionally followed by the owner-name field (`query.ownerField`), and
-//      nothing else: no address, value or other attribute ever leaves the
-//      state service. The owner name labels the parcels and merges touching
-//      parcels of one owner in the Viewer; add it only for a state that
-//      publishes owner names as public data. `extent` is the layer's
+//   3. Fill every field below. `query.outFields` must be exactly the
+//      fields approved for this source in APPROVED_PARCEL_FIELDS (below): the
+//      id field, then the owner-name field (`query.ownerField`) if approved.
+//      Nothing else ever leaves the state service: no address, value or other
+//      attribute. Adding a source or a field needs an approval recorded
+//      there. The owner name labels the parcels and merges touching parcels
+//      of one owner in the Viewer. `extent` is the layer's
 //      published extent as lon/lat rounded outward. Order matters: extents
 //      are rectangles and neighbouring states overlap, so the first match wins.
 //   4. Fill `shortName`, `vintage` and `dataUpdated` from the layer: its
 //      release, the tax-roll year most rows carry, and its
-//      editingInfo.dataLastEditDate as YYYY-MM-DD. The property lines panel
-//      shows them ("Parcels: WI statewide V12, 2025 tax roll ...").
+//      editingInfo.dataLastEditDate as YYYY-MM-DD. They record what is loaded
+//      (the offer response carries them); the panel does not show them.
 //   5. Optional `discovery` lets scripts/check-parcel-releases.mjs look for a
 //      newer release each month. It only reports; a person or agent updates
 //      layerUrl, release, vintage, dataUpdated and discovery.currentVersion
@@ -98,8 +99,20 @@ function validExtent(e) {
     && e.west >= -180 && e.east <= 180 && e.south >= -85 && e.north <= 85 && e.west < e.east && e.south < e.north;
 }
 
+// The exact attribute fields each source may request, besides its polygon
+// geometry: an allowlist, approved per source, never a pattern. A source
+// whose query asks for anything else (or is missing here) is refused at
+// startup. Changing a list needs the same approval as adding a source.
+//   wi-statewide-parcels: OBJECTID (row id) and OWNERNME1 (first owner name),
+//     approved by Beau on 2026-11-22 for owner labels; the state confirmed on
+//     2026-11-18 that the data is public domain.
+const APPROVED_PARCEL_FIELDS = Object.freeze({
+  'wi-statewide-parcels': Object.freeze({ idField: 'OBJECTID', ownerField: 'OWNERNME1' }),
+});
+
 // Fails loudly at startup on a config the fetcher cannot serve safely.
-function validateParcelSource(source) {
+// approved: the field allowlist (tests pass their own for test-only sources).
+function validateParcelSource(source, approved = APPROVED_PARCEL_FIELDS) {
   const problems = [];
   if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(source?.id || '')) problems.push('id');
   for (const key of ['region', 'name', 'release', 'credit', 'disclaimer', 'datumNote'])
@@ -110,9 +123,14 @@ function validateParcelSource(source) {
   if (!url || url.protocol !== 'https:' || url.search || url.hash || !/\/FeatureServer\/\d+$/.test(url.pathname)) problems.push('layerUrl');
   if (!validExtent(source?.extent)) problems.push('extent');
   const q = source?.query;
-  // Owner names only: never an address, value or similar field.
-  if (q?.ownerField != null && (!/^\w{1,64}$/.test(q.ownerField) || /ADD?RESS|VALUE|PSTL|SITE|ZIP/i.test(q.ownerField))) problems.push('query.ownerField');
-  if (!q || !/^\w{1,64}$/.test(q.idField || '') || q.outFields !== [q.idField, q.ownerField].filter(Boolean).join(',')) problems.push('query.outFields');
+  // Exactly the approved fields, in order: id, then the owner name if approved.
+  const allowed = Object.prototype.hasOwnProperty.call(approved, source?.id || '') ? approved[source.id] : null;
+  if (!allowed) problems.push('approved fields');
+  else {
+    if (q?.idField !== allowed.idField) problems.push('query.idField');
+    if ((q?.ownerField ?? null) !== (allowed.ownerField ?? null)) problems.push('query.ownerField');
+    if (q?.outFields !== [allowed.idField, allowed.ownerField].filter(Boolean).join(',')) problems.push('query.outFields');
+  }
   for (const key of ['shortName', 'vintage'])
     if (source?.[key] != null && (typeof source[key] !== 'string' || !source[key] || source[key].length > 80)) problems.push(key);
   if (source?.dataUpdated != null && !/^\d{4}-\d{2}-\d{2}$/.test(source.dataUpdated)) problems.push('dataUpdated');
@@ -124,10 +142,10 @@ function validateParcelSource(source) {
   return source;
 }
 
-function validateRegistry(sources) {
+function validateRegistry(sources, approved = APPROVED_PARCEL_FIELDS) {
   const ids = new Set();
   for (const source of sources) {
-    validateParcelSource(source);
+    validateParcelSource(source, approved);
     if (ids.has(source.id)) throw new Error(`duplicate parcel source ${source.id}`);
     ids.add(source.id);
   }
@@ -152,6 +170,7 @@ module.exports = {
   PARCEL_SOURCES,
   PARCEL_DISCLAIMER,
   WISCONSIN,
+  APPROVED_PARCEL_FIELDS,
   extentTouches,
   selectParcelSource,
   validateParcelSource,

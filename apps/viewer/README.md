@@ -629,13 +629,21 @@ WGS84 UTM 16N
   Positions, with one Show/Hide toggle for the map,
   model and point cloud views draws parcel outlines from the Wisconsin
   Statewide Parcel Map (release V12). The browser calls this server
-  (`GET /api/v1/property-lines/parcels?bbox=west,south,east,north&model=id`), which
-  asks the state's public ArcGIS service with fixed parameters for geometry
-  and the first owner name (`OWNERNME1`; no address, value or other fields),
+  (`GET /api/v1/property-lines/parcels?tile=z/x/y&model=id` for map views,
+  `?bbox=west,south,east,north&model=id` for 3D views), which asks the
+  state's public ArcGIS service with fixed parameters for geometry and
+  exactly the fields approved for that source in `APPROVED_PARCEL_FIELDS`
+  (Wisconsin: `OBJECTID` and the first owner name `OWNERNME1`; no address,
+  value or other fields),
   with a size, record, time and rate limit and a ten-minute cache. Lines are
-  the Viewer's orange accent. Touching parcels whose owner names match (case,
-  punctuation spacing and whitespace ignored) are drawn as one outline with
-  the shared lines removed, and map views label each outline with the owner's
+  the Viewer's orange accent. Parcels whose owner names match (case,
+  punctuation spacing and whitespace ignored) are joined where they share a
+  boundary: an edge one parcel has and another has in the opposite direction
+  (corners within 0.2 m) is removed and the parcels draw as one outline.
+  Corners present on one side only are inserted first, within a per-parcel
+  work budget; past that budget (very dense same-owner land), or where the
+  two sides have no common corners, that stretch stays drawn and parcels
+  joined by nothing else stay separate outlines. Map views label each outline with the owner's
   name from zoom 14, only where the name fits and never overlapping another;
   "Merge parcels by owner" in the card turns merging off to show every parcel
   (remembered in `ltds-viewer:property-lines-merge`). Map views fetch fixed
@@ -667,9 +675,14 @@ WGS84 UTM 16N
   Wisconsin, within the parcel map's own accuracy.
   Each request names the model; the server checks live access to that model
   (session, admin, or a live share at its current revision) and accepts only
-  boxes that reach the model's coverage window (its site window, a verified
-  centre plus a half-size from the surveyed area, default 1.5 km, plus margin,
-  widened by 4 km). The service URL changes with each yearly release: update
+  two request types. A 3D `bbox` must lie inside the model's site window (a
+  verified centre plus a half-size from the surveyed area, default 1.5 km,
+  plus margin). A map `tile` must be on the fixed grid (zoom 14 to 16), touch
+  the coverage window (the site window widened by 4 km) and lie inside it
+  widened by one zoom-14 tile (2 km). For both, the query to the state and
+  every returned ring are clipped to the window's lon/lat bounds, so nothing
+  past it is served. Calls to the state are also capped at 240 a minute for
+  the whole server, besides the per-caller slots and rates and the cache. The service URL changes with each yearly release: update
   the Wisconsin entry in `server/parcelSources.js` (URL, release, vintage,
   dataUpdated and credit together); the monthly release check reports a newer
   release and newer layer data.

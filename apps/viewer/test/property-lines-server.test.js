@@ -15,6 +15,9 @@ const {
   modelSiteWindow,
   modelCoverageWindow,
   COVERAGE_METERS,
+  TILE_EDGE_ALLOWANCE_METERS,
+  authorizedEnvelope,
+  LIMITS,
   boundsInsideSite,
   boundsTouchSite,
   cacheBounds,
@@ -294,6 +297,105 @@ test('API: clients and live shares allowed, live share checks, model binding and
     assert.equal(failed.status, 502);
     assert.equal((await failed.json()).status, 'unavailable');
   });
+});
+
+// Web Mercator tile helpers for the synthetic public-link tests.
+const tileXY = (lon, lat, z) => {
+  const n = 2 ** z;
+  return [Math.floor((lon + 180) / 360 * n), Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * n)];
+};
+const tileWest = (x, z) => x / 2 ** z * 360 - 180;
+
+test('API: public link map tiles: only on-grid tiles inside the coverage, queried and answered clipped to it', async () => {
+  const seen = [];
+  // The state answers every tile with one parcel reaching 30 km east of the model.
+  const source = { parcels: async (bounds, options) => {
+    seen.push({ bounds, options });
+    return { status: 'ok', parcels: [{ id: 9, owner: 'SAMPLE FARMS LLC', rings: [[[bounds.west, bounds.south], [bounds.west, bounds.north], [-89.0, bounds.north], [-89.0, bounds.south], [bounds.west, bounds.south]]] }] };
+  } };
+  const share = { Cookie: `ltds_share=${shareCookie()}` };
+  const version = madisonModel('model-a').activeVersion;
+  const coverage = modelCoverageWindow(version);
+  const [cx, cy] = tileXY(-89.401, 43.07475, 14);
+  await withServer({ source }, async base => {
+    const get = query => fetch(`${base}/api/v1/property-lines/parcels?${query}&model=model-a`, { headers: share });
+    // The model's own tile: served exactly as the grid defines it.
+    const own = await get(`tile=14/${cx}/${cy}`);
+    assert.equal(own.status, 200);
+    assert.equal(seen.at(-1).options.snap, false, 'tiles are queried exactly, not snapped outward');
+    assert.equal(seen.at(-1).bounds.west, tileWest(cx, 14));
+    assert.equal(seen.at(-1).options.caller, 'share:share-1');
+    // Off-grid or malformed tiles never reach the state service.
+    const before = seen.length;
+    for (const tile of ['13/2061/2985', '17/1/1', '14/4123.5/5940', '14/-1/5940', '14/16384/5940', `14/${cx}/${cy}/1`, `14,${cx},${cy}`, '014/1/1', '', `14/${cx}/${cy}&bbox=-89.402,43.074,-89.4,43.0755`])
+      assert.equal((await get(`tile=${encodeURIComponent(tile).replace('%26', '&').replace('%3D', '=')}`)).status, 400, tile);
+    assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?tile=14/${cx}/${cy}&bbox=-89.402,43.074,-89.4,43.0755&model=model-a`, { headers: share })).status, 400, 'one request type at a time');
+    assert.equal(seen.length, before, 'refused tiles are never fetched');
+    // Walk east along the model's row: tiles stop at the coverage plus the
+    // one-tile edge allowance; overhanging tiles past that are refused.
+    const accepted = [], refused = [];
+    for (let x = cx; x <= cx + 8; x++) {
+      const res = await get(`tile=14/${x}/${cy}`);
+      if (res.status === 200) accepted.push({ x, body: await res.json(), query: seen.at(-1).bounds });
+      else { assert.equal(res.status, 403); assert.equal((await res.json()).code, 'outside_model'); refused.push(x); }
+    }
+    assert.ok(accepted.length >= 2 && refused.length >= 2, `accepted ${accepted.map(a => a.x)} refused ${refused}`);
+    assert.ok(Math.max(...accepted.map(a => a.x)) < Math.min(...refused), 'one contiguous run from the model outward');
+    const projection = coverage.projection;
+    const eastOf = lon => projection.latLonToUtm(43.07475, lon)[0];
+    for (const { x, body, query } of accepted) {
+      // The tile itself lies within the coverage plus the allowance.
+      assert.ok(eastOf(tileWest(x + 1, 14)) <= coverage.maxE + TILE_EDGE_ALLOWANCE_METERS + 1, `tile ${x} within the allowance`);
+      // The query and every returned point stop at the coverage envelope.
+      // The envelope is the coverage window's lon/lat bounds: grid convergence
+      // this far from the zone's central meridian adds a bounded sliver.
+      const env = authorizedEnvelope('tile', query, version);
+      assert.ok(eastOf(env.east) <= coverage.maxE + 250, 'envelope within 250 m of the coverage window');
+      assert.ok(query.east <= env.east && query.west >= env.west, `tile ${x} query clipped`);
+      for (const ring of body.parcels.flatMap(p => p.rings)) for (const [lon, lat] of ring)
+        assert.ok(lon <= env.east && lon >= env.west && lat <= env.north && lat >= env.south, `tile ${x} response clipped`);
+      assert.equal(body.parcels[0].owner, 'SAMPLE FARMS LLC');
+    }
+    const edge = accepted.at(-1);
+    assert.ok(eastOf(tileWest(edge.x + 1, 14)) > coverage.maxE, 'the last accepted tile overhangs the coverage');
+    assert.ok(edge.query.east < tileWest(edge.x + 1, 14), 'and only its covered part is queried');
+    // A dense tile's zoom-16 children are accepted on the same terms.
+    const [x16, y16] = tileXY(-89.401, 43.07475, 16);
+    assert.equal((await get(`tile=16/${x16}/${y16}`)).status, 200);
+    // 3D scene boxes stay limited to the model's site window, not the coverage.
+    const site = modelSiteWindow(version);
+    const [, outsideSiteLon] = site.projection.utmToLatLon(site.maxE + 500, (site.minN + site.maxN) / 2);
+    const sceneBox = `bbox=${(outsideSiteLon - 0.002).toFixed(4)},43.074,${outsideSiteLon.toFixed(4)},43.0755`;
+    assert.equal((await get(sceneBox)).status, 403, 'a scene box past the site window is refused even inside the coverage');
+  });
+});
+
+test('origin budget: unrelated cache misses from many callers stay within the per-minute origin budget', async () => {
+  let calls = 0, now = 0;
+  const source = createParcelSource({ now: () => now, limits: { ...LIMITS, originPerMinute: 5 }, fetchImpl: async () => { calls++; return response({ features: [] }); } });
+  const box = i => ({ west: -89.5 + i * 0.003, south: 43.07, east: -89.5 + i * 0.003 + 0.002, north: 43.072 });
+  const statuses = [];
+  for (let i = 0; i < 20; i++) statuses.push((await source.parcels(box(i), { caller: `share:${i}`, snap: false })).status);
+  assert.equal(calls, 5, 'at most the budget reaches the parcel service');
+  assert.deepEqual(statuses.filter(s => s === 'busy').length, 15);
+  assert.equal(source.stats().originRefused, 15);
+  assert.equal((await source.parcels(box(0), { caller: 'share:other', snap: false })).status, 'none', 'cached answers are still served');
+  assert.equal(calls, 5);
+  now += 61_000;
+  assert.equal((await source.parcels(box(19), { caller: 'share:19', snap: false })).status, 'none', 'the budget refills after a minute');
+  assert.equal(calls, 6);
+  assert.equal(LIMITS.originPerMinute, 240, 'production budget');
+
+  // Through the API: a public link asking for many distinct tiles gets 429 once the origin budget is spent.
+  let upstream = 0;
+  const limited = createParcelSource({ limits: { ...LIMITS, originPerMinute: 3 }, fetchImpl: async () => { upstream++; return response({ features: [] }); } });
+  const [cx, cy] = tileXY(-89.401, 43.07475, 16);
+  await withServer({ source: limited }, async base => {
+    const codes = [];
+    for (let dx = 0; dx < 8; dx++) codes.push((await fetch(`${base}/api/v1/property-lines/parcels?tile=16/${cx + dx}/${cy}&model=model-a`, { headers: { Cookie: `ltds_share=${shareCookie()}` } })).status);
+    assert.deepEqual(codes, [200, 200, 200, 429, 429, 429, 429, 429]);
+  });
+  assert.equal(upstream, 3);
 });
 
 test('API: an uploaded boundary replaces the state layer behind the same access checks', async () => {

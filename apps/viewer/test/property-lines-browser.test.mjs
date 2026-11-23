@@ -142,7 +142,7 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     assert.equal(state.card.replace(/\s+/g, ' ').trim().toLowerCase(), 'property lines hide merge parcels by owner');
     assert.doesNotMatch(state.card, /parcels? shown|not a survey|Source|release|V12|tax roll|updated/i);
     const request = hits.find(h => h.startsWith('/api/v1/property-lines/parcels'));
-    assert.match(request, /^\/api\/v1\/property-lines\/parcels\?bbox=-89\.\d{6}%2C43\.\d{6}%2C-89\.\d{6}%2C43\.\d{6}&model=model-1$/);
+    assert.match(request, /^\/api\/v1\/property-lines\/parcels\?tile=14%2F\d+%2F\d+&model=model-1$/);
     assert.equal(await client.evaluate('map.hasLayer && Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && typeof l.getLatLngs === "function").length'), 2);
     // Orange accent line over a dark halo.
     assert.deepEqual(await client.evaluate('Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && l.getLatLngs).map(l => l.options.color)'), ['#111111', '#ee5007']);
@@ -208,8 +208,11 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     const tileHits = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).slice(beforeWide);
     assert.ok(tileHits.length >= 4, `tiles fetched for the wider view: ${tileHits.length}`);
     for (const hit of tileHits) {
-      const [west, south, east, north] = decodeURIComponent(new URL(hit, 'http://x').searchParams.get('bbox')).split(',').map(Number);
-      assert.ok(east - west < 0.03 && north - south < 0.03, 'tile-sized requests');
+      const tile = new URL(hit, 'http://x').searchParams.get('tile');
+      assert.match(tile, /^1[4-6]\/\d+\/\d+$/, 'on-grid tile keys only');
+      const [z, x, y] = tile.split('/').map(Number), n = 2 ** z;
+      const lonAt = i => i / n * 360 - 180, latAt = j => Math.atan(Math.sinh(Math.PI * (1 - 2 * j / n))) * 180 / Math.PI;
+      const [west, south, east, north] = [lonAt(x), latAt(y + 1), lonAt(x + 1), latAt(y)];
       assert.ok(west < -89.401 + 0.08 && east > -89.401 - 0.08 && south < 43.0745 + 0.06 && north > 43.0745 - 0.06, 'within the coverage around the model');
     }
     await client.evaluate('map.setView([43.0745, -89.401], 11, {animate:false}); 0');
