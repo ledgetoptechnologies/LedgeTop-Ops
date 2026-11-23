@@ -11,6 +11,8 @@ import {
 import { PRINT_PAGES, layoutSheet, planSheet, renderSheet, sheetLabels, sheetMapCap } from './print-sheet.mjs';
 import { encodeSheetPdf, sheetFilename } from './print-pdf.mjs';
 
+// Printed on every sheet.
+export const IMAGERY_CREDIT = 'Imagery: Ledge Top.';
 export const JPEG_QUALITY = 0.92;
 const LIST_LIMIT = 200;
 

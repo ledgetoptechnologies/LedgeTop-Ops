@@ -12,7 +12,7 @@ import { CONTOUR_COLORS } from '../contours.mjs';
 import * as printProperty from '../print-property.mjs';
 import { dissolveParcelsByOwner, formatParcelArea } from '../property-lines-owners.mjs';
 import { tilesCoverBounds } from '../property-lines.mjs';
-import { captureDates } from '../print-page.mjs';
+import { IMAGERY_CREDIT, captureDates } from '../print-page.mjs';
 import { IOS_MAX_PIXELS } from '../print-sheet.mjs';
 import { assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, isIosLike, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, verifyOrthoCrs } from '../ortho-print-export.mjs';
 
@@ -419,7 +419,7 @@ function printPageOf({ permissions = WITH_DOWNLOAD, holdOpen = false } = {}) {
   const p = page({ holdOpen, permissions });
   const seen = { shut: 0, parcels: [] };
   Object.assign(p.context, {
-    isIosLike: () => false, IOS_MAX_PIXELS, verifyOrthoCrs, tilesCoverBounds, dissolveParcelsByOwner, captureDates, camFeatures: [], utmToLatLon: (e, n) => [n, e],
+    isIosLike: () => false, IOS_MAX_PIXELS, IMAGERY_CREDIT, verifyOrthoCrs, tilesCoverBounds, dissolveParcelsByOwner, captureDates, camFeatures: [], utmToLatLon: (e, n) => [n, e],
     createSheetMeasure: () => () => 0, createPrintModel: deps => { seen.deps = deps; return { deps }; }, printPageJob: null,
     printPage: { shut() { seen.shut++; p.context.printPageJob?.end(); } },
     readCaptureMask: async () => ({ captured: () => true, inside: () => 100 }),
@@ -438,6 +438,7 @@ test('print page: opens for this viewer with the orthophoto’s parcels, and is 
   assert.deepEqual({ ...seen.parcels[0] }, { west: -90, south: 44, east: -89.9, north: 44.1 });
   assert.equal(seen.deps.outlines.length, 1);
   assert.equal(seen.deps.attribution, 'Source: Synthetic Parcel Map R1.');
+  assert.equal(seen.deps.imageryCredit, IMAGERY_CREDIT);
   assert.equal(seen.deps.merge, false);
   assert.equal(seen.deps.orthoGsd, 2);
   assert.deepEqual([seen.deps.meta.title, seen.deps.meta.captured, seen.deps.maxPixels], ['Model', null, Infinity]);

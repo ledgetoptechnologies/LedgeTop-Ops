@@ -88,7 +88,7 @@ import { modelHorizontalDatum, tilesCoverBounds, verifiedUtmGeoref } from './pro
 import { createPropertyLinesController } from './property-lines-layer.mjs';
 import { createContourController, dtmVerticalScale } from './contour-layer.mjs';
 import { PRINT_DISTANCE_DEFAULT_FT, METERS_PER_FOOT as PRINT_METERS_PER_FOOT, coverageNote, linesToUtm, outlineToUtm, printClip, printPropertyError, propertyCoverage, propertyFrame, readCaptureMask, resolvePrintProperty } from './print-property.mjs';
-import { captureDates, createPrintModel, mountPrintPage } from './print-page.mjs';
+import { IMAGERY_CREDIT, captureDates, createPrintModel, mountPrintPage } from './print-page.mjs';
 import { IOS_MAX_PIXELS, createSheetMeasure, supportedPages } from './print-sheet.mjs';
 import { dissolveParcelsByOwner, formatParcelArea } from './property-lines-owners.mjs';
 import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, canvasWorks, clampExtent, exportOrthoPrint, isIosLike, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, supportedPrintSizes, verifyOrthoCrs } from './ortho-print-export.mjs';
@@ -4237,7 +4237,7 @@ async function openPrintPage() {
       ortho, orthoGsd: (ortho.maxE - ortho.minE) / ortho.images[0].getWidth(), capture,
       outlines: dissolveParcelsByOwner(parcels, { merge }), merge, loadParcels: load,
       covered: found && !found.failed && !found.partial ? (bounds) => tilesCoverBounds(found.loaded, bounds) : null,
-      attribution: parcels.length ? propertyLines.attribution() : '', datumNote: parcels.length ? propertyLines.datumNote() : '', imageryCredit: 'Imagery: Ledge Top.',
+      attribution: parcels.length ? propertyLines.attribution() : '', datumNote: parcels.length ? propertyLines.datumNote() : '', imageryCredit: IMAGERY_CREDIT,
       latLonToUtm: (lat, lon) => latLonToUtm(lat, lon), utmToLatLon: (e, n) => utmToLatLon(e, n), units: DISPLAY_UNITS,
       meta: { title: PROJECT?.title || '', project: PROJECT?.projectName || '', captured: SHARE_PERMISSIONS.cameras ? captureDates(camFeatures) : null,
         printed: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) },
