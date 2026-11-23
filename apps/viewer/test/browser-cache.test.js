@@ -377,6 +377,107 @@ test('an already known source decision shortens the copy by its greatest possibl
   assert.deepEqual([refused.status, refused.headers['cache-control'], decisions], [403, NO_STORE, 2]);
 });
 
+// A client share behind the real validator; `ops` answers for Operations.
+function clientShare(f, ops) {
+  const source = { type: 'client_grant', id: 'grant', version: 1, subject: 'client', expiresAt: null };
+  f.repository.getPublicShare = () => ({ id: 'share', modelId: f.modelId, versionPolicy: 'active', authorizationRevision: 0, allowedViews: null, permissions: {}, expiresAt: null, shareClass: 'client', sourceAuthorization: source });
+  const state = { active: true, decisions: 0, decidedAt: 0 };
+  assets.setSourceAuthorizationValidator(new SourceAuthorizationValidator({ enabled: true, baseUrl: 'https://ops.test', keyId: 'key', secret: 's'.repeat(32),
+    fetchImpl: async () => {
+      const active = state.active; // what Operations decided, when it was asked
+      state.decisions += 1;
+      state.decidedAt = performance.now();
+      await ops?.(state);
+      return Response.json({ active, authorizationId: source.id, authorizationVersion: 1, subject: source.subject, modelId: f.modelId, expiresAt: null });
+    } }));
+  state.url = f.url('model.glb', auth.sign({ kind: 'share-asset', shareId: 'share', shareRevision: 0, modelId: f.modelId }, 3_600_000));
+  return state;
+}
+// The copy must end within 300 s (real time) of the decision that allowed it.
+function endsInTime(response, state, label) {
+  const age = (performance.now() - state.decidedAt) / 1000;
+  assert.ok([200, 206, 304].includes(response.status), `${label}: ${response.status}`);
+  assert.ok(age + (Number.isNaN(maxAge(response)) ? 0 : maxAge(response)) <= 300, `${label}: ${age.toFixed(1)} s old, ${response.headers['cache-control']}`);
+}
+
+test('client shares: a wall clock set back or forward never lengthens the window', async (t) => {
+  const realNow = Date.now;
+  t.after(() => { Date.now = realNow; });
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const shifted = (ms) => { Date.now = () => realNow() + ms; };
+  const f = await fixture(t);
+  const revalidate = { 'if-none-match': `"sha256-${sha256(f.bodies.glb)}"` };
+
+  // Set back after the decision: a kept allow still ends 5 s after it was made.
+  let state = clientShare(f);
+  endsInTime(await f.request(state.url), state, 'first');
+  state.active = false; // access removed in Operations
+  shifted(-120_000);
+  await wait(2000);
+  for (const headers of [{}, { range: 'bytes=0-9' }, revalidate]) endsInTime(await f.request(state.url, headers), state, 'known decision, clock set back');
+  assert.equal(state.decisions, 1);
+  await wait(3300);
+  let refused = await f.request(state.url, revalidate);
+  assert.deepEqual([refused.status, refused.headers['cache-control']], [403, NO_STORE], 'not extended by 120 s');
+  assert.equal(state.decisions, 2);
+  Date.now = realNow;
+
+  // Set back while Operations is being asked, and while the file is checked.
+  state = clientShare(f, async () => { await wait(1500); shifted(-120_000); });
+  endsInTime(await f.request(state.url), state, 'clock set back during the decision');
+  state.active = false;
+  await wait(3800);
+  refused = await f.request(state.url, revalidate);
+  assert.deepEqual([refused.status, refused.headers['cache-control']], [403, NO_STORE]);
+  Date.now = realNow;
+  const { verifyWholeFile } = f.integrity;
+  state = clientShare(f);
+  f.integrity.verifyWholeFile = async (...args) => { await wait(2100); shifted(-120_000); return verifyWholeFile.apply(f.integrity, args); };
+  endsInTime(await f.request(state.url), state, 'clock set back during the file check');
+  delete f.integrity.verifyWholeFile;
+  Date.now = realNow;
+
+  // Set forward: the decision is over at once and Operations is asked again.
+  state = clientShare(f);
+  endsInTime(await f.request(state.url), state, 'before the jump');
+  state.active = false;
+  shifted(6000);
+  refused = await f.request(state.url, revalidate);
+  assert.deepEqual([refused.status, refused.headers['cache-control'], state.decisions], [403, NO_STORE, 2]);
+});
+
+test('client shares: requests that join a running decision get its age, not their own', async (t) => {
+  const f = await fixture(t);
+  const state = clientShare(f, () => new Promise((resolve) => setTimeout(resolve, 2500)));
+  const first = f.request(state.url);
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  state.active = false; // removed after Operations decided
+  for (const response of await Promise.all([first, f.request(state.url), f.request(state.url, { range: 'bytes=0-9' })])) endsInTime(response, state, 'joined');
+  assert.equal(state.decisions, 1);
+});
+
+test('a failure in the integrity setup of a tree child closes the file and is not cacheable', async (t) => {
+  const f = await fixture(t);
+  const handles = [];
+  const { open } = fs.promises;
+  t.mock.method(fs.promises, 'open', async (...args) => { const handle = await open(...args); handles.push(handle); return handle; });
+  let lookups = 0;
+  f.repository.getModelAssetFile = () => { lookups += 1; throw new Error('database failed'); };
+  for (const rel of ['tiles/0/tile.b3dm', 'tiles/tileset.json', 'ept/ept-data/0-0-0-0.laz']) {
+    for (const [label, options] of Object.entries({ GET: [], range: [{ range: 'bytes=0-9' }], HEAD: [{}, 'HEAD'], conditional: [{ 'if-none-match': '"x"' }] })) {
+      handles.length = 0;
+      lookups = 0;
+      const response = await f.request(f.url(rel), ...options);
+      assert.equal(response.status, 500, `${rel} ${label}`);
+      assert.ok(!String(response.headers['cache-control']).includes('max-age'), `${rel} ${label}`);
+      assert.deepEqual([lookups, handles.length], [1, 1], `${rel} ${label}: it failed with the file open`);
+      assert.equal(handles[0].fd, -1, `${rel} ${label}: the descriptor is closed before the error is sent`);
+    }
+  }
+  delete f.repository.getModelAssetFile;
+  fullTime(await f.request(f.url('tiles/0/tile.b3dm')), 'and it serves again');
+});
+
 test('a failure while the strong ETag is looked up closes the file and is not cacheable', async (t) => {
   const f = await fixture(t);
   const handles = [];

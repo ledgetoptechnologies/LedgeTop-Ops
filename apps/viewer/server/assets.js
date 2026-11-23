@@ -175,7 +175,8 @@ async function verifyChunks(filePath,stat,chunks,range,totalSize,options={}){if(
 const BROWSER_CACHE_KINDS=new Set(['tiles','ept','glb','ortho','orthoCutline','dsm','dtm']);
 const BROWSER_CACHE_MAX_SECONDS=300;
 // The oldest an Operations answer about a client share can be when the share is
-// allowed (sourceAuthorization: answers are kept, and checks may run, 5 s at most).
+// allowed. sourceAuthorization enforces it: no allow is used more than 5 s after
+// its check started, on the wall and the monotonic clock, kept or in flight.
 const SOURCE_DECISION_MAX_AGE_MS=5000;
 // A cached copy never outlives the capability (`until`), and the 5 minutes start
 // at the authorization decision, not when the response is sent: access removed
@@ -329,7 +330,10 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   }
   let opened;
   try { opened = await openForDelivery(abs); } catch { return res.status(404).json({ error: 'asset not found' }); }
-  const { etag, ...delivery } = integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened);
+  // The integrity record is read with the file open: a failure closes it.
+  let etag, delivery;
+  try { ({ etag, ...delivery } = integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened)); }
+  catch (error) { await opened.handle.close().catch(() => {}); throw error; }
   return deliverVerified(req, res, {
     ...opened,
     filePath: abs,
