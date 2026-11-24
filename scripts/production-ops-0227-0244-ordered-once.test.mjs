@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after, before } from 'node:test';
@@ -506,7 +507,9 @@ function baselineFor(recorded = 0) {
   const file = receiptPath();
   fs.writeFileSync(file, JSON.stringify({ contract: 'production-ops-0227-0244-ordered-once-v1',
     planSha256: loadVerifiedOps0227To0244Plan().planSha256, target: { environment: 'non-production', ...REHEARSAL },
-    rowCounts: { start: row }, stop: null, existingSchema: ops0227To0244ExistingSchema({ schema }, loadVerifiedOps0227To0244Plan()),
+    schemaVersion: 2, mode: 'execute', ...(recorded === 10 ? { status: 'complete', stop: null, writesPerformed: 1, steps: [{ apply: { outcome: 'acknowledged' } }] }
+      : { status: 'stopped', stop: { step: OPS_0227_0244_ORDERED_NAMES[recorded], phase: 'preflight', code: 'preflight_failed:synthetic' }, writesPerformed: 0, steps: [] }),
+    rowCounts: { start: row }, existingSchema: ops0227To0244ExistingSchema({ schema }, loadVerifiedOps0227To0244Plan()),
     finalLedger: { count: 226 + recorded, lastMigration: recorded === 0 ? '0226_staff_login_bindings.sql' : OPS_0227_0244_ORDERED_NAMES[recorded - 1] } }));
   return file;
 }
@@ -665,6 +668,58 @@ test('production execute requires an approval reference and records it; rehearsa
 });
 
 // --- Review follow-ups: non-atomic batches, row counts, sequence, targets ----
+
+test('only an ended execute run, or its unsent starting point, can be a baseline', async () => {
+  const plan = loadVerifiedOps0227To0244Plan(), target = { environment: 'non-production', ...REHEARSAL };
+  const load = value => { const file = receiptPath(); fs.writeFileSync(file, JSON.stringify(value)); return loadOps0227To0244BaselineReceipt(file, { plan, target }); };
+  // Real receipts: complete, stopped, reconciliation-required, and the pre-apply receipt of the complete run.
+  const completeFile = freshDb(), completeReceipt = receiptPath();
+  const complete = await cli(completeFile, execArgs(completeReceipt));
+  assert.equal(complete.result.status, 'complete');
+  const preApplyReceipt = `${completeReceipt}.pre-apply.json`;
+  const ambiguousFile = freshDb(), ambiguousReceipt = receiptPath();
+  await cli(ambiguousFile, execArgs(ambiguousReceipt), { providerOptions: { ambiguousAt: OPS_0227_0244_ORDERED_NAMES[2] } });
+  const [completed, ambiguous, preApply] = [completeReceipt, ambiguousReceipt, preApplyReceipt].map(readReceipt);
+  for (const value of [completed, ambiguous, preApply, readReceipt(baselineFor(3))]) assert.equal(load(value).status, value.status);
+  // A run that had not ended is never eligible, even with a full final ledger in it.
+  for (const value of [completed, ambiguous, preApply]) for (const status of ['running', 'refused', 'cancelled', 'dry-run-passed', 'reconciled', 'unknown', '', null, undefined])
+    assert.throws(() => load({ ...value, status }), /baseline_receipt_status_not_eligible/u, String(status));
+  const invalid = [
+    ...['dry-run', 'reconcile', undefined].flatMap(mode => [completed, ambiguous, preApply].map(value => ({ ...value, mode }))),
+    { ...completed, stop: ambiguous.stop }, { ...completed, finalLedger: ambiguous.finalLedger }, { ...completed, writesPerformed: 9 },
+    { ...completed, writesPerformed: 0, steps: [] }, { ...completed, steps: undefined }, { ...completed, steps: [null] }, { ...completed, schemaVersion: 1 },
+    { ...ambiguous, stop: null }, { ...ambiguous, stop: {} }, { ...ambiguous, stop: { phase: 'apply', code: '' } }, { ...ambiguous, stop: { phase: 'apply' } },
+    { ...ambiguous, finalLedger: { ...ambiguous.finalLedger, lastMigration: OPS_0227_0244_ORDERED_NAMES[5] } },
+    { ...ambiguous, finalLedger: { ...ambiguous.finalLedger, count: 237 } }, { ...ambiguous, finalLedger: { ...ambiguous.finalLedger, count: 225 } },
+    { ...preApply, writesPerformed: 1, steps: [{ apply: { outcome: 'acknowledged' } }] }, { ...preApply, steps: [{ apply: { outcome: 'sending' } }] },
+    { ...preApply, steps: [{ apply: { outcome: 'ambiguous' } }] }, { ...preApply, stop: ambiguous.stop }, { ...preApply, finalLedger: ambiguous.finalLedger },
+    { ...preApply, initial: null },
+  ];
+  for (const [index, value] of invalid.entries()) assert.throws(() => load(value), /baseline_receipt_invalid/u, `case ${index}`);
+
+  // The starting point can be compared before anything landed; it never stands in for a sent step, and never resumes.
+  const untouched = freshDb();
+  const before = await cli(untouched, ['--reconcile', '--baseline-receipt', preApplyReceipt, ...rehearsalArgs]);
+  assert.deepEqual([before.result.status, before.result.reconcile.nextStep], ['reconciled', OPS_0227_0244_ORDERED_NAMES[0]]);
+  const landed = freshDb();
+  applyPrefix(landed, 1);
+  const after = await cli(landed, ['--reconcile', '--baseline-receipt', preApplyReceipt, ...rehearsalArgs]);
+  assert.deepEqual([after.result.status, after.result.stop.code], ['reconciliation-required', 'reconciliation_required:baseline_receipt_not_latest']);
+  for (const [file, next] of [[untouched, 0], [landed, 1]]) {
+    const receiptFile = receiptPath();
+    const resumed = await cli(file, [...execArgs(receiptFile), '--resume-from', OPS_0227_0244_ORDERED_NAMES[next], '--baseline-receipt', preApplyReceipt]);
+    assert.deepEqual([resumed.result.status, resumed.result.stop.code, resumed.provider.calls.writes, resumed.provider.calls.reads],
+      ['reconciliation-required', 'ops_0227_0244:baseline_receipt_pre_apply_not_resumable', 0, 0]);
+    assert.equal(readReceipt(receiptFile).stop.code, 'ops_0227_0244:baseline_receipt_pre_apply_not_resumable');
+  }
+  // A running receipt is refused by the command, before any read of the ledger.
+  const running = receiptPath();
+  fs.writeFileSync(running, JSON.stringify({ ...completed, status: 'running' }));
+  for (const args of [['--reconcile'], [...execArgs(receiptPath()).filter(arg => !rehearsalArgs.includes(arg)), '--resume-from', OPS_0227_0244_ORDERED_NAMES[1]]]) {
+    const { result, provider } = await cli(landed, [...args, '--baseline-receipt', running, ...rehearsalArgs]);
+    assert.deepEqual([result.status, result.stop.code, provider.calls.reads, provider.calls.writes], ['reconciliation-required', 'ops_0227_0244:baseline_receipt_status_not_eligible', 0, 0]);
+  }
+});
 
 test('a partially applied batch (some statements, no ledger row) is detected and refused by reconcile', async () => {
   const file = freshDb();
@@ -1067,6 +1122,62 @@ test('reconcile and resume re-prove the approved schema, and a receipt cannot in
 });
 
 // The exact production-shaped store holds raw production definitions, so it is never committed.
+/** A local server that answers every request with `head` and the start of a body, and never finishes it. */
+async function openBodyServer(head, start) {
+  const seen = { requests: 0, closed: 0 };
+  const server = http.createServer((request, response) => {
+    seen.requests++;
+    response.on('close', () => { seen.closed++; });
+    request.resume();
+    response.writeHead(head.status, head.headers);
+    response.write(start);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  return { seen, port: server.address().port, close: () => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }) };
+}
+const OPEN_BODIES = [
+  ['http_failure', { status: 503, headers: { 'content-type': 'application/json' } }, '{"success":false'],
+  ['http_failure', { status: 401, headers: {} }, 'x'],
+  ['redirect_refused', { status: 302, headers: { location: 'http://127.0.0.1:9/' } }, 'x'],
+  ['response_too_large', { status: 200, headers: { 'content-length': String(40 * 1024 * 1024) } }, '{'],
+  ['response_too_large', { status: 200, headers: {} }, 'x'.repeat(1024 * 1024 + 10)],
+];
+
+test('provider: a refused answer whose body stays open is dropped at once, with the same code and one request', async () => {
+  for (const [code, head, start] of OPEN_BODIES) {
+    const server = await openBodyServer(head, start);
+    const signals = [];
+    try {
+      const p = provider((url, init) => { signals.push(init.signal); return fetch(`http://127.0.0.1:${server.port}/`, init); }, { timeoutMs: 120_000 });
+      const started = Date.now();
+      await assert.rejects(p.assertTarget(), { message: `ops_0227_0244_provider:${code}` });
+      for (let i = 0; i < 100 && server.seen.closed === 0; i++) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.ok(Date.now() - started < 5_000);
+      assert.deepEqual([server.seen.requests, server.seen.closed, signals.length, signals[0].aborted], [1, 1, 1, true], code);
+    } finally { await server.close(); }
+  }
+  // A success is not aborted; a failed transport and an unreadable answer are, with their codes unchanged.
+  const signals = [];
+  const good = fakeFetch(() => ({ payload: targetPayload }));
+  await provider((url, init) => { signals.push(init.signal); return good.fetchImpl(url, init); }).assertTarget();
+  assert.equal(signals[0].aborted, false);
+  for (const [fetchImpl, code] of [[async () => { throw new Error('transport'); }, 'request_uncertain_no_retry'], [async () => new Response('not json'), 'response_invalid'],
+    [async () => new Response('{"success":false}'), 'response_invalid']]) {
+    let signal = null, calls = 0;
+    await assert.rejects(provider((url, init) => { calls++; signal = init.signal; return fetchImpl(); }).assertTarget(), { message: `ops_0227_0244_provider:${code}` });
+    assert.deepEqual([calls, signal.aborted], [1, true], code);
+  }
+  // A refused mutation keeps its one request and its code.
+  const file = loadVerifiedOps0227To0244Plan().files[0], server = await openBodyServer({ status: 500, headers: {} }, 'x');
+  try {
+    let calls = 0;
+    const p = provider((url, init) => (init.method === 'GET' ? good.fetchImpl(url, init) : (calls++, fetch(`http://127.0.0.1:${server.port}/`, init))), { allowWrites: true });
+    await p.assertTarget();
+    await assert.rejects(p.applyMigration({ name: file.name, sha256: file.sha256, statements: file.statements, statementsSha256: file.statementsSha256 }), /http_failure$/u);
+    assert.deepEqual([calls, server.seen.requests], [1, 1]);
+  } finally { await server.close(); }
+});
+
 // --- The real command and the real provider, answered from a local SQLite file -------
 
 /** Starts the real command as a child process. Cloudflare requests are answered from `file`; writes are refused there. */
@@ -1179,6 +1290,15 @@ test('a run that cannot save its receipt stops at once and is never reported as 
 });
 
 const realFs = Object.fromEntries(['openSync', 'writeSync', 'fsyncSync', 'closeSync', 'readFileSync', 'renameSync'].map(name => [name, fs[name]]));
+const HELD = ['EPERM', 'EACCES', 'EBUSY'];
+/** Runs `body` as on Windows, without really waiting; returns the requested waits in milliseconds. */
+async function asOnWindows(body) {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform'), wait = Atomics.wait, waits = [];
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  Atomics.wait = (array, index, expected, ms) => { waits.push(ms); return 'timed-out'; };
+  try { await body(waits); } finally { Object.defineProperty(process, 'platform', platform); Atomics.wait = wait; restoreFs(); }
+  return waits;
+}
 const diskError = code => Object.assign(new Error('synthetic'), { code });
 const isNext = file => typeof file === 'string' && file.endsWith('.next');
 /** A file that takes only `limit` bytes; afterwards `end` decides what a write does. Applies to receipt writes only. */
@@ -1234,7 +1354,7 @@ test('the receipt writer replaces the receipt only when the new one is proven, a
     EROFS: () => ({ renameSync: () => { throw diskError('EROFS'); } }),
     cutOff: () => ({ readFileSync: (file, ...rest) => (isNext(file) ? realFs.readFileSync(file).subarray(0, 100) : realFs.readFileSync(file, ...rest)) }),
     changed: () => ({ readFileSync: (file, ...rest) => { const b = realFs.readFileSync(file, ...rest); if (isNext(file)) b[20] ^= 1; return b; } }),
-    unreadable: () => ({ readFileSync: (file, ...rest) => { if (isNext(file)) throw diskError('EACCES'); return realFs.readFileSync(file, ...rest); } }),
+    unreadable: () => ({ readFileSync: (file, ...rest) => { if (isNext(file)) throw diskError('EIO'); return realFs.readFileSync(file, ...rest); } }),
     changedByOthers: name => { fs.writeFileSync(name, 'not ours'); return {}; },
     removed: name => { fs.rmSync(name); fs.writeFileSync(name, ''); return {}; },
     leftover: name => { fs.writeFileSync(`${name}.next`, 'from elsewhere'); return {}; },
@@ -1257,16 +1377,12 @@ test('the receipt writer replaces the receipt only when the new one is proven, a
   assert.equal(reread.error?.message, 'ops_0227_0244:receipt_write_failed');
   assert.ok(reread.stored.equals(encode(value)));
 
-  // A file held by another program is a failure at once, with the previous receipt in place. Nothing is tried again.
-  for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
-    const calls = { rename: 0, read: 0 };
-    const renamed = attempt(() => ({ renameSync: () => { calls.rename++; throw diskError(code); } }));
-    const reading = attempt(() => ({ readFileSync: (file, ...rest) => { if (isNext(file)) { calls.read++; throw diskError(code); } return realFs.readFileSync(file, ...rest); } }));
-    for (const run of [renamed, reading]) {
-      assert.deepEqual([run.error?.message, run.error?.cause?.code, run.again?.message], ['ops_0227_0244:receipt_write_failed', code, 'ops_0227_0244:receipt_write_failed']);
-      assert.ok(run.stored.equals(old), code);
-    }
-    assert.deepEqual(calls, { rename: 1, read: 1 }, code);
+  // Outside Windows a refused replacement is a failure at once.
+  if (process.platform !== 'win32') for (const code of HELD) {
+    let count = 0;
+    const { error, stored } = attempt(() => ({ renameSync: () => { count++; throw diskError(code); } }));
+    assert.deepEqual([error?.cause?.code, count], [code, 1]);
+    assert.ok(stored.equals(old));
   }
   // The folder is flushed after the replacement, where the platform supports it; a failure there is a failed receipt.
   for (const call of ['openSync', 'fsyncSync']) {
@@ -1292,6 +1408,116 @@ test('the receipt writer replaces the receipt only when the new one is proven, a
   assert.ok(fs.readFileSync(name).equals(old));
   assert.throws(() => receipt.keep(first), /receipt_exists_no_replay/u);
   assert.ok(fs.readFileSync(`${name}.pre-apply.json`).equals(encode(value)));
+});
+
+test('Windows: a held receipt is waited for, at most 15 seconds, with the same proven file onto the same receipt', async () => {
+  const first = { phase: 'first' }, value = { phase: 'second', text: 'x'.repeat(2000) };
+  const encode = item => Buffer.from(`${JSON.stringify(item, null, 2)}\n`);
+  const attempt = async patch => {
+    const name = receiptPath(), lines = [], receipt = openOps0227To0244Receipt(name, { log: line => lines.push(line) });
+    receipt.write(first);
+    let wait = null, error = null;
+    const waits = await asOnWindows(() => {
+      Object.assign(fs, patch(name));
+      try { wait = receipt.write(value); } catch (caught) { error = caught; }
+    });
+    const left = fs.existsSync(`${name}.next`) ? fs.readFileSync(`${name}.next`) : null;
+    return { name, wait, error, waits, lines, left, stored: fs.existsSync(name) ? fs.readFileSync(name) : null };
+  };
+  const refuseRename = (code, times, calls) => () => ({ renameSync: (from, to) => { calls.push([from, to]); if (calls.length <= times) throw diskError(code); realFs.renameSync(from, to); } });
+  for (const code of HELD) {
+    const calls = [], saved = await attempt(refuseRename(code, 3, calls));
+    assert.equal(saved.error, null);
+    assert.equal(saved.wait.refusals, 3);
+    assert.deepEqual(saved.waits, [100, 100, 100]);
+    assert.ok(calls.length === 4 && calls.every(([from, to]) => from === `${saved.name}.next` && to === saved.name));
+    assert.ok(saved.stored.equals(encode(value)));
+    assert.match(saved.lines.join('\n'), /^receipt replacement refused 3 times over \d+ ms: then saved \(.+\.json\)$/u);
+
+    const refused = [], failed = await attempt(refuseRename(code, Infinity, refused));
+    assert.equal(failed.error?.message, 'ops_0227_0244:receipt_write_failed');
+    assert.deepEqual([failed.error.cause.code, failed.error.receiptWait.refusals, refused.length, failed.waits.length], [code, 151, 151, 150]);
+    assert.ok(failed.stored.equals(encode(first)), 'the previous receipt is intact');
+    assert.ok(failed.left.equals(encode(value)), 'the proven file is left beside it');
+    assert.match(failed.lines.join('\n'), /^receipt replacement refused 151 times over \d+ ms: not saved/u);
+
+    // Reading the same two files can be refused in the same way, before the replacement.
+    let reads = 0;
+    const reading = await attempt(() => ({ readFileSync: (file, ...rest) => { if (isNext(file) && ++reads <= 2) throw diskError(code); return realFs.readFileSync(file, ...rest); } }));
+    assert.deepEqual([reading.error, reading.wait.refusals], [null, 2]);
+  }
+  // 15 seconds of real time end the wait too, however few tries that was.
+  const clock = performance.now.bind(performance);
+  let now = 0;
+  try {
+    performance.now = () => (now += 8_000);
+    const calls = [], slow = await attempt(refuseRename('EBUSY', Infinity, calls));
+    assert.ok(slow.error && calls.length === 3 && slow.error.receiptWait.waitedMs === 16_000);
+  } finally { performance.now = clock; }
+  // Never again after a replacement that may have happened, and never with other bytes on either side.
+  const renames = [];
+  const committed = await attempt(() => ({ renameSync: (from, to) => { renames.push(to); realFs.renameSync(from, to); throw diskError('EPERM'); } }));
+  assert.deepEqual([committed.error?.cause?.code, renames.length, committed.waits.length], ['ENOENT', 1, 1]);
+  assert.ok(committed.stored.equals(encode(value)));
+  for (const target of ['next', 'receipt']) {
+    const calls = [];
+    const changed = await attempt(name => ({ renameSync: () => { calls.push(1); fs.writeFileSync(target === 'next' ? `${name}.next` : name, 'other bytes'); throw diskError('EPERM'); } }));
+    assert.match(changed.error?.cause?.message ?? '', /differs$/u);
+    assert.equal(calls.length, 1);
+    assert.ok(changed.stored.equals(target === 'next' ? encode(first) : Buffer.from('other bytes')));
+  }
+  // Anything else, and anything after the replacement, is a failure at once.
+  for (const patch of [() => ({ renameSync: () => { throw diskError('ENOSPC'); } }), () => ({ openSync: () => { throw diskError('EACCES'); } }),
+    name => { let renamed = false; return { renameSync: (from, to) => { realFs.renameSync(from, to); renamed = true; },
+      readFileSync: (file, ...rest) => { if (renamed && file === name) throw diskError('EBUSY'); return realFs.readFileSync(file, ...rest); } }; }]) {
+    const { error, waits } = await attempt(patch);
+    assert.equal(error?.message, 'ops_0227_0244:receipt_write_failed');
+    assert.deepEqual(waits, []);
+  }
+});
+
+test('Windows: a held receipt during a run is waited for or stops it, at the first, middle and last write, with nothing remote meanwhile', async () => {
+  const attempt = async (failAt, times) => {
+    const file = freshDb(), provider = sqliteProvider(file), receiptFile = receiptPath(), lines = [];
+    const remote = () => provider.calls.reads + provider.calls.writes + provider.calls.targets;
+    let renames = 0, refusals = 0, remoteAtRefusal = null, result;
+    const waits = await asOnWindows(async () => {
+      fs.renameSync = (from, to) => {
+        if (renames + 1 === failAt && refusals < times) {
+          refusals++;
+          remoteAtRefusal ??= remote();
+          assert.equal(remote(), remoteAtRefusal, 'nothing is sent or read remotely while waiting');
+          throw diskError('EPERM');
+        }
+        renames++;
+        realFs.renameSync(from, to);
+      };
+      result = await mainOps0227To0244(execArgs(receiptFile), { env: TOKEN_ENV, out: line => lines.push(line), providerFactory: () => provider, confirm: async () => true });
+    });
+    const after = remote(), sent = provider.calls.writes;
+    provider.close();
+    return { result, receiptFile, lines, waits, sent, remoteAtRefusal, after, saved: fs.statSync(receiptFile).size ? readReceipt(receiptFile) : null };
+  };
+  // Writes: 1 and 2 start, 3 pre-apply, 4 first 'sending', then two per file, 24 the last.
+  for (const failAt of [1, 2, 3, 4, 5, 12, 13, 23, 24]) {
+    const ok = await attempt(failAt, 2);
+    assert.deepEqual([ok.result.status, ok.result.receiptFailure, ok.waits.length, ok.sent], ['complete', undefined, 2, 10], `write ${failAt}`);
+    assert.equal(ok.saved.status, 'complete');
+    assert.equal(ok.saved.receiptWaits.length, 1);
+    assert.deepEqual([ok.saved.receiptWaits[0].receipt, ok.saved.receiptWaits[0].refusals], [failAt === 3 ? 'pre-apply' : 'receipt', 2], `write ${failAt}`);
+    assert.equal(ok.lines.filter(line => line.startsWith('receipt replacement refused 2 times')).length, 1);
+
+    const held = await attempt(failAt, Infinity);
+    assert.equal(held.waits.length, 150);
+    assert.equal(held.after, held.remoteAtRefusal, 'nothing remote after the wait ran out');
+    assert.deepEqual([held.result.status, held.result.stop.code, held.result.receiptFailure, held.result.writesPerformed], [
+      ...(held.sent ? ['reconciliation-required', 'reconciliation_required:receipt_write_failed'] : ['stopped', 'receipt_write_failed']),
+      'ops_0227_0244:receipt_write_failed', held.sent], `write ${failAt}`);
+    assert.match(held.result.stop.detail, /^receipt replacement refused 151 times over \d+ ms$/u);
+    assert.equal(held.sent, failAt < 5 ? 0 : failAt === 24 ? 10 : Math.floor((failAt - 3) / 2), `write ${failAt}`);
+    if (failAt === 1) assert.equal(held.saved, null); else assert.equal(held.saved.status, 'running');
+    if (failAt > 3) assert.equal(readReceipt(`${held.receiptFile}.pre-apply.json`).status, 'pre-apply');
+  }
 });
 
 test('a process that stops at any file operation or any part of a write leaves a complete receipt', () => {
@@ -1376,7 +1602,7 @@ test('every unsaved receipt of a real-file run leaves the last complete receipt 
     if (failAt === 1) { assert.equal(fs.statSync(receiptFile).size, 0); continue; }
     const saved = readReceipt(receiptFile);
     assert.equal(saved.status, 'running', 'the last complete receipt, never a success');
-    assert.throws(() => loadOps0227To0244BaselineReceipt(receiptFile, { plan, target }), /baseline_receipt_invalid/u);
+    assert.throws(() => loadOps0227To0244BaselineReceipt(receiptFile, { plan, target }), /baseline_receipt_status_not_eligible/u);
     if (failAt <= 3) { assert.equal(sent, 0); continue; }
     const kept = `${receiptFile}.pre-apply.json`;
     assert.deepEqual(loadOps0227To0244BaselineReceipt(kept, { plan, target }).startCounts, preApply.rowCounts.start);

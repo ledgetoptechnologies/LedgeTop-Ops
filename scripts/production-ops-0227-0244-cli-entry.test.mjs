@@ -3,8 +3,9 @@
 // No npm dependencies. This file exists because a top-level await in the entry deadlocked with the provider import
 // (exit 13, zero requests) while every test that injected a provider passed.
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
@@ -189,6 +190,34 @@ test('a settled refusal keeps its code when its receipt cannot be written', () =
   const short = file('short.json');
   assert.equal(run(executeArgs(short), { root, extraEnv: { GIT_CEILING_DIRECTORIES: tmp, OPS_TEST_RECEIPT_FAILS: 'short' } }).stderr, '');
   assertRefusedReceipt(short, 'execute', code, 'source-check');
+});
+
+test('a refused answer whose body stays open cannot hold the real command', async () => {
+  const bodies = [
+    ['http_failure', 503, { 'content-type': 'application/json' }, '{"success":false'],
+    ['redirect_refused', 302, { location: 'http://127.0.0.1:9/' }, 'x'],
+    ['response_too_large', 200, { 'content-length': String(40 * 1024 * 1024) }, '{'],
+  ];
+  for (const [code, status, headers, start] of bodies) for (const mode of [[], ['--reconcile']]) {
+    let requests = 0;
+    const server = http.createServer((request, response) => { requests++; request.resume(); response.writeHead(status, headers); response.write(start); });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const receipt = file('open-body.json'), log = file('network.log');
+    fs.writeFileSync(log, '');
+    const env = { OPS_TEST_NETWORK_LOG: log, OPS_TEST_LOOPBACK_PORT: String(server.address().port), CLOUDFLARE_API_TOKEN: TOKEN };
+    for (const key of ['PATH', 'Path', 'SystemRoot', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE']) if (process.env[key]) env[key] = process.env[key];
+    const child = spawn(process.execPath, ['--import', PRELOAD, path.join(ROOT, TOOL), ...mode, ...PRODUCTION, '--receipt', receipt], { cwd: ROOT, env, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const started = Date.now();
+    const exit = await Promise.race([new Promise(resolve => child.once('close', status => resolve(status))), new Promise(resolve => setTimeout(() => resolve('held'), 20_000).unref())]);
+    child.kill('SIGKILL');
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    assert.deepEqual([exit, stderr, requests], [1, `ops_0227_0244_provider:${code}\n`, 1], code);
+    assert.ok(Date.now() - started < 15_000);
+    assertRefusedReceipt(receipt, mode.length ? 'reconcile' : 'dry-run', `ops_0227_0244_provider:${code}`);
+  }
 });
 
 test('a run that never settles exits 1 and says so; importing the module runs nothing', () => {

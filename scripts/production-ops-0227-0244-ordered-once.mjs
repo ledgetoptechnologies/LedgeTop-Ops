@@ -296,6 +296,25 @@ export function ops0227To0244LedgerPosition(snapshot, plan) {
 }
 
 /**
+ * The receipts that may be a baseline: an execute run that ended (stopped, reconciliation-required or complete), or the
+ * starting point such a run saved before it sent anything. A run that is still 'running' never is, whatever it holds.
+ */
+function eligibleBaseline(value, plan) {
+  const { status, stop, steps, writesPerformed, finalLedger } = value;
+  if (value.schemaVersion !== 2 || value.mode !== 'execute' || !Array.isArray(steps) || steps.some(step => !isPlain(step))
+    || !Number.isSafeInteger(writesPerformed)
+    || steps.filter(step => step.apply?.outcome === 'acknowledged').length !== writesPerformed) return false;
+  const prior = OPS_0227_0244_PRIOR_LEDGER, recorded = finalLedger?.count - prior.count;
+  if (!Number.isSafeInteger(recorded) || recorded < 0 || recorded > plan.files.length
+    || finalLedger.lastMigration !== (recorded === 0 ? prior.lastMigration : plan.files[recorded - 1].name)) return false;
+  if (status === 'stopped' || status === 'reconciliation-required')
+    return isPlain(stop) && typeof stop.phase === 'string' && typeof stop.code === 'string' && stop.code.length > 0;
+  if (status === 'complete') return stop === null && recorded === plan.files.length && writesPerformed > 0;
+  return status === 'pre-apply' && stop === null && writesPerformed === 0 && steps.every(step => step.apply === null)
+    && value.initial?.ledger?.count === finalLedger.count;
+}
+
+/**
  * Loads the start row counts from an earlier receipt of this tool (the first run's receipt, or a resumed
  * run's receipt, which carries the same start counts forward). Counts only; no identities.
  */
@@ -303,18 +322,20 @@ export function loadOps0227To0244BaselineReceipt(filename, { plan, target } = {}
   if (typeof filename !== 'string' || !path.isAbsolute(filename)) fail('baseline_receipt_path_invalid');
   let value;
   try { value = JSON.parse(fs.readFileSync(filename, 'utf8')); } catch { fail('baseline_receipt_unreadable'); }
+  if (isPlain(value) && value.contract === OPS_0227_0244_CONTRACT
+    && !['stopped', 'reconciliation-required', 'complete', 'pre-apply'].includes(value.status)) fail('baseline_receipt_status_not_eligible');
   const start = value?.rowCounts?.start;
   if (!isPlain(value) || value.contract !== OPS_0227_0244_CONTRACT || value.planSha256 !== plan.planSha256
     || value.target?.databaseId !== target.databaseId || value.target?.accountId !== target.accountId
     || !exactKeys(start, TRACKED_ROWS) || TRACKED_ROWS.some(key => !Number.isSafeInteger(start[key]) || start[key] < 0)
     || !Number.isSafeInteger(value.finalLedger?.count) || typeof value.finalLedger?.lastMigration !== 'string'
     || !exactKeys(value.existingSchema, ['objectCount', 'sha256']) || !Number.isSafeInteger(value.existingSchema.objectCount)
-    || !SHA.test(value.existingSchema.sha256 ?? ''))
+    || !SHA.test(value.existingSchema.sha256 ?? '') || !eligibleBaseline(value, plan))
     fail('baseline_receipt_invalid');
   // The approved fingerprint is a source constant; a receipt can never introduce another production baseline.
   if (isProductionTarget(target) && canonical(value.existingSchema) !== canonical(OPS_PRODUCTION_EXISTING_SCHEMA))
     fail('baseline_receipt_existing_schema_not_approved');
-  return Object.freeze({ startCounts: Object.freeze({ ...start }), stopPhase: value.stop?.phase ?? null,
+  return Object.freeze({ status: value.status, startCounts: Object.freeze({ ...start }), stopPhase: value.stop?.phase ?? null,
     stopCode: value.stop?.code ?? null, stopStep: value.stop?.step ?? null,
     existingSchema: Object.freeze({ ...value.existingSchema }),
     finalLedger: Object.freeze({ count: value.finalLedger.count, lastMigration: value.finalLedger.lastMigration }) });
@@ -496,15 +517,23 @@ function syncFolder(folder) {
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
+/** Windows refuses to replace or read a file that another program holds open. */
+const HELD_BY_OTHERS = ['EPERM', 'EACCES', 'EBUSY'];
+const HELD_WAIT_MS = 100, HELD_LIMIT_MS = 15_000;
+
 /**
  * Exclusive receipt file. Every write replaces the whole file atomically: the new content goes to `<file>.next`, every
  * byte is written and flushed, the closed file is read back and compared, and only then does it replace the receipt.
  * The folder is flushed and the receipt is read back once more. The last complete receipt therefore stays in place
- * until a newer one is proven, whenever the process stops. Any failure, including a file that another program holds
- * open, is `receipt_write_failed`. Nothing is tried again: this process never writes the file again, and
- * `<file>.next` is left as it is. `keep` saves one value, once, as `<file>.pre-apply.json`.
+ * until a newer one is proven, whenever the process stops. Any failure is `receipt_write_failed`: this process never
+ * writes the file again, and `<file>.next` is left as it is. `keep` saves one value, once, as `<file>.pre-apply.json`.
+ *
+ * One local wait: on Windows, a replacement that is refused because another program holds a file is tried again with
+ * the same flushed file onto the same receipt, for at most 15 seconds, and only while both still hold exactly the
+ * expected bytes (so never after a replacement that may have happened). The wait blocks the process: nothing is sent
+ * or read remotely meanwhile. It is logged, and returned or attached to the error as `{ refusals, waitedMs }`.
  */
-export function openOps0227To0244Receipt(filename) {
+export function openOps0227To0244Receipt(filename, { log = () => {} } = {}) {
   if (typeof filename !== 'string' || !path.isAbsolute(filename)) fail('receipt_path_invalid');
   try { fs.closeSync(fs.openSync(filename, 'wx', 0o600)); } catch (error) {
     if (error?.code === 'EEXIST') fail('receipt_exists_no_replay');
@@ -517,6 +546,7 @@ export function openOps0227To0244Receipt(filename) {
     write(receipt) {
       if (broken) fail('receipt_write_failed');
       broken = true;
+      const wait = { refusals: 0, waitedMs: 0 };
       try {
         const bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
         JSON.parse(bytes.toString('utf8'));
@@ -533,17 +563,33 @@ export function openOps0227To0244Receipt(filename) {
           throw error;
         }
         fs.closeSync(fd);
-        same(next, bytes);
-        // Only this process's own last receipt is replaced.
-        same(filename, current);
-        fs.renameSync(next, filename);
+        for (const started = performance.now(); ;) {
+          try {
+            same(next, bytes);
+            // Only this process's own last receipt is replaced.
+            same(filename, current);
+            fs.renameSync(next, filename);
+            break;
+          } catch (error) {
+            if (process.platform !== 'win32' || !HELD_BY_OTHERS.includes(error?.code)) throw error;
+            wait.refusals++;
+            if (wait.waitedMs >= HELD_LIMIT_MS || wait.refusals > HELD_LIMIT_MS / HELD_WAIT_MS) throw error;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_WAIT_MS);
+            wait.waitedMs = Math.round(performance.now() - started);
+          }
+        }
         syncFolder(path.dirname(filename));
         same(filename, bytes);
         current = bytes;
-      } catch (cause) { throw new Error(RECEIPT_WRITE_FAILED, { cause }); }
+      } catch (cause) {
+        if (wait.refusals > 0) log(`receipt replacement refused ${wait.refusals} times over ${wait.waitedMs} ms: not saved (${path.basename(filename)})`);
+        throw Object.assign(new Error(RECEIPT_WRITE_FAILED, { cause }), { receiptWait: wait });
+      }
+      if (wait.refusals > 0) log(`receipt replacement refused ${wait.refusals} times over ${wait.waitedMs} ms: then saved (${path.basename(filename)})`);
       broken = false;
+      return wait;
     },
-    keep(receipt) { openOps0227To0244Receipt(`${filename}.pre-apply.json`).write(receipt); },
+    keep(receipt) { return openOps0227To0244Receipt(`${filename}.pre-apply.json`, { log }).write(receipt); },
     close() {},
   };
 }
@@ -578,7 +624,9 @@ export async function runOps0227To0244Ordered(options = {}) {
     if (!state.stop) {
       const code = sent ? 'reconciliation_required:receipt_write_failed' : 'receipt_write_failed';
       state.status = sent ? 'reconciliation-required' : 'stopped';
-      state.stop = { step: state.steps.at(-1)?.name ?? null, phase: 'receipt', code };
+      const wait = error.cause?.receiptWait;
+      state.stop = { step: state.steps.at(-1)?.name ?? null, phase: 'receipt', code,
+        ...(wait?.refusals > 0 ? { detail: `receipt replacement refused ${wait.refusals} times over ${wait.waitedMs} ms` } : {}) };
       options.log?.(`STOP at ${state.stop.step ?? 'start'} (receipt): ${code}`);
     }
     state.receiptFailure = RECEIPT_WRITE_FAILED;
@@ -608,7 +656,7 @@ async function runOrdered({ plan, provider, mode = 'dry-run', target, receipt = 
     startedAt: stamp(), finishedAt: null, status: 'running', stop: null,
     files: plan.files.map(({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount }) =>
       ({ order, name, ledgerId, sha256, statementCount, statementsSha256, expectedAddedObjectCount })),
-    initial: null, reconcile: null, steps: [], notes: [], rowCounts: null, existingSchema: null,
+    initial: null, reconcile: null, steps: [], notes: [], receiptWaits: [], rowCounts: null, existingSchema: null,
     approvedExistingSchema: approvedSchema ? { expected: { ...approvedSchema }, observed: null, ok: false } : null,
     finalLedger: null, writesPerformed: 0,
   };
@@ -616,12 +664,18 @@ async function runOrdered({ plan, provider, mode = 'dry-run', target, receipt = 
     if (snapshot.snapshotBytes > OPS_0227_0244_SNAPSHOT_WARN_BYTES)
       state.notes.push(`Snapshot at ${where} is ${snapshot.snapshotBytes} bytes, near the D1 per-value limit.`);
   };
-  const persist = () => { if (receipt) try { receipt.write(state); } catch (cause) { throw new ReceiptWriteFailure(state, cause); } };
+  const save = (write, what) => {
+    let wait;
+    try { wait = write(); } catch (cause) { throw new ReceiptWriteFailure(state, cause); }
+    // A local wait for a held file is part of the record; the next saved receipt carries it.
+    if (wait?.refusals > 0) state.receiptWaits.push({ receipt: what, step: state.steps.at(-1)?.name ?? null, ...wait });
+  };
+  const persist = () => { if (receipt) save(() => receipt.write(state), 'receipt'); };
   // Saved once, before the first file is sent: the proven starting point of this run, whatever happens later.
   let kept = false;
   const keepPreApply = ledger => {
     if (kept || !receipt?.keep) return;
-    try { receipt.keep({ ...state, status: 'pre-apply', finalLedger: ledgerSummary(ledger) }); } catch (cause) { throw new ReceiptWriteFailure(state, cause); }
+    save(() => receipt.keep({ ...state, status: 'pre-apply', finalLedger: ledgerSummary(ledger) }), 'pre-apply');
     kept = true;
   };
   const stop = (step, phase, code, detail = null) => {
@@ -747,7 +801,10 @@ async function runOrdered({ plan, provider, mode = 'dry-run', target, receipt = 
     stop(null, 'final', 'final_ledger_mismatch');
   }
   state.finishedAt = stamp();
+  const waits = state.receiptWaits.length;
   persist();
+  // The last receipt cannot hold its own wait, so it is saved once more; a wait of that write is only logged.
+  if (state.receiptWaits.length > waits) persist();
   return state;
 }
 
@@ -825,9 +882,9 @@ export async function mainOps0227To0244(args, dependencies = {}) {
     databaseName: options.databaseName };
   let receipt = null, receiptTouched = false;
   if (options.receiptPath) {
-    const opened = (dependencies.openReceipt ?? openOps0227To0244Receipt)(options.receiptPath);
-    receipt = { write(value) { receiptTouched = true; opened.write(value); }, close() { opened.close(); },
-      ...(opened.keep ? { keep(value) { opened.keep(value); } } : {}) };
+    const opened = (dependencies.openReceipt ?? openOps0227To0244Receipt)(options.receiptPath, { log: out });
+    receipt = { write(value) { receiptTouched = true; return opened.write(value); }, close() { opened.close(); },
+      ...(opened.keep ? { keep(value) { return opened.keep(value); } } : {}) };
   }
   // A settled result keeps its own code when its receipt cannot be written; the receipt failure is reported beside it.
   const record = result => {
@@ -868,6 +925,12 @@ export async function mainOps0227To0244(args, dependencies = {}) {
           status: 'reconciliation-required', stop: { step: null, phase: 'baseline-receipt', code: errorCode(error) },
           writesPerformed: 0, at: new Date().toISOString() };
         return record(refusal);
+      }
+      // The starting point of a run says nothing about what that run sent. It may be compared, never resumed from.
+      if (options.mode === 'execute' && baseline.status === 'pre-apply') {
+        return record({ schemaVersion: 2, contract: OPS_0227_0244_CONTRACT, mode: options.mode, target, approvalRef: options.approvalRef,
+          status: 'reconciliation-required', stop: { step: null, phase: 'baseline-receipt', code: 'ops_0227_0244:baseline_receipt_pre_apply_not_resumable' },
+          writesPerformed: 0, at: new Date().toISOString() });
       }
     }
     const common = { plan, target, log: out, approvalRef: options.approvalRef, baseline,

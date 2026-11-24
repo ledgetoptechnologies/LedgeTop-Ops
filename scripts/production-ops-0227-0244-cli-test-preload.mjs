@@ -2,6 +2,7 @@
 // Every network attempt is recorded in OPS_TEST_NETWORK_LOG (method and kind only, never headers) and refused.
 // With OPS_TEST_D1_SQLITE, requests to the Cloudflare D1 API are answered from that local SQLite file instead, and
 // batches are applied only with OPS_TEST_D1_WRITES=1. OPS_TEST_FETCH_HANGS=1 makes a request that never settles.
+// With OPS_TEST_LOOPBACK_PORT, requests to the Cloudflare D1 API go to that port on 127.0.0.1 instead, and only there.
 // OPS_TEST_RECEIPT_FAILS makes one kind of receipt operation fail and records each failure: open, fsync, close,
 // readback, rename, reread, enospc:<bytes>, edquot:<bytes>, zero:<bytes> (a file that takes only that many bytes), or
 // short (writes of at most 100 bytes, which must still succeed). OPS_TEST_RECEIPT_FAILS_AFTER=<n> lets the first n
@@ -16,7 +17,12 @@ const LOG = process.env.OPS_TEST_NETWORK_LOG;
 if (!LOG) throw new Error('OPS_TEST_NETWORK_LOG is required');
 const record = entry => fs.appendFileSync(LOG, `${JSON.stringify(entry)}\n`);
 const refuse = kind => function refused() { record({ kind }); throw new Error('network refused by the test preload'); };
-net.Socket.prototype.connect = refuse('socket');
+const LOOPBACK = Number(process.env.OPS_TEST_LOOPBACK_PORT ?? 0), connect = net.Socket.prototype.connect, refuseSocket = refuse('socket');
+net.Socket.prototype.connect = function guarded(...args) {
+  const options = Array.isArray(args[0]) ? args[0][0] : args[0];
+  if (LOOPBACK > 0 && Number(options?.port) === LOOPBACK && (options.host ?? options.hostname) === '127.0.0.1') return connect.apply(this, args);
+  return refuseSocket();
+};
 dgram.Socket.prototype.send = refuse('datagram');
 dgram.Socket.prototype.connect = refuse('datagram');
 for (const target of [dns, dns.promises]) for (const name of Object.keys(target))
@@ -92,10 +98,12 @@ if (process.env.OPS_TEST_FETCH_HANGS === '1') {
   const real = globalThis.setTimeout;
   globalThis.setTimeout = (...args) => { const timer = real(...args); timer.unref?.(); return timer; };
 }
+const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input), method = init.method ?? 'GET';
   record({ kind: 'fetch', method, url: url.replace(/[a-f0-9]{32}/u, '<account>'), auth: /^Bearer .{20,}$/u.test(init.headers?.Authorization ?? '') });
   if (process.env.OPS_TEST_FETCH_HANGS === '1') return new Promise(() => {});
+  if (LOOPBACK > 0 && API.test(url)) return realFetch(`http://127.0.0.1:${LOOPBACK}/`, init);
   if (process.env.OPS_TEST_D1_SQLITE && API.test(url)) return answer(url, init);
   throw new Error('network refused by the test preload');
 };

@@ -270,10 +270,13 @@ A receipt write counts only after every byte is written to `<receipt>.next`,
 flushed, closed and read back equal, the file has replaced the receipt, the folder
 has been flushed (not on Windows, which has no way to), and the receipt has been
 read back equal. After a failure the process never writes that
-receipt again, and nothing is tried again. On Windows a receipt that another
-program holds open cannot be replaced, and that is such a failure: do not open the
-receipt files during a run. The previous complete receipt normally stays in place,
-and
+receipt again. One local wait exists: on Windows, a replacement refused because
+another program holds a file open (EPERM, EACCES or EBUSY) is tried again with the
+same file for at most 15 seconds, and only while both files still hold exactly the
+expected bytes. Nothing is sent or read remotely meanwhile. The refusals and the
+time are logged and recorded in `receiptWaits`. No migration batch and no other
+request is ever sent twice. Do not open the receipt files during a run. The
+previous complete receipt normally stays in place, and
 `.next` holds whatever was written. A receipt that was not saved is never
 reported as a success: the exit code is 1, whatever the run reached, and stderr
 has its own line.
@@ -298,10 +301,18 @@ run that reached 236. Do not retry. The exit code and stderr decide, not the
 file. If only the last check after the replacement failed, the receipt can be
 newer, even `complete`.
 
-An unfinished receipt (status `running`) is not accepted as a baseline. The
-pre-apply receipt is accepted only while the ledger is still where it was before
-the first file. Any later state needs a reviewed manual reconciliation from a
-read-only look at the ledger and schema.
+Only the receipt of an execute run that ended (`stopped`,
+`reconciliation-required` or `complete`) or a pre-apply receipt is accepted as a
+baseline. An unfinished receipt (status `running`) never is, whatever it holds. The
+pre-apply receipt is accepted by reconcile only while the ledger is still where it
+was before the first file, and never for a resume: it says nothing about what its
+run sent. After any step was sent, the state is resolved from the live ledger and
+schema, read from the primary, in a reviewed manual reconciliation.
+
+A successful exit and an independent read-back from the primary are both needed
+before a run counts as done. A final receipt beside exit code 1 needs
+reconciliation. On Windows the folder cannot be flushed, so after a power loss the
+previous complete receipt can reappear.
 
 ## Reconcile and resume
 
