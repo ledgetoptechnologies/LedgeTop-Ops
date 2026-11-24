@@ -255,7 +255,15 @@ function createApiV1(repository) {
     if (typeof grantId !== 'string' || !/^[0-9a-f-]{36}$/i.test(grantId))
       return res.status(400).json({ error: 'invalid session grant' });
     const existing = presentedViewer(req);
-    const outcome = repository.transaction(() => {
+    // Spent together with the session it opens. A grant whose renewal fails is
+    // not spent: the session presented with it ended meanwhile, and the grant
+    // still opens a new one. A grant that can no longer open its target (its
+    // authorization ended, or that version is no longer the published or
+    // reviewed one) is spent by the attempt, as it was before.
+    const renewalFailed = Symbol('renewal failed');
+    let outcome;
+    try {
+    outcome = repository.transaction(() => {
     const grant = repository.redeemSessionGrantInTransaction(grantId);
     if (!grant) return { status: 410, error: 'session grant expired or already redeemed' };
     const authorizedUntilMs = Date.parse(grant.permissions.__authorizedUntil || '');
@@ -314,10 +322,14 @@ function createApiV1(repository) {
         expiresAt,
       });
     }
-    if (!session) return { status: 410, error: 'viewer session could not be renewed' };
+    if (!session) throw renewalFailed;
     repository.audit({ actorType: grant.audience, actorId: grant.subject, action: 'session.redeemed', entityType: 'model', entityId: grant.modelId });
     return { session, accessToken, ttlMs };
     });
+    } catch (error) {
+      if (error !== renewalFailed) throw error;
+      outcome = { status: 410, error: 'viewer session could not be renewed' };
+    }
     if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
     res.cookie(VIEWER_COOKIE, outcome.accessToken, auth.cookieAttrs(req, { maxAge: outcome.ttlMs }));
     return sendCurrentSession(req, res, outcome.session, outcome.accessToken);
@@ -453,8 +465,7 @@ function createApiV1(repository) {
       const revoked = repository.revokePublishedSessionsBySourceAuthorization({
         sourceAuthorization,
         idempotency: {
-          keyId: req.servicePrincipal.keyId,
-          idempotencyKey: req.get('Idempotency-Key'),
+          reservation: req.idempotencyReceipt.reservation,
           encrypt,
         },
         audit: {

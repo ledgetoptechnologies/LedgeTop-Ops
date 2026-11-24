@@ -348,13 +348,14 @@ test('exact source revocation is atomic, scoped, replay-safe, and token-redacted
   const lostResponseRequestHash = crypto.createHash('sha256').update(Buffer.concat([
     Buffer.from(`DELETE\n${revokePath}\n`), Buffer.from(lostResponseBody),
   ])).digest('hex');
-  assert.equal(lostResponseRepository.reserveIdempotency({
+  const lostResponseReservation = lostResponseRepository.reserveIdempotency({
     keyId: 'ops-v1', idempotencyKey: lostResponseKey, method: 'DELETE', path: revokePath,
     requestHash: lostResponseRequestHash, expiresAt: new Date(Date.now() + 60_000).toISOString(),
-  }).created, true);
+  });
+  assert.equal(lostResponseReservation.created, true);
   const committedWithoutResponse = lostResponseRepository.revokePublishedSessionsBySourceAuthorization({
     sourceAuthorization: lostResponseDescriptor,
-    idempotency: { keyId: 'ops-v1', idempotencyKey: lostResponseKey, encrypt: encryptReplay },
+    idempotency: { reservation: lostResponseReservation.reservation, encrypt: encryptReplay },
     audit: {
       actorType: 'service', actorId: 'ops-v1', action: 'published_session.source_authorization_revoked',
       entityType: 'source_authorization',

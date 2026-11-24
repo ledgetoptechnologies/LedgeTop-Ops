@@ -126,29 +126,32 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       }
       return error(res,409,'idempotency_in_progress');
     }
-    req.adminIdempotency={sessionId:req.adminPrincipal.id,key,requestHash};
+    const held=reservation.reservation;
+    req.adminIdempotency={sessionId:req.adminPrincipal.id,key,requestHash,reservation:held};
     // As serviceIdempotency.js: a receipt stored in the transaction that issues what it answers with.
-    req.idempotencyReceipt={store:(status,body)=>processing.completeAdminIdempotency(req.adminPrincipal.id,key,status,body),committed:()=>{req.adminIdempotencyCompleted=true;}};
+    if(held)req.idempotencyReceipt={store:(status,body)=>processing.storeIssuedAdminReceipt(held,status,body),committed:()=>{req.adminIdempotencyCompleted=true;}};
     let finalized=false;
     const finish=(body)=>{
       if(finalized||req.adminIdempotencyCompleted||res.statusCode>=500)return;
       finalized=true;
       // Not kept: it ends when the model is restored (see serviceIdempotency.js).
-      if(res.locals.modelDeleted)return processing.releaseAdminIdempotency(req.adminPrincipal.id,key);
+      if(res.locals.modelDeleted){if(held)processing.releaseAdminIdempotency(held);return;}
       if(durableOperation)return processing.completeSubjectOperationReceipt(req.actorId,key,res.statusCode,body);
       const stored=shareReceipt&&res.statusCode===201&&body&&typeof body==='object'
         ?Object.fromEntries(Object.entries(body).filter(([name])=>name!=='viewUrl'))
         :body;
-      processing.completeAdminIdempotency(req.adminPrincipal.id,key,res.statusCode,stored);
+      // A lost reservation means no receipt; it never goes to another request's reservation.
+      processing.completeAdminIdempotency(held,res.statusCode,stored);
     };
     const originalJson=res.json.bind(res),originalEnd=res.end.bind(res);
     res.json=(body)=>{finish(body);return originalJson(body);};
     res.end=(...args)=>{finish(null);return originalEnd(...args);};
     next();
   }
-  // Only on the one connection both repositories share can a receipt be part of the issuing transaction.
-  const storeReceipt=(req,status,body)=>{if(repository.database===processing.database)req.idempotencyReceipt?.store(status,body);};
-  const receiptCommitted=(req)=>{if(repository.database===processing.database)req.idempotencyReceipt?.committed();};
+  // A receipt is part of the issuing transaction only on the one connection both repositories share. Storing it outside
+  // a transaction of its own connection is refused, so on two connections nothing is issued.
+  const storeReceipt=(req,status,body)=>req.idempotencyReceipt.store(status,body);
+  const receiptCommitted=(req)=>req.idempotencyReceipt.committed();
   const providerView=(provider)=>providerCredentials?providerCredentials.view(provider):provider;
   // Removed providers stay in storage for history but are invisible to provider routes.
   const liveProvider=(id)=>{const provider=processing.getProvider(id);return provider&&!provider.removedAt?provider:null;};
@@ -496,7 +499,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
         const result={share:adminShareView(share)};
         // Never persist the capability URL/token. Persist success before COMMIT
         // so a lost response replays the same link without a second publication.
-        processing.completeAdminIdempotency(req.adminIdempotency.sessionId,req.adminIdempotency.key,201,result);
+        processing.storeIssuedAdminReceipt(req.adminIdempotency.reservation,201,result);
         return result;
       });
       req.adminIdempotencyCompleted=true;
