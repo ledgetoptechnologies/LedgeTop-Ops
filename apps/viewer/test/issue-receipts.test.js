@@ -288,3 +288,35 @@ test('a grant whose renewal fails is not spent; one that can no longer open its 
   const over = f.repository.createSessionGrant({ modelId: f.published.modelId, modelVersionId: f.published.versionId, subject: 'client:one', audience: 'client', permissions: { view: true, __authorizedUntil: '2020-01-01T00:00:00.000Z' }, expiresAt: f.until });
   assert.deepEqual([(await redeem(over.id)).status, spent(over.id)], [410, true]);
 });
+
+test('clearing a stale staff reservation never removes the fresh one another process has put in its place', async (t) => {
+  const f = await fixture(t), other = openDatabase(path.join(f.root, 'viewer.sqlite')), elsewhere = new ProcessingRepository(other), session = f.database.prepare('SELECT id FROM admin_sessions').get().id;
+  const stale = {
+    'left pending': (id) => f.database.prepare('UPDATE admin_idempotency SET created_at=? WHERE rowid=?').run(new Date(Date.now() - 16 * 60_000).toISOString(), id),
+    expired: (id) => f.database.prepare("UPDATE admin_idempotency SET created_at='2020-01-01T00:00:00.000Z',expires_at='2020-01-02T00:00:00.000Z' WHERE rowid=?").run(id),
+  };
+  for (const [why, makeStale] of Object.entries(stale)) {
+    for (const replaced of [true, false]) {
+      const key = `stale-${why.replace(' ', '-')}-${replaced}`, request = { sessionId: session, key, method: 'POST', path: '/p', requestHash: 'h' };
+      const first = f.processing.reserveAdminIdempotency(request).reservation;
+      makeStale(first.rowId);
+      // Between this process reading the stale row and clearing it, the other one clears it and reserves the key.
+      const prepare = f.database.prepare;
+      let fresh = null;
+      f.database.prepare = function staged(sql, ...rest) {
+        if (replaced && !fresh && /^DELETE FROM admin_idempotency/.test(sql)) fresh = elsewhere.reserveAdminIdempotency(request).reservation;
+        return prepare.call(this, sql, ...rest);
+      };
+      const second = f.processing.reserveAdminIdempotency(request);
+      f.database.prepare = prepare;
+      if (!replaced) { assert.equal(second.created, true, `${key}: a stale reservation is still taken over`); continue; }
+      assert.ok(fresh, `${key}: the case under test`);
+      assert.equal(second.created, false, key);
+      assert.equal(second.record.created_at, fresh.createdAt, key);
+      assert.equal(f.database.prepare('SELECT COUNT(*) n FROM admin_idempotency WHERE idempotency_key=?').get(key).n, 1, key);
+      // Its owner still holds it and can store its receipt.
+      assert.equal(elsewhere.completeAdminIdempotency(fresh, 200, {}), true, key);
+    }
+  }
+  other.close();
+});
