@@ -827,16 +827,22 @@ class ViewerRepository {
     return { id, modelId, modelVersionId, reviewAttemptId, sessionMode, sourceAuthorization: authorization, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
   }
 
-  createSessionGrantAudited(input, audit) {
+  // issued(grant): run in the same transaction, for example to store the receipt.
+  createSessionGrantAudited(input, audit, issued = null) {
     return this.transaction(() => {
       const grant = this.createSessionGrant(input);
       this.audit({ ...audit, entityId: audit.entityId || input.reviewAttemptId || grant.id });
+      issued?.(grant);
       return grant;
     });
   }
 
   redeemSessionGrant(id, at = Date.now()) {
-    return this.transaction(() => {
+    return this.transaction(() => this.redeemSessionGrantInTransaction(id, at));
+  }
+
+  redeemSessionGrantInTransaction(id, at = Date.now()) {
+    if (!this.database.isTransaction) throw new Error('grant redemption requires an active transaction');
       const row = this.database.prepare('SELECT * FROM session_grants WHERE id=?').get(id);
       if (!row || row.redeemed_at || Date.parse(row.expires_at) <= at) return null;
       if (this.modelDeleted(row.model_id, row.model_version_id)) return null;
@@ -862,7 +868,6 @@ class ViewerRepository {
         displayUnits: row.display_units,
         expiresAt: row.expires_at,
       };
-    });
   }
 
   viewerSession(row) {

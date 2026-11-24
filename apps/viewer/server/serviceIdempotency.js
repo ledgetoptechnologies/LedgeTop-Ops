@@ -63,6 +63,12 @@ function idempotent(repository) {
     }
 
     let completed = false;
+    // A route can store its receipt in the transaction that issues what it
+    // answers with, and then say that it committed.
+    req.idempotencyReceipt = {
+      store: (status, body) => repository.completeIdempotency(keyId, idempotencyKey, status, encrypt(body)),
+      committed: () => { completed = true; },
+    };
     const originalJson = res.json.bind(res);
     res.json = (body) => {
       // A refusal because the model is in the Recycle Bin ends when it is
