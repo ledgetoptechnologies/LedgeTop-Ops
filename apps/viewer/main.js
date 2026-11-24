@@ -84,12 +84,14 @@ import { createUtmProjection } from './utm-conversion.mjs';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
-import { modelHorizontalDatum, verifiedUtmGeoref } from './property-lines.mjs';
+import { modelHorizontalDatum, tilesCoverBounds, verifiedUtmGeoref } from './property-lines.mjs';
 import { createPropertyLinesController } from './property-lines-layer.mjs';
 import { createContourController, dtmVerticalScale } from './contour-layer.mjs';
 import { PRINT_DISTANCE_DEFAULT_FT, METERS_PER_FOOT as PRINT_METERS_PER_FOOT, coverageNote, linesToUtm, outlineToUtm, printClip, printPropertyError, propertyCoverage, propertyFrame, readCaptureMask, resolvePrintProperty } from './print-property.mjs';
-import { formatParcelArea } from './property-lines-owners.mjs';
-import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, supportedPrintSizes } from './ortho-print-export.mjs';
+import { IMAGERY_CREDIT, captureDates, createPrintModel, mountPrintPage } from './print-page.mjs';
+import { IOS_MAX_PIXELS, createSheetMeasure, supportedPages } from './print-sheet.mjs';
+import { dissolveParcelsByOwner, formatParcelArea } from './property-lines-owners.mjs';
+import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, canvasWorks, clampExtent, exportOrthoPrint, isIosLike, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, supportedPrintSizes, verifyOrthoCrs } from './ortho-print-export.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
 import { renderProjectSwitcherOptions } from './project-switcher.mjs';
@@ -195,6 +197,7 @@ let viewerProductDownloads = null;
 let propertyLines = null;
 let contourLines = null;
 let orthoPrintDialog = null;
+let printPage = null, printPageJob = null;
 
 const state = {
   activeMode: null,
@@ -4193,7 +4196,57 @@ function installContours() {
     run: (options, signal) => exportOrthoPrintFromViewer(options, signal),
     chooseProperty: () => choosePrintProperty(),
   });
+  printPage ||= mountPrintPage({
+    openButton: document.getElementById('btn-print-map'), open: () => openPrintPage(), onClose: () => printPageJob?.end(),
+    pages: () => supportedPages({ probe: (width, height) => canvasWorks(() => document.createElement('canvas'), width, height) }),
+  });
   contourLines.refresh();
+}
+
+// The Print map page, for the viewer, model and version it opens for: the
+// parcels, the capture and the sheet all belong to them. A session change that
+// breaks that, or takes away the resolution it opened with, closes the page.
+async function openPrintPage() {
+  const policy = orthoPrintPermissions(), identity = orthoPrintIdentity(), epsg = printEpsg();
+  assertOrthoPrintAllowed(policy, { area: 'view', format: 'png' });
+  if (!ORTHO_URL) throw Object.assign(new Error('This model has no orthophoto.'), { code: 'print_no_ortho' });
+  if (epsg === null) throw printPropertyError('georef');
+  const controller = new AbortController(), signal = controller.signal;
+  const permitted = () => { const now = orthoPrintPermissions(); return now.allowed && (!policy.whole || now.whole); };
+  const job = { identity, permitted, cancel: () => { controller.abort(); printPage?.shut(); }, end: () => { controller.abort(); orthoPrintExports.delete(job); if (printPageJob === job) printPageJob = null; } };
+  const checkpoint = () => {
+    if (orthoPrintIdentity() !== identity || !permitted()) controller.abort();
+    if (signal.aborted) throw new DOMException('Cancelled.', 'AbortError');
+  };
+  printPageJob?.end();
+  printPageJob = job;
+  orthoPrintExports.add(job);
+  try {
+    const ortho = await getDataset(ORTHO_URL, false, { signal });
+    checkpoint();
+    verifyOrthoCrs(ortho, epsg);
+    const capture = await readCaptureMask(ortho, { signal, pool: ensureGeoTiffPool() });
+    checkpoint();
+    const merge = propertyLines?.state.merge !== false, [[south, west], [north, east]] = ortho.llBounds;
+    const load = (bounds) => propertyLines.loadPrintParcels(bounds);
+    const found = propertyLines ? await load({ west, south, east, north }) : null;
+    checkpoint();
+    const parcels = found?.status === 'ok' ? found.parcels : [];
+    const createCanvas = () => document.createElement('canvas');
+    return createPrintModel({
+      ortho, orthoGsd: (ortho.maxE - ortho.minE) / ortho.images[0].getWidth(), capture,
+      outlines: dissolveParcelsByOwner(parcels, { merge }), merge, loadParcels: load,
+      covered: found && !found.failed && !found.partial ? (bounds) => tilesCoverBounds(found.loaded, bounds) : null,
+      attribution: parcels.length ? propertyLines.attribution() : '', datumNote: parcels.length ? propertyLines.datumNote() : '', imageryCredit: IMAGERY_CREDIT,
+      latLonToUtm: (lat, lon) => latLonToUtm(lat, lon), utmToLatLon: (e, n) => utmToLatLon(e, n), units: DISPLAY_UNITS,
+      meta: { title: PROJECT?.title || '', project: PROJECT?.projectName || '', captured: SHARE_PERMISSIONS.cameras ? captureDates(camFeatures) : null,
+        printed: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) },
+      policy: orthoPrintPermissions, screen: () => map?.getSize?.() || { x: window.innerWidth, y: window.innerHeight }, pixelRatio: () => window.devicePixelRatio || 1,
+      maxPixels: isIosLike() ? IOS_MAX_PIXELS : Infinity,
+      traceContours: DTM_URL && contourLines ? (extent, cell, traceSignal) => contourLines.computeForExtent(extent, cell, { signal: traceSignal || signal }) : null,
+      colors: () => contourLines?.colors(), createCanvas, pool: ensureGeoTiffPool(), measure: createSheetMeasure(createCanvas), checkpoint,
+    });
+  } catch (error) { job.end(); throw error; }
 }
 
 function printEpsg() {

@@ -11,6 +11,7 @@ import {
   groundHeightsConsistent,
   parcelsToUtmPolylines,
   propertyLinesAvailability,
+  propertyLinesDatumNote,
   propertyLinesMessage,
   propertyLinesRequestBounds,
   propertyLinesTilesForView,
@@ -630,7 +631,7 @@ export function createPropertyLinesController(deps) {
       const body = response.ok ? await response.json() : null;
       nextOffered = body?.offered === true && Boolean(body.source);
       // Plain strings only; they are shown with textContent, never as HTML.
-      nextSource = nextOffered ? Object.fromEntries(['kind', 'name', 'release', 'credit', 'disclaimer', 'datumNote', 'datum', 'region', 'owners']
+      nextSource = nextOffered ? Object.fromEntries(['kind', 'name', 'release', 'credit', 'disclaimer', 'datumNote', 'datum', 'region', 'vintage', 'owners']
         .filter(key => typeof body.source[key] === 'string').map(key => [key, body.source[key].slice(0, 600)])) : null;
     } catch { nextOffered = false; nextSource = null; }
     if (stale()) return;
@@ -680,7 +681,12 @@ export function createPropertyLinesController(deps) {
     refresh,
     loadPrintParcels,
     // The source of the lines drawn now and its credit line, for prints.
-    attribution: () => (offered && propertyLinesSourceText(source) ? [propertyLinesSourceText(source), source.credit].filter(Boolean).join(' ') : ''),
+    attribution: () => (offered && propertyLinesSourceText(source) ? [propertyLinesSourceText(source), source.vintage ? `${source.vintage}.` : '', source.credit].filter(Boolean).join(' ') : ''),
+    // Said on a print when the parcels and the model are on different datums.
+    datumNote: () => {
+      const model = deps.modelDatum?.(), datum = source?.datum || 'NAD83';
+      return offered && model && model !== datum ? propertyLinesDatumNote(model, datum) : '';
+    },
     toggle,
     setMerge,
     wake,
