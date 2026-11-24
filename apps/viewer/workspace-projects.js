@@ -345,7 +345,8 @@ async function workspaceFetch(path,init={},beforeDispatch){
   };
   if(beforeDispatch)(await beforeDispatch())();
   let response=await dispatch();
-  if(response.status!==401)return response;
+  const isRecordedReceipt=response=>(Boolean(beforeDispatch)||init.headers?.['X-Viewer-Share-Receipt-Only']==='true')&&response.headers?.get('Idempotency-Replayed')==='true';
+  if(response.status!==401||isRecordedReceipt(response))return response;
   // Renewal retains the bearer but replaces the authenticated session envelope.
   // A response from before that renewal must not revoke the newer authority.
   if(requestToken===state.token&&requestSession===state.adminSession){
@@ -359,7 +360,7 @@ async function workspaceFetch(path,init={},beforeDispatch){
   }else if(!state.token||!state.adminSession)return response;
   if(beforeDispatch)(await beforeDispatch())();
   response=await dispatch();
-  if(response.status===401){
+  if(response.status===401&&!isRecordedReceipt(response)){
     if(requestToken!==state.token||requestSession!==state.adminSession){
       // Bounded replay: never loop through repeated renewals, and do not return
       // a stale401 to api(), which would clear the latest valid workspace.
@@ -369,7 +370,7 @@ async function workspaceFetch(path,init={},beforeDispatch){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const assertRequestCurrent=()=>{if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});};let response;if(recoveryGuard){assertRequestCurrent();response=await fetch(path,init);assertRequestCurrent()}else response=await workspaceFetch(path,init,beforeDispatch);let payload;try{payload=await response.json()}catch{}assertRequestCurrent();if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return payload}
+async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const assertRequestCurrent=()=>{if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});};let response;if(recoveryGuard){assertRequestCurrent();response=await fetch(path,init);assertRequestCurrent()}else response=await workspaceFetch(path,init,beforeDispatch);let payload;try{payload=await response.json()}catch{}assertRequestCurrent();if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}const receiptReplayed=(Boolean(beforeDispatch)||init.headers['X-Viewer-Share-Receipt-Only']==='true')&&response.headers?.get('Idempotency-Replayed')==='true';if(!response.ok&&receiptReplayed)throw Object.assign(responseError(payload?.message||payload?.error||'The earlier share request was refused.',response.status),{code:payload?.code,receiptReplayed:true});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return receiptReplayed?{...payload,receiptReplayed:true}:payload}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message,onFailure){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');let submitted=false;try{const result=await api(path,options);submitted=true;toast(typeof message==='function'?message(result):message);await load();return result}catch(error){onFailure?.(error,{submitted});toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
@@ -2125,7 +2126,7 @@ async function createOutputShare(form,projectId,onlyOutputId){
     const path=`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`;
     const pending=state.pendingOutputShares??=new Map();
     const sessionId=state.adminSession?.id;
-    let request=pending.get(output.id),consent=null,result;
+    let request=pending.get(output.id),consent=null,result,receiptRecovered=false;
     if(request?.busy)return;
     if(request&&(request.subject!==state.adminSession?.subject||request.sessionId!==sessionId))
       throw new Error('A previous request is unresolved. Review the existing links before creating another.');
@@ -2161,17 +2162,27 @@ async function createOutputShare(form,projectId,onlyOutputId){
       subject:state.adminSession?.subject,busy:false,dispatched:false,
     });
     if(request){
-      try{result=await dispatch(true)}catch(error){
+      try{result=await dispatch(true);receiptRecovered=true}catch(error){
         if(error.code==='idempotency_in_progress')
           throw new Error('The previous link request is still being processed. Try again to check it.');
         if(error.code!=='share_receipt_missing'){
           if(error.code==='share_dispatch_cancelled')return await stopped();
+          if(error.receiptReplayed&&error.status>=400&&error.status<500){
+            pending.delete(output.id);
+            if(error.status===409&&error.message==='output_project_changed')return await reopenMovedShare(output,projectId,fence);
+            if(error.status===409&&error.message==='existing_access_update_confirmation_required')
+              state.sharePreflight[output.id]={...state.sharePreflight[output.id],existingAccessUpdateRequired:true};
+          }
           throw error;
         }
       }
       if(!result){
-        if(request.inputSignature!==inputSignature)
-          throw new Error('The previous link request is unresolved. Restore its original settings before retrying.');
+        if(request.inputSignature!==inputSignature){
+          const retry=await dialogs.confirm('The previous request used different settings. Retry it with its original settings?',{
+            title:'Retry previous link request?',submitLabel:'Retry previous request',
+          });
+          if(!retry||!fence.live())return await stopped();
+        }
         body=JSON.parse(request.serialized);
       }
     }else{
@@ -2200,9 +2211,23 @@ async function createOutputShare(form,projectId,onlyOutputId){
         if(error.code==='idempotency_in_progress')throw new Error('The previous link request is still being processed. Try again to check it.');
         throw error;
       }
-    }else body=JSON.parse(request.serialized);
+    }
     pending.delete(output.id);
     if(!fence.authority())return;
+    if(receiptRecovered||result.receiptReplayed){
+      form.shareSaved=true;
+      clearShareResult(result.share?.id,'output');
+      const changed=output.projectId||projectId;
+      outputFences.set(changed,(outputFences.get(changed)||0)+1);
+      toast('The previous link request completed. Check the current link in Share.');
+      await refreshProjectOutputs(changed);
+      if(fence.sameShare()&&!fence.moved()){
+        const opening=openShareModal(projectId,onlyOutputId);
+        if(state.shareContext)state.shareContext.mode='public';
+        await opening;
+      }
+      return;
+    }
     // The link exists: its model's rows are updated wherever the person is now. Only the dialog it was asked from shows it.
     const here=fence.sameShare();
     if(here){rememberShareResult(result,projectId,output.id);if(fence.context)fence.context.mode='public'}

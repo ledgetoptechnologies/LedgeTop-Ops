@@ -349,12 +349,18 @@ test('a completed receipt recovers the exact request without another write or co
   f.respondReceipt(async()=>{throw new Error('down')});
   await f.context.createOutputShare(f.form,'project','output');
   assert.equal(f.posts().length,1);assert.equal(f.asked.length,1);
-  f.respondReceipt(async()=>({share:{id:'share'},viewUrl:'https://viewer.test/view/x'}));
+  const live={id:'share',revokedAt:'2026-11-24T12:00:00Z'};
+  const base=f.context.api;
+  f.context.api=(path,options)=>path.endsWith('/outputs/output/shares')&&options?.method!=='POST'
+    ? Promise.resolve({shares:[live],publicationRequired:true}):base(path,options);
+  f.respondReceipt(async()=>({share:{id:'share',revokedAt:null},viewUrl:'https://viewer.test/view/x'}));
   await f.context.createOutputShare(f.form,'project','output');
   assert.equal(f.asked.length,1);assert.equal(f.posts().length,1);assert.equal(f.receipts().length,2);
   assert.equal(f.receipts()[1].options.headers['Idempotency-Key'],f.posts()[0].options.headers['Idempotency-Key']);
   assert.deepEqual(f.receipts()[1].options.body,f.posts()[0].options.body);
-  assert.equal(f.state.lastShareUrl,'https://viewer.test/view/x');
+  assert.equal(f.state.lastShareUrl,null);
+  assert.equal(f.output.activePublished,false);
+  assert.equal(f.state.shares.output[0],live);
 });
 test('an existing version asks once, with the clients and the existing links together',async()=>{
   const f=askFixture([grantFor('Acme')]);f.state.sharePreflight.output={existingAccessUpdateRequired:true};
@@ -654,15 +660,15 @@ test('raced consent retry uses new key, uncertain retry retains exact consent pa
   assert.equal(f.state.lastShareUrl,'https://viewer.test/view/same-link');
 });
 
-test('uncertain retry retains the exact key and blocks edits until the original is resolved',async()=>{
+test('uncertain retry with edited settings explicitly resends the frozen original',async()=>{
   const f=fixture();f.respondPost(async()=>{throw new Error('offline')});
   await f.context.createOutputShare(f.form,'project','output');await f.context.createOutputShare(f.form,'project','output');
   assert.equal(f.posts()[0].options.headers['Idempotency-Key'],f.posts()[1].options.headers['Idempotency-Key']);
   f.form.elements.label.value='Changed';await f.context.createOutputShare(f.form,'project','output');
-  assert.equal(f.posts().length,2);
+  assert.equal(f.posts().length,3);
   assert.equal(f.receipts().length,2);
   assert.equal(f.receipts()[1].options.headers['Idempotency-Key'],f.posts()[0].options.headers['Idempotency-Key']);
-  assert.match(f.notices.at(-1)[0],/Restore its original settings/);
+  assert.deepEqual(f.posts()[2].options,f.posts()[0].options);
 });
 
 test('double submit is suppressed while creation is pending and close suppresses stale modal rendering',async()=>{
@@ -1123,4 +1129,30 @@ test('workspace transport rechecks the dispatch guard after a session renewal',a
   });
   assert.equal(result.status,200);
   assert.deepEqual(events,['review','checked','dispatch','renewed','review','checked','dispatch']);
+});
+
+
+test('a recorded terminal refusal clears only the previous request',async()=>{
+  const f=fixture();
+  f.respondPost(async()=>{throw new Error('response unavailable')});
+  await f.context.createOutputShare(f.form,'project','output');
+  f.respondReceipt(async()=>{throw Object.assign(new Error('Previous expiry was refused'),{status:400,receiptReplayed:true})});
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.posts().length,1);
+  assert.equal(f.receipts().length,1);
+  assert.match(f.notices.at(-1)[0],/Previous expiry was refused/);
+  f.respondPost(async()=>({share:{id:'saved'},viewUrl:'https://viewer.test/view/after-refusal'}));
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.posts().length,2);
+  assert.notEqual(f.posts()[0].options.headers['Idempotency-Key'],f.posts()[1].options.headers['Idempotency-Key']);
+});
+
+test('a recorded historical authorization refusal does not renew or clear the current workspace',async()=>{
+  const historical=new Response(null,{status:401,headers:{'Idempotency-Replayed':'true'}});
+  const scope=vm.createContext({state:{token:'synthetic',adminSession:{id:'same'}},
+    workspaceRecovery:{wait:async()=>{}},workspaceRenewal:{expiresAtMs:Date.now()+10_000,
+      waitForRenewal:async()=>{throw new Error('unexpected renewal')}},
+    clearWorkspaceAuthorization:()=>{throw new Error('unexpected authorization clearing')},fetch:async()=>historical});
+  vm.runInContext(declaration('workspaceFetch'),scope);
+  assert.equal(await scope.workspaceFetch('/fixture',{headers:{'X-Viewer-Share-Receipt-Only':'true'}}),historical);
 });
