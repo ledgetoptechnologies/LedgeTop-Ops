@@ -107,6 +107,17 @@ test('a replacement list is checked before signing, and its answer is typed', as
   }
 });
 
+test('replacement overflow keeps its actionable code and omits any partial grant list', async t => {
+  const message = 'Revoke shares the client no longer needs one at a time, then try again';
+  const payload = { error: message, code: 'share_replacement_limit' };
+  for (const grants of [undefined, [{ grantId: 'grant-old', grantVersion: 2 }]]) {
+    const { request } = await fixture(t, () => json({ ...payload, grants }, { status: 409 }));
+    const response = await request(PATH, { method: 'POST', body: { ...input, replaces: [] } });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), payload);
+  }
+});
+
 test('direct revoke uses path grant id, optional bounded reason and requires a typed completion', async t => {
   const receipt = { success: true, replayed: true, sessionRevocation: { pending: true } };
   const { request, envelopes } = await fixture(t, () => json(receipt, { status: 202 }));

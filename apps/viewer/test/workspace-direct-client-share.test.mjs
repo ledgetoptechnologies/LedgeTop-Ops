@@ -134,6 +134,21 @@ test('server codes become plain explanations',()=>{
   assert.equal(directShareErrorText({message:'Request failed (503)'}),'Request failed (503)');
 });
 
+test('replacement overflow directs staff to the individual revoke controls, including for expired shares',async()=>{
+  const grants=Array.from({length:101},(_,index)=>({
+    grantId:`legacy-${index}`,viewerProjectId:'project',scopeType:'task',taskId:`legacy-task-${index}`,expiresAt:'2020-01-01T00:00:00Z',revokedAt:null,
+  }));
+  const message=directShareErrorText({code:'share_replacement_limit'});
+  assert.match(message,/more than 100 shares/);
+  assert.match(message,/Clients with access, revoke shares .* one at a time, then try again/);
+  const access=await loadDirectClientAccess(async path=>new URLSearchParams(path.split('?')[1]).has('grantsCursor')
+    ? {clients:[],grants:grants.slice(100),grantsNextCursor:null}
+    : {clients:[],grants:grants.slice(0,100),grantsNextCursor:'legacy-99'},'project');
+  const rows=directGrantRows(access,{projectId:'project',tasks:[]});
+  assert.equal([...rows.matchAll(/data-action="revoke-direct-client-grant"/g)].length,101);
+  assert.match(rows,/data-id="legacy-100">Revoke/);
+});
+
 test('new client shares start with measurements on and camera positions and downloads off',()=>{
   const html=directShareForm({projectName:'Site',tasks,access:{clients,grants:[]}});
   assert.match(html,/name="measure" checked/);

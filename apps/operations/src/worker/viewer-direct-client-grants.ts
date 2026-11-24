@@ -91,8 +91,9 @@ function restrictedReceiptLiveSql(grantTable:string){const g=`${grantTable}.`,j=
    AND ${j('$.recipientAuthorityPin.workspaceId')}=${g}workspace_id AND ${j('$.recipientAuthorityPin.sourceId')}=${g}source_id
    AND (json_type(receipt.response_json,'$.grant.expiresAt')='null'
     OR ${expiryJulianSql(j('$.grant.expiresAt'))}>julianday('now')))`;}
+const MAX_REPLACED_GRANTS=100;
 /** The shares a new one takes the place of: exact ids and versions, unique. */
-const replacesSchema=z.array(z.object({grantId:opaque,grantVersion:z.number().int().min(1)}).strict()).max(100)
+const replacesSchema=z.array(z.object({grantId:opaque,grantVersion:z.number().int().min(1)}).strict()).max(MAX_REPLACED_GRANTS)
  .refine(list=>new Set(list.map(item=>item.grantId)).size===list.length)
  .transform(list=>[...list].sort((left,right)=>left.grantId<right.grantId?-1:1));
 export type DirectViewerReplaced={grantId:string;grantVersion:number};
@@ -496,10 +497,13 @@ const REPLACEMENT_PROOF_SQL=`
 type ShareTarget={sourceId:string;workspaceId:string;viewerProjectId:string};
 async function requireCurrentShares(database:Pick<D1Database,'prepare'>,g:ShareTarget,replaces:DirectViewerReplaced[]){
  const rows=(await database.prepare(`SELECT id grantId,grant_version grantVersion FROM viewer_direct_client_grants
-  WHERE source_id=? AND workspace_id=? AND viewer_project_id=? AND status='active' ORDER BY id LIMIT 101`)
-  .bind(g.sourceId,g.workspaceId,g.viewerProjectId).all<DirectViewerReplaced>()).results.map(row=>({grantId:row.grantId,grantVersion:row.grantVersion}));
- if(JSON.stringify(rows.sort((left,right)=>left.grantId<right.grantId?-1:1))!==JSON.stringify(replaces))
-  throw new DirectViewerGrantError(409,'share_changed','This client’s shares in the project changed. Check them and try again',undefined,rows);
+  WHERE source_id=? AND workspace_id=? AND viewer_project_id=? AND status='active' ORDER BY id LIMIT ?`)
+  .bind(g.sourceId,g.workspaceId,g.viewerProjectId,MAX_REPLACED_GRANTS+1).all<DirectViewerReplaced>()).results;
+ if(rows.length>MAX_REPLACED_GRANTS)
+  fail(409,'share_replacement_limit',`This client has more than ${MAX_REPLACED_GRANTS} shares in this project. Revoke shares they no longer need one at a time, then try again.`);
+ const current=rows.map(row=>({grantId:row.grantId,grantVersion:row.grantVersion}));
+ if(JSON.stringify(current.sort((left,right)=>left.grantId<right.grantId?-1:1))!==JSON.stringify(replaces))
+  throw new DirectViewerGrantError(409,'share_changed','This client’s shares in the project changed. Check them and try again',undefined,current);
 }
 async function remainingShares(database:Pick<D1Database,'prepare'>,g:ShareTarget,listed:string){
  return await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND ${effectiveGrantSql()}

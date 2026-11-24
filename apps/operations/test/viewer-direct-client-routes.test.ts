@@ -98,6 +98,12 @@ describe("staff direct Viewer grant routes",()=>{
   const response=await request("",mutation());expect(response.status).toBe(409);
   expect(await response.json()).toEqual({error:"Changed",code:"share_changed",grants:[{grantId:"grant-two",grantVersion:3}]});
  });
+ it("forwards replacement overflow without a partial list",async()=>{
+  const message="Revoke shares the client no longer needs one at a time, then try again.";
+  mock.create.mockRejectedValueOnce(new DirectViewerGrantError(409,"share_replacement_limit",message));
+  const response=await app()("",mutation());expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({error:message,code:"share_replacement_limit"});
+ });
  it("accurately distinguishes pending revocation from completed idempotent revocation",async()=>{
   mock.revoke.mockResolvedValueOnce({success:true,replayed:false,sessionRevocation:{pending:true}});
   const request=app();expect((await request("/grant-one",mutation("DELETE",{}))).status).toBe(202);

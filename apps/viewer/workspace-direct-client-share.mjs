@@ -16,6 +16,7 @@ const ERRORS={
   expired_at_invalid:'Choose an expiry date in the future, or leave it empty.',
   duplicate_active_grant:'This client already has this access. Revoke it first to change its settings.',
   grant_limit:'This client has reached the maximum number of shares. Revoke one they no longer need first.',
+  share_replacement_limit:'This client has more than 100 shares in this project. In Clients with access, revoke shares they no longer need one at a time, then try again.',
   idempotency_conflict:'This share changed while it was being sent. Check the list below before trying again.',
   forbidden:'You do not have permission to share with clients.',
   later_required:'A whole-project share always includes models published later. To share only what is published now, choose the tasks instead.',

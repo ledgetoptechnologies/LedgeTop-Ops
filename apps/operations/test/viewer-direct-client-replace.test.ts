@@ -164,6 +164,30 @@ describe('replacing a client’s shares in a project',()=>{
   expect(await readDirectViewerClientGrants(f.env,CLIENT)).toHaveLength(100);
  },120_000);
 
+ it('reports an overflow of 101 expired shares without changing any of them, then replaces 100 after a staff revoke',async()=>{
+  const f=await fixture();
+  const insert=(index:number)=>f.database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,can_measure,
+   can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+   VALUES(?,'project-alpha:primary','ws-one','project-one',?,'task',0,1,0,0,?,1,'active','staff-one',?,?)`)
+   .bind(`legacy-${index}`,`legacy-task-${index}`,'2020-01-02T00:00:00.000Z','2020-01-01T00:00:00.000Z','2020-01-01T00:00:00.000Z');
+  const listed=Array.from({length:100},(_,index)=>({grantId:`legacy-${index}`,grantVersion:1}));
+  for(let start=0;start<100;start+=50)await f.database.batch(Array.from({length:50},(_,offset)=>insert(start+offset)));
+  expect(await readDirectViewerClientGrants(f.env,CLIENT)).toEqual([]);
+  let landed='';
+  const racing=around(f,{before:async()=>{await insert(100).run();landed=await everything(f);}});
+  const overflow={status:409,code:'share_replacement_limit',message:expect.stringMatching(/revoke shares/i),grants:undefined};
+  await expect(share(racing,{selection:only,replaces:listed})).rejects.toMatchObject(overflow);
+  expect(await everything(f)).toBe(landed);
+  await expect(share(f.env,{selection:only,replaces:listed})).rejects.toMatchObject(overflow);
+  expect(await everything(f)).toBe(landed);
+  expect(mocks.revoke).not.toHaveBeenCalled();
+  await expect(revokeDirectViewerClientGrant({env:f.env,principal,grantId:'legacy-100',reason:'No longer needed',
+   idempotencyKey:'replace-overflow-revoke1',request})).resolves.toMatchObject({success:true});
+  const replacement=await share(f.env,{selection:only,replaces:listed});
+  expect(replacement).toMatchObject({replayed:false,sessionRevocation:{revokedGrants:100}});
+  expect(await count(f,"viewer_direct_client_grants WHERE workspace_id='ws-one' AND viewer_project_id='project-one' AND status='active'")).toBe(1);
+ },180_000);
+
  it('replaces 100 shares with the whole tombstone, receipt and audit batch; a lost answer replays to the same share',async()=>{
   const f=await fixture(),listed:Array<{grantId:string;grantVersion:number}>=[];
   for(let start=0;start<100;start+=50)await f.database.batch(Array.from({length:50},(_,offset)=>{const index=start+offset;listed.push({grantId:`many-${String(index).padStart(3,'0')}`,grantVersion:1});
