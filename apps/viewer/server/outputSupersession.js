@@ -237,14 +237,14 @@ async function purgeSupersededOutputs(processing,storage,{limit=1,signal=null}={
       if(!fresh.eligible||fresh.fingerprint!==state.fingerprint)throw Object.assign(new Error('cleanup dependency changed'),{code:'dependency_changed'});
       if(!registeredProofMatches(processing.database,state.source,sourceManifest)||!registeredProofMatches(processing.database,state.target,targetManifest)
         ||(contentProof.registrationSha256&&contentProof.registrationSha256!==recoveryRegistrationIdentity(processing.database,state.source.id,state.target.id)))throw Object.assign(new Error('cleanup registry changed during verification'),{code:'dependency_changed'});
-      const mutation=processing.beginPurgeMutation(item.id,'viewer-output-maintenance');
+      const mutation=processing.beginPurgeMutation(item.id,'viewer-output-maintenance',{expired:true});
       if(!mutation)throw Object.assign(new Error('purge journal unavailable'),{code:'lifecycle_conflict'});
       const complete=applyStorageMutation(processing,storage,mutation,{supersessionProof:authorizeMutation(mutation)});
       results.push({trashId:item.id,status:complete?.status||'deferred'});
     }catch(error){
       if(signal?.aborted)return results;
-      // Retry at most daily after a failed final proof. No bytes are removed.
-      processing.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=? AND permanently_deleted_at IS NULL').run(new Date(Date.now()+86400_000).toISOString(),item.id);
+      // Retry at most daily after a failed final proof. No bytes are removed. A date another process moved stays.
+      if(error.code!=='trash_not_expired')processing.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=? AND permanently_deleted_at IS NULL').run(new Date(Date.now()+86400_000).toISOString(),item.id);
       processing.insertAudit({actorType:'system',actorId:'viewer-output-maintenance',action:'output.supersession_purge_deferred',entityType:'model_output',entityId:item.entityId,details:{trashId:item.id,reason:error.code||'verification_failed'}});
       results.push({trashId:item.id,status:'deferred',reason:error.code||'verification_failed'});
     }

@@ -6,6 +6,8 @@ function exists(storage,rootKey,relativePath){return Boolean(rootKey&&relativePa
 
 function conflict(message){return Object.assign(new Error(message),{code:'lifecycle_conflict'});}
 
+const purgeRefused=code=>['trash_owner_not_deleted','trash_not_expired'].includes(code);
+
 function markApplied(processing,mutation,options){
   const applied=processing.markStorageMutationFsApplied(mutation.id,options);
   if(applied)return applied;
@@ -20,6 +22,7 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   if(mutation.status==='complete'||mutation.status==='failed')return mutation;
   if(faultAt==='after_intent')throw Object.assign(new Error('injected failure after lifecycle intent'),{code:'fault_injected'});
   try{
+    if(mutation.type==='purge')processing.requirePurgeJournalAllowed(mutation);
     if(mutation.status==='intent'){
       if(mutation.type==='trash'||mutation.type==='restore'){
         const sourceExists=exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath),destinationExists=exists(storage,mutation.destinationRootKey,mutation.destinationRelativePath);
@@ -48,7 +51,7 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
     // Deterministic state/configuration conflicts require operator repair. Database,
     // process, and transient filesystem errors intentionally leave the durable
     // intent/applied state recoverable on the next reconciliation pass.
-    if(['lifecycle_conflict','lifecycle_cross_device'].includes(error.code))processing.failStorageMutation(mutation.id,error.code,sanitizeLogMessage(error.message));
+    if(['lifecycle_conflict','lifecycle_cross_device','trash_owner_not_deleted'].includes(error.code))processing.failStorageMutation(mutation.id,error.code,sanitizeLogMessage(error.message));
     throw error;
   }
 }
@@ -56,13 +59,17 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
 function reconcileStorageMutations(processing,storage,limit=20){const results=[];for(const mutation of processing.pendingStorageMutations(limit)){try{results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
 
 function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null}={}){
-  const results=[];
-  for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
+  const results=[],most=Math.max(1,Math.min(Number(limit)||20,100));
+  // Items that may not be purged don't count, so they never keep the rest from being purged.
+  let attempted=0;
+  for(const item of processing.expiredTrash()){
+    if(attempted>=most)break;
+    attempted+=1;
     try{
       if(item.entityType==='output'&&require('./outputSupersession').automaticSupersessionTrash(processing,item.id)){results.push({trashId:item.id,status:'deferred',errorCode:'supersession_reverification_required'});continue;}
       if(item.entityType==='project'||item.entityType==='task'){
         const {purgeContainerTrash}=require('./containerLifecycle');
-        const purged=purgeContainerTrash(processing,storage,item.id,actor);
+        const purged=purgeContainerTrash(processing,storage,item.id,actor,{expired:true});
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         results.push({trashId:item.id,status:'complete',container:true});
         if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
@@ -81,23 +88,23 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
         }
       }
       if(dataset?.storageMode==='external_reference'){
-        const purged=processing.markTrashPurged(item.id);
+        const purged=processing.markTrashPurged(item.id,null,{expired:true});
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         results.push({trashId:item.id,status:'complete',externalReference:true});
       }else if(output&&output.storageMode!=='managed'){
-        const purged=processing.purgeMetadataOutput(item.id);
+        const purged=processing.purgeMetadataOutput(item.id,null,{expired:true});
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         results.push({trashId:item.id,status:'complete',externalReference:true});
       }else{
-        const mutation=processing.beginPurgeMutation(item.id,actor);
+        const mutation=processing.beginPurgeMutation(item.id,actor,{expired:true});
         if(!mutation){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         const completed=applyStorageMutation(processing,storage,mutation);
         results.push({trashId:item.id,status:completed.status,mutationId:completed.id,externalReference:false});
       }
       if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
-    }catch(error){results.push({trashId:item.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}
+    }catch(error){if(purgeRefused(error.code))attempted-=1;results.push({trashId:item.id,status:purgeRefused(error.code)?'skipped':'failed',errorCode:error.code||'lifecycle_failed'});}
   }
   return results;
 }
 
-module.exports={applyStorageMutation,reconcileStorageMutations,purgeExpiredTrash};
+module.exports={purgeRefused,applyStorageMutation,reconcileStorageMutations,purgeExpiredTrash};

@@ -612,6 +612,7 @@ test('Rome v3 surface failure retries under v4 and atomically exposes the verifi
   assert.equal(context.processing.restoreMetadataEntity(taskTrash.id, 'ops:rome').status, 'ready_for_review');
   const purgeTrash = context.processing.trashTask(source.task.id, 'ops:rome');
   assert.ok(purgeTrash);
+  context.database.prepare("UPDATE model_outputs SET status='trashed' WHERE task_id=?").run(source.task.id);
   assert.ok(context.processing.purgeMetadataEntity(purgeTrash.id, 'ops:rome').permanentlyDeletedAt,
     'normal task restore and purge semantics remain available after recovery succeeds');
 });

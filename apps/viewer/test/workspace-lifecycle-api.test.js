@@ -547,9 +547,9 @@ test('a failed dataset purge is retried only when no active or restorable task n
   assert.equal((await retryJournal(context, id)).status, 409);
   assert.ok(photosInTrash(context)); assert.equal(context.processing.getStorageMutation(id).status, 'failed');
   // An active task blocks it too.
-  context.database.prepare("UPDATE processing_tasks SET status='draft',archived_at=NULL WHERE id=?").run(first.id);
+  context.database.prepare("UPDATE processing_tasks SET status='draft' WHERE id=?").run(first.id);
   assert.equal((await retryJournal(context, id)).status, 409);
-  context.database.prepare("UPDATE processing_tasks SET status='archived',archived_at=? WHERE id=?").run(new Date().toISOString(), first.id);
+  context.database.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(first.id);
   // Once no task outside the purging container needs it, the retry is admitted and the purge completes.
   assert.equal((await purge(context, firstTrash, first.id)).status, 204);
   const response = await retryJournal(context, id); assert.equal(response.status, 200);

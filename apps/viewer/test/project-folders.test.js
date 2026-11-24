@@ -205,6 +205,7 @@ test('project trash keeps nested folders for restore; permanent project purge re
   assert.deepEqual(folders(project.id),before,'restore brings back the same hierarchy');
   assert.equal(p.getTask(task.id).folderId,leaf.id);
   const purgeTrash=p.trashProject(project.id,'staff');assert.ok(purgeTrash);
+  p.addContainerTrashMember(purgeTrash.id,p.trashTask(task.id,'staff',{withinProjectTrash:true}).id);
   assert.ok(p.purgeMetadataEntity(purgeTrash.id,'staff').permanentlyDeletedAt);
   assert.deepEqual(folders(project.id),[],'purge removes every folder row of the project');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM project_folders WHERE display_name='Identifying client name'").get().n,1,'only the other project keeps its name');

@@ -216,6 +216,8 @@ test('after a project is trashed and purged the client catalog returns no folder
   // Settle the fixture attempt so the project can be trashed.
   state.database.prepare("UPDATE processing_attempts SET status='ready_for_review' WHERE task_id=?").run(task.task.id);
   const trash = processing.trashProject(project.id, 'ops:test');
+  processing.addContainerTrashMember(trash.id, processing.trashTask(task.task.id, 'ops:test', { withinProjectTrash: true }).id);
+  state.database.prepare("UPDATE model_outputs SET status='trashed' WHERE task_id=?").run(task.task.id);
   assert.ok(processing.purgeMetadataEntity(trash.id, 'ops:test').permanentlyDeletedAt);
   for (const path of [url, url + `&taskId=${task.task.id}`]) {
     const response = await signed(path), body = await response.text();

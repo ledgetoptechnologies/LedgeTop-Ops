@@ -106,6 +106,11 @@ test('verified supersession is recoverable for 7 days then purges only redundant
   c.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z',trash.id);
   c.database.prepare("INSERT INTO model_camera_photos(version_id,filename,root_key,relative_path,content_type,byte_size,sha256,created_at) VALUES (?,'original.jpg','models',?,'image/jpeg',13,?,?)").run(c.source.id,`${c.source.relativePath}/model.glb`,digest('same original'),new Date().toISOString());
   assert.equal(purgeExpiredTrash(c.processing,c.storage)[0].status,'deferred','generic purge cannot bypass revalidation');
+  const begin=c.processing.beginPurgeMutation;
+  c.processing.beginPurgeMutation=function(...args){c.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2999-01-01T00:00:00.000Z',trash.id);return begin.apply(this,args);};
+  assert.equal((await purgeSupersededOutputs(c.processing,c.storage))[0].reason,'trash_not_expired','its date moved while its content was verified');
+  assert.equal(c.processing.getTrash(trash.id).purgeAfter,'2999-01-01T00:00:00.000Z');assert.ok(fs.existsSync(c.storage.resolve('trash',trash.relativePath)));
+  delete c.processing.beginPurgeMutation;c.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z',trash.id);
   assert.equal((await purgeSupersededOutputs(c.processing,c.storage))[0].status,'complete');
   assert.equal(c.processing.getModelOutput(c.source.id).byteSize,0);
   assert.ok(c.processing.getAttempt(c.source.attemptId),'attempt history survives');

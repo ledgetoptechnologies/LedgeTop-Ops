@@ -29,13 +29,14 @@ function purgeItem(processing,storage,item,actor,containerId=null){if(!item||ite
 //    so that task keeps its photos; the set is purged only with the last deleted task that uses it.
 // 2. The container is marked purging in its own committed transaction: from here on nothing in it can be restored.
 // 3. Files and member records are purged, then the container's own record.
-function purgeContainerTrash(processing,storage,containerId,actor){
+function purgeContainerTrash(processing,storage,containerId,actor,{expired=false}={}){
   const root=processing.getTrash(containerId);if(!root||!['project','task'].includes(root.entityType))return null;if(root.permanentlyDeletedAt)return root;
+  processing.requirePurgeAllowed(root,{expired});// before any source set moves; decided again in beginContainerPurge
   const order={output:0,dataset:1,task:2,project:3},members=()=>processing.listContainerTrashMembers(root.id).sort((a,b)=>(order[a.entityType]??4)-(order[b.entityType]??4));
   for(const item of members()){if(item.entityType!=='dataset'||item.permanentlyDeletedAt)continue;if(processing.hasPendingStorageMutation('dataset',item.entityId))continue;/* its purge already began; let it finish */const heir=processing.datasetTrashHeir(item.entityId,root.id);if(heir&&!processing.moveContainerTrashMember(root.id,heir.id,item.id,actor))return null;}
   // A set still needed outside this container (an active task) refuses the purge before anything is marked or deleted.
   if(!root.purgeStartedAt&&members().some(item=>item.entityType==='dataset'&&!item.permanentlyDeletedAt&&!processing.hasPendingStorageMutation('dataset',item.entityId)&&processing.datasetPurgeBlocked(item.entityId,root.id)))return null;
-  if(!processing.beginContainerPurge(root.id,actor))return null;
+  if(!processing.beginContainerPurge(root.id,actor,{expired}))return null;
   for(const item of members())if(!purgeItem(processing,storage,item,actor,root.id))return null;
   return purgeItem(processing,storage,root,actor,root.id)?processing.getTrash(root.id):null;
 }
