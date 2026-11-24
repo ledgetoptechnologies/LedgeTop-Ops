@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const path = require('node:path');
 const { validCameraFilename } = require('./cameraPhotos');
+const { modelDeleted } = require('./modelDeletion');
 
 function now() {
   return new Date().toISOString();
@@ -583,21 +584,8 @@ class ViewerRepository {
     };
   }
 
-  // True while the model's task or project is in the Recycle Bin, or once it is
-  // purged, however far that delete got. The model version's own output decides;
-  // a version with no output of its own follows the model's other outputs. A
-  // model that was never processed here has no outputs and is never deleted.
   modelDeleted(modelId, modelVersionId = null) {
-    const rows = this.database.prepare(`SELECT o.id,
-        t.purged_at IS NOT NULL OR p.purged_at IS NOT NULL OR EXISTS(SELECT 1 FROM storage_trash s
-          WHERE s.permanently_deleted_at IS NULL
-            AND ((s.entity_type='task' AND s.entity_id=t.id) OR (s.entity_type='project' AND s.entity_id=p.id))) AS deleted
-      FROM model_outputs o JOIN processing_tasks t ON t.id=o.task_id JOIN projects p ON p.id=o.project_id
-      WHERE o.model_id=?`).all(modelId);
-    if (!rows.length) return false;
-    const versionId = modelVersionId || this.database.prepare('SELECT active_version_id FROM models WHERE id=?').get(modelId)?.active_version_id;
-    const own = rows.filter((row) => row.id === versionId);
-    return (own.length ? own : rows).some((row) => row.deleted === 1);
+    return modelDeleted(this.database, modelId, modelVersionId);
   }
 
   assertModelNotDeleted(modelId, modelVersionId = null) {
@@ -722,7 +710,9 @@ class ViewerRepository {
 
   publicShareLive(share, at = Date.now()) {
     if (!share || share.revokedAt) return false;
-    return !share.expiresAt || Date.parse(share.expiresAt) > at;
+    if (share.expiresAt && Date.parse(share.expiresAt) <= at) return false;
+    // A stored link is refused while its model is in the Recycle Bin.
+    return !(share.modelId && this.modelDeleted(share.modelId, share.modelVersionId));
   }
 
   recordPublicShareAccess(id) {
@@ -926,6 +916,8 @@ class ViewerRepository {
 
   viewerSessionLive(session, at = Date.now()) {
     if (!session || session.revokedAt || Date.parse(session.expiresAt) <= at) return false;
+    // So is a stored session, whoever it was issued to.
+    if (this.modelDeleted(session.modelId, session.modelVersionId)) return false;
     if (session.sourceAuthorization && this.database.prepare(`SELECT 1 FROM revoked_published_session_authorizations
       WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`)
       .get(session.sourceAuthorization.type, session.sourceAuthorization.id, session.sourceAuthorization.version)) return false;
