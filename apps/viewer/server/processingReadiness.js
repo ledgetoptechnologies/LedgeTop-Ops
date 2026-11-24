@@ -1,13 +1,13 @@
 'use strict';
 
-const { ProcessingRepository } = require('./processingRepository');
+const { readProviderCredential } = require('./processingRepository');
 const { ProviderCredentials } = require('./providerCredentials');
 
 function resolveEnabledProviderCredentials(database, config) {
   const providers = database.prepare('SELECT id FROM processing_providers WHERE enabled=1').all();
-  const processing = new ProcessingRepository(database, { logMaxBytes: config.processingLogMaxBytes });
+  // Readiness must not seed processing presets through the repository constructor.
   const credentials = new ProviderCredentials({
-    processing,
+    processing: { getProviderCredential: (providerId) => readProviderCredential(database, providerId) },
     activeKeyId: config.providerCredentialsKeyId,
     keys: config.providerCredentialsKeys,
     legacyTokens: config.processingProviderTokens,
