@@ -38,8 +38,8 @@ export function areaCentre(positions) {
   return Math.abs(twice) < 1e-16 ? positions[0] : [x0 + x / (3 * twice), y0 + y / (3 * twice)];
 }
 
-export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove = () => {}, describe = mark => mark.name }) {
-  let group = null, overlay = null, previewLine = null, attachedMap = null, last = null, far = false;
+export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove = () => {}, onViewChange = () => {}, describe = mark => mark.name }) {
+  let group = null, overlay = null, previewLine = null, ghost = null, pointer = null, attachedMap = null, last = null, far = false;
   // One tab stop for all pins: the last one focused, else the first.
   let tabStop = null;
   const items = new Map(); // mark id -> { kind, signature, marker | layers }
@@ -95,6 +95,7 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
 
   // ---- points ----------------------------------------------------------------
   function pinKeys(event, id) {
+    if (items.get(id)?.movable) return; // the keys move it
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       event.stopPropagation();
@@ -221,29 +222,48 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
     far = map.getZoom() < FAR_OUT_ZOOM;
     map.on('mousemove', preview);
     map.on('zoomend', zoomed);
+    map.on('move', onViewChange);
+    map.on('resize', onViewChange);
   }
 
   function detach() {
     if (!attachedMap) return;
     attachedMap.off('mousemove', preview);
     attachedMap.off('zoomend', zoomed);
+    attachedMap.off('move', onViewChange);
+    attachedMap.off('resize', onViewChange);
     for (const id of [...items.keys()]) removeItem(id);
     for (const layers of [group, overlay]) { layers.clearLayers(); layers.remove(); }
     group = null;
     overlay = null;
     previewLine = null;
+    ghost = null;
+    pointer = null;
     attachedMap = null;
   }
 
   function preview(event) {
+    pointer = event.latlng;
+    if (last?.ghost) drawGhost();
     const drawing = last?.drawing;
     if (!drawing?.positions.length || !previewLine) return;
     previewLine.setLatLngs([latLng(drawing.positions.at(-1)), event.latlng]);
   }
 
+  // The pin that follows the pointer while a spot is picked.
+  function drawGhost() {
+    if (!pointer) return;
+    if (ghost) { ghost.setLatLng(pointer); return; }
+    const { html, size, anchor } = mapPin(last.ghost, { draft: true });
+    ghost = L.marker(pointer, { icon: L.divIcon({ className: 'viewer-map-ghost', html, iconSize: size, iconAnchor: anchor }),
+      interactive: false, keyboard: false, zIndexOffset: 12_000 }).addTo(overlay);
+  }
+
   function drawOverlay(next) {
     overlay.clearLayers();
     previewLine = null;
+    ghost = null;
+    if (next.ghost) drawGhost();
     if (next.preview) {
       L.circleMarker(latLng(next.preview), { radius: 9, color: '#ffffff', weight: 2, dashArray: '3 3', fillOpacity: 0, interactive: false }).addTo(overlay);
     }
@@ -275,8 +295,27 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
     drawOverlay(next);
   }
 
+  const anchorPosition = geometry => (geometry.type === 'Polygon' ? areaCentre(markPositions(geometry)) : markPositions(geometry)[0]);
   return {
     render,
+    // Where a mark is in the map's container, for the card beside it.
+    anchor(geometry) {
+      const point = attachedMap?.latLngToContainerPoint?.(latLng(anchorPosition(geometry)));
+      return point ? [point.x, point.y] : null;
+    },
+    // Shifts the map so a mark is above a sheet that covers the lower part of it.
+    keepAbove(geometry, covered) {
+      const point = this.anchor(geometry), size = attachedMap?.getSize?.();
+      if (!point || !size) return;
+      const limit = size.y * (1 - covered) - 24;
+      if (point[1] > limit) attachedMap.panBy([0, point[1] - limit], { animate: false });
+    },
+    centre() { const centre = getMap()?.getCenter?.(); return centre ? toPosition(centre) : null; },
+    nudge(position, dx, dy) {
+      const point = attachedMap?.latLngToContainerPoint?.(latLng(position));
+      return point ? toPosition(attachedMap.containerPointToLatLng([point.x + dx, point.y + dy])) : position;
+    },
+    focusPin(id) { items.get(id)?.marker?.getElement()?.focus?.({ preventScroll: true }); },
     focus(geometry) {
       const map = getMap();
       if (!map) return;

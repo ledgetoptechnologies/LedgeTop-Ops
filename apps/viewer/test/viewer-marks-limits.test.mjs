@@ -217,22 +217,21 @@ test('when Recently deleted is full, a delete asks first and then deletes only t
   await panel.marks.setScope(scope('client', 'client-a'));
   const mark = await panel.store.create(pin('One more')), kept = await panel.store.create(pin('Kept'));
   const content = () => database.prepare("SELECT count(*) n FROM viewer_marks WHERE deleted_at IS NOT NULL AND document_json<>'{}'").get().n;
-  const button = text => panel.q('.viewer-mark-form').querySelectorAll('button').find(node => node.textContent === text);
-  await panel.open('One more');
-  await button('Delete').click();
-  await button('Tap again to delete').click();
+  await panel.show('One more');
+  await panel.card('Delete').click();
+  await panel.card('Tap again to delete').click();
   assert.ok(panel.store.find(mark.id), 'refused, nothing happened');
   assert.equal(content(), LIMITS.deleted, 'and nothing older was destroyed');
   assert.match(panel.text(), /Recently deleted is full/);
   const undo = panel.store.state.undo.length;
-  await button('Delete for good').click();
+  await panel.card('Delete for good').click();
   assert.equal(panel.store.find(mark.id), null);
   assert.equal(content(), LIMITS.deleted);
   assert.equal(database.prepare('SELECT document_json d FROM viewer_marks WHERE id=?').get(mark.id).d, '{}');
   assert.equal(panel.store.state.undo.length, undo, 'it offers no undo it cannot do');
   // The offer does not carry to another mark.
-  await panel.open('Kept');
-  assert.equal(button('Delete for good'), undefined);
+  await panel.show('Kept');
+  assert.equal(panel.card('Delete for good'), undefined);
   assert.ok(panel.store.find(kept.id));
 });
 

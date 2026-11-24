@@ -39,13 +39,15 @@ export async function openMarksPanel(t, { rateLimited = () => false, maxRequestB
   const requests = [];
   const request = (path, init) => fetch(base + path, { ...init, redirect: 'follow' });
   const mount = ({ dom = createMiniDocument(), units = () => 'imperial', map = true, request = null, georef = () => null } = {}) => {
-    const panel = dom.document.createElement('div');
+    const panel = dom.document.createElement('div'), sidebar = dom.document.createElement('div'), overlay = dom.document.createElement('div');
+    panel.append(sidebar, overlay);
     const leaflet = createMiniLeaflet(dom.document);
-    const marks = mountViewerMarks({ panel, L: leaflet.L, getMap: () => leaflet.map, units, georef,
+    const marks = mountViewerMarks({ panel: sidebar, overlay, L: leaflet.L, getMap: () => leaflet.map, units, georef,
       request: (path, init) => { requests.push([init.method, path]); return (request || fetch)(base + path, { ...init, redirect: 'follow' }); } });
     if (map) marks.setView({ map: true });
     const q = selector => panel.querySelector(selector);
-    return { dom, panel, marks, leaflet, store: marks.store, q,
+    const card = text => q('.viewer-mark-card').querySelectorAll('button').find(node => node.textContent === text);
+    return { dom, panel, sidebar, overlay, marks, leaflet, card, store: marks.store, q,
       button: text => panel.querySelectorAll('button').find(node => node.textContent === text),
       text: () => panel.textContent,
       values: () => [...panel.querySelectorAll('input'), ...panel.querySelectorAll('textarea')].map(node => node.value).join('\n'),
@@ -56,7 +58,9 @@ export async function openMarksPanel(t, { rateLimited = () => false, maxRequestB
         await q('.viewer-mark-coords').fire('submit');
       },
       save: () => q('.viewer-mark-form').fire('submit'),
-      open: name => panel.querySelector('[id=viewer-marks-list]').querySelectorAll('.viewer-mark-list-item').find(node => node.textContent.startsWith(name)).click(),
+      // Opens the card, and the editor when this person may edit.
+      async show(name) { await panel.querySelector('[id=viewer-marks-list]').querySelectorAll('.viewer-mark-list-item').find(node => node.textContent.startsWith(name)).click(); },
+      async open(name) { await this.show(name); if (!card('Edit').hidden) await card('Edit').click(); },
     };
   };
   return { mount, scope, database, requests, request };

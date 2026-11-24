@@ -78,6 +78,11 @@ class MiniElement extends MiniTarget {
       return index < 0;
     });
   }
+  contains(node) { for (let up = node; up; up = up.parent) if (up === this) return true; return false; }
+  closest(selector) {
+    for (let up = this; up; up = up.parent) if (selector.split(',').some(part => up.matches(part))) return up;
+    return null;
+  }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   focus() { this.ownerDocument.activeElement = this; }
   select() {}

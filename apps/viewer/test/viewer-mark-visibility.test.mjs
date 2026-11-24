@@ -161,10 +161,9 @@ test('saving, restoring, importing or orphaning a mark never leaves it unseen', 
   await panel.save();
   assert.deepEqual(pins(panel), ['Loose', 'Stand 1', 'Stand 2', 'Trail'], 'saved into a hidden category');
 
-  await panel.open('Loose');
-  const form = text => panel.q('.viewer-mark-form').querySelectorAll('button').find(node => node.textContent === text);
-  await form('Delete').click();
-  await form('Tap again to delete').click();
+  await panel.show('Loose');
+  await panel.card('Delete').click();
+  await panel.card('Tap again to delete').click();
   await eye(panel, NO_CATEGORY).click();
   await panel.q('[data-tab=deleted]').click();
   await panel.q('[aria-label="Restore Loose"]').click();
@@ -238,10 +237,12 @@ test('hiding the category of the open mark hides its pin and keeps the editor', 
   assert.equal(draftPins(panel), 3, 'the open pin follows its saved category');
   assert.equal(panel.q('.viewer-mark-form').hidden, false);
   assert.equal(panel.q('[name=note]').value, 'Being typed');
-  const move = panel.q('.viewer-mark-form').querySelectorAll('button').find(node => node.textContent === 'Move');
-  await move.click();
+  await panel.card('Cancel').click();
+  await panel.card('Move').click();
   assert.equal(panel.leaflet.pins().some(layer => layer.options.draggable), false, 'a hidden pin cannot be dragged');
   assert.equal(draftPins(panel), 3);
+  await panel.q('.viewer-mark-move').querySelectorAll('button').find(node => node.textContent === 'Cancel').click();
+  await panel.card('Edit').click();
   // Another category picked but not saved does not bring it back; saving does.
   panel.q('[name=categoryId]').value = stands.id;
   await panel.q('[name=categoryId]').fire('change');

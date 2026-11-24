@@ -61,10 +61,18 @@ export function createMiniLeaflet(document) {
     click() { for (const handler of this.handlers.click || []) handler({ target: this }); }
   }
   const container = document.createElement('div');
-  let zoom = 18;
+  let zoom = 18, centre = { lat: 43, lng: -87 }, size = { x: 1000, y: 800 };
+  const PX = 1e-5; // degrees per pixel
+  const keyboard = { on: true, enable() { this.on = true; }, disable() { this.on = false; } };
   const map = { layers: new Set(), on: (type, handler) => { (mapHandlers[type] ||= new Set()).add(handler); },
-    off: (type, handler) => { mapHandlers[type]?.delete(handler); }, getContainer: () => container, getZoom: () => zoom, setView() {}, fitBounds() {},
+    off: (type, handler) => { mapHandlers[type]?.delete(handler); }, getContainer: () => container, getZoom: () => zoom, keyboard,
+    getSize: () => size, getCenter: () => centre,
+    latLngToContainerPoint: ([lat, lng]) => ({ x: size.x / 2 + (lng - centre.lng) / PX, y: size.y / 2 - (lat - centre.lat) / PX }),
+    containerPointToLatLng: ([x, y]) => ({ lat: centre.lat - (y - size.y / 2) * PX, lng: centre.lng + (x - size.x / 2) * PX }),
+    panBy: ([x, y]) => { centre = { lat: centre.lat - y * PX, lng: centre.lng + x * PX }; fire('move'); },
+    setView: ([lat, lng]) => { centre = { lat, lng }; }, fitBounds() {},
     doubleClickZoom: { enable() {}, disable() {} } };
+  const fire = (type, event) => { for (const handler of [...(mapHandlers[type] || [])]) handler(event); };
   const L = {
     DomEvent: { stop() {} },
     divIcon: options => options,
@@ -82,6 +90,7 @@ export function createMiniLeaflet(document) {
   // The names that stay on the map: each once per label drawn.
   const shown = () => [...drawn().filter(layer => layer.kind === 'tooltip').map(layer => layer.text),
     ...drawn().filter(layer => layer.label?.options.permanent && layer.label.open).map(layer => layer.label.text)].sort();
-  return { L, map, drawn, made, shown, mapHandlers, setZoom: next => { zoom = next; for (const handler of mapHandlers.zoomend || []) handler(); },
+  return { L, map, drawn, made, shown, mapHandlers, fire, keyboard, setZoom: next => { zoom = next; fire('zoomend'); }, setSize: (x, y) => { size = { x, y }; fire('resize'); }, centre: () => centre,
+    ghosts: () => markers('viewer-map-ghost'),
     pins: () => markers('viewer-map-mark'), corners: () => markers('viewer-mark-vertex'), areaGlyphs: () => markers('viewer-map-area') };
 }

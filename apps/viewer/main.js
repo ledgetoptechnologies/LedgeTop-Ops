@@ -2578,6 +2578,7 @@ function installViewerMarks() {
   if (!viewerMarks) {
     viewerMarks = mountViewerMarks({
       panel: document.getElementById('panel-marks'),
+      overlay: document.getElementById('viewer-marks-ui'),
       L, getMap: () => map,
       // Placing or drawing a mark ends any measuring tool first.
       onActivate: () => { if (state.activeTool && state.activeTool !== 'none') setTool('none'); },
@@ -3276,7 +3277,7 @@ function ensureMap() {
     if (mapMeasure?.points.length >= 3) { L.DomEvent.stop(e); finishMapMeasure(); }
   });
   map.on('contextmenu', (e) => {
-    if (!mapMeasure) return;
+    if (!mapMeasure) { if (viewerMarks?.mapContextMenu(e.latlng)) L.DomEvent.stop(e); return; }
     L.DomEvent.stop(e);
     if (mapMeasure.points.length >= 3) finishMapMeasure();
     else { cancelMapMeasure(); setMapTool('none'); }

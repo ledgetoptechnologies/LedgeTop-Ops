@@ -26,7 +26,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const executable = () => [process.env.CHROME_PATH, process.env.EDGE_PATH,
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].filter(Boolean).find(existsSync) || null;
-const MODULES = ['viewer-marks.mjs', 'viewer-marks-store.mjs', 'viewer-mark-map-layer.mjs', 'viewer-mark-icons.mjs', 'viewer-mark-style.mjs', 'viewer-mark-draft-recovery.mjs', 'viewer-mark-visibility.mjs',
+const MODULES = ['viewer-marks.mjs', 'viewer-marks-store.mjs', 'viewer-mark-map-layer.mjs', 'viewer-mark-icons.mjs', 'viewer-mark-style.mjs', 'viewer-mark-draft-recovery.mjs', 'viewer-mark-dom.mjs', 'viewer-mark-picker.mjs', 'viewer-mark-visibility.mjs',
   'viewer-mark-coordinates.mjs', 'viewer-mark-geojson.mjs', 'utm-conversion.mjs'];
 const SESSION_TOKEN = 'synthetic-browser-session-token-0001';
 
@@ -37,16 +37,17 @@ function page() {
 <link rel="stylesheet" href="/node_modules/leaflet/dist/leaflet.css">${style}</head><body>
 <div id="main" style="height:100vh;display:flex"><aside id="sidebar" style="overflow:auto"><div id="sidebar-custom">
 <div class="panel" id="panel-marks" hidden><h3>Marks</h3><div data-marks-root></div></div></div></aside>
-<div id="viewer-wrap" style="flex:1"><div id="leaflet-map" style="display:block;height:100%"></div></div></div>
+<div id="viewer-wrap" style="flex:1"><div id="leaflet-map" style="display:block;height:100%"></div><div id="viewer-marks-ui"></div></div></div>
 <script type="module">
 import * as L from '/node_modules/leaflet/dist/leaflet-src.esm.js';
 import { mountViewerMarks } from '/viewer-marks.mjs';
 const signedIn = new URLSearchParams(location.search).get('mode') === 'session';
 const map = L.map('leaflet-map').setView([43.05, -87.0], 18);
-const marks = mountViewerMarks({ panel: document.getElementById('panel-marks'), L, getMap: () => map,
+const marks = mountViewerMarks({ panel: document.getElementById('panel-marks'), overlay: document.getElementById('viewer-marks-ui'), L, getMap: () => map,
   request: signedIn ? (url, init) => fetch(url, init) : () => { throw new Error('temporary marks must not reach an API'); },
   georef: () => ({ epsg: 32616, utmZoneLon0Deg: -87, hemisphere: 'N' }), units: () => 'imperial' });
 map.on('click', e => marks.mapClick(e.latlng));
+map.on('contextmenu', e => { if (marks.mapContextMenu(e.latlng)) L.DomEvent.stop(e); });
 map.on('dblclick', e => { if (marks.mapDoubleClick()) L.DomEvent.stop(e); });
 marks.setView({ map: true });
 await marks.setScope(signedIn ? { mode: 'session', key: 'client', token: () => '${SESSION_TOKEN}' } : { mode: 'temporary', key: 'public' });
@@ -106,7 +107,7 @@ async function withBrowser(t, { app = null } = {}, run) {
       assert.fail(`timed out: ${label}`);
     };
     const mouse = (type, x, y, extra = {}) => client.command('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, ...extra });
-    const button = text => `[...document.querySelectorAll('#panel-marks button')].find(b => b.textContent === ${JSON.stringify(text)} && !b.closest('[hidden]'))`;
+    const button = text => `[...document.querySelectorAll('#panel-marks button, #viewer-marks-ui button')].find(b => b.textContent === ${JSON.stringify(text)} && !b.closest('[hidden]'))`;
     const h = {
       client, waitFor, mouse,
       size: (width, height, mobile = false) => client.command('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }),
@@ -167,8 +168,8 @@ test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeou
 
   // Move, drag and Save; undo puts it back.
   await client.evaluate('map.setView([43.05, -87.0], 18, { animate: false }), 0');
-  if (await client.evaluate("document.querySelector('.viewer-mark-form').hidden")) await h.press('#viewer-marks-list .viewer-mark-list-item');
   await client.evaluate('map.setView([43.05, -87.0], 18, { animate: false }), 0');
+  await h.press('#viewer-marks-list .viewer-mark-list-item');
   await h.pressText('Move');
   const placedLon = saved.geometry.coordinates[0];
   await mouse('mousePressed', x, y);
@@ -255,6 +256,7 @@ test('signed-in client: map-click and typed pins survive a reload at full precis
 
     const openTreeStand = async () => {
       await h.client.evaluate(`[...document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item')].find(b => b.textContent.includes('Tree stand')).click(), 0`);
+      await h.pressText('Edit');
       await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'edit open');
     };
 
@@ -303,7 +305,7 @@ test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
   await withBrowser(t, {}, async h => {
     const { client, waitFor } = h;
     const key = async (name, code) => {
-      for (const type of ['keyDown', 'keyUp']) await client.command('Input.dispatchKeyEvent', { type, key: name, code: code || name, windowsVirtualKeyCode: { Enter: 13, ArrowRight: 39, ArrowLeft: 37, Tab: 9 }[name] });
+      for (const type of ['keyDown', 'keyUp']) await client.command('Input.dispatchKeyEvent', { type, key: name, code: code || name, windowsVirtualKeyCode: { Enter: 13, ArrowRight: 39, ArrowLeft: 37, Tab: 9, Escape: 27 }[name] });
     };
     const place = async (lat, lng, name) => {
       await h.type('[name=coordinates]', `${lat}, ${lng}`);
@@ -327,7 +329,7 @@ test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
     const before = Object.fromEntries(await stops());
     assert.deepEqual([before.West, before.East].sort(), ['-1', '0']);
     assert.deepEqual(Object.values(before).filter(value => value === null).length, 1, JSON.stringify(before));
-    await h.pressText('Close');
+    await h.pressText('Cancel');
     const view = await centre();
     await client.evaluate("[...document.querySelectorAll('.viewer-map-mark')].find(p => p.getAttribute('aria-label').startsWith('West')).focus(), 0");
     assert.equal(await focused(), 'West');
@@ -339,10 +341,12 @@ test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
     const element = "window.east = document.activeElement, 0";
     await client.evaluate(element);
     await key('Enter');
-    await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'opened by Enter');
-    assert.equal(await client.evaluate("document.querySelector('.viewer-mark-form [name=name]').value"), 'East');
-    assert.equal(await client.evaluate('window.east.isConnected && document.activeElement === window.east'), true, 'the same pin, still focused');
-    await h.pressText('Close');
+    await waitFor("!document.querySelector('.viewer-mark-view').hidden", 'opened by Enter');
+    assert.equal(await client.evaluate("document.querySelector('.viewer-mark-view h4').textContent"), 'East');
+    assert.equal(await client.evaluate('document.activeElement.textContent'), 'Edit');
+    await key('Escape');
+    await waitFor("document.querySelector('.viewer-mark-card').hidden", 'closed by Escape');
+    assert.equal(await client.evaluate('window.east.isConnected && document.activeElement === window.east'), true, 'the same pin, focused again');
 
     // Touch: 44 px around the pin, a tap opens, a swipe from a pin pans and moves nothing.
     await client.command('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
@@ -354,13 +358,18 @@ test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
     const touch = (type, points) => client.command('Input.dispatchTouchEvent', { type, touchPoints: points });
     await touch('touchStart', [{ x: box[0], y: box[1] }]);
     await touch('touchEnd', []);
-    await waitFor("document.querySelector('.viewer-mark-form [name=name]').value === 'West' && !document.querySelector('.viewer-mark-form').hidden", 'opened by tap');
-    await h.pressText('Close');
+    await waitFor("document.querySelector('.viewer-mark-view h4').textContent === 'West'", 'opened by tap');
+    await h.press('[aria-label=Close]');
     await touch('touchStart', [{ x: box[0], y: box[1] }]);
     for (let step = 1; step <= 6; step += 1) await touch('touchMove', [{ x: box[0] + step * 12, y: box[1] }]);
     await touch('touchEnd', []);
     await delay(500);
     assert.deepEqual((await h.state()).map(mark => mark.revision), [1, 1], 'a swipe writes nothing');
     assert.equal(await h.editorOpen(), false);
+    // Holding a finger on the map opens a draft (the browser's own contextmenu) and saves nothing.
+    await client.evaluate("map.getContainer().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 700, clientY: 300 })), 0");
+    await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'draft from a hold');
+    await h.pressText('Cancel');
+    assert.equal((await h.state()).length, 2);
   });
 });

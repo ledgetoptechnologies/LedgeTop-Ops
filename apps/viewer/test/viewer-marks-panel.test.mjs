@@ -198,48 +198,55 @@ test('a saved mark moves only in Move mode, only on Save, and can be undone', as
   const panel = mount();
   await panel.marks.setScope(scope('client', 'client-a'));
   const pin = await add(panel, 'Pin'), path = await add(panel, 'Path', { geometry: line });
+  const moveRow = text => panel.q('.viewer-mark-move').querySelectorAll('button').find(node => node.textContent === text);
+  const draggable = () => panel.leaflet.pins().filter(layer => layer.options.draggable);
   requests.length = 0;
-  // Not open, and open without Move: a drag does nothing.
-  assert.equal(panel.leaflet.pins()[0].drag(43.01, -87.01), false);
-  await panel.open('Pin');
-  assert.equal(panel.leaflet.pins()[0].drag(43.01, -87.01), false);
-  await panel.open('Path');
-  assert.deepEqual(panel.leaflet.corners(), []);
+  // Not open, open, and being edited: a drag does nothing.
+  for (const step of [() => {}, () => panel.show('Pin'), () => panel.card('Edit').click(), () => panel.show('Path')]) {
+    await step();
+    assert.deepEqual([draggable(), panel.leaflet.corners()], [[], []]);
+    assert.equal(panel.leaflet.pins()[0].drag(43.01, -87.01), false);
+  }
   assert.deepEqual(requests, []);
 
-  await panel.open('Pin');
-  await bar(panel, 'Move').click();
-  assert.equal(bar(panel, 'Move').getAttribute('aria-pressed'), 'true');
-  assert.equal(panel.leaflet.pins().filter(layer => layer.options.draggable).length, 1, 'only the open mark');
-  assert.equal(panel.leaflet.pins().find(layer => layer.options.draggable).drag(43.01, -87.01), true);
+  await panel.show('Pin');
+  await panel.card('Move').click();
+  assert.equal(panel.q('.viewer-mark-card').hidden, true, 'the map is free while moving');
+  assert.match(panel.q('.viewer-mark-strip').textContent, /Move Pin/);
+  assert.equal(draggable().length, 1, 'only the open mark');
+  assert.equal(draggable()[0].drag(43.01, -87.01), true);
   assert.deepEqual(requests, [], 'a drag alone writes nothing');
-  await bar(panel, 'Close').click();
-  assert.deepEqual(panel.store.find(pin.id).geometry, pin.geometry, 'Close leaves it where it was');
-  await panel.open('Pin');
-  assert.equal(panel.leaflet.pins().some(layer => layer.options.draggable), false, 'Move does not stay on');
-  await bar(panel, 'Move').click();
-  panel.leaflet.pins().find(layer => layer.options.draggable).drag(43.01, -87.01);
-  await panel.save();
-  assert.deepEqual(panel.store.find(pin.id).geometry.coordinates, [-87.01, 43.01]);
+  await moveRow('Cancel').click();
+  assert.deepEqual(panel.store.find(pin.id).geometry, pin.geometry);
+  assert.equal(panel.q('.viewer-mark-card').hidden, false, 'back to its card');
+  assert.deepEqual(draggable(), [], 'Move does not stay on');
+  // By drag, by a click on the map, and by the keys.
+  await panel.card('Move').click();
+  draggable()[0].drag(43.01, -87.01);
+  assert.equal(panel.marks.mapClick({ lat: 43.02, lng: -87.02 }), true);
+  await panel.dom.window.fire('keydown', { key: 'ArrowUp' });
+  await moveRow('Save').click();
+  const [lng, lat] = panel.store.find(pin.id).geometry.coordinates;
+  assert.ok(Math.abs(lng + 87.02) < 1e-6 && lat > 43.02 && lat < 43.0201, `${lng} ${lat}`);
   assert.deepEqual(requests.map(([method]) => method), ['PUT']);
   await panel.button('Undo').click();
   assert.deepEqual(panel.store.find(pin.id).geometry, pin.geometry);
 
-  await panel.open('Path');
-  await bar(panel, 'Move').click();
+  await panel.show('Path');
+  await panel.card('Move').click();
   assert.equal(panel.leaflet.corners()[1].drag(43.002, -87.002), true);
-  await panel.save();
+  await panel.dom.window.fire('keydown', { key: 'Enter' });
   assert.deepEqual(panel.store.find(path.id).geometry.coordinates, [[-87, 43], [-87.002, 43.002]]);
   await panel.button('Undo').click();
   assert.deepEqual(panel.store.find(path.id).geometry, path.geometry);
 });
 
-test('a new mark can be adjusted before its first save, and one that cannot be edited never moves', async t => {
+test('a new mark can be adjusted before its first save, and one that is view-only never moves', async t => {
   const { mount, scope } = await openMarksPanel(t);
   const client = mount(), staff = mount();
   await client.marks.setScope(scope('client', 'client-a'));
   await client.place('43.05, -87');
-  assert.equal(bar(client, 'Move').hidden, true);
+  assert.equal(client.q('.viewer-mark-view').hidden, true, 'no Move or Delete for what is not saved');
   assert.equal(client.leaflet.pins()[0].drag(43.06, -87.02), true);
   await client.type('[name=name]', 'New');
   client.q('[name=visibility]').value = 'staff';
@@ -247,13 +254,14 @@ test('a new mark can be adjusted before its first save, and one that cannot be e
   assert.deepEqual(client.store.state.marks[0].geometry.coordinates, [-87.02, 43.06]);
 
   await staff.marks.setScope(scope('ops', 'staff-person'));
-  await staff.open('New');
-  assert.match(staff.text(), /From a client/);
-  for (const text of ['Move', 'Save', 'Delete']) assert.equal(bar(staff, text).hidden, true, text);
-  for (const name of ['name', 'note', 'pointCoordinates']) assert.equal(staff.q(`[name=${name}]`).disabled, true, name);
-  assert.equal(staff.q('[name=visibility]').parent.hidden, true);
-  assert.equal(staff.leaflet.pins().some(layer => layer.options.draggable), false);
-  await bar(staff, 'Move').click();
+  await staff.show('New');
+  assert.match(staff.q('.viewer-mark-view').textContent, /New.*From a client/);
+  for (const text of ['Edit', 'Move', 'Delete']) {
+    assert.equal(staff.card(text).hidden, true, text);
+    await staff.card(text).click();
+  }
+  assert.equal(staff.q('.viewer-mark-form').hidden, true);
+  assert.equal(staff.q('.viewer-mark-strip').hidden, true);
   assert.equal(staff.leaflet.pins().some(layer => layer.options.draggable), false);
 });
 

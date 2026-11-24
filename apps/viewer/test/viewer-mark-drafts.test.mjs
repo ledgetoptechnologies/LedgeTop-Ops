@@ -118,7 +118,7 @@ test('a reload keeps a new mark that was not saved, and saving or closing it end
   assert.equal(form(third).hidden, true);
   await third.place('43.06, -87');
   assert.equal(stored(storage), true);
-  await button(third, 'Close').click();
+  await button(third, 'Cancel').click();
   assert.equal(stored(storage), false);
 });
 
@@ -317,10 +317,10 @@ test('recently deleted lists the person\'s own marks and restores them in place'
   const { id } = panel.store.state.marks[0];
   await openSection(panel);
   assert.match(section(panel).textContent, /None in the last 30 days/);
-  await panel.open('Gone');
-  await button(panel, 'Delete').click();
+  await panel.show('Gone');
+  await panel.card('Delete').click();
   assert.equal(panel.store.state.marks.length, 1, 'asks twice');
-  await button(panel, 'Tap again to delete').click();
+  await panel.card('Tap again to delete').click();
   assert.match(section(panel).textContent, /Gone/);
   await other.marks.setScope(scope('ops', 'staff-person'));
   await openSection(other);

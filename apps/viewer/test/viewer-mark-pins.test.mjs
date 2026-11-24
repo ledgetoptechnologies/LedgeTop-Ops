@@ -149,7 +149,7 @@ test('while drawing, pins take no input, and nothing is left behind when the map
   assert.deepEqual(selected, ['a']);
   render([mark('a')], { visible: false });
   assert.deepEqual(leaflet.drawn(), []);
-  assert.deepEqual(Object.values(leaflet.mapHandlers).map(handlers => handlers.size), [0, 0]);
+  assert.deepEqual(Object.values(leaflet.mapHandlers).map(handlers => handlers.size), [0, 0, 0, 0]);
   render([mark('a')]);
   assert.equal(leaflet.pins().length, 1);
   layer.dispose();
@@ -195,10 +195,12 @@ test('in the panel: opening a pin keeps its element, and clicking it again keeps
   pin.click();
   assert.equal(panel.leaflet.pins()[0].getElement(), element);
   assert.equal(panel.leaflet.pins()[0].options.icon.iconSize[0], 40);
+  assert.equal(panel.q('.viewer-mark-form').hidden, true, 'a click shows the card, not a form');
+  await panel.card('Edit').click();
   await panel.type('[name=name]', 'Typed');
   panel.leaflet.pins()[0].click();
   assert.equal(panel.q('[name=name]').value, 'Typed');
-  assert.equal(panel.dom.document.activeElement, panel.q('[name=name]'));
+  assert.ok(panel.dom.document.activeElement === panel.q('[name=name]'));
   await panel.q('.viewer-mark-swatch[data-color="#c62828"]').click();
   await panel.q('[data-icon=warning]').click();
   await panel.save();
