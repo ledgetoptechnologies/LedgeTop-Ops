@@ -1,5 +1,6 @@
 'use strict';
 
+const permanentDeletion = require('../server/permanentDeletion');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -205,6 +206,7 @@ test('client catalog carries the folder path of visible tasks only', async t => 
 });
 
 test('after a project is trashed and purged the client catalog returns no folder path data for it', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const state = fixture(t, 48), { processing } = state;
   const project = processing.createProject({ displayName: 'Purged path delivery' });
   const task = publish(state, project, 'Purged flight');

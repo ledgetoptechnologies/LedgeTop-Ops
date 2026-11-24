@@ -20,6 +20,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const permanentDeletion = require('./permanentDeletion');
 
 const BOUNDARY_LIMITS = Object.freeze({
   maxBytes: 20 * 1024 * 1024,
@@ -499,6 +500,7 @@ function mountBoundaryRoutes(router, { processing, repository, boundaries, autho
 // files. Trashing alone keeps them so a restore brings them back; trashing
 // already revokes every viewer session and share for the project's models.
 function purgeProjectBoundary(storage, projectId) {
+  permanentDeletion.refusePermanentDeletion();
   const root = storage?.roots?.models;
   if (!root || typeof projectId !== 'string' || !PROJECT_ID.test(projectId)) return;
   try { fs.rmSync(path.join(root, 'property-lines', projectId), { recursive: true, force: true }); } catch { /* best effort; nothing serves it once the project is purged */ }

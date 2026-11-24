@@ -1,5 +1,6 @@
 'use strict';
 
+const permanentDeletion = require('./permanentDeletion');
 const { sanitizeLogMessage } = require('./processingSecurity');
 
 function exists(storage,rootKey,relativePath){return Boolean(rootKey&&relativePath&&storage.pathExistsStrict(rootKey,relativePath));}
@@ -18,6 +19,7 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   const mutation=typeof input==='string'?processing.getStorageMutation(input):input;
   if(!mutation)return null;
   if(mutation.status==='complete'||mutation.status==='failed')return mutation;
+  if(mutation.type==='purge')permanentDeletion.refusePermanentDeletion();// outside the try: the journal stays as it is
   if(faultAt==='after_intent')throw Object.assign(new Error('injected failure after lifecycle intent'),{code:'fault_injected'});
   try{
     if(mutation.status==='intent'){
@@ -53,9 +55,11 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   }
 }
 
-function reconcileStorageMutations(processing,storage,limit=20){const results=[];for(const mutation of processing.pendingStorageMutations(limit)){try{results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
+function reconcileStorageMutations(processing,storage,limit=20){const results=[],paused=permanentDeletion.permanentDeletionPaused();for(const mutation of processing.pendingStorageMutations(limit,{purges:!paused})){try{results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
 
 function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null}={}){
+  // Before anything is moved or dated anew: every item stays exactly as it is.
+  if(permanentDeletion.permanentDeletionPaused())return processing.expiredTrash().map(item=>({trashId:item.id,status:'skipped',errorCode:permanentDeletion.PAUSED_CODE}));
   const results=[];
   for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
     try{
