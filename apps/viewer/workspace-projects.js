@@ -370,7 +370,7 @@ async function workspaceFetch(path,init={},beforeDispatch){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const assertRequestCurrent=()=>{if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});};let response;if(recoveryGuard){assertRequestCurrent();response=await fetch(path,init);assertRequestCurrent()}else response=await workspaceFetch(path,init,beforeDispatch);let payload;try{payload=await response.json()}catch{}assertRequestCurrent();if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}const receiptReplayed=(Boolean(beforeDispatch)||init.headers['X-Viewer-Share-Receipt-Only']==='true')&&response.headers?.get('Idempotency-Replayed')==='true';if(!response.ok&&receiptReplayed)throw Object.assign(responseError(payload?.message||payload?.error||'The earlier share request was refused.',response.status),{code:payload?.code,receiptReplayed:true});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return receiptReplayed?{...payload,receiptReplayed:true}:payload}
+async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const assertRequestCurrent=()=>{if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});};let response;if(recoveryGuard){assertRequestCurrent();response=await fetch(path,init);assertRequestCurrent()}else response=await workspaceFetch(path,init,beforeDispatch);let payload;try{payload=await response.json()}catch{}assertRequestCurrent();if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}const receiptReplayed=(Boolean(beforeDispatch)||init.headers['X-Viewer-Share-Receipt-Only']==='true')&&response.headers?.get('Idempotency-Replayed')==='true';if(!response.ok&&receiptReplayed)throw Object.assign(responseError(payload?.message||payload?.error||'The earlier share request was refused.',response.status),{code:payload?.code,receiptReplayed:true});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});if(beforeDispatch&&response.status!==201)throw new Error('The link request outcome could not be read. Retry to check it.');return receiptReplayed?{...payload,receiptReplayed:true}:payload}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message,onFailure){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');let submitted=false;try{const result=await api(path,options);submitted=true;toast(typeof message==='function'?message(result):message);await load();return result}catch(error){onFailure?.(error,{submitted});toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
@@ -2138,7 +2138,7 @@ async function createOutputShare(form,projectId,onlyOutputId){
       const sending=request;
       sending.busy=true;
       try{
-        return await api(path,{
+        const outcome=await api(path,{
           method:'POST',body:JSON.parse(sending.serialized),
           headers:{'Idempotency-Key':sending.key,...(receiptOnly?{'X-Viewer-Share-Receipt-Only':'true'}:{})},
           beforeDispatch:async()=>{
@@ -2155,6 +2155,9 @@ async function createOutputShare(form,projectId,onlyOutputId){
             };
           },
         });
+        if(typeof outcome?.share?.id!=='string'||!outcome.share.id.trim()||(receiptOnly&&!outcome.receiptReplayed))
+          throw new Error('The link request outcome could not be read. Retry to check it.');
+        return outcome;
       }finally{sending.busy=false}
     };
     const makeRequest=()=>({
@@ -2165,7 +2168,7 @@ async function createOutputShare(form,projectId,onlyOutputId){
       try{result=await dispatch(true);receiptRecovered=true}catch(error){
         if(error.code==='idempotency_in_progress')
           throw new Error('The previous link request is still being processed. Try again to check it.');
-        if(error.code!=='share_receipt_missing'){
+        if(error.status!==404||error.code!=='share_receipt_missing'||error.receiptReplayed){
           if(error.code==='share_dispatch_cancelled')return await stopped();
           if(error.receiptReplayed&&error.status>=400&&error.status<500){
             pending.delete(output.id);
@@ -2216,7 +2219,7 @@ async function createOutputShare(form,projectId,onlyOutputId){
     if(!fence.authority())return;
     if(receiptRecovered||result.receiptReplayed){
       form.shareSaved=true;
-      clearShareResult(result.share?.id,'output');
+      clearShareResult(result.share.id,'model');
       const changed=output.projectId||projectId;
       outputFences.set(changed,(outputFences.get(changed)||0)+1);
       toast('The previous link request completed. Check the current link in Share.');

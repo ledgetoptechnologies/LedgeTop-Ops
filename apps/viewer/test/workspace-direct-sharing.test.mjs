@@ -353,7 +353,7 @@ test('a completed receipt recovers the exact request without another write or co
   const base=f.context.api;
   f.context.api=(path,options)=>path.endsWith('/outputs/output/shares')&&options?.method!=='POST'
     ? Promise.resolve({shares:[live],publicationRequired:true}):base(path,options);
-  f.respondReceipt(async()=>({share:{id:'share',revokedAt:null},viewUrl:'https://viewer.test/view/x'}));
+  f.respondReceipt(async()=>({share:{id:'share',revokedAt:null},viewUrl:'https://viewer.test/view/x',receiptReplayed:true}));
   await f.context.createOutputShare(f.form,'project','output');
   assert.equal(f.asked.length,1);assert.equal(f.posts().length,1);assert.equal(f.receipts().length,2);
   assert.equal(f.receipts()[1].options.headers['Idempotency-Key'],f.posts()[0].options.headers['Idempotency-Key']);
@@ -1155,4 +1155,23 @@ test('a recorded historical authorization refusal does not renew or clear the cu
     clearWorkspaceAuthorization:()=>{throw new Error('unexpected authorization clearing')},fetch:async()=>historical});
   vm.runInContext(declaration('workspaceFetch'),scope);
   assert.equal(await scope.workspaceFetch('/fixture',{headers:{'X-Viewer-Share-Receipt-Only':'true'}}),historical);
+});
+
+
+test('unreadable create and unverified receipt responses preserve the original key',async()=>{
+  const f=fixture();
+  f.respondPost(async()=>undefined);
+  await f.context.createOutputShare(f.form,'project','output');
+  const original=f.posts()[0].options.headers['Idempotency-Key'];
+  assert.match(f.notices.at(-1)[0],/outcome could not be read/);
+  for(const response of [undefined,{share:{id:'saved'}},{receiptReplayed:true}]){
+    f.respondReceipt(async()=>response);
+    await f.context.createOutputShare(f.form,'project','output');
+    assert.equal(f.posts().length,1);
+    assert.equal(f.receipts().at(-1).options.headers['Idempotency-Key'],original);
+  }
+  f.respondReceipt(async()=>({share:{id:'saved'},receiptReplayed:true}));
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.posts().length,1);
+  assert.equal(f.state.pendingOutputShares.size,0);
 });
