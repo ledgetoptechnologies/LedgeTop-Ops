@@ -480,9 +480,9 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   claimUploadFinalization(id) { const t=now();return this.database.prepare("UPDATE upload_sessions SET status='finalizing',updated_at=? WHERE id=? AND status='open'").run(t,id).changes===1; }
   reopenUpload(id) { this.database.prepare("UPDATE upload_sessions SET status='open',updated_at=? WHERE id=? AND status='finalizing'").run(now(),id); }
   completeUpload(id) { const t=now(); this.database.prepare("UPDATE upload_sessions SET status='complete',updated_at=? WHERE id=?").run(t,id); return this.getUpload(id); }
-  // Sessions are never deleted, and one with an unfinished CSV keeps its cache on purpose. Newly expired sessions
-  // come first, then the least recently visited, so a kept cohort never hides a later one from the bounded pass.
-  expiredUploads(at=Date.now()){return this.database.prepare("SELECT id FROM upload_sessions WHERE status IN ('open','expired','cancelled') AND expires_at<=? ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,updated_at,id").all(new Date(at).toISOString()).map((r)=>r.id);}
+  // Sessions are never deleted, and one with an unfinished CSV keeps its cache on purpose. The least
+  // recently used or visited goes first, so neither a kept cohort nor sustained arrivals hide another from the bounded pass.
+  expiredUploads(at=Date.now()){return this.database.prepare("SELECT id FROM upload_sessions WHERE status IN ('open','expired','cancelled') AND expires_at<=? ORDER BY updated_at,id").all(new Date(at).toISOString()).map((r)=>r.id);}
   // Also records the visit for a session that is already expired or cancelled, before its cleanup can fail.
   expireUpload(id){this.database.prepare("UPDATE upload_sessions SET status=CASE WHEN status IN ('open','finalizing') THEN 'expired' ELSE status END,updated_at=? WHERE id=? AND status IN ('open','finalizing','expired','cancelled')").run(now(),id);}
   cancelDatasetUploads(datasetId){const ids=this.database.prepare("SELECT id FROM upload_sessions WHERE dataset_id=? AND status IN ('open','finalizing')").all(datasetId).map((r)=>r.id),t=now();this.database.prepare("UPDATE upload_sessions SET status='cancelled',updated_at=? WHERE dataset_id=? AND status IN ('open','finalizing')").run(t,datasetId);return ids;}

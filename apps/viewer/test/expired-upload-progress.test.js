@@ -57,8 +57,9 @@ const keptUpload=(c,status)=>c.upload({name:'partial.csv',bytes:Buffer.from('poi
 test('a kept, expired or cancelled cohort never starves a later expired upload',t=>{
   const c=fixture(t),cohort=[];
   for(let index=0;index<PER_PASS+5;index+=1)cohort.push(keptUpload(c,index%2?'cancelled':'expired'));
+  c.pass();c.pass();// the cohort has been visited
   const later=c.upload({name:'photo.jpg',bytes:Buffer.from('invented photo')});
-  assert.ok(c.pass().includes(later.id),'the later upload is cleaned in the first pass');
+  assert.ok(c.pass().includes(later.id),'a later upload, last used before that visit, is cleaned in the next pass');
   assert.equal(fs.existsSync(later.part),false);
   assert.equal(c.processing.getUpload(later.id).status,'expired');
   for(const kept of cohort){
@@ -104,4 +105,16 @@ test('rotation keeps a retained original byte-identical and single',t=>{
   assert.equal(fs.existsSync(complete.part),false,'the cache may go once the original is kept');
   assert.deepEqual(c.originals.get(saved.id).bytes,bytes);
   assert.equal(c.originals.list(complete.datasetId).length,1);
+});
+
+test('sustained arrivals never starve a session waiting for its next visit',t=>{
+  const c=fixture(t);
+  const waiting=c.upload({name:'photo.jpg',bytes:Buffer.from('invented photo'),status:'cancelled'});
+  let visited=false;
+  for(let count=0;count<6&&!visited;count+=1){
+    for(let index=0;index<PER_PASS;index+=1)c.upload({name:`photo-${index}.jpg`,bytes:Buffer.from('invented photo')});
+    visited=c.pass().includes(waiting.id);
+  }
+  assert.ok(visited,'a full pass of new arrivals every time does not hide it');
+  assert.equal(fs.existsSync(waiting.part),false);
 });
