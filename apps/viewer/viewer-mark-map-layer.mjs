@@ -49,15 +49,42 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
     span.textContent = text;
     return span;
   }
-  function bindLabel(map, layer, mark, { labels, offset }) {
-    layer.unbindTooltip?.();
-    layer.bindTooltip(label(map, mark.name), { permanent: labels, direction: 'top', offset, className: 'viewer-mark-label', interactive: false });
+  // A mark's name on hover and focus is bound once and renamed in place: Leaflet adds
+  // listeners to the element each time one is bound and never takes them off. A label
+  // that stays on the map is a layer of its own, which focus and blur do not close.
+  // A pin being placed has no name here; it is in the editor.
+  const LABEL = { direction: 'top', className: 'viewer-mark-label', interactive: false };
+  function setLabel(map, item, layer, mark, offset) {
+    if (!item.hover) {
+      layer.bindTooltip(label(map, mark.name), { ...LABEL, permanent: false, offset });
+      // After it has finished opening, not in the middle of it.
+      layer.on('tooltipopen', () => { if (item.kept) queueMicrotask(() => { if (item.kept) layer.closeTooltip(); }); });
+      item.hover = layer;
+    } else {
+      layer.setTooltipContent(label(map, mark.name));
+      layer.getTooltip().options.offset = offset;
+    }
+  }
+  function keepLabel(map, item, show, { at, text, offset }) {
+    if (!show) {
+      if (item.kept) group.removeLayer(item.kept);
+      item.kept = null;
+      return;
+    }
+    if (!item.kept) item.hover.closeTooltip();
+    else item.kept.options.offset = offset;
+    const kept = item.kept || L.tooltip({ ...LABEL, permanent: true, offset });
+    kept.setLatLng(latLng(at));
+    kept.setContent(label(map, text));
+    if (!item.kept) kept.addTo(group);
+    item.kept = kept;
   }
 
   function removeItem(id) {
     const item = items.get(id);
     // Nothing a marker or its element listens to outlives it.
     item.listeners?.abort();
+    if (item.kept) group.removeLayer(item.kept);
     for (const layer of item.layers || [item.marker]) {
       layer.unbindTooltip?.();
       group.removeLayer(layer);
@@ -128,7 +155,10 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
     // Selected is always on top; otherwise Leaflet puts southern pins over northern ones.
     item.marker.setZIndexOffset(selected || draft ? 10_000 : 0);
     item.marker.getElement()?.setAttribute('aria-label', describe(mark));
-    bindLabel(map, item.marker, mark, { labels: labels && !draft, offset: labelOffset });
+    if (id !== DRAFT) {
+      setLabel(map, item, item.marker, mark, labelOffset);
+      keepLabel(map, item, labels && !draft, { at: mark.geometry.coordinates, text: mark.name, offset: labelOffset });
+    }
     item.signature = signature;
   }
 
@@ -163,9 +193,13 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
         icon: L.divIcon({ className: 'viewer-map-area', html, iconSize: size, iconAnchor: anchor }) }).addTo(group));
     }
     if (interactive && id !== DRAFT) shapes[1].on('click', event => { L.DomEvent.stop(event); onSelect(id); });
-    bindLabel(map, shapes[1], mark, { labels: labels && !draft, offset: [0, 0] });
+    const made = { kind: 'shape', signature, layers };
+    if (id !== DRAFT) {
+      setLabel(map, made, shapes[1], mark, [0, 0]);
+      keepLabel(map, made, labels && !draft, { at: area ? areaCentre(positions) : positions[0], text: mark.name, offset: [0, 0] });
+    }
     if (movable && interactive) vertexHandles(map, mark, shapes, layers);
-    items.set(id, { kind: 'shape', signature, layers });
+    items.set(id, made);
   }
 
   const draw = (map, id, mark, options) => (mark.geometry.type === 'Point' ? drawPin : drawShape)(map, id, mark, options);

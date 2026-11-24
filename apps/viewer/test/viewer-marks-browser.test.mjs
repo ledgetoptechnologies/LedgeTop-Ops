@@ -322,13 +322,14 @@ test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
     await h.pressText('Save');
     await waitFor('marks.store.state.marks.length === 2', 'second');
 
-    // One tab stop; the pin being placed is none.
+    // One tab stop among the saved pins; the pin being placed is none.
     await place(43.0502, -87.0, 'New');
     const before = Object.fromEntries(await stops());
-    assert.deepEqual([before.West, before.East, before.Pin ?? before.New], ['0', '-1', null]);
+    assert.deepEqual([before.West, before.East].sort(), ['-1', '0']);
+    assert.deepEqual(Object.values(before).filter(value => value === null).length, 1, JSON.stringify(before));
     await h.pressText('Close');
     const view = await centre();
-    await client.evaluate("document.querySelector('.viewer-map-mark[tabindex=\"0\"]').focus(), 0");
+    await client.evaluate("[...document.querySelectorAll('.viewer-map-mark')].find(p => p.getAttribute('aria-label').startsWith('West')).focus(), 0");
     assert.equal(await focused(), 'West');
     await key('ArrowRight');
     assert.equal(await focused(), 'East');

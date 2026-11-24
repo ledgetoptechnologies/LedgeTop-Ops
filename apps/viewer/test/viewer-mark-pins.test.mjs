@@ -67,7 +67,8 @@ function layerFixture(options = {}) {
   const selected = [], moved = [];
   const layer = createMarkMapLayer({ L: leaflet.L, getMap: () => leaflet.map, onSelect: id => selected.push(id), onDraftMove: geometry => moved.push(geometry), ...options });
   const render = (marks, more = {}) => layer.render({ visible: true, marks, draft: null, selectedId: null, labels: false, preview: null, drawing: null, ...more });
-  const pin = id => leaflet.pins().find(item => item.label.text === id);
+  // The pin being placed has no name on the map; it is found by what it is spoken as.
+  const pin = id => leaflet.pins().find(item => (item.label?.text ?? item.getElement().getAttribute('aria-label')) === id);
   return { document, leaflet, layer, render, pin, selected, moved };
 }
 const mark = (id, changes = {}) => ({ id, name: id, color: '#1565c0', icon: 'pin', geometry: { type: 'Point', coordinates: [-87, 43] }, ...changes });
@@ -269,4 +270,41 @@ test('a removed or replaced marker keeps no handlers', async () => {
   assert.deepEqual(selected, ['a', 'b', 'a'], 'redrawing adds no second handler');
   layer.dispose();
   for (const item of leaflet.made) assert.deepEqual(Object.values(item.handlers).flat(), []);
+});
+
+test('a pin being placed has no name on the map, not even on hover', () => {
+  const { leaflet, layer, pin } = layerFixture();
+  for (const labels of [false, true]) {
+    layer.render({ visible: true, marks: [mark('a')], draft: { ...mark('__draft__'), name: 'Pin', movable: true }, selectedId: null, labels, preview: null, drawing: null });
+    const draft = leaflet.pins().find(item => item.options.icon.className.includes('draft'));
+    assert.equal(draft.label, null);
+    assert.ok(!leaflet.shown().includes('Pin'), 'what is being typed is in the editor');
+    assert.equal(pin('a').label.text, 'a');
+  }
+});
+
+test('labels that are on stay through focus and blur, and redrawing binds nothing again', async () => {
+  const { leaflet, render, pin } = layerFixture();
+  const area = mark('area', { geometry: { type: 'Polygon', coordinates: [[[-87, 43], [-86.99, 43], [-86.99, 43.01], [-87, 43]]] } });
+  render([mark('a'), area], { labels: false });
+  assert.deepEqual(leaflet.shown(), []);
+  render([mark('a'), area], { labels: true });
+  assert.deepEqual(leaflet.shown(), ['a', 'area']);
+  const element = pin('a').getElement();
+  for (const type of ['focus', 'blur', 'focus']) {
+    await element.fire(type);
+    assert.deepEqual(leaflet.shown(), ['a', 'area'], type);
+  }
+  assert.equal(pin('a').label.open, false, 'its name is not shown twice');
+  for (let i = 0; i < 10; i += 1) render([mark('a', { name: 'a' + i, color: i % 2 ? '#c62828' : '#1565c0' }), area], { labels: i % 2 === 0, selectedId: i % 3 ? 'a' : null });
+  assert.equal(pin('a9').binds, 1);
+  assert.equal(pin('a9').label.text, 'a9', 'renamed in place');
+  render([mark('a', { name: 'Moved', geometry: { type: 'Point', coordinates: [-87.5, 43.5] } })], { labels: true });
+  const [kept] = leaflet.drawn().filter(item => item.kind === 'tooltip');
+  assert.deepEqual([leaflet.shown(), kept.positions], [['Moved'], [43.5, -87.5]]);
+  render([]);
+  assert.deepEqual(leaflet.shown(), []);
+  render([mark('a')], { labels: false });
+  await pin('a').getElement().fire('focus');
+  assert.equal(pin('a').label.open, true, 'with labels off the name still comes on hover and focus');
 });
