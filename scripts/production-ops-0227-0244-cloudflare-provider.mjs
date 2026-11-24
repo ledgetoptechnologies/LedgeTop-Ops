@@ -52,6 +52,7 @@ export function createOps0227To0244CloudflareProvider({ getBearerToken, accountI
     try { bearer = await getBearerToken(); } catch { fail('auth_unavailable'); }
     if (typeof bearer !== 'string' || bearer.length < 20 || bearer.length > 16_384 || !/^[\x21-\x7e]+$/u.test(bearer)) fail('auth_unavailable');
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs);
+    let succeeded = false;
     try {
       const response = await fetchImpl(`${API_ROOT}/accounts/${accountId}/${route}`, {
         method, redirect: 'manual', cache: 'no-store', signal: controller.signal,
@@ -66,12 +67,17 @@ export function createOps0227To0244CloudflareProvider({ getBearerToken, accountI
         fail('response_invalid');
       }
       if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.success !== true) fail('response_invalid');
+      succeeded = true;
       return payload;
     } catch (error) {
       if (error instanceof Error && error.message.startsWith('ops_0227_0244_provider:')) throw error;
       // A transport failure after sending a mutation has an unknown outcome: reconcile, never retry.
       fail('request_uncertain_no_retry');
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+      // A refused or unreadable answer is dropped with its connection, so an open body cannot hold the process.
+      if (!succeeded) controller.abort();
+    }
   }
 
   async function assertTarget() {
