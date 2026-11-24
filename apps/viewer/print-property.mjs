@@ -4,7 +4,7 @@
 // The clip changes which pixels show, never where they are. It is a choice of
 // what to print, not access control: the Viewer still shows the surroundings.
 import { expandLonLatBounds, tilesCoverBounds } from './property-lines.mjs';
-import { dissolveParcelsByOwner, outlineAreaM2 } from './property-lines-owners.mjs';
+import { dissolveParcelsByOwner, outlineAreaM2, parcelSoundness } from './property-lines-owners.mjs';
 import { printLayout, renderOrthoPixels } from './ortho-print-export.mjs';
 
 export const METERS_PER_FOOT = 0.3048;
@@ -22,6 +22,9 @@ export const PRINT_PROPERTY_MESSAGES = Object.freeze({
   incomplete: 'Property lines could not be fully loaded here. Try again.',
   too_many: 'Too many parcels to load here.',
   unclosed: 'This parcel’s shape is not complete.',
+  unsound: 'This parcel’s shape crosses or overlaps itself.',
+  unverified: 'This parcel’s shape is too detailed to check.',
+  zoom_out: 'Zoom out so the whole property fits in the view.',
   upload: 'An uploaded boundary file cannot be used to choose a property.',
   unavailable: 'Property lines are not available.',
   uncaptured: 'None of this property was captured.',
@@ -70,11 +73,16 @@ export function outlineAt(outlines, point) {
 }
 
 // Why an outline cannot be printed as a property, or null. Its whole shape
-// must be known: not clipped by the server, every ring closed.
+// must be known and sound: not clipped by the server, every ring closed, no
+// parcel crossing or overlapping itself. Sound parcels whose land cannot be
+// added up (outlineAreaM2 null) may be printed, without an acreage.
 export function outlineRefusal(outline) {
   if (outline.parcels.some(parcel => Array.isArray(parcel.lines))) return 'clipped';
   const closed = ring => ring.length >= 4 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1];
   if (!outline.parcels.every(parcel => parcel.rings.every(closed))) return 'unclosed';
+  const states = outline.parcels.map(parcelSoundness);
+  if (states.includes('unsound')) return 'unsound';
+  if (states.includes('unverified')) return 'unverified';
   return null;
 }
 

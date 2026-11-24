@@ -9,7 +9,7 @@ import {
   CLIP_HIDE, CLIP_SHOW, CLIP_UNCAPTURED, PRINT_PROPERTY_MESSAGES, captureMask, coverageNote, linesToUtm, outlineAt, outlineRefusal, outlineToUtm,
   printClip, printPropertyError, propertyCoverage, propertyFrame, readCaptureMask, resolvePrintProperty, shapeMask,
 } from '../print-property.mjs';
-import { dissolveParcelsByOwner } from '../property-lines-owners.mjs';
+import { dissolveParcelsByOwner, outlineAreaM2 } from '../property-lines-owners.mjs';
 
 const box = (x, y, w, h = w) => [[x, y], [x, y + h], [x + w, y + h], [x + w, y], [x, y]];
 
@@ -166,6 +166,38 @@ test('choosing refuses rather than print part of a property', async () => {
   assert.ok(calls <= 8, `${calls} loads`);
 });
 
+test('choosing: a closed but unsound shape is refused; valid land that cannot be added up prints without acreage', async () => {
+  const [w, s] = [EDGE - 0.010, LAT - 0.001], at = rings => ({ id: 1, owner: 'SAMPLE FARMS LLC', rings: rings.map(r => r.map(([x, y]) => [Math.round((w + x * 1e-5) * 1e7) / 1e7, Math.round((s + y * 1e-5) * 1e7) / 1e7])) });
+  const unsound = {
+    'bow tie': at([[[0, 0], [200, 200], [200, 0], [0, 200], [0, 0]]]),
+    'crossed ring': at([[[0, 0], [250, 200], [200, 0], [0, 150], [0, 0]]]),
+    'ring twice': at([box(0, 0, 200), box(0, 0, 200)]),
+    'overlapping parts': at([box(0, 0, 200), box(150, 150, 200)]),
+    'no area': at([[[0, 0], [200, 0], [100, 0], [0, 0]]]),
+  };
+  for (const [name, parcel] of Object.entries(unsound)) {
+    assert.equal(outlineRefusal({ parcels: [parcel] }), 'unsound', name);
+    assert.equal(outlineRefusal({ parcels: [WEST, parcel] }), 'unsound', `${name}, one of several`);
+    if (name === 'no area' || name === 'ring twice') continue;   // nothing to click inside
+    for (const merge of [true, false]) await assert.rejects(resolvePrintProperty({ point: [w + 190e-5, s + (name === 'bow tie' ? 100e-5 : 30e-5)], merge, load: loaderOver([parcel]).load }), reason('unsound'), name);
+  }
+  // Sound: plain, holed, multi-part, an island, a hole touching its outer ring.
+  for (const parcel of [WEST, at([box(0, 0, 200), box(50, 50, 50)]), at([box(0, 0, 100), box(300, 0, 100)]), at([box(0, 0, 200), box(50, 50, 100), box(70, 70, 20)]), at([box(0, 0, 200), [[0, 0], [100, 50], [50, 100], [0, 0]]])])
+    assert.equal(outlineRefusal({ parcels: [parcel] }), null);
+  // Open is its own reason.
+  assert.equal(outlineRefusal({ parcels: [at([box(0, 0, 200).slice(0, 4)])] }), 'unclosed');
+  // Two sound parcels side by side, each too long-edged for their union to be added up: printed, no acreage.
+  const teeth = dy => { const top = Array.from({ length: 2600 }, (_, i) => [i * 0.2, dy + (i % 2 ? 0.1 : 150)]); return at([[[0, dy - 10], ...top, [520, dy - 10], [0, dy - 10]]]); };
+  const a = teeth(0), b = { ...teeth(0.05), id: 2 };
+  assert.deepEqual([outlineRefusal({ parcels: [a] }), outlineRefusal({ parcels: [a, b] })], [null, null]);
+  const intricate = { ownerKey: 'SAMPLE FARMS LLC', owner: 'SAMPLE FARMS LLC', parcels: [a, b], parcelIds: [1, 2], lines: [] };
+  assert.equal(outlineAreaM2(intricate, { covered: () => true }), null);
+  // One parcel too intricate even to check is refused, and said differently.
+  const huge = at([[[0, -10], ...Array.from({ length: 9000 }, (_, i) => [i * 0.05, i % 2 ? 0.1 : 150]), [460, -10], [0, -10]]]);
+  assert.equal(outlineRefusal({ parcels: [huge] }), 'unverified');
+  assert.notEqual(PRINT_PROPERTY_MESSAGES.unverified, PRINT_PROPERTY_MESSAGES.unsound);
+});
+
 test('choosing: stacked shapes give the smallest; a hole is not the property', () => {
   const big = ll(-90, 0.01, 'A OWNER', 1), small = ll(-89.996, 0.001, 'B OWNER', 2, LAT - 0.0005, 0.001);
   const outlines = dissolveParcelsByOwner([big, small]);
@@ -273,7 +305,7 @@ test('pixels past the raster are background, not stretched edge pixels', async (
   assert.deepEqual(result.extent, { minE: 500300, maxE: 500400, minN: 4700000, maxN: 4700100 });
 });
 
-test('policy: a property is a PNG held to the screen size without download permission; the gates are otherwise unchanged', () => {
+test('policy: a property is a PNG held to its screen pixels in the view without download permission; the gates are otherwise unchanged', () => {
   const measureOnly = orthoPrintPolicy({ accessAvailable: true, measure: true, download: false }), full = orthoPrintPolicy({ accessAvailable: true, measure: true, download: true });
   assert.doesNotThrow(() => assertOrthoPrintAllowed(measureOnly, { area: 'property', format: 'png' }));
   for (const policy of [measureOnly, full]) assert.throws(() => assertOrthoPrintAllowed(policy, { area: 'property', format: 'tif' }), { code: 'print_not_permitted' });
@@ -282,7 +314,7 @@ test('policy: a property is a PNG held to the screen size without download permi
   for (const area of ['full', 'anything', undefined]) assert.throws(() => assertOrthoPrintAllowed(measureOnly, { area, format: 'png' }), { code: 'print_not_permitted' });
   assert.equal(printLongEdge({ area: 'property', requested: 6144, policy: measureOnly, viewPixels: 1280 }), 1280);
   assert.equal(printLongEdge({ area: 'property', requested: 6144, policy: measureOnly, viewPixels: 9000 }), 2048);
-  assert.equal(printLongEdge({ area: 'property', requested: 6144, policy: measureOnly, viewPixels: NaN }), 2048);
+  for (const viewPixels of [NaN, 0, undefined]) assert.equal(printLongEdge({ area: 'property', requested: 6144, policy: measureOnly, viewPixels }), 0, 'not in the view: nothing');
   assert.equal(printLongEdge({ area: 'property', requested: 6144, policy: full, viewPixels: 1280 }), 6144);
 });
 

@@ -26,7 +26,7 @@ function region(from, to) {
 }
 // viewerAccessAvailable, orthoPrintPermissions and the export fence (the in-flight set, identity and cancel hook).
 const SHIPPED = [region('function viewerAccessAvailable()', 'function syncMeasurementActionVisibility()'),
-  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()', 'async function choosePrintProperty(', 'function propertyClipper(',
+  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()', 'async function choosePrintProperty(', 'function propertyClipper(', 'function frameViewPixels(',
     'async function exportOrthoPrintFromViewer('].map(extract)].join('\n');
 
 const tick = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve)); };
@@ -96,7 +96,8 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissio
   const first = session({ permissions });
   const map = {
     getBounds: () => ({ getNorthWest: () => ({ lat: 4700180, lng: 500020 }), getNorthEast: () => ({ lat: 4700180, lng: 500380 }),
-      getSouthWest: () => ({ lat: 4700020, lng: 500020 }), getSouthEast: () => ({ lat: 4700020, lng: 500380 }) }),
+      getSouthWest: () => ({ lat: 4700020, lng: 500020 }), getSouthEast: () => ({ lat: 4700020, lng: 500380 }),
+      contains: ([lat, lng]) => lat >= 4700020 && lat <= 4700180 && lng >= 500020 && lng <= 500380 }),
     getSize: () => ({ x: 720, y: 320 }),
   };
   const context = vm.createContext({
@@ -106,7 +107,7 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissio
     sessionAccessState: 'active', sessionAccessReason: null, sessionRenewalBlocked: false,
     ORTHO_URL: '/ortho.tif', DTM_URL: '/dtm.tif', DISPLAY_UNITS: 'metric', TILES_URL: null,
     map, state: { activeMode: 'ortho', cloudMode: 'none', meshSource: 'none' }, isMapMode: mode => mode === 'ortho',
-    latLonToUtm: (lat, lng) => [lng, lat], window: { devicePixelRatio: 1 },
+    latLonToUtm: (lat, lng) => [lng, lat], utmToLatLon: (e, n) => [n, e], window: { devicePixelRatio: 1 },
     document: { createElement: canvas },
     // Inert sources: they answer when the test says so, whatever happened meanwhile.
     getDataset: (url, isDem, { signal }) => hold(holdOpen, log.opens, ortho, { url, signal }),
@@ -317,16 +318,63 @@ test('property: a choice made by another viewer, or for another version, is refu
   await rejects(exportProperty(p, chosenProperty(), { format: 'tif' }), 'code', 'print_not_permitted');
 });
 
-test('property: without download it is held to the screen fitted to its frame; with download the chosen size', async () => {
+test('property: without download it is held to the pixels it covers in the current view; with download the chosen size', async () => {
   const p = page();
   const result = await exportProperty(p);
-  // 215 m frame across a 720 x 320 screen: limited by the height (119 m over 320 px).
-  const frame = printProperty.propertyFrame(chosenProperty().parcels, 25 * 0.3048), expected = Math.round(320 / (frame.maxN - frame.minN) * (frame.maxE - frame.minE));
+  // The view is 360 x 160 m over 720 x 320 px: 2 px per metre, for the frame as it lies on the screen.
+  const frame = printProperty.propertyFrame(chosenProperty().parcels, 25 * 0.3048), expected = Math.round(2 * (frame.maxE - frame.minE));
   assert.ok(Math.abs(result.width - expected) <= 1 && result.width < 720, `${result.width} vs ${expected}`);
   assert.match(result.note, /limited by your access/);
   assert.equal(result.filename, `property-${result.width}px.png`);
   const full = page({ permissions: WITH_DOWNLOAD });
   assert.equal((await exportProperty(full)).width, 2048);
+});
+
+// A view that does not hold the property plus its margin.
+const viewOf = (minE, maxE, minN, maxN) => ({ getNorthWest: () => ({ lat: maxN, lng: minE }), getNorthEast: () => ({ lat: maxN, lng: maxE }), getSouthWest: () => ({ lat: minN, lng: minE }), getSouthEast: () => ({ lat: minN, lng: maxE }),
+  contains: ([lat, lng]) => lat >= minN && lat <= maxN && lng >= minE && lng <= maxE });
+
+test('property: without download it must fit the current view, margin and all; with download it need not', async () => {
+  const views = { 'zoomed in': viewOf(500150, 500250, 4700080, 4700120), 'panned away': viewOf(500310, 500390, 4700020, 4700180), 'margin cut off': viewOf(500098, 500302, 4700020, 4700180) };
+  for (const [name, view] of Object.entries(views)) {
+    const p = page();
+    p.context.map.getBounds = () => view;
+    await assert.rejects(exportProperty(p), error => { assert.deepEqual([error.code, error.reason, error.message], ['print_property', 'zoom_out', 'Zoom out so the whole property fits in the view.'], name); return true; });
+    assert.equal(p.log.canvases.length, 0, `${name}: nothing rendered`);
+    assert.equal(p.inFlight(), 0);
+    const full = page({ permissions: WITH_DOWNLOAD });
+    full.context.map.getBounds = () => view;
+    assert.equal((await exportProperty(full)).width, 2048, `${name}: with download`);
+  }
+  // Zoomed out it fits, and covers fewer pixels: no better than what is on the screen.
+  const far = page();
+  far.context.map.getBounds = () => viewOf(499960, 500440, 4699993, 4700207);
+  const small = await exportProperty(far);
+  const frame = printProperty.propertyFrame(chosenProperty().parcels, 25 * 0.3048);
+  assert.ok(Math.abs(small.width - Math.round(1.5 * (frame.maxE - frame.minE))) <= 1, `${small.width}`);
+  // Not a map view, or no map.
+  for (const change of [c => { c.state = { ...c.state, activeMode: 'model' }; }, c => { c.map = null; }]) {
+    const p = page();
+    change(p.context);
+    await assert.rejects(exportProperty(p), { reason: 'zoom_out' });
+  }
+});
+
+test('property: download lost mid-export ends it unless the result still fits the no-download rule', async () => {
+  const run = async (view, size) => {
+    const p = page({ permissions: WITH_DOWNLOAD }), reading = deferred();
+    if (view) p.context.map.getBounds = () => view;
+    p.context.readCaptureMask = async () => { await reading.promise; return { captured: () => true, inside: () => 100 }; };
+    const done = exportProperty(p, chosenProperty(), { size });
+    done.catch(() => {});
+    await tick();
+    p.context.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD }));
+    reading.resolve();
+    return done;
+  };
+  await rejects(run(null, 2048), 'name', 'AbortError');
+  await rejects(run(viewOf(500150, 500250, 4700080, 4700120), 300), 'name', 'AbortError');
+  assert.equal((await run(null, 300)).width, 300, 'small enough and in the view');
 });
 
 test('property: a viewer, version or access change while the capture is read ends it with no file', async () => {

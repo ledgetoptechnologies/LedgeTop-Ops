@@ -259,7 +259,7 @@ export function orthoPrintPolicy({ accessAvailable = false, measure = false, dow
 export function assertOrthoPrintAllowed(policy, { area, format }) {
   const deny = message => { throw Object.assign(new Error(message), { code: 'print_not_permitted' }); };
   if (!policy?.allowed) deny('Image export is not available for this view.');
-  // One property is a current-view style picture: PNG only, held to the screen size without download.
+  // One property is a current-view style picture: PNG only, and without download it must fit the view.
   if (area === 'property' && format !== 'png') deny('A property is exported as PNG only.');
   if (area !== 'view' && area !== 'property' && !policy.whole) deny('Exporting the whole orthophoto needs download permission.');
   if (format === 'tif' && !policy.geotiff) deny('GeoTIFF export needs download permission.');
@@ -269,10 +269,12 @@ export function assertOrthoPrintAllowed(policy, { area, format }) {
 // viewer can already see: the screen pixels covering the exported area (the
 // view clipped to the orthophoto), and never more than 2048 px.
 // Otherwise a zoomed-out view at 6144 px would equal the gated whole-ortho print.
-// A property is held the same way, to the screen pixels of the map fitted to it.
+// A property is held the same way: to the screen pixels it covers in the
+// current view, and to nothing (0) when it is not wholly in the view.
 export const VIEW_EXPORT_MAX_EDGE = 2048;
 export function printLongEdge({ area, requested, policy, viewPixels }) {
   if ((area !== 'view' && area !== 'property') || policy?.whole === true) return requested;
+  if (area === 'property' && !(viewPixels > 0)) return 0;
   const screen = Number.isFinite(viewPixels) && viewPixels > 0 ? Math.round(viewPixels) : VIEW_EXPORT_MAX_EDGE;
   return Math.max(16, Math.min(requested, VIEW_EXPORT_MAX_EDGE, screen));
 }
