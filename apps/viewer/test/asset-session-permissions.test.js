@@ -12,6 +12,7 @@ const auth = require('../server/auth');
 const assets = require('../server/assets');
 const { createAssetRateLimiter } = require('../server/assetRateLimiter');
 const { config } = require('../server/config');
+const { hooks } = require('../server/verifiedDelivery');
 const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
 
@@ -39,9 +40,14 @@ async function fixture(t, { accelerated = false, permissions = FULL, big = false
   const server = await new Promise(resolve => { const value = app.listen(0, '127.0.0.1', () => resolve(value)); });
   // Something changes while this response's bytes are being checked.
   const cache = assets.assetIntegrityCache, whole = cache.verifyWholeFile;
-  const during = change => { cache.verifyWholeFile = async function (...args) { const result = await whole.apply(this, args); if (change) { const run = change; change = null; run(); } return result; }; };
+  // After the check of a delivered file (also when nothing is hashed, as for HEAD), or of an accelerated one.
+  const during = change => {
+    const land = () => { if (change) { const run = change; change = null; run(); } };
+    hooks.afterVerify = land;
+    if (accelerated) cache.verifyWholeFile = async function (...args) { const result = await whole.apply(this, args); land(); return result; };
+  };
   t.after(async () => {
-    cache.verifyWholeFile = whole; cache.clear();
+    cache.verifyWholeFile = whole; hooks.afterVerify = null; cache.clear();
     await new Promise(resolve => server.close(resolve));
     assets.setRepository(null); assets.setAssetRateLimiter(createAssetRateLimiter());
     [config.xAccelRedirectPrefix, config.modelsMount] = before;
@@ -132,6 +138,48 @@ for (const [label, url, name, arm] of [
         assert.equal(Number(response.headers.get('content-length')), Buffer.byteLength(response.body));
       }
     }
+});
+
+// The decision and the first write are one step: a change queued while deciding lands after the bytes are on their way, and
+// a change queued before is seen. Every gate of deliverVerified is measured against the response object itself.
+for (const asynchronous of [false, true]) test(`the gate sends in the ${asynchronous ? 'continuation of a promised' : 'same turn as a synchronous'} answer, once`, async t => {
+  const { deliverVerified, openForDelivery } = require('../server/verifiedDelivery');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-gate-')), small = path.join(root, 'small.bin'), big = path.join(root, 'big.bin');
+  fs.writeFileSync(small, MESH); fs.writeFileSync(big, BIG);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const region = body => [{ kind: 'file', offset: 0, size: body.length, sha256: sha(body), toEof: true }];
+  const modified = new Date(Date.now() + 60_000).toUTCString(), past = new Date(0).toUTCString();
+  const cases = [['registered', small, MESH, {}, 'GET', true, 200], ['registered range', small, MESH, { Range: 'bytes=0-1' }, 'GET', true, 206], ['small stream', small, MESH, {}, 'GET', false, 200],
+    ['large stream', big, BIG, {}, 'GET', false, 200], ['HEAD', small, MESH, {}, 'HEAD', true, 200], ['304', small, MESH, { 'If-Modified-Since': modified, 'Cache-Control': 'max-age=0' }, 'GET', true, 304],
+    ['412', small, MESH, { 'If-Unmodified-Since': past }, 'GET', true, 412], ['416', small, MESH, { Range: 'bytes=99-' }, 'GET', true, 416]];
+  for (const allowed of [true, false, 'throws']) for (const [label, filePath, body, headers, method, registered, status] of cases) {
+    const order = []; let asked = 0, released = 0;
+    const cache = Object.create(assets.assetIntegrityCache);
+    cache.verifiedSlice = async (...args) => { const piece = await assets.assetIntegrityCache.verifiedSlice(...args); return piece && { bytes: piece.bytes, release() { released += 1; piece.release(); } }; };
+    const app = express();
+    app.use(async (req, res) => {
+      for (const name of ['write', 'end', 'status']) { const real = res[name]; res[name] = function (...args) { if (asked && !order.includes('sent')) order.push('sent'); return real.apply(this, args); }; }
+      const answer = () => { asked += 1; queueMicrotask(() => order.push('queued change')); if (allowed === 'throws') throw new Error('authorizer failed'); if (!allowed) res.status(403).json({ error: 'not authorized' }); return allowed; };
+      try {
+        const opened = await openForDelivery(filePath);
+        await deliverVerified(req, res, { ...opened, filePath, cache, headers: { 'X-File': 'yes' }, verify: async () => true, regions: registered ? () => region(body) : null,
+          beforeSend: asynchronous ? async () => answer() : answer, onFailure: () => res.sendStatus(404), onError: error => res.status(error.status).end() });
+      } catch (error) { order.push(error.message); res.status(500).end(); }
+    });
+    const server = await new Promise(resolve => { const value = app.listen(0, '127.0.0.1', () => resolve(value)); });
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/`, { method, headers }), text = await response.text();
+    await new Promise(resolve => server.close(resolve));
+    const name = `${label} ${allowed}`;
+    assert.equal(asked, 1, name);
+    assert.equal(response.status, allowed === 'throws' ? 500 : allowed ? status : 403, name);
+    assert.equal(response.headers.get('x-file'), allowed === true ? 'yes' : null, name);
+    if (allowed === true) {
+      // A synchronous answer: the bytes are dispatched before anything queued runs. A promise settles first; its continuation sends.
+      assert.deepEqual(order, asynchronous ? ['queued change', 'sent'] : ['sent', 'queued change'], name);
+      if (status === 200 && method === 'GET') assert.equal(text, body);
+    } else assert.doesNotMatch(text, /mesh|bigbig/, name);
+    if (registered && method === 'GET' && status < 300) assert.equal(released, 1, `${name}: the buffered region is released`);
+  }
 });
 
 test('a conditional request is decided when it is answered', async t => {
