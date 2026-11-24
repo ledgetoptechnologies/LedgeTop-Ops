@@ -6,6 +6,20 @@ const SLOT = 'ltds-viewer-mark-draft';
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// What a mark holds, as the server keeps it: to tell whether a change that was never
+// answered is the one that is there now.
+export const markContent = mark => ({ geometry: { type: mark.geometry.type, coordinates: mark.geometry.coordinates }, name: String(mark.name ?? '').trim(), note: String(mark.note ?? '').trim(),
+  categoryId: mark.categoryId ? mark.categoryId.toLowerCase() : null, color: String(mark.color ?? '').toLowerCase(), icon: mark.icon || 'pin',
+  elevationNavd88M: Number.isFinite(mark.elevationNavd88M) ? Math.round(mark.elevationNavd88M * 1000) / 1000 : null,
+  ...(mark.visibility && { visibility: mark.visibility }), ...(mark.visibility === 'client' && { shareAccount: mark.shareAccount ?? null }) });
+export function sameMark(stored, sent) {
+  const has = markContent(stored), want = markContent(sent);
+  return Object.keys(want).every(field => JSON.stringify(has[field]) === JSON.stringify(want[field]));
+}
+// A later version with exactly what was sent is that change, not someone else's.
+export const sentBefore = (stored, sent) => Boolean(stored && sent?.some(item => stored.revision > item.revision && sameMark(stored, item)));
+export const SENT_LIMIT = 5;
+
 const text = (value, max) => typeof value === 'string' && value.length <= max;
 const idOrNull = value => value === null || (typeof value === 'string' && UUID.test(value));
 const position = value => Array.isArray(value) && value.length === 2 && value.every(Number.isFinite)
@@ -19,6 +33,11 @@ function validGeometry(geometry) {
   return type === 'Polygon' && Array.isArray(coordinates) && coordinates.length === 1 && positions(coordinates[0]) && coordinates[0].length >= 4;
 }
 
+const validSent = item => Boolean(item) && typeof item === 'object' && Number.isSafeInteger(item.revision) && item.revision >= 0 && validGeometry(item.geometry)
+  && text(item.name, 100) && text(item.note, 2000) && idOrNull(item.categoryId) && text(item.color, 7) && text(item.icon, 32)
+  && (item.elevationNavd88M === null || Number.isFinite(item.elevationNavd88M)) && (item.visibility === undefined || text(item.visibility, 16))
+  && (item.shareAccount === undefined || item.shareAccount === null || text(item.shareAccount, 200));
+
 export function validMarkDraft(draft) {
   if (!draft || typeof draft !== 'object') return false;
   if (draft.kind === 'drawing') return ['LineString', 'Polygon'].includes(draft.type) && positions(draft.positions) && draft.positions.length > 0;
@@ -26,7 +45,8 @@ export function validMarkDraft(draft) {
     && (draft.id === null || (Number.isSafeInteger(draft.revision) && draft.revision > 0)) && validGeometry(draft.geometry)
     && text(draft.name, 100) && text(draft.note, 2000) && idOrNull(draft.categoryId) && text(draft.color, 7) && text(draft.icon, 32)
     && text(draft.elevation, 40) && ['imperial', 'metric'].includes(draft.units) && (draft.coordinates === null || text(draft.coordinates, 120))
-    && text(draft.visibility, 16) && (draft.starter === undefined || draft.starter === null || text(draft.starter, 32));
+    && text(draft.visibility, 16) && (draft.starter === undefined || draft.starter === null || text(draft.starter, 32))
+    && (draft.sent === undefined || (Array.isArray(draft.sent) && draft.sent.length <= SENT_LIMIT && draft.sent.every(validSent)));
 }
 
 // What an editor draft becomes when it is restored. It is never written over a
@@ -39,7 +59,8 @@ export function reconcileMarkDraft(draft, find, newId) {
     return current ? { ...draft, id: current.id, newId: null, revision: current.revision, changedElsewhere: false }
       : { ...draft, newId: existing ? newId() : draft.newId, changedElsewhere: false };
   }
-  if (current && current.revision === draft.revision) return { ...draft, newId: null, changedElsewhere: false };
+  // Unchanged, or changed by this draft's own save, whose answer was lost.
+  if (current && (current.revision === draft.revision || sentBefore(current, draft.sent))) return { ...draft, newId: null, revision: current.revision, changedElsewhere: false };
   return { ...draft, id: null, newId: newId(), revision: null, changedElsewhere: true };
 }
 

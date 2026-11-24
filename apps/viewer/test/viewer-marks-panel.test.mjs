@@ -139,6 +139,8 @@ for (const permissions of REDUCED) {
     assert.equal(panel.q('.viewer-mark-tools').hidden, true);
     assert.equal(database.prepare("SELECT count(*) n FROM viewer_marks WHERE document_json LIKE '%import%'").get().n, 0, 'the import was never sent');
 
+    const landed = () => database.prepare("SELECT count(*) n FROM viewer_marks WHERE document_json LIKE '%Private late%'").get().n;
+    for (let i = 0; i < 100 && !landed(); i += 1) await new Promise(resolve => setTimeout(resolve, 10));
     // Recovery with the identity back: their own marks return, from a new load. The
     // save that was already on its way had been theirs and did land.
     requests.length = 0;

@@ -6,7 +6,7 @@ import { DEFAULT_STYLE, ICON_CHOICES, categoryBadge, categoryStyle, colorName, k
 import { elevationForDisplay, elevationToMetres, elevationUnit, formatDecimal, formatDms, formatUtm, parseCoordinateInput } from './viewer-mark-coordinates.mjs';
 import { geoJsonToMarks, marksToGeoJson } from './viewer-mark-geojson.mjs';
 import { NO_CATEGORY, categoryOf, createMarkVisibility } from './viewer-mark-visibility.mjs';
-import { createMarkDraftRecovery, reconcileMarkDraft } from './viewer-mark-draft-recovery.mjs';
+import { createMarkDraftRecovery, markContent, reconcileMarkDraft, sameMark, SENT_LIMIT } from './viewer-mark-draft-recovery.mjs';
 
 const TYPE_LABEL = { Point: 'Pin', LineString: 'Line', Polygon: 'Area' };
 // The server says which of these a person may choose; with one choice the field is hidden.
@@ -50,7 +50,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // The last change that can be undone, shown for a while after it was made.
   let barEntry = null, barTimer = null, barHeld = false, barSeen = null, barError = '';
 
-  const store = createMarksStore({ request, newId, onChange: () => render() });
+  const store = createMarksStore({ request, newId, onChange: () => render(),
+    later: (work, ms) => { const id = window.setTimeout(work, ms); return () => window.clearTimeout(id); } });
   const layer = createMarkMapLayer({ L, getMap,
     onSelect: (id, { pointer = false } = {}) => {
       if (draft && draft.id === id) { nameInput.focus?.(); return; }
@@ -304,9 +305,12 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         if (placeChoice === clicked) placeChoice = choice;
       }
       const category = categoryById(choice);
-      const saved = await store.create({ id: newId(), geometry: { type: 'Point', coordinates: position }, name: nameFor(choice, 'Point'), note: '',
+      // One id until it is placed: a click that was never answered and the next one are one pin.
+      mine.id ||= newId();
+      const saved = await store.create({ id: mine.id, geometry: { type: 'Point', coordinates: position }, name: nameFor(choice, 'Point'), note: '',
         categoryId: category?.id || null, ...categoryStyle(category), elevationNavd88M: null, visibility: defaultVisibility() });
       if (!saved || !held.live()) return;
+      mine.id = null;
       reveal(saved);
       render();
     } finally { mine.busy = false; }
@@ -461,7 +465,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     return { kind: 'editor', id: draft.id, newId: draft.newId || null, revision: draft.id ? draft.revision : null, geometry: structuredClone(draft.geometry),
       name: nameInput.value, note: noteInput.value, categoryId: chosenStarter() ? null : categorySelect.value || null, starter: chosenStarter()?.key || null, color: safeColor(colorInput.value), icon: keepIcon(draft.icon),
       elevation: elevationInput.value, units: units() === 'metric' ? 'metric' : 'imperial', visibility: visibilitySelect.value,
-      coordinates: draft.geometry.type === 'Point' && pointCoords.value !== writtenCoords ? pointCoords.value : null };
+      coordinates: draft.geometry.type === 'Point' && pointCoords.value !== writtenCoords ? pointCoords.value : null,
+      ...(draft.sent && { sent: draft.sent }) };
   }
 
   function keepDraft() {
@@ -495,6 +500,12 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (savedUnits === (units() === 'metric' ? 'metric' : 'imperial') || Number.isNaN(metres)) elevationInput.value = elevation;
     if (starter && store.starters().some(item => item.key === starter)) categorySelect.value = 'starter:' + starter;
     if (coordinates !== null && draft.geometry.type === 'Point') pointCoords.value = coordinates;
+    store.expect(draft.id || draft.newId, draft.sent);
+    // It was saved, only the answer was lost: nothing is unsaved.
+    if (current && draft.sent && coordinates === null && !chosenStarter() && sameMark(current, { ...readEditor(), icon: draft.icon, geometry: draft.geometry })) {
+      closeCard();
+      return;
+    }
     message(changedElsewhere ? 'That mark changed elsewhere. Your unsaved edit opened as a new mark.' : 'Your unsaved mark was restored.');
   }
 
@@ -1070,6 +1081,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     // A new mark keeps one id, so saving again after a lost answer updates it instead of adding a copy.
     const current = store.find(draft.id || draft.newId);
     if (draft.id && !current) { message('That mark is no longer there.'); return; }
+    // Kept with the draft, so that a reload before the answer knows it again.
+    if (sessionScope) open.sent = [...(open.sent || []), { revision: current?.revision || 0, ...markContent({ ...current, ...changes }) }].slice(-SENT_LIMIT);
     const saved = current ? await store.update(current, changes) : await store.create({ ...changes, id: draft.newId });
     if (!saved || !held.live()) return;
     reveal(saved);

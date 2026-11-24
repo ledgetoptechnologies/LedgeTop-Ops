@@ -1,3 +1,4 @@
+import { markContent, sameMark, SENT_LIMIT, sentBefore } from './viewer-mark-draft-recovery.mjs';
 import { STARTER_CATEGORIES } from './viewer-mark-style.mjs';
 
 // Marks state for one model: loading, saving, categories, import and a
@@ -10,6 +11,11 @@ const MARK_FIELDS = ['id', 'geometry', 'name', 'note', 'categoryId', 'color', 'i
 const UNDO_LIMIT = 20;
 // What others share arrives in pages; this many are shown at most.
 const SHARED_LIMIT = 5000;
+// How long an answer is waited for before a change counts as not answered (a large one
+// longer, by its size), and for the check whether it was made.
+export const WRITE_MS = 30_000;
+export const READ_MS = 30_000;
+const BYTES_PER_MS = 8;
 const MESSAGES = {
   mark_revision_conflict: 'Someone else changed this mark. The list was reloaded.',
   mark_category_revision_conflict: 'Someone else changed this category. The list was reloaded.',
@@ -20,6 +26,8 @@ const MESSAGES = {
   mark_storage_limit: 'Your marks take up all the space there is for them here. Delete or simplify some first.',
   mark_deleted_full: 'Recently deleted is full, so this one could not be brought back. Nothing was deleted.',
   mark_category_not_found: 'That category is gone. The list was reloaded.',
+  answer_unknown: 'No answer came, so this may or may not be saved. Try again to check.',
+  saved_after_all: 'The change before this one was saved after all. Try again for this one.',
   import_changed: 'Some of those marks changed since the import, so it was not undone.',
   import_too_large: 'That file is too large to import at once. Split it and import the parts.',
   'entity.too.large': 'That is too large to save at once.',
@@ -38,8 +46,12 @@ class MarksError extends Error {
 // Thrown into a continuation whose scope was replaced; run() drops it silently.
 class ScopeEnded extends Error {}
 
-export function createMarksStore({ request = globalThis.fetch, newId = () => crypto.randomUUID(), onChange = () => {} } = {}) {
+export function createMarksStore({ request = globalThis.fetch, newId = () => crypto.randomUUID(), onChange = () => {},
+  later = (work, ms) => { const id = globalThis.setTimeout(work, ms); return () => globalThis.clearTimeout(id); } } = {}) {
   let context = null, controller = null;
+  // Changes not answered, by mark: what was sent and what it was based on. And the one
+  // that could not be checked either, if any: nothing else is sent before it is.
+  let attempts = new Map(), doubt = null, pendingImport = null;
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
     marks: [], categories: [], audiences: [], deleted: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
@@ -63,19 +75,42 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         check();
         const token = held?.token?.();
         if (!token) throw new MarksError('marks_unavailable', 403);
-        const response = await request('/api/v1/marks' + path, {
-          method, credentials: 'omit', redirect: 'error', cache: 'no-store', signal,
-          headers: { authorization: 'Bearer ' + token, ...(body && { 'content-type': 'application/json' }) },
-          ...(body && { body: JSON.stringify(body) }),
-        });
-        check();
-        if (response.status === 204) return null;
-        const data = await response.json().catch(() => null);
-        check();
-        if (!response.ok) throw new MarksError(data?.code || 'marks_request_failed', response.status);
-        return data;
+        const text = body && JSON.stringify(body), write = method !== 'GET';
+        // Reading the list at the start may take its time; nothing waits for it.
+        const limit = write ? Math.max(WRITE_MS, (text?.length || 0) / BYTES_PER_MS) : state.busy ? READ_MS : 0;
+        try { return await bounded(limit, signal, own => answer(path, method, token, text, own, check)); }
+        catch (error) {
+          check();
+          if (write && !(error instanceof MarksError && error.status < 500)) throw new MarksError('answer_unknown', 0);
+          throw error;
+        }
       },
     };
+  }
+
+  // Ends by itself after limit, or with the scope, also when the request does neither.
+  function bounded(limit, signal, work) {
+    const own = new AbortController(), stop = () => own.abort();
+    signal.addEventListener('abort', stop, { once: true });
+    const cancel = limit ? later(stop, limit) : null;
+    const ended = new Promise((_, reject) => own.signal.addEventListener('abort', () => reject(new Error('ended')), { once: true }));
+    return Promise.race([work(own.signal), ended]).finally(() => { cancel?.(); signal.removeEventListener('abort', stop); });
+  }
+
+  async function answer(path, method, token, text, signal, check) {
+    const response = await request('/api/v1/marks' + path, {
+      method, credentials: 'omit', redirect: 'error', cache: 'no-store', signal,
+      headers: { authorization: 'Bearer ' + token, ...(text && { 'content-type': 'application/json' }) },
+      ...(text && { body: text }),
+    });
+    check();
+    if (response.status === 204) return null;
+    const data = await response.json().catch(() => null);
+    check();
+    if (!response.ok) throw new MarksError(data?.code || 'marks_request_failed', response.status);
+    // Cut off on the way: what was asked for may well have been done.
+    if (data === null) throw new Error('no answer');
+    return data;
   }
 
   function body(mark, extra = {}) {
@@ -135,8 +170,44 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     }
   }
 
+  const attempted = (id, revision, mark) => attempts.set(id, [...(attempts.get(id) || []), { revision, ...markContent(mark) }].slice(-SENT_LIMIT));
+  // Whether what is there now came from here, although it was never answered.
+  const own = id => sentBefore(find(id), attempts.get(id));
+  // What a change is based on: what the person saw, or their own change since.
+  const based = current => (own(current.id) ? find(current.id) : current);
+
+  // Was it made? If that cannot be found out either, it stays in doubt.
+  async function checkDoubt(scope, op) {
+    try { await load(scope); }
+    catch (error) {
+      scope.check();
+      if (['marks_unavailable', 'mark_identity_required'].includes(error.code)) throw error;
+      doubt = op;
+      throw new MarksError('answer_unknown', 0);
+    }
+    scope.check();
+    doubt = null;
+  }
+
+  // What was in doubt is settled before anything else is sent.
+  async function settleDoubt(scope, op) {
+    const earlier = doubt;
+    await checkDoubt(scope, earlier);
+    if (op.key && op.key === earlier.key) return op.landed?.();
+    const value = earlier.landed?.();
+    if (value === undefined) return undefined;
+    earlier.done?.(value);
+    // Perhaps this was meant as the same thing again: the person sees it before more is added.
+    if (op.makes) throw new MarksError('saved_after_all', 0);
+    return undefined;
+  }
+
   // Runs one change; on failure explains it and reloads when the data moved underneath us.
-  async function run(task) {
+  // A change without an answer is looked up: found, it counts as made. op says how:
+  //   landed() what the change made, if it is there now    done(value) once, when it was made
+  //   tried() it went out unanswered    mine() what is in its way is itself, from before
+  //   key the same for a second go at it    makes it adds something each time it is sent
+  async function run(send, op = {}) {
     if (!context || state.blocked || !state.ready || state.busy) return false;
     const scope = currentScope();
     state.busy = true;
@@ -144,7 +215,27 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     state.failure = '';
     emit();
     try {
-      await task(scope);
+      let value = doubt ? await settleDoubt(scope, op) : undefined;
+      for (let again = false; value === undefined; again = true) {
+        try { value = (await send(scope)) ?? true; }
+        catch (error) {
+          scope.check();
+          if (error.code === 'answer_unknown') {
+            op.tried?.();
+            await checkDoubt(scope, op);
+            value = op.landed?.();
+            if (value === undefined) throw new MarksError('not_saved', 0);
+          } else if (!again && [404, 409].includes(error.status) && op.mine) {
+            await load(scope).catch(() => {});
+            scope.check();
+            error.loaded = true;
+            if (!op.mine()) throw error;
+            value = op.landed?.();
+          } else throw error;
+        }
+      }
+      scope.check();
+      op.done?.(value);
       return scope.live();
     } catch (error) {
       if (!scope.live()) return false;
@@ -159,7 +250,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         state.undo = [];
       } else {
         state.message = MESSAGES[error.code] || 'Could not save the change. Try again.';
-        if (error.status === 409 || error.status === 404 || ['mark_identity_required', 'mark_category_not_found'].includes(error.code)) await load(scope).catch(() => {});
+        if (!error.loaded && (error.status === 409 || error.status === 404 || ['mark_identity_required', 'mark_category_not_found'].includes(error.code))) await load(scope).catch(() => {});
       }
       return false;
     } finally {
@@ -229,6 +320,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       }
       controller?.abort();
       controller = new AbortController();
+      attempts = new Map();
+      doubt = pendingImport = null;
       context = next;
       const scope = currentScope();
       Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], undo: [],
@@ -257,39 +350,51 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
 
     async create(input) {
       const mark = { ...input, id: input.id || newId() };
-      let saved = null;
-      const ok = await run(async scope => {
-        saved = await createRaw(mark, scope);
-        scope.check();
-        remember({ type: 'create', id: saved.id, label: 'add ' + saved.name, done: saved.name + ' added' });
-      });
+      let saved = null, base = 0;
+      const ok = await run(scope => {
+        // Its id is there already, from a go that was never answered: that one is brought up to date.
+        const now = own(mark.id) ? find(mark.id) : null;
+        base = now?.revision || 0;
+        return now ? updateRaw(now, mark, scope) : createRaw(mark, scope);
+      }, { key: 'mark ' + mark.id, makes: true, tried: () => attempted(mark.id, base, mark), mine: () => own(mark.id),
+        landed: () => (own(mark.id) && sameMark(find(mark.id), mark) ? find(mark.id) : undefined),
+        done: made => {
+          saved = made;
+          attempts.delete(mark.id);
+          remember({ type: 'create', id: saved.id, label: 'add ' + saved.name, done: saved.name + ' added' });
+        } });
       return ok ? saved : null;
     },
 
     async update(current, changes) {
       if (!find(current?.id)) return null;
-      let saved = null;
-      const ok = await run(async scope => {
-        saved = await updateRaw(current, changes, scope);
-        scope.check();
+      let saved = null, base = current;
+      const { id } = current, next = { ...current, ...changes };
+      const ok = await run(scope => { base = based(current); return updateRaw(base, changes, scope); },
+        { key: 'mark ' + id, tried: () => attempted(id, base.revision, next), mine: () => own(id),
+        landed: () => (own(id) && sameMark(find(id), next) ? find(id) : undefined),
+        done: made => {
+        saved = made;
+        attempts.delete(id);
         const moved = JSON.stringify(saved.geometry) !== JSON.stringify(current.geometry)
           && ['name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility'].every(field => (saved[field] ?? null) === (current[field] ?? null));
         remember({ type: 'update', id: current.id, before: current, label: 'edit ' + current.name, done: saved.name + (moved ? ' moved' : ' changed') });
-      });
+      } });
       return ok ? saved : null;
     },
 
     // permanent: the person said for good, so there is nothing to undo.
     async remove(current, { permanent = false } = {}) {
       if (!find(current?.id)) return false;
-      return run(async scope => {
-        await removeRaw(current, scope, { permanent });
-        scope.check();
+      let tried = false;
+      const gone = () => !find(current.id);
+      return run(async scope => { await removeRaw(based(current), scope, { permanent }); }, { key: `delete ${current.id} ${permanent}`,
+        tried: () => { tried = true; }, mine: () => (tried && gone()) || own(current.id), landed: () => (gone() || undefined), done: () => {
         // For good: nothing about it can be undone any more.
         // An import is undone whole or not at all.
         if (permanent) state.undo = state.undo.filter(entry => entry.id !== current.id && entry.before?.id !== current.id && !entry.marks?.some(mark => mark.id === current.id));
         else remember({ type: 'delete', before: current, label: 'delete ' + current.name, done: current.name + ' deleted' });
-      });
+      } });
     },
 
     // The owner's own recently deleted marks, read when asked for.
@@ -304,11 +409,12 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     async restore(deleted) {
       if (!state.deleted.some(item => item.id === deleted?.id)) return null;
       let saved = null;
-      const ok = await run(async scope => {
-        saved = await restoreRaw(deleted, scope);
-        scope.check();
+      const back = () => find(deleted.id) || undefined;
+      const ok = await run(scope => restoreRaw(deleted, scope), { key: 'restore ' + deleted.id, mine: () => Boolean(back()), landed: back, done: mark => {
+        saved = mark;
+        state.deleted = state.deleted.filter(item => item.id !== mark.id);
         remember({ type: 'create', id: saved.id, label: 'restore ' + saved.name, done: saved.name + ' restored' });
-      });
+      } });
       return ok ? saved : null;
     },
 
@@ -317,10 +423,14 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       const entry = state.undo.at(-1);
       if (!entry) return false;
       const held = store.hold();
+      const current = entry.type === 'create' || entry.type === 'update' ? find(entry.id) : null;
+      const before = entry.before && body(entry.before), gone = () => (entry.marks || [entry]).every(mark => !find(mark.id));
+      let tried = false, base = current;
+      const landed = { create: () => gone() || undefined, import: () => gone() || undefined, delete: () => Boolean(find(entry.before?.id)) || undefined,
+        update: () => (own(entry.id) && sameMark(find(entry.id), before)) || undefined }[entry.type];
       const ok = await run(async scope => {
         if (entry.type === 'create') {
-          const current = find(entry.id);
-          if (current) await removeRaw(current, scope);
+          if (current) await removeRaw(based(current), scope);
         } else if (entry.type === 'import') {
           // Exactly what the import returned, in one request: all of it as it was, or nothing.
           if (scope.temporary) {
@@ -333,18 +443,22 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           const ids = new Set(entry.marks.map(mark => mark.id));
           state.marks = state.marks.filter(mark => !ids.has(mark.id));
         } else if (entry.type === 'update') {
-          const current = find(entry.id);
           if (!current) throw new MarksError('mark_revision_conflict', 409);
-          await updateRaw(current, body(entry.before), scope);
+          base = based(current);
+          await updateRaw(base, before, scope);
         } else if (entry.type === 'delete') {
           if (scope.temporary) await createRaw(entry.before, scope);
           else await restoreRaw(entry.before, scope);
         }
-      });
+      }, { key: 'undo ' + entry.at, landed,
+        tried: () => { tried = true; if (entry.type === 'update' && base) attempted(entry.id, base.revision, before); },
+        mine: () => (entry.type === 'update' ? own(entry.id) : entry.type === 'delete' ? Boolean(landed()) : tried && Boolean(landed())),
+        // By order: deleting a category rewrites entries.
+        done: () => { state.undo = state.undo.filter(item => item.at !== entry.at); if (entry.type === 'update') attempts.delete(entry.id); } });
       if (!held.live()) return false;
       // A change that has moved underneath can never be undone; anything else can be tried again.
-      const gone = ['mark_revision_conflict', 'mark_not_found', 'mark_edit_forbidden', 'mark_category_not_found', 'import_changed'].includes(state.failure);
-      if (ok || gone) state.undo = state.undo.filter(item => item !== entry);
+      const never = ['mark_revision_conflict', 'mark_not_found', 'mark_edit_forbidden', 'mark_category_not_found', 'import_changed'].includes(state.failure);
+      if (ok || never) state.undo = state.undo.filter(item => item.at !== entry.at);
       emit();
       return ok;
     },
@@ -365,30 +479,42 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         emit();
         return category;
       }
-      let saved = null;
+      let saved = null, tried = false;
+      const payload = { id: input.id || newId(), name: input.name.trim(), color: input.color, icon: input.icon };
+      // A name is only there once, so the same one with the same look is this one.
+      const is = row => row.mine && ['name', 'color', 'icon'].every(field => row[field].toLowerCase() === payload[field].toLowerCase())
+        && (input.id ? row.id === input.id && row.revision > input.revision : true);
+      const landed = () => state.categories.find(is);
       const ok = await run(async scope => {
-        const payload = { id: input.id || newId(), name: input.name.trim(), color: input.color, icon: input.icon };
-        saved = input.id
+        const made = input.id
           ? (await scope.api('/categories/' + encodeURIComponent(input.id), 'PUT', { ...payload, revision: input.revision })).category
           : (await scope.api('/categories', 'POST', payload)).category;
         scope.check();
         if (!input.id) beganOwn();
-        state.categories = [...state.categories.filter(row => row.id !== saved.id), saved]
-          .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-      });
+        state.categories = byName([...state.categories.filter(row => row.id !== made.id), made]);
+        return made;
+      }, { key: `category ${input.id || payload.name.toLowerCase()}`, makes: !input.id, landed, tried: () => { tried = true; },
+        mine: () => tried && Boolean(landed()), done: made => { saved = made; } });
       return ok ? saved : null;
     },
 
     async deleteCategory(category) {
       const held = store.hold();
-      const ok = temporary() || await run(async scope => {
-        await scope.api('/categories/' + encodeURIComponent(category.id), 'DELETE', { revision: category.revision });
-      });
-      if (!ok || !held.live()) return false;
-      state.categories = state.categories.filter(row => row.id !== category.id);
-      const without = mark => (mark?.categoryId === category.id ? { ...mark, categoryId: null } : mark);
-      state.marks = state.marks.map(without);
-      state.undo = state.undo.map(item => (item.before ? { ...item, before: without(item.before) } : item));
+      let tried = false;
+      const gone = () => !state.categories.some(row => row.id === category.id) || undefined;
+      const done = () => {
+        state.categories = state.categories.filter(row => row.id !== category.id);
+        const without = mark => (mark?.categoryId === category.id ? { ...mark, categoryId: null } : mark);
+        state.marks = state.marks.map(without);
+        state.undo = state.undo.map(item => (item.before ? { ...item, before: without(item.before) } : item));
+      };
+      if (temporary()) done();
+      else {
+        const ok = await run(async scope => {
+          await scope.api('/categories/' + encodeURIComponent(category.id), 'DELETE', { revision: category.revision });
+        }, { key: 'delete category ' + category.id, landed: gone, tried: () => { tried = true; }, mine: () => tried && Boolean(gone()), done });
+        if (!ok || !held.live()) return false;
+      }
       emit();
       return true;
     },
@@ -400,13 +526,14 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       const { key, name, color, icon } = starter;
       let saved = null;
       const ok = await run(async scope => {
-        saved = scope.temporary ? { id: newId(), name, color, icon, revision: 1, mine: true, editable: true }
+        const made = scope.temporary ? { id: newId(), name, color, icon, revision: 1, mine: true, editable: true }
           : (await scope.api('/categories/starter', 'POST', { key, name, color, icon })).category;
         scope.check();
-        state.categories = [...state.categories.filter(row => row.id !== saved.id), saved]
-          .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+        state.categories = byName([...state.categories.filter(row => row.id !== made.id), made]);
         state.starters = state.starters.filter(item => item !== key);
-      });
+        return made;
+      }, { key: 'starter ' + key, done: made => { saved = made; },
+        landed: () => (state.starters.includes(key) ? undefined : state.categories.find(row => row.mine && row.name.toLowerCase() === name.toLowerCase())) });
       return ok ? saved : null;
     },
 
@@ -414,6 +541,11 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     async importMarks({ marks, categories = [] }) {
       if (!marks.length) return 0;
       let count = 0;
+      // The same file again, after a go that was never answered: with the ids it had then.
+      const named = new Map(categories.map(({ id, name, color, icon }) => [id, [name, color, icon]]));
+      const signature = JSON.stringify([marks.map(mark => [{ ...markContent(mark), categoryId: null }, named.get(mark.categoryId) || mark.categoryId || null]), [...named.values()]]);
+      if (pendingImport?.signature === signature) ({ marks, categories } = pendingImport);
+      const landed = () => { const rows = marks.map(mark => find(mark.id)); return rows.every(Boolean) ? rows : undefined; };
       const ok = await run(async scope => {
         let imported;
         if (scope.temporary) {
@@ -434,11 +566,17 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           state.categories = byName([...state.categories, ...saved.categories.filter(row => !state.categories.some(item => item.id === row.id))]);
           imported = saved.marks;
         }
+        return imported;
+      }, { key: 'import ' + signature, makes: true, landed, tried: () => { pendingImport = { signature, marks, categories }; }, done: imported => {
+        pendingImport = null;
         count = imported.length;
         remember({ type: 'import', marks: Object.freeze(imported.map(({ id, revision }) => Object.freeze({ id, revision }))), label: `import ${count} marks`, done: `${count} mark${count === 1 ? '' : 's'} imported` });
-      });
+      } });
       return ok ? count : 0;
     },
+
+    // A draft kept over a reload: what was sent for it before, so it is recognised.
+    expect(id, sent) { if (id && sent?.length) attempts.set(id, sent); },
 
     hasTemporaryMarks: () => Boolean(temporary() && state.marks.length),
     discardTemporaryMarks() {

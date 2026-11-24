@@ -224,28 +224,37 @@ test('a draft renewed under the same scope stays open, and public links store no
   assert.equal(stored(storage), false);
 });
 
-test('saving again after a lost answer updates the one mark instead of adding a copy', async t => {
-  let lose = false;
-  const lossy = async (path, init) => {
-    const response = await fetch(path, init);
-    if (lose && init.method === 'POST') { lose = false; await response.arrayBuffer(); throw new TypeError('connection lost'); }
-    return response;
-  };
+test('a new mark whose answer was lost is the one mark, also after a reload', async t => {
   for (const reload of [false, true]) {
-    const { page, person, storage } = await start(t, { request: lossy });
+    let lose = false;
+    const lossy = async (path, init) => {
+      if (lose && reload && init.method === 'GET') throw new TypeError('offline');
+      const response = await fetch(path, init);
+      if (lose && init.method === 'POST') { await response.arrayBuffer(); throw new TypeError('connection lost'); }
+      return response;
+    };
+    const { page, person, storage, database } = await start(t, { request: lossy });
     let panel = page();
     await panel.marks.setScope(person);
     await panel.place('43.05, -87');
     await panel.type('[name=name]', 'Once');
     lose = true;
     await panel.save();
-    assert.equal(form(panel).hidden, false, 'the editor stays open');
-    assert.equal(stored(storage), true);
-    if (reload) { panel = page(); await panel.marks.setScope(person); }
+    lose = false;
+    const [{ id }] = database.prepare('SELECT id FROM viewer_marks').all();
+    if (reload) {
+      assert.equal(form(panel).hidden, false, 'it could not be checked either');
+      assert.equal(stored(storage), true);
+      panel = page();
+      await panel.marks.setScope(person);
+    }
+    assert.equal(form(panel).hidden, true, 'it is there, so nothing is unsaved');
+    assert.equal(stored(storage), false);
+    await panel.open('Once');
     await panel.type('[name=name]', 'Once, changed');
     await panel.save();
-    if (!reload) await panel.save(); // the first retry reports the conflict and reloads the list
-    assert.deepEqual(panel.store.state.marks.map(mark => mark.name), ['Once, changed']);
+    assert.deepEqual(panel.store.state.marks.map(mark => [mark.id, mark.name]), [[id, 'Once, changed']]);
+    assert.equal(database.prepare('SELECT count(*) n FROM viewer_marks').get().n, 1);
     assert.equal(stored(storage), false);
   }
 });
@@ -335,7 +344,7 @@ test('recently deleted lists the person\'s own marks and restores them in place'
   assert.doesNotMatch(panel.text(), /Gone/);
 });
 
-test('a save the network refuses says so, keeps what was typed and can be tried again', async t => {
+test('a save the network refuses says so and keeps what was typed; one that arrived is recognised, also after a reload', async t => {
   let fail = null;
   const request = async (path, init) => {
     const how = init.method === 'GET' ? null : fail;
@@ -375,19 +384,20 @@ test('a save the network refuses says so, keeps what was typed and can be tried 
     requests.length = 0;
     await panel.save();
     fail = null;
-    assert.equal(requests.length, 1, at + ': one request, not repeated by itself');
-    still(/Could not save the change\. Try again\./);
-    const sent = kind === 'new' ? [[1, 'Ladder']] : [[2, 'Ladder']];
-    assert.deepEqual(rows(), how === 'never sent' ? before : sent, at);
-    await panel.save();
-    if (kind === 'edit' && how !== 'never sent') {
-      // The first one did arrive, so this one is refused, and the one after it is based on that.
-      still(/The list was reloaded/);
-      assert.deepEqual(rows(), sent, at);
+    assert.deepEqual(requests.map(([method]) => method).filter(method => method !== 'GET').length, 1, at + ': one request, not repeated by itself');
+    assert.equal(requests[1][0], 'GET', at + ': and a look whether it was made');
+    if (how === 'never sent') {
+      still(/Could not save the change\. Try again\./);
+      assert.deepEqual(rows(), before, at);
       await panel.save();
     }
     assert.equal(form(panel).hidden, true, at);
+    assert.doesNotMatch(panel.text(), /Someone else|Could not/, at);
     assert.equal(stored(storage), false, at);
-    assert.deepEqual(rows().map(([, note]) => note), ['Ladder'], at + ': no copy');
+    assert.deepEqual(rows(), [[kind === 'new' ? 1 : 2, 'Ladder']], at + ': no copy');
+    assert.equal(panel.store.state.undo.length, undo + 1, at);
+    const [{ id }] = panel.store.state.marks, second = page();
+    await second.marks.setScope(person);
+    assert.deepEqual([form(second).hidden, second.store.state.marks.map(mark => mark.id)], [true, [id]], at + ': the same mark after a reload');
   }
 });
