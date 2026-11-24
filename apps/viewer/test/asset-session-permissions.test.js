@@ -16,18 +16,18 @@ const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
 
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
-const SHOTS = '{"type":"FeatureCollection","features":[]}', MESH = 'mesh', PHOTO = 'photo';
+const SHOTS = '{"type":"FeatureCollection","features":[]}', MESH = 'mesh', PHOTO = 'photo', BIG = 'bigbig'.repeat(40_000);
 const FULL = { view: true, measure: true, cameras: true, download: false };
 
-async function fixture(t, { accelerated = false, permissions = FULL } = {}) {
+async function fixture(t, { accelerated = false, permissions = FULL, big = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-asset-permission-'));
-  for (const [name, body] of [['model.glb', MESH], ['shots.geojson', SHOTS], ['photo.jpg', PHOTO]]) fs.writeFileSync(path.join(root, name), body);
+  for (const [name, body] of [['model.glb', MESH], ['shots.geojson', SHOTS], ['photo.jpg', PHOTO], ...(big ? [['big.bin', BIG]] : [])]) fs.writeFileSync(path.join(root, name), body);
   const database = openDatabase(path.join(root, 'viewer.sqlite')), repository = new ViewerRepository(database);
   const before = [config.xAccelRedirectPrefix, config.modelsMount];
   config.modelsMount = root;
   config.xAccelRedirectPrefix = accelerated ? '/protected' : '';
   const version = (modelId, versionId) => repository.upsertModelVersion({ modelId, versionId, provider: 'webodm', providerModelId: modelId, providerVersionId: versionId, displayName: modelId, status: 'ready',
-    sourceLocator: {}, assets: [['glb', 'model.glb', MESH], ['shots', 'shots.geojson', SHOTS]].map(([kind, relativePath, body]) => ({ kind, rootKey: 'models', relativePath, byteSize: body.length, sha256: sha(body), published: true })) });
+    sourceLocator: {}, assets: [['glb', 'model.glb', MESH], ['shots', 'shots.geojson', SHOTS], ...(big ? [['dsm', 'big.bin', BIG]] : [])].map(([kind, relativePath, body]) => ({ kind, rootKey: 'models', relativePath, byteSize: body.length, sha256: sha(body), published: true })) });
   version('model', 'version'); version('other', 'other-version');
   repository.replaceCameraPhotos?.('version', [{ filename: 'photo.jpg', rootKey: 'models', relativePath: 'photo.jpg', byteSize: PHOTO.length, sha256: sha(PHOTO), contentType: 'image/jpeg' }]);
   const session = (token, input = {}) => repository.createViewerSession({ tokenHash: auth.hashToken(token), modelId: 'model', modelVersionId: 'version', subject: 's', audience: 'ops', permissions, expiresAt: new Date(Date.now() + 60_000).toISOString(), ...input });
@@ -49,7 +49,7 @@ async function fixture(t, { accelerated = false, permissions = FULL } = {}) {
   });
   const get = async (url, { cookie = false, headers = {}, method = 'GET' } = {}) => {
     const response = await fetch(`http://127.0.0.1:${server.address().port}${url}`, { method, headers: { ...(cookie ? { 'x-viewer': 'session' } : {}), ...headers } });
-    return { status: response.status, body: await response.text(), accel: response.headers.get('x-accel-redirect') };
+    return { status: response.status, body: await response.text(), accel: response.headers.get('x-accel-redirect'), headers: response.headers };
   };
   return { database, repository, admitted, session, version, during, get };
 }
@@ -100,6 +100,49 @@ for (const accelerated of [false, true]) for (const [place, url, options, isCame
       }
     }
   });
+
+// After the check passes the body still waits for its first bytes. What changes in that wait decides too.
+for (const [label, url, name, arm] of [
+  ['registered bytes, waiting for the first slice', '/assets/model/models/model.glb', 'model.glb', 'slice'],
+  ['camera photo, waiting for its slice', '/session-camera-photos/session/model/photo.jpg', 'photo.jpg', 'slice'],
+  ['streamed file, waiting for the first read', '/session-assets/session/model/models/big.bin', 'big.bin', 'read'],
+  ['small streamed file, waiting for its only read', '/session-assets/session/model/models/model.glb', 'model.glb', 'read'],
+  ['small streamed file, waiting for the closing identity check', '/session-assets/session/model/models/model.glb', 'model.glb', 'stat'],
+]) test(`first write: ${label}`, async t => {
+  const cache = assets.assetIntegrityCache, delivery = require('../server/verifiedDelivery'), real = { slice: cache.verifiedSlice, buffer: cache.canBuffer };
+  const opened = await fs.promises.open(__filename, 'r'), proto = Object.getPrototypeOf(opened), io = { read: proto.read, stat: proto.stat }; await opened.close();
+  let armed = null, reads = 0;
+  const land = () => { const change = armed; armed = null; change?.(); };
+  t.after(() => { cache.verifiedSlice = real.slice; cache.canBuffer = real.buffer; Object.assign(proto, io); delivery.hooks.afterVerify = null; });
+  if (arm !== 'slice') cache.canBuffer = () => false;
+  cache.verifiedSlice = async function (...args) { const value = await real.slice.apply(this, args); if (arm === 'slice') land(); return value; };
+  proto.read = async function (...args) { const value = await io.read.apply(this, args); if (armed) { reads += 1; if (arm === 'read') land(); } return value; };
+  proto.stat = async function (...args) { const value = await io.stat.apply(this, args); if (arm === 'stat' && armed && reads) land(); return value; };
+  for (const [change, reach] of [[state => state.repository.revokeViewerSession(state.admitted.id), true], [state => reduce(state, { view: false }), true], [state => reduce(state, { cameras: false }), name === 'photo.jpg'], [() => {}, false]])
+    for (const headers of [{}, { Range: 'bytes=0-1' }]) {
+      const state = await fixture(t, { big: name === 'big.bin' });
+      let landed = false; reads = 0;
+      delivery.hooks.afterVerify = () => { armed = () => { landed = true; change(state); }; };
+      const response = await state.get(url, { cookie: url.startsWith('/assets'), headers });
+      assert.equal(landed, true, 'the change landed in the wait');
+      assert.equal(response.status, reach ? 403 : headers.Range ? 206 : 200);
+      if (reach) {
+        assert.doesNotMatch(response.body, /mesh|photo|bigbig/);
+        for (const header of ['content-range', 'last-modified']) assert.equal(response.headers.get(header), null, `no ${header} of the file`);
+        assert.equal(Number(response.headers.get('content-length')), Buffer.byteLength(response.body));
+      }
+    }
+});
+
+test('a conditional request is decided when it is answered', async t => {
+  for (const [route, url, options] of ROUTES) {
+    const state = await fixture(t), first = await state.get(url('model.glb'), options), headers = { 'If-Modified-Since': first.headers.get('last-modified'), 'Cache-Control': 'max-age=0' };
+    assert.equal((await state.get(url('model.glb'), { ...options, headers })).status, 304, route);
+    state.during(() => state.repository.revokeViewerSession(state.admitted.id));
+    const refused = await state.get(url('model.glb'), { ...options, headers });
+    assert.equal(refused.status, 403, route); assert.equal(refused.headers.get('last-modified'), null);
+  }
+});
 
 test('a session for one model opens nothing of another, and staff and share links are as before', async t => {
   const state = await fixture(t);
