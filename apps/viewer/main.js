@@ -664,7 +664,7 @@ async function createShareLink() {
   try {
     const body = {
       password: dom.shareNewPassword.value || undefined,
-      expiresDays: dom.shareNewExpires.value ? Number(dom.shareNewExpires.value) : undefined,
+      expiresDays: dom.shareNewExpires.value ? Number(dom.shareNewExpires.value) : null,
       permissions: {
         measure: dom.shareNewPermMeasure.checked,
         cameras: dom.shareNewPermCameras.checked,
@@ -688,7 +688,7 @@ async function createShareLink() {
       btn.addEventListener('click', () => navigator.clipboard?.writeText(btn.dataset.copy));
     });
     dom.shareNewPassword.value = '';
-    dom.shareNewExpires.value = '';
+    dom.shareNewExpires.value = dom.shareNewExpires.defaultValue;
     loadShareLinksList();
   } catch (err) {
     dom.shareCreateResult.style.display = 'block';

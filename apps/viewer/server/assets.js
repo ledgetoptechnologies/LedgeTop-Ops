@@ -41,6 +41,12 @@ function setAssetRateLimiter(limiter) {
 }
 function setSourceAuthorizationValidator(validator){sourceAuthorizationValidator=validator;}
 
+function legacyShareAccess(shareId, projectId) {
+  const share = shareStore.getById(shareId);
+  return shareStore.isLive(share) && share.viewerProjectId === projectId
+    ? { model: null, legacyShareId: shareId, cameras: assetAllowed(share, 'shots') } : false;
+}
+
 // Resolve `relPath` under `root`, refusing anything that escapes it.
 function safeResolve(root, relPath) {
   const resolvedRoot = path.resolve(root);
@@ -76,9 +82,7 @@ async function cookieAuthorization(req, projectId) {
     return allowed ? { model: null, share } : false;
   }
   if (payload.viewerProjectId !== projectId) return false;
-  const legacyShare = shareStore.getById(payload.shareId);
-  return shareStore.isLive(legacyShare) && legacyShare.viewerProjectId === projectId
-    ? { model: null, cameras: legacyShare.permissions?.cameras !== false } : false;
+  return legacyShareAccess(payload.shareId, projectId);
 }
 
 // What one Viewer session allows for one model, read afresh: at admission, and again right before protected bytes leave.
@@ -128,6 +132,16 @@ function safeExistingFile(root, relPath) {
     if (!real.startsWith(`${realRoot}${path.sep}`) || !fs.statSync(real).isFile()) return null;
     return real;
   } catch { return null; }
+}
+
+function isLegacyCameraAsset(project, absolutePath) {
+  if (path.basename(absolutePath).toLowerCase() === 'shots.geojson') return true;
+  const camera = project.relAssets?.shots;
+  const cameraRoot = camera && project.assetRoots?.[camera.root];
+  if (!cameraRoot || typeof camera.rel !== 'string') return false;
+  // Legacy root keys can overlap. Compare the registered file in the same resolved namespace as delivery.
+  const registered = safeExistingFile(cameraRoot, camera.rel);
+  return registered !== null && path.relative(registered, absolutePath) === '';
 }
 
 function canonicalAssetRoot(model, rootKey) {
@@ -230,8 +244,7 @@ async function pathTokenAuthorization(req, projectId) {
         && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId);
       return allowed ? { model, share, review: false, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
     }
-    const share = shareStore.getById(payload.shareId);
-    return shareStore.isLive(share) && share.viewerProjectId === projectId ? { model: null, review: false, cameras: share.permissions?.cameras !== false } : false;
+    return legacyShareAccess(payload.shareId, projectId);
   }
   if (payload.kind === 'project-share-asset' && processingRepository) {
     const share = canonicalRepository.getProjectShare(payload.shareId);
@@ -268,7 +281,7 @@ function xAccelLocation(abs) {
   return null;
 }
 
-async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true, share = null, viewer = null } = {}) {
+async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true, share = null, viewer = null, legacyShareId = null } = {}) {
   const resolved = authorizedModel
     ? { project: authorizedModel, rootPath: canonicalAssetRoot(authorizedModel, req.params.root) }
     : resolveProject(req.params.id, req.params.root);
@@ -281,16 +294,30 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   if (project.activeVersion && !publishedAsset) {
     return res.status(404).json({ error: 'asset not found' });
   }
-  if (publishedAsset?.kind === 'shots' && !cameras) return res.status(403).json({ error: 'not authorized' });
+  const publishedCamera = publishedAsset?.kind === 'shots';
+  if (publishedCamera && !cameras) return res.status(403).json({ error: 'not authorized' });
   if (share && (!publishedAsset || !assetAllowed(share,publishedAsset.kind)))return res.status(403).json({error:'not authorized'});
   const abs = safeExistingFile(rootPath, rel);
   if (!abs) return res.status(404).json({ error: 'asset not found' });
+  const legacyCamera = legacyShareId && isLegacyCameraAsset(project, abs);
+  if (legacyCamera && !cameras) return res.status(403).json({ error: 'not authorized' });
 
   // Authorization/revocation is evaluated for every request, and again after
   // the (possibly slow) integrity check, right before any byte is sent.
   // Responses are never stored by browsers or intermediaries, so a URL stops
   // working as soon as its session/share expires or is revoked.
-  const stillAllows=()=>{if(!viewerStillAllows(viewer,{cameras:publishedAsset?.kind==='shots'}))return false;if(!share)return true;const current=canonicalRepository.getPublicShare(share.id);return canonicalRepository.publicShareLive(current)&&revisionMatches(current,{shareRevision:share.authorizationRevision})&&assetAllowed(current,publishedAsset?.kind);};
+  const stillAllows = () => {
+    if (!viewerStillAllows(viewer, { cameras: publishedCamera })) return false;
+    if (legacyShareId) {
+      const current = legacyShareAccess(legacyShareId, req.params.id);
+      return Boolean(current) && (!(publishedCamera || legacyCamera) || current.cameras);
+    }
+    if (!share) return true;
+    const current = canonicalRepository.getPublicShare(share.id);
+    return canonicalRepository.publicShareLive(current)
+      && revisionMatches(current, { shareRevision: share.authorizationRevision })
+      && assetAllowed(current, publishedAsset?.kind);
+  };
   const requested = String(rel).replaceAll('\\', '/');
   const accelerated = xAccelLocation(abs);
   if (!project.activeVersion || accelerated) {

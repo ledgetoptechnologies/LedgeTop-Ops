@@ -26,6 +26,8 @@ import {
 } from "../../../client/src/worker/client-portal/workspace-v2";
 import type { Env as ClientEnv } from "../../../client/src/worker/types";
 
+/** What a client's own public link allows: what a new staff link starts with. */
+const CLIENT_LINK_PERMISSIONS = { view: true, measure: true, cameras: false, download: false } as const;
 const opaqueId = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const requestSchema = z.object({
   protocolVersion: z.literal(1),
@@ -500,7 +502,7 @@ export async function createClientViewerShare(
       expiresAt: effectiveExpiry,
       password: parsed.data.password || null,
       displayUnits: parsed.data.displayUnits,
-      permissions: { view: true, measure: true, cameras: true, download: false },
+      permissions: CLIENT_LINK_PERMISSIONS,
     })}`);
     const authorizationId = `client-viewer-${(await sha256(`${parsed.data.identityId}\n${parsed.data.idempotencyKey}`)).slice(0, 40)}`;
     await db(env).prepare(`INSERT OR IGNORE INTO client_viewer_source_authorizations(
@@ -528,6 +530,7 @@ export async function createClientViewerShare(
       expiresAt: effectiveExpiry,
       displayUnits: parsed.data.displayUnits,
       ...(parsed.data.password ? { password: parsed.data.password } : {}),
+      permissions: CLIENT_LINK_PERMISSIONS,
       shareClass: "client",
       sourceAuthorization: {
         type: "client_grant",
