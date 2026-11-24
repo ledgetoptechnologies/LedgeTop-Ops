@@ -1,4 +1,5 @@
 'use strict';
+const permanentDeletion = require('../server/permanentDeletion');
 const assert=require('node:assert/strict'),crypto=require('node:crypto'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),test=require('node:test');
 const {openDatabase}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
@@ -93,7 +94,17 @@ test('atomic archive+trash intent rejects dependency changes without modifying o
   assert.equal(c.database.prepare('SELECT active_version_id FROM models WHERE id=?').get(c.target.modelId).active_version_id,c.target.id);
 });
 
+test('while permanent deletion is paused a superseded output is retired but never purged, and its date stays',linux,async t=>{
+  const c=fixture(t),trash=c.processing.getTrash((await retireSupersededOutputs(c.processing,c.storage))[0].trashId);
+  c.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z',trash.id);
+  assert.deepEqual(await purgeSupersededOutputs(c.processing,c.storage),[]);
+  assert.deepEqual(purgeExpiredTrash(c.processing,c.storage).map(item=>[item.status,item.errorCode]),[['skipped','permanent_deletion_paused']]);
+  assert.equal(c.processing.getTrash(trash.id).purgeAfter,'2000-01-01T00:00:00.000Z');
+  assert.ok(fs.existsSync(c.storage.resolve('trash',trash.relativePath)));
+});
+
 test('verified supersession is recoverable for 7 days then purges only redundant old output',linux,async t=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const c=fixture(t),result=await retireSupersededOutputs(c.processing,c.storage);
   assert.equal(result[0]?.status,'retired');
   const trash=c.processing.getTrash(result[0].trashId);
@@ -125,6 +136,7 @@ test('legacy manifest descendants and physical root aliases prevent automatic re
 });
 
 test('replacement loss blocks expired-trash purge and durable intent replay',linux,async t=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const c=fixture(t),retired=(await retireSupersededOutputs(c.processing,c.storage))[0],trash=c.processing.getTrash(retired.trashId);
   c.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z',trash.id);
   const pending=c.processing.beginPurgeMutation(trash.id,'storage-maintenance');
@@ -181,6 +193,7 @@ test('registered integrity mismatch blocks even when both output copies have the
 });
 
 test('replacement corruption during grace retains the last good copy',linux,async t=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const c=fixture(t),retired=(await retireSupersededOutputs(c.processing,c.storage))[0],trash=c.processing.getTrash(retired.trashId);
   c.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z',trash.id);
   fs.writeFileSync(c.storage.resolve('models',`${c.target.relativePath}/model.glb`),'bad! original');
@@ -312,6 +325,7 @@ test('recovery proof refuses an unbound plan, unknown originals, changed bytes a
 });
 
 test('remapped recovery plus secure mesh closure retires and purges with a bound group proof',linux,async t=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const c=remappedFixture(t),retired=(await retireSupersededOutputs(c.processing,c.storage))[0];assert.equal(retired?.status,'retired');
   const proof=JSON.parse(c.database.prepare("SELECT details_json FROM audit_events WHERE action='output.supersession_proved'").get().details_json);
   assert.equal(proof.preservationMethod,'registered_recovery_groups');assert.equal(proof.policyRevision,2);
@@ -330,6 +344,7 @@ test('missing raw mesh dependency blocks even when registered assets still match
 });
 
 test('remapped proof is rechecked at purge and owner restore remains a permanent opt-out',linux,async t=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const c=remappedFixture(t),retired=(await retireSupersededOutputs(c.processing,c.storage))[0];
   c.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z',retired.trashId);
   const payload=JSON.parse(c.operation().payload_json);payload.companions.manifestSha256='a'.repeat(64);

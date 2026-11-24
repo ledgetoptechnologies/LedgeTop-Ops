@@ -1,4 +1,5 @@
 'use strict';
+const permanentDeletion = require('../server/permanentDeletion');
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const {openDatabase,MIGRATIONS}=require('../server/database');
 const {DatabaseSync}=require('node:sqlite');
@@ -160,6 +161,7 @@ test('folder API requires permissions and moves only within the original project
 
 
 test('permanent task purge releases folder membership and preserves its retained tombstone and audit',t=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const db=openDatabase(':memory:');t.after(()=>db.close());
   const p=new ProcessingRepository(db),project=p.createProject({displayName:'Synthetic purge'});
   const source=p.createDataset({projectId:project.id,displayName:'Source',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()});
@@ -185,6 +187,7 @@ test('permanent task purge releases folder membership and preserves its retained
 });
 
 test('project trash keeps nested folders for restore; permanent project purge removes every folder of that project only',t=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const db=openDatabase(':memory:');t.after(()=>db.close());
   const p=new ProcessingRepository(db),project=p.createProject({displayName:'Synthetic purged project'}),other=p.createProject({displayName:'Synthetic kept project'});
   const source=p.createDataset({projectId:project.id,displayName:'Source',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()});
@@ -216,6 +219,7 @@ test('project trash keeps nested folders for restore; permanent project purge re
 });
 
 test('project purge succeeds when user folder names collide with folder ids or repeat under different parents',t=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const db=openDatabase(':memory:');t.after(()=>db.close());
   const p=new ProcessingRepository(db),project=p.createProject({displayName:'Synthetic colliding names'}),other=p.createProject({displayName:'Synthetic untouched'});
   const a=p.createProjectFolder(project.id,{displayName:'Site'},'staff');

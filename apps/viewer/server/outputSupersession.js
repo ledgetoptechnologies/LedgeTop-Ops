@@ -4,6 +4,7 @@ const crypto=require('node:crypto');
 const fs=require('node:fs');
 const path=require('node:path');
 const {buildStorageSupersessionManifest,inventoryTree,verifyRetainedClosure,storageSupersessionInventoryIdentity}=require('./retainedManifest');
+const permanentDeletion=require('./permanentDeletion');
 const {applyStorageMutation}=require('./storageLifecycle');
 const {POLICY_REVISION,recoveryPreservation,recoveryRegistrationIdentity}=require('./outputPreservation');
 const sha=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -210,6 +211,7 @@ async function retireSupersededOutputs(processing,storage,{limit=1,signal=null}=
 }
 
 async function purgeSupersededOutputs(processing,storage,{limit=1,signal=null}={}){
+  if(permanentDeletion.permanentDeletionPaused())return [];// purgeExpiredTrash counts these items
   signal=maintenanceSignal(processing,signal);
   const results=[];
   if(signal?.aborted)return results;
@@ -237,7 +239,7 @@ async function purgeSupersededOutputs(processing,storage,{limit=1,signal=null}={
       if(!fresh.eligible||fresh.fingerprint!==state.fingerprint)throw Object.assign(new Error('cleanup dependency changed'),{code:'dependency_changed'});
       if(!registeredProofMatches(processing.database,state.source,sourceManifest)||!registeredProofMatches(processing.database,state.target,targetManifest)
         ||(contentProof.registrationSha256&&contentProof.registrationSha256!==recoveryRegistrationIdentity(processing.database,state.source.id,state.target.id)))throw Object.assign(new Error('cleanup registry changed during verification'),{code:'dependency_changed'});
-      const mutation=processing.beginPurgeMutation(item.id,'viewer-output-maintenance');
+      const mutation=processing.beginPurgeMutation(item.id,'viewer-output-maintenance',{expired:true});
       if(!mutation)throw Object.assign(new Error('purge journal unavailable'),{code:'lifecycle_conflict'});
       const complete=applyStorageMutation(processing,storage,mutation,{supersessionProof:authorizeMutation(mutation)});
       results.push({trashId:item.id,status:complete?.status||'deferred'});

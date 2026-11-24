@@ -1,4 +1,5 @@
 'use strict';
+const permanentDeletion = require('../server/permanentDeletion');
 const assert=require('node:assert/strict');const crypto=require('node:crypto');const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const test=require('node:test');
 const {openDatabase}=require('../server/database');const {ProcessingRepository}=require('../server/processingRepository');const {ViewerRepository}=require('../server/repository');const {StorageManager,hashFile,hashFileChunks,hashTree}=require('../server/storageManager');const {publishedAssetAllows,publishedAssetIntegrityAllows,safeExistingFile}=require('../server/assets');const {discoverOutputs}=require('../server/processingWorker');const {adminOutputAssetKind,publicDerivativeKind,sanitizeLogMessage}=require('../server/processingSecurity');
 const {processOneDatasetOperation}=require('../server/datasetOperationWorker');
@@ -71,6 +72,7 @@ test('storage lifecycle conflicts fail closed and can be retried after operator 
 });
 
 test('trash restore and purge recover when a process dies before recording the filesystem effect',(t)=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context=fixture(t),{processing,storage}=context,{dataset,directory}=storedDataset(context,'Filesystem boundary');
   const trashMutation=processing.beginTrashMutation(dataset.id,'ops:1');
   assert.throws(()=>applyStorageMutation(processing,storage,trashMutation,{faultAt:'after_filesystem'}),{code:'fault_injected'});
@@ -99,9 +101,13 @@ test('trash restore and purge recover when a process dies before recording the f
 });
 
 test('overlapping lifecycle reconcilers converge to one metadata transition',(t)=>{
-  const context=fixture(t),{db,processing,storage}=context,{dataset}=storedDataset(context,'Concurrent reconciliation'),mutation=processing.beginTrashMutation(dataset.id,'ops:1'),move=storage.moveExact.bind(storage);let nested=false;
-  storage.moveExact=(...args)=>{const result=move(...args);if(!nested){nested=true;applyStorageMutation(processing,storage,mutation.id);}return result;};
+  const context=fixture(t),{root,db,processing,storage}=context,{dataset}=storedDataset(context,'Concurrent reconciliation'),mutation=processing.beginTrashMutation(dataset.id,'ops:1'),move=storage.moveExact.bind(storage);let nested=null;
+  // The other process, on its own connection, while this one moves the files: it has to wait for the move to be recorded.
+  const otherDatabase=openDatabase(path.join(root,'viewer.sqlite'));t.after(()=>otherDatabase.close());otherDatabase.exec('PRAGMA busy_timeout=0');const other=new ProcessingRepository(otherDatabase);
+  storage.moveExact=(...args)=>{const result=move(...args);if(!nested)nested=reconcileStorageMutations(other,storage);return result;};
   const completed=applyStorageMutation(processing,storage,mutation.id);
+  assert.deepEqual(nested.map((row)=>[row.id,row.status,row.errorCode]),[[mutation.id,'failed','ERR_SQLITE_ERROR']]);
+  assert.equal(applyStorageMutation(other,storage,mutation).status,'complete','a late copy of the journal changes nothing');
   assert.equal(completed.status,'complete');
   assert.equal(processing.getDataset(dataset.id).status,'trashed');
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM storage_trash WHERE entity_id=? AND permanently_deleted_at IS NULL').get(dataset.id).count,1);
@@ -109,6 +115,7 @@ test('overlapping lifecycle reconcilers converge to one metadata transition',(t)
 });
 
 test('restore and manual purge use the same recoverable lifecycle journal',(t)=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context=fixture(t),{processing,storage}=context,{dataset,directory}=storedDataset(context,'Restore'),trashMutation=processing.beginTrashMutation(dataset.id,'ops:1');
   applyStorageMutation(processing,storage,trashMutation);
   const trash=processing.getTrash(trashMutation.trashId),restore=processing.beginRestoreMutation(trash.id,'ops:1');
@@ -137,6 +144,7 @@ test('restore and manual purge use the same recoverable lifecycle journal',(t)=>
 });
 
 test('empty draft trash is metadata-recoverable and retention purges use the journal',(t)=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context=fixture(t),{db,processing,storage}=context,project=processing.createProject({displayName:'Draft project'}),draft=processing.createDataset({projectId:project.id,displayName:'Empty draft',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()}),trashMutation=processing.beginTrashMutation(draft.id,'ops:1');
   assert.equal(trashMutation.allowAbsentSource,true);
   applyStorageMutation(processing,storage,trashMutation);
@@ -155,6 +163,7 @@ test('empty draft trash is metadata-recoverable and retention purges use the jou
 });
 
 test('external-reference lifecycle never moves or deletes referenced bytes',(t)=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context=fixture(t),{db,processing,storage}=context,{dataset,directory}=storedDataset(context,'External','external_reference');
   assert.equal(processing.beginTrashMutation(dataset.id,'ops:1'),null);
   const firstTrash=processing.trashDataset(dataset.id,{trashRelative:'',actor:'ops:1'});
@@ -191,6 +200,7 @@ test('malformed ownership metadata and unavailable mounts cannot delete external
 });
 
 test('invalid absent and divergent lifecycle states fail closed without metadata transitions',(t)=>{
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const missing=fixture(t),missingDataset=storedDataset(missing,'Missing source'),missingMutation=missing.processing.beginTrashMutation(missingDataset.dataset.id,'ops:1');
   fs.rmSync(missingDataset.directory,{recursive:true,force:true});
   assert.throws(()=>applyStorageMutation(missing.processing,missing.storage,missingMutation),{code:'lifecycle_conflict'});

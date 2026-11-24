@@ -1,13 +1,46 @@
 'use strict';
 
+const permanentDeletion = require('./permanentDeletion');
 const { applyStorageMutation } = require('./storageLifecycle');
 const { purgeProjectBoundary } = require('./propertyLinesBoundary');
 
 function trashDataset(processing,storage,id,actor){const existing=processing.activeTrashForEntity('dataset',id);if(existing)return existing;const dataset=processing.getDataset(id);if(!dataset||dataset.status==='trashed')return null;if(dataset.storageMode==='external_reference')return processing.trashDataset(id,{trashRelative:'',actor});const mutation=processing.beginTrashMutation(id,actor);if(!mutation)return null;applyStorageMutation(processing,storage,mutation);return processing.getTrash(mutation.trashId);}
-function trashOutput(processing,storage,id,actor){const existing=processing.activeTrashForEntity('output',id);if(existing)return existing;let output=processing.getModelOutput(id);if(!output||output.status==='trashed')return null;const originalStatus=output.status;if(['ready','published','failed'].includes(output.status))output=processing.archiveModelOutput(id,actor);if(!output||output.status!=='archived')return null;if(output.storageMode!=='managed')return processing.trashMetadataOutput(id,actor,originalStatus);const mutation=processing.beginOutputTrashMutation(id,actor,originalStatus);if(!mutation)return null;applyStorageMutation(processing,storage,mutation);return processing.getTrash(mutation.trashId);}
+function trashOutput(processing,storage,id,actor){const existing=processing.activeTrashForEntity('output',id);if(existing)return existing;const output=processing.getModelOutput(id),moved=output&&processing.moveOutputToTrash(id,actor);if(!moved)return null;if(output.storageMode!=='managed')return moved;applyStorageMutation(processing,storage,moved);return processing.getTrash(moved.trashId);}
+const purgeStarted=()=>Object.assign(new Error('Permanent deletion of this Recycle Bin item started before it was complete. It can no longer be restored or deleted, and its project cannot be deleted. Nothing more is removed, but new results of its task cannot be reviewed, published or shared.'),{code:'purge_started'});
+const conflict=message=>Object.assign(new Error(message),{code:'lifecycle_conflict'});
+// Refuses a delete or restore of something whose permanent deletion has begun, with a reason staff can read.
+function assertNotPurging(item){if(item&&!item.permanentlyDeletedAt&&item.purgeStartedAt)throw purgeStarted();}
+// Every item a delete moved must be in the container, or a restore would miss it and its own date would remove it.
+function assertMembers(processing,container,items){const members=new Set(processing.listContainerTrashMembers(container.id).map(item=>item.id));if(items.some(item=>!members.has(item.id)))throw conflict('a deleted item is missing from its Recycle Bin item');}
 function addMember(processing,container,item){if(!item||!processing.addContainerTrashMember(container.id,item.id))throw Object.assign(new Error('container member could not be moved to trash'),{code:'lifecycle_conflict'});}
-function trashTaskTree(processing,storage,taskId,actor,container=null){const taskTrash=processing.trashTask(taskId,actor,{withinProjectTrash:container?.entityType==='project'});if(!taskTrash)throw Object.assign(new Error('task has active processing work'),{code:'task_not_trashable'});const root=container||taskTrash;if(container)addMember(processing,container,taskTrash);const owned=processing.taskOwnedEntities(taskId);for(const outputId of owned.outputs)addMember(processing,root,trashOutput(processing,storage,outputId,actor));for(const datasetId of owned.datasets)addMember(processing,root,trashDataset(processing,storage,datasetId,actor));processing.refreshContainerTrashBytes(root.id);return root;}
-function trashProjectTree(processing,storage,projectId,actor){const root=processing.trashProject(projectId,actor);if(!root)throw Object.assign(new Error('project has active processing work'),{code:'project_not_trashable'});const owned=processing.projectOwnedEntities(projectId);for(const taskId of owned.tasks)trashTaskTree(processing,storage,taskId,actor,root);for(const outputId of owned.outputs){const item=trashOutput(processing,storage,outputId,actor);if(item)addMember(processing,root,item);}for(const datasetId of owned.datasets){const item=trashDataset(processing,storage,datasetId,actor);if(item)addMember(processing,root,item);}return processing.refreshContainerTrashBytes(root.id);}
+function trashTaskTree(processing,storage,taskId,actor,container=null){
+  assertNotPurging(container);assertNotPurging(processing.activeTrashForEntity('task',taskId));
+  if(processing.hasPendingTaskMove(taskId,'restore'))throw conflict('a restore of this task is still finishing');
+  const taskTrash=processing.trashTask(taskId,actor,{withinProjectTrash:container?.entityType==='project',containerId:container?.id??null});
+  if(!taskTrash)throw Object.assign(new Error('task has active processing work'),{code:'task_not_trashable'});
+  const root=container||taskTrash,items=[],add=item=>{addMember(processing,root,item);items.push(item);};
+  if(container)items.push(taskTrash);
+  const owned=processing.taskOwnedEntities(taskId);
+  for(const item of processing.interruptedTaskTrash(taskTrash,root.id))add(item);
+  for(const outputId of owned.outputs)add(trashOutput(processing,storage,outputId,actor));
+  for(const datasetId of owned.datasets)add(trashDataset(processing,storage,datasetId,actor));
+  assertMembers(processing,root,items);
+  return processing.refreshContainerTrashBytes(root.id);
+}
+function trashProjectTree(processing,storage,projectId,actor){
+  assertNotPurging(processing.activeTrashForEntity('project',projectId));
+  if(processing.hasPendingProjectMove(projectId,'restore'))throw conflict('a restore of this project is still finishing');
+  for(const taskId of processing.projectOwnedEntities(projectId).tasks){assertNotPurging(processing.activeTrashForEntity('task',taskId));}
+  const root=processing.trashProject(projectId,actor);if(!root)throw Object.assign(new Error('project has active processing work'),{code:'project_not_trashable'});
+  const items=[],add=item=>{addMember(processing,root,item);items.push(item);},owned=processing.projectOwnedEntities(projectId);
+  for(const taskId of owned.tasks)trashTaskTree(processing,storage,taskId,actor,root);
+  for(const item of processing.interruptedProjectTrash(root))add(item);
+  for(const outputId of owned.outputs){const item=trashOutput(processing,storage,outputId,actor);if(item)add(item);}
+  // Photos that cannot be moved now stay where they are, unless a move of them was begun: then this is not finished.
+  for(const datasetId of owned.datasets){const item=trashDataset(processing,storage,datasetId,actor);if(item)add(item);else if(processing.hasUnfinishedMove('dataset',datasetId))throw conflict('photos of the project could not be moved');}
+  assertMembers(processing,root,items);
+  return processing.refreshContainerTrashBytes(root.id);
+}
 function restoreItem(processing,storage,item,actor){if(!item||item.permanentlyDeletedAt)return true;if(['project','task'].includes(item.entityType))return Boolean(processing.restoreMetadataEntity(item.id,actor));if(item.entityType==='dataset'){const dataset=processing.getDataset(item.entityId);if(dataset?.storageMode==='external_reference')return Boolean(processing.restoreTrash(item.id,actor));const mutation=processing.beginRestoreMutation(item.id,actor);if(!mutation)return false;applyStorageMutation(processing,storage,mutation);return true;}if(item.entityType==='output'){const output=processing.getModelOutput(item.entityId);if(output?.storageMode!=='managed')return Boolean(processing.restoreMetadataOutput(item.id,actor));const mutation=processing.beginRestoreMutation(item.id,actor);if(!mutation)return false;applyStorageMutation(processing,storage,mutation);return true;}return false;}
 function restorePreflight(processing,storage,item){if(!item||item.permanentlyDeletedAt)return true;if(['project','task'].includes(item.entityType))return processing.canRestoreMetadataEntity(item.id);const preview=processing.previewRestoreMutation(item.id);if(!preview)return false;if(preview.complete||preview.metadataOnly)return true;const source=Boolean(preview.sourceRootKey&&preview.sourceRelativePath&&storage.pathExistsStrict(preview.sourceRootKey,preview.sourceRelativePath)),destination=Boolean(preview.destinationRootKey&&preview.destinationRelativePath&&storage.pathExistsStrict(preview.destinationRootKey,preview.destinationRelativePath));return !(source&&destination)&&!(!source&&!destination&&!preview.allowAbsentSource);}
 // A task can use a source set that went to the Recycle Bin with another task that shared it (Duplicate, Use saved
@@ -17,27 +50,42 @@ function sharedDatasetTrash(processing,root,members){
   for(const taskId of taskIds){const task=processing.getTask(taskId),dataset=task&&processing.getDataset(task.datasetId);if(dataset?.status!=='trashed')continue;const item=processing.activeTrashForEntity('dataset',dataset.id);if(item&&!memberIds.has(item.id))found.set(item.id,item);}
   return[...found.values()];
 }
-function restoreContainerTrash(processing,storage,containerId,actor){const root=processing.getTrash(containerId);if(!root||root.permanentlyDeletedAt||root.purgeStartedAt||!['project','task'].includes(root.entityType))return null;
+function restoreContainerTrash(processing,storage,containerId,actor){let root=processing.getTrash(containerId);if(!root||root.permanentlyDeletedAt||!['project','task'].includes(root.entityType))return null;assertNotPurging(root);
   // A task on its own comes back only into an active project. Check that before restoring any shared source set, so a
   // refused restore never leaves a set out of the Recycle Bin with nothing left to purge it.
   if(root.entityType==='task'){const task=processing.getTask(root.entityId);if(processing.getProject(task?.projectId)?.status!=='active')return null;}
-  const members=processing.listContainerTrashMembers(root.id),shared=sharedDatasetTrash(processing,root,members),data=[...shared,...members.filter(item=>['dataset','output'].includes(item.entityType))],tasks=members.filter(item=>item.entityType==='task');if(!restorePreflight(processing,storage,root)||[...shared,...members].some(item=>!restorePreflight(processing,storage,item)))return null;for(const item of data)if(!restoreItem(processing,storage,item,actor))return null;if(root.entityType==='project'&&!processing.restoreMetadataEntity(root.id,actor,{finalizeTrash:false}))return null;for(const item of tasks)if(!restoreItem(processing,storage,item,actor))return null;if(root.entityType==='task'&&!restoreItem(processing,storage,root,actor))return null;if(root.entityType==='project'&&!processing.finishMetadataRestore(root.id,actor))return null;return root.entityType==='project'?processing.getProject(root.entityId):processing.getTask(root.entityId);}
+  // Tasks of the project that an earlier version's delete archived but did not get into the item come back with it.
+  if(root.entityType==='project')for(const item of processing.interruptedProjectTasks(root))if(!processing.addContainerTrashMember(root.id,item.id))return null;
+  // A delete that stopped partway: wait for moves still in progress, and take back what it moved outside this item.
+  const deletedTasks=[...(root.entityType==='task'?[root]:[]),...processing.listContainerTrashMembers(root.id).filter(item=>item.entityType==='task'&&!item.permanentlyDeletedAt)];
+  if(deletedTasks.some(item=>processing.hasPendingTaskMove(item.entityId,'trash'))||(root.entityType==='project'&&processing.hasPendingProjectMove(root.entityId,'trash')))return null;
+  // A restore that stops partway is left in the bin with a full recovery time.
+  root=processing.renewTrashWindow(root.id);if(!root)return null;
+  const left=()=>[...deletedTasks.flatMap(task=>processing.interruptedTaskTrash(task,root.id)),...(root.entityType==='project'?processing.interruptedProjectTrash(root):[])];
+  for(const item of left())if(!processing.addContainerTrashMember(root.id,item.id))return null;
+  const members=processing.listContainerTrashMembers(root.id),shared=sharedDatasetTrash(processing,root,members),data=[...shared,...members.filter(item=>['dataset','output'].includes(item.entityType))],tasks=members.filter(item=>item.entityType==='task');if(!restorePreflight(processing,storage,root)||[...shared,...members].some(item=>!restorePreflight(processing,storage,item)))return null;for(const item of deletedTasks)processing.claimCurrentOutput(item.id);for(const item of data)if(!restoreItem(processing,storage,item,actor))return null;for(const item of deletedTasks)processing.restoreInterruptedOutputs(item.entityId,item.createdAt,actor);
+  // Nothing that was deleted with these tasks may still be in the bin once they are live again.
+  if([...data,...processing.listContainerTrashMembers(root.id).filter(item=>['dataset','output'].includes(item.entityType))].some(item=>!processing.getTrash(item.id).permanentlyDeletedAt)||left().length)return null;
+  if(root.entityType==='project'&&!processing.restoreMetadataEntity(root.id,actor,{finalizeTrash:false}))return null;for(const item of tasks)if(!restoreItem(processing,storage,item,actor))return null;if(root.entityType==='task'&&!restoreItem(processing,storage,root,actor))return null;if(root.entityType==='project'&&!processing.finishMetadataRestore(root.id,actor))return null;return root.entityType==='project'?processing.getProject(root.entityId):processing.getTask(root.entityId);}
 // containerId: the container being purged, so tasks deleted in it don't block their own source set (see datasetPurgeBlocked).
-function purgeItem(processing,storage,item,actor,containerId=null){if(!item||item.permanentlyDeletedAt)return true;if(item.entityType==='project'){const purged=Boolean(processing.purgeMetadataEntity(item.id,actor));if(purged)purgeProjectBoundary(storage,item.entityId);return purged;}if(item.entityType==='task')return Boolean(processing.purgeMetadataEntity(item.id,actor));if(item.entityType==='dataset'){const dataset=processing.getDataset(item.entityId);if(dataset?.storageMode==='external_reference')return Boolean(processing.markTrashPurged(item.id,actor,{containerId}));}else if(item.entityType==='output'){const output=processing.getModelOutput(item.entityId);if(output?.storageMode!=='managed')return Boolean(processing.purgeMetadataOutput(item.id,actor));}const mutation=processing.beginPurgeMutation(item.id,actor,{containerId});if(!mutation)return false;applyStorageMutation(processing,storage,mutation);return true;}
+function purgeItem(processing,storage,item,actor,containerId=null){if(!item||item.permanentlyDeletedAt)return true;if(item.entityType==='project'){const purged=Boolean(processing.purgeMetadataEntity(item.id,actor));if(purged)purgeProjectBoundary(storage,item.entityId);return purged;}if(item.entityType==='task')return Boolean(processing.purgeMetadataEntity(item.id,actor));if(item.entityType==='dataset'){const dataset=processing.getDataset(item.entityId);if(dataset?.storageMode==='external_reference')return Boolean(processing.markTrashPurged(item.id,actor,{containerId}));}else if(item.entityType==='output'){const output=processing.getModelOutput(item.entityId);if(output?.storageMode!=='managed')return Boolean(processing.purgeMetadataOutput(item.id,actor,{containerId}));}const mutation=processing.beginPurgeMutation(item.id,actor,{containerId});if(!mutation)return false;applyStorageMutation(processing,storage,mutation);return true;}
 // Purging a container, in order, each step safe to repeat after a crash (expiredTrash resumes it):
 // 1. A source set in it that another deleted, restorable task still uses moves into the newest such Recycle Bin item,
 //    so that task keeps its photos; the set is purged only with the last deleted task that uses it.
 // 2. The container is marked purging in its own committed transaction: from here on nothing in it can be restored.
 // 3. Files and member records are purged, then the container's own record.
-function purgeContainerTrash(processing,storage,containerId,actor){
+// expired: maintenance, which purges only what is past its date; staff can empty an item earlier.
+function purgeContainerTrash(processing,storage,containerId,actor,{expired=false}={}){
+  permanentDeletion.refusePermanentDeletion();
   const root=processing.getTrash(containerId);if(!root||!['project','task'].includes(root.entityType))return null;if(root.permanentlyDeletedAt)return root;
+  if((expired&&!root.purgeStartedAt&&!processing.trashExpired(root))||!processing.containerPurgeAllowed(root,{expired:expired&&!root.purgeStartedAt}))return null;
   const order={output:0,dataset:1,task:2,project:3},members=()=>processing.listContainerTrashMembers(root.id).sort((a,b)=>(order[a.entityType]??4)-(order[b.entityType]??4));
   for(const item of members()){if(item.entityType!=='dataset'||item.permanentlyDeletedAt)continue;if(processing.hasPendingStorageMutation('dataset',item.entityId))continue;/* its purge already began; let it finish */const heir=processing.datasetTrashHeir(item.entityId,root.id);if(heir&&!processing.moveContainerTrashMember(root.id,heir.id,item.id,actor))return null;}
   // A set still needed outside this container (an active task) refuses the purge before anything is marked or deleted.
   if(!root.purgeStartedAt&&members().some(item=>item.entityType==='dataset'&&!item.permanentlyDeletedAt&&!processing.hasPendingStorageMutation('dataset',item.entityId)&&processing.datasetPurgeBlocked(item.entityId,root.id)))return null;
-  if(!processing.beginContainerPurge(root.id,actor))return null;
+  if(!processing.beginContainerPurge(root.id,actor,{expired}))return null;
   for(const item of members())if(!purgeItem(processing,storage,item,actor,root.id))return null;
   return purgeItem(processing,storage,root,actor,root.id)?processing.getTrash(root.id):null;
 }
 
-module.exports={trashOutput,trashTaskTree,trashProjectTree,restoreContainerTrash,purgeContainerTrash};
+module.exports={purgeStarted,trashOutput,trashTaskTree,trashProjectTree,restoreContainerTrash,purgeContainerTrash};

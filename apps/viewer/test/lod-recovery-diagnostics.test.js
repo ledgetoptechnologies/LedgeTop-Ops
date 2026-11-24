@@ -1,5 +1,6 @@
 'use strict';
 
+const permanentDeletion = require('../server/permanentDeletion');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const express = require('express');
@@ -524,6 +525,7 @@ test('ready output with a failed legacy mesh derivative starts an immutable reco
 });
 
 test('Rome v3 surface failure retries under v4 and atomically exposes the verified 3D Model', (t) => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = fixture(t);
   const source = readyMeshSource(context, 'Rome Dam recovery');
   const operation = context.processing.createLodRecoveryOperation({
