@@ -1,13 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { createHash, generateKeyPairSync, sign as signBytes, verify as verifyBytes } from "node:crypto";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
-import {
-  STAGE_OWNER_ADOPTION_MIGRATIONS as MIGRATIONS, STAGE_OWNER_ADOPTION_TARGET_STAFF_ID as TARGET, STAGE_PINS,
+import { readStageOwnerAdoptionSnapshot as readCurrentStageOwnerAdoptionSnapshot } from "../../../scripts/stage-owner-native-adoption.mjs";
+// @ts-expect-error reviewed test-only JavaScript fixture
+import { historicalOperations0244Fixture, loadHistoricalStageOwnerAdoption } from "../../../scripts/test-fixtures/historical-operations-0244.mjs";
+
+const historical = historicalOperations0244Fixture();
+const {
+  STAGE_OWNER_ADOPTION_MIGRATIONS: MIGRATIONS, STAGE_OWNER_ADOPTION_TARGET_STAFF_ID: TARGET, STAGE_PINS,
   assertStageOwnerAdoptionPinsProvisioned, buildStageOwnerAdoptionPlan, executeStageOwnerAdoption, prepareStageOwnerAdoption,
   readStageOwnerAdoptionSnapshot, readStageOwnerAdoptionSourceMigrations, stageOwnerAdoptionConsentEnvelope,
-} from "../../../scripts/stage-owner-native-adoption.mjs";
+} = loadHistoricalStageOwnerAdoption(historical) as typeof import("../../../scripts/stage-owner-native-adoption.mjs");
 
 // Only the fixed, public Stage tuple is reused as a LOCAL Miniflare namespace.
 // Rows, tokens and keys are synthetic; no transport/provider is configured.
@@ -57,16 +63,15 @@ async function nativeCounts() {
 }
 const none = { a: 0, p: 0, ap: 0, r: 0 };
 
-// Each full-state snapshot/CAS pass over the complete current schema is slow
+// Each full-state snapshot/CAS pass over the full pinned schema is slow
 // on local Windows Miniflare; this bounds test time only, not production.
 describe("Stage owner native adoption (fixed-purpose, synthetic)", { timeout: 300_000 }, () => {
   beforeAll(async () => {
     runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22", script: "export default {fetch(){return new Response('ok')}}", d1Databases: { OPS_DB: PINS.databaseId } });
     db = await runtime.getD1Database("OPS_DB") as D1Database;
     await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)").run();
-    const dir = new URL("../migrations/", import.meta.url);
-    for (const name of readdirSync(dir).filter(name => /^\d{4}_.+\.sql$/u.test(name)).sort()) {
-      await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, dir), "utf8")).map(sql => db.prepare(sql)));
+    for (const name of historical.source.names) {
+      await db.batch(splitD1MigrationStatements(readFileSync(path.join(historical.migrations, name), "utf8")).map(sql => db.prepare(sql)));
       await db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name).run();
     }
     await db.batch([
@@ -76,14 +81,18 @@ describe("Stage owner native adoption (fixed-purpose, synthetic)", { timeout: 30
       db.prepare("INSERT INTO native_staff_admissions(staff_id,bound_access_subject,active,admitted_by) VALUES('staff-other','access|other',1,'staff-other')"),
     ]);
   }, 600_000);
-  afterAll(async () => runtime?.dispose());
+  afterAll(async () => {
+    try { await runtime?.dispose(); }
+    finally { historical.cleanup(); }
+  });
 
-  it("pins the current main migration chain, not the stale 225 bootstrap digest", () => {
+  it("admits the pinned 0244 source and refuses the current 0247/0248 source", async () => {
     const source = readStageOwnerAdoptionSourceMigrations();
     expect(source.names.length).toBe(MIGRATIONS.count);
     expect(source.names.at(-1)).toBe(MIGRATIONS.last);
     expect(source.namesSha256).toBe(MIGRATIONS.namesSha256);
     expect(source.contentsSha256).toBe(MIGRATIONS.contentsSha256);
+    await expect(readCurrentStageOwnerAdoptionSnapshot(db, TARGET_DB)).rejects.toThrow("source_migration_chain_changed");
   });
 
   it("ships only the Merger-verified Stage tuple and refuses placeholder or mismatched targets", async () => {

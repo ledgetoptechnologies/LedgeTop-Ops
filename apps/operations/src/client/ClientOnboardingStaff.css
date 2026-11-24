@@ -19,9 +19,23 @@
 .onboarding-staff-form .wide { grid-column: 1 / -1; }
 .onboarding-staff-form fieldset { min-width: 0; margin: 0; padding: 1rem; border: 1px solid var(--line, #cbd2d8); border-radius: 10px; }
 .onboarding-staff-form legend { padding: 0 .35rem; font-weight: 850; }
+.onboarding-email-delivery { display: grid; gap: .55rem; }
+.onboarding-staff-form .onboarding-email-delivery label:has(input:is([type="radio"], [type="checkbox"])) { display: flex; align-items: center; gap: .55rem; }
+.onboarding-staff-form .onboarding-email-delivery input:is([type="radio"], [type="checkbox"]) { flex: 0 0 1.1rem; width: 1.1rem; min-height: 1.1rem; margin: 0; padding: 0; }
+.onboarding-staff-form .onboarding-destinations { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: .75rem; }
+.onboarding-destination { display: grid; align-content: start; gap: .65rem; padding: .85rem; border: 1px solid var(--line, #cbd2d8); border-radius: 8px; }
+.onboarding-destination--technologies { background: linear-gradient(135deg, #e4efff, #f7faff); }
+.onboarding-destination--drone { background: linear-gradient(135deg, #ffebdc, #fff9f3); }
+.onboarding-staff-form .onboarding-destination-toggle { display: flex; align-items: center; gap: .45rem; }
+.onboarding-destination-toggle input { flex: 0 0 1.1rem; width: 1.1rem; min-height: 1.1rem; margin: 0; padding: 0; }
+.onboarding-destination select { min-width: 0; min-height: 44px; border: 1px solid var(--line, #cbd2d8); border-radius: 8px; padding: .55rem; background: #fff; color: inherit; font: inherit; }
 .onboarding-target-mode { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; }
 .onboarding-target-mode label { display: flex; align-items: center; gap: .45rem; }
 .onboarding-target-mode input { width: 1.1rem; min-height: 1.1rem; margin: 0; }
+.onboarding-target-mode .onboarding-hint { flex-basis: 100%; }
+.onboarding-target-picker { display: grid; align-content: start; gap: .55rem; }
+.onboarding-target-picker ul { display: grid; gap: .35rem; margin: 0; padding: 0; list-style: none; overflow-wrap: anywhere; }
+.onboarding-target-picker > button { justify-self: start; }
 .onboarding-scope { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: .75rem; margin-bottom: .75rem; }
 .onboarding-created { display: grid; gap: .8rem; }
 .onboarding-created h2, .onboarding-created h3, .onboarding-created p { margin: 0; }

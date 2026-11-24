@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { readClientOnboardingScopeChoices } from "../src/worker/client-onboarding-scope-choices";
+import { resolveInviteDestinations } from "../src/worker/client-onboarding-invite-destinations";
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "../src/worker/native-staff-auth";
 
 let runtime: Miniflare | undefined, db: D1Database, sequence = 0;
@@ -92,6 +93,16 @@ describe("onboarding scope choices against migrated D1", () => {
     expect((await read(auth)).scopes.map(scope => scope.businessAreaId)).toEqual(["area:b"]);
     await db.prepare("UPDATE native_directory_grants SET active=0 WHERE id=?").bind(id).run();
     expect(await read(auth)).toEqual({ scopes: [] });
+  });
+  it("removes a configured destination after a division deny without using the remaining whole-area choice", async () => {
+    const auth = await actor(); await grant(auth, "allow", "global");
+    const binding = { sourceId: "project-alpha:primary", businessAreaId: "area:a", divisionId: "division:a" };
+    const configuration = JSON.stringify([binding]);
+    expect(resolveInviteDestinations(configuration, await read(auth), [binding.sourceId])).toEqual([binding]);
+    await grant(auth, "deny", "division", null, binding.divisionId);
+    const deniedChoices = await read(auth);
+    expect(deniedChoices.scopes.find(scope => scope.businessAreaId === "area:a")?.allowAreaWide).toBe(true);
+    expect(resolveInviteDestinations(configuration, deniedChoices, [binding.sourceId])).toBeNull();
   });
   it("denies stale profile, admission, subject, email and expired or revoked staff instead of returning choices", async () => {
     const auth = await actor(); await grant(auth, "allow", "global");

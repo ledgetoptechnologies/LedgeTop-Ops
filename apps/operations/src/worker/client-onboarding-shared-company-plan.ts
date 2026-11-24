@@ -1,5 +1,5 @@
 import type {AuthenticatedNativeStaffWithAdmissionVersion} from "./native-staff-auth";
-import {readClientOnboardingSubmissionForReview} from "./client-onboarding-review";
+import {readClientOnboardingSubmissionForReview,verifyReviewDestinationIntent} from "./client-onboarding-review";
 import {parseClientOnboardingEnrollmentSourceIds} from "./client-onboarding-enrollment-selection";
 import {canonicalRecordId,clientUpdateProfile,normalizeProfile,updateDestinations} from "./native-directory-profile-routes";
 import {readNativeDirectoryDurableRemoteHead,type NativeDirectoryDestinationAuthority} from "./native-directory-profile-writer";
@@ -144,11 +144,12 @@ function bindingFingerprint(value:ProjectAlphaDirectoryBindingObservation){retur
 
 /** Captures reviewed evidence only; there is intentionally no create-admission,
  * client/profile writer, approval receipt, portal template, email or file grant. */
-export async function prepareClientOnboardingSharedCompanyPlan(database:D1Database,auth:Auth,input:Record<string,unknown>,connections:string|undefined){
+export async function prepareClientOnboardingSharedCompanyPlan(database:D1Database,auth:Auth,input:Record<string,unknown>,connections:string|undefined,inviteDestinationBindingsJson?:string){
  const selected=parseSharedCompanySelection(input.organizationSelection),sources=parseClientOnboardingEnrollmentSourceIds(input.sourceIds);
  if(typeof input.commandId!=="string"||!UUID.test(input.commandId)||typeof input.fieldsSha256!=="string"||!SHA.test(input.fieldsSha256)
   ||!selected||!sources||sources.length<1||sources.length>2)return deny();
  const review=await readClientOnboardingSubmissionForReview(database,auth,input.submissionId);
+ const destinationIssuanceSha256=await verifyReviewDestinationIntent(database,auth,review,sources,inviteDestinationBindingsJson);
  if(review.targetClientRecordId!==null||review.fields.clientType!=="business"||review.fieldsSha256!==input.fieldsSha256)return deny();
  await authorize(database,auth);
  const members=await companyMembers(database,selected),deadline=Date.now()+40_000,children:PlannedChild[]=[];
@@ -185,7 +186,7 @@ export async function prepareClientOnboardingSharedCompanyPlan(database:D1Databa
  if(children.length<1||children.length>2||children.reduce((n,c)=>n+c.destinations.length,0)!==sources.length)return deny();
  const requestSha=await hash(["onboarding-shared-company-plan-v1",input.commandId,review.invitationId,review.submissionId,review.fieldsSha256,
   selected,sources,review.scopes,profile,auth.identity.staffId,auth.identity.verifiedAccessSubject,auth.admissionVersion,auth.identity.profileVersion,
-  children.map(c=>({...c,bindings:c.bindings.map(bindingFingerprint)}))]);
+  children.map(c=>({...c,bindings:c.bindings.map(bindingFingerprint)})),...(destinationIssuanceSha256?[destinationIssuanceSha256]:[])]);
  const saved=await database.withSession("first-primary").prepare(`SELECT plan.request_sha256 requestSha,plan.verified_until expiresAt
   FROM client_onboarding_live_shared_company_plans plan JOIN client_onboarding_shared_company_plan_seals seal ON seal.plan_id=plan.plan_id
   WHERE plan.plan_id=?`).bind(input.commandId).first<{requestSha:string;expiresAt:string}>();
