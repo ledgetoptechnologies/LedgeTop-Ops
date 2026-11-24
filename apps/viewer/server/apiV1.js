@@ -255,14 +255,23 @@ function createApiV1(repository) {
     if (typeof grantId !== 'string' || !/^[0-9a-f-]{36}$/i.test(grantId))
       return res.status(400).json({ error: 'invalid session grant' });
     const existing = presentedViewer(req);
-    const grant = repository.redeemSessionGrant(grantId);
-    if (!grant) return res.status(410).json({ error: 'session grant expired or already redeemed' });
+    // Spent together with the session it opens. A grant whose renewal fails is
+    // not spent: the session presented with it ended meanwhile, and the grant
+    // still opens a new one. A grant that can no longer open its target (its
+    // authorization ended, or that version is no longer the published or
+    // reviewed one) is spent by the attempt, as it was before.
+    const renewalFailed = Symbol('renewal failed');
+    let outcome;
+    try {
+    outcome = repository.transaction(() => {
+    const grant = repository.redeemSessionGrantInTransaction(grantId);
+    if (!grant) return { status: 410, error: 'session grant expired or already redeemed' };
     const authorizedUntilMs = Date.parse(grant.permissions.__authorizedUntil || '');
     const ttlMs = Math.min(
       config.viewerSessionTtlSeconds * 1000,
       Number.isFinite(authorizedUntilMs) ? authorizedUntilMs - Date.now() : config.viewerSessionTtlSeconds * 1000,
     );
-    if (ttlMs <= 0) return res.status(410).json({ error: 'LTDS authorization has expired' });
+    if (ttlMs <= 0) return { status: 410, error: 'LTDS authorization has expired' };
     const modelVersionId = grant.modelVersionId || grant.permissions.__versionId;
     const target = {
       sessionMode: grant.sessionMode || 'published',
@@ -279,7 +288,7 @@ function createApiV1(repository) {
       ? repository.viewerSessionLive(target)
       : model?.status === 'ready' && model.activeVersionId === target.modelVersionId;
     if (!model || !targetLive)
-      return res.status(404).json({ error: 'model not found' });
+      return { status: 404, error: 'model not found' };
     const grantedPermissions = { ...grant.permissions };
     delete grantedPermissions.__authorizedUntil;
     delete grantedPermissions.__versionId;
@@ -313,10 +322,17 @@ function createApiV1(repository) {
         expiresAt,
       });
     }
-    if (!session) return res.status(410).json({ error: 'viewer session could not be renewed' });
-    res.cookie(VIEWER_COOKIE, accessToken, auth.cookieAttrs(req, { maxAge: ttlMs }));
+    if (!session) throw renewalFailed;
     repository.audit({ actorType: grant.audience, actorId: grant.subject, action: 'session.redeemed', entityType: 'model', entityId: grant.modelId });
-    return sendCurrentSession(req, res, session, accessToken);
+    return { session, accessToken, ttlMs };
+    });
+    } catch (error) {
+      if (error !== renewalFailed) throw error;
+      outcome = { status: 410, error: 'viewer session could not be renewed' };
+    }
+    if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
+    res.cookie(VIEWER_COOKIE, outcome.accessToken, auth.cookieAttrs(req, { maxAge: outcome.ttlMs }));
+    return sendCurrentSession(req, res, outcome.session, outcome.accessToken);
   });
 
   router.get('/api/v1/sessions/current', (req, res) => {
@@ -380,9 +396,10 @@ function createApiV1(repository) {
       Date.parse(authorizedUntil),
       Date.now() + config.sessionGrantTtlSeconds * 1000,
     )).toISOString();
-    let grant;
+    const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
+    let issued;
     try {
-      grant = repository.createSessionGrantAudited({
+      repository.createSessionGrantAudited({
         modelId: model.id,
         modelVersionId: model.activeVersionId,
         sessionMode: 'published',
@@ -403,7 +420,19 @@ function createApiV1(repository) {
         entityType: 'model',
         entityId: model.id,
         details: { audience: body.audience, subject: body.subject },
+      }, (grant) => {
+        issued = {
+          grant: grant.id,
+          grantExpiresAt,
+          sessionTtlSeconds: config.viewerSessionTtlSeconds,
+          modelVersionId: model.activeVersionId,
+          authorizationExpiresAt: authorizedUntil,
+          redeemUrl: `${base}/api/v1/sessions/redeem`,
+          embedUrl: `${base}/session/${encodeURIComponent(grant.id)}`,
+        };
+        req.idempotencyReceipt.store(201, issued);
       });
+      req.idempotencyReceipt.committed();
     } catch (error) {
       if (error?.code === 'source_authorization_revoked')
         return res.status(409).json({ error: 'sourceAuthorization is revoked' });
@@ -413,17 +442,8 @@ function createApiV1(repository) {
       }
       throw error;
     }
-    const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
     res.setHeader('Cache-Control', 'no-store');
-    res.status(201).json({
-      grant: grant.id,
-      grantExpiresAt,
-      sessionTtlSeconds: config.viewerSessionTtlSeconds,
-      modelVersionId: model.activeVersionId,
-      authorizationExpiresAt: authorizedUntil,
-      redeemUrl: `${base}/api/v1/sessions/redeem`,
-      embedUrl: `${base}/session/${encodeURIComponent(grant.id)}`,
-    });
+    res.status(201).json(issued);
   });
 
   function publishedSessionSourceRevocationEnabled(req, res, next) {
@@ -445,8 +465,7 @@ function createApiV1(repository) {
       const revoked = repository.revokePublishedSessionsBySourceAuthorization({
         sourceAuthorization,
         idempotency: {
-          keyId: req.servicePrincipal.keyId,
-          idempotencyKey: req.get('Idempotency-Key'),
+          reservation: req.idempotencyReceipt.reservation,
           encrypt,
         },
         audit: {
@@ -493,6 +512,8 @@ function createApiV1(repository) {
       const { token, tokenHash } = auth.newShareToken();
       if (body.displayUnits !== undefined && body.displayUnits !== 'imperial' && body.displayUnits !== 'metric')
         return res.status(400).json({ error: 'displayUnits must be imperial or metric' });
+      const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
+      const issued = repository.transaction(() => {
       const share = repository.createPublicShare({
         modelId: model.id,
         versionPolicy: 'latest',
@@ -509,14 +530,18 @@ function createApiV1(repository) {
         sourceAuthorization:shareClass==='client'?source:null,
       });
       repository.audit({ actorType: 'service', actorId: req.servicePrincipal.keyId, action: 'share.created', entityType: 'share', entityId: share.id, details: { modelId: model.id } });
-      const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
-      res.setHeader('Cache-Control', 'no-store');
-      res.status(201).json({
+      const result = {
         share: publicShareSummary(share),
         token,
         viewUrl: `${base}/view/${token}`,
         embedUrl: `${base}/embed/${token}`,
+      };
+      req.idempotencyReceipt.store(201, result);
+      return result;
       });
+      req.idempotencyReceipt.committed();
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(201).json(issued);
     } catch (error) {
       if (error?.code === 'model_deleted') {
         res.locals.modelDeleted = true;

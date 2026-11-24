@@ -63,18 +63,28 @@ function idempotent(repository) {
     }
 
     let completed = false;
+    const held = reservation.reservation;
+    // A route can store its receipt in the transaction that issues what it
+    // answers with, and then say that it committed.
+    req.idempotencyReceipt = {
+      reservation: held,
+      store: (status, body) => repository.storeIssuedReceipt(held, status, encrypt(body)),
+      committed: () => { completed = true; },
+    };
     const originalJson = res.json.bind(res);
     res.json = (body) => {
       // A refusal because the model is in the Recycle Bin ends when it is
       // restored, so it is not kept: the same key may be used again then.
       if (!completed && res.statusCode < 500 && !res.locals.modelDeleted) {
-        repository.completeIdempotency(keyId, idempotencyKey, res.statusCode, encrypt(body));
+        // What is answered here is done already; a lost reservation only means
+        // there is no receipt. It never goes to another request's reservation.
+        repository.completeIdempotency(held, res.statusCode, encrypt(body));
         completed = true;
       }
       return originalJson(body);
     };
     res.once('finish', () => {
-      if (!completed) repository.releaseIdempotency(keyId, idempotencyKey);
+      if (!completed) repository.releaseIdempotency(held);
     });
     return next();
   };

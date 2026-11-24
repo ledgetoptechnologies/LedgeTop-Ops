@@ -109,6 +109,9 @@ function asModel(row, version, assets = [], loadLodVerifierReceipt = () => null,
   };
 }
 
+const PENDING_RESERVATION = 'rowid=? AND key_id=? AND idempotency_key=? AND method=? AND path=? AND request_hash=? AND created_at=? AND response_status IS NULL';
+const pendingReservation = ({ rowId, keyId, idempotencyKey, method, path, requestHash, createdAt }) => [rowId, keyId, idempotencyKey, method, path, requestHash, createdAt];
+
 class ViewerRepository {
   constructor(database) {
     this.database = database;
@@ -828,16 +831,22 @@ class ViewerRepository {
     return { id, modelId, modelVersionId, reviewAttemptId, sessionMode, sourceAuthorization: authorization, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
   }
 
-  createSessionGrantAudited(input, audit) {
+  // issued(grant): run in the same transaction, for example to store the receipt.
+  createSessionGrantAudited(input, audit, issued = null) {
     return this.transaction(() => {
       const grant = this.createSessionGrant(input);
       this.audit({ ...audit, entityId: audit.entityId || input.reviewAttemptId || grant.id });
+      issued?.(grant);
       return grant;
     });
   }
 
   redeemSessionGrant(id, at = Date.now()) {
-    return this.transaction(() => {
+    return this.transaction(() => this.redeemSessionGrantInTransaction(id, at));
+  }
+
+  redeemSessionGrantInTransaction(id, at = Date.now()) {
+    if (!this.database.isTransaction) throw new Error('grant redemption requires an active transaction');
       const row = this.database.prepare('SELECT * FROM session_grants WHERE id=?').get(id);
       if (!row || row.redeemed_at || !(Date.parse(row.expires_at) > at)) return null;
       if (this.modelDeleted(row.model_id, grantVersionId(row))) return null;
@@ -863,7 +872,6 @@ class ViewerRepository {
         displayUnits: row.display_units,
         expiresAt: row.expires_at,
       };
-    });
   }
 
   viewerSession(row) {
@@ -982,11 +990,7 @@ class ViewerRepository {
         // Keep the canonical replay payload in the same commit as the
         // revocation. A lost HTTP response must not strand the caller behind
         // an incomplete idempotency reservation.
-        const completed = this.database.prepare(`UPDATE service_idempotency SET
-          response_status=200,response_ciphertext=?
-          WHERE key_id=? AND idempotency_key=? AND response_status IS NULL`
-        ).run(idempotency.encrypt(result), idempotency.keyId, idempotency.idempotencyKey);
-        if (completed.changes !== 1) throw new Error('source revocation idempotency reservation is unavailable');
+        this.storeIssuedReceipt(idempotency.reservation, 200, idempotency.encrypt(result));
       }
       return result;
     });
@@ -1052,12 +1056,12 @@ class ViewerRepository {
     ).get(keyId, idempotencyKey);
     if (existing) return { created: false, record: existing };
     try {
-      this.database.prepare(`INSERT INTO service_idempotency(
+      const createdAt = now(), rowId = this.database.prepare(`INSERT INTO service_idempotency(
         key_id,idempotency_key,method,path,request_hash,created_at,expires_at
       ) VALUES (?,?,?,?,?,?,?)`).run(
-        keyId, idempotencyKey, method, path, requestHash, now(), expiresAt,
-      );
-      return { created: true, record: null };
+        keyId, idempotencyKey, method, path, requestHash, createdAt, expiresAt,
+      ).lastInsertRowid;
+      return { created: true, record: null, reservation: { rowId, keyId, idempotencyKey, method, path, requestHash, createdAt } };
     } catch (error) {
       if (!String(error && error.message).includes('UNIQUE constraint failed')) throw error;
       return {
@@ -1069,16 +1073,26 @@ class ViewerRepository {
     }
   }
 
-  completeIdempotency(keyId, idempotencyKey, status, ciphertext) {
-    this.database.prepare(`UPDATE service_idempotency SET
-      response_status=?,response_ciphertext=? WHERE key_id=? AND idempotency_key=?`
-    ).run(status, ciphertext, keyId, idempotencyKey);
+  // A reservation is this one pending row, not whatever holds its key now: the
+  // row can be pruned while its request runs, and the key reserved again.
+  // Returns false when this reservation is gone or already completed.
+  completeIdempotency(reservation, status, ciphertext) {
+    return this.database.prepare(`UPDATE service_idempotency SET
+      response_status=?,response_ciphertext=? WHERE ${PENDING_RESERVATION}`
+    ).run(status, ciphertext, ...pendingReservation(reservation)).changes === 1;
   }
 
-  releaseIdempotency(keyId, idempotencyKey) {
-    this.database.prepare(
-      'DELETE FROM service_idempotency WHERE key_id=? AND idempotency_key=? AND response_status IS NULL',
-    ).run(keyId, idempotencyKey);
+  // The same inside the transaction that issues what the receipt answers with:
+  // without its receipt, nothing is issued.
+  storeIssuedReceipt(reservation, status, ciphertext) {
+    if (!this.database.isTransaction) throw new Error('a receipt is stored in the transaction that issues');
+    if (!this.completeIdempotency(reservation, status, ciphertext))
+      throw Object.assign(new Error('idempotency reservation is no longer held'), { code: 'idempotency_reservation_lost' });
+  }
+
+  releaseIdempotency(reservation) {
+    return this.database.prepare(`DELETE FROM service_idempotency WHERE ${PENDING_RESERVATION}`)
+      .run(...pendingReservation(reservation)).changes === 1;
   }
 
   consumeServiceNonce(keyId, nonce, cutoffIso, createdAtIso = now()) {
