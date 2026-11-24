@@ -48,7 +48,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // One go at placing, from + to Cancel: a late answer from an earlier one changes nothing in the next.
   let placement = null;
   // The last change that can be undone, shown for a while after it was made.
-  let barEntry = null, barTimer = null, barHeld = false, barSeen = null;
+  let barEntry = null, barTimer = null, barHeld = false, barSeen = null, barError = '';
 
   const store = createMarksStore({ request, newId, onChange: () => render() });
   const layer = createMarkMapLayer({ L, getMap,
@@ -602,9 +602,9 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   function clearTimer() { if (barTimer !== null) window.clearTimeout(barTimer); barTimer = null; }
   function startTimer() {
     clearTimer();
-    if (barEntry && !barHeld) barTimer = window.setTimeout(() => { barTimer = null; hideBar(); }, BAR_MS);
+    if (barEntry && !barHeld && !barError) barTimer = window.setTimeout(() => { barTimer = null; hideBar(); }, BAR_MS);
   }
-  function hideBar() { clearTimer(); barEntry = null; barHeld = false; undoBar.hidden = true; barText.textContent = ''; }
+  function hideBar() { clearTimer(); barEntry = null; barError = ''; barHeld = false; undoBar.hidden = true; barText.textContent = ''; }
   function renderBar() {
     const { state } = store, top = state.undo.at(-1) || null;
     // By order, not identity: deleting a category rewrites entries without changing them.
@@ -612,12 +612,14 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       // Newer than what was shown: a change was just made. Going back to an older one is not.
       const added = top && top.at > (barSeen?.at ?? 0);
       barSeen = top;
+      barError = '';
       if (added) { barEntry = top; startTimer(); } else hideBar();
     }
     if (!state.ready || state.blocked) hideBar();
     undoBar.hidden = !barEntry;
     if (!barEntry) return;
-    barText.textContent = state.failure && state.message ? `${barEntry.done}. ${state.message}` : barEntry.done;
+    barText.textContent = barError ? `${barEntry.done}. ${barError}` : barEntry.done;
+    barUndo.hidden = !state.undo.some(entry => entry.at === barEntry.at);
     barUndo.disabled = state.busy;
   }
 
@@ -883,8 +885,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (event.defaultPrevented || event.altKey || (!view.map && !boxOpen)) return;
     if (event.ctrlKey || event.metaKey) {
       // Ctrl+Z is the field's own while typing.
-      if (event.key.toLowerCase() !== 'z' || event.shiftKey || event.target?.closest?.('dialog[open]') || textHost(event.target)) return;
-      if (!store.state.undo.length || mode !== 'idle' || moving || !canWrite()) return;
+      if (event.key.toLowerCase() !== 'z' || event.shiftKey || event.repeat || event.target?.closest?.('dialog[open]') || textHost(event.target)) return;
+      if (mode !== 'idle' || moving || !canWrite() || document.querySelector?.('#photo-modal')?.style.display === 'flex' || !undoNow()) return;
       event.preventDefault();
       return undoLast({ focus: true });
     }
@@ -1018,29 +1020,33 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(showAllButton, 'click', () => { visibility.showAll(); shownChanged(); });
   on(hideAllButton, 'click', () => { visibility.hideAll(); shownChanged(); });
   on(searchInput, 'input', () => { search = searchInput.value.trim().toLowerCase(); render(); });
-  on(deleteButton, 'click', async () => {
-    const current = store.find(selectedId);
-    if (current) await removeMark(current.id);
+  on(deleteButton, 'click', async event => {
+    // The second half of a double click is not an answer to what the first one asked.
+    if (!store.find(selectedId) || event.detail > 1) return;
+    await removeMark(selectedId, { permanent: deleteForGood === selectedId });
   });
+  on(deleteButton, 'keydown', event => { if (event.repeat && (event.key === 'Enter' || event.key === ' ')) event.preventDefault(); });
   // No question for one mark: it can be undone at once and restored for a while. Only
   // when that is not possible any more does it ask, and then says so.
-  async function removeMark(id) {
+  async function removeMark(id, { permanent = false } = {}) {
     const current = store.find(id);
     if (!current || !store.editable(current) || store.state.busy) return;
-    const permanent = deleteForGood === current.id;
     deleteForGood = null;
-    const held = store.hold();
+    const held = store.hold(), open = selectedId, stays = focusKeeper();
     const removed = await store.remove(current, { permanent });
     if (!held.live()) return;
     // Recently deleted is full: this one can still go, but only for good and only if asked again.
-    if (!removed && store.state.failure === 'mark_deleted_full') {
+    // With something else open by then, the message alone says so.
+    const same = !draft && !picked && mode === 'idle' && (selectedId === open || selectedId === current.id);
+    if (!removed && same && store.state.failure === 'mark_deleted_full') {
       if (selectedId !== current.id) select(current.id, { focus: false });
       deleteForGood = current.id;
       message(store.state.message || 'Recently deleted is full, so this one could not be brought back.');
     }
     render();
     // Another card opened meanwhile stays.
-    if (removed && !draft && (!selectedId || selectedId === current.id)) { closeCard(); layer.focusStop(); }
+    if (removed && !draft && !picked && (!selectedId || selectedId === current.id)) closeCard();
+    if (removed && stays() && !picked && (!selectedId || selectedId === open)) layer.focusStop();
     if (removed) await readDeleted();
   }
   on(editor, 'submit', event => { event.preventDefault(); return saveDraft(); });
@@ -1077,18 +1083,33 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   on(labelsSelect, 'change', () => { labels = labelsSelect.value; writePreference(window, LABELS_KEY, labels); render(); });
   on(groupToggle, 'change', () => { grouping = groupToggle.checked; writePreference(window, GROUP_KEY, grouping ? 'on' : 'off'); render(); });
+  // True while the focus has not been taken anywhere else since.
+  function focusKeeper() {
+    const from = document.activeElement;
+    return () => !draft && [from, document.body, null, undefined].includes(document.activeElement);
+  }
+  // Whether the last change can be undone now; an unsaved edit is said to be in the way.
+  const undoNow = () => Boolean(store.state.undo.length) && !store.state.busy && !unsaved();
   async function undoLast({ focus = false } = {}) {
-    const entry = store.state.undo.at(-1);
-    if (!entry || unsaved() || store.state.busy) return false;
+    if (!undoNow()) return false;
+    const entry = store.state.undo.at(-1), held = store.hold(), stays = focusKeeper(), pressed = document.activeElement === barUndo;
+    barError = '';
     closeCard();
     const ok = await store.undo();
     if (ok) {
       const back = store.find(entry.before?.id || entry.id);
       if (back) reveal(back);
       render();
-      if (focus) { if (back) layer.focusPin(back.id); else layer.focusStop(); }
+      if (focus && stays() && !selectedId) { if (back) layer.focusPin(back.id); else layer.focusStop(); }
       await readDeleted();
-    } else render();
+    } else if (held.live()) {
+      // The offer may be gone by now: what went wrong is said, with another try if there can be one.
+      clearTimer();
+      barEntry = entry;
+      barError = store.state.message;
+      render();
+      if (pressed && stays()) (barUndo.hidden ? barClose : barUndo).focus?.({ preventScroll: true });
+    }
     return ok;
   }
   on(undoButton, 'click', () => undoLast());
@@ -1179,6 +1200,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         boxOpen = false; picked = null;
         hideBar();
         barSeen = null;
+        hideBar();
         search = ''; tab = 'list'; armedDelete = null; categoryDraft = null; moving = false; deleteForGood = null;
         showCategoryIcon(DEFAULT_STYLE.icon);
         categoryColor.value = DEFAULT_STYLE.color;

@@ -286,7 +286,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         await removeRaw(current, scope, { permanent });
         scope.check();
         // For good: nothing about it can be undone any more.
-        if (permanent) state.undo = state.undo.filter(entry => entry.id !== current.id && entry.before?.id !== current.id);
+        // An import is undone whole or not at all.
+        if (permanent) state.undo = state.undo.filter(entry => entry.id !== current.id && entry.before?.id !== current.id && !entry.marks?.some(mark => mark.id === current.id));
         else remember({ type: 'delete', before: current, label: 'delete ' + current.name, done: current.name + ' deleted' });
       });
     },

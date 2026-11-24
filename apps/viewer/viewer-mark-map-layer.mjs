@@ -182,7 +182,8 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onGroup = (
       if (items.get(id)?.kind !== 'pin') return;
       event.preventDefault();
       event.stopPropagation();
-      return onDelete(id);
+      // Focus goes on to the next pin: a key held down is not for that one.
+      return event.repeat ? undefined : onDelete(id);
     }
     const step = STEPS[event.key];
     if (!step) return;

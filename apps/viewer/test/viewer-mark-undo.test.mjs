@@ -133,8 +133,9 @@ test('Ctrl+Z takes back the last change, not while typing, placing, moving or wi
   await key('Escape');
   await panel.card('Edit').click();
   await panel.type('[name=note]', 'Typing');
-  await z();
+  assert.equal((await z()).defaultPrevented, false, 'refused, so the key is not taken');
   assert.deepEqual([names(), panel.q('[name=note]').value], [['One', 'Two'], 'Typing']);
+  assert.match(panel.text(), /Save or cancel the open mark first/);
   await panel.card('Cancel').click();
   assert.equal((await z()).defaultPrevented, true);
   assert.deepEqual([names(), says()], [['One'], null]);
@@ -227,4 +228,199 @@ test('public links have it in the tab, and it never carries to another person or
   assert.equal(time.pending(), 1);
   panel.marks.dispose();
   assert.deepEqual([time.pending(), panel.overlay.children], [0, []]);
+});
+
+// Requests of one kind wait until they are let go, or are refused.
+function gate() {
+  let waiting = null;
+  const held = { refuse: false,
+    hold(match) { waiting = { match, promise: Promise.withResolvers(), reached: Promise.withResolvers() }; return waiting.reached.promise; },
+    release() { const was = waiting; waiting = null; was.promise.resolve(); },
+    request: async (path, init) => {
+      const now = waiting;
+      if (now && now.match(path, init)) { now.reached.resolve(); await now.promise.promise; }
+      if (held.refuse && init.method !== 'GET') return new Response(JSON.stringify({ code: 'mark_rate_limited' }), { status: 429 });
+      return fetch(path, { ...init, signal: undefined });
+    } };
+  return held;
+}
+const writes = (path, init) => init.method !== 'GET';
+const settle = () => new Promise(resolve => setTimeout(resolve, 25));
+const press = (element, more = {}) => element.fire('keydown', { key: 'Delete', stopPropagation() {}, ...more });
+function fillDeleted(database) {
+  const insert = database.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, document_json, creation_hash, revision, created_at, updated_at,
+    updated_by_audience, updated_by_subject, deleted_at) VALUES (?, 'synthetic-model', 'client', 'client-a', 'private', '{"a":1}', 'x', 1, 'x', 'x', 'client', 'client-a', ?)`);
+  for (let i = 0; i < 1000; i += 1) insert.run('old' + i, new Date().toISOString());
+}
+
+test('a mark goes for good only from the button that says so; held keys and double clicks delete nothing more', async t => {
+  const { panel, add, pin, database } = await open(t);
+  const one = await add('One');
+  for (const name of ['Two', 'Three']) await add(name);
+  const there = () => panel.store.state.marks.map(mark => mark.name).sort();
+  // Focus moves to the next pin: the key still held is not for that one.
+  pin('Three').getElement().focus();
+  await press(pin('Three').getElement());
+  const event = await press(panel.dom.document.activeElement, { repeat: true });
+  assert.equal(event.defaultPrevented, true);
+  assert.deepEqual(there(), ['One', 'Two']);
+  fillDeleted(database);
+  await press(pin('One').getElement());
+  assert.match(panel.q('.viewer-mark-card').textContent, /Recently deleted is full/);
+  const button = panel.card('Delete for good');
+  assert.ok(button);
+  for (const more of [{ repeat: true }, {}, {}]) {
+    await press(pin('One').getElement(), more);
+    assert.ok(panel.store.find(one.id), 'a key is not a confirmation');
+  }
+  assert.equal((await button.fire('keydown', { key: 'Enter', repeat: true })).defaultPrevented, true, 'a held Enter does not press it again');
+  assert.equal((await button.fire('keydown', { key: 'Enter' })).defaultPrevented, false);
+  assert.ok(panel.card('Delete for good'), 'the last key asked again');
+  await button.fire('click', { detail: 2 });
+  assert.ok(panel.store.find(one.id), 'the second half of a double click on Delete');
+  await panel.show('Two');
+  assert.ok(panel.card('Delete'), 'asked about one, not the next');
+  await panel.card('Delete').click();
+  assert.deepEqual(there(), ['One', 'Two']);
+  await panel.card('Delete for good').click();
+  assert.deepEqual(there(), ['One']);
+});
+
+test('an import is not offered for undo once one of its marks is gone for good', async t => {
+  const { panel, database, key, says, add } = await open(t);
+  const before = await add('Before');
+  const input = panel.panel.querySelectorAll('input').find(node => node.getAttribute('type') === 'file');
+  const feature = name => ({ type: 'Feature', properties: { name }, geometry: { type: 'Point', coordinates: [-87, 43] } });
+  const text = JSON.stringify({ type: 'FeatureCollection', features: [feature('Gone'), feature('Stays')] });
+  input.files = [{ size: text.length, text: async () => text }];
+  await input.fire('change');
+  const stays = panel.store.state.marks.find(mark => mark.name === 'Stays');
+  assert.ok(stays);
+  fillDeleted(database);
+  await panel.show('Gone');
+  await panel.card('Delete').click();
+  await panel.card('Delete for good').click();
+  assert.deepEqual(panel.store.state.marks.map(mark => mark.name).sort(), ['Before', 'Stays']);
+  assert.deepEqual([panel.store.state.undo.map(entry => entry.type), says()], [['create'], null]);
+  database.exec("DELETE FROM viewer_marks WHERE id LIKE 'old%'");
+  assert.equal((await key('z', { ctrlKey: true })).defaultPrevented, true);
+  assert.deepEqual([panel.store.find(before.id), panel.store.find(stays.id)?.name], [null, 'Stays'], 'the one before it is next');
+});
+
+test('a delete that answers late leaves another card, another person and the focus alone', async t => {
+  const held = gate();
+  const { panel, add, pin, scope, database } = await open(t, { mount: { request: held.request } });
+  for (const name of ['One', 'Two', 'Three']) await add(name);
+  const card = () => panel.q('.viewer-mark-view').textContent;
+  // It went, and another card is open by then.
+  await panel.show('One');
+  let reached = held.hold(writes), going = panel.card('Delete').click();
+  await reached;
+  await panel.show('Two');
+  let focus = panel.dom.document.activeElement;
+  held.release();
+  await going;
+  await settle();
+  assert.match(card(), /Two/);
+  assert.equal(panel.q('.viewer-mark-card').hidden, false);
+  assert.ok(panel.dom.document.activeElement === focus, 'focus stays');
+  // Refused, with another card or an unsaved edit open by then.
+  fillDeleted(database);
+  for (const edit of [false, true]) {
+    await panel.show('Three');
+    reached = held.hold(writes);
+    going = press(pin('Three').getElement());
+    await reached;
+    await panel.show('Two');
+    // Edit is off while the delete is on its way; a key press that was already queued is not.
+    if (edit) { panel.card('Edit').disabled = false; await panel.card('Edit').click(); panel.q('[name=note]').value = 'Typing'; }
+    focus = panel.dom.document.activeElement;
+    held.release();
+    await going;
+    await settle();
+    assert.equal(panel.q('.viewer-mark-form').hidden, !edit);
+    assert.match(edit ? panel.q('[name=name]').value : card(), /Two/);
+    assert.ok(panel.dom.document.activeElement === focus, 'focus stays');
+    assert.equal(panel.card('Delete for good') ?? null, null);
+    if (edit) { assert.equal(panel.q('[name=note]').value, 'Typing'); await panel.card('Cancel').click(); }
+  }
+  // Refused, with another person signed in by then.
+  await panel.show('Three');
+  reached = held.hold(writes);
+  going = panel.card('Delete').click();
+  await reached;
+  await panel.marks.setScope(scope('client', 'client-b'));
+  held.release();
+  await going;
+  await settle();
+  assert.deepEqual([panel.q('.viewer-mark-card').hidden, panel.store.state.marks], [true, []]);
+  assert.doesNotMatch(panel.text() + panel.overlay.textContent, /is full|Three/);
+});
+
+test('Ctrl+Z is the text\'s own in anything editable, and taken only when the map undoes something', async t => {
+  const held = gate();
+  const { panel, key, add } = await open(t, { mount: { request: held.request } });
+  await add('One');
+  await add('Two');
+  const z = (more = {}) => key('z', { ctrlKey: true, ...more });
+  const make = value => { const host = panel.dom.document.createElement('div'); if (value !== undefined) host.setAttribute('contenteditable', value); return host; };
+  const inside = host => { const child = panel.dom.document.createElement('span'); host.append(child); return child; };
+  for (const target of [make('true'), make(''), make('plaintext-only'), inside(make('')), inside(inside(make('plaintext-only'))), Object.assign(make(), { isContentEditable: true })]) {
+    assert.equal((await z({ target })).defaultPrevented, false);
+  }
+  assert.equal((await z({ repeat: true })).defaultPrevented, false, 'one press, one change');
+  assert.equal(panel.store.state.marks.length, 2);
+  const reached = held.hold(writes), first = z();
+  await reached;
+  assert.equal((await z()).defaultPrevented, false, 'not while one is on its way');
+  held.release();
+  assert.equal((await first).defaultPrevented, true);
+  await settle();
+  assert.deepEqual(panel.store.state.marks.map(mark => mark.name), ['One']);
+});
+
+test('an undo that fails after its offer is gone says so and can be tried again', async t => {
+  const held = gate();
+  const { panel, key, add, undo, says, time, scope, database } = await open(t, { mount: { request: held.request } });
+  await add('One');
+  await add('Two');
+  // The offer runs out while the undo is on its way.
+  held.refuse = true;
+  const reached = held.hold(writes), late = undo().click();
+  await reached;
+  time.pass(8000);
+  held.release();
+  await late;
+  await settle();
+  assert.match(String(says()), /Two added\. Too many requests/);
+  time.pass(60_000);
+  assert.match(String(says()), /Two added\. Too many requests/, 'it stays until it is dealt with');
+  await panel.q('[aria-label=Dismiss]').click();
+  assert.equal(says(), null);
+  // With the keyboard, long after.
+  assert.equal((await key('z', { ctrlKey: true })).defaultPrevented, true);
+  await settle();
+  assert.match(String(says()), /Two added\. Too many requests/);
+  held.refuse = false;
+  await undo().click();
+  assert.deepEqual([panel.store.state.marks.map(mark => mark.name), says()], [['One'], null]);
+  // Something else failing is not this one's error.
+  await add('Three');
+  held.refuse = true;
+  await panel.open('One');
+  await panel.type('[name=note]', 'x');
+  await panel.save();
+  assert.equal(says(), 'Three added');
+  await panel.card('Cancel').click();
+  held.refuse = false;
+  // What can never be undone says so, with nothing to press.
+  database.exec('UPDATE viewer_marks SET revision = revision + 1 WHERE deleted_at IS NULL');
+  time.pass(8000);
+  await key('z', { ctrlKey: true });
+  await settle();
+  assert.match(panel.bar().textContent, /Three added\. Someone else changed this mark/);
+  assert.deepEqual([panel.bar().hidden, undo().hidden], [false, true]);
+  assert.ok(!panel.store.state.undo.some(entry => entry.done === 'Three added'));
+  await panel.marks.setScope(scope('client', 'client-b'));
+  assert.deepEqual([says(), panel.bar().textContent.includes('Three')], [null, false]);
 });
