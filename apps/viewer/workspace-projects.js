@@ -251,7 +251,7 @@ function injectProjectShareCard(projectId){
   const target=modalContent.querySelector('[data-legacy-project-shares]');if(!target)return;
   const shares=state.projectShares[projectId]||[],tab=modalContent.querySelector('#share-tab-public');
   if(tab)tab.textContent=publicTabLabel(shares);
-  target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project links cannot be created. A link marked active opens the project until it expires or you revoke it.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views · ${publicLinkState(share)==='expired'?`Expired ${esc(dateTime(share.expiresAt))}`:share.expiresAt?`Expires ${esc(dateTime(share.expiresAt))}`:'No expiry'}</small></div>${badge(publicLinkState(share))}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
+  target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project links cannot be created. A link marked active opens the project until it expires or you revoke it.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views · ${share.expiresAt&&Number.isNaN(Date.parse(share.expiresAt))?(publicLinkState(share)==='expired'?'Expired, end date unknown':'End date unknown'):publicLinkState(share)==='expired'?`Expired ${esc(dateTime(share.expiresAt))}`:share.expiresAt?`Expires ${esc(dateTime(share.expiresAt))}`:'No expiry'}</small></div>${badge(publicLinkState(share))}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
   bindProjectShareCard(projectId);
 }
 function bindProjectShareCard(projectId){
@@ -1832,8 +1832,9 @@ function bindDirectShare(form,projectId,onlyOutputId){
   form.onsubmit=async event=>{
     event.preventDefault();if(form.shareBusy)return;
     if(directShareContext(onlyOutputId).targetMissing){if(form.reviewing)setReviewing(false);summary.textContent=SHARE_TARGET_MISSING;return}
-    let bodies,target;try{target=read();bodies=target.bodies()}catch(error){summary.textContent=error.message;if(form.reviewing)setReviewing(false);return}
+    let bodies,target;try{target=read();bodies=target.bodies()}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
     if(!form.reviewing){
+      summary.textContent=target.summary;
       const body=bodies[0];
       form.querySelector('[data-direct-review-text]').textContent=directShareReviewText({summary:target.summary,permissions:body.permissions,expiresAt:body.expiresAt,dateTime});
       setReviewing(true);form.querySelector('[data-direct-send]').focus();return;
@@ -1841,7 +1842,7 @@ function bindDirectShare(form,projectId,onlyOutputId){
     // Inputs stay frozen while sending so the summary always matches what is being shared.
     const controls=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);
     for(const [element] of controls)element.disabled=true;
-    form.shareBusy=true;form.requestKeys||=new Map();let shared=0;summary.textContent=`Sharing… ${target.summary}`;
+    form.shareBusy=true;form.requestKeys||=new Map();let shared=0,refusal='';summary.textContent=`Sharing… ${target.summary}`;
     try{
       for(const body of bodies){
         const serialized=JSON.stringify(body);if(!form.requestKeys.has(serialized))form.requestKeys.set(serialized,crypto.randomUUID());
@@ -1850,8 +1851,10 @@ function bindDirectShare(form,projectId,onlyOutputId){
       toast(bodies.length>1?`Shared ${shared} tasks with the client`:'Shared with the client');
     }catch(error){
       toast(directShareErrorText(error),true);
-      if(live())summary.textContent=(shared?`Shared ${shared} of ${bodies.length}. Share again to finish; already shared tasks are not duplicated. `:'')+directShareErrorText(error);
+      refusal=(shared?`Shared ${shared} of ${bodies.length}. Share again to finish; already shared tasks are not duplicated. `:'')+directShareErrorText(error);
     }finally{form.shareBusy=false;if(form.isConnected){for(const [element,disabled] of controls)element.disabled=disabled;if(shared!==bodies.length)setReviewing(false)}}
+    // After the form is open again, which shows its choices: the reason stays until one of them changes.
+    if(refusal&&live())summary.textContent=refusal;
     // A partial share keeps the form and its retry keys exactly as they were.
     if(shared!==bodies.length||!live())return;
     try{const result=await loadDirectClientAccess(api,projectId);if(result&&live())state.clientDirectAccess=result}catch{}
@@ -1924,7 +1927,7 @@ function selectedShareViews(form){
 }
 function shareSettingsSummary(share){
   const labels=shareViewLabels(),views=share.allowedViews===null||share.allowedViews===undefined?'All available views':share.allowedViews.map(view=>labels[view]||view).join(', ');
-  return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.hasPassword?'Password protected':'No password'} · ${share.expiresAt?`Expires ${dateTime(share.expiresAt)}`:'No expiry'}`;
+  return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.hasPassword?'Password protected':'No password'} · ${!share.expiresAt?'No expiry':Number.isNaN(Date.parse(share.expiresAt))?'End date unknown':`Expires ${dateTime(share.expiresAt)}`}`;
 }
 // One rule for a public link everywhere in the dialog, the server's own (publicShareLive, projectShareLive):
 // an unreadable expiry is expired.

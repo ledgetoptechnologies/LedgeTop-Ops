@@ -137,7 +137,7 @@ export function directGrantRows(access,{projectId,tasks,taskId=null,dateTime=val
     // An expired share gives no access, but it still holds its place until it is revoked.
     const expired=Boolean(grant.expiresAt)&&!(Date.parse(grant.expiresAt)>now);
     const details=[what,grant.permissions?`Can ${permissionList(grant.permissions)}`:null,
-      expired?`Expired ${dateTime(grant.expiresAt)}; revoke it to share this again`:grant.expiresAt?`Expires ${dateTime(grant.expiresAt)}`:'No expiry',
+      expired?`Expired${Number.isNaN(Date.parse(grant.expiresAt))?', end date unknown':` ${dateTime(grant.expiresAt)}`}; revoke it to share this again`:grant.expiresAt?`Expires ${dateTime(grant.expiresAt)}`:'No expiry',
       grant.createdAt?`Shared ${dateTime(grant.createdAt)}`:null].filter(Boolean).join(' · ');
     return `<div class="manage-row"><div><strong>${esc(grant.clientDisplayName||'Client')}</strong><small>${esc(details)}</small></div><span class="status ${expired?'expired':'active'}">${expired?'expired':'active'}</span><div><button class="secondary-button" data-action="revoke-direct-client-grant" data-id="${esc(grant.grantId)}">Revoke</button></div></div>`;
   }).join('')}</div>`;
