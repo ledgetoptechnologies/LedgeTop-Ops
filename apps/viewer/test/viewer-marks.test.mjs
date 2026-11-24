@@ -101,6 +101,22 @@ test('batch status reads only the signed owner’s reserved IDs, including perma
   assert.equal((await request(owner, 'POST', 'batch/status', { ids: ['bad'] })).status, 400);
 });
 
+test('batch import rejects a deleted category reference with status 400 and writes no marks', async t => {
+  const { session, request } = await openApi(t);
+  const owner = session('client', 'owner');
+  const category = { id: randomUUID(), name: 'Gate', color: '#3366ff', icon: 'gate' };
+  assert.equal((await request(owner, 'POST', 'categories', category)).status, 201);
+  assert.equal((await request(owner, 'DELETE', 'categories/' + category.id, { revision: 1 })).status, 204);
+
+  const withDeletedCategory = point({ categoryId: category.id });
+  const other = point();
+  const result = await request(owner, 'POST', 'batch', { marks: [other, withDeletedCategory] });
+  assert.equal(result.status, 400);
+  assert.equal(result.body.code, 'mark_category_not_found');
+  assert.deepEqual((await request(owner, 'POST', 'batch/status', { ids: [other.id, withDeletedCategory.id] })).body,
+    { reservedIds: [] }, 'the whole batch was refused');
+});
+
 test('marks nobody shared stay with their owner, whatever else is asked for or already stored', async t => {
   const { session, request, db } = await openApi(t);
   const people = {

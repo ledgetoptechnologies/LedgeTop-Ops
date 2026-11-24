@@ -137,6 +137,53 @@ test('Viewer access loss is reported even when the initial Marks list was never 
   assert.equal(lost, 1);
 });
 
+for (const phase of ['initial load', 'reload']) {
+  test(`a late ${phase} refusal does not invalidate a renewed bearer on the same owner key`, async () => {
+    let denyCurrent = false, lost = 0, holdOld = false, finishOld;
+    const requests = [], ready = [];
+    const current = { ...ownList, capabilities: { ...ownList.capabilities, shared: false } };
+    const refusal = () => Response.json({ code: 'marks_unavailable' }, { status: 403 });
+    const store = createMarksStore({
+      onChange: state => { ready.push(state.ready); },
+      onViewerAccessLost: () => { lost++; },
+      request: async (path, init) => {
+        assert.equal(path, base);
+        const token = init.headers.authorization;
+        requests.push(token);
+        if (token === 'Bearer old' && holdOld) return new Promise(resolve => { finishOld = resolve; });
+        if (token === 'Bearer renewed' && denyCurrent) return refusal();
+        return Response.json(current);
+      },
+    });
+    const sameOwner = token => ({ mode: 'session', key: 'same owner', token: () => token });
+    if (phase === 'reload') await store.setScope(sameOwner('old'));
+    holdOld = true;
+    const pending = phase === 'reload' ? store.refresh() : store.setScope(sameOwner('old'));
+    assert.equal(typeof finishOld, 'function');
+    const held = store.hold();
+    const prior = { type: 'create', id: owned.id, revision: 1 };
+    if (phase === 'reload') store.state.undo = [prior];
+    ready.length = 0;
+    await store.setScope(sameOwner('renewed'));
+    finishOld(refusal());
+    await pending;
+    assert.deepEqual(requests.slice(-2), ['Bearer old', 'Bearer renewed']);
+    assert.equal(held.live(), true);
+    assert.equal(lost, 0);
+    assert.equal(store.canWrite(), true);
+    assert.deepEqual(store.state.marks, [owned]);
+    assert.ok(ready.every(Boolean), 'the stale response never clears the panel');
+    if (phase === 'reload') assert.deepEqual(store.state.undo, [prior]);
+
+    denyCurrent = true;
+    await store.refresh();
+    assert.equal(requests.at(-1), 'Bearer renewed');
+    assert.equal(lost, 1, 'a refusal for the bearer now in use still invalidates access');
+    assert.equal(store.canWrite(), false);
+    assert.deepEqual(store.state.marks, []);
+  });
+}
+
 test('a shared read cannot overwrite a write or reappear after a scope change', async () => {
   let held, signal, holdNext = false;
   const store = createMarksStore({ request: async (path, init) => {

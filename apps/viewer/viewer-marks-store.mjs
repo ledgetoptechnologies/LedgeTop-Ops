@@ -67,6 +67,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   // that could not be checked either, if any: nothing else is sent before it is.
   let attempts = new Map(), doubt = null;
   const pendingImports = new Map();
+  // A refusal applies only to the bearer that got it. A renewed session can
+  // keep the same owner key, and replacing that key is not required to retry.
+  const refusalBearers = new WeakMap();
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
     marks: [], categories: [], audiences: [], deleted: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
@@ -76,6 +79,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   const emit = () => onChange(state);
   const temporary = () => context?.mode === 'temporary';
   const find = id => state.marks.find(mark => mark.id === id) || null;
+  const bearer = () => context?.token?.();
+  const staleRefusal = error => refusalBearers.has(error) && refusalBearers.get(error) !== bearer();
   const readOnlyCapabilities = () => ({ write: false, staff: false, visibility: ['private'] });
 
   function hideInaccessibleMarks(error, message = 'Marks are hidden until access is restored.') {
@@ -98,14 +103,16 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       live, check, temporary: held?.mode === 'temporary',
       async api(path, method = 'GET', body, { readOnly = method === 'GET' } = {}) {
         check();
-        const token = held?.token?.();
-        if (!token) throw new MarksError('marks_unavailable', 403);
+        const token = bearer();
         const text = body && JSON.stringify(body);
         // Reading the list at the start may take its time; nothing waits for it.
         const limit = readOnly ? (state.busy ? READ_MS : 0) : Math.max(WRITE_MS, (text?.length || 0) / BYTES_PER_MS);
-        try { return await bounded(limit, signal, own => answer(path, method, token, text, own, check)); }
-        catch (error) {
+        try {
+          if (!token) throw new MarksError('marks_unavailable', 403);
+          return await bounded(limit, signal, own => answer(path, method, token, text, own, check));
+        } catch (error) {
           check();
+          if (accessLost(error)) refusalBearers.set(error, token);
           if (!readOnly && !(error instanceof MarksError && error.status < 500)) throw new MarksError('answer_unknown', 0);
           throw error;
         }
@@ -171,6 +178,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   }
 
   async function load(scope) {
+    try { await loadSnapshot(scope); }
+    catch (error) {
+      scope.check();
+      if (!staleRefusal(error)) throw error;
+      await loadSnapshot(scope);
+    }
+  }
+
+  async function loadSnapshot(scope) {
     const data = await scope.api('');
     scope.check();
     // Staff pick a client account when sharing a mark, if the server serves that choice.
@@ -221,7 +237,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     const refresh = new AbortController();
     sharedRefresh = refresh;
     const scope = currentScope(refresh.signal);
-    const token = context.token?.();
+    const token = bearer();
     let timedOut = false, current = false;
     const stopTimeout = later(() => { timedOut = true; refresh.abort(); }, READ_MS);
     const marks = [], categories = new Map();
@@ -242,7 +258,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       current = sharedRefresh === refresh;
       if (current) sharedRefresh = null;
     }
-    if (!current || context.token?.() !== token) return;
+    if (!current || bearer() !== token || (refusal && staleRefusal(refusal))) return;
     if (refusal) {
       hideInaccessibleMarks(refusal);
       emit();
@@ -355,7 +371,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
             op.tried?.();
             value = await checkDoubt(scope, op);
             if (value === undefined) throw new MarksError('not_saved', 0);
-          } else if (!again && [404, 409].includes(error.status) && op.mine) {
+          } else if (!again && op.mine && ([404, 409].includes(error.status)
+            || (op.refused && error.status === 400 && error.code === 'mark_category_not_found'))) {
             error.loaded = true;
             try { await load(scope); }
             catch (readError) {
@@ -380,7 +397,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       op.done?.(value, answered);
       return scope.live();
     } catch (error) {
-      if (!scope.live()) return false;
+      if (!scope.live() || staleRefusal(error)) return false;
       state.failure = error.code || 'failed';
       if (accessLost(error)) {
         hideInaccessibleMarks(error);
@@ -388,7 +405,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         state.message = MESSAGES[error.code] || 'Could not save the change. Try again.';
         if (!error.loaded && (error.status === 409 || error.status === 404 || error.code === 'mark_category_not_found')) {
           await load(scope).catch(readError => {
-            if (scope.live() && accessLost(readError)) hideInaccessibleMarks(readError);
+            if (scope.live() && accessLost(readError) && !staleRefusal(readError)) hideInaccessibleMarks(readError);
           });
         }
       }
@@ -477,6 +494,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
 
     async setScope(next) {
       if (context?.key === next?.key && (!next || state.ready || state.loading)) {
+        context = next;
         if (state.blocked) { state.blocked = false; emit(); }
         return true;
       }
@@ -502,7 +520,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       try {
         await load(scope);
       } catch (error) {
-        if (scope.live()) {
+        if (scope.live() && !staleRefusal(error)) {
           if (accessLost(error)) hideInaccessibleMarks(error, state.ready ? undefined : 'Marks are unavailable for this session.');
           else state.message = 'Marks are unavailable for this session.';
         }

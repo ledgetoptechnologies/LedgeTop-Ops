@@ -245,7 +245,7 @@ for (const conflict of ['mark_category_name_taken', 'mark_category_id_conflict',
       if (reserved || sameName || deletedReference) {
         if (submissions.length === 2) unavailable = base;
         if (submissions.length === 3) unavailable = base + '/batch/status';
-        return Response.json({ code: conflict }, { status: deletedReference ? 404 : 409 });
+        return Response.json({ code: conflict }, { status: deletedReference ? 400 : 409 });
       }
       assert.deepEqual(payload.categories, []);
       assert.equal(payload.marks[0].categoryId, existing.id);
