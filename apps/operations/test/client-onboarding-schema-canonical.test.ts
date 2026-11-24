@@ -208,6 +208,104 @@ describe("client onboarding schema readiness canonicalization", () => {
       expect(() => canonicalSqliteSchemaTuple(object("table", "t", sql)), sql).toThrow("sqlite_schema_text_unrecognized");
   });
 
+  it.each([
+    ["different word", "table", "t", "CREATE TABLE u(a)"],
+    ["different case", "table", "t", 'CREATE TABLE "T"(a)'],
+    ["extra space inside the quotes", "table", "t", 'CREATE TABLE "t "(a)'],
+    ["prefix only", "table", "t", "CREATE TABLE [t_old](a)"],
+    ["escaped quote left escaped", "table", 'a""b', 'CREATE TABLE "a""b"(x)'],
+    ["bracket text is not unescaped", "table", "a]b", "CREATE TABLE [a]]b](x)"],
+    ["empty quoted name", "table", "t", 'CREATE TABLE ""(a)'],
+    ["quotes kept in the row name", "table", '"t"', 'CREATE TABLE "t"(a)'],
+    ["schema qualifier", "table", "t", "CREATE TABLE main.t(a)"],
+    ["trigger named like another trigger", "trigger", "r", 'CREATE TRIGGER "s" INSERT ON t BEGIN SELECT 1; END'],
+    ["trigger named like its table", "trigger", "r", "CREATE TRIGGER t INSERT ON t BEGIN SELECT 1; END"],
+    ["view", "view", "v", "CREATE VIEW `w` AS SELECT 1 AS a"],
+    ["index", "index", "i", 'CREATE INDEX "j" ON t(a)'],
+    ["unique index", "index", "i", "CREATE UNIQUE INDEX [j] ON t(a)"],
+  ])("refuses a declared name that is not exactly the row name: %s", (_label, type, name, sql) => {
+    expect(() => canonicalSqliteSchemaTuple(object(type, name, sql, "t"))).toThrow("sqlite_schema_text_unrecognized");
+  });
+
+  it("decodes a declared name exactly once", () => {
+    for (const sql of ['CREATE TABLE "a""b"(x)', 'CREATE TABLE [a"b](x)', 'CREATE TABLE `a"b`(x)'])
+      expect(canonicalSqliteSchemaTuple(object("table", 'a"b', sql))[3]).toEqual(["CREATE", "TABLE", null, "(", "x", ")"]);
+  });
+
+  it("never applies the declared-name exception to a later use of the same quoted text", () => {
+    const pairs: [string, string, string, string][] = [
+      ["table", "t", "CREATE TABLE t(a, CHECK(a<>'t'))", 'CREATE TABLE t(a, CHECK(a<>"t"))'],
+      ["table", "t", "CREATE TABLE t(a, CHECK(t.a>0))", 'CREATE TABLE t(a, CHECK("t".a>0))'],
+      ["table", "t", "CREATE TABLE t(a DEFAULT t)", 'CREATE TABLE t(a DEFAULT "t")'],
+      ["table", "t", "CREATE TABLE t(a DEFAULT 't')", 'CREATE TABLE t(a DEFAULT "t")'],
+      ["table", "t", "CREATE TABLE t(a REFERENCES t(a))", "CREATE TABLE t(a REFERENCES [t](a))"],
+      ["table", "t", "CREATE TABLE t(t)", "CREATE TABLE t(`t`)"],
+      ["trigger", "r", "CREATE TRIGGER r INSERT ON t BEGIN SELECT RAISE(ABORT,'r'); END", 'CREATE TRIGGER r INSERT ON t BEGIN SELECT RAISE(ABORT,"r"); END'],
+      ["trigger", "r", "CREATE TRIGGER r INSERT ON t WHEN NEW.a='r' BEGIN SELECT 1; END", 'CREATE TRIGGER r INSERT ON t WHEN NEW.a="r" BEGIN SELECT 1; END'],
+      ["trigger", "r", "CREATE TRIGGER r INSERT ON t WHEN NEW.a BEGIN SELECT 1; END", 'CREATE TRIGGER r INSERT ON t WHEN NEW."a" BEGIN SELECT 1; END'],
+      ["view", "v", "CREATE VIEW v AS SELECT a AS v FROM t WHERE a=v", 'CREATE VIEW v AS SELECT a AS v FROM t WHERE a="v"'],
+      ["view", "v", "CREATE VIEW v AS SELECT true AS a", "CREATE VIEW v AS SELECT [true] AS a"],
+      ["view", "v", "CREATE VIEW v AS SELECT current_timestamp AS a", 'CREATE VIEW v AS SELECT "current_timestamp" AS a'],
+      ["index", "i", "CREATE INDEX i ON t(i)", 'CREATE INDEX i ON t("i")'],
+      ["index", "i", "CREATE INDEX i ON t(a) WHERE a='i'", 'CREATE INDEX i ON t(a) WHERE a="i"'],
+    ];
+    for (const [type, name, left, right] of pairs) {
+      expect(same(type, name, left, right, "t"), right).toBe(false);
+      // Quoting the declared name as well must not hide the difference.
+      expect(same(type, name, left.replace(/^(CREATE \w+) (\w+)/, '$1 "$2"'), right, "t"), right).toBe(false);
+    }
+  });
+
+  it.each([
+    ["virtual table", "table", "t", "CREATE VIRTUAL TABLE t USING fts5(a)"],
+    ["temporary table", "table", "t", "CREATE TEMPORARY TABLE t(a)"],
+    ["temporary trigger", "trigger", "t", "CREATE TEMP TRIGGER t INSERT ON u BEGIN SELECT 1; END"],
+    ["IF NOT EXISTS", "table", "t", "CREATE TABLE IF NOT EXISTS t(a)"],
+    ["lower-case header", "table", "t", "create table t(a)"],
+    ["row type and statement kind differ", "trigger", "t", "CREATE VIEW t AS SELECT 1 AS a"],
+    ["leading statement", "table", "t", "SELECT 1; CREATE TABLE t(a)"],
+    ["no name", "table", "t", "CREATE TABLE"],
+    ["empty text", "table", "t", ""],
+    ["comment only", "table", "t", "-- CREATE TABLE t(a)"],
+    ["unique table", "table", "t", "CREATE UNIQUE TABLE t(a)"],
+    ["named variable", "view", "t", "CREATE VIEW t AS SELECT :a AS a"],
+    ["at variable", "view", "t", "CREATE VIEW t AS SELECT @a AS a"],
+    ["dollar variable", "view", "t", "CREATE VIEW t AS SELECT $a AS a"],
+    ["backslash", "view", "t", "CREATE VIEW t AS SELECT \\ AS a"],
+    ["lone exclamation mark", "view", "t", "CREATE VIEW t AS SELECT ! 1 AS a"],
+    ["digit separator", "view", "t", "CREATE VIEW t AS SELECT 1_000 AS a"],
+    ["incomplete exponent", "view", "t", "CREATE VIEW t AS SELECT 1e AS a"],
+    ["unterminated bracket", "table", "t", "CREATE TABLE t([a)"],
+    ["unterminated backtick", "table", "t", "CREATE TABLE t(`a)"],
+    ["opening comment only", "table", "t", "CREATE TABLE t(a)/*/"],
+  ])("fails closed on an unsupported form: %s", (_label, type, name, sql) => {
+    expect(() => canonicalSqliteSchemaTuple(object(type, name, sql, "t"))).toThrow("sqlite_schema_text_unrecognized");
+  });
+
+  it("the shipped fences fail closed, with their one error, when any pinned row is unsupported or misnamed", async () => {
+    const changes: ((row: SqliteSchemaTuple) => unknown)[] = [
+      row => [row[0], `${row[1]}_other`, row[2], row[3]],
+      row => [row[0], row[1], `${row[2]}_other`, row[3]],
+      row => [row[0], row[1], row[2], String(row[3]).replace(row[1], `"${row[1]}_other"`)],
+      row => [row[0], row[1], row[2], `${String(row[3])} \\`],
+      row => [row[0], row[1], row[2], `${String(row[3])}; SELECT 1`],
+      row => [row[0], row[1], row[2], null],
+      row => [row[0], row[1], row[2]],
+      () => null,
+    ];
+    for (const name of NAMES) {
+      const rows = await inventory(source, name);
+      const reply = (text: string) => ({ prepare: () => ({ first: async () => text, bind: () => ({}) }) }) as unknown as Pick<D1Database, "prepare">;
+      // Control: the same shim with the unmodified rows is accepted.
+      await expect(fences[name](reply(JSON.stringify(rows)))).resolves.toBeDefined();
+      const at = rows.findIndex(row => row[0] === "trigger");
+      for (const change of changes)
+        await expect(fences[name](reply(JSON.stringify(rows.map((row, index) => index === at ? change(row) : row)))))
+          .rejects.toThrow("client_onboarding_target_schema_unavailable");
+      for (const text of ["", "{}", "null", "[]", "not json", JSON.stringify([...rows, rows[at]]), JSON.stringify([...rows].reverse())])
+        await expect(fences[name](reply(text)), text.slice(0, 20)).rejects.toThrow("client_onboarding_target_schema_unavailable");
+    }
+  });
   it("follows SQLite comment boundaries", () => {
     // A lone CR does not end a line comment, so the constraint is really gone.
     expect(same("table", "t", "CREATE TABLE t(a --x\rCHECK(a)\n)", "CREATE TABLE t(a)")).toBe(true);
