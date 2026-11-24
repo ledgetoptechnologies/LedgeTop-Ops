@@ -160,6 +160,34 @@ schema; check that before rolling back. The
 attestation must still exist, so this works for 90 days after that candidate
 was built. For older images, pin the digest on the host instead (section 2).
 
+### Rollback after schema 46
+
+Schema 46 keeps original GCP source files. An older release ignores it: its
+worker runs at start and every hour, deletes expired Recycle Bin datasets
+without keeping their CSV files, and deletes upload caches this release keeps
+on purpose. Its API does the same when staff delete or purge. Those files
+cannot be recovered from the database. Retained originals are not touched.
+
+Rule: never run an older release with processing on against a store that a
+schema 46 release has opened. Use the first of these that applies:
+
+1. Fix forward, or roll back to a release that has schema 46 retention.
+2. Roll back to an older release view-only. Set `PROCESSING_PLATFORM_ENABLED=false`
+   in `Config/viewer.env` first. The older worker then stays idle and the
+   processing, upload, delete and purge routes are off; viewing still works.
+   Check the `viewer-worker` log for `Processing worker is idle` before
+   anything else. Keep it so until a release with retention runs, then set
+   the value back.
+3. If an older release must run with processing, stop both services, keep the
+   current database, cache and trash, and restore the pre-upgrade backup of the
+   database and storage together. Work done since the upgrade is not in it.
+
+`scripts/update-truenas.sh` enforces this. Its automatic rollback starts an
+image without retention view-only, and it refuses to update to such an image
+while processing is on. Nothing enforces it for a plain `docker compose up`, the
+TrueNAS app page or a pinned digest, so set the value first. A failed or
+view-only rollback is not a reason to turn processing back on.
+
 ## Updating the production host
 
 After `latest` moves, update with the guarded helper as before:

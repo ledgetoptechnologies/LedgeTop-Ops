@@ -62,9 +62,24 @@ if [[ -n "$api_id" ]]; then
   docker image tag "$previous_image_id" "$rollback_image"
 fi
 
+# Releases that keep original GCP source files (schema 46) ship this module. An
+# older release would purge trash and upload caches without keeping them. An
+# image that cannot be checked counts as older.
+retention_module=/app/server/gcpUploadRetention.js
+retention_aware() {
+  docker run --rm --network none --pull never --entrypoint node "$1" -e 'process.exit(require("node:fs").existsSync(process.argv[1])?0:3)' "$retention_module" >/dev/null 2>&1
+}
+
 rollback() {
   local status="$1"
   echo "viewer update failed during $status" >&2
+  # A failed pull started nothing, so the store is as it was. After that the
+  # store may be migrated: an older release may only run view-only, where its
+  # worker stays idle and the processing routes are off.
+  if [[ -n "$previous_image_id" && "$status" != pull ]] && ! retention_aware "$rollback_image"; then
+    echo "the previous image does not keep original GCP source files; starting it view-only (docs/RELEASING.md, Rollback after schema 46)" >&2
+    export PROCESSING_PLATFORM_ENABLED=false
+  fi
   if [[ -n "$previous_image_id" ]]; then
     echo "rolling back to $previous_image_id via $rollback_image" >&2
     VIEWER_ROLLBACK_IMAGE="$rollback_image" docker compose "${compose_args[@]}" -f docker-compose.yml -f "$rollback_compose" up -d --remove-orphans --pull never --wait --wait-timeout 180 || true
@@ -75,6 +90,9 @@ rollback() {
 }
 
 docker compose "${compose_args[@]}" pull || rollback pull
+if [[ "$mode" == processing ]] && ! retention_aware "$target_image"; then
+  fail "$target_image does not keep original GCP source files; it may only run with PROCESSING_PLATFORM_ENABLED=false (docs/RELEASING.md, Rollback after schema 46)"
+fi
 if [[ -n "$api_id" && "${VIEWER_UPDATE_ALLOW_ACTIVE:-0}" != 1 ]]; then
   # Pull first, then check immediately before replacement. Operators must keep
   # Ops processing admission paused for the update so no new work can enter
