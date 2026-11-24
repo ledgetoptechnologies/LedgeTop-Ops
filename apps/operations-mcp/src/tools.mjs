@@ -54,6 +54,10 @@ export function buildTools(client, { allowWrites = false } = {}) {
     a => client.request(query('/api/delivery/shares/active', a)));
   add('list_delivery_grants', 'Inspect existing grants and folder bindings for an authorized folder. grantId is the logical grant ID; id is a physical record ID.',
     { folderRef }, a => client.request(query('/api/delivery/authenticated-grants', a)));
+  add('list_viewer_client_grants', 'Read direct Viewer client grants. viewerProjectId filters grants; q, cursor, and limit page the client workspace list only. Listed rows can have an expiry in the past, so they do not prove effective current access. Preserve exact sourceId, workspaceId, viewerProjectId, and taskId values; never infer identity from names or email.',
+    { viewerProjectId: opaque.optional(), q: z.string().max(120).refine(v => !/[\p{C}]/u.test(v)).optional(),
+      cursor: opaque.optional(), limit: z.number().int().min(1).max(50).optional() },
+    a => client.request(query('/api/viewer/direct-client-grants', a)));
   add('find_grant_audiences', 'Find current authorized recipients for an existing folder binding. Use returned IDs, never infer them from names.',
     { folderBindingId: opaque, q: text(100).refine(v => v.length >= 2), audienceType: audienceType.optional() },
     a => client.request(query('/api/delivery/authenticated-grants/audiences', a)));
