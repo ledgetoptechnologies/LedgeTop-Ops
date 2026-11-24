@@ -2601,7 +2601,10 @@ function syncViewerMarks() {
     const session = activeViewerSession;
     if (VIEW_MODE === 'session' && sessionAccessState !== 'unavailable'
       && Date.parse(session?.expiresAt) > Date.now() && session?.subject && ['ops', 'client'].includes(session.audience)) {
-      context = { mode: 'session', key: JSON.stringify([session.audience, session.subject, model.id]),
+      // Whose marks, and whether the login is still that individual: losing that
+      // clears the panel like a different person, before anything is loaded.
+      context = { mode: 'session', key: JSON.stringify([session.audience, session.subject, model.id,
+        session.audience === 'ops' || session.permissions?.personalMeasurements === true]),
         token: () => sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null,
       };
     } else if (['view', 'embed', 'project'].includes(VIEW_MODE)) {

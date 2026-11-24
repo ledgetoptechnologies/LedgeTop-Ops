@@ -36,10 +36,10 @@ export async function openMarksPanel(t, options) {
     return { mode: 'session', key: JSON.stringify([audience, subject, modelId]), token: () => token, record };
   };
   const requests = [];
-  const mount = ({ dom = createMiniDocument(), units = () => 'imperial' } = {}) => {
+  const mount = ({ dom = createMiniDocument(), units = () => 'imperial', request = null } = {}) => {
     const panel = dom.document.createElement('div');
     const marks = mountViewerMarks({ panel, L: {}, getMap: () => null, units,
-      request: (path, init) => { requests.push([init.method, path]); return fetch(base + path, { ...init, redirect: 'follow' }); } });
+      request: (path, init) => { requests.push([init.method, path]); return (request || fetch)(base + path, { ...init, redirect: 'follow' }); } });
     marks.setView({ map: true });
     const q = selector => panel.querySelector(selector);
     return { dom, panel, marks, store: marks.store, q,
