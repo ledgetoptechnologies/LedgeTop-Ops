@@ -84,8 +84,8 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
           results.push({trashId:item.id,status:'transferred',containerTrashId:heir.id});continue;
         }
       }
-      // An output that belongs to a deleted, restorable task goes with that task's item as well.
-      const container=output&&processing.deletedTaskContainer(item);
+      // So does anything that belongs to a deleted, restorable task or project but is not in its item.
+      const container=processing.deletedTaskContainer(item);
       if(container){
         if(!processing.moveContainerTrashMember(null,container.id,item.id,null)){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         results.push({trashId:item.id,status:'transferred',containerTrashId:container.id});continue;
