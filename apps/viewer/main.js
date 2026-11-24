@@ -87,6 +87,8 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { modelHorizontalDatum, verifiedUtmGeoref } from './property-lines.mjs';
 import { createPropertyLinesController } from './property-lines-layer.mjs';
 import { createContourController, dtmVerticalScale } from './contour-layer.mjs';
+import { PRINT_DISTANCE_DEFAULT_FT, METERS_PER_FOOT as PRINT_METERS_PER_FOOT, coverageNote, linesToUtm, outlineToUtm, printClip, printPropertyError, propertyCoverage, propertyFrame, readCaptureMask, resolvePrintProperty } from './print-property.mjs';
+import { formatParcelArea } from './property-lines-owners.mjs';
 import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, supportedPrintSizes } from './ortho-print-export.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
@@ -4183,11 +4185,13 @@ function installContours() {
         contoursAvailable: Boolean(DTM_URL), contoursOn: contourLines?.state.on === true,
         propertyAvailable: propertyLinesForPrint().lines.length > 0, propertyOn: true,
         geotiffAvailable: policy.geotiff && printEpsg() !== null, wholeAvailable: policy.whole,
+        chooseAvailable: Boolean(map && isMapMode(state.activeMode) && printEpsg() !== null && propertyLines?.state.drawn.map),
         // Without download permission a view export is capped at the screen size (at most 2048 px).
         sizes: policy.whole ? printSizes : printSizes.filter((s) => s <= VIEW_EXPORT_MAX_EDGE),
       };
     },
     run: (options, signal) => exportOrthoPrintFromViewer(options, signal),
+    chooseProperty: () => choosePrintProperty(),
   });
   contourLines.refresh();
 }
@@ -4220,11 +4224,84 @@ function propertyLinesForPrint() {
   return { lines, color: typeof line.options.color === 'string' ? line.options.color : null, attribution: propertyLines.attribution() };
 }
 
-async function exportOrthoPrintFromViewer({ area, size, format, contours, property }, dialogSignal) {
+// One click on the map, with everything under it out of reach of the map's own
+// tools. Escape, or a viewer or access change meanwhile, gives null.
+function pickMapPoint(identity) {
+  return new Promise((resolve) => {
+    const container = map.getContainer(), cover = document.createElement('div'), hint = document.createElement('p');
+    cover.id = 'print-property-pick';
+    hint.textContent = 'Click your property';
+    cover.append(hint);
+    L.DomEvent.disableClickPropagation(cover);
+    const job = { identity, permitted: () => orthoPrintPermissions().allowed, cancel: () => done(null) };
+    const done = (value) => { orthoPrintExports.delete(job); cover.remove(); document.removeEventListener('keydown', onKey, true); resolve(value); };
+    const onKey = (event) => { if (event.key === 'Escape') { event.stopPropagation(); done(null); } };
+    cover.addEventListener('click', (event) => {
+      const rect = container.getBoundingClientRect();
+      const at = map.containerPointToLatLng([event.clientX - rect.left, event.clientY - rect.top]);
+      done(Number.isFinite(at?.lng) && Number.isFinite(at?.lat) ? [at.lng, at.lat] : null);
+    });
+    document.addEventListener('keydown', onKey, true);
+    orthoPrintExports.add(job);
+    container.append(cover);
+  });
+}
+
+// The property for a print, chosen on the map. It belongs to the viewer, model
+// and version it was chosen for, as an export does.
+async function choosePrintProperty() {
+  const identity = orthoPrintIdentity();
+  const current = () => { if (orthoPrintIdentity() !== identity || !orthoPrintPermissions().allowed) throw new DOMException('Cancelled.', 'AbortError'); };
+  current();
+  if (!map || !isMapMode(state.activeMode) || printEpsg() === null) throw printPropertyError('georef');
+  const point = await pickMapPoint(identity);
+  current();
+  if (!point) return null;
+  const found = await resolvePrintProperty({ point, merge: propertyLines.state.merge, load: (bounds) => propertyLines.loadPrintParcels(bounds) });
+  current();
+  const { outline, outlines, areaM2 } = found;
+  return {
+    identity, attribution: propertyLines.attribution(),
+    label: [outline.owner, formatParcelArea(areaM2, DISPLAY_UNITS)].filter(Boolean).join(' '),
+    parcels: outlineToUtm(outline, latLonToUtm), boundary: linesToUtm([outline], latLonToUtm),
+    neighbours: linesToUtm(outlines.filter((other) => other !== outline), latLonToUtm),
+  };
+}
+
+// Screen pixels (long edge) a frame covers in the current map view; 0 unless
+// all of it is in the view. Checked on the map itself: a UTM frame leans a
+// little against the view, so its own outline is followed round.
+function frameViewPixels(frame) {
+  if (!map || !isMapMode(state.activeMode)) return 0;
+  const bounds = map.getBounds();
+  for (let i = 0; i <= 8; i++) {
+    const e = frame.minE + (frame.maxE - frame.minE) * i / 8, n = frame.minN + (frame.maxN - frame.minN) * i / 8;
+    for (const [pe, pn] of [[e, frame.minN], [e, frame.maxN], [frame.minE, n], [frame.maxE, n]]) if (!bounds.contains(utmToLatLon(pe, pn))) return 0;
+  }
+  const corners = [bounds.getNorthWest(), bounds.getNorthEast(), bounds.getSouthWest(), bounds.getSouthEast()].map((c) => latLonToUtm(c.lat, c.lng));
+  const span = (axis) => Math.max(...corners.map((c) => c[axis])) - Math.min(...corners.map((c) => c[axis]));
+  const size = map.getSize(), pixels = Math.max(size.x * (frame.maxE - frame.minE) / span(0), size.y * (frame.maxN - frame.minN) / span(1));
+  return Number.isFinite(pixels) ? (window.devicePixelRatio || 1) * pixels : 0;
+}
+
+// What a property print shows, once its size is known; refuses a property none
+// of which was captured.
+function propertyClipper(ortho, parcels, signal) {
+  const marginMeters = PRINT_DISTANCE_DEFAULT_FT * PRINT_METERS_PER_FOOT, trimMeters = marginMeters;
+  return async ({ width, height, extent }) => {
+    const capture = await readCaptureMask(ortho, { signal, pool: ensureGeoTiffPool() });
+    const coverage = propertyCoverage({ parcels, capture, trimMeters });
+    if (!coverage.percent) throw printPropertyError('uncaptured');
+    return { ...printClip({ width, height, extent, parcels, marginMeters, trimMeters, capture }), note: coverageNote(coverage) };
+  };
+}
+
+async function exportOrthoPrintFromViewer({ area, size, format, contours, property, selection = null }, dialogSignal) {
   // Re-check here, not only when the dialog opened: the session may have
   // expired or permissions changed since.
   assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
   if (!ORTHO_URL) throw Object.assign(new Error('This model has no orthophoto.'), { code: 'print_no_ortho' });
+  if (area === 'property' && (!selection || selection.identity !== orthoPrintIdentity())) throw printPropertyError('stale');
   if (area === 'view' && !(map && isMapMode(state.activeMode))) throw Object.assign(new Error('Open a map view to export the current view.'), { code: 'print_no_view' });
   // The export belongs to the viewer, model and version it started for, and
   // to the entitlement behind every choice it made: area, format and, once
@@ -4233,19 +4310,24 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
   // closing the dialog cancels it, and after every await `current()` checks
   // both against the latest session. Any mismatch ends it as a cancel: no file.
   const controller = new AbortController(), signal = controller.signal;
-  let planned = null; // { longEdge, viewPixels } once the size is chosen
+  let planned = null; // { longEdge, viewPixels, frame, restricted } once the size is chosen
+  // A property's pixels are counted in the view as it is at every check, up to
+  // the save: without download it must still be there, at that size.
   const permitted = () => {
     const now = orthoPrintPermissions();
     try { assertOrthoPrintAllowed(now, { area, format }); } catch { return false; }
-    return !planned || planned.longEdge <= printLongEdge({ area, requested: size, policy: now, viewPixels: planned.viewPixels });
+    return !planned || planned.longEdge <= printLongEdge({ area, requested: size, policy: now, viewPixels: planned.frame ? frameViewPixels(planned.frame) : planned.viewPixels });
   };
   const job = { identity: orthoPrintIdentity(), permitted, cancel: () => controller.abort() };
   const fromDialog = () => controller.abort();
   if (dialogSignal?.aborted) controller.abort(); else dialogSignal?.addEventListener('abort', fromDialog, { once: true });
   const current = () => {
     if (orthoPrintIdentity() !== job.identity || !permitted()) controller.abort();
-    if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+    if (signal.aborted) throw viewChanged() ? printPropertyError('view_changed') : new DOMException('Export cancelled.', 'AbortError');
   };
+  // Cancelled only because the map moved under a restricted property export.
+  const viewChanged = () => Boolean(planned?.restricted && planned.frame) && !dialogSignal?.aborted && orthoPrintIdentity() === job.identity
+    && orthoPrintPermissions().allowed && !permitted();
   orthoPrintExports.add(job);
   try {
     const ortho = await getDataset(ORTHO_URL, false, { signal });
@@ -4257,7 +4339,9 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
       const corners = [b.getNorthWest(), b.getNorthEast(), b.getSouthWest(), b.getSouthEast()].map((c) => latLonToUtm(c.lat, c.lng));
       extent = { minE: Math.min(...corners.map((c) => c[0])), maxE: Math.max(...corners.map((c) => c[0])), minN: Math.min(...corners.map((c) => c[1])), maxN: Math.max(...corners.map((c) => c[1])) };
     }
-    const drawnLines = property ? propertyLinesForPrint() : { lines: [], color: null };
+    if (area === 'property') extent = propertyFrame(selection.parcels, PRINT_DISTANCE_DEFAULT_FT * PRINT_METERS_PER_FOOT);
+    const drawnLines = area === 'property' ? { lines: property ? selection.neighbours : [], color: propertyLinesForPrint().color, attribution: selection.attribution }
+      : property ? propertyLinesForPrint() : { lines: [], color: null };
     const policy = orthoPrintPermissions();
     // Screen pixels the exported area actually covers: the view clipped to the
     // orthophoto, not the whole map viewport.
@@ -4266,8 +4350,14 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
       const mapSize = map.getSize(), dpr = window.devicePixelRatio || 1, clipped = clampExtent(extent, ortho);
       if (clipped) viewPixels = dpr * Math.max(mapSize.x * (clipped.maxE - clipped.minE) / (extent.maxE - extent.minE), mapSize.y * (clipped.maxN - clipped.minN) / (extent.maxN - extent.minN));
     }
+    // Without download a saved image never shows more than the current view:
+    // the property, with its margin, must be in it. Downloaders may save it from anywhere.
+    if (area === 'property') {
+      viewPixels = frameViewPixels(extent);
+      if (!policy.whole && !viewPixels) throw printPropertyError('zoom_out');
+    }
     const longEdge = printLongEdge({ area, requested: size, policy, viewPixels });
-    planned = { longEdge, viewPixels };
+    planned = { longEdge, viewPixels, frame: area === 'property' ? extent : null, restricted: !policy.whole };
     // `checkpoint` runs after the contours are traced, after the pixels are
     // rendered and after the file is encoded.
     const result = await exportOrthoPrint({
@@ -4276,11 +4366,12 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
       colors: contourLines?.colors(), propertyLines: drawnLines.lines.length ? drawnLines.lines : null,
       propertyStyle: drawnLines.color ? { color: drawnLines.color } : null, propertyAttribution: drawnLines.attribution || '', units: DISPLAY_UNITS,
       createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal, checkpoint: current,
+      ...(area === 'property' ? { frame: true, boundary: property ? selection.boundary : null, prepareClip: propertyClipper(ortho, selection.parcels, signal) } : {}),
     });
     // Rendering takes a while: the session may have expired or changed
     // meanwhile. Check again before the dialog saves anything.
     current();
-    if (result.width < size && result.height < size && longEdge < size) result.note = `Saved at ${Math.max(result.width, result.height)} px (limited by your access).`;
+    if (result.width < size && result.height < size && longEdge < size) result.note = [result.note, `Saved at ${Math.max(result.width, result.height)} px (limited by your access).`].filter(Boolean).join(' ');
     // The dialog asks once more right before it saves the file.
     result.stillCurrent = () => { try { current(); return true; } catch { return false; } };
     return result;

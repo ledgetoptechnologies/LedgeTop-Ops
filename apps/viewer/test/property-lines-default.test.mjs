@@ -112,6 +112,53 @@ test('default on: an authorized offer shows the lines on every supported view wi
   }
 });
 
+test('prints: parcels come through the same offer, access and lifecycle, without disturbing the map', async () => {
+  const around = { west: -89.4013, south: 43.0741, east: -89.4007, north: 43.0747 };
+  const ctx = await open(page());
+  const mapRequests = ctx.requests.length;
+  const first = await ctx.controller.loadPrintParcels(around);
+  assert.deepEqual([first.status, first.parcels.length, first.failed, first.partial], ['ok', 1, false, false]);
+  assert.ok(first.loaded.size > 0);
+  assert.ok(ctx.requests.length > mapRequests);
+  assertShownOn(ctx, 'map');
+  // Hide is a display choice; a print may still be made.
+  ctx.controller.toggle();
+  assert.equal((await ctx.controller.loadPrintParcels(around)).status, 'ok');
+  assert.equal(ctx.drawn().map, 0, 'still hidden');
+  // Access lost, or another version since: nothing.
+  ctx.version = 'v2';
+  assert.equal((await ctx.controller.loadPrintParcels(around)).status, 'unavailable');
+  const lost = await open(page());
+  lost.controller.suspend();
+  const asked = lost.requests.length;
+  assert.equal((await lost.controller.loadPrintParcels(around)).status, 'unavailable');
+  assert.equal(lost.requests.length, asked, 'no request');
+  // An answer from before a change is dropped.
+  const slow = deferred();
+  let hold = false;
+  const late = await open(page({ parcels: () => (hold ? slow.promise : reply(PARCELS)) }));
+  late.map.getBounds = () => ({ getWest: () => -89.4015, getSouth: () => 43.0741, getEast: () => -89.4005, getNorth: () => 43.0749 });
+  hold = true;
+  const pending = late.controller.loadPrintParcels(around);
+  await flush();
+  late.version = 'v2';
+  slow.resolve(reply(PARCELS));
+  const dropped = await pending;
+  assert.deepEqual([dropped.status, dropped.parcels.length], ['unavailable', 0]);
+  // Far from the model, an uploaded boundary, no verified position, a busy service.
+  assert.equal((await ctx.controller.loadPrintParcels({ west: -88, south: 44, east: -87.99, north: 44.01 })).status, 'unavailable');
+  const there = await open(page());
+  assert.equal((await there.controller.loadPrintParcels({ west: -88, south: 44, east: -87.99, north: 44.01 })).status, 'none');
+  const upload = await open(page({ offer: () => reply({ offered: true, source: { ...OFFER.source, kind: 'upload' } }) }));
+  assert.equal((await upload.controller.loadPrintParcels(around)).status, 'upload');
+  const busy = await open(page({ parcels: () => reply({}, 502) }));
+  const answer = await busy.controller.loadPrintParcels(around);
+  assert.deepEqual([answer.status, answer.failed], ['unavailable', true]);
+  const moved = await open(page());
+  moved.georef = false;
+  assert.notEqual((await moved.controller.loadPrintParcels(around)).status, 'ok');
+});
+
 test('prints: the source and credit of the drawn lines, and nothing once access is lost', async () => {
   const ctx = await open(page());
   assert.equal(ctx.controller.attribution(), 'Source: Wisconsin Statewide Parcel Map V12. C');

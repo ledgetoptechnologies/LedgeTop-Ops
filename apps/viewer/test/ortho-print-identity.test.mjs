@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { CONTOUR_COLORS } from '../contours.mjs';
+import * as printProperty from '../print-property.mjs';
+import { formatParcelArea } from '../property-lines-owners.mjs';
 import { assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge } from '../ortho-print-export.mjs';
 
 const source = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -24,7 +26,7 @@ function region(from, to) {
 }
 // viewerAccessAvailable, orthoPrintPermissions and the export fence (the in-flight set, identity and cancel hook).
 const SHIPPED = [region('function viewerAccessAvailable()', 'function syncMeasurementActionVisibility()'),
-  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()',
+  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()', 'async function choosePrintProperty(', 'function propertyClipper(', 'function frameViewPixels(',
     'async function exportOrthoPrintFromViewer('].map(extract)].join('\n');
 
 const tick = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve)); };
@@ -94,7 +96,8 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissio
   const first = session({ permissions });
   const map = {
     getBounds: () => ({ getNorthWest: () => ({ lat: 4700180, lng: 500020 }), getNorthEast: () => ({ lat: 4700180, lng: 500380 }),
-      getSouthWest: () => ({ lat: 4700020, lng: 500020 }), getSouthEast: () => ({ lat: 4700020, lng: 500380 }) }),
+      getSouthWest: () => ({ lat: 4700020, lng: 500020 }), getSouthEast: () => ({ lat: 4700020, lng: 500380 }),
+      contains: ([lat, lng]) => lat >= 4700020 && lat <= 4700180 && lng >= 500020 && lng <= 500380 }),
     getSize: () => ({ x: 720, y: 320 }),
   };
   const context = vm.createContext({
@@ -104,7 +107,7 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissio
     sessionAccessState: 'active', sessionAccessReason: null, sessionRenewalBlocked: false,
     ORTHO_URL: '/ortho.tif', DTM_URL: '/dtm.tif', DISPLAY_UNITS: 'metric', TILES_URL: null,
     map, state: { activeMode: 'ortho', cloudMode: 'none', meshSource: 'none' }, isMapMode: mode => mode === 'ortho',
-    latLonToUtm: (lat, lng) => [lng, lat], window: { devicePixelRatio: 1 },
+    latLonToUtm: (lat, lng) => [lng, lat], utmToLatLon: (e, n) => [n, e], window: { devicePixelRatio: 1 },
     document: { createElement: canvas },
     // Inert sources: they answer when the test says so, whatever happened meanwhile.
     getDataset: (url, isDem, { signal }) => hold(holdOpen, log.opens, ortho, { url, signal }),
@@ -113,6 +116,7 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissio
       colors: () => CONTOUR_COLORS.brown,
     },
     propertyLinesForPrint: () => ({ lines: [], color: null }),
+    ...printProperty, PRINT_METERS_PER_FOOT: printProperty.METERS_PER_FOOT, formatParcelArea,
     measurementCoordinateReference: () => ({ crs: 'EPSG:32616' }), ensureGeoTiffPool: () => null,
     // applyViewerSession / setSessionAccessState collaborators, inert here.
     setDisplayUnits() {}, sessionStorageKey: 'k', SESSION_STORAGE_PREFIX: 'p:', sessionCapabilities: { write() {} },
@@ -288,4 +292,248 @@ test('download revoked immediately before the dialog saves: no file', async () =
   kept.dialog.controls.size.value = '2048';
   await kept.dialog.controls.exportButton.fire('click');
   assert.deepEqual(kept.doc.downloads, ['orthophoto-2048px.png']);
+});
+
+// ── One property ─────────────────────────────────────────────────────────
+
+const IDENTITY = (subject = 'person-one', version = 'v1') => JSON.stringify(['client', subject, 'model-one', version]);
+const chosenProperty = (identity = IDENTITY()) => ({ identity, label: 'EXAMPLE OWNER', attribution: 'Source: Synthetic Parcel Map R1.',
+  parcels: [{ rings: [[[500100, 4700050], [500100, 4700150], [500300, 4700150], [500300, 4700050], [500100, 4700050]]] }],
+  boundary: [[[500100, 4700050], [500300, 4700050]]], neighbours: [] });
+const exportProperty = (p, selection = chosenProperty(), options = {}) => {
+  const controller = new AbortController();
+  return p.context.exportOrthoPrintFromViewer({ area: 'property', size: 2048, format: 'png', contours: false, property: true, selection, ...options }, controller.signal);
+};
+// Cross-realm: the VM throws its own DOMException-likes; match by name or code.
+const rejects = (promise, key, value) => assert.rejects(promise, error => { assert.equal(error[key], value, String(error)); return true; });
+
+test('property: a choice made by another viewer, or for another version, is refused before anything is opened', async () => {
+  for (const selection of [null, chosenProperty(IDENTITY('person-two')), chosenProperty(IDENTITY('person-one', 'v0'))]) {
+    const p = page();
+    await rejects(exportProperty(p, selection), 'code', 'print_property');
+    assert.equal(p.log.opens.length, 0);
+    assert.equal(p.inFlight(), 0);
+  }
+  const p = page();
+  await rejects(exportProperty(p, chosenProperty(), { format: 'tif' }), 'code', 'print_not_permitted');
+});
+
+test('property: without download it is held to the pixels it covers in the current view; with download the chosen size', async () => {
+  const p = page();
+  const result = await exportProperty(p);
+  // The view is 360 x 160 m over 720 x 320 px: 2 px per metre, for the frame as it lies on the screen.
+  const frame = printProperty.propertyFrame(chosenProperty().parcels, 25 * 0.3048), expected = Math.round(2 * (frame.maxE - frame.minE));
+  assert.ok(Math.abs(result.width - expected) <= 1 && result.width < 720, `${result.width} vs ${expected}`);
+  assert.match(result.note, /limited by your access/);
+  assert.equal(result.filename, `property-${result.width}px.png`);
+  const full = page({ permissions: WITH_DOWNLOAD });
+  assert.equal((await exportProperty(full)).width, 2048);
+});
+
+// A view that does not hold the property plus its margin.
+const viewOf = (minE, maxE, minN, maxN) => ({ getNorthWest: () => ({ lat: maxN, lng: minE }), getNorthEast: () => ({ lat: maxN, lng: maxE }), getSouthWest: () => ({ lat: minN, lng: minE }), getSouthEast: () => ({ lat: minN, lng: maxE }),
+  contains: ([lat, lng]) => lat >= minN && lat <= maxN && lng >= minE && lng <= maxE });
+
+test('property: without download it must fit the current view, margin and all; with download it need not', async () => {
+  const views = { 'zoomed in': viewOf(500150, 500250, 4700080, 4700120), 'panned away': viewOf(500310, 500390, 4700020, 4700180), 'margin cut off': viewOf(500098, 500302, 4700020, 4700180) };
+  for (const [name, view] of Object.entries(views)) {
+    const p = page();
+    p.context.map.getBounds = () => view;
+    await assert.rejects(exportProperty(p), error => { assert.deepEqual([error.code, error.reason, error.message], ['print_property', 'zoom_out', 'Zoom out so the whole property fits in the view.'], name); return true; });
+    assert.equal(p.log.canvases.length, 0, `${name}: nothing rendered`);
+    assert.equal(p.inFlight(), 0);
+    const full = page({ permissions: WITH_DOWNLOAD });
+    full.context.map.getBounds = () => view;
+    assert.equal((await exportProperty(full)).width, 2048, `${name}: with download`);
+  }
+  // Zoomed out it fits, and covers fewer pixels: no better than what is on the screen.
+  const far = page();
+  far.context.map.getBounds = () => viewOf(499960, 500440, 4699993, 4700207);
+  const small = await exportProperty(far);
+  const frame = printProperty.propertyFrame(chosenProperty().parcels, 25 * 0.3048);
+  assert.ok(Math.abs(small.width - Math.round(1.5 * (frame.maxE - frame.minE))) <= 1, `${small.width}`);
+  // Not a map view, or no map.
+  for (const change of [c => { c.state = { ...c.state, activeMode: 'model' }; }, c => { c.map = null; }]) {
+    const p = page();
+    change(p.context);
+    await assert.rejects(exportProperty(p), { reason: 'zoom_out' });
+  }
+});
+
+test('property: download lost mid-export ends it unless the result still fits the no-download rule', async () => {
+  const run = async (view, size) => {
+    const p = page({ permissions: WITH_DOWNLOAD }), reading = deferred();
+    if (view) p.context.map.getBounds = () => view;
+    p.context.readCaptureMask = async () => { await reading.promise; return { captured: () => true, inside: () => 100 }; };
+    const done = exportProperty(p, chosenProperty(), { size });
+    done.catch(() => {});
+    await tick();
+    p.context.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD }));
+    reading.resolve();
+    return done;
+  };
+  await rejects(run(null, 2048), 'name', 'AbortError');
+  await rejects(run(viewOf(500150, 500250, 4700080, 4700120), 300), 'name', 'AbortError');
+  assert.equal((await run(null, 300)).width, 300, 'small enough and in the view');
+});
+
+// The view is checked as it is, at every checkpoint up to the save, never as it was at the start.
+const VIEW_CHANGES = {
+  'zoomed in': c => { c.map.getBounds = () => viewOf(500150, 500250, 4700080, 4700120); },
+  'panned away': c => { c.map.getBounds = () => viewOf(500310, 500670, 4700020, 4700180); },
+  'zoomed out past the planned size': c => { c.map.getBounds = () => viewOf(499840, 500560, 4699940, 4700260); },
+  'a smaller window': c => { c.map.getSize = () => ({ x: 360, y: 160 }); },
+  'another view': c => { c.state = { ...c.state, activeMode: 'model' }; },
+};
+const loseDownload = c => c.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD }));
+
+test('property: a view change during a restricted export ends it: while the capture is read, while encoding, and right before saving', async () => {
+  for (const [name, change] of Object.entries(VIEW_CHANGES)) {
+    const reading = deferred(), clip = page();
+    clip.context.readCaptureMask = async () => { await reading.promise; return { captured: () => true, inside: () => 100 }; };
+    const first = exportProperty(clip);
+    first.catch(() => {});
+    await tick();
+    change(clip.context);
+    reading.resolve();
+    await assert.rejects(first, error => { assert.deepEqual([error.code, error.reason, error.message], ['print_property', 'view_changed', 'The map view changed. Export again.'], name); return true; });
+    assert.equal(clip.log.canvases.length, 0, `${name}: nothing rendered`);
+
+    const encoding = page({ holdBlob: true });
+    const second = exportProperty(encoding);
+    second.catch(() => {});
+    await tick();
+    assert.equal(encoding.log.blobs.length, 1, 'encoding in progress');
+    change(encoding.context);
+    encoding.log.blobs[0].resolve();
+    await assert.rejects(second, { reason: 'view_changed' }, `${name}: while encoding`);
+    assert.equal(encoding.log.canvases[0].width, 0, 'canvas released');
+
+    const saving = page();
+    const result = await exportProperty(saving);
+    assert.equal(result.stillCurrent(), true);
+    change(saving.context);
+    assert.equal(result.stillCurrent(), false, `${name}: right before saving`);
+    for (const p of [clip, encoding, saving]) assert.equal(p.inFlight(), 0);
+  }
+});
+
+test('property: losing download together with a view change ends it; a view change alone does not stop a downloader', async () => {
+  for (const [name, change] of Object.entries(VIEW_CHANGES)) for (const order of [[change, loseDownload], [loseDownload, change]]) {
+    // 400 px fits the no-download rule in the first view (438 px), and only there.
+    const p = page({ permissions: WITH_DOWNLOAD, holdBlob: true });
+    const done = exportProperty(p, chosenProperty(), { size: 400 });
+    done.catch(() => {});
+    await tick();
+    assert.equal(p.log.canvases[0].width, 400);
+    for (const step of order) step(p.context);
+    p.log.blobs[0].resolve();
+    await rejects(done, 'name', 'AbortError');
+    const saving = page({ permissions: WITH_DOWNLOAD });
+    const result = await exportProperty(saving, chosenProperty(), { size: 400 });
+    for (const step of order) step(saving.context);
+    assert.equal(result.stillCurrent(), false, `${name}: before saving`);
+  }
+  for (const [name, change] of Object.entries(VIEW_CHANGES)) {
+    const p = page({ permissions: WITH_DOWNLOAD, holdBlob: true });
+    const done = exportProperty(p);
+    await tick();
+    change(p.context);
+    p.log.blobs[0].resolve();
+    const result = await done;
+    assert.deepEqual([result.width, result.stillCurrent()], [2048, true], name);
+  }
+  // Download lost while the view still holds the property at that size: saved.
+  const kept = page({ permissions: WITH_DOWNLOAD, holdBlob: true });
+  const done = exportProperty(kept, chosenProperty(), { size: 400 });
+  await tick();
+  loseDownload(kept.context);
+  kept.log.blobs[0].resolve();
+  assert.equal((await done).stillCurrent(), true);
+  // A pan that keeps it all in view, at the same scale, changes nothing.
+  const nudged = page();
+  const result = await exportProperty(nudged);
+  nudged.context.map.getBounds = () => viewOf(500025, 500385, 4700022, 4700182);
+  assert.equal(result.stillCurrent(), true);
+});
+
+test('property: a viewer, version or access change while the capture is read ends it with no file', async () => {
+  for (const change of [c => c.applyViewerSession(session({ subject: 'person-two' })), c => { c.PROJECT = model('v2'); }, c => c.setSessionAccessState('unavailable', 'session-expired')]) {
+    const p = page(), reading = deferred();
+    p.context.readCaptureMask = async () => { await reading.promise; return { captured: () => true, inside: () => 100 }; };
+    const done = exportProperty(p);
+    await tick();
+    assert.equal(p.inFlight(), 1);
+    change(p.context);
+    reading.resolve();
+    await rejects(done, 'name', 'AbortError');
+    assert.equal(p.log.canvases.length, 0, 'nothing rendered');
+    assert.equal(p.inFlight(), 0);
+  }
+  const none = page();
+  none.context.readCaptureMask = async () => ({ captured: () => false, inside: () => 0 });
+  await rejects(exportProperty(none), 'code', 'print_property');
+  assert.equal(none.log.canvases.length, 0);
+});
+
+test('choosing a property belongs to the viewer who chose: a change while picking or loading gives nothing', async () => {
+  const ring = [[500100, 4700050], [500100, 4700150], [500300, 4700150], [500300, 4700050], [500100, 4700050]];
+  const lines = extra => ({ state: { merge: true }, attribution: () => 'Source: Synthetic Parcel Map R1.', loadPrintParcels: () => null, sync() {}, suspend() {}, resume() {}, ...extra });
+  const found = { outline: { owner: 'EXAMPLE OWNER', parcels: [{ rings: [ring] }], lines: [ring] }, outlines: [], areaM2: 20000 };
+  const open = (pick, resolve) => {
+    const p = page();
+    p.context.propertyLines = lines();
+    p.context.pickMapPoint = pick; p.context.resolvePrintProperty = resolve;
+    return p;
+  };
+  const p = open(async () => [500200, 4700100], async () => found);
+  const selection = await p.context.choosePrintProperty();
+  assert.equal(selection.identity, IDENTITY());
+  assert.equal(selection.label, 'EXAMPLE OWNER ≈ 2.0 ha');
+  assert.deepEqual(selection.parcels[0].rings[0][0], [500100, 4700050]);
+  assert.equal(await open(async () => null, async () => found).context.choosePrintProperty(), null, 'nothing picked');
+  for (const stage of ['pick', 'load']) {
+    const gate = deferred();
+    const q = open(async () => { if (stage === 'pick') await gate.promise; return [500200, 4700100]; }, async () => { if (stage === 'load') await gate.promise; return found; });
+    const choosing = q.context.choosePrintProperty();
+    await tick();
+    q.context.applyViewerSession(session({ subject: 'person-two' }));
+    gate.resolve();
+    await rejects(choosing, 'name', 'AbortError');
+  }
+  const denied = open(async () => [1, 1], async () => found);
+  denied.context.SHARE_PERMISSIONS = { view: true, measure: false };
+  await rejects(denied.context.choosePrintProperty(), 'name', 'AbortError');
+});
+
+test('dialog: My property needs a choice, shows it, sends it, and drops it when the dialog opens again', async () => {
+  const doc = fakeDocument(), runs = [];
+  const opener = doc.createElement('button');
+  let next = { label: 'EXAMPLE OWNER ≈ 40.0 ac' };
+  const { controls } = mountOrthoPrintDialog({ documentRef: doc, openButton: opener, defaults: () => ({ chooseAvailable: true }), chooseProperty: async () => { if (next instanceof Error) throw next; return next; },
+    run: async options => { runs.push(options); return { blob: new Blob(['x']), filename: 'x.png' }; } });
+  await opener.fire('click');
+  controls.area.value = 'property';
+  await controls.area.fire('change');
+  assert.deepEqual([controls.exportButton.disabled, controls.format.disabled, controls.format.value], [true, true, 'png']);
+  await controls.choose.fire('click');
+  assert.deepEqual([controls.chosen.textContent, controls.exportButton.disabled], ['EXAMPLE OWNER ≈ 40.0 ac', false]);
+  next = null;
+  await controls.choose.fire('click');
+  assert.equal(controls.chosen.textContent, 'EXAMPLE OWNER ≈ 40.0 ac', 'a cancelled pick keeps the choice');
+  await controls.exportButton.fire('click');
+  assert.equal(runs[0].selection.label, 'EXAMPLE OWNER ≈ 40.0 ac');
+  assert.equal(controls.exportButton.disabled, false);
+  next = printProperty.printPropertyError('clipped');
+  await controls.choose.fire('click');
+  assert.deepEqual([controls.chosen.textContent, controls.exportButton.disabled, controls.status.textContent], ['', true, printProperty.PRINT_PROPERTY_MESSAGES.clipped]);
+  next = new TypeError('internal detail');
+  await controls.choose.fire('click');
+  assert.equal(controls.status.textContent, 'Could not load the property. Try again.');
+  await opener.fire('click');
+  controls.area.value = 'view';
+  await controls.area.fire('change');
+  assert.deepEqual([controls.exportButton.disabled, controls.format.disabled], [false, false]);
+  await controls.exportButton.fire('click');
+  assert.equal('selection' in runs[1], false);
 });

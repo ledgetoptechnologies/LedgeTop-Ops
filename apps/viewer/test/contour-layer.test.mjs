@@ -180,8 +180,8 @@ test('viewer wiring: Contours panel sits with the map layer panels; mode switche
   assert.match(exporter, /clampExtent\(extent, ortho\)/, 'cap measured on the view clipped to the orthophoto');
   assert.match(exporter, /limited by your access/);
   // Identity continuity: `current()` checks the subject/model/version and the policy after every await.
-  assert.match(exporter, /const permitted = \(\) => \{\s*const now = orthoPrintPermissions\(\);\s*try \{ assertOrthoPrintAllowed\(now, \{ area, format \}\); \} catch \{ return false; \}\s*return !planned \|\| planned\.longEdge <= printLongEdge\(\{ area, requested: size, policy: now, viewPixels: planned\.viewPixels \}\);\s*\};/, 'latest policy applied to area, format and planned size');
-  assert.match(exporter, /planned = \{ longEdge, viewPixels \};/, 'planned size recorded');
+  assert.match(exporter, /const permitted = \(\) => \{\s*const now = orthoPrintPermissions\(\);\s*try \{ assertOrthoPrintAllowed\(now, \{ area, format \}\); \} catch \{ return false; \}\s*return !planned \|\| planned\.longEdge <= printLongEdge\(\{ area, requested: size, policy: now, viewPixels: planned\.frame \? frameViewPixels\(planned\.frame\) : planned\.viewPixels \}\);\s*\};/, 'latest policy applied to area, format and planned size');
+  assert.match(exporter, /planned = \{ longEdge, viewPixels, frame: area === 'property' \? extent : null, restricted: !policy\.whole \};/, 'planned size recorded; a property is measured in the view as it is at each check');
   assert.match(exporter, /const current = \(\) => \{\s*if \(orthoPrintIdentity\(\) !== job\.identity \|\| !permitted\(\)\) controller\.abort\(\);\s*if \(signal\.aborted\) throw [^\n]*\s*\};/, 'identity and entitlement checked together');
   assert.match(main, /job\.identity !== identity \|\| !job\.permitted\(\)\) job\.cancel\(\);/, 'session changes cancel exports no longer permitted');
   assert.match(exporter, /await getDataset\([^\n]*\);\s*current\(\);/, 'checked after opening the orthophoto');

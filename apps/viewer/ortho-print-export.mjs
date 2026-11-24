@@ -60,6 +60,7 @@ export async function renderOrthoPixels({ ds, extent, width, height, signal, poo
   const rowsPerStrip = Math.max(1, Math.floor((maxStripPixels / srcCols - 4) / Math.max(srcRowsPerOut, 1e-9)));
   const out = new Uint8ClampedArray(width * height * 4);
   const bg = background ? [background[0], background[1], background[2]] : null;
+  if (bg) for (let o = 0; o < out.length; o += 4) { out[o] = bg[0]; out[o + 1] = bg[1]; out[o + 2] = bg[2]; out[o + 3] = 255; }
   const sxs = new Float64Array(width);
   for (let x = 0; x < width; x++) sxs[x] = sxOf(x);
   for (let r0 = 0; r0 < height; r0 += rowsPerStrip) {
@@ -73,9 +74,11 @@ export async function renderOrthoPixels({ ds, extent, width, height, signal, poo
     const R = raster[0], G = raster[1] || R, B = raster[2] || R, A = raster.length >= 4 ? raster[3] : null;
     for (let y = r0; y < r1; y++) {
       const fy = syOf(y) - sy0;
+      if (fy + sy0 < -0.5 || fy + sy0 > ih - 0.5) continue; // off the raster: background
       const y0 = Math.max(0, Math.min(wh - 1, Math.floor(fy))), y1 = Math.min(wh - 1, y0 + 1);
       const ty = Math.max(0, Math.min(1, fy - y0));
       for (let x = 0; x < width; x++) {
+        if (sxs[x] < -0.5 || sxs[x] > iw - 0.5) continue;
         const fx = sxs[x] - sx0;
         const x0 = Math.max(0, Math.min(ww - 1, Math.floor(fx))), x1 = Math.min(ww - 1, x0 + 1);
         const tx = Math.max(0, Math.min(1, fx - x0));
@@ -154,8 +157,42 @@ function drawPropertyNote(ctx, { lines, font, lineHeight, bandHeight, pad }, { w
   ctx.restore();
 }
 
+// Ground inside a printed property with no imagery.
+export const UNCAPTURED_LABEL = 'No imagery captured here';
+const HATCH = Object.freeze({ color: '#9a9a9a', rgb: [154, 154, 154], period: 12, width: 1.5 });
+
+// Hide everything the clip leaves out (white) and hatch uncaptured ground, in
+// strips so a large print never reads the whole canvas at once.
+// mask: 0 hide, 1 show, 2 uncaptured (print-property.mjs).
+export function applyClip(ctx, { mask, width, height, scale, stripRows = 256 }) {
+  const period = HATCH.period * scale, line = HATCH.width * scale * Math.SQRT2;
+  for (let y0 = 0; y0 < height; y0 += stripRows) {
+    const rows = Math.min(stripRows, height - y0);
+    const image = ctx.getImageData(0, y0, width, rows), data = image.data;
+    for (let y = 0; y < rows; y++) for (let x = 0; x < width; x++) {
+      const kind = mask[(y0 + y) * width + x];
+      if (kind === 1) continue;
+      const o = (y * width + x) * 4, hatch = kind === 2 && (x + y0 + y) % period < line;
+      data[o] = hatch ? HATCH.rgb[0] : 255; data[o + 1] = hatch ? HATCH.rgb[1] : 255; data[o + 2] = hatch ? HATCH.rgb[2] : 255; data[o + 3] = 255;
+    }
+    ctx.putImageData(image, 0, y0);
+  }
+}
+
+function drawPropertyLines(ctx, lines, { color, scale, project }) {
+  ctx.save(); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  for (const [style, w] of [[PROPERTY_LINE.halo, PROPERTY_LINE.haloWidth], [color, PROPERTY_LINE.width]]) {
+    ctx.beginPath();
+    for (const line of lines) {
+      line.forEach(([e, n], i) => { const [x, y] = project(e, n); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    }
+    ctx.strokeStyle = style; ctx.lineWidth = w * scale; ctx.stroke();
+  }
+  ctx.restore();
+}
+
 // bottom: height of the note band the legend stays above.
-function drawLegend(ctx, { width, height, gsdE, units, contours, propertyColor = null, bottom = 0, scale, colors }) {
+function drawLegend(ctx, { width, height, gsdE, units, contours, propertyColor = null, uncaptured = false, bottom = 0, scale, colors }) {
   const pad = 10 * scale, line = 18 * scale;
   const u = unitMeters(units), suffix = unitSuffix(units);
   const barUnits = niceLength((width * 0.18) * gsdE / u);
@@ -163,8 +200,9 @@ function drawLegend(ctx, { width, height, gsdE, units, contours, propertyColor =
   const rows = [];
   if (contours) rows.push(`Contours ${contours.interval} ${suffix} · index every ${+(contours.interval * CONTOUR_INDEX_EVERY).toFixed(3)} ${suffix}`);
   if (propertyColor) rows.push('Property lines');
+  if (uncaptured) rows.push(UNCAPTURED_LABEL);
   rows.push('Grid north up');
-  const swatch = contours || propertyColor ? 34 * scale : 0;
+  const swatch = contours || propertyColor || uncaptured ? 34 * scale : 0;
   ctx.save();
   ctx.font = `600 ${12 * scale}px system-ui, -apple-system, "Segoe UI", sans-serif`;
   const textW = Math.max(...rows.map(t => ctx.measureText(t).width), barPx + 70 * scale);
@@ -185,6 +223,13 @@ function drawLegend(ctx, { width, height, gsdE, units, contours, propertyColor =
     ctx.beginPath(); ctx.moveTo(x + pad, py); ctx.lineTo(x + pad + 26 * scale, py);
     ctx.strokeStyle = PROPERTY_LINE.halo; ctx.lineWidth = PROPERTY_LINE.haloWidth * scale; ctx.stroke();
     ctx.strokeStyle = propertyColor; ctx.lineWidth = PROPERTY_LINE.width * scale; ctx.stroke();
+  }
+  if (uncaptured) {
+    const uy = cy + (Number(Boolean(contours)) + Number(Boolean(propertyColor))) * line, h = 10 * scale;
+    ctx.strokeStyle = HATCH.color; ctx.lineWidth = HATCH.width * scale;
+    ctx.beginPath();
+    for (let k = 0; k <= 26 * scale - h; k += HATCH.period / 2 * scale) { ctx.moveTo(x + pad + k, uy + h / 2); ctx.lineTo(x + pad + k + h, uy - h / 2); }
+    ctx.stroke();
   }
   const tx = x + pad + swatch;
   for (const row of rows) { ctx.fillText(row, tx, cy); cy += line; }
@@ -214,7 +259,9 @@ export function orthoPrintPolicy({ accessAvailable = false, measure = false, dow
 export function assertOrthoPrintAllowed(policy, { area, format }) {
   const deny = message => { throw Object.assign(new Error(message), { code: 'print_not_permitted' }); };
   if (!policy?.allowed) deny('Image export is not available for this view.');
-  if (area !== 'view' && !policy.whole) deny('Exporting the whole orthophoto needs download permission.');
+  // One property is a current-view style picture: PNG only, and without download it must fit the view.
+  if (area === 'property' && format !== 'png') deny('A property is exported as PNG only.');
+  if (area !== 'view' && area !== 'property' && !policy.whole) deny('Exporting the whole orthophoto needs download permission.');
   if (format === 'tif' && !policy.geotiff) deny('GeoTIFF export needs download permission.');
 }
 
@@ -222,9 +269,12 @@ export function assertOrthoPrintAllowed(policy, { area, format }) {
 // viewer can already see: the screen pixels covering the exported area (the
 // view clipped to the orthophoto), and never more than 2048 px.
 // Otherwise a zoomed-out view at 6144 px would equal the gated whole-ortho print.
+// A property is held the same way: to the screen pixels it covers in the
+// current view, and to nothing (0) when it is not wholly in the view.
 export const VIEW_EXPORT_MAX_EDGE = 2048;
 export function printLongEdge({ area, requested, policy, viewPixels }) {
-  if (area !== 'view' || policy?.whole === true) return requested;
+  if ((area !== 'view' && area !== 'property') || policy?.whole === true) return requested;
+  if (area === 'property' && !(viewPixels > 0)) return 0;
   const screen = Number.isFinite(viewPixels) && viewPixels > 0 ? Math.round(viewPixels) : VIEW_EXPORT_MAX_EDGE;
   return Math.max(16, Math.min(requested, VIEW_EXPORT_MAX_EDGE, screen));
 }
@@ -298,14 +348,17 @@ function putPixels(ctx, rgba, width, height) {
  *   contours: { features: [{coords:[E,N...], isIndex, label}], interval, units } | null,
  *   colors, propertyLines: [[[E,N],...], ...] | null, propertyStyle: { color } | null,
  *   propertyAttribution: the parcel source and its credit, printed after the "not a survey" note,
+ *   clip: { mask, uncaptured } | null (PNG only): what shows, see applyClip,
+ *   boundary: lines drawn over the clip's edge (the chosen property's own), counted as property lines,
+ *   frame: keep the extent as asked, past the orthophoto where it goes past,
  *   units, createCanvas, pool, signal
  * }
  */
 export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 4096, format = 'png', contours = null,
   colors = CONTOUR_COLORS.brown, propertyLines = null, propertyStyle = null, propertyAttribution = '', units = 'imperial', createCanvas, pool, signal,
-  maxStripPixels } = {}) {
+  clip = null, boundary = null, frame = false, maxStripPixels } = {}) {
   abortIf(signal);
-  const extent = clampExtent(requested, ortho);
+  const extent = frame ? requested : clampExtent(requested, ortho);
   if (!extent) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
   const { width, height, gsdE, gsdN } = printLayout(extent, longEdge);
   const print = format !== 'tif';
@@ -321,8 +374,8 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
   let note = null;
   try {
     // Part of the picture on a PNG only. A GeoTIFF's pixels are map data; its
-    // note is a tag (exportOrthoPrint).
-    if (print && propertyLines?.length) note = layoutPropertyNote(ctx, { width, height, scale, attribution: propertyAttribution });
+    // note is a tag (exportOrthoPrint). A clip is parcel data too, lines or not.
+    if (print && (propertyLines?.length || boundary?.length || clip)) note = layoutPropertyNote(ctx, { width, height, scale, attribution: propertyAttribution });
     const { rgba } = await renderOrthoPixels({ ds: ortho, extent, width, height, signal, pool, maxStripPixels, background: print ? [255, 255, 255] : null });
     putPixels(ctx, rgba, width, height);
   } catch (error) { release(); if (error instanceof RangeError) throw tooLarge(); throw error; }
@@ -331,20 +384,18 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
   if (contours?.features?.length) drawn = drawContours(ctx, contours.features, project, { colors, scale, width, height });
   let propertyCount = 0;
   const lineColor = propertyStyle?.color || PROPERTY_LINE.color;
-  if (propertyLines?.length) {
-    ctx.save(); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-    for (const [style, w] of [[PROPERTY_LINE.halo, PROPERTY_LINE.haloWidth], [lineColor, PROPERTY_LINE.width]]) {
-      ctx.beginPath();
-      for (const line of propertyLines) {
-        line.forEach(([e, n], i) => { const [x, y] = project(e, n); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
-      }
-      ctx.strokeStyle = style; ctx.lineWidth = w * scale; ctx.stroke();
-    }
-    ctx.restore();
-    propertyCount = propertyLines.length;
-  }
+  // The clip covers imagery, contours and neighbours' lines alike; only the
+  // chosen property's own boundary is drawn over its edge.
+  const strokeLines = lines => {
+    if (!lines?.length) return;
+    drawPropertyLines(ctx, lines, { color: lineColor, scale, project });
+    propertyCount += lines.length;
+  };
+  strokeLines(propertyLines);
+  if (clip) applyClip(ctx, { mask: clip.mask, width, height, scale });
+  strokeLines(boundary);
   if (print) {
-    drawLegend(ctx, { width, height, gsdE, units: contours?.units || units, contours, propertyColor: propertyCount ? lineColor : null, bottom: note?.bandHeight || 0, scale, colors });
+    drawLegend(ctx, { width, height, gsdE, units: contours?.units || units, contours, propertyColor: propertyCount ? lineColor : null, uncaptured: clip?.uncaptured > 0, bottom: note?.bandHeight || 0, scale, colors });
     if (note) drawPropertyNote(ctx, note, { width, height });
     // A canvas the browser could not back reads as blank: the print's
     // corner is always opaque (white or imagery).
@@ -412,21 +463,27 @@ export function encodePrintGeoTiff({ rgba, width, height, extent, epsg, descript
 }
 
 /**
- * `checkpoint()` (optional) runs after each await: after the contours are
- * traced, after the pixels are rendered and after the file is encoded. If it
+ * `checkpoint()` (optional) runs after each await: after the clip is worked
+ * out, after the contours are traced, after the pixels are rendered and after the file is encoded. If it
  * throws, the export stops there, the canvas is released and nothing is returned.
  */
-export async function exportOrthoPrint({ format = 'png', epsg = null, traceContours = null, checkpoint = null, ...opts }) {
-  const extent = clampExtent(opts.extent, opts.ortho);
+export async function exportOrthoPrint({ format = 'png', epsg = null, traceContours = null, checkpoint = null, prepareClip = null, ...opts }) {
+  const extent = opts.frame ? opts.extent : clampExtent(opts.extent, opts.ortho);
   if (!extent) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
-  if (opts.propertyLines?.length && !cleanAttribution(opts.propertyAttribution)) throw Object.assign(new Error('The property line source is not available. Export without property lines.'), { code: 'print_note' });
+  if (prepareClip && format !== 'png') throw Object.assign(new Error('A property is exported as PNG only.'), { code: 'print_not_permitted' });
+  if (prepareClip && !epsg) throw Object.assign(new Error('This model has no verified map position.'), { code: 'print_crs' });
+  if ((opts.propertyLines?.length || prepareClip) && !cleanAttribution(opts.propertyAttribution)) throw Object.assign(new Error('The property line source is not available. Export without property lines.'), { code: 'print_note' });
   if (format === 'tif' && !(Number.isInteger(epsg) && epsg > 0)) throw Object.assign(new Error('GeoTIFF needs a verified coordinate reference. Export PNG instead.'), { code: 'print_crs' });
-  if (format === 'tif' || (epsg && (traceContours || opts.propertyLines?.length))) verifyOrthoCrs(opts.ortho, epsg, { requireDeclared: format === 'tif' });
-  const { width, gsdE } = printLayout(extent, opts.longEdge ?? 4096);
+  if (format === 'tif' || (epsg && (prepareClip || traceContours || opts.propertyLines?.length))) verifyOrthoCrs(opts.ortho, epsg, { requireDeclared: format === 'tif' });
+  const { width, height, gsdE } = printLayout(extent, opts.longEdge ?? 4096);
+  // `prepareClip` (optional) works out what shows once the size is known; it
+  // refuses by throwing.
+  const clip = prepareClip ? await prepareClip({ width, height, extent }) : null;
+  checkpoint?.();
   // Trace about one DTM cell per 2.5 output pixels: smooth at print size.
   const contours = traceContours ? await traceContours(extent, gsdE * 2.5) : null;
   checkpoint?.();
-  const result = await renderOrthoPrint({ ...opts, extent, format, contours });
+  const result = await renderOrthoPrint({ ...opts, extent, format, contours, clip });
   let blob;
   const release = () => { result.canvas.width = 0; result.canvas.height = 0; };
   try {
@@ -446,17 +503,18 @@ export async function exportOrthoPrint({ format = 'png', epsg = null, traceConto
     checkpoint?.();
   } finally { release(); }
   return { blob, width: result.width, height: result.height, extent: result.extent, contours: result.contours, propertyLines: result.propertyLines,
-    filename: `orthophoto${contours?.features?.length ? '-contours' : ''}-${result.width}px.${format === 'tif' ? 'tif' : 'png'}`, gsd: width ? gsdE : null };
+    ...(clip?.note ? { note: clip.note } : {}),
+    filename: `${clip ? 'property' : 'orthophoto'}${contours?.features?.length ? '-contours' : ''}-${result.width}px.${format === 'tif' ? 'tif' : 'png'}`, gsd: width ? gsdE : null };
 }
 
 /**
  * Small dialog: area, size, format, layers. `run(options, signal)` returns
  * { blob, filename }; the dialog saves it with a temporary object URL.
  */
-export function mountOrthoPrintDialog({ documentRef = document, openButton, defaults = () => ({}), run }) {
+export function mountOrthoPrintDialog({ documentRef = document, openButton, defaults = () => ({}), run, chooseProperty = null }) {
   const el = (tag, props = {}, children = []) => { const n = documentRef.createElement(tag); Object.assign(n, props); n.append(...children); return n; };
   const select = (name, options) => el('select', { name }, options.map(([value, text]) => el('option', { value: String(value), textContent: text })));
-  const area = select('area', [['view', 'Current view'], ['full', 'Whole orthophoto']]);
+  const area = select('area', [['view', 'Current view'], ['full', 'Whole orthophoto'], ...(chooseProperty ? [['property', 'My property']] : [])]);
   const size = select('size', PRINT_SIZES.map(s => [s, `${s} px`])); size.value = '4096';
   const format = select('format', [['png', 'PNG'], ['tif', 'GeoTIFF']]);
   const contours = el('input', { type: 'checkbox', name: 'contours' });
@@ -464,18 +522,44 @@ export function mountOrthoPrintDialog({ documentRef = document, openButton, defa
   const status = el('p', { className: 'hint' }); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
   const exportButton = el('button', { type: 'button', className: 'tool-btn full', textContent: 'Export' });
   const close = el('button', { type: 'button', className: 'ortho-print-close', textContent: 'Close' });
+  // "My property": picked on the map; its name and acreage show beside the button.
+  const choose = el('button', { type: 'button', className: 'tool-btn', textContent: 'Choose on map' });
+  const chosen = el('span', {});
+  const propertyRow = el('div', { className: 'ortho-print-property', hidden: true }, [choose, chosen]);
+  let selection = null, controller = null;
+  const syncArea = () => {
+    const own = area.value === 'property';
+    propertyRow.hidden = !own;
+    format.disabled = own; if (own) format.value = 'png';
+    chosen.textContent = selection?.label || '';
+    exportButton.disabled = Boolean(controller) || (own && !selection);
+  };
   const row = (label, control) => el('label', { className: 'slider-row' }, [el('span', { textContent: label }), control]);
   const check = (control, label) => el('label', { className: 'ortho-print-check' }, [control, el('span', { textContent: label })]);
   const dialog = el('dialog', { className: 'ortho-print-dialog' }, [
     el('h2', { textContent: 'Export image' }), close,
-    row('Area', area), row('Size', size), row('Format', format),
+    row('Area', area), propertyRow, row('Size', size), row('Format', format),
     check(contours, 'Contour lines'), check(property, 'Property lines'),
     exportButton, status,
   ]);
   dialog.setAttribute('aria-label', 'Export orthophoto image');
   documentRef.body.append(dialog);
-  let controller = null;
-  const stop = () => { controller?.abort(); controller = null; exportButton.disabled = false; };
+  const stop = () => { controller?.abort(); controller = null; syncArea(); };
+  const show = () => { if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', ''); };
+  area.addEventListener('change', syncArea);
+  choose.addEventListener('click', async () => {
+    dialog.close();
+    status.textContent = '';
+    try { selection = await chooseProperty() || selection; } catch (error) {
+      selection = null;
+      syncArea();
+      // The viewer or their access changed meanwhile: nothing to come back to.
+      if (error?.name === 'AbortError') return;
+      status.textContent = error?.code ? error.message : 'Could not load the property. Try again.';
+    }
+    syncArea();
+    show();
+  });
   close.addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', stop);
   openButton?.addEventListener('click', () => {
@@ -490,19 +574,21 @@ export function mountOrthoPrintDialog({ documentRef = document, openButton, defa
     };
     gate(format, 'tif', Boolean(d.geotiffAvailable), 'png');
     gate(area, 'full', Boolean(d.wholeAvailable), 'view');
+    if (chooseProperty) gate(area, 'property', Boolean(d.chooseAvailable), 'view');
+    selection = null; syncArea();
     const sizes = Array.isArray(d.sizes) && d.sizes.length ? d.sizes : PRINT_SIZES;
     for (const s of PRINT_SIZES) gate(size, String(s), sizes.includes(s), String(Math.max(...sizes.filter(x => x <= 4096), sizes[0])));
     status.textContent = '';
-    if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
+    show();
   });
   exportButton.addEventListener('click', async () => {
     stop();
     controller = new AbortController();
     const signal = controller.signal;
-    exportButton.disabled = true;
+    syncArea();
     status.textContent = 'Rendering…';
     try {
-      const result = await run({ area: area.value, size: Number(size.value), format: format.value, contours: contours.checked, property: property.checked }, signal);
+      const result = await run({ area: area.value, size: Number(size.value), format: format.value, contours: contours.checked, property: property.checked, ...(area.value === 'property' ? { selection } : {}) }, signal);
       if (signal.aborted) return;
       // The viewer may have switched to another model, version or viewer since `run` resolved.
       if (result.stillCurrent?.() === false) { status.textContent = ''; return; }
@@ -515,7 +601,7 @@ export function mountOrthoPrintDialog({ documentRef = document, openButton, defa
       // Cancelled: by Close (the dialog is gone) or by a viewer change (no file, no error).
       if (error?.name === 'AbortError') { if (!signal.aborted) status.textContent = ''; return; }
       status.textContent = error?.code ? error.message : 'Could not export the image. Try a smaller size.';
-    } finally { if (!signal.aborted) exportButton.disabled = false; }
+    } finally { if (!signal.aborted) { controller = null; syncArea(); } }
   });
-  return { dialog, controls: { area, size, format, contours, property, exportButton, status } };
+  return { dialog, controls: { area, size, format, contours, property, choose, chosen, exportButton, status } };
 }
