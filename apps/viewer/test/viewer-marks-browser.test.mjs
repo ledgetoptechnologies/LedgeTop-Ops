@@ -77,15 +77,52 @@ function marksApi() {
   return { app, database };
 }
 
+// What the page and the server saw since the last navigation, for a check that timed
+// out: console, errors, dialogs and requests. Paths and statuses only, no headers or bodies.
+function recordPage(client, served) {
+  let from = 0, navigated = '';
+  const short = (value, max = 300) => String(value ?? '').replace(/http:\/\/127\.0\.0\.1:\d+/g, '').slice(0, max);
+  return {
+    start(query) { from = client.events.length; served.length = 0; navigated = query; },
+    async report() {
+      const lines = [`navigated to /${navigated}`], requests = new Map();
+      for (const { method, params } of client.events.slice(from)) {
+        if (method === 'Runtime.consoleAPICalled') lines.push(`console.${params.type}: ${short(params.args.map(arg => arg.value ?? arg.description).join(' '))}`);
+        if (method === 'Runtime.exceptionThrown') lines.push(`exception: ${short(params.exceptionDetails.exception?.description || params.exceptionDetails.text, 800)}`);
+        if (method === 'Log.entryAdded') lines.push(`log ${params.entry.level}: ${short(params.entry.text)} ${short(params.entry.url)}`);
+        if (method === 'Page.javascriptDialogOpening') lines.push(`dialog ${params.type}: ${short(params.message)}`);
+        if (method === 'Page.frameNavigated') lines.push(`frame: ${short(params.frame.url)} ${short(params.frame.unreachableUrl)}`);
+        if (method === 'Network.requestWillBeSent') requests.set(params.requestId, { what: `${params.request.method} ${short(params.request.url)}`, how: 'no answer' });
+        const request = requests.get(params?.requestId);
+        if (request && method === 'Network.responseReceived') request.how = `${params.response.status}, body unfinished`;
+        if (request && method === 'Network.loadingFinished') request.how = request.how.replace(', body unfinished', ' done');
+        if (request && method === 'Network.loadingFailed') request.how = `failed ${params.errorText}${params.canceled ? ' (canceled)' : ''}`;
+      }
+      for (const { what, how } of requests.values()) lines.push(`request ${what}: ${how}`);
+      for (const { what, how } of served) lines.push(`server ${what}: ${how}`);
+      const page = `(() => { const state = window.marks?.store.state; return JSON.stringify({ at: location.pathname + location.search, readyState: document.readyState,
+        body: Boolean(document.body), ready: document.body?.dataset.ready, map: typeof window.map, marks: state && { ready: state.ready, loading: state.loading, busy: state.busy, message: state.message, count: state.marks.length },
+        kept: Object.keys(sessionStorage), form: document.querySelector('.viewer-mark-form')?.hidden }); })()`;
+      lines.push(`page: ${await client.evaluate(page).catch(error => 'not readable: ' + short(error.message))}`);
+      return lines.join('\n  ');
+    },
+  };
+}
+
 async function withBrowser(t, { app = null } = {}, run) {
   const binary = executable();
   if (!binary) { t.skip('Chromium is required for the isolated marks check.'); return; }
   if (!existsSync(path.join(root, 'node_modules', 'leaflet', 'dist', 'leaflet-src.esm.js'))) { t.skip('npm ci is required.'); return; }
   const unlock = await acquireBrowserHarnessLock({ root });
   let browser, client, server, profile;
+  const served = [];
   try {
     server = createServer((req, res) => {
       const url = new URL(req.url, 'http://fixture.invalid');
+      const entry = { what: `${req.method} ${url.pathname}`, how: 'not answered' };
+      served.push(entry);
+      res.on('finish', () => { entry.how = `${res.statusCode} sent`; });
+      res.on('close', () => { if (!res.writableFinished) entry.how = 'connection closed first'; });
       res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'");
       if (app && url.pathname.startsWith('/api/v1/marks')) { app(req, res); return; }
       if (url.pathname === '/') { res.setHeader('Content-Type', 'text/html'); res.end(page()); return; }
@@ -100,11 +137,12 @@ async function withBrowser(t, { app = null } = {}, run) {
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
     const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     client = await Cdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
-    await client.command('Page.enable');
+    for (const domain of ['Page', 'Runtime', 'Log', 'Network']) await client.command(domain + '.enable');
+    const recorded = recordPage(client, served);
     const waitFor = async (expression, label, ms = 8000) => {
       const deadline = Date.now() + ms;
       while (Date.now() < deadline) { if (await client.evaluate(expression)) return; await delay(50); }
-      assert.fail(`timed out: ${label}`);
+      assert.fail(`timed out: ${label}\n  ${await recorded.report()}`);
     };
     const mouse = (type, x, y, extra = {}) => client.command('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, ...extra });
     const button = text => `[...document.querySelectorAll('#panel-marks button, #viewer-marks-ui button')].find(b => b.textContent === ${JSON.stringify(text)} && !b.closest('[hidden]:not(.viewer-mark-box)'))`; // the Marks pop-up may be closed
@@ -112,7 +150,9 @@ async function withBrowser(t, { app = null } = {}, run) {
       client, waitFor, mouse,
       size: (width, height, mobile = false) => client.command('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }),
       load: async (query = '') => {
-        await client.command('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/${query}` });
+        recorded.start(query);
+        const { errorText } = await client.command('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/${query}` });
+        if (errorText) assert.fail(`navigation failed: ${errorText}\n  ${await recorded.report()}`);
         await waitFor("document.body?.dataset.ready === 'true'", 'page ready');
       },
       click: async (x, y) => { await mouse('mousePressed', x, y); await mouse('mouseReleased', x, y); },
