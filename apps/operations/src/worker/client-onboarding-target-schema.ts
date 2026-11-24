@@ -2,15 +2,14 @@ import { canonicalSqliteSchemaInventory } from "./sqlite-schema-canonical";
 
 /** SHA-256 of the canonical token inventory (sqlite-schema-tokens-v1) after
  * Operations migrations through 0248. Stored comments and formatting do not
- * change these; any other difference does. The earlier stored-text digests and
- * every tuple's old and new digest are recorded, and proven equivalent, by
- * test/client-onboarding-schema-canonical.test.ts and its fixture. The mail
+ * change these; any other difference does. The schema canonicalization test
+ * and its fixture record the stored-text and token digests for each tuple. The mail
  * inventory is layered on the target inventory; a digest is not evidence of an
  * installed schema. */
 export const CLIENT_ONBOARDING_SCHEMA_PINS = Object.freeze({
-  target: "767a41b0f73ab6afd5828e78384eb0a0db6bd0ea1e151ed93d75cd268292b8e8",
-  destination: "5946bd6e92dad21883e56b8cc854bb6072e271490c26be64aa99f883f8d5f36e",
-  mail: "5d5e0cb9b3a25e28bc19a333578be235f169969b8c83664b6a01a7c9ab74a102",
+  target: "6f49290e3806cb0469d332abc437d60c0f06e691709138b6db7a473520cdc173",
+  destination: "bca0f92a2f09a037aae19606991c0509ef05de40b7d5e4440390a40a4d022809",
+  mail: "aa8a2f17c2dd71a7f46e46e29c586645afc9e4f318c3aa7d418077e6a17f4716",
 });
 const schemaInventory = `SELECT json_group_array(json_array(type,name,tbl_name,sql)) inventory FROM (
   SELECT type,name,tbl_name,sql FROM sqlite_schema
