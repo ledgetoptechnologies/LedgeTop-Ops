@@ -4268,6 +4268,22 @@ async function choosePrintProperty() {
   };
 }
 
+// Screen pixels (long edge) a frame covers in the current map view; 0 unless
+// all of it is in the view. Checked on the map itself: a UTM frame leans a
+// little against the view, so its own outline is followed round.
+function frameViewPixels(frame) {
+  if (!map || !isMapMode(state.activeMode)) return 0;
+  const bounds = map.getBounds();
+  for (let i = 0; i <= 8; i++) {
+    const e = frame.minE + (frame.maxE - frame.minE) * i / 8, n = frame.minN + (frame.maxN - frame.minN) * i / 8;
+    for (const [pe, pn] of [[e, frame.minN], [e, frame.maxN], [frame.minE, n], [frame.maxE, n]]) if (!bounds.contains(utmToLatLon(pe, pn))) return 0;
+  }
+  const corners = [bounds.getNorthWest(), bounds.getNorthEast(), bounds.getSouthWest(), bounds.getSouthEast()].map((c) => latLonToUtm(c.lat, c.lng));
+  const span = (axis) => Math.max(...corners.map((c) => c[axis])) - Math.min(...corners.map((c) => c[axis]));
+  const size = map.getSize(), pixels = Math.max(size.x * (frame.maxE - frame.minE) / span(0), size.y * (frame.maxN - frame.minN) / span(1));
+  return Number.isFinite(pixels) ? (window.devicePixelRatio || 1) * pixels : 0;
+}
+
 // What a property print shows, once its size is known; refuses a property none
 // of which was captured.
 function propertyClipper(ortho, parcels, signal) {
@@ -4329,10 +4345,11 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
       const mapSize = map.getSize(), dpr = window.devicePixelRatio || 1, clipped = clampExtent(extent, ortho);
       if (clipped) viewPixels = dpr * Math.max(mapSize.x * (clipped.maxE - clipped.minE) / (extent.maxE - extent.minE), mapSize.y * (clipped.maxN - clipped.minN) / (extent.maxN - extent.minN));
     }
-    // A property: the screen's own pixels for the map fitted to its frame.
-    if (area === 'property' && map) {
-      const mapSize = map.getSize(), spanE = extent.maxE - extent.minE, spanN = extent.maxN - extent.minN;
-      viewPixels = (window.devicePixelRatio || 1) * Math.min(mapSize.x / spanE, mapSize.y / spanN) * Math.max(spanE, spanN);
+    // Without download a saved image never shows more than the current view:
+    // the property, with its margin, must be in it. Downloaders may save it from anywhere.
+    if (area === 'property') {
+      viewPixels = frameViewPixels(extent);
+      if (!policy.whole && !viewPixels) throw printPropertyError('zoom_out');
     }
     const longEdge = printLongEdge({ area, requested: size, policy, viewPixels });
     planned = { longEdge, viewPixels };
