@@ -365,11 +365,11 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     if (Number(opened.stat.size) !== photo.byteSize) { await opened.handle.close(); return res.status(404).json({ error: 'photo not found' }); }
     const headers = { 'Cache-Control': 'private, no-store', 'Content-Type': photo.contentType, 'X-Content-Type-Options': 'nosniff' };
     // Access is re-checked after the (possibly slow) integrity check.
-    const stillAllows = async () => {
-      const current = authorization.share ? await pathTokenAuthorization(req, req.params.id) : null;
-      if ((!authorization.share || current?.cameras) && viewerStillAllows(authorization.viewer, { cameras: true })) return true;
-      res.status(403).json({ error: 'not authorized' });
-      return false;
+    const refuse = () => { res.status(403).json({ error: 'not authorized' }); return false; };
+    // A session answers at once; a link asks its source and is decided when that answers.
+    const stillAllows = () => {
+      if (!authorization.share) return viewerStillAllows(authorization.viewer, { cameras: true }) || refuse();
+      return pathTokenAuthorization(req, req.params.id).then(current => Boolean(current?.cameras) || refuse());
     };
     const accelerated = xAccelLocation(absolute);
     if (accelerated) {
