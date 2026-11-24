@@ -164,6 +164,13 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
   const searched = mark => !search || [mark.name, mark.note, categoryById(mark.categoryId)?.name].some(value => value?.toLowerCase().includes(search));
   const categoryIds = () => [...store.state.categories.map(category => category.id), NO_CATEGORY];
   // Placing or saving into a hidden category shows it again.
+  // After a change to what is hidden: nothing hidden at all is Show all, and a
+  // choice this browser could not keep is said.
+  function shownChanged() {
+    if (!categoryIds().some(visibility.isHidden)) visibility.showAll();
+    if (!visibility.remembered()) store.state.message = 'Hidden categories could not be remembered in this browser.';
+    render();
+  }
   const reveal = (...marks) => visibility.show(marks.filter(Boolean).map(categoryOf));
   const defaultVisibility = () => store.state.capabilities.visibility[0];
   const message = text => { store.state.message = text; render(); };
@@ -411,19 +418,21 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     categoryForm.hidden = !writable;
     showAllButton.disabled = !categoryIds().some(visibility.isHidden);
     hideAllButton.disabled = categoryIds().every(visibility.isHidden);
+    const counts = new Map();
+    for (const mark of state.marks) counts.set(categoryOf(mark), (counts.get(categoryOf(mark)) || 0) + 1);
     // One row per category: eye, icon, name (only this), count.
     const categoryRow = (id, name, category) => {
       const hidden = visibility.isHidden(id), alone = visibility.isOnly(id, categoryIds());
       const eye = h(document, 'button', { type: 'button', class: 'viewer-mark-eye', 'data-eye': id,
         'aria-label': `${hidden ? 'Show' : 'Hide'} ${name}`, text: hidden ? 'Show' : 'Hide' });
-      on(eye, 'click', () => { visibility.toggle(id); render(); categoryList.querySelector(`[data-eye="${id}"]`)?.focus(); });
+      on(eye, 'click', () => { visibility.toggle(id); shownChanged(); categoryList.querySelector(`[data-eye="${id}"]`)?.focus(); });
       const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
       if (category) icon.innerHTML = categoryBadge(category);
       const only = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'data-only': id, 'aria-pressed': String(alone),
         'aria-label': 'Show only ' + name }, h(document, 'span', { class: 'viewer-mark-list-name' }, h(document, 'span', { text: name }),
         h(document, 'small', { text: category && !category.mine ? (category.author === 'staff' ? 'From project staff' : 'From a client') : '' })));
-      on(only, 'click', () => { if (alone) visibility.showAll(); else visibility.only(id, categoryIds()); render(); categoryList.querySelector(`[data-only="${id}"]`)?.focus(); });
-      return h(document, 'li', {}, eye, icon, only, h(document, 'span', { class: 'hint', text: String(state.marks.filter(mark => categoryOf(mark) === id).length) }));
+      on(only, 'click', () => { if (alone) visibility.showAll(); else visibility.only(id); shownChanged(); categoryList.querySelector(`[data-only="${id}"]`)?.focus(); });
+      return h(document, 'li', {}, eye, icon, only, h(document, 'span', { class: 'hint', text: String(counts.get(id) || 0) }));
     };
     const rowsByCategory = state.categories.map(category => {
       const row = categoryRow(category.id, category.name, category);
@@ -466,7 +475,9 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     importButton.hidden = !writable;
     exportButton.disabled = !visibleMarks().length;
 
-    layer.render({ visible: Boolean(view.map && state.ready && !state.blocked), marks: visibleMarks(), draft: editable ? { ...draft, movable: !draft.id || moving, ...(draft.id ? {} : { id: '__draft__' }) } : null,
+    // The open mark follows its saved category like any other; the editor stays.
+    const draftShown = !existing || visibility.shows(existing);
+    layer.render({ visible: Boolean(view.map && state.ready && !state.blocked), marks: visibleMarks(), draft: editable && draftShown ? { ...draft, movable: !draft.id || moving, ...(draft.id ? {} : { id: '__draft__' }) } : null,
       selectedId, labels, preview, drawing });
     keepDraft();
   }
@@ -562,8 +573,8 @@ export function mountViewerMarks({ panel, L, getMap, request = globalThis.fetch,
     next.click();
   });
   on(hiddenButton, 'click', () => { tab = 'categories'; render(); });
-  on(showAllButton, 'click', () => { visibility.showAll(); render(); });
-  on(hideAllButton, 'click', () => { visibility.hideAll(categoryIds()); render(); });
+  on(showAllButton, 'click', () => { visibility.showAll(); shownChanged(); });
+  on(hideAllButton, 'click', () => { visibility.hideAll(); shownChanged(); });
   on(searchInput, 'input', () => { search = searchInput.value.trim().toLowerCase(); render(); });
   on(deleteButton, 'click', async () => {
     const current = draft?.id ? store.find(draft.id) : null;
