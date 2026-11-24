@@ -30,13 +30,14 @@ const reviewedAckMigrations = [
   { version: 42, name: 'viewer_acceptance_ack_outbox_schema_reconcile' },
 ];
 const reviewedFolderMigration = { version: 48, name: 'project_organizational_folders' };
+const reviewedAuthorizationGenerationMigration = { version: 88, name: 'task_authorization_generations' };
 const reviewedTimerMigration = { version: 83, name: 'provider_engine_processing_elapsed' };
 const reviewedTimerSqlSha256 = 'c8b8205fbcf5b066030223c1176527f347ffc1bf4861b6ccf32e5845000f3214';
 const reviewedProviderRemovalMigration = { version: 85, name: 'processing_provider_removal' };
 const reviewedProviderRemovalSqlSha256 = 'a916f9316bc0c2d332e599113b8bf8eee0657294bc6236270612b3902808a913';
 const reviewedTrashPurgeMigration = { version: 86, name: 'trash_container_purge_started' };
 const reviewedTrashPurgeSqlSha256 = '52576879d42af94bde93b510d936442a8d6e407e559068bbb1874442b2d61f8b';
-const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "86"';
+const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "88"';
 const reviewedConverter = {
   patchSha256: 'fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c',
   lockSetSha256: 'b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98',
@@ -51,8 +52,10 @@ const reviewedConverter = {
 // schema 83 adds an attempt- and provider-task-bound engine elapsed
 // record; schema 85 adds nullable removed_at/removed_by provider archive
 // columns; schema 86 adds a nullable storage_trash.purge_started_at marker for
-// crash-safe Recycle Bin container purges. The candidate image verification
-// and attestation pins advance from the upstream 38 to 86; the other runtime,
+// crash-safe Recycle Bin container purges; schema 88 adds the monotonic per-task
+// authorization generation that fences restricted client credentials and requires
+// 48 (its earlier reservation, 52, was never shipped). The candidate image verification
+// and attestation pins advance from the upstream 38 to 88; the other runtime,
 // numerical, promotion and digest
 // guards remain fully compared.
 // The reviewed Obj2Tiles build updates its bounded-concurrency patch and adds
@@ -332,13 +335,13 @@ test('No script writes the Viewer image to a registry', () => {
 test('Viewer publication preserves the ACK and folder migrations and pins the exact timer, provider-removal and trash-purge schemas', () => {
   const migrations = MIGRATIONS.filter(({ version }) => version >= reviewedAckMigrations[0].version);
   assert.deepEqual(migrations.map(({ version, name }) => ({ version, name })),
-    [...reviewedAckMigrations, reviewedFolderMigration, reviewedTimerMigration, reviewedProviderRemovalMigration, reviewedTrashPurgeMigration], 'another schema advance requires a new explicit gate review');
+    [...reviewedAckMigrations, reviewedFolderMigration, reviewedTimerMigration, reviewedProviderRemovalMigration, reviewedTrashPurgeMigration, reviewedAuthorizationGenerationMigration], 'another schema advance requires a new explicit gate review');
   const timer = migrations.find(({ version }) => version === reviewedTimerMigration.version);
   const sqlSha256 = createHash('sha256').update(timer.sql.replace(/\r\n/g, '\n')).digest('hex');
   assert.equal(sqlSha256, reviewedTimerSqlSha256, 'migration 83 SQL must match the reviewed timer schema');
   const removal = migrations.find(({ version }) => version === reviewedProviderRemovalMigration.version);
   assert.equal(createHash('sha256').update(removal.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedProviderRemovalSqlSha256, 'migration 85 SQL must match the reviewed provider-removal schema');
-  const trashPurge = migrations.at(-1);
+  const trashPurge = migrations.find(({ version }) => version === reviewedTrashPurgeMigration.version);
   assert.equal(createHash('sha256').update(trashPurge.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedTrashPurgeSqlSha256, 'migration 86 SQL must match the reviewed trash-purge schema');
 });
 

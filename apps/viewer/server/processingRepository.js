@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const path = require('node:path');
+const { canonicalProjectExclusions, projectExclusionPredicate } = require('./projectExclusions');
 const { storageTrashRetentionMs } = require('./storageRetention');
 const { compareUtf8, safeRelativePath, sanitizeLogMessage } = require('./processingSecurity');
 const { odmGcpList } = require('./gcpOdm');
@@ -900,17 +901,22 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   modelOutput(row){if(!row)return null;const model=this.database.prepare('SELECT display_name FROM models WHERE id=?').get(row.model_id);return{id:row.id,modelId:row.model_id,taskId:row.task_id,attemptId:row.attempt_id,projectId:row.project_id,displayName:model?.display_name||'',rootKey:row.root_key,relativePath:row.relative_path,storageMode:row.storage_mode||'managed',status:row.status,byteSize:Number(row.byte_size||0),assetCount:Number(row.asset_count||0),createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,trashedAt:row.trashed_at};}
   getModelOutput(id){return this.modelOutput(this.database.prepare('SELECT * FROM model_outputs WHERE id=?').get(id));}
   activePublishedProjectTask(row){return row&&{projectId:row.project_id,projectDisplayName:row.project_display_name,projectDefaultUnits:row.project_default_units,taskId:row.task_id,taskDisplayName:row.task_display_name,taskCreatedAt:row.task_created_at,modelId:row.model_id,modelDisplayName:row.model_display_name,modelVersionId:row.model_version_id,attemptId:row.attempt_id,publishedAt:row.published_at};}
-  getActivePublishedProjectTask(projectId,taskId,{strictPublished=false}={}){return this.activePublishedProjectTask(this.database.prepare(`SELECT
-      p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
-      t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
-      m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
-      o.attempt_id,o.updated_at AS published_at
-      FROM projects p
-      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL
-      JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
-      JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
-        AND o.project_id=p.id AND o.status='published'
-      WHERE p.id=? AND p.status='active' AND t.id=?${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}`).get(projectId,taskId));}
+  validateProjectExclusions(projectId, value) {
+    const exclusions = canonicalProjectExclusions(value);
+    const project = this.getProject(projectId);
+    if (!exclusions || project?.status !== 'active' || !this.database.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_folders'",
+    ).get()) return null;
+    const folder = this.database.prepare('SELECT 1 FROM project_folders WHERE project_id=? AND id=?');
+    const task = this.database.prepare('SELECT 1 FROM processing_tasks WHERE project_id=? AND id=? AND purged_at IS NULL');
+    if (!exclusions.folderIds.every(id => folder.get(projectId, id))
+      || !exclusions.taskIds.every(id => task.get(projectId, id))) return null;
+    return exclusions;
+  }
+
+  getActivePublishedProjectTask(projectId, taskId, options) {
+    return this.activePublishedProjectTask(activePublishedProjectTaskRow(this.database, projectId, taskId, options));
+  }
   /**
    * Folder path (root first) for tasks the caller has ALREADY filtered to client-visible published tasks. Only the
    * ancestry of those exact tasks is read, so a folder holding no visible task is never named. A chain that is too
@@ -936,7 +942,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     }
     return paths;
   }
-  listActivePublishedProjectTasksPage(projectId,{limit=50,cursor=null,strictPublished=false}={}){const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[projectId],after=c?' AND (t.created_at<? OR (t.created_at=? AND t.id<?))':'';if(c)args.push(c.createdAt,c.createdAt,c.id);const rows=this.database.prepare(`SELECT
+  listActivePublishedProjectTasksPage(projectId,{limit=50,cursor=null,strictPublished=false,exclusions}={}){const scope=projectExclusionPredicate(this.database,exclusions);strictPublished ||= exclusions !== undefined;const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[projectId,...scope.args],after=c?' AND (t.created_at<? OR (t.created_at=? AND t.id<?))':'';if(c)args.push(c.createdAt,c.createdAt,c.id);const rows=this.database.prepare(`SELECT
       p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
       t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
       m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
@@ -946,7 +952,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
       JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
         AND o.project_id=p.id AND o.status='published'
-      WHERE p.id=? AND p.status='active'${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}${after}
+      WHERE p.id=? AND p.status='active'${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}${scope.sql}${after}
       ORDER BY t.created_at DESC,t.id DESC LIMIT ?`).all(...args,n+1),items=rows.slice(0,n).map((row)=>this.activePublishedProjectTask(row)),last=items.at(-1);return{items,nextCursor:rows.length>n?encodeCursor(strictPublished?{created_at:last.taskCreatedAt,id:last.taskId}:{createdAt:last.taskCreatedAt,id:last.taskId}):null};}
   listActivePublishedProjectsPage({limit=50,cursor=null,q=''}={}) {
     const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[];
@@ -1616,4 +1622,16 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   retryEvent(id,message,attemptCount){const terminal=attemptCount>=12,t=now(),next=new Date(Date.now()+Math.min(3600_000,5000*2**Math.min(attemptCount,10))).toISOString();this.database.prepare('UPDATE event_outbox SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=?').run(terminal?'failed':'pending',next,bounded(sanitizeLogMessage(message),1000),t,id);}
 }
 
-module.exports = { BUILT_IN_PRESETS, ProcessingRepository };
+function activePublishedProjectTaskRow(database,projectId,taskId,{strictPublished=false,exclusions}={}){const scope=projectExclusionPredicate(database,exclusions);strictPublished ||= exclusions !== undefined;return database.prepare(`SELECT
+      p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
+      t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
+      m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
+      o.attempt_id,o.updated_at AS published_at
+      FROM projects p
+      JOIN processing_tasks t ON t.project_id=p.id AND t.published_model_id IS NOT NULL
+      JOIN models m ON m.id=t.published_model_id AND m.status='ready' AND m.active_version_id IS NOT NULL
+      JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
+        AND o.project_id=p.id AND o.status='published'
+      WHERE p.id=? AND p.status='active' AND t.id=?${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}${scope.sql}`).get(projectId,taskId,...scope.args);}
+
+module.exports = { BUILT_IN_PRESETS, ProcessingRepository, activePublishedProjectTaskRow };

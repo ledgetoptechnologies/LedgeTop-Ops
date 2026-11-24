@@ -8,6 +8,14 @@ import {viewerServiceClient} from './viewer-integration';
 import {portalProjectionSourceGuard,readPortalProjectionSourceProof} from '../../../client/src/worker/project-alpha-portal-authority';
 import type {Env,StaffPrincipal} from './types';
 
+const RESTRICTED_GRANT_EXPIRY = '1970-01-01T00:00:00.000Z';
+const scopedId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+const exclusionsSchema = z.object({ version: z.literal(1), folderIds: z.array(scopedId).max(128),
+ taskIds: z.array(scopedId).max(128) }).strict().refine(x => x.folderIds.length + x.taskIds.length > 0
+  && x.folderIds.length + x.taskIds.length <= 128).transform(x => ({
+   version: x.version, folderIds: [...new Set(x.folderIds)].sort(), taskIds: [...new Set(x.taskIds)].sort(),
+  }));
+type Exclusions = z.output<typeof exclusionsSchema>;
 const opaque=z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const source=z.string().min(15).max(78).regex(/^project-alpha:[a-z0-9][a-z0-9_-]*$/);
 const key=z.string().min(16).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
@@ -24,14 +32,59 @@ export const directViewerClientGrantListQuerySchema=z.object({q:z.string().trim(
 export const DIRECT_VIEWER_GRANT_PAGE_SIZE=100;
 /** Effective shares per client; see readDirectViewerClientGrants for why this is a real limit. */
 export const DIRECT_VIEWER_GRANTS_PER_CLIENT=100;
-/** An effective grant: active, unrevoked and unexpired. The client-portal read and every per-client
- * cap check use this one boundary, so expired rows (which never change status) neither show nor count. */
+/** An effective grant: active, unrevoked and unexpired. The client-portal read, the create precheck,
+ * the in-INSERT cap and the post-write diagnosis all use this one boundary, so expired rows (which never
+ * change status) neither show nor count.
+ * A restricted (exclusion-scoped) grant keeps the fail-closed RESTRICTED_GRANT_EXPIRY sentinel on its row
+ * for older readers; its real lifetime is in its single v2 creation receipt. Such a row is effective only
+ * while that receipt matches the row and has not expired (restrictedReceiptLiveSql). A row whose receipt is
+ * missing, duplicated or does not match neither counts nor issues (resolveRestrictedGrant also rejects it). */
 function effectiveGrantSql(alias?:string){const c=alias?`${alias}.`:'';
- return `${c}status='active' AND ${c}revoked_at IS NULL AND (${c}authorization_expires_at IS NULL OR datetime(${c}authorization_expires_at)>datetime('now'))`;}
+ return `${c}status='active' AND ${c}revoked_at IS NULL AND (${c}authorization_expires_at IS NULL
+  OR ${expiryJulianSql(`${c}authorization_expires_at`)}>julianday('now')
+  OR (${c}authorization_expires_at='${RESTRICTED_GRANT_EXPIRY}' AND ${restrictedReceiptLiveSql(alias??'viewer_direct_client_grants')}))`;}
+/** Expiry instant (Julian day, UTC) of a stored expiry string, matching expiryMillis. New rows and receipts
+ * store canonical UTC (`…Z`); rows written before that may carry any offset the create schema accepts
+ * (±HH:MM up to ±23:59). SQLite's own parser rejects offsets above 14 hours, so the offset is applied here
+ * by hand. A string with neither `Z` nor a ±HH:MM suffix yields NULL: it never counts as live, and
+ * expiryMillis likewise refuses it, so it is never issued either. */
+function expiryJulianSql(value:string){
+ return `(CASE WHEN substr(${value},-1)='Z' THEN julianday(${value})
+  WHEN substr(${value},-6,1) IN ('+','-') AND substr(${value},-3,1)=':' THEN julianday(substr(${value},1,length(${value})-6))
+   -(CASE substr(${value},-6,1) WHEN '+' THEN 1 ELSE -1 END)*(CAST(substr(${value},-5,2) AS INTEGER)*60+CAST(substr(${value},-2,2) AS INTEGER))/1440.0
+  END)`;}
+const isoExpiry=z.iso.datetime({offset:true});
+/** Milliseconds for an expiry the create schema accepts; NaN for anything else (treated as unusable). */
+function expiryMillis(value:string){return isoExpiry.safeParse(value).success?Date.parse(value):Number.NaN;}
+const CANONICAL_EXPIRY=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+/** The one stored form of an expiry: canonical UTC ISO (`YYYY-MM-DDTHH:MM:SS.sssZ`), or undefined when that
+ * instant has no such form. The schema accepts 9999-12-31T23:59:59-01:00, whose UTC instant falls in year
+ * 10000 (`+010000-…`): the create schema, the Viewer's expiry check and SQLite would all reject or misread it. */
+function canonicalExpiry(value:string|null):string|null|undefined{
+ if(value===null)return null;
+ const millis=expiryMillis(value);if(!Number.isFinite(millis))return undefined;
+ const canonical=new Date(millis).toISOString();
+ return CANONICAL_EXPIRY.test(canonical)&&isoExpiry.safeParse(canonical).success?canonical:undefined;
+}
+/** SQL form of the receipt checks in resolveRestrictedGrant. It is deliberately no stricter than that
+ * function, so a grant the issuer would honour always counts toward the cap; a receipt it would reject
+ * for a stricter reason can only be over-counted (never issued). */
+function restrictedReceiptLiveSql(grantTable:string){const g=`${grantTable}.`,j=(path:string)=>`json_extract(receipt.response_json,'${path}')`;
+ return `(SELECT count(*) FROM viewer_direct_client_grant_mutation_receipts receipt WHERE receipt.grant_id=${g}id AND receipt.action='grant.create')=1
+  AND EXISTS(SELECT 1 FROM viewer_direct_client_grant_mutation_receipts receipt WHERE receipt.grant_id=${g}id AND receipt.action='grant.create'
+   AND json_valid(receipt.response_json) AND ${j('$.version')}=2 AND json_type(receipt.response_json,'$.exclusions')='object'
+   AND ${j('$.grant.grantId')}=${g}id AND ${j('$.grant.viewerProjectId')}=${g}viewer_project_id
+   AND ${j('$.grant.scopeType')}='project' AND ${g}scope_type='project' AND ${j('$.grant.grantVersion')}=${g}grant_version
+   AND ${j('$.grant.workspaceId')}=${g}workspace_id AND ${j('$.grant.sourceId')}=${g}source_id
+   AND ${j('$.grant.permissions.measure')}=${g}can_measure AND ${j('$.grant.permissions.cameras')}=${g}can_view_cameras
+   AND ${j('$.grant.permissions.download')}=${g}can_download
+   AND ${j('$.recipientAuthorityPin.workspaceId')}=${g}workspace_id AND ${j('$.recipientAuthorityPin.sourceId')}=${g}source_id
+   AND (json_type(receipt.response_json,'$.grant.expiresAt')='null'
+    OR ${expiryJulianSql(j('$.grant.expiresAt'))}>julianday('now')))`;}
 const inputSchema=z.object({sourceId:source,workspaceId:opaque,viewerProjectId:opaque,taskId:opaque.nullable(),
  scopeType:z.enum(['project','task']),includeFuturePublished:z.boolean(),confirmedScope:z.literal(true),
- expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict()}).strict()
- .refine(g=>g.scopeType==='project'?g.taskId===null&&g.includeFuturePublished:g.taskId!==null&&!g.includeFuturePublished);
+ expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict(),exclusions:exclusionsSchema.optional()}).strict()
+ .refine(g=>g.scopeType==='project'?g.taskId===null&&g.includeFuturePublished:g.taskId!==null&&!g.includeFuturePublished&&g.exclusions===undefined);
 export class DirectViewerGrantError extends HTTPException {
  constructor(status:400|403|404|409|503,public readonly code:string,message:string,public readonly grantId?:string){super(status,{message,cause:{code}});}
 }
@@ -67,7 +120,7 @@ export interface DirectViewerClientGrantRow {
  id:string;source_id:string;workspace_id:string;viewer_project_id:string;task_id:string|null;scope_type:'project'|'task';
  include_future_published:number;can_measure:number;can_view_cameras:number;can_download:number;authorization_expires_at:string|null;
  grant_version:number;status:'active'|'revoked';created_by_staff_id:string;created_at:string;updated_at:string;revoked_at:string|null;
- revoked_by_staff_id:string|null;revoke_reason:string|null;client_display_name?:string;
+ revoked_by_staff_id:string|null;revoke_reason:string|null;client_display_name?:string; exclusions?:Exclusions;
 }
 export type DirectViewerClientGrantPublicResult=ReturnType<typeof directViewerClientGrantView>;
 export type DirectViewerClientRecipientAuthorityPin = Readonly<
@@ -75,7 +128,8 @@ export type DirectViewerClientRecipientAuthorityPin = Readonly<
     rootPublicId:string}
  | {version:1;mode:'operations_native';sourceId:string;workspaceId:string;sourceWorkspaceId:string;rootType:'organization'|'standalone_client';
     rootPublicId:string;authorityId:string;ownershipEpoch:number;claimOwnershipEpoch:number}>;
-type CreateReceiptEnvelope = Readonly<{version:1;grant:unknown;recipientAuthorityPin:DirectViewerClientRecipientAuthorityPin}>;
+type CreateReceiptEnvelope = Readonly<{version:1;grant:unknown;recipientAuthorityPin:DirectViewerClientRecipientAuthorityPin}
+ | {version:2;grant:unknown;recipientAuthorityPin:DirectViewerClientRecipientAuthorityPin;exclusions:Exclusions}>;
 export function directViewerClientGrantView(r:DirectViewerClientGrantRow){return {grantId:r.id,sourceId:r.source_id,workspaceId:r.workspace_id,
  viewerProjectId:r.viewer_project_id,taskId:r.task_id,scopeType:r.scope_type,includeFuturePublished:!!r.include_future_published,
  permissions:{measure:!!r.can_measure,cameras:!!r.can_view_cameras,download:!!r.can_download},expiresAt:r.authorization_expires_at,
@@ -157,7 +211,7 @@ export async function readDirectViewerClientGrants(env:Env,input:{sourceId:strin
  const rows=await db(env).prepare(`SELECT * FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=?
  AND ${effectiveGrantSql()}
  ${input.grantId?'AND id=?':''} ORDER BY id LIMIT 101`).bind(input.sourceId,input.workspaceId,...(input.grantId?[input.grantId]:[])).all<DirectViewerClientGrantRow>();
- if(rows.results.length>100)fail(503,'grant_limit','Client Viewer grant limit exceeded');return rows.results;
+ if(rows.results.length>100)fail(503,'grant_limit','Client Viewer grant limit exceeded');return (await Promise.all(rows.results.map(row => resolveRestrictedGrant(env, row)))).filter(row => row !== null);
 }
 type PickerRecipient=Recipient&{sort_name?:string;workspace_display_name?:string};
 export interface DirectViewerPickerClient {sourceId:string;workspaceId:string;displayName:string;businessName:string;
@@ -245,32 +299,67 @@ export async function listDirectViewerClientGrantWorkspace(env:Env,principal:Sta
   grants=rows.results.slice(0,DIRECT_VIEWER_GRANT_PAGE_SIZE);
   if(rows.results.length>DIRECT_VIEWER_GRANT_PAGE_SIZE)grantsNextCursor=grants.at(-1)!.id;
  }
- return {clients,clientsNextCursor,grants:grants.map(directViewerClientGrantView),grantsNextCursor};
+ return {clients,clientsNextCursor,grantsNextCursor,
+  grants:(await Promise.all(grants.map(row => resolveRestrictedGrant(env, row, true)))).map((row, index) => directViewerClientGrantView(row ?? grants[index]!))};
 }
+function validCreateReceiptEnvelope(envelope: Record<string, unknown>): boolean {
+ const shape = Object.keys(envelope).sort().join(',');
+ if (envelope.version === 1) return shape === 'grant,recipientAuthorityPin,version';
+ if (envelope.version !== 2 || shape !== 'exclusions,grant,recipientAuthorityPin,version') return false;
+ const parsed = exclusionsSchema.safeParse(envelope.exclusions);
+ return parsed.success && JSON.stringify(parsed.data) === JSON.stringify(envelope.exclusions);
+}
+
+// The legacy reader sees an expired grant. V2 must prove the exact immutable
+// creation receipt before restoring the effective expiry or applying the scope.
+async function resolveRestrictedGrant(env: Env, row: DirectViewerClientGrantRow, includeExpired = false) {
+ if (row.authorization_expires_at !== RESTRICTED_GRANT_EXPIRY) return row;
+ const receipts = await db(env).prepare(`SELECT response_json FROM viewer_direct_client_grant_mutation_receipts
+   WHERE grant_id=? AND action='grant.create' ORDER BY created_at LIMIT 2`).bind(row.id).all<{response_json:string}>();
+ if (receipts.results.length !== 1) return null;
+ let envelope: Record<string, unknown>;
+ try { envelope = JSON.parse(receipts.results[0]!.response_json); } catch { return null; }
+ if (!envelope || envelope.version !== 2 || !validCreateReceiptEnvelope(envelope)
+   || !validRecipientAuthorityPin(envelope.recipientAuthorityPin)) return null;
+ const grant = envelope.grant;
+ if (!validCreateReceiptGrant(grant) || grant.grantId !== row.id || grant.viewerProjectId !== row.viewer_project_id
+   || grant.scopeType !== 'project' || row.scope_type !== 'project' || grant.grantVersion !== row.grant_version
+   || grant.workspaceId !== row.workspace_id || grant.sourceId !== row.source_id
+   || grant.permissions.measure !== (row.can_measure === 1) || grant.permissions.cameras !== (row.can_view_cameras === 1)
+   || grant.permissions.download !== (row.can_download === 1)
+   || envelope.recipientAuthorityPin.workspaceId !== row.workspace_id
+   || envelope.recipientAuthorityPin.sourceId !== row.source_id) return null;
+ if (grant.expiresAt !== null && (!Number.isFinite(expiryMillis(grant.expiresAt))
+   || (!includeExpired && expiryMillis(grant.expiresAt) <= Date.now()))) return null;
+ // A receipt written before canonical storage keeps its original string if it has no canonical form.
+ return { ...row, authorization_expires_at: canonicalExpiry(grant.expiresAt) ?? grant.expiresAt, exclusions: exclusionsSchema.parse(envelope.exclusions) };
+}
+
 async function receipt(env:Env,actor:string,idempotencyKey:string,fingerprint:string){
  const row=await db(env).prepare(`SELECT request_fingerprint,grant_id,response_json FROM viewer_direct_client_grant_mutation_receipts
  WHERE actor_staff_id=? AND idempotency_key=?`).bind(actor,idempotencyKey).first<{request_fingerprint:string;grant_id:string;response_json:string}>();
  if(row&&row.request_fingerprint!==fingerprint)fail(409,'idempotency_conflict','Idempotency key already used for another request');
  return row?{grantId:row.grant_id,response:JSON.parse(row.response_json)}:null;
 }
-function createReceiptGrant(value:unknown,expectedGrantId:string):DirectViewerClientGrantPublicResult {
+function createReceiptGrant(value:unknown,expectedGrantId:string,exclusions?:Exclusions):DirectViewerClientGrantPublicResult {
  if(value&&typeof value==='object'&&!Array.isArray(value)&&('recipientAuthorityPin' in value||'version' in value)){
   const envelope=value as Record<string,unknown>,grant=envelope.grant;
-  if(Object.keys(envelope).length!==3||envelope.version!==1||!('grant'in envelope)||!('recipientAuthorityPin'in envelope)
+  if(!validCreateReceiptEnvelope(envelope)||!('grant'in envelope)||!('recipientAuthorityPin'in envelope)
+    ||JSON.stringify(exclusions)!==JSON.stringify(envelope.exclusions)
     ||!validRecipientAuthorityPin(envelope.recipientAuthorityPin)||!validCreateReceiptGrant(grant)
     ||grant.grantId!==expectedGrantId||grant.workspaceId!==envelope.recipientAuthorityPin.workspaceId
     ||grant.sourceId!==envelope.recipientAuthorityPin.sourceId)
    fail(503,'grant_receipt_unavailable','Viewer share receipt is unavailable; contact support');
   return grant;
  }
- if(!validCreateReceiptGrant(value)||value.grantId!==expectedGrantId)
+ if(exclusions!==undefined||!validCreateReceiptGrant(value)||value.grantId!==expectedGrantId)
   fail(503,'grant_receipt_unavailable','Viewer share receipt is unavailable; contact support');
  return value;
 }
 function createReceiptAuthorityPin(value:unknown):DirectViewerClientRecipientAuthorityPin|null{
  if(!value||typeof value!=='object'||Array.isArray(value))return null;
  const envelope=value as Record<string,unknown>;
- return envelope.version===1&&validRecipientAuthorityPin(envelope.recipientAuthorityPin)?envelope.recipientAuthorityPin:null;
+ return validCreateReceiptEnvelope(envelope)&&validRecipientAuthorityPin(envelope.recipientAuthorityPin)?envelope.recipientAuthorityPin:null;
 }
 async function workspaceHasClaimHistory(env:Env,workspaceId:string):Promise<boolean>{
  const database=db(env);
@@ -327,7 +416,7 @@ export async function readDirectViewerClientGrantAuthorityPin(env:Env,grantId:st
  // Existing raw public-result receipts remain identifiable as legacy. Anything
  // claiming to be a versioned envelope must validate fully or deny the read.
  if(!('recipientAuthorityPin'in envelope)&&!('version'in envelope))return null;
- if(Object.keys(envelope).length!==3||envelope.version!==1||!('grant'in envelope)||!('recipientAuthorityPin'in envelope))
+ if(!validCreateReceiptEnvelope(envelope)||!('grant'in envelope)||!('recipientAuthorityPin'in envelope))
   throw new Error('direct-viewer-grant-authority-receipt-invalid');
  const grant=envelope.grant,pin=envelope.recipientAuthorityPin;
  if(!validCreateReceiptGrant(grant)||grant.grantId!==grantId||!validRecipientAuthorityPin(pin)
@@ -369,11 +458,14 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    if(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))
     fail(409,'relationship_missing','Client authority changed; refresh the client connection');
   }
-  return {grant:createReceiptGrant(prior.response,prior.grantId),replayed:true};
+  return {grant:createReceiptGrant(prior.response,prior.grantId,g.exclusions),replayed:true};
  }
- if(g.expiresAt!==null&&Date.parse(g.expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
+ // After the replay check, so an already committed request still replays; before any read or write.
+ const expiresAt=canonicalExpiry(g.expiresAt);
+ if(expiresAt===undefined)fail(400,'expired_at_invalid','Expiration is outside the supported range');
+ if(expiresAt!==null&&Date.parse(expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
  let catalog;
- try{catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{})});}
+ try{catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{}),...(g.exclusions?{exclusions:g.exclusions,validateExclusions:true}:{})});}
  catch(error){
   if(error instanceof ViewerServiceError){
    if(error.code==='not_found')fail(409,g.taskId?'task_not_published':'relationship_missing',g.taskId
@@ -395,7 +487,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  // Checked here for a clear early answer and again inside the INSERT so concurrent creates cannot pass it.
  if((count??0)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
  const result={grantId:id,sourceId:g.sourceId,workspaceId:g.workspaceId,viewerProjectId:g.viewerProjectId,taskId:g.taskId,scopeType:g.scopeType,
- includeFuturePublished:g.includeFuturePublished,permissions:g.permissions,expiresAt:g.expiresAt,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:row.display_name};
+ includeFuturePublished:g.includeFuturePublished,permissions:g.permissions,expiresAt,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:row.display_name};
  try{await database.batch([
  database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
  can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
@@ -424,18 +516,19 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    WHERE authority.client_authority_id=claim.client_authority_id AND authority.workspace_id=w.id AND authority.state='active'
      AND authority.target_id=? AND authority.target_revision=? AND authority.ownership_epoch=? AND authority.root_kind=w.root_type)`:''})`)
  .bind(id,g.sourceId,g.workspaceId,g.viewerProjectId,g.taskId,g.scopeType,+g.includeFuturePublished,+g.permissions.measure,+g.permissions.cameras,+g.permissions.download,
- g.expiresAt,principal.id,now,now,...guard.bindings,g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
+ g.exclusions?RESTRICTED_GRANT_EXPIRY:result.expiresAt,principal.id,now,now,...guard.bindings,g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
  g.workspaceId,g.sourceId,row.active_generation_id,row.source_sequence,row.root_version,
  row.claim_authority_id,row.claim_source_id,row.claim_source_workspace_id,row.claim_ownership_epoch,
  ...(operationsAuthority?[operationsAuthority.targetId,operationsAuthority.targetRevision,operationsAuthority.ownershipEpoch]:[])),
  ...mutationStatements(database,principal,input.idempotencyKey,fingerprint,id,'grant.create',result,now,
-   {version:1,grant:result,recipientAuthorityPin:pin} satisfies CreateReceiptEnvelope)]);
+   (g.exclusions ? {version:2,grant:result,recipientAuthorityPin:pin,exclusions:g.exclusions}
+    : {version:1,grant:result,recipientAuthorityPin:pin}) satisfies CreateReceiptEnvelope)]);
  }catch(error){const replay=await receipt(env,principal.id,input.idempotencyKey,fingerprint);if(replay){
    const current=await recipient(env,g.sourceId,g.workspaceId),priorPin=createReceiptAuthorityPin(replay.response);
    if((priorPin&&JSON.stringify(priorPin)!==JSON.stringify(current.pin))
     ||(!priorPin&&(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))))
     fail(409,'relationship_missing','Client authority changed; refresh the client connection');
-   return {grant:createReceiptGrant(replay.response,replay.grantId),replayed:true};}
+   return {grant:createReceiptGrant(replay.response,replay.grantId,g.exclusions),replayed:true};}
   const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
    AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
   if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);

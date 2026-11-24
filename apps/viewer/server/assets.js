@@ -66,7 +66,10 @@ async function isAuthorizedForProject(req, projectId) {
     if (requestedModelId
       && requestedModelId === viewer.modelId
       && model?.status === 'ready'
-      && model.activeVersionId === viewer.modelVersionId) return true;
+      && model.activeVersionId === viewer.modelVersionId) {
+      recordAdmittingSession(req, auth.hashToken(viewerCookie), viewer);
+      return true;
+    }
   }
 
   const cookieVal = req.cookies && req.cookies[SHARE_COOKIE];
@@ -200,6 +203,7 @@ async function pathTokenAuthorization(req, projectId) {
       && (review
         ? model?.activeVersion?.id === viewer.modelVersionId && model.activeVersion.status === 'ready'
         : model?.status === 'ready' && model.activeVersionId === viewer.modelVersionId);
+    if (allowed) recordAdmittingSession(req, auth.hashToken(req.params.token), viewer);
     return allowed ? { model, review, cameras: viewer.permissions?.cameras !== false, download: viewer.permissions?.download === true } : false;
   }
   const payload = auth.verify(req.params.token);
@@ -233,6 +237,24 @@ async function pathTokenAuthorization(req, projectId) {
     return allowed ? { model, review: false, publicOnly: true, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
   }
   return false;
+}
+
+// The final check revalidates only the authority that admitted this delivery.
+// When a direct-client (or restricted) Viewer session admitted it, that exact
+// session is re-read and its liveness decided in one SQLite snapshot
+// immediately before protected bytes leave, so a task move, generation bump or
+// source tombstone that lands during an awaited integrity check denies here.
+// Unrelated cookies or tokens on the same request are never consulted, and
+// public-share/staff authorities keep their existing checks. A response that
+// passes is then handed to nginx or sendFile and is not interrupted mid-stream;
+// the next request (or next Range) is refused.
+function recordAdmittingSession(req, tokenHash, session) {
+  if (req && session && (session.restrictedScope !== undefined || session.sourceAuthorization?.type === 'direct_client_grant'))
+    req.admittedDirectSessionHash = tokenHash;
+}
+function admittedDirectSessionStillLive(req) {
+  if (!req?.admittedDirectSessionHash) return true;
+  return Boolean(canonicalRepository?.liveViewerSessionByHash(req.admittedDirectSessionHash));
 }
 
 function xAccelLocation(abs) {
@@ -277,7 +299,8 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   // the (possibly slow) integrity check, right before any byte is sent.
   // Responses are never stored by browsers or intermediaries, so a URL stops
   // working as soon as its session/share expires or is revoked.
-  const shareStillAllows=()=>{if(!share)return true;const current=canonicalRepository.getPublicShare(share.id);return canonicalRepository.publicShareLive(current)&&revisionMatches(current,{shareRevision:share.authorizationRevision})&&assetAllowed(current,publishedAsset?.kind);};
+  // A direct-client session that admitted this delivery is re-read the same way (its tombstone, generation and selection).
+  const shareStillAllows=()=>{if(!admittedDirectSessionStillLive(req))return false;if(!share)return true;const current=canonicalRepository.getPublicShare(share.id);return canonicalRepository.publicShareLive(current)&&revisionMatches(current,{shareRevision:share.authorizationRevision})&&assetAllowed(current,publishedAsset?.kind);};
   const requested = String(rel).replaceAll('\\', '/');
   const accelerated = xAccelLocation(abs);
   if (!project.activeVersion || accelerated) {
@@ -347,7 +370,12 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     if (Number(opened.stat.size) !== photo.byteSize) { await opened.handle.close(); return res.status(404).json({ error: 'photo not found' }); }
     const headers = { 'Cache-Control': 'private, no-store', 'Content-Type': photo.contentType, 'X-Content-Type-Options': 'nosniff' };
     // Share access is re-checked after the (possibly slow) integrity check.
-    const shareStillAllows = async () => { if (!authorization.share) return true; const current = await pathTokenAuthorization(req, req.params.id); if (current?.cameras) return true; res.status(403).json({ error: 'not authorized' }); return false; };
+    const shareStillAllows = async () => {
+      const current = authorization.share ? await pathTokenAuthorization(req, req.params.id) : null;
+      if ((!authorization.share || current?.cameras) && admittedDirectSessionStillLive(req)) return true;
+      res.status(403).json({ error: 'not authorized' });
+      return false;
+    };
     const accelerated = xAccelLocation(absolute);
     if (accelerated) {
       try { if (!await assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle })) return res.status(404).json({ error: 'photo not found' }); } finally { await opened.handle.close(); }
@@ -425,6 +453,7 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
 });
 
 module.exports = router;
+module.exports.admittedDirectSessionStillLive = admittedDirectSessionStillLive;
 module.exports.setRepository = setRepository;
 module.exports.setAssetRateLimiter = setAssetRateLimiter;
 module.exports.setProcessingRepository = setProcessingRepository;

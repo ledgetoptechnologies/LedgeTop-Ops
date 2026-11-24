@@ -181,3 +181,40 @@ describe("direct Viewer folder paths",()=>{
     expect(beforePath).not.toEqual(afterPath);expect(afterRest).toEqual(beforeRest);
   });
 });
+
+describe("restricted (exclusion) grants and the Viewer task authorization generation",()=>{
+  const exclusions={version:1 as const,folderIds:["folder-hidden"],taskIds:[]};
+  const restrictedRow=()=>({...row(),scope_type:"project",task_id:null,exclusions});
+  const catalogAt=(generation?:number,modelVersionId="version-one")=>({schemaVersion:1,project:{id:"project-one",displayName:"Property survey"},
+    tasks:[{...task,modelVersionId,...(generation===undefined?{}:{authorizationGeneration:generation})}],nextCursor:null});
+  it("mints only with the exact captured generation and passes exclusions to every catalog read",async()=>{
+    mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(7));
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:true});
+    expect(mock.create.mock.calls[0]![0].restrictedScope).toEqual({version:1,projectId:"project-one",taskId:"task-one",generation:7,exclusions});
+    for(const call of mock.catalog.mock.calls)expect(call[0].exclusions).toEqual(exclusions);
+  });
+  it("fails closed when an older Viewer returns no generation for a restricted grant",async()=>{
+    mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(undefined));
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});expect(mock.create).not.toHaveBeenCalled();
+  });
+  it("does not return a minted grant when the task moves (generation changes) during the Viewer call",async()=>{
+    mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(7));
+    mock.create.mockImplementationOnce(async()=>{mock.catalog.mockResolvedValue(catalogAt(9));
+      return {grant:"hidden",grantExpiresAt:new Date(Date.now()+60_000).toISOString()};});
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});expect(receipts.size).toBe(0);
+  });
+  it("A->B->A: an old receipt is never replayed; a fresh key issues at the new generation",async()=>{
+    mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(7));
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:true});
+    mock.catalog.mockResolvedValue(catalogAt(9)); // moved out and back: same place, new generation
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});
+    expect(mock.create).toHaveBeenCalledTimes(1);
+    expect(await issueDirectClientViewerSession(env(),{...session,idempotencyKey:"direct-client-session-fresh-key-01"})).toMatchObject({ok:true});
+    expect(mock.create.mock.calls[1]![0].restrictedScope.generation).toBe(9);
+  });
+  it("an unrestricted grant keeps its existing contract without a generation",async()=>{
+    mock.catalog.mockResolvedValue(catalogAt(undefined));
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:true});
+    expect(mock.create.mock.calls[0]![0].restrictedScope).toBeUndefined();
+  });
+});
