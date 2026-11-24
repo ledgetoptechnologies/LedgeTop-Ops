@@ -20,7 +20,7 @@ import { createWorkspaceNavigationWork, workspaceNavigationState } from './works
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, publishAudience, publishAudienceText, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -1691,8 +1691,8 @@ function associationProjectId(item){return item?.projectId||item?.project_id||nu
 function portalAccountId(item){return item?.accountId||item?.account_id||null}
 function clientProjectKey(project){return JSON.stringify([project.id,portalAccountId(project)])}
 function clientProjectLabel(project){return `${project.clientName||project.client_name||'Client'} — ${project.name||project.projectName||project.project_name||project.id} · ${project.nativeTarget?`${project.nativeTarget.sourceId} · ${project.accountName}`:project.accountName||portalAccountId(project)}`}
-function clientAccessSnapshot(){
-  const access=state.clientAccess||{projects:[],associations:[],grants:[]},native=state.clientNativeAccess;
+function clientAccessSnapshot(legacy=state.clientAccess,native=state.clientNativeAccess){
+  const access=legacy||{projects:[],associations:[],grants:[]};
   if(!native)return access;
   const projects=(native.targets||[]).map(target=>({id:JSON.stringify([target.sourceId,target.workspaceId,target.projectPublicId]),accountId:target.workspaceId,accountName:target.workspaceName,clientName:target.workspaceName,projectName:target.projectName,nativeTarget:target}));
   return {...access,projects:[...(access.projects||[]),...projects],
@@ -1956,31 +1956,73 @@ async function retrieveShareLink(element){
     }
   }catch(error){popup?.close();const unavailable=error.status===409&&/share_link_unavailable|original link cannot be recovered/i.test(error.message);toast(unavailable?'The original URL is not recoverable. The existing link has not been changed or revoked; create a separate link if needed.':error.message,true)}finally{element.disabled=false}
 }
-// Read now, not from the open dialog: names are only as good as the list they come from.
+// One Share, as it was when the person pressed the button: the sign-in, the dialog and the exact model, task and project.
+// Checked after every await, so nothing read for one is used, asked or sent for another.
+function shareFence(form,output,projectId){
+  const token=state.token,subject=state.adminSession?.subject,context=state.shareContext,known=state.tasks.some(task=>task.id===output.taskId);
+  const authority=()=>state.token===token&&state.adminSession?.subject===subject;
+  const dialog=()=>authority()&&state.shareContext===context&&modal.open&&form.isConnected;
+  const task=()=>state.tasks.find(item=>item.id===output.taskId);
+  const moved=()=>Boolean(dialog()&&task()&&task().projectId!==projectId);
+  return {authority,dialog,moved,live:()=>dialog()&&can('viewer.shares.create')&&(output.activePublished||can('viewer.processing.publish'))
+    &&state.outputs.some(item=>item.id===output.id&&item.taskId===output.taskId&&item.modelId===output.modelId)
+    &&(known?task()?.projectId===projectId:true)};
+}
+// All three lists are read now, never taken from when the dialog opened. What cannot be read is unknown, not nobody.
 async function publicationAudience(output,projectId){
-  if(!can('viewer.client_grants.manage'))return publishAudienceText([],{complete:false});
-  const names=new Set();let complete=true;
-  try{
-    const access=await loadDirectClientAccess(api,projectId);
-    if(access){complete=!access.grantsIncomplete;for(const name of publishAudience(access,{projectId,taskId:output.taskId}))names.add(name);}else complete=false;
-  }catch{complete=false}
-  // Older Operations shares follow the model; without both lists they are unknown, never assumed to be none.
-  if(!state.clientAccess||!state.clientNativeAccess)complete=false;
-  const access=clientAccessSnapshot(),own=(access.associations||[]).filter(item=>output.modelId&&associationModelId(item)===output.modelId);
+  if(!can('viewer.client_grants.manage'))return {clients:[],complete:false,text:publishAudienceText([],{complete:false})};
+  const lists=(value,...names)=>names.every(name=>Array.isArray(value?.[name]))?value:null;
+  const [direct,legacy,native]=(await Promise.allSettled([loadDirectClientAccess(api,projectId),api('/api/v1/workspace/client-grants'),api('/api/v1/workspace/native-client-grants')]))
+    .map(result=>result.status==='fulfilled'?result.value:null);
+  const older=lists(legacy,'projects','associations','grants'),connected=lists(native,'targets','grants');
+  const complete=Boolean(can('viewer.client_grants.manage')&&direct&&!direct.grantsIncomplete&&older&&connected),clients=new Map();
+  for(const client of direct?publishAudience(direct,{projectId,taskId:output.taskId}):[])clients.set(client.key,client);
+  // Older Operations shares follow the model.
+  const access=clientAccessSnapshot(older,connected),own=(access.associations||[]).filter(item=>output.modelId&&associationModelId(item)===output.modelId);
   const ids=new Set(own.map(item=>item.id)),projects=new Set(own.map(associationProjectId));
   for(const grant of access.grants||[]){
     if((grant.status||'active')!=='active')continue;
-    if((grant.scopeType||grant.scope_type)==='task'?ids.has(grant.associationId||grant.association_id):projects.has(grant.projectId||grant.project_id))names.add(grant.clientName||grant.client_name||'a client');
+    if(!((grant.scopeType||grant.scope_type)==='task'?ids.has(grant.associationId||grant.association_id):projects.has(grant.projectId||grant.project_id)))continue;
+    // A connected workspace is the same client as its direct share; an older account has no such link.
+    const id=portalAccountId(grant)||grant.id,key=grant.native?JSON.stringify([grant.source_id,grant.workspace_id]):JSON.stringify(['account',id]);
+    if(!clients.has(key))clients.set(key,{key,name:grant.clientName||grant.client_name||'a client',id});
   }
-  return publishAudienceText([...names].sort((left,right)=>left.localeCompare(right)),{complete});
+  const all=[...clients.values()];
+  return {clients:all.map(client=>client.key).sort(),complete,text:publishAudienceText(publishAudienceNames(all),{complete})};
 }
-// One question before a public link publishes a model: which clients gain the task, and what an existing version's links gain.
-async function confirmPublication(output,projectId,existingAccess,form){
-  const audience=await publicationAudience(output,projectId);
-  if(!modal.open||!form.isConnected)return false;
-  if(!existingAccess)return !audience||dialogs.confirm(audience,{title:'Publish this task?',submitLabel:'Publish and create link'});
-  return dialogs.confirm(`${audience?`${audience} `:''}Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links and clients who have the whole project also get newly activated tasks. Continue and create the public link?`,
-    {title:'Update existing shared access?',submitLabel:'Activate and create link'});
+// Before a public link publishes a model: which clients gain the task, and what an existing version's links gain.
+// Asked again if that grew while the question was open, so what is sent is what was answered.
+async function confirmPublication(output,projectId,existingAccess,fence){
+  let answered=null;
+  for(let round=0;round<4;round++){
+    const audience=await publicationAudience(output,projectId);
+    if(!fence.live())return false;
+    const grew=answered&&(audience.clients.some(key=>!answered.clients.includes(key))||answered.complete&&!audience.complete);
+    if(answered?!grew:!existingAccess&&!audience.text)return true;
+    if(round===3)break;
+    const asking=`${answered?'Client access changed while you were deciding. ':''}${audience.text}`;
+    const agreed=existingAccess
+      ?await dialogs.confirm(`${asking?`${asking} `:''}Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links and clients who have the whole project also get newly activated tasks. Continue and create the public link?`,
+        {title:'Update existing shared access?',submitLabel:'Activate and create link'})
+      :await dialogs.confirm(asking,{title:'Publish this task?',submitLabel:'Publish and create link'});
+    if(!agreed||!fence.live())return false;
+    answered=audience;
+  }
+  throw new Error('Client access keeps changing, so nothing was shared. Try again in a moment.');
+}
+// The task is in another project now, with other clients: nothing was shared, and Share opens again there.
+async function reopenMovedShare(output,projectId,fence){
+  const name=state.tasks.find(task=>task.id===output.taskId)?.displayName||'This task';
+  let moved=null;
+  try{const result=await api(`/api/v1/tasks/${encodeURIComponent(output.taskId)}`);if(result?.task?.id===output.taskId&&result.task.projectId!==projectId)moved=result.task;}catch{}
+  if(!fence.dialog())return;
+  if(!moved)return toast(`${name} moved to another project. Nothing was shared. Close Share and open it again.`,true);
+  state.tasks=state.tasks.map(task=>task.id===moved.id?{...task,...moved}:task);
+  state.outputs=state.outputs.map(item=>item.taskId===moved.id?{...item,projectId:moved.projectId}:item);
+  toast(`${name} moved to ${state.projects.find(project=>project.id===moved.projectId)?.displayName||'another project'}. Nothing was shared. Check who will see it and create the link again.`,true);
+  const opening=openShareModal(moved.projectId,output.id);
+  if(state.shareContext)state.shareContext.mode='public';
+  await opening;
 }
 async function createOutputShare(form,projectId,onlyOutputId){
   if(form.shareBusy||form.shareSaved||!onlyOutputId)return;
@@ -1996,14 +2038,27 @@ async function createOutputShare(form,projectId,onlyOutputId){
     if(input.password)body.password=input.password;
     const inputSignature=JSON.stringify(body);
     fields=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);for(const [element] of fields)element.disabled=true;
-    if(form.shareRequest?.inputSignature===inputSignature)body={...form.shareRequest.body};
+    const fence=shareFence(form,output,projectId);
+    const stopped=()=>fence.moved()?reopenMovedShare(output,projectId,fence):undefined;
+    if(form.shareRequest?.inputSignature===inputSignature){
+      // The earlier send may have been applied. Replayed as it was if it published; otherwise asked again, still with its own key.
+      body={...form.shareRequest.body};
+      if(body.publishIfReady&&!output.activePublished){
+        let current;
+        try{current=await api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)}catch{throw new Error('Could not check whether the link was created. Try again.')}
+        if(!fence.live())return await stopped();
+        if(typeof current?.publicationRequired!=='boolean')throw new Error('Could not check whether the link was created. Try again.');
+        if(current.publicationRequired&&!await confirmPublication(output,projectId,body.allowExistingAccessUpdate===true,fence))return await stopped();
+      }
+    }
     else if(!output.activePublished){
-      body.publishIfReady=true;
+      if(fence.moved())return await stopped();
+      body.publishIfReady=true;body.expectedProjectId=projectId;
       const existingAccess=Boolean(state.sharePreflight[output.id]?.existingAccessUpdateRequired);
-      if(!await confirmPublication(output,projectId,existingAccess,form))return;
+      if(!await confirmPublication(output,projectId,existingAccess,fence))return await stopped();
       if(existingAccess)body.allowExistingAccessUpdate=true;
     }
-    if(!modal.open||!form.isConnected)return;
+    if(!fence.live())return await stopped();
     const send=()=>{
       const serialized=JSON.stringify(body);
       // Retain the key for the same payload after an uncertain network outcome.
@@ -2012,13 +2067,22 @@ async function createOutputShare(form,projectId,onlyOutputId){
       return api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`,{
         method:'POST',body,headers:{'Idempotency-Key':form.shareRequest.key}});
     };
+    // A refusal ends that request; only an unanswered one keeps its payload and key for a retry.
+    const refused=error=>error.status>=400&&error.status<500&&error.status!==408;
     let result;
-    try{result=await send()}catch(error){
-      if(error.status!==409||error.message!=='existing_access_update_confirmation_required'||body.allowExistingAccessUpdate)throw error;
-      if(!await confirmPublication(output,projectId,true,form)||!modal.open||!form.isConnected)return;
-      body.allowExistingAccessUpdate=true;
-      result=await send();
+    try{
+      try{result=await send()}catch(error){
+        if(error.status!==409||error.message!=='existing_access_update_confirmation_required'||body.allowExistingAccessUpdate)throw error;
+        if(!fence.live()||!await confirmPublication(output,projectId,true,fence)){delete form.shareRequest;return await stopped()}
+        body.allowExistingAccessUpdate=true;
+        result=await send();
+      }
+    }catch(error){
+      if(refused(error))delete form.shareRequest;
+      if(error.status===409&&error.message==='output_project_changed')return await reopenMovedShare(output,projectId,fence);
+      throw error;
     }
+    if(!fence.authority())return;
     rememberShareResult(result,projectId,output.id);
     form.shareSaved=true;if(state.shareContext)state.shareContext.mode='public';
     state.shares[output.id]=[result.share,...(state.shares[output.id]||[]).filter(share=>share.id!==result.share.id)];

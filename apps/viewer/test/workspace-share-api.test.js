@@ -67,6 +67,35 @@ async function readyShareFixture(t) {
   return c;
 }
 
+test('a link that publishes is refused when the task is no longer in the project whose clients were checked',async t=>{
+  const c=await readyShareFixture(t),target=c.processing.createProject({displayName:'Other clients'});
+  const task=c.processing.getTask(c.item?.taskId||c.task.id);
+  const move=()=>{const current=c.processing.getTask(task.id);return c.processing.moveTaskToProject(task.id,target.id,null,'ops:other',
+    {expectedProjectId:current.projectId,expectedFolderId:current.folderId,expectedFolderRevision:current.folderRevision});};
+  c.db.prepare("UPDATE processing_jobs SET status='complete'").run();
+  move();assert.equal(c.processing.getModelOutput(c.item.versionId).projectId,target.id);
+  let response=await c.request({body:{publishIfReady:true,expectedProjectId:c.project.id}});
+  assert.equal(response.status,409);assert.equal((await response.json()).code,'output_project_changed');
+  c.assertPrivate();assert.equal(c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n,0);
+  for(const expectedProjectId of ['',1,null,{}])assert.equal((await c.request({body:{publishIfReady:true,expectedProjectId}})).status,400);
+  c.assertPrivate();
+  response=await c.request({body:{publishIfReady:true,expectedProjectId:target.id}});assert.equal(response.status,201);
+  assert.equal(c.processing.getModelOutput(c.item.versionId).status,'published');
+});
+test('the project check is repeated inside the write: a move while the password is hashed is refused',async t=>{
+  const c=await readyShareFixture(t),target=c.processing.createProject({displayName:'Other clients'}),current=c.processing.getTask(c.task.id);
+  c.db.prepare("UPDATE processing_jobs SET status='complete'").run();
+  const hash=auth.hashPassword;t.mock.method(auth,'hashPassword',async value=>{
+    c.processing.moveTaskToProject(current.id,target.id,null,'ops:other',{expectedProjectId:current.projectId,expectedFolderId:current.folderId,expectedFolderRevision:current.folderRevision});
+    return hash(value);
+  });
+  const response=await c.request({body:{publishIfReady:true,expectedProjectId:c.project.id,password:'password 123'}});
+  assert.equal(response.status,409);assert.equal((await response.json()).code,'output_project_changed');c.assertPrivate();
+});
+test('a request from an older workspace, without the project, works as before',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+});
+
 test('durable recopy is authenticated, encrypted, stable through edits and fails closed for unrecoverable legacy links',async t=>{
   const c=await readyShareFixture(t),created=await (await c.request()).json(),id=created.share.id;
   assert.deepEqual(created.share.allowedViews,['model']);

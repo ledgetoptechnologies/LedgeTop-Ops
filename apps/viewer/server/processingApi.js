@@ -420,7 +420,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.post('/api/v1/processing/outputs/:id/shares',authorize('viewer.shares.create'),mutate,async(req,res,next)=>{
     try {
       const b=req.body||{};
-      if(!onlyKeys(b,['label','password','expiresAt','permissions','displayUnits','publishIfReady','selectedAssetKinds','allowExistingAccessUpdate','allowedViews']))
+      if(!onlyKeys(b,['label','password','expiresAt','permissions','displayUnits','publishIfReady','selectedAssetKinds','allowExistingAccessUpdate','allowedViews','expectedProjectId']))
         return error(res,400,'invalid_share');
       for(const flag of ['publishIfReady','allowExistingAccessUpdate'])
         if(b[flag]!==undefined&&typeof b[flag]!=='boolean')return error(res,400,'invalid_share');
@@ -434,8 +434,12 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       const permissions=b.permissions||{view:true,measure:true,cameras:true,download:false};
       if(!onlyKeys(permissions,['view','measure','cameras','download'])||permissions.view!==true
         ||Object.values(permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');
-      const initial=outputShareState(processing.getModelOutput(req.params.id));
+      if(b.expectedProjectId!==undefined&&(typeof b.expectedProjectId!=='string'||!b.expectedProjectId))return error(res,400,'invalid_share');
+      // The workspace names the project whose clients staff were shown. A task that moved meanwhile must not be published to others.
+      const projectChanged=output=>b.expectedProjectId!==undefined&&output.projectId!==b.expectedProjectId;
+      const before=processing.getModelOutput(req.params.id),initial=outputShareState(before);
       if(!initial)return error(res,404,'published_output_not_found');
+      if(projectChanged(before))return error(res,409,'output_project_changed');
       const availableViews=Object.keys(VIEW_KINDS).filter(view=>VIEW_KINDS[view].some(kind=>(b.selectedAssetKinds||initial.eligibleAssetKinds).includes(kind)));
       const allowedViews=b.allowedViews===undefined?availableViews:b.allowedViews;
       if(!Array.isArray(allowedViews)||!allowedViews.length||allowedViews.some(view=>!availableViews.includes(view)))return error(res,400,'invalid_allowed_views');
@@ -456,6 +460,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       const body=processing.transaction(()=>{
         const output=processing.getModelOutput(req.params.id),state=outputShareState(output);
         if(!state)reject(409,'output_changed');
+        if(projectChanged(output))reject(409,'output_project_changed');
         const principal=processing.getAdminSessionByHash(auth.hashToken(String(req.get('authorization')).replace(/^Bearer\s+/i,'')));
         if(!principal||!processing.adminSessionLive(principal)||principal.revokedAt)reject(401,'authentication_required');
         if(!principal.permissions.includes('viewer.shares.create'))reject(403,'permission_denied');

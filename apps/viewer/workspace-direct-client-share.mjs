@@ -149,11 +149,19 @@ export function publishAudience(access,{projectId,taskId,now=Date.now()}){
   const clients=new Map();
   for(const grant of access.grants){
     if(grant.revokedAt||grant.viewerProjectId!==projectId||grant.expiresAt&&!(Date.parse(grant.expiresAt)>now))continue;
-    if(grant.scopeType==='project'||grant.scopeType==='task'&&grant.taskId===taskId)clients.set(directClientKey(grant),grant.clientDisplayName||'a client');
+    if(grant.scopeType==='project'||grant.scopeType==='task'&&grant.taskId===taskId)
+      clients.set(directClientKey(grant),{key:directClientKey(grant),name:grant.clientDisplayName||'a client',id:grant.workspaceId});
   }
-  return [...clients.values()].sort((left,right)=>left.localeCompare(right));
+  return [...clients.values()];
 }
 const NAMED_CLIENTS=5;
+// One line per client, in name order. Clients that share a name carry the end of their id, as in the client search.
+export function publishAudienceNames(clients){
+  const fold=name=>name.toLocaleLowerCase(),count=new Map();
+  for(const client of clients)count.set(fold(client.name),(count.get(fold(client.name))||0)+1);
+  return clients.map(client=>count.get(fold(client.name))>1?`${client.name} (ref ${String(client.id||client.key).slice(-6)})`:client.name)
+    .sort((left,right)=>left.localeCompare(right));
+}
 // Nothing to say only when every list was read in full and no client gains the task.
 export function publishAudienceText(names,{complete}){
   if(!names.length)return complete?'':'Client access could not be checked. Publishing this task shows it to every client who has the whole project.';

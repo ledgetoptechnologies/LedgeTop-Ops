@@ -22,7 +22,7 @@ function declaration(name){
   return next?rest.slice(0,next.index):rest;
 }
 const names=['clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
-  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','publicationAudience','confirmPublication',
+  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','shareFence','publicationAudience','confirmPublication','reopenMovedShare',
   'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
@@ -54,7 +54,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     querySelectorAll(selector){return selector==='input[name="allowedViews"]'?[{checked:true,value:'model'}]:[]}};
   const posts=()=>calls.filter(call=>call.options?.method==='POST');
   return {context,state,output,posts,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
-    respond(fn){respond=fn},respondNative(fn){nativeRespond=fn},respondDirect(fn){directRespond=fn},html:()=>rendered.at(-1)?.html||''};
+    respond(fn){respond=fn},respondPost(fn){const base=respond;respond=(path,options)=>options.method==='POST'?fn(path,options):base(path,options)},respondNative(fn){nativeRespond=fn},respondDirect(fn){directRespond=fn},html:()=>rendered.at(-1)?.html||''};
 }
 
 test('ready share preflight and cancel execute only reads and never reopen a closed modal',async()=>{
@@ -99,7 +99,7 @@ test('creating a link for a private model says clients with the whole project ge
   assert.match(html,/“North wall” is not published yet/);assert.doesNotMatch(html,/name="scope" value="project" checked/);
   f.state.sharePreflight.output={existingAccessUpdateRequired:true,eligibleAssetKinds:['glb']};f.context.shareModal('project','output');
   assert.match(f.html(),/shows this task to every client who has the whole project\. Confirmation is required/);
-  let asked='';f.context.dialogs.confirm=async text=>{asked=text;return false};await f.context.confirmPublication(f.output,'project',true,f.form);
+  let asked='';f.context.dialogs.confirm=async text=>{asked=text;return false};await f.context.confirmPublication(f.output,'project',true,f.context.shareFence(f.form,f.output,'project'));
   assert.match(asked,/clients who have the whole project also get newly activated tasks/);
   Object.assign(f.output,{status:'published',activePublished:true});f.state.sharePreflight={};f.context.shareModal('project','output');
   assert.match(f.html(),/Links follow this model’s latest published version\./);assert.doesNotMatch(f.html(),/not published yet/);
@@ -160,9 +160,10 @@ test('a project Share is unaffected by task rows coming and going',async()=>{
 
 const grantFor=(clientDisplayName,extra={})=>({grantId:clientDisplayName,sourceId:'s',workspaceId:clientDisplayName,viewerProjectId:'project',scopeType:'project',taskId:null,revokedAt:null,expiresAt:null,clientDisplayName,...extra});
 function askFixture(grants){
-  const f=fixture(),asked=[];f.state.clientNativeAccess={targets:[],grants:[]};
-  f.context.dialogs.confirm=async(text,options)=>{asked.push({text,options:{...options}});return f.answer!==false};
-  f.respondDirect(async()=>({clients:[],grants,clientsNextCursor:null,grantsNextCursor:null}));
+  const f=fixture(),asked=[];f.direct=grants;f.legacy=async()=>({projects:[],associations:[],grants:[]});
+  f.context.dialogs.confirm=async(text,options)=>{asked.push({text,options:{...options}});f.onAsk?.(asked.length);return f.answer!==false};
+  f.respondDirect(async()=>({clients:[],grants:f.direct,clientsNextCursor:null,grantsNextCursor:null}));
+  const base=f.context.api;f.context.api=(path,options)=>path==='/api/v1/workspace/client-grants'?(f.calls.push({path,options:{}}),f.legacy()):base(path,options);
   return Object.assign(f,{asked});
 }
 test('a link that publishes a task names the clients who will see it, and cancelling sends nothing',async()=>{
@@ -174,6 +175,7 @@ test('a link that publishes a task names the clients who will see it, and cancel
   f.answer=true;await f.context.createOutputShare(f.form,'project','output');
   assert.equal(f.asked.length,2,'a cancelled publication is asked again');assert.equal(f.posts().length,1);
   assert.equal(f.posts()[0].options.body.publishIfReady,true);assert.equal(f.posts()[0].options.body.allowExistingAccessUpdate,undefined,'naming clients is not consent to change existing links');
+  assert.equal(f.posts()[0].options.body.expectedProjectId,'project');
   assert.ok(f.calls.some(call=>/include=grants/.test(call.path||'')));assert.equal(f.calls.some(call=>/include=(clients|all)/.test(call.path||'')),false,'clients are never listed');
 });
 test('no client gains the task: no extra question; already published: nothing is read or asked',async()=>{
@@ -183,7 +185,7 @@ test('no client gains the task: no extra question; already published: nothing is
   assert.deepEqual(g.asked,[]);assert.equal(g.calls.length,1);
 });
 for(const [label,arrange] of [['the read fails',f=>f.respondDirect(async()=>{throw new Error('offline')})],['the answer is malformed',f=>f.respondDirect(async()=>({clients:[]}))],
-  ['older Operations shares are unknown',f=>{f.state.clientAccess=null}],['connected workspaces are unknown',f=>{f.state.clientNativeAccess=null}]])
+  ['older Operations shares cannot be read now',f=>{f.legacy=async()=>{throw new Error('down')}}],['older Operations shares are malformed',f=>{f.legacy=async()=>({grants:[]})}],['connected workspaces cannot be read now',f=>f.respondNative(async()=>{throw new Error('down')})]])
 test(`unknown access is said and asked, never taken as none: ${label}`,async()=>{
   const f=askFixture([]);arrange(f);f.answer=false;await f.context.createOutputShare(f.form,'project','output');
   assert.equal(f.asked[0].text,'Client access could not be checked. Publishing this task shows it to every client who has the whole project.');assert.equal(f.posts().length,0);
@@ -200,13 +202,126 @@ test('a partly read list names what it has and says the rest is unknown; long li
   assert.equal(directClientShare.publishAudienceText(['a','b','c','d','e','f','g'],{complete:true}),'Publishing this task shows it to a, b, c, d, e and 2 other clients.');
   assert.equal(directClientShare.publishAudienceText(['a','b','c','d','e','f'],{complete:true}),'Publishing this task shows it to a, b, c, d, e and 1 other client.');
 });
-test('older Operations shares of the same model are named; other models and revoked ones are not',async()=>{
+test('older and connected Operations shares of the same model are read now, not taken from when Share opened',async()=>{
   const f=askFixture([]);
-  f.state.clientAccess={projects:[],associations:[{id:'a1',modelId:'model',projectId:'p1'},{id:'a2',modelId:'other',projectId:'p2'}],grants:[
-    {id:'1',scopeType:'task',associationId:'a1',clientName:'Task client'},{id:'2',scopeType:'project',projectId:'p1',clientName:'Project client'},
-    {id:'3',scopeType:'task',associationId:'a2',clientName:'Other model'},{id:'4',scopeType:'project',projectId:'p1',clientName:'Gone',status:'revoked'}]};
+  // What the dialog loaded when it opened says nobody; that is not used.
+  f.state.clientAccess={projects:[],associations:[],grants:[]};f.state.clientNativeAccess={targets:[],grants:[]};
+  f.legacy=async()=>({projects:[],associations:[{id:'a1',modelId:'model',projectId:'p1'},{id:'a2',modelId:'other',projectId:'p2'}],grants:[
+    {id:'1',scopeType:'task',associationId:'a1',clientName:'Task client',accountId:'acc-1'},{id:'2',scopeType:'project',projectId:'p1',clientName:'Project client',accountId:'acc-2'},
+    {id:'3',scopeType:'task',associationId:'a2',clientName:'Other model',accountId:'acc-3'},{id:'4',scopeType:'project',projectId:'p1',clientName:'Gone',status:'revoked',accountId:'acc-4'}]});
+  f.respondNative(async()=>({targets:[{sourceId:'s',workspaceId:'w9',projectPublicId:'pp',workspaceName:'Connected client',projectName:'P',associations:[{id:'n1',viewerModelId:'model',modelTitle:'M'}]}],
+    grants:[{id:'5',source_id:'s',workspace_id:'w9',project_public_id:'pp',workspace_name:'Connected client',project_name:'P',scope_type:'task',association_id:'n1',status:'active'}]}));
   f.answer=false;await f.context.createOutputShare(f.form,'project','output');
-  assert.equal(f.asked[0].text,'Publishing this task shows it to Project client and Task client.');
+  assert.equal(f.asked[0].text,'Publishing this task shows it to Connected client, Project client and Task client.');
+  assert.deepEqual(f.state.clientAccess.grants,[],'the open dialog is not rewritten');
+});
+test('two different clients with one name are told apart; one client in two lists is one',async()=>{
+  const f=askFixture([grantFor('Acme',{workspaceId:'workspace-aaa111'}),grantFor('acme',{workspaceId:'workspace-bbb222'}),grantFor('North Farm')]);
+  f.respondNative(async()=>({targets:[{sourceId:'s',workspaceId:'North Farm',projectPublicId:'pp',workspaceName:'North Farm',projectName:'P',associations:[{id:'n1',viewerModelId:'model',modelTitle:'M'}]}],
+    grants:[{id:'5',source_id:'s',workspace_id:'North Farm',project_public_id:'pp',workspace_name:'North Farm',project_name:'P',scope_type:'task',association_id:'n1',status:'active'}]}));
+  f.answer=false;await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.asked[0].text,'Publishing this task shows it to Acme (ref aaa111), acme (ref bbb222) and North Farm.');
+});
+test('a client added while the question is open is asked about before anything is sent; a client removed is not',async()=>{
+  const f=askFixture([grantFor('Acme')]);f.onAsk=count=>{if(count===1)f.direct=[grantFor('Acme'),grantFor('North Farm')]};
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.deepEqual(f.asked.map(item=>item.text),['Publishing this task shows it to Acme.','Client access changed while you were deciding. Publishing this task shows it to Acme and North Farm.']);
+  assert.equal(f.posts().length,1);
+  const g=askFixture([grantFor('Acme'),grantFor('North Farm')]);g.onAsk=()=>{g.direct=[grantFor('Acme')]};
+  await g.context.createOutputShare(g.form,'project','output');assert.equal(g.asked.length,1);assert.equal(g.posts().length,1);
+  const h=askFixture([grantFor('A0')]);h.onAsk=count=>{h.direct=[...h.direct,grantFor(`A${count}`)]};
+  await h.context.createOutputShare(h.form,'project','output');
+  assert.equal(h.posts().length,0);assert.equal(h.asked.length,3);assert.match(h.notices.at(-1)[0],/keeps changing/);
+  const k=askFixture([grantFor('Acme')]);k.onAsk=()=>k.respondDirect(async()=>{throw new Error('down')});k.answers=0;
+  await k.context.createOutputShare(k.form,'project','output');
+  assert.match(k.asked[1].text,/could not be checked/,'losing the list is a change too');
+});
+for(const known of [true,false])test(`a task moved to another project while Share is open is never published there unasked: ${known?'already known here':'refused by the server'}`,async()=>{
+  const f=askFixture([]);f.state.tasks[0].displayName='North wall';f.state.projects.push({id:'other',displayName:'Other site'});
+  const reopened=[];f.context.openShareModal=async(projectId,outputId)=>{reopened.push([projectId,outputId]);f.state.shareContext={id:'new',projectId}};
+  const base=f.context.api;f.context.api=(path,options)=>path==='/api/v1/tasks/task'?(f.calls.push({path,options:{}}),Promise.resolve({task:{id:'task',projectId:'other',displayName:'North wall'}})):base(path,options);
+  f.respondPost(async()=>{throw Object.assign(new Error('output_project_changed'),{status:409})});
+  if(known)f.state.tasks=[{...f.state.tasks[0],projectId:'other'}];
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.posts().length,known?0:1);if(!known)assert.equal(f.posts()[0].options.body.expectedProjectId,'project');
+  assert.deepEqual(reopened,[['other','output']]);assert.equal(f.state.shareContext.mode,'public');
+  assert.equal(f.state.tasks[0].projectId,'other');assert.equal(f.state.outputs[0].projectId,'other');
+  assert.match(f.notices.at(-1)[0],/North wall.*moved to Other site.*Nothing was shared/);assert.equal(f.output.activePublished,false);
+});
+const changes={
+  token:f=>{f.state.token='other'},'signed-in person':f=>{f.state.adminSession={subject:'ops:other'}},dialog:f=>{f.state.shareContext={id:'another'}},
+  'closed dialog':f=>{f.modal.open=false},'replaced form':f=>{f.form.isConnected=false},'share permission':f=>f.permissions.delete('viewer.shares.create'),
+  'publish permission':f=>f.permissions.delete('viewer.processing.publish'),'model row':f=>{f.state.outputs=[]},'model task':f=>{f.state.outputs=[{...f.output,taskId:'elsewhere'}]},
+  'task row':f=>{f.state.tasks=[]}};
+for(const [label,change] of Object.entries(changes))for(const point of ['first read','question','read after the answer','retry check'])
+test(`nothing is sent when the ${label} changes during the ${point}`,async()=>{
+  const f=askFixture([grantFor('Acme')]);f.state.adminSession={subject:'ops:me'};
+  f.permissions=new Set(['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']);f.context.can=name=>f.permissions.has(name);
+  let expected=0;
+  if(point==='retry check'){
+    f.respondPost(async()=>{throw new Error('network')});await f.context.createOutputShare(f.form,'project','output');expected=1;assert.equal(f.posts().length,1);
+    const base=f.context.api;f.context.api=async(path,options)=>{const value=await base(path,options);if(path.endsWith('/outputs/output/shares')&&options?.method!=='POST')change(f);return value};
+    f.respondPost(async()=>({share:{id:'share'},viewUrl:'https://viewer.test/view/x'}));
+  }else if(point==='question')f.onAsk=()=>change(f);
+  else{let reads=0;f.legacy=async()=>{if(++reads===(point==='first read'?1:2))change(f);return{projects:[],associations:[],grants:[]}}}
+  const asked=f.asked.length;await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.posts().length,expected);assert.equal(f.output.activePublished,false);assert.equal(f.state.lastShareUrl,null);
+  if(point==='first read'||point==='retry check')assert.equal(f.asked.length,asked,'and nothing more is asked');
+});
+for(const changed of ['token','person'])test(`a link that answers after the ${changed} changed is not kept in the new session`,async()=>{
+  const f=askFixture([]);f.state.adminSession={subject:'ops:me'};
+  f.respondPost(async()=>{if(changed==='token')f.state.token='other';else f.state.adminSession={subject:'ops:other'};return{share:{id:'share'},viewUrl:'https://viewer.test/view/secret'}});
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.state.lastShareUrl,null);assert.deepEqual(f.state.shares,{});assert.equal(f.output.activePublished,false);assert.equal(f.rendered.length,0);
+});
+test('losing the right to see client shares while they are read makes the list incomplete',async()=>{
+  const f=askFixture([]);let allowed=true;const base=f.context.can;f.context.can=name=>name==='viewer.client_grants.manage'?allowed:base(name);
+  f.legacy=async()=>{allowed=false;return{projects:[],associations:[],grants:[]}};f.answer=false;
+  await f.context.createOutputShare(f.form,'project','output');assert.match(f.asked[0].text,/could not be checked/);
+});
+test('a task read for reopening is ignored after the dialog or sign-in changed',async()=>{
+  for(const change of [f=>{f.state.shareContext={id:'another'}},f=>{f.state.token='other'}]){
+    const f=askFixture([]);let reopened=0;f.context.openShareModal=async()=>{reopened++};
+    const base=f.context.api;f.context.api=async(path,options)=>{if(path!=='/api/v1/tasks/task')return base(path,options);change(f);return{task:{id:'task',projectId:'other'}}};
+    f.respondPost(async()=>{throw Object.assign(new Error('output_project_changed'),{status:409})});
+    await f.context.createOutputShare(f.form,'project','output');
+    assert.equal(reopened,0);assert.equal(f.state.tasks[0].projectId,'project');assert.equal(f.state.outputs[0].projectId,'project');
+  }
+});
+test('a moved task whose project cannot be read closes to sharing with a clear message',async()=>{
+  const f=askFixture([]);let reopened=0;f.context.openShareModal=async()=>{reopened++};
+  const base=f.context.api;f.context.api=(path,options)=>path==='/api/v1/tasks/task'?Promise.reject(new Error('down')):base(path,options);
+  f.respondPost(async()=>{throw Object.assign(new Error('output_project_changed'),{status:409})});
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(reopened,0);assert.match(f.notices.at(-1)[0],/moved to another project.*Nothing was shared.*Close Share/);
+});
+test('a retry asks again: refused first attempt, and an uncertain one that did not publish',async()=>{
+  const f=askFixture([grantFor('Acme')]);let failure=Object.assign(new Error('publish_conflict'),{status:409}),fail=true;
+  f.respondPost(async()=>{if(fail)throw failure;return{share:{id:'share'},viewUrl:'https://viewer.test/view/x'}});
+  await f.context.createOutputShare(f.form,'project','output');assert.equal(f.asked.length,1);
+  f.direct=[grantFor('Acme'),grantFor('North Farm')];fail=false;
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.asked.length,2);assert.match(f.asked[1].text,/Acme and North Farm/);
+  assert.notEqual(f.posts()[0].options.headers['Idempotency-Key'],f.posts()[1].options.headers['Idempotency-Key'],'a refused request is over');
+
+  const g=askFixture([grantFor('Acme')]);fail=true;failure=new Error('network');
+  g.respondPost(async()=>{if(fail)throw failure;return{share:{id:'share'},viewUrl:'https://viewer.test/view/x'}});
+  await g.context.createOutputShare(g.form,'project','output');g.direct=[grantFor('Acme'),grantFor('North Farm')];fail=false;
+  await g.context.createOutputShare(g.form,'project','output');
+  assert.equal(g.asked.length,2);assert.match(g.asked[1].text,/Acme and North Farm/);
+  assert.deepEqual(g.posts()[1].options,g.posts()[0].options,'the same request and key, so it can never be created twice');
+});
+test('an uncertain attempt that did publish is replayed unasked; one that cannot be checked is not sent',async()=>{
+  const f=askFixture([grantFor('Acme')]);let fail=true;
+  f.respondPost(async()=>{if(fail)throw Object.assign(new Error('bad gateway'),{status:502});return{share:{id:'share'},viewUrl:'https://viewer.test/view/x'}});
+  await f.context.createOutputShare(f.form,'project','output');fail=false;
+  const base=f.context.api;let preflight=async()=>({publicationRequired:false,shares:[]});
+  f.context.api=(path,options)=>path.endsWith('/outputs/output/shares')&&options?.method!=='POST'?preflight():base(path,options);
+  f.direct=[grantFor('Acme'),grantFor('North Farm')];
+  preflight=async()=>{throw new Error('down')};await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.posts().length,1);assert.equal(f.asked.length,1);assert.match(f.notices.at(-1)[0],/Could not check whether the link was created/);
+  preflight=async()=>({publicationRequired:false,shares:[]});await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.asked.length,1);assert.equal(f.posts().length,2);assert.deepEqual(f.posts()[1].options,f.posts()[0].options);
 });
 test('an existing version asks once, with the clients and the existing links together',async()=>{
   const f=askFixture([grantFor('Acme')]);f.state.sharePreflight.output={existingAccessUpdateRequired:true};
@@ -358,7 +473,7 @@ test('cancelled exposure confirmation sends nothing; accepted confirmation carri
 
 test('raced consent retry uses new key, uncertain retry retains exact consent payload even if output refreshes as published',async()=>{
   const f=fixture();let attempt=0;
-  f.respond(async()=>{
+  f.respondPost(async()=>{
     attempt++;
     if(attempt===1)throw Object.assign(new Error('existing_access_update_confirmation_required'),{status:409});
     if(attempt===2)throw new Error('network interrupted');
@@ -373,7 +488,7 @@ test('raced consent retry uses new key, uncertain retry retains exact consent pa
 });
 
 test('same-form uncertain network retry retains key; changing visible request input rotates it',async()=>{
-  const f=fixture();f.respond(async()=>{throw new Error('offline')});
+  const f=fixture();f.respondPost(async()=>{throw new Error('offline')});
   await f.context.createOutputShare(f.form,'project','output');await f.context.createOutputShare(f.form,'project','output');
   assert.equal(f.posts()[0].options.headers['Idempotency-Key'],f.posts()[1].options.headers['Idempotency-Key']);
   f.form.elements.label.value='Changed';await f.context.createOutputShare(f.form,'project','output');
@@ -381,7 +496,7 @@ test('same-form uncertain network retry retains key; changing visible request in
 });
 
 test('double submit is suppressed while creation is pending and close suppresses stale modal rendering',async()=>{
-  const f=fixture();let done;f.respond(()=>new Promise(resolve=>{done=resolve}));
+  const f=fixture();let done;f.respondPost(()=>new Promise(resolve=>{done=resolve}));
   const pending=f.context.createOutputShare(f.form,'project','output');await new Promise(resolve=>setImmediate(resolve));
   await f.context.createOutputShare(f.form,'project','output');assert.equal(f.posts().length,1);
   f.modal.close();f.form.isConnected=false;done({share:{id:'share'},viewUrl:'https://viewer.test/view/success'});await pending;
