@@ -60,6 +60,7 @@ function sharedViewerConfig(project, share) {
   }, SHARE_SESSION_TTL_MS);
   if (share.modelId) return toViewerConfig(project, { assetToken,assetFilter:asset=>assetAllowed(share,asset.kind) });
   const result = toClientConfig(project);
+  if (!assetAllowed(share, 'shots')) result.assets.shots = null;
   const prefix = `/session-assets/${encodeURIComponent(assetToken)}`;
   for (const [kind, value] of Object.entries(result.assets || {})) {
     if (kind !== 'pointCloudFormat' && typeof value === 'string' && value.startsWith('/assets/')) {

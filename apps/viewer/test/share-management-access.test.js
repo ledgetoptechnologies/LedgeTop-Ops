@@ -2,6 +2,23 @@
 const test=require('node:test'),assert=require('node:assert/strict'),crypto=require('node:crypto'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),express=require('express');
 const {openDatabase}=require('../server/database'),{ViewerRepository}=require('../server/repository'),auth=require('../server/auth'),shareApi=require('../server/shareApi'),assets=require('../server/assets');
 const {resolveEphemeralAccess,localAccess}=require('../server/ephemeralMeasurementAccess');
+
+test('legacy share bootstrap keeps camera positions subject to the stored permission', () => {
+  const project = { id: 'legacy-fixture', relAssets: {
+    shots: { root: 'webodm', rel: 'camera-positions.geojson' },
+    ortho: { root: 'webodm', rel: 'ortho.tif' },
+  } };
+  const configFor = permissions => shareApi.sharedViewerConfig(project, {
+    id: 'legacy-link', viewerProjectId: project.id, permissions,
+  });
+
+  const optedOut = configFor({ cameras: false });
+  assert.equal(optedOut.assets.shots, null);
+  assert.match(optedOut.assets.ortho, /^\/session-assets\/[^/]+\/legacy-fixture\/webodm\/ortho\.tif$/);
+  assert.match(configFor({ cameras: true }).assets.shots, /\/camera-positions\.geojson$/);
+  assert.match(configFor({}).assets.shots, /\/camera-positions\.geojson$/);
+});
+
 test('share changes enforce password, views, cameras, downloads and queued calculation access across old signed credentials',async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'share-policy-')),db=openDatabase(path.join(root,'viewer.sqlite')),repository=new ViewerRepository(db),body=Buffer.from('fixture bytes');
  const entries=[['glb','model.glb'],['ortho','ortho.tif'],['dsm','dsm.tif'],['shots','shots.geojson'],['report','report.pdf'],['allAssets','all.zip']];

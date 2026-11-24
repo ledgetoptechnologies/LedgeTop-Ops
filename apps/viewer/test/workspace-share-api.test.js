@@ -53,9 +53,10 @@ async function readyShareFixture(t) {
   const base=`http://127.0.0.1:${server.address().port}`;
   c.manage=(id,{method='GET',body,token=c.admin,suffix='/link',key=crypto.randomUUID()}={})=>fetch(`${base}/api/v1/processing/shares/${id}${suffix}`,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':key},...(body?{body:JSON.stringify(body)}:{})});
   c.base=base;
-  c.request=({item=c.item,method='POST',body={publishIfReady:true},token=c.admin,key=crypto.randomUUID()}={})=>fetch(
+  c.request=({item=c.item,method='POST',body={publishIfReady:true},token=c.admin,key=crypto.randomUUID(),receiptOnly=false}={})=>fetch(
     `${base}/api/v1/processing/outputs/${item.versionId}/shares`,{
-      method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':key},
+      method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':key,
+        ...(receiptOnly?{'X-Viewer-Share-Receipt-Only':'true'}:{})},
       ...(method==='GET'?{}:{body:JSON.stringify(body)}),
     });
   c.assertPrivate=(item=c.item)=>{
@@ -103,6 +104,18 @@ test('existing links keep what they had: the list says what they really allow, a
     assert.deepEqual(c.repository.getPublicShare(share.id).permissions,expected);assert.equal(c.repository.getPublicShare(share.id).expiresAt,null);
   }
   await c.manage(off.id,{method:'PATCH',suffix:'',body:{permissions:{view:true,cameras:true}}});assert.equal(c.repository.getPublicShare(off.id).permissions.cameras,true);
+});
+
+test('a partial permission edit preserves a separate permission saved while its password is hashed',async t=>{
+  const c=await readyShareFixture(t),created=(await (await c.request()).json()).share;
+  t.mock.method(auth,'hashPassword',async()=>{
+    const concurrent=await c.manage(created.id,{method:'PATCH',suffix:'',body:{permissions:{view:true,download:true}}});
+    assert.equal(concurrent.status,200);
+    return 'test-only-password-hash';
+  });
+  const response=await c.manage(created.id,{method:'PATCH',suffix:'',body:{password:'ordinary edit',permissions:{view:true,cameras:true}}});
+  assert.equal(response.status,200);
+  assert.deepEqual((await response.json()).share.permissions,{view:true,measure:true,cameras:true,download:true});
 });
 
 test('durable recopy is authenticated, encrypted, stable through edits and fails closed for unrecoverable legacy links',async t=>{
@@ -181,13 +194,47 @@ for(const [label,sql] of [
 test('lost success response replays the committed link and publication without storing the capability',async t=>{
   const c=await readyShareFixture(t),key=crypto.randomUUID();c.failAfterCommit=true;
   assert.equal((await c.request({key})).status,500);
-  const response=await c.request({key});assert.equal(response.status,201);assert.equal(response.headers.get('idempotency-replayed'),'true');
+  const response=await c.request({key,receiptOnly:true});assert.equal(response.status,201);assert.equal(response.headers.get('idempotency-replayed'),'true');
+  assert.equal(response.headers.get('cache-control'),'no-store');
   const result=await response.json(),token=result.viewUrl.split('/').at(-1);
+  assert.deepEqual(await (await c.request({key})).json(),result);
   assert.equal(c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n,1);
   assert.equal(c.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='processing_attempt.published'").get().n,1);
   const receipt=c.db.prepare('SELECT response_json FROM admin_idempotency WHERE idempotency_key=?').get(key).response_json;
   assert.equal(receipt.includes(token),false);assert.equal(receipt.includes('viewUrl'),false);
   assert.equal((await c.request({key,body:{publishIfReady:true,label:'different'}})).status,409);
+});
+
+test('a share receipt lookup leaves missing and pending requests unchanged',async t=>{
+  const c=await readyShareFixture(t),key=crypto.randomUUID(),body={publishIfReady:true};
+  const sessionId=c.processing.getAdminSessionByHash(auth.hashToken(c.admin)).id;
+  const route=`/api/v1/processing/outputs/${c.item.versionId}/shares`;
+  const requestHash=crypto.createHash('sha256').update(`POST\n${route}\n${JSON.stringify(body)}`).digest('hex');
+  let response=await c.request({key,body,receiptOnly:true});
+  assert.equal(response.status,404);
+  assert.equal((await response.json()).code,'share_receipt_missing');
+  assert.equal(c.processing.getAdminIdempotency(sessionId,key),undefined);
+  c.assertPrivate();
+
+  c.processing.reserveOutputShareReceipt({sessionId,key,method:'POST',path:route,requestHash});
+  const pending=c.processing.getAdminIdempotency(sessionId,key);
+  response=await c.request({key,body,receiptOnly:true});
+  assert.equal(response.status,409);
+  assert.equal((await response.json()).code,'idempotency_in_progress');
+  assert.equal(response.headers.get('retry-after'),'2');
+  assert.deepEqual(c.processing.getAdminIdempotency(sessionId,key),pending);
+
+  c.db.prepare('UPDATE admin_idempotency SET created_at=? WHERE session_id=? AND idempotency_key=?')
+    .run(new Date(Date.now()-16*60_000).toISOString(),sessionId,key);
+  const expired=c.processing.getAdminIdempotency(sessionId,key);
+  response=await c.request({key,body,receiptOnly:true});
+  assert.equal(response.status,404);
+  assert.equal((await response.json()).code,'share_receipt_missing');
+  assert.deepEqual(c.processing.getAdminIdempotency(sessionId,key),expired);
+  c.assertPrivate();
+  assert.equal((await c.request({key,body})).status,201);
+  assert.equal(c.processing.getAdminIdempotency(sessionId,key).request_hash,requestHash);
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n,1);
 });
 
 test('replacement requires explicit existing-access consent and keeps old activation on rejection',async t=>{

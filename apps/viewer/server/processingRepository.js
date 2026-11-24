@@ -1393,8 +1393,55 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   adminSessionLive(session,at=Date.now()) { return Boolean(session&&!session.revokedAt&&Date.parse(session.expiresAt)>at); }
   renewAdminSession(id,{permissions,displayUnits,expiresAt}) { const t=now();const changed=this.database.prepare('UPDATE admin_sessions SET permissions_json=?,display_units=?,expires_at=?,updated_at=? WHERE id=? AND revoked_at IS NULL').run(JSON.stringify(permissions),displayUnits||'imperial',expiresAt,t,id);return changed.changes===1?this.adminSession(this.database.prepare('SELECT * FROM admin_sessions WHERE id=?').get(id)):null; }
   revokeAdminSession(id) { const t=now();return this.database.prepare('UPDATE admin_sessions SET revoked_at=COALESCE(revoked_at,?),updated_at=? WHERE id=?').run(t,t,id).changes===1; }
-  reserveAdminIdempotency({sessionId,key,method,path:route,requestHash}) { const t=now();let existing=this.database.prepare('SELECT * FROM admin_idempotency WHERE session_id=? AND idempotency_key=?').get(sessionId,key);if(existing&&(Date.parse(existing.expires_at)<=Date.now()||(existing.response_status===null&&Date.parse(existing.created_at)<=Date.now()-15*60_000))){this.database.prepare('DELETE FROM admin_idempotency WHERE session_id=? AND idempotency_key=? AND response_status IS NULL').run(sessionId,key);existing=this.database.prepare('SELECT * FROM admin_idempotency WHERE session_id=? AND idempotency_key=?').get(sessionId,key);}if(existing)return{created:false,record:existing};try{this.database.prepare('INSERT INTO admin_idempotency(session_id,idempotency_key,method,path,request_hash,created_at,expires_at) VALUES (?,?,?,?,?,?,?)').run(sessionId,key,method,route,requestHash,t,new Date(Date.now()+24*3600_000).toISOString());return{created:true};}catch(error){if(!String(error.message).includes('UNIQUE constraint failed'))throw error;return{created:false,record:this.database.prepare('SELECT * FROM admin_idempotency WHERE session_id=? AND idempotency_key=?').get(sessionId,key)};} }
+  reserveAdminIdempotency({sessionId,key,method,path:route,requestHash}) {
+    let existing=this.getAdminIdempotency(sessionId,key);
+    // A different operation cannot reclaim an expired output-share claim.
+    if(existing?.method==='POST'&&/^\/api\/v1\/processing\/outputs\/[^/]+\/shares(?:\?|$)/.test(existing.path))
+      return {created:false,record:existing};
+    if(existing&&(Date.parse(existing.expires_at)<=Date.now()||this.adminIdempotencyClaimExpired(existing))){
+      this.database.prepare('DELETE FROM admin_idempotency WHERE session_id=? AND idempotency_key=? AND response_status IS NULL AND method=? AND path=? AND request_hash=? AND created_at=?')
+        .run(sessionId,key,existing.method,existing.path,existing.request_hash,existing.created_at);
+      existing=this.getAdminIdempotency(sessionId,key);
+    }
+    if(existing)return {created:false,record:existing};
+    try{
+      this.database.prepare('INSERT INTO admin_idempotency(session_id,idempotency_key,method,path,request_hash,created_at,expires_at) VALUES (?,?,?,?,?,?,?)')
+        .run(sessionId,key,method,route,requestHash,now(),new Date(Date.now()+24*3600_000).toISOString());
+      return {created:true};
+    }catch(error){
+      if(!String(error.message).includes('UNIQUE constraint failed'))throw error;
+      return {created:false,record:this.getAdminIdempotency(sessionId,key)};
+    }
+  }
   completeAdminIdempotency(sessionId,key,status,response) { this.database.prepare('UPDATE admin_idempotency SET response_status=?,response_json=? WHERE session_id=? AND idempotency_key=?').run(status,JSON.stringify(response),sessionId,key); }
+  getAdminIdempotency(sessionId,key) {
+    return this.database.prepare('SELECT * FROM admin_idempotency WHERE session_id=? AND idempotency_key=?').get(sessionId,key);
+  }
+  adminIdempotencyClaimExpired(record,at=Date.now()) {
+    return record.response_status===null&&Date.parse(record.created_at)<=at-15*60_000;
+  }
+  reserveOutputShareReceipt({sessionId,key,method,path:route,requestHash}) {
+    return this.transaction(()=>{
+      const existing=this.getAdminIdempotency(sessionId,key),at=Date.now(),claimedAt=new Date(at).toISOString();
+      const expiresAt=new Date(at+24*3600_000).toISOString();
+      if(!existing){
+        this.database.prepare('INSERT INTO admin_idempotency(session_id,idempotency_key,method,path,request_hash,created_at,expires_at) VALUES (?,?,?,?,?,?,?)')
+          .run(sessionId,key,method,route,requestHash,claimedAt,expiresAt);
+        return {created:true,claimedAt};
+      }
+      // Refresh only the claim. The original key and request identity remain bound.
+      if(existing.method!==method||existing.path!==route||existing.request_hash!==requestHash||!this.adminIdempotencyClaimExpired(existing,at))
+        return {created:false,record:existing};
+      this.database.prepare('UPDATE admin_idempotency SET created_at=?,expires_at=? WHERE session_id=? AND idempotency_key=?')
+        .run(claimedAt,expiresAt,sessionId,key);
+      return {created:true,claimedAt};
+    });
+  }
+  completeOutputShareReceipt({sessionId,key,requestHash,claimedAt},status,response) {
+    return this.database.prepare(`UPDATE admin_idempotency SET response_status=?,response_json=?
+      WHERE session_id=? AND idempotency_key=? AND request_hash=? AND created_at=? AND response_status IS NULL`)
+      .run(status,JSON.stringify(response),sessionId,key,requestHash,claimedAt).changes===1;
+  }
   reserveSubjectOperationReceipt({subject,key,method,path:route,requestHash}){const t=now();return this.transaction(()=>{let existing=this.database.prepare('SELECT * FROM subject_operation_receipts WHERE subject=? AND client_key=?').get(subject,key);if(existing&&existing.operation_id===null&&existing.response_status===null&&Date.parse(existing.created_at)<Date.now()-2*60_000){this.database.prepare('DELETE FROM subject_operation_receipts WHERE subject=? AND client_key=? AND operation_id IS NULL AND response_status IS NULL').run(subject,key);existing=null;}if(existing)return{created:false,record:existing};this.database.prepare('INSERT INTO subject_operation_receipts(subject,client_key,method,path,request_sha256,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run(subject,key,method,route,requestHash,t,t);return{created:true};});}
   attachSubjectOperationReceipt(receipt,operationId){if(!receipt)return;const changed=this.database.prepare('UPDATE subject_operation_receipts SET operation_id=?,updated_at=? WHERE subject=? AND client_key=? AND method=? AND path=? AND request_sha256=? AND operation_id IS NULL').run(operationId,now(),receipt.subject,receipt.key,receipt.method,receipt.path,receipt.requestHash);if(changed.changes!==1){const row=this.database.prepare('SELECT operation_id FROM subject_operation_receipts WHERE subject=? AND client_key=?').get(receipt.subject,receipt.key);if(row?.operation_id!==operationId)throw Object.assign(new Error('operation receipt is unavailable'),{code:'operation_receipt_unavailable'});}}
   completeSubjectOperationReceipt(subject,key,status,response){const operationId=response?.operation?.id||null;this.database.prepare('UPDATE subject_operation_receipts SET response_status=?,response_json=?,operation_id=?,updated_at=? WHERE subject=? AND client_key=?').run(status,JSON.stringify(response),operationId,now(),subject,key);}

@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const path = require('node:path');
 const { validCameraFilename } = require('./cameraPhotos');
+const { effectiveSharePermissions } = require('./publicSharePolicy');
 
 function now() {
   return new Date().toISOString();
@@ -673,9 +674,11 @@ class ViewerRepository {
     return this.publicShare(this.database.prepare('SELECT * FROM public_shares WHERE id=?').get(id));
   }
 
-  updatePublicShare(id,patch) {
+  updatePublicShare(id,patch,{mergePermissions=false}={}) {
     const share=this.getPublicShare(id);if(!share||share.revokedAt)return null;
     const next={...share,...patch};
+    if(mergePermissions&&patch.permissions!==undefined)
+      next.permissions={...effectiveSharePermissions(share.permissions),...patch.permissions};
     this.database.prepare(`UPDATE public_shares SET label=?,password_hash=?,expires_at=?,permissions_json=?,allowed_views_json=?,token_ciphertext=?,authorization_revision=authorization_revision+?,updated_at=? WHERE id=? AND revoked_at IS NULL`).run(next.label,next.passwordHash,next.expiresAt,JSON.stringify(next.permissions),next.allowedViews?JSON.stringify(next.allowedViews):null,next.tokenCiphertext,patch.invalidateAuthorization?1:0,now(),id);
     return this.getPublicShare(id);
   }

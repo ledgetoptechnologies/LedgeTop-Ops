@@ -109,9 +109,19 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       :sha256Hex(Buffer.concat([Buffer.from(`${req.method}\n${req.originalUrl}\n`),rawBody]));
     const durableOperation=/^\/api\/v1\/(?:admin\/uploads\/[^/]+\/finalize|dataset-imports\/(?:preview|adopt|copy)|processing\/(?:catalog-imports\/(?:scans|candidates\/[^/]+\/map)|outputs\/[^/]+\/(?:lod-recovery-attempts|companion-repair-attempts)))$/.test(req.path);
     const shareReceipt=shareReceiptDefinition(req);
-    const reservation=durableOperation
-      ?processing.reserveSubjectOperationReceipt({subject:req.actorId,key,method:req.method,path:req.originalUrl,requestHash})
-      :processing.reserveAdminIdempotency({sessionId:req.adminPrincipal.id,key,method:req.method,path:req.originalUrl,requestHash});
+    const outputShare=shareReceipt?.scope==='model-public-share';
+    const receiptOnlyHeader=req.get('X-Viewer-Share-Receipt-Only');
+    if(receiptOnlyHeader!==undefined&&(!outputShare||receiptOnlyHeader!=='true'))return error(res,400,'invalid_share_receipt_request');
+    const receiptOnly=receiptOnlyHeader==='true';
+    const request={sessionId:req.adminPrincipal.id,key,method:req.method,path:req.originalUrl,requestHash};
+    let reservation;
+    if(receiptOnly){
+      res.setHeader('Cache-Control','no-store');
+      reservation={created:false,record:processing.getAdminIdempotency(request.sessionId,key)};
+      if(!reservation.record)return error(res,404,'share_receipt_missing');
+    }else if(outputShare)reservation=processing.reserveOutputShareReceipt(request);
+    else if(durableOperation)reservation=processing.reserveSubjectOperationReceipt({subject:req.actorId,...request});
+    else reservation=processing.reserveAdminIdempotency(request);
     if(!reservation.created){
       const r=reservation.record,storedHash=r.request_sha256||r.request_hash;
       if(r.method!==req.method||r.path!==req.originalUrl||storedHash!==requestHash)return error(res,409,'idempotency_conflict');
@@ -124,9 +134,12 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
         if(r.response_status===202&&body?.operation?.id){res.setHeader('Location',`/api/v1/operations/${body.operation.id}`);res.setHeader('Retry-After','2');}
         return r.response_status===204?res.status(204).end():res.status(r.response_status).json(body);
       }
+      // An expired claim cannot finalize a new claim. A receipt read leaves it unchanged.
+      if(receiptOnly&&processing.adminIdempotencyClaimExpired(r))return error(res,404,'share_receipt_missing');
+      if(outputShare)res.setHeader('Retry-After','2');
       return error(res,409,'idempotency_in_progress');
     }
-    req.adminIdempotency={sessionId:req.adminPrincipal.id,key,requestHash};
+    req.adminIdempotency={sessionId:request.sessionId,key,requestHash,claimedAt:reservation.claimedAt};
     let finalized=false;
     const finish=(body)=>{
       if(finalized||req.adminIdempotencyCompleted||res.statusCode>=500)return;
@@ -135,7 +148,8 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       const stored=shareReceipt&&res.statusCode===201&&body&&typeof body==='object'
         ?Object.fromEntries(Object.entries(body).filter(([name])=>name!=='viewUrl'))
         :body;
-      processing.completeAdminIdempotency(req.adminPrincipal.id,key,res.statusCode,stored);
+      if(outputShare)processing.completeOutputShareReceipt(req.adminIdempotency,res.statusCode,stored);
+      else processing.completeAdminIdempotency(request.sessionId,key,res.statusCode,stored);
     };
     const originalJson=res.json.bind(res),originalEnd=res.end.bind(res);
     res.json=(body)=>{finish(body);return originalJson(body);};
@@ -490,7 +504,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
         const result={share:adminShareView(share)};
         // Never persist the capability URL/token. Persist success before COMMIT
         // so a lost response replays the same link without a second publication.
-        processing.completeAdminIdempotency(req.adminIdempotency.sessionId,req.adminIdempotency.key,201,result);
+        if(!processing.completeOutputShareReceipt(req.adminIdempotency,201,result))reject(409,'idempotency_in_progress');
         return result;
       });
       req.adminIdempotencyCompleted=true;
@@ -527,13 +541,13 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       if(b.label!==undefined){if(b.label!==null&&(typeof b.label!=='string'||b.label.length>120))return error(res,400,'invalid_label');patch.label=b.label||null;}
       if(b.password!==undefined){if(b.password!==null&&(typeof b.password!=='string'||(b.password!==''&&b.password.length<8)||b.password.length>1024))return error(res,400,'invalid_password');patch.passwordHash=b.password?await auth.hashPassword(b.password):null;}
       if(b.expiresAt!==undefined){const expiry=b.expiresAt===null?null:Date.parse(b.expiresAt);if(b.expiresAt!==null&&(!Number.isFinite(expiry)||expiry<=Date.now()))return error(res,400,'invalid_expiry');patch.expiresAt=expiry?new Date(expiry).toISOString():null;}
-      if(b.permissions!==undefined){if(!onlyKeys(b.permissions,['view','measure','cameras','download'])||b.permissions.view!==true||Object.values(b.permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');patch.permissions={...effectiveSharePermissions(share.permissions),...b.permissions};}
+      if(b.permissions!==undefined){if(!onlyKeys(b.permissions,['view','measure','cameras','download'])||b.permissions.view!==true||Object.values(b.permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');patch.permissions=b.permissions;}
       if(b.allowedViews!==undefined){const model=repository.getModel(share.modelId),available=Object.keys(VIEW_KINDS).filter(view=>VIEW_KINDS[view].some(kind=>model?.activeVersion?.assets.some(asset=>asset.kind===kind&&asset.published)));if(!Array.isArray(b.allowedViews)||!b.allowedViews.length||b.allowedViews.some(view=>!available.includes(view)))return error(res,400,'invalid_allowed_views');patch.allowedViews=[...new Set(b.allowedViews)];}
       if(b.displayUnits!==undefined){if(!validUnits(b.displayUnits))return error(res,400,'invalid_units');patch.displayUnits=b.displayUnits;}
       // Password hashing yields; recheck the administrative session before committing.
       if(!admin(req))return error(res,401,'authentication_required');
       if(!['viewer.shares.read','viewer.shares.create'].every(p=>req.adminPrincipal.permissions.includes(p)))return error(res,403,'permission_denied');
-      const updated=repository.transaction(()=>{const result=repository.updatePublicShare(share.id,{...patch,invalidateAuthorization:true});if(result)repository.audit({actorType:'admin',actorId:req.actorId,action:'share.updated',entityType:'share',entityId:share.id,details:{fields:Object.keys(patch)}});return result;});
+      const updated=repository.transaction(()=>{const result=repository.updatePublicShare(share.id,{...patch,invalidateAuthorization:true},{mergePermissions:true});if(result)repository.audit({actorType:'admin',actorId:req.actorId,action:'share.updated',entityType:'share',entityId:share.id,details:{fields:Object.keys(patch)}});return result;});
       return updated?res.json({share:adminShareView(updated)}):error(res,409,'share_changed');
     }catch(e){next(e);}
   });

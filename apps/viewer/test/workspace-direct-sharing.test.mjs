@@ -29,6 +29,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     shares:{},sharePreflight:{},projectShares:{},clientAccess:{projects:[],associations:[],grants:[]},shareContext:{id:'context'},lastShareUrl:null};
   const calls=[],notices=[],rendered=[],decisions=[],copyButtons=[];
   let nativeRespond=async()=>({targets:[],grants:[]}),directRespond=async()=>{throw Object.assign(new Error('Not found'),{status:404})};
+  let receipt=async()=>{throw Object.assign(new Error('No saved receipt'),{status:404,code:'share_receipt_missing'})};
   let sequence=0,respond=async(path,options)=>options.method==='POST'
     ?{share:{id:'share',permissions:{view:true,download:false}},viewUrl:'https://viewer.test/view/capability'}
     :path.endsWith('/client-grants')?state.clientAccess:{shares:[],publicationRequired:true,existingAccessUpdateRequired:false,eligibleAssetKinds:['glb']};
@@ -37,13 +38,13 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     contains:()=>false,querySelectorAll:selector=>selector==='[data-action="copy-share"]'?copyButtons:[],
   };
   const esc=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
-  const context=vm.createContext({...directClientShare,document,state,modal,modalContent,crypto:{randomUUID:()=>`request-${++sequence}`},
+  const context=vm.createContext({...directClientShare,document,state,modal,modalContent,AbortController,crypto:{randomUUID:()=>`request-${++sequence}`},
     can:permission=>permissions.includes(permission),esc,dateTime:value=>value,card:(title,body)=>`<section><h3>${esc(title)}</h3>${body}</section>`,
     empty:text=>`<p>${esc(text)}</p>`,field:(label,name,attrs='')=>`<label>${esc(label)}<input name="${name}" ${attrs}></label>`,
     badge:value=>`<span>${esc(value)}</span>`,button:(action,id,label)=>`<button data-action="${action}" data-id="${id}">${label}</button>`,
     openModal:(title,html)=>{rendered.push({title,html});modal.open=true},injectProjectShareCard:()=>{},
     values:form=>({label:form.elements.label?.value||'',password:form.elements.password?.value||'',expiresAt:form.elements.expiresAt.value}),
-    api:async(path,options={})=>{calls.push({path,options:JSON.parse(JSON.stringify(options))});return path.startsWith('/api/v1/workspace/direct-client-grants')?directRespond(path,options):path.endsWith('/native-client-grants')?nativeRespond(path,options):respond(path,options)},
+    api:async(path,options={})=>{if(options.beforeDispatch)(await options.beforeDispatch())();calls.push({path,options:JSON.parse(JSON.stringify(options))});if(options.headers?.['X-Viewer-Share-Receipt-Only'])return receipt(path,options);return path.startsWith('/api/v1/workspace/direct-client-grants')?directRespond(path,options):path.endsWith('/native-client-grants')?nativeRespond(path,options):respond(path,options)},
     outputFences:new Map(),projectDataGeneration:0,refreshProjectOutputs:async projectId=>{calls.refreshes=[...(calls.refreshes||[]),projectId]},
     mutate:async(...args)=>calls.push({mutation:args}),toast:(...args)=>notices.push(args),navigator:{clipboard:{writeText:async()=>{throw new Error('clipboard denied')}}},
     dialogs:{confirm:async()=>{decisions.push('confirm');return true},form:async()=>null},
@@ -52,9 +53,10 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   const form={dataset:{outputId:'output'},isConnected:true,elements:{label:{value:''},password:{value:''},expiresAt:{value:''},
     measure:{checked:true},cameras:{checked:true},download:{checked:false}},button:{disabled:false},querySelector(){return this.button},
     querySelectorAll(selector){return selector==='input[name="allowedViews"]'?[{checked:true,value:'model'}]:[]}};
-  const posts=()=>calls.filter(call=>call.options?.method==='POST');
-  return {context,document,state,output,posts,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
-    respond(fn){respond=fn},respondPost(fn){const base=respond;respond=(path,options)=>options.method==='POST'?fn(path,options):base(path,options)},respondNative(fn){nativeRespond=fn},respondDirect(fn){directRespond=fn},html:()=>rendered.at(-1)?.html||''};
+  const receipts=()=>calls.filter(call=>call.options?.headers?.['X-Viewer-Share-Receipt-Only']);
+  const posts=()=>calls.filter(call=>call.options?.method==='POST'&&!call.options.headers?.['X-Viewer-Share-Receipt-Only']);
+  return {context,document,state,output,posts,receipts,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
+    respondReceipt(fn){receipt=fn},respond(fn){respond=fn},respondPost(fn){const base=respond;respond=(path,options)=>options.method==='POST'?fn(path,options):base(path,options)},respondNative(fn){nativeRespond=fn},respondDirect(fn){directRespond=fn},html:()=>rendered.at(-1)?.html||''};
 }
 
 test('ready share preflight and cancel execute only reads and never reopen a closed modal',async()=>{
@@ -161,7 +163,7 @@ test('a project Share is unaffected by task rows coming and going',async()=>{
 const grantFor=(clientDisplayName,extra={})=>({grantId:clientDisplayName,sourceId:'s',workspaceId:clientDisplayName,viewerProjectId:'project',scopeType:'project',taskId:null,revokedAt:null,expiresAt:null,clientDisplayName,...extra});
 function askFixture(grants){
   const f=fixture(),asked=[];f.direct=grants;f.legacy=async()=>({projects:[],associations:[],grants:[]});
-  f.context.dialogs.confirm=async(text,options)=>{asked.push({text,options:{...options}});f.onAsk?.(asked.length);return f.answer!==false};
+  f.context.dialogs.confirm=async(text,{signal,...options})=>{asked.push({text,options});f.onAsk?.(asked.length);return f.answer!==false};
   f.respondDirect(async()=>({clients:[],grants:f.direct,clientsNextCursor:null,grantsNextCursor:null}));
   const base=f.context.api;f.context.api=(path,options)=>path==='/api/v1/workspace/client-grants'?(f.calls.push({path,options:{}}),f.legacy()):base(path,options);
   return Object.assign(f,{asked});
@@ -260,7 +262,7 @@ test(`nothing is sent when the ${label} changes during the ${point}`,async()=>{
   let expected=0;
   if(point==='retry check'){
     f.respondPost(async()=>{throw new Error('network')});await f.context.createOutputShare(f.form,'project','output');expected=1;assert.equal(f.posts().length,1);
-    const base=f.context.api;f.context.api=async(path,options)=>{const value=await base(path,options);if(path.endsWith('/outputs/output/shares')&&options?.method!=='POST')change(f);return value};
+    f.respondReceipt(async()=>{change(f);throw Object.assign(new Error('No saved receipt'),{status:404,code:'share_receipt_missing'})});
     f.respondPost(async()=>({share:{id:'share'},viewUrl:'https://viewer.test/view/x'}));
   }else if(point==='question')f.onAsk=()=>change(f);
   else{let reads=0;f.legacy=async()=>{if(++reads===(point==='first read'?1:2))change(f);return{projects:[],associations:[],grants:[]}}}
@@ -303,9 +305,9 @@ test('a refusal for a moved task, after its dialog closed, still says nothing wa
   assert.equal(reopened,0);assert.match(f.notices.at(-1)[0],/North wall moved to another project\. Nothing was shared/);
 });
 test('losing the right to see client shares while they are read makes the list incomplete',async()=>{
-  const f=askFixture([]);let allowed=true;const base=f.context.can;f.context.can=name=>name==='viewer.client_grants.manage'?allowed:base(name);
+  const f=askFixture([grantFor('Acme')]);let allowed=true;const base=f.context.can;f.context.can=name=>name==='viewer.client_grants.manage'?allowed:base(name);
   f.legacy=async()=>{allowed=false;return{projects:[],associations:[],grants:[]}};f.answer=false;
-  await f.context.createOutputShare(f.form,'project','output');assert.match(f.asked[0].text,/could not be checked/);
+  await f.context.createOutputShare(f.form,'project','output');assert.match(f.asked[0].text,/could not be checked/);assert.doesNotMatch(f.asked[0].text,/Acme/);
 });
 test('a task read for reopening is ignored after the dialog or sign-in changed',async()=>{
   for(const change of [f=>{f.state.shareContext={id:'another'}},f=>{f.state.token='other'}]){
@@ -339,17 +341,20 @@ test('a retry asks again: refused first attempt, and an uncertain one that did n
   assert.equal(g.asked.length,2);assert.match(g.asked[1].text,/Acme and North Farm/);
   assert.deepEqual(g.posts()[1].options,g.posts()[0].options,'the same request and key, so it can never be created twice');
 });
-test('an uncertain attempt that did publish is replayed unasked; one that cannot be checked is not sent',async()=>{
-  const f=askFixture([grantFor('Acme')]);let fail=true;
-  f.respondPost(async()=>{if(fail)throw Object.assign(new Error('bad gateway'),{status:502});return{share:{id:'share'},viewUrl:'https://viewer.test/view/x'}});
-  await f.context.createOutputShare(f.form,'project','output');fail=false;
-  const base=f.context.api;let preflight=async()=>({publicationRequired:false,shares:[]});
-  f.context.api=(path,options)=>path.endsWith('/outputs/output/shares')&&options?.method!=='POST'?preflight():base(path,options);
+test('a completed receipt recovers the exact request without another write or confirmation',async()=>{
+  const f=askFixture([grantFor('Acme')]);
+  f.respondPost(async()=>{throw Object.assign(new Error('bad gateway'),{status:502})});
+  await f.context.createOutputShare(f.form,'project','output');
   f.direct=[grantFor('Acme'),grantFor('North Farm')];
-  preflight=async()=>{throw new Error('down')};await f.context.createOutputShare(f.form,'project','output');
-  assert.equal(f.posts().length,1);assert.equal(f.asked.length,1);assert.match(f.notices.at(-1)[0],/Could not check whether the link was created/);
-  preflight=async()=>({publicationRequired:false,shares:[]});await f.context.createOutputShare(f.form,'project','output');
-  assert.equal(f.asked.length,1);assert.equal(f.posts().length,2);assert.deepEqual(f.posts()[1].options,f.posts()[0].options);
+  f.respondReceipt(async()=>{throw new Error('down')});
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.posts().length,1);assert.equal(f.asked.length,1);
+  f.respondReceipt(async()=>({share:{id:'share'},viewUrl:'https://viewer.test/view/x'}));
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(f.asked.length,1);assert.equal(f.posts().length,1);assert.equal(f.receipts().length,2);
+  assert.equal(f.receipts()[1].options.headers['Idempotency-Key'],f.posts()[0].options.headers['Idempotency-Key']);
+  assert.deepEqual(f.receipts()[1].options.body,f.posts()[0].options.body);
+  assert.equal(f.state.lastShareUrl,'https://viewer.test/view/x');
 });
 test('an existing version asks once, with the clients and the existing links together',async()=>{
   const f=askFixture([grantFor('Acme')]);f.state.sharePreflight.output={existingAccessUpdateRequired:true};
@@ -649,12 +654,15 @@ test('raced consent retry uses new key, uncertain retry retains exact consent pa
   assert.equal(f.state.lastShareUrl,'https://viewer.test/view/same-link');
 });
 
-test('same-form uncertain network retry retains key; changing visible request input rotates it',async()=>{
+test('uncertain retry retains the exact key and blocks edits until the original is resolved',async()=>{
   const f=fixture();f.respondPost(async()=>{throw new Error('offline')});
   await f.context.createOutputShare(f.form,'project','output');await f.context.createOutputShare(f.form,'project','output');
   assert.equal(f.posts()[0].options.headers['Idempotency-Key'],f.posts()[1].options.headers['Idempotency-Key']);
   f.form.elements.label.value='Changed';await f.context.createOutputShare(f.form,'project','output');
-  assert.notEqual(f.posts()[1].options.headers['Idempotency-Key'],f.posts()[2].options.headers['Idempotency-Key']);
+  assert.equal(f.posts().length,2);
+  assert.equal(f.receipts().length,2);
+  assert.equal(f.receipts()[1].options.headers['Idempotency-Key'],f.posts()[0].options.headers['Idempotency-Key']);
+  assert.match(f.notices.at(-1)[0],/Restore its original settings/);
 });
 
 test('double submit is suppressed while creation is pending and close suppresses stale modal rendering',async()=>{
@@ -891,7 +899,9 @@ test('editing preserves legacy all-views and password unless explicitly changed;
   assert.equal(f.calls.length,2);assert.equal(f.calls[0].options.headers['Idempotency-Key'],f.calls[1].options.headers['Idempotency-Key']);
   assert.equal(f.calls[0].options.body.expiresAt,share.expiresAt);
   assert.equal(Object.hasOwn(f.calls[0].options.body,'password'),false);assert.equal(Object.hasOwn(f.calls[0].options.body,'allowedViews'),false);
-  form.elements.passwordAction.value='remove';form.shareViewsChanged=true;await submit();
+  assert.equal(Object.hasOwn(f.calls[0].options.body,'permissions'),false);
+  form.elements.passwordAction.value='remove';form.shareViewsChanged=true;form.elements.download.checked=true;await submit();
+  assert.deepEqual(f.calls[2].options.body.permissions,{view:true,download:true});
   assert.equal(f.calls[2].options.body.password,null);assert.deepEqual(f.calls[2].options.body.allowedViews,['model']);
   assert.notEqual(f.calls[2].options.headers['Idempotency-Key'],f.calls[1].options.headers['Idempotency-Key']);
 });
@@ -1079,4 +1089,38 @@ for(const change of ['closed','context','token','subject','permission'])test(`la
   if(change==='permission')permissions.splice(permissions.indexOf('viewer.client_grants.manage'),1);
   settle({clients:[{sourceId:'s',workspaceId:'w',displayName:'Late'}],grants:[]});await new Promise(resolve=>setImmediate(resolve));
   assert.equal(f.state.clientDirectAccess,access);assert.equal(f.clientPanel.innerHTML,panel);
+});
+
+
+test('a reopened share checks the original pending request before writing',async()=>{
+  const f=fixture();
+  f.respondPost(async()=>{throw new Error('response unavailable')});
+  await f.context.createOutputShare(f.form,'project','output');
+  const reopened={...f.form,shareBusy:false,elements:{...f.form.elements,label:{value:'Another label'}}};
+  f.form.isConnected=false;
+  f.state.shareContext={id:'reopened'};
+  f.respondReceipt(async()=>{throw Object.assign(new Error('Pending'),{status:409,code:'idempotency_in_progress'})});
+  await f.context.createOutputShare(reopened,'project','output');
+  assert.equal(f.posts().length,1);assert.equal(f.receipts().length,1);
+  assert.equal(f.receipts()[0].options.headers['Idempotency-Key'],f.posts()[0].options.headers['Idempotency-Key']);
+  assert.deepEqual(f.receipts()[0].options.body,f.posts()[0].options.body);
+  assert.match(f.notices.at(-1)[0],/still being processed/);
+});
+
+test('workspace transport rechecks the dispatch guard after a session renewal',async()=>{
+  const events=[],session={id:'same'};
+  const state={token:'synthetic',adminSession:session};
+  const workspaceRenewal={expiresAtMs:Date.now()+10_000,waitForRenewal:async()=>{
+    events.push('renewed');state.adminSession={id:'same'};return true;
+  }};
+  const fetch=async()=>{
+    events.push('dispatch');return{status:events.filter(item=>item==='dispatch').length===1?401:200};
+  };
+  const scope=vm.createContext({state,workspaceRenewal,workspaceRecovery:{wait:async()=>{}},fetch});
+  vm.runInContext(declaration('workspaceFetch'),scope);
+  const result=await scope.workspaceFetch('/fixture',{},async()=>{
+    events.push('review');return()=>events.push('checked');
+  });
+  assert.equal(result.status,200);
+  assert.deepEqual(events,['review','checked','dispatch','renewed','review','checked','dispatch']);
 });
