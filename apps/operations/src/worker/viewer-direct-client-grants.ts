@@ -556,18 +556,21 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  // Recheck recipient authority after the remote catalog request, then pin it in the INSERT itself.
  const {row,guard,operationsAuthority,pin}=await recipient(env,g.sourceId,g.workspaceId),database=db(env),id=crypto.randomUUID(),now=new Date().toISOString();
  const listed=JSON.stringify(replaces??[]),marker=`${REPLACED_PREFIX}${id}`;
- if(replaces)await requireCurrentShares(database,g,replaces);
- else{
+ // A replacement checks inside the try below: the other request under this key may have committed while this one waited
+ // for the Viewer, and its receipt then decides before any conflict does.
+ if(!replaces){
   const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
   AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
   if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);
  }
  // Real limit, not a listing artefact: the client portal reads all of one client's grants per request.
  // Checked here for a clear early answer and again inside the INSERT so concurrent creates cannot pass it.
- if(await remainingShares(database,g,listed)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
+ const requireRoom=async()=>{if(await remainingShares(database,g,listed)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');};
+ if(!replaces)await requireRoom();
  const result={grantId:id,sourceId:g.sourceId,workspaceId:g.workspaceId,viewerProjectId:g.viewerProjectId,taskId:g.taskId,scopeType:g.scopeType,
  includeFuturePublished:g.includeFuturePublished,permissions:g.permissions,expiresAt,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:row.display_name};
- try{await database.batch([
+ try{if(replaces){await requireCurrentShares(database,g,replaces);await requireRoom();}
+ await database.batch([
  // A replacement is one batch. The marker names this attempt's fresh id and is written only where id, version, client,
  // project and active status all match; the immutability trigger keeps a revoked row, and so the marker, as it is.
  ...(replaces?[
@@ -618,19 +621,26 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  ...(replaces?[database.prepare(`INSERT INTO viewer_direct_client_grant_audit(id,grant_id,action,actor_staff_id,idempotency_key,details_json,created_at)
   SELECT lower(hex(randomblob(16))),id,'grant.revoke',?,?,json_object('success',json('true'),'replacedBy',?),? FROM viewer_direct_client_grants WHERE revoke_reason=?`)
   .bind(principal.id,input.idempotencyKey,id,now,marker)]:[])]);
- }catch(error){const replay=await receipt(env,principal.id,input.idempotencyKey,fingerprint);if(replay){
+ }catch(error){const committed=async()=>{const replay=await receipt(env,principal.id,input.idempotencyKey,fingerprint);if(!replay)return null;
    const current=await recipient(env,g.sourceId,g.workspaceId),priorPin=createReceiptAuthorityPin(replay.response);
    if((priorPin&&JSON.stringify(priorPin)!==JSON.stringify(current.pin))
     ||(!priorPin&&(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))))
     fail(409,'relationship_missing','Client authority changed; refresh the client connection');
-   return {grant:createReceiptGrant(replay.response,replay.grantId,g.selection),replayed:true,...(replaces?{sessionRevocation:await drainReplaced(env,replaces)}:{})};}
+   return {grant:createReceiptGrant(replay.response,replay.grantId,g.selection),replayed:true,...(replaces?{sessionRevocation:await drainReplaced(env,replaces)}:{})};};
+  const replay=await committed();if(replay)return replay;
   if(replaces){
-   // The batch changed nothing. Say why by reading again, in this order; anything else is not guessed.
-   await requireCurrentShares(database,g,replaces);
-   const current=await recipient(env,g.sourceId,g.workspaceId);
-   if(JSON.stringify([current.pin,current.row])!==JSON.stringify([pin,row]))fail(409,'relationship_missing','Client connection changed; refresh before sharing');
-   if(await remainingShares(database,g,listed)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
-   throw error;
+   // This request changed nothing. A conflict seen before the batch stands: the receipt was read after it. Otherwise say
+   // why by reading again, in this order, then read the receipt once more; anything else is not guessed.
+   if(error instanceof DirectViewerGrantError)throw error;
+   let reason:unknown=error;
+   try{
+    await requireCurrentShares(database,g,replaces);
+    const current=await recipient(env,g.sourceId,g.workspaceId);
+    if(JSON.stringify([current.pin,current.row])!==JSON.stringify([pin,row]))fail(409,'relationship_missing','Client connection changed; refresh before sharing');
+    await requireRoom();
+   }catch(conflict){reason=conflict;}
+   const late=await committed();if(late)return late;
+   throw reason;
   }
   const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
    AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();

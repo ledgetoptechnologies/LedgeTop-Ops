@@ -208,6 +208,52 @@ describe('replacing a client’s shares in a project',()=>{
   expect((await row(f,won!.grant.grantId)).status).toBe('active');
  },120_000);
 
+ it('a request that was still waiting for the Viewer answers from the receipt its key now has, before any conflict',async()=>{
+  // The delayed request read no receipt; the other one commits while it waits for the catalog.
+  const delayed=async(f:Fixture,mine:Record<string,unknown>,peer:Record<string,unknown>,key:string)=>{
+   let release=()=>{},waiting=()=>{};const held=new Promise<void>(resolve=>{release=resolve;}),reached=new Promise<void>(resolve=>{waiting=resolve;});
+   mocks.catalog.mockImplementationOnce(async(input:{projectId:string})=>{waiting();await held;return {project:{id:input.projectId},tasks:[]};});
+   const answer=share(f.env,mine,key).then(value=>({value}),error=>({error}));await reached;
+   const won=await share(f.env,peer,key),landed=await everything(f);release();
+   const result=await answer as {value?:Awaited<ReturnType<typeof share>>;error?:{code:string;grants?:unknown}};
+   expect(await everything(f)).toBe(landed);return {won,...result};
+  };
+  const f=await fixture(),first=(await share(f.env)).grant,list=[ref(first)];
+  const same=await delayed(f,{selection:only,replaces:list},{selection:only,replaces:list},'replace-delayed-0001');
+  expect(same.value).toEqual({...same.won,replayed:true});
+  const next=[ref(same.won.grant)];
+  const different=await delayed(f,{replaces:next},{selection:only,replaces:next},'replace-delayed-0002');
+  expect(different.error).toMatchObject({code:'idempotency_conflict'});expect(different.error!.grants).toBeUndefined();
+  // Another payload under another key is still told the current shares.
+  await expect(share(f.env,{replaces:next})).rejects.toMatchObject({code:'share_changed',grants:[ref(different.won.grant)]});
+  // The limit too: the other request took the client's last place in another project.
+  await f.database.batch(Array.from({length:98},(_,index)=>f.database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,
+   include_future_published,can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+   VALUES(?,'project-alpha:primary','ws-one',?,NULL,'project',1,1,0,0,NULL,1,'active','staff-one',?,?)`).bind(`filler-${index}`,`filler-project-${index}`,NOW,NOW)));
+  const limit=await delayed(f,{viewerProjectId:'project-last',replaces:[]},{viewerProjectId:'project-other',replaces:[]},'replace-delayed-0003');
+  expect(limit.error).toMatchObject({code:'idempotency_conflict'});
+  await expect(share(f.env,{viewerProjectId:'project-last',replaces:[]})).rejects.toMatchObject({code:'grant_limit'});
+  // An identical request at the limit it filled itself.
+  const seat=(await row(f,'filler-0')),free=[{grantId:String(seat.id),grantVersion:1}];
+  const full=await delayed(f,{viewerProjectId:'filler-project-0',replaces:free},{viewerProjectId:'filler-project-0',replaces:free},'replace-delayed-0004');
+  expect(full.value).toEqual({...full.won,replayed:true});
+ },120_000);
+
+ it('a receipt that appears while a failed batch is being explained still decides',async()=>{
+  for(const identical of [true,false]){
+   const f=await fixture(),first=(await share(f.env)).grant,list=[ref(first)],key='replace-explained-01';let checks=0,failed=false;
+   let won:Awaited<ReturnType<typeof share>>|undefined;
+   const session={prepare:(sql:string)=>{const statement=f.database.prepare(sql);
+     if(!/^SELECT id grantId,grant_version grantVersion/.test(sql)||++checks!==2)return statement;
+     return {bind:(...values:unknown[])=>({all:async()=>{won=await share(f.env,identical?{selection:only,replaces:list}:{replaces:list},key);return statement.bind(...values).all();}})};},
+    batch:async(statements:D1PreparedStatement[])=>{if(!failed){failed=true;await f.database.prepare(`UPDATE portal_v2_directory_checkpoints SET source_sequence=2 WHERE workspace_id='ws-one'`).run();}return f.database.batch(statements);}};
+   const answer=share({...f.env,DELIVERY_DB:{withSession:()=>session}} as unknown as Env,{selection:only,replaces:list},key);
+   if(identical)expect(await answer).toEqual({...won!,replayed:true});
+   else await expect(answer).rejects.toMatchObject({code:'idempotency_conflict'});
+   expect(checks).toBeGreaterThanOrEqual(2);expect(await readDirectViewerClientGrants(f.env,CLIENT)).toHaveLength(1);
+  }
+ },120_000);
+
  it('counts every row that carries its marker, listed or not',async()=>{
   const f=await fixture(),first=(await share(f.env)).grant,fixed='11111111-1111-4111-8111-111111111111';
   await f.database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,can_measure,can_view_cameras,can_download,
