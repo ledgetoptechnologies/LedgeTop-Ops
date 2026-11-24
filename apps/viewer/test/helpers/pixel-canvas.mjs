@@ -2,7 +2,7 @@
 // pixels, so what covers what can be checked without a browser.
 export function pixelCanvasFactory(log) {
   return () => {
-    let data = null, stride = 0, path = [], state = { fillStyle: '#000000', strokeStyle: '#000000', font: '10px x', lineWidth: 1 };
+    let data = null, stride = 0, path = [], clip = null, state = { fillStyle: '#000000', strokeStyle: '#000000', font: '10px x', lineWidth: 1 };
     const stack = [], texts = [], canvas = { width: 0, height: 0 };
     const colour = style => {
       if (style.startsWith('#')) return [1, 3, 5].map(i => parseInt(style.slice(i, i + 2), 16)).concat(1);
@@ -10,6 +10,7 @@ export function pixelCanvasFactory(log) {
       return [r, g, b, a];
     };
     const dot = (x, y, [r, g, b, a]) => {
+      if (clip && !(x >= clip[0] && y >= clip[1] && x < clip[0] + clip[2] && y < clip[1] + clip[3])) return;
       if (!data || x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return;
       const i = (y * canvas.width + x) * 4;
       [r, g, b].forEach((v, k) => { data[i + k] = Math.round(v * a + data[i + k] * (1 - a)); });
@@ -20,8 +21,12 @@ export function pixelCanvasFactory(log) {
     const px = () => Number(/([\d.]+)px/.exec(state.font)[1]);
     const width = text => text.length * px() * 0.55;
     const ctx = {
-      save() { stack.push({ ...state }); }, restore() { state = stack.pop(); },
+      save() { stack.push([{ ...state }, clip]); }, restore() { [state, clip] = stack.pop(); },
+      clip() { clip = path.box; },
+      // Nearest-neighbour; only from another canvas of this factory.
+      drawImage(from, x, y, w, h) { for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) dot(x + xx, y + yy, from.read(Math.floor((xx + 0.5) / w * from.width), Math.floor((yy + 0.5) / h * from.height)).map((v, i) => (i === 3 ? v / 255 : v))); },
       measureText: text => ({ width: width(text) }),
+      scale() {},
       putImageData(image, x = 0, y = 0) {
         if (!x && !y && image.data.length === canvas.width * canvas.height * 4) { stride = canvas.width; data = new Uint8ClampedArray(image.data); return; }
         ready();
@@ -29,7 +34,7 @@ export function pixelCanvasFactory(log) {
         for (let r = 0; r * w * 4 < image.data.length; r++) data.set(image.data.subarray(r * w * 4, (r + 1) * w * 4), ((y + r) * canvas.width + x) * 4);
       },
       createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
-      getImageData(x, y, w, h) { const out = new Uint8ClampedArray(w * h * 4); for (let r = 0; r < h; r++) out.set(data.subarray(((y + r) * canvas.width + x) * 4, ((y + r) * canvas.width + x + w) * 4), r * w * 4); return { data: out }; },
+      getImageData(x, y, w, h) { const out = new Uint8ClampedArray(w * h * 4); for (let r = 0; r < h; r++) out.set(data.subarray(((y + r) * canvas.width + x) * 4, ((y + r) * canvas.width + x + w) * 4), r * w * 4); return { data: out, width: w, height: h }; },
       fillRect(x, y, w, h) { rect(x, y, w, h, colour(state.fillStyle)); },
       fillText(text, x, y) { texts.push({ text, x, y, px: px(), width: width(text) }); rect(x, y - px() * 0.35, width(text), px() * 0.7, colour(state.fillStyle)); },
       strokeText() {}, translate() {}, rotate() {}, closePath() {},
@@ -47,6 +52,7 @@ export function pixelCanvasFactory(log) {
     for (const key of ['lineJoin', 'lineCap', 'textBaseline', 'textAlign']) ctx[key] = '';
     for (const key of Object.keys(state)) Object.defineProperty(ctx, key, { get: () => state[key], set: value => { state[key] = value; } });
     canvas.getContext = () => ctx;
+    canvas.read = (x, y) => { const i = (y * stride + x) * 4; return Array.from(data.subarray(i, i + 4)); };
     canvas.toBlob = cb => cb(new Blob(['png'], { type: 'image/png' }));
     log.push({ texts, ctx, pixel: (x, y) => { const i = (y * stride + x) * 4; return Array.from(data.slice(i, i + 4)); } });
     return canvas;
