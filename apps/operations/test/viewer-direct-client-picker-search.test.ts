@@ -186,6 +186,14 @@ describe('direct Viewer grant listing',()=>{
   const other=await listDirectViewerClientGrantWorkspace(env,principal,{include:'grants',viewerProjectId:'other-project'});
   expect(other).toMatchObject({grants:[],grantsNextCursor:null});
  });
+ it('reads the receipts of a whole page at once, not one read per share',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'},{id:'ws-two',name:'Two'}]);await seedGrants(database,200);
+  let receiptReads=0;const session={batch:(statements:D1PreparedStatement[])=>database.batch(statements),
+   prepare:(sql:string)=>{if(/^SELECT grant_id,response_json FROM viewer_direct_client_grant_mutation_receipts|^SELECT response_json FROM viewer_direct_client_grant_mutation_receipts/.test(sql))receiptReads++;return database.prepare(sql);}};
+  const counted={...env,DELIVERY_DB:{withSession:()=>session}} as unknown as Env;
+  expect((await listDirectViewerClientGrantWorkspace(counted,principal,{include:'grants'})).grants).toHaveLength(100);expect(receiptReads).toBe(1);
+  expect(await readDirectViewerClientGrants(counted,{sourceId:'project-alpha:primary',workspaceId:'ws-one'})).toHaveLength(100);expect(receiptReads).toBe(2);
+ },120_000);
  it('holds the per-client limit when another share lands between the count and the insert',async()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'},{id:'ws-two',name:'Two'}]);await seedGrants(database,198);// 99 per client
   const now=new Date().toISOString();let raced=false;

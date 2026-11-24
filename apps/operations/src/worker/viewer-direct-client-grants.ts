@@ -221,7 +221,7 @@ export async function readDirectViewerClientGrants(env:Env,input:{sourceId:strin
  const rows=await db(env).prepare(`SELECT * FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=?
  AND ${effectiveGrantSql()}
  ${input.grantId?'AND id=?':''} ORDER BY id LIMIT 101`).bind(input.sourceId,input.workspaceId,...(input.grantId?[input.grantId]:[])).all<DirectViewerClientGrantRow>();
- if(rows.results.length>100)fail(503,'grant_limit','Client Viewer grant limit exceeded');return (await Promise.all(rows.results.map(row => resolveRestrictedGrant(env, row)))).filter(row => row !== null);
+ if(rows.results.length>100)fail(503,'grant_limit','Client Viewer grant limit exceeded');return (await resolveRestrictedGrants(env, rows.results)).filter(row => row !== null);
 }
 type PickerRecipient=Recipient&{sort_name?:string;workspace_display_name?:string};
 export interface DirectViewerPickerClient {sourceId:string;workspaceId:string;displayName:string;businessName:string;
@@ -310,7 +310,7 @@ export async function listDirectViewerClientGrantWorkspace(env:Env,principal:Sta
   if(rows.results.length>DIRECT_VIEWER_GRANT_PAGE_SIZE)grantsNextCursor=grants.at(-1)!.id;
  }
  return {clients,clientsNextCursor,grantsNextCursor,
-  grants:(await Promise.all(grants.map(row => resolveRestrictedGrant(env, row, true)))).map((row, index) => directViewerClientGrantView(row
+  grants:(await resolveRestrictedGrants(env, grants, true)).map((row, index) => directViewerClientGrantView(row
    // A row whose receipt contradicts it gives no access: staff see it as ended, never as a whole project.
    ?? { ...grants[index]!, authorization_expires_at: RESTRICTED_GRANT_EXPIRY }))};
 }
@@ -334,13 +334,21 @@ function validCreateReceiptEnvelope(envelope: Record<string, unknown>): boolean 
 
 // An older reader sees an ended grant. A v2 or v3 receipt must prove the exact immutable creation before the
 // effective expiry is restored or the selection applied; on a row without the sentinel it is a contradiction.
-async function resolveRestrictedGrant(env: Env, row: DirectViewerClientGrantRow, includeExpired = false) {
- const receipts = await db(env).prepare(`SELECT response_json FROM viewer_direct_client_grant_mutation_receipts
-   WHERE grant_id=? AND action='grant.create' ORDER BY created_at LIMIT 2`).bind(row.id).all<{response_json:string}>();
- if (row.authorization_expires_at !== RESTRICTED_GRANT_EXPIRY) return receipts.results.some(item => carriesSelection(item.response_json)) ? null : row;
- if (receipts.results.length !== 1) return null;
+async function resolveRestrictedGrants(env: Env, rows: DirectViewerClientGrantRow[], includeExpired = false) {
+ if (!rows.length) return [];
+ // One read for the whole page: every row needs its receipts, and a read per row would be a hundred of them.
+ const found = await db(env).prepare(`SELECT grant_id,response_json FROM viewer_direct_client_grant_mutation_receipts
+   WHERE action='grant.create' AND grant_id IN (SELECT value FROM json_each(?))`)
+  .bind(JSON.stringify(rows.map(row => row.id))).all<{grant_id:string;response_json:string}>();
+ const receipts = new Map<string, string[]>();
+ for (const item of found.results) receipts.set(item.grant_id, [...receipts.get(item.grant_id) ?? [], item.response_json]);
+ return rows.map(row => resolveRestrictedGrant(row, receipts.get(row.id) ?? [], includeExpired));
+}
+function resolveRestrictedGrant(row: DirectViewerClientGrantRow, receipts: string[], includeExpired: boolean): DirectViewerClientGrantRow | null {
+ if (row.authorization_expires_at !== RESTRICTED_GRANT_EXPIRY) return receipts.some(carriesSelection) ? null : row;
+ if (receipts.length !== 1) return null;
  let envelope: Record<string, unknown>;
- try { envelope = JSON.parse(receipts.results[0]!.response_json); } catch { return null; }
+ try { envelope = JSON.parse(receipts[0]!); } catch { return null; }
  const selection = envelope && typeof envelope === 'object' && !Array.isArray(envelope) ? envelopeSelection(envelope) : null;
  if (!selection || !validRecipientAuthorityPin(envelope.recipientAuthorityPin)) return null;
  const grant = envelope.grant;
