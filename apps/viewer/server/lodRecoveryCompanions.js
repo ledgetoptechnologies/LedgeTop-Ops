@@ -138,7 +138,7 @@ async function verifyRecoveryCompanionDestination(plan, destination, { signal = 
 function ownedRecoveryCompanions(plan, targetRelativePath, attemptId) {
   return {
     assets: plan.assets.map(asset => ({ ...asset, relativePath: `${targetRelativePath}/${asset.relativePath}`,
-      rootKey: 'models', storageMode: 'managed', published: false, sourceAttemptId: attemptId })),
+      rootKey: 'models', storageMode: 'managed', published: false, sourceAttemptId: attemptId, recoveryCopy: true })),
     cameraPhotos: plan.cameraPhotos.map(photo => ({ ...photo,
       relativePath: `${targetRelativePath}/${photo.relativePath}`, rootKey: 'models' })),
   };

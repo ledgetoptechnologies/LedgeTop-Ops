@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const path = require('node:path');
 const { validCameraFilename } = require('./cameraPhotos');
+const { assertAssetIntegrity, insertAssetIntegrity } = require('./assetIntegrityRecords');
 
 function now() {
   return new Date().toISOString();
@@ -443,10 +444,10 @@ class ViewerRepository {
       const insertAsset = this.database.prepare(`INSERT INTO model_assets(
         id,version_id,kind,root_key,relative_path,format,content_type,byte_size,storage_mode,published,source_attempt_id,sha256,manifest_sha256,created_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-      const insertAssetFile = this.database.prepare('INSERT INTO model_asset_files(asset_id,relative_path,byte_size,sha256) VALUES (?,?,?,?)');
-      const insertAssetChunk=this.database.prepare('INSERT INTO model_asset_chunks(asset_id,relative_path,chunk_index,byte_offset,byte_size,sha256) VALUES (?,?,?,?,?,?)');
       for (const asset of input.assets || []) {
         const assetId = crypto.randomUUID();
+        const integrity = { ...asset, manifestFiles: asset.manifestFiles || asset.files };
+        assertAssetIntegrity(integrity, { recoveryCopy: asset.recoveryCopy === true });
         insertAsset.run(
           assetId,
           versionId,
@@ -463,8 +464,7 @@ class ViewerRepository {
           asset.manifestSha256 || null,
           timestamp,
         );
-        for(const chunk of asset.chunks||[])insertAssetChunk.run(assetId,'',chunk.chunkIndex,chunk.byteOffset,chunk.byteSize,chunk.sha256);
-        for (const file of asset.manifestFiles || asset.files || []){insertAssetFile.run(assetId,file.relativePath,file.byteSize,file.sha256);for(const chunk of file.chunks||[])insertAssetChunk.run(assetId,file.relativePath,chunk.chunkIndex,chunk.byteOffset,chunk.byteSize,chunk.sha256);}
+        insertAssetIntegrity(this.database, assetId, integrity);
       }
 
       const insertCameraPhoto = cameraPhotoLinksAvailable ? this.database.prepare(`INSERT INTO model_camera_photos(

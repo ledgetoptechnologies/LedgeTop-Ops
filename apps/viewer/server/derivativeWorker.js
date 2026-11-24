@@ -546,8 +546,14 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
           if (reusedManifest && verified.asset.manifestSha256 !== reusedManifest.assets[0]?.manifestSha256) {
             throw Object.assign(new Error('copied verified mesh artifacts changed before registration'), { code: 'lod_provenance_invalid' });
           }
+          // Supersession later compares the copy's chunk rows with this plan, so
+          // a reused tree keeps the plan's rows even where they predate chunks.
+          if (reusedManifest) {
+            const planned = new Map(reusedManifest.assets[0].manifestFiles.map((file) => [file.relativePath, file.chunks]));
+            verified.asset.manifestFiles = verified.asset.manifestFiles.map((file) => ({ ...file, chunks: planned.get(file.relativePath) || [] }));
+          }
           derivativePhase(processing, job, owner, 'registering');
-          if (!processing.registerVerifiedLodAsset(job.id, owner, verified.asset, verified.provenance, { leaseToken: job.lease_token })) {
+          if (!processing.registerVerifiedLodAsset(job.id, owner, verified.asset, verified.provenance, { leaseToken: job.lease_token, recoveryCopy: Boolean(reusedManifest) })) {
             throw Object.assign(new Error('derivative lease was lost before verified tile registration'), { code: 'lease_lost' });
           }
           const auditEvidence = successfulLodAuditEvidence(verified.provenance);

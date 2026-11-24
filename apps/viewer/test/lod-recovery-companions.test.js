@@ -22,9 +22,11 @@ const { stable, OFFICIAL_CONVERTER_BINARY_SHA256 } = require('../lod-converter-p
 const { config } = require('../server/config');
 const { retainedChunkVerifier } = require('../server/retainedChunkVerifier');
 const { buildMeshRecoveryManifest } = require('../server/retainedManifest');
+const { RACES, race } = require('./helpers/scoped-file-races');
 
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const jsonHash = value => sha(JSON.stringify(value));
+const CHUNK = 4 * 1024 * 1024;
 const linux = { skip: process.platform === 'win32' };
 
 function fixture(t) {
@@ -61,7 +63,11 @@ function richSource(context, { glb = Buffer.from('fixture-glb'), obj = Buffer.fr
   const attempt = processing.createImportedAttempt({ id: crypto.randomUUID(), taskId: task.id, datasetId: dataset.id,
     providerTaskId: 'source', createdBy: 'staff', staged: false });
   const base = `${task.id}/${attempt.id}`;
-  const assets = ['obj', 'glb'].map(kind => ({ kind, ...write(context, 'models', `${base}/model.${kind}`, kind === 'obj' ? obj : glb), published: false }));
+  const assets = ['obj', 'glb'].map(kind => ({ kind, ...write(context, 'models', `${base}/model.${kind}`, kind === 'obj' ? obj : glb), published: false }))
+    .map(asset => asset.byteSize < CHUNK ? asset : { ...asset, chunks: Array.from({ length: Math.ceil(glb.length / CHUNK) }, (_, chunkIndex) => {
+      const bytes = glb.subarray(chunkIndex * CHUNK, (chunkIndex + 1) * CHUNK);
+      return { chunkIndex, byteOffset: chunkIndex * CHUNK, byteSize: bytes.length, sha256: sha(bytes) };
+    }) });
   for (const [kind, suffix] of [['ortho', 'ortho.tif'], ['dsm', 'dsm.tif'], ['dtm', 'dtm.tif'], ['shots', 'shots.geojson'], ['report', 'report.pdf'], ['pointCloud', 'source.laz']]) {
     const bytes = Buffer.from(`${kind}-data`);
     assets.push({ kind, ...write(context, 'datasets', `${dataset.id}/${suffix}`, bytes), published: false,
@@ -412,4 +418,49 @@ test('explicit companion repair API has authenticated idempotency, disabled-poli
   assert.equal(context.processing.getTask(recovered.task.id).activeAttemptId, recovered.attempt.id, 'queueing does not replace the active attempt');
   assert.equal(context.processing.getModelOutput(recovered.versionId).status, 'ready');
   assert.equal(context.repository.getModel(recovered.model.id).activeVersionId, null);
+});
+
+test('recovery hashes its mesh pair and keeps a chunkless companion exactly as chunkless as its source', linux, async t => {
+  const context = fixture(t), source = richSource(context, { glb: crypto.randomBytes(4 * 1024 * 1024) });
+  // A raster registered before chunk hashes existed.
+  const ortho = context.database.prepare("SELECT id,relative_path FROM model_assets WHERE version_id=? AND kind='ortho'").get(source.versionId);
+  const legacy = write(context, 'datasets', ortho.relative_path, Buffer.alloc(5 * 1024 * 1024, 7));
+  context.database.prepare('UPDATE model_assets SET byte_size=?,sha256=? WHERE id=?').run(legacy.byteSize, legacy.sha256, ortho.id);
+  context.database.prepare('DELETE FROM model_asset_chunks WHERE asset_id=?').run(ortho.id);
+  queue(context, source);
+  const result = await processLodRecovery(context.processing.claimDatasetOperation('chunk-worker'), { ...context, config: { meshDerivativesEnabled: true } });
+  const assets = result.model.activeVersion.assets, chunks = kind => context.repository.getModelAssetChunks(assets.find(asset => asset.kind === kind).id);
+  assert.deepEqual(chunks('glb'), [{ chunkIndex: 0, byteOffset: 0, byteSize: source.glb.length, sha256: sha(source.glb) }]);
+  assert.deepEqual(chunks('ortho'), []);
+  assert.equal(chunks('dsm').length, 1);
+});
+
+test('companion repair registers a reused tile tree with the chunk rows of its authorized plan', linux, async t => {
+  const context = fixture(t), recovered = await legacyRecovery(context);
+  const tiles = context.database.prepare("SELECT id FROM model_assets WHERE version_id=? AND kind='tiles'").get(recovered.versionId);
+  const leaf = recovered.tree.files.find(file => file.relativePath === 'leaf-a.b3dm');
+  context.database.prepare('INSERT INTO model_asset_chunks(asset_id,relative_path,chunk_index,byte_offset,byte_size,sha256) VALUES (?,?,0,0,?,?)').run(tiles.id, leaf.relativePath, leaf.byteSize, leaf.sha256);
+  const operation = queue(context, recovered, { companionRepair: true }), leased = context.processing.claimDatasetOperation('repair-worker');
+  const result = await processLodRecovery(leased, { ...context, config: { meshDerivativesEnabled: true } });
+  context.processing.activateImportedDerivativesForOperation(operation.id, 'repair-worker', result.attempt.id, result.requiredDerivatives, result);
+  await processOneDerivative({ ...context, config: {} }, 'repair-auditor');
+  assert.equal(context.processing.getDatasetOperation(operation.id).status, 'succeeded');
+  const copied = context.database.prepare("SELECT id FROM model_assets WHERE version_id=? AND kind='tiles'").get(result.model.activeVersion.id);
+  const rows = id => context.database.prepare('SELECT relative_path,chunk_index,byte_offset,byte_size,sha256 FROM model_asset_chunks WHERE asset_id=? ORDER BY relative_path,chunk_index').all(id);
+  assert.equal(rows(copied.id).length, 1);
+  assert.deepEqual(rows(copied.id), rows(tiles.id));
+});
+
+for (const [label, change] of Object.entries(RACES)) test(`recovery refuses to hash its copied mesh after ${label}`, linux, async t => {
+  const context = fixture(t), source = richSource(context, { glb: crypto.randomBytes(5 * 1024 * 1024) });
+  queue(context, source);
+  const leased = context.processing.claimDatasetOperation('race-worker'), payload = JSON.parse(leased.payload_json);
+  const file = path.join(fs.realpathSync.native(context.storage.roots.models), ...payload.targetRelativePath.split('/'), 'model.glb');
+  // Armed only once the copy is in place: the copier has its own checks.
+  let state;
+  const progress = async value => { if (value === 0.75) state = race(t, change, file, path.join(context.root, 'outside')); };
+  await assert.rejects(processLodRecovery(leased, { ...context, config: { meshDerivativesEnabled: true } }, progress), { code: 'lod_recovery_destination_conflict' });
+  assert.equal(state.fired, 1);
+  assert.equal(context.database.prepare('SELECT COUNT(*) n FROM model_versions WHERE id=?').get(payload.ids.versionId).n, 0);
+  assert.equal(context.processing.getModelOutput(payload.ids.versionId), null);
 });
