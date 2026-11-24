@@ -67,6 +67,44 @@ async function readyShareFixture(t) {
   return c;
 }
 
+const {assetAllowed}=require('../server/publicSharePolicy');
+const DAY=24*60*60*1000,near=(value,expected)=>assert.ok(Math.abs(Date.parse(value)-expected)<60_000,`${value}`);
+test('a new link stores every permission: what a request leaves out is off for camera positions and downloads',async t=>{
+  for(const permissions of [undefined,{view:true},{view:true,measure:true},{view:true,download:false}]){
+    const c=await readyShareFixture(t),response=await c.request({body:{publishIfReady:true,...(permissions?{permissions}:{})}});
+    assert.equal(response.status,201);const created=(await response.json()).share,stored=c.repository.getPublicShare(created.id);
+    assert.deepEqual(stored.permissions,{view:true,measure:true,cameras:false,download:false});
+    assert.deepEqual(created.permissions,stored.permissions);
+    assert.equal(assetAllowed(stored,'shots'),false);assert.equal(assetAllowed(stored,'report'),false);assert.equal(assetAllowed(stored,'glb'),true);
+  }
+  const c=await readyShareFixture(t),chosen={view:true,measure:false,cameras:true,download:true};
+  const created=(await (await c.request({body:{publishIfReady:true,permissions:chosen}})).json()).share;
+  assert.deepEqual(c.repository.getPublicShare(created.id).permissions,chosen);
+});
+test('a link that names no end gets 30 days; no end is an explicit null and nothing else',async t=>{
+  let c=await readyShareFixture(t);near((await (await c.request()).json()).share.expiresAt,Date.now()+30*DAY);
+  c=await readyShareFixture(t);assert.equal((await (await c.request({body:{publishIfReady:true,expiresAt:null}})).json()).share.expiresAt,null);
+  c=await readyShareFixture(t);const chosen=new Date(Date.now()+90*DAY).toISOString();
+  assert.equal((await (await c.request({body:{publishIfReady:true,expiresAt:chosen}})).json()).share.expiresAt,chosen);
+  c=await readyShareFixture(t);
+  for(const expiresAt of ['',0,false,'soon','2000-01-01'])assert.equal((await c.request({body:{publishIfReady:true,expiresAt}})).status,400,JSON.stringify(expiresAt));
+  c.assertPrivate();
+});
+test('existing links keep what they had: the list says what they really allow, and a partial edit changes only what it names',async t=>{
+  const c=await readyShareFixture(t),created=(await (await c.request()).json()).share;
+  const link=permissions=>c.repository.createPublicShare({modelId:created.modelId,publicIdHash:crypto.randomBytes(32).toString('hex'),permissions});
+  const old=link({view:true}),off=link({view:true,measure:false,cameras:false,download:false});
+  assert.equal(assetAllowed(c.repository.getPublicShare(old.id),'shots'),true,'a stored link is not rewritten');
+  const shown=(await (await c.request({method:'GET'})).json()).shares.find(share=>share.id===old.id);
+  assert.equal(shown.permissions.cameras,true);assert.equal(shown.permissions.download,false);assert.equal(shown.expiresAt,null);
+  assert.deepEqual(c.repository.getPublicShare(old.id).permissions,{view:true});
+  for(const [share,expected] of [[old,{view:true,measure:true,cameras:true,download:false}],[off,{view:true,measure:false,cameras:false,download:false}]]){
+    const response=await c.manage(share.id,{method:'PATCH',suffix:'',body:{permissions:{view:true}}});assert.equal(response.status,200);
+    assert.deepEqual(c.repository.getPublicShare(share.id).permissions,expected);assert.equal(c.repository.getPublicShare(share.id).expiresAt,null);
+  }
+  await c.manage(off.id,{method:'PATCH',suffix:'',body:{permissions:{view:true,cameras:true}}});assert.equal(c.repository.getPublicShare(off.id).permissions.cameras,true);
+});
+
 test('durable recopy is authenticated, encrypted, stable through edits and fails closed for unrecoverable legacy links',async t=>{
   const c=await readyShareFixture(t),created=await (await c.request()).json(),id=created.share.id;
   assert.deepEqual(created.share.allowedViews,['model']);
@@ -100,7 +138,7 @@ test('ready Share is read-only until explicit link creation, publishes only elig
   let response=await c.request({body:{}});assert.equal(response.status,409);
   assert.equal((await response.json()).code,'publication_confirmation_required');c.assertPrivate();
   response=await c.request();assert.equal(response.status,201);
-  const created=await response.json();assert.equal(created.share.hasPassword,false);assert.equal(created.share.permissions.download,false);
+  const created=await response.json();assert.equal(created.share.hasPassword,false);assert.equal(created.share.permissions.download,false);assert.equal(created.share.permissions.cameras,false);
   assert.match(created.viewUrl,/\/view\/[A-Za-z0-9_-]+$/);
   assert.equal(c.processing.getModelOutput(c.item.versionId).status,'published');
   assert.deepEqual(c.db.prepare('SELECT kind,published FROM model_assets WHERE version_id=? ORDER BY kind').all(c.item.versionId).map(x=>({...x})),[{kind:'glb',published:1},{kind:'report',published:0}]);
@@ -237,4 +275,33 @@ test('admin bearer can create list and revoke a one-time staff link for a publis
   processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:share',permissions:['viewer.processing.publish','viewer.shares.read','viewer.shares.create','viewer.shares.revoke'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
   const app=express();app.use(express.json({verify:(req,_res,buffer)=>{req.rawBody=Buffer.from(buffer)}}));app.use(createProcessingApi({repository,processing,storage:{}}));const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))});t.after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(root,{recursive:true,force:true})});
   const base=`http://127.0.0.1:${server.address().port}`,headers={authorization:`Bearer ${token}`,'content-type':'application/json'},body=JSON.stringify({label:'Review link',password:'password123',permissions:{view:true,measure:true,cameras:false,download:false}});db.exec("CREATE TRIGGER reject_workspace_share_audit BEFORE INSERT ON audit_events WHEN NEW.action='share.created' BEGIN SELECT RAISE(ABORT,'injected share audit failure'); END");let response=await fetch(`${base}/api/v1/processing/outputs/${version}/shares`,{method:'POST',headers:{...headers,'idempotency-key':'workspace-share-audit-failure'},body});assert.equal(response.status,500);assert.equal(db.prepare('SELECT COUNT(*) n FROM public_shares').get().n,0);db.exec('DROP TRIGGER reject_workspace_share_audit');const clientToken=auth.newShareToken();const clientShare=repository.createPublicShare({modelId:model.id,publicIdHash:clientToken.tokenHash,permissions:{view:true},shareClass:'client',sourceAuthorization:{type:'client_grant',id:'client-auth',version:1,subject:'client:one',expiresAt:null}});response=await fetch(`${base}/api/v1/processing/outputs/${version}/shares`,{method:'POST',headers:{...headers,'idempotency-key':'workspace-share-create'},body});assert.equal(response.status,201);const created=await response.json(),rawToken=created.viewUrl.split('/').at(-1);assert.match(created.viewUrl,/\/view\/[A-Za-z0-9_-]+$/);assert.equal(created.share.hasPassword,true);response=await fetch(`${base}/api/v1/processing/outputs/${version}/shares`,{method:'POST',headers:{...headers,'idempotency-key':'workspace-share-create'},body});assert.equal(response.status,201);assert.equal(response.headers.get('idempotency-replayed'),'true');assert.deepEqual(await response.json(),created);const receipt=db.prepare("SELECT response_json FROM admin_idempotency WHERE idempotency_key='workspace-share-create'").get();assert.equal(receipt.response_json.includes(rawToken),false);assert.equal(receipt.response_json.includes('viewUrl'),false);response=await fetch(`${base}/api/v1/processing/outputs/${version}/shares`,{headers});assert.equal(response.status,200);const listed=(await response.json()).shares;assert.equal(listed.length,1);assert.equal(listed[0].id,created.share.id);response=await fetch(`${base}/api/v1/processing/shares/${clientShare.id}`,{method:'DELETE',headers:{...headers,'idempotency-key':'workspace-client-share-revoke'},body:'{}'});assert.equal(response.status,404);assert.equal(repository.getPublicShare(clientShare.id).revokedAt,null);response=await fetch(`${base}/api/v1/processing/shares/${created.share.id}`,{method:'DELETE',headers:{...headers,'idempotency-key':'workspace-share-revoke'},body:'{}'});assert.equal(response.status,200);assert.ok((await response.json()).share.revokedAt);
+});
+
+test('a link that publishes is refused when the task is no longer in the project whose clients were checked',async t=>{
+  const c=await readyShareFixture(t),target=c.processing.createProject({displayName:'Other clients'});
+  const task=c.processing.getTask(c.item?.taskId||c.task.id);
+  const move=()=>{const current=c.processing.getTask(task.id);return c.processing.moveTaskToProject(task.id,target.id,null,'ops:other',
+    {expectedProjectId:current.projectId,expectedFolderId:current.folderId,expectedFolderRevision:current.folderRevision});};
+  c.db.prepare("UPDATE processing_jobs SET status='complete'").run();
+  move();assert.equal(c.processing.getModelOutput(c.item.versionId).projectId,target.id);
+  let response=await c.request({body:{publishIfReady:true,expectedProjectId:c.project.id}});
+  assert.equal(response.status,409);assert.equal((await response.json()).code,'output_project_changed');
+  c.assertPrivate();assert.equal(c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n,0);
+  for(const expectedProjectId of ['',1,null,{}])assert.equal((await c.request({body:{publishIfReady:true,expectedProjectId}})).status,400);
+  c.assertPrivate();
+  response=await c.request({body:{publishIfReady:true,expectedProjectId:target.id}});assert.equal(response.status,201);
+  assert.equal(c.processing.getModelOutput(c.item.versionId).status,'published');
+});
+test('the project check is repeated inside the write: a move while the password is hashed is refused',async t=>{
+  const c=await readyShareFixture(t),target=c.processing.createProject({displayName:'Other clients'}),current=c.processing.getTask(c.task.id);
+  c.db.prepare("UPDATE processing_jobs SET status='complete'").run();
+  const hash=auth.hashPassword;t.mock.method(auth,'hashPassword',async value=>{
+    c.processing.moveTaskToProject(current.id,target.id,null,'ops:other',{expectedProjectId:current.projectId,expectedFolderId:current.folderId,expectedFolderRevision:current.folderRevision});
+    return hash(value);
+  });
+  const response=await c.request({body:{publishIfReady:true,expectedProjectId:c.project.id,password:'password 123'}});
+  assert.equal(response.status,409);assert.equal((await response.json()).code,'output_project_changed');c.assertPrivate();
+});
+test('a request from an older workspace, without the project, works as before',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
 });

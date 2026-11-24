@@ -487,6 +487,23 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   assert.equal((await fetch(`${baseUrl}${publicConfig.assets.glb}`)).status, 403);
   assert.equal((await fetch(publicEptNodeUrl)).status, 403);
 
+  // The service route uses the same rule as the workspace: left out is off for camera positions, and 30 days.
+  const sharesFor = async (key, body) => (await (await signedFetch(baseUrl, `/api/v1/models/${model.id}/shares`, {
+    method: 'POST', body: JSON.stringify(body), headers: { 'Idempotency-Key': key },
+  })).json()).share;
+  assert.deepEqual(createdShare.share.permissions, { view: true, measure: true, cameras: false, download: false });
+  const defaults = await sharesFor('share-defaults-0000001', {});
+  assert.deepEqual(defaults.permissions, { view: true, measure: true, cameras: false, download: false });
+  assert.ok(Math.abs(Date.parse(defaults.expiresAt) - (Date.now() + 30 * 24 * 60 * 60 * 1000)) < 60_000, defaults.expiresAt);
+  const chosen = await sharesFor('share-chosen-00000001', { expiresAt: null, permissions: { view: true, cameras: true, download: true } });
+  assert.equal(chosen.expiresAt, null);
+  assert.deepEqual(chosen.permissions, { view: true, measure: true, cameras: true, download: true });
+  for (const expiresAt of ['', 0, false]) assert.equal((await signedFetch(baseUrl, `/api/v1/models/${model.id}/shares`, {
+    method: 'POST', body: JSON.stringify({ expiresAt }), headers: { 'Idempotency-Key': `share-bad-end-${String(expiresAt) || 'empty'}-0001` },
+  })).status, 400);
+  // Viewer sessions keep their own rule.
+  assert.equal(require('../server/apiV1').permissions({ view: true }).cameras, true);
+
   const secondShareResponse = await signedFetch(baseUrl, `/api/v1/models/${model.id}/shares`, {
     method: 'POST', body: shareBody, headers: { 'Idempotency-Key': 'share-client-review-0002' },
   });
