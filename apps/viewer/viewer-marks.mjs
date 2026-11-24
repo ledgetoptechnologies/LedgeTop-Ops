@@ -38,6 +38,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   let tab = 'list', search = '', armedDelete = null, categoryDraft = null;
   let sessionScope = false, scopeKey, writtenCoords = null;
   let hadMarksAccess = false, hadWriteAccess = false;
+  let pendingRestoreFocus = null;
   let sharedRefreshTimer = null, pageSuspended = false;
   const visibility = createMarkVisibility({ storage: () => window.localStorage });
   // Unsaved work, kept for this person and model. Nothing is kept or cleared until the stored draft was looked at.
@@ -745,8 +746,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   function render() {
     const { state } = store;
     const active = document.activeElement;
-    const restoreFocus = hadMarksAccess && !state.ready && active
-      && (panel.contains(active) || overlay.contains(active) || active.closest?.('.viewer-map-mark,.viewer-map-area,.viewer-map-group'));
+    const restoreFocus = hadMarksAccess && !state.ready && (pendingRestoreFocus?.()
+      || (active && (panel.contains(active) || overlay.contains(active) || active.closest?.('.viewer-map-mark,.viewer-map-area,.viewer-map-group'))));
     const writeAccess = state.ready && state.capabilities.write;
     if (hadWriteAccess && !writeAccess) endMarkInput();
     hadMarksAccess = state.ready;
@@ -905,19 +906,24 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         const held = store.hold(), pressed = document.activeElement === restore;
         let focusMoved = false;
         const watchFocus = ({ target }) => { if (target !== restore && target !== document.body) focusMoved = true; };
-        if (pressed) document.addEventListener('focusin', watchFocus);
+        const stillOwnsFocus = () => !focusMoved && [restore, document.body, null, undefined].includes(document.activeElement);
+        if (pressed) {
+          // The busy render removes this row before an access refusal can close Marks.
+          pendingRestoreFocus = stillOwnsFocus;
+          document.addEventListener('focusin', watchFocus);
+        }
         try {
           const back = await store.restore(mark);
           if (!held.live()) return;
           if (back) { reveal(back); render(); }
           // Repainting detaches the pressed control. An unrelated open draft is
           // kept, and any focus the person chose during the request is respected.
-          if (pressed && !focusMoved && boxOpen && tab === 'deleted'
-            && [restore, document.body, null, undefined].includes(document.activeElement)) {
+          if (pressed && stillOwnsFocus() && boxOpen && tab === 'deleted') {
             const retry = [...deletedList.querySelectorAll('[data-restore-mark]')].find(button => button.dataset.restoreMark === mark.id);
             (retry || activeTab())?.focus?.({ preventScroll: true });
           }
         } finally {
+          if (pendingRestoreFocus === stillOwnsFocus) pendingRestoreFocus = null;
           if (pressed) document.removeEventListener('focusin', watchFocus);
         }
       });

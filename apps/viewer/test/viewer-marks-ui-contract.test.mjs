@@ -32,18 +32,24 @@ test('the Marks list remains readable without advertising actions that need a ma
   }
 });
 
-test('expired Restore keeps a draft and only brings back focus that was lost', async () => {
-  for (const moveFocus of [false, true]) {
+test('Restore returns focus after its busy repaint unless the user moved it', async () => {
+  for (const refused of [false, true]) for (const moveFocus of [false, true]) {
     const { document } = createMiniDocument();
     const panel = document.createElement('div');
+    const chosen = document.createElement('button'), fallback = document.createElement('button');
+    document.body.append(panel, chosen, fallback);
     const leaflet = createMiniLeaflet(document);
     const row = { ...owned, id: 'deleted-pin', deletedAt: '2026-07-01T00:00:00Z', revision: 2 };
-    let complete, deleted = [row];
-    const marks = mountViewerMarks({ panel, L: leaflet.L, getMap: () => leaflet.map, request: async (path, init) => {
-      if (path.endsWith('/deleted')) return Response.json({ marks: deleted });
-      if (init.method === 'POST') return new Promise(resolve => { complete = resolve; });
-      return Response.json({ marks: [], categories: [], capabilities: { write: true, staff: true, visibility: ['private'] } });
-    } });
+    let complete, deleted = [row], accessLosses = 0, focusRestores = 0;
+    const marks = mountViewerMarks({ panel, L: leaflet.L, getMap: () => leaflet.map,
+      focusAfterAccessLoss: () => { focusRestores++; fallback.focus(); },
+      onViewerAccessLost: () => { accessLosses++; },
+      request: async (path, init) => {
+        if (path.endsWith('/deleted')) return Response.json({ marks: deleted });
+        if (init.method === 'POST') return new Promise(resolve => { complete = resolve; });
+        return Response.json({ marks: [], categories: [], capabilities: { write: true, staff: true, visibility: ['private'] } });
+      },
+    });
     try {
       marks.setView({ map: true });
       await marks.setScope({ mode: 'session', key: 'staff', token: () => 'staff' });
@@ -58,19 +64,28 @@ test('expired Restore keeps a draft and only brings back focus that was lost', a
       const restore = panel.querySelector('[data-restore-mark]');
       restore.focus();
       const restoring = restore.click();
-      const chosen = panel.querySelector('[data-tab=categories]');
+      const busyRestore = panel.querySelector('[data-restore-mark]');
+      assert.ok(busyRestore !== restore, 'the busy render replaced the original Restore button');
+      assert.equal(busyRestore.disabled, true);
       // The miniature DOM does not automatically move focus off a removed node.
+      document.activeElement = document.body;
       if (moveFocus) {
         chosen.focus();
         await document.fire('focusin', { target: chosen });
-      } else document.activeElement = document.body;
+      }
       deleted = [];
-      complete(Response.json({ code: 'mark_not_found' }, { status: 404 }));
+      complete(Response.json({ code: refused ? 'marks_unavailable' : 'mark_not_found' }, { status: refused ? 403 : 404 }));
       await restoring;
       assert.equal(panel.querySelector('[data-restore-mark]'), null);
-      assert.equal(document.activeElement, moveFocus ? chosen : deletedTab);
-      assert.equal(draft.value, 'Draft pin');
-      assert.equal(panel.querySelector('.viewer-mark-form').hidden, false);
+      assert.equal(accessLosses, Number(refused));
+      const expectedFocus = moveFocus ? chosen : refused ? fallback : deletedTab;
+      assert.ok(document.activeElement === expectedFocus, 'Restore recovered only focus that was lost');
+      assert.equal(focusRestores, Number(refused && !moveFocus));
+      if (refused) assert.equal(panel.querySelector('.viewer-mark-box').hidden, true);
+      else {
+        assert.equal(draft.value, 'Draft pin');
+        assert.equal(panel.querySelector('.viewer-mark-form').hidden, false);
+      }
     } finally {
       marks.dispose();
     }
