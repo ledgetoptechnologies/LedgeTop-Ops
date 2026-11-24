@@ -380,6 +380,86 @@ test('property: download lost mid-export ends it unless the result still fits th
   assert.equal((await run(null, 300)).width, 300, 'small enough and in the view');
 });
 
+// The view is checked as it is, at every checkpoint up to the save, never as it was at the start.
+const VIEW_CHANGES = {
+  'zoomed in': c => { c.map.getBounds = () => viewOf(500150, 500250, 4700080, 4700120); },
+  'panned away': c => { c.map.getBounds = () => viewOf(500310, 500670, 4700020, 4700180); },
+  'zoomed out past the planned size': c => { c.map.getBounds = () => viewOf(499840, 500560, 4699940, 4700260); },
+  'a smaller window': c => { c.map.getSize = () => ({ x: 360, y: 160 }); },
+  'another view': c => { c.state = { ...c.state, activeMode: 'model' }; },
+};
+const loseDownload = c => c.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD }));
+
+test('property: a view change during a restricted export ends it: while the capture is read, while encoding, and right before saving', async () => {
+  for (const [name, change] of Object.entries(VIEW_CHANGES)) {
+    const reading = deferred(), clip = page();
+    clip.context.readCaptureMask = async () => { await reading.promise; return { captured: () => true, inside: () => 100 }; };
+    const first = exportProperty(clip);
+    first.catch(() => {});
+    await tick();
+    change(clip.context);
+    reading.resolve();
+    await assert.rejects(first, error => { assert.deepEqual([error.code, error.reason, error.message], ['print_property', 'view_changed', 'The map view changed. Export again.'], name); return true; });
+    assert.equal(clip.log.canvases.length, 0, `${name}: nothing rendered`);
+
+    const encoding = page({ holdBlob: true });
+    const second = exportProperty(encoding);
+    second.catch(() => {});
+    await tick();
+    assert.equal(encoding.log.blobs.length, 1, 'encoding in progress');
+    change(encoding.context);
+    encoding.log.blobs[0].resolve();
+    await assert.rejects(second, { reason: 'view_changed' }, `${name}: while encoding`);
+    assert.equal(encoding.log.canvases[0].width, 0, 'canvas released');
+
+    const saving = page();
+    const result = await exportProperty(saving);
+    assert.equal(result.stillCurrent(), true);
+    change(saving.context);
+    assert.equal(result.stillCurrent(), false, `${name}: right before saving`);
+    for (const p of [clip, encoding, saving]) assert.equal(p.inFlight(), 0);
+  }
+});
+
+test('property: losing download together with a view change ends it; a view change alone does not stop a downloader', async () => {
+  for (const [name, change] of Object.entries(VIEW_CHANGES)) for (const order of [[change, loseDownload], [loseDownload, change]]) {
+    // 400 px fits the no-download rule in the first view (438 px), and only there.
+    const p = page({ permissions: WITH_DOWNLOAD, holdBlob: true });
+    const done = exportProperty(p, chosenProperty(), { size: 400 });
+    done.catch(() => {});
+    await tick();
+    assert.equal(p.log.canvases[0].width, 400);
+    for (const step of order) step(p.context);
+    p.log.blobs[0].resolve();
+    await rejects(done, 'name', 'AbortError');
+    const saving = page({ permissions: WITH_DOWNLOAD });
+    const result = await exportProperty(saving, chosenProperty(), { size: 400 });
+    for (const step of order) step(saving.context);
+    assert.equal(result.stillCurrent(), false, `${name}: before saving`);
+  }
+  for (const [name, change] of Object.entries(VIEW_CHANGES)) {
+    const p = page({ permissions: WITH_DOWNLOAD, holdBlob: true });
+    const done = exportProperty(p);
+    await tick();
+    change(p.context);
+    p.log.blobs[0].resolve();
+    const result = await done;
+    assert.deepEqual([result.width, result.stillCurrent()], [2048, true], name);
+  }
+  // Download lost while the view still holds the property at that size: saved.
+  const kept = page({ permissions: WITH_DOWNLOAD, holdBlob: true });
+  const done = exportProperty(kept, chosenProperty(), { size: 400 });
+  await tick();
+  loseDownload(kept.context);
+  kept.log.blobs[0].resolve();
+  assert.equal((await done).stillCurrent(), true);
+  // A pan that keeps it all in view, at the same scale, changes nothing.
+  const nudged = page();
+  const result = await exportProperty(nudged);
+  nudged.context.map.getBounds = () => viewOf(500025, 500385, 4700022, 4700182);
+  assert.equal(result.stillCurrent(), true);
+});
+
 test('property: a viewer, version or access change while the capture is read ends it with no file', async () => {
   for (const change of [c => c.applyViewerSession(session({ subject: 'person-two' })), c => { c.PROJECT = model('v2'); }, c => c.setSessionAccessState('unavailable', 'session-expired')]) {
     const p = page(), reading = deferred();

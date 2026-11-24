@@ -25,6 +25,7 @@ export const PRINT_PROPERTY_MESSAGES = Object.freeze({
   unsound: 'This parcel’s shape crosses or overlaps itself.',
   unverified: 'This parcel’s shape is too detailed to check.',
   zoom_out: 'Zoom out so the whole property fits in the view.',
+  view_changed: 'The map view changed. Export again.',
   upload: 'An uploaded boundary file cannot be used to choose a property.',
   unavailable: 'Property lines are not available.',
   uncaptured: 'None of this property was captured.',

@@ -4363,19 +4363,24 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
   // closing the dialog cancels it, and after every await `current()` checks
   // both against the latest session. Any mismatch ends it as a cancel: no file.
   const controller = new AbortController(), signal = controller.signal;
-  let planned = null; // { longEdge, viewPixels } once the size is chosen
+  let planned = null; // { longEdge, viewPixels, frame, restricted } once the size is chosen
+  // A property's pixels are counted in the view as it is at every check, up to
+  // the save: without download it must still be there, at that size.
   const permitted = () => {
     const now = orthoPrintPermissions();
     try { assertOrthoPrintAllowed(now, { area, format }); } catch { return false; }
-    return !planned || planned.longEdge <= printLongEdge({ area, requested: size, policy: now, viewPixels: planned.viewPixels });
+    return !planned || planned.longEdge <= printLongEdge({ area, requested: size, policy: now, viewPixels: planned.frame ? frameViewPixels(planned.frame) : planned.viewPixels });
   };
   const job = { identity: orthoPrintIdentity(), permitted, cancel: () => controller.abort() };
   const fromDialog = () => controller.abort();
   if (dialogSignal?.aborted) controller.abort(); else dialogSignal?.addEventListener('abort', fromDialog, { once: true });
   const current = () => {
     if (orthoPrintIdentity() !== job.identity || !permitted()) controller.abort();
-    if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+    if (signal.aborted) throw viewChanged() ? printPropertyError('view_changed') : new DOMException('Export cancelled.', 'AbortError');
   };
+  // Cancelled only because the map moved under a restricted property export.
+  const viewChanged = () => Boolean(planned?.restricted && planned.frame) && !dialogSignal?.aborted && orthoPrintIdentity() === job.identity
+    && orthoPrintPermissions().allowed && !permitted();
   orthoPrintExports.add(job);
   try {
     const ortho = await getDataset(ORTHO_URL, false, { signal });
@@ -4405,7 +4410,7 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
       if (!policy.whole && !viewPixels) throw printPropertyError('zoom_out');
     }
     const longEdge = printLongEdge({ area, requested: size, policy, viewPixels });
-    planned = { longEdge, viewPixels };
+    planned = { longEdge, viewPixels, frame: area === 'property' ? extent : null, restricted: !policy.whole };
     // `checkpoint` runs after the contours are traced, after the pixels are
     // rendered and after the file is encoded.
     const result = await exportOrthoPrint({
