@@ -109,10 +109,320 @@ test("closing and reopening preserves an uncopied one-time link in memory", asyn
   expect(await bodies(page, "reveal")).toHaveLength(1);
 });
 
+test("returning from review preserves an uncopied one-time link without reissuing it", async ({ page }) => {
+  await render(page, "success", "?dialog=route");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  await trigger.click();
+  await chooseScope(page);
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await page.getByRole("button", { name: "Create one-time link" }).click();
+  await expect(page.getByRole("button", { name: "Copy link" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
+  await page.getByRole("link", { name: "Review submissions" }).click();
+  await expect(page.getByRole("heading", { name: "Review submissions" })).toBeVisible();
+  await expect(trigger).toHaveCount(0);
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await page.goBack();
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await trigger.click();
+  await page.getByRole("button", { name: "Copy link" }).click();
+  expect(await page.evaluate(() => (window as Window & { copied?: string[] }).copied)).toEqual([
+    `https://portal.example.test/onboarding/11111111-1111-4111-8111-111111111111#${"d".repeat(64)}`,
+  ]);
+  expect(await bodies(page, "create")).toHaveLength(1);
+  expect(await bodies(page, "reveal")).toHaveLength(1);
+});
+
+test("navigation closes the dialog and stops an in-flight reveal from copying off-route", async ({ page }) => {
+  await render(page, "destination-copy-expiry-delayed", "?dialog=route");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  await trigger.click();
+  await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await page.getByRole("button", { name: "Generate and Copy" }).click();
+  await expect.poll(async () => (await bodies(page, "reveal")).length).toBe(1);
+  await page.evaluate(() => {
+    history.pushState(null, "", "/administration/client-onboarding");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await expect(page.getByRole("heading", { name: "Review submissions" })).toBeVisible();
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  // Observe that the retained issuer has received the reply before checking for clipboard side effects.
+  await expect(page.locator("dialog")).toContainText("One-time link ready");
+  expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+  await page.goBack();
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await trigger.click();
+  await expect(page.getByRole("button", { name: "Copy link" })).toBeVisible();
+  expect(await bodies(page, "create")).toHaveLength(1);
+  expect(await bodies(page, "reveal")).toHaveLength(1);
+});
+
+for (const change of ["actor", "session"] as const) {
+  test(`returning after ${change === "actor" ? "an actor" : "a session"} change discards the retained link`, async ({ page }) => {
+    await render(page, "success", "?dialog=route");
+    const trigger = page.getByRole("button", { name: "Onboard client" });
+    await trigger.click();
+    await chooseScope(page);
+    await page.getByRole("button", { name: "Create invitation" }).click();
+    await page.getByRole("button", { name: "Create one-time link" }).click();
+    await expect(page.getByRole("button", { name: "Copy link" })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
+    await page.getByRole("link", { name: "Review submissions" }).click();
+    await expect(page.getByRole("heading", { name: "Review submissions" })).toBeVisible();
+    await page.evaluate(change => {
+      const fixture = window as Window & { onboardingActor?: string; onboardingSessionExpiry?: string };
+      if (change === "actor") fixture.onboardingActor = "other-fixture-staff";
+      else fixture.onboardingSessionExpiry = "2099-01-02T00:00:00.000Z";
+    }, change);
+    await page.goBack();
+    await trigger.click();
+    await expect(page.getByRole("alert")).toContainText("Onboarding access could not be verified");
+    await expect(page.locator("dialog")).toHaveCount(0);
+    expect(await bodies(page, "create")).toHaveLength(1);
+    expect(await bodies(page, "reveal")).toHaveLength(1);
+  });
+}
+
 test("capability remains hidden when the dedicated administrator session is disabled", async ({ page }) => {
   await render(page, "disabled");
   await expect(page.getByRole("heading", { name: "Client onboarding unavailable" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
+});
+
+test("an ambiguous destination Copy result preserves the original invitation after reopen", async ({ page }) => {
+  await render(page, "destination-copy-denied", "?dialog=1");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  const dialog = page.getByRole("dialog");
+  await trigger.click();
+  const drone = dialog.getByRole("checkbox", { name: "Ledge Top Drone Services" });
+  const technologies = dialog.getByRole("checkbox", { name: "Ledge Top Technologies" });
+  await drone.check();
+  await expect(dialog.getByRole("radio", { name: "Email the client" })).toBeEnabled();
+  const sessionReadsBeforeCreate = (await bodies(page, "session")).length;
+  await dialog.getByRole("button", { name: "Create invitation" }).click();
+  const reference = dialog.getByRole("alert").filter({ hasText: "The invitation result isn't confirmed." }).locator("code");
+  await expect(reference).toBeVisible();
+  await expect.poll(async () => (await bodies(page, "session")).length).toBe(sessionReadsBeforeCreate + 1);
+  const issued = await bodies(page, "create");
+  expect(issued).toHaveLength(1);
+  const [issuedCommand] = issued;
+  if (!issuedCommand) throw new Error("Expected one recorded create command");
+  expect(issuedCommand.destinationSourceIds).toEqual(["project-alpha:primary"]);
+  await expect(reference).toHaveText(String(issuedCommand.commandId));
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await expect(dialog).toHaveCount(0);
+  await trigger.click();
+  await expect(reference).toHaveText(String(issuedCommand.commandId));
+  await expect(drone).toBeChecked();
+  await expect(drone).toBeDisabled();
+  await expect(technologies).not.toBeChecked();
+  await expect(technologies).toBeDisabled();
+  await expect(dialog.getByRole("radio", { name: "Email the client" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Generate and Copy" })).toHaveCount(0);
+  expect(await bodies(page, "create")).toEqual(issued);
+  expect(await bodies(page, "reveal")).toHaveLength(0);
+  expect(await bodies(page, "create-email")).toHaveLength(0);
+});
+
+for (const mode of ["destination-copy", "destination-copy-blocked", "destination-copy-no-link", "destination-copy-mismatched-link"]) {
+  test(`destination invitation preserves one reveal when copying: ${mode}`, async ({ page }) => {
+    await render(page, mode, "?dialog=1");
+    await page.getByRole("button", { name: "Onboard client" }).click();
+    await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+    await page.getByRole("button", { name: "Create invitation" }).click();
+    await expect(page.getByRole("button", { name: "Generate and Email" })).toBeDisabled();
+    await page.getByRole("button", { name: "Generate and Copy" }).click();
+    const clipboard = () => page.evaluate(() => (window as Window & { copied?: string[] }).copied);
+    if (mode === "destination-copy-no-link" || mode === "destination-copy-mismatched-link") {
+      await expect(page.getByRole("heading", { name: "Invitation code ready" })).toBeVisible();
+      expect(await clipboard()).toEqual([]);
+      await expect(page.getByRole("button", { name: "Open form in a new tab" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Generate and Copy" })).toHaveCount(0);
+      await page.getByRole("button", { name: "Copy invitation code" }).click();
+      await expect.poll(clipboard).toEqual(["d".repeat(64)]);
+    } else {
+      if (mode === "destination-copy-blocked") {
+        await expect(page.getByRole("alert")).toContainText("Copying was blocked");
+        expect(await clipboard()).toEqual([]);
+        await page.getByRole("button", { name: "Copy link" }).click();
+      }
+      await expect.poll(clipboard).toEqual([`https://portal.example.test/onboarding/11111111-1111-4111-8111-111111111111#${"d".repeat(64)}`]);
+    }
+    expect(await bodies(page, "create")).toHaveLength(1);
+    expect(await bodies(page, "reveal")).toHaveLength(1);
+    expect(await bodies(page, "create-email")).toEqual([]);
+  });
+}
+
+test("email issuance stays unavailable without a boolean capability", async ({ page }) => {
+  for (const mode of ["email-gate-off", "email-malformed-gate"]) {
+    await render(page, mode, "?dialog=1");
+    await page.getByRole("button", { name: "Onboard client" }).click();
+    await expect(page.getByRole("checkbox", { name: "Ledge Top Drone Services" })).toBeEnabled();
+    await expect(page.getByRole("radio", { name: "Email the client" })).toHaveCount(0);
+    expect(await bodies(page, "create-email")).toHaveLength(0);
+  }
+});
+
+for (const [mode, message] of [
+  ["email-delayed", "Email is queued."],
+  ["email-sent", "The email provider accepted the message."],
+  ["email-failed", "Email delivery failed."],
+  ["email-unknown", "Email delivery status is unknown."],
+  ["email-denied", "The email invitation result isn't confirmed."],
+  ["email-malformed-receipt", "The email invitation result isn't confirmed."],
+] as const) {
+  test(`email issuance stays on the original command: ${mode}`, async ({ page }) => {
+    await render(page, mode, "?dialog=1");
+    const trigger = page.getByRole("button", { name: "Onboard client" });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "Onboard client" });
+    await dialog.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+    await dialog.getByRole("radio", { name: "Email the client" }).check();
+    const address = dialog.getByRole("textbox", { name: "Recipient email" });
+    const confirmed = dialog.getByRole("checkbox", { name: "I confirmed the recipient address" });
+    const submit = dialog.getByRole("button", { name: "Generate and Email" });
+    await address.fill("first@example.test");
+    await confirmed.check();
+    await address.fill("client@example.test");
+    await expect(submit).toBeDisabled();
+    await confirmed.check();
+    await submit.click();
+    if (mode === "email-delayed") {
+      await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+      await expect(dialog.getByRole("radio", { name: "Copy a link" })).toBeDisabled();
+      await expect.poll(async () => (await bodies(page, "create-email")).length).toBe(1);
+      await page.evaluate(() => {
+        const release = (window as Window & { release?: () => void }).release;
+        if (typeof release !== "function") throw new Error("Missing delayed mail fixture release");
+        release();
+      });
+    }
+    await expect(dialog.getByText(message, { exact: false })).toBeVisible();
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await trigger.click();
+    await expect(dialog.getByText(message, { exact: false })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Generate and Email" })).toHaveCount(0);
+    const emailCalls = await bodies(page, "create-email");
+    expect(emailCalls).toEqual([{ commandId: expect.any(String), expiresAt: expect.any(String),
+      destinationSourceIds: ["project-alpha:primary"], recipient: "client@example.test", recipientConfirmed: true }]);
+    if (mode === "email-denied" || mode === "email-malformed-receipt") {
+      await expect(dialog.getByText(emailCalls[0]!.commandId as string, { exact: true })).toBeVisible();
+    }
+    expect(await bodies(page, "create")).toEqual([]);
+    expect(await bodies(page, "reveal")).toEqual([]);
+    expect(await page.evaluate(() => (window as Window & { copied?: string[] }).copied)).toEqual([]);
+  });
+}
+
+test("targeted invitation verifies a separate proof for each chosen business", async ({ page }) => {
+  await render(page, "target-both", "?dialog=1");
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  await page.getByRole("checkbox", { name: "Ledge Top Technologies" }).check();
+  await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+  await page.getByRole("radio", { name: "Email the client" }).check();
+  await page.getByRole("textbox", { name: "Recipient email" }).fill("fixture@example.test");
+  await page.getByRole("radio", { name: "Existing client", exact: true }).check();
+  await expect(page.getByRole("textbox", { name: "Recipient email" })).toHaveCount(0);
+  const create = page.getByRole("button", { name: "Create invitation" });
+  for (const business of ["Ledge Top Technologies", "Ledge Top Drone Services"]) {
+    const picker = page.getByRole("group", { name: business, exact: true });
+    const input = picker.getByRole("searchbox");
+    await input.fill("Fixture");
+    await input.press("Enter");
+    await expect(create).toBeDisabled();
+    expect(await bodies(page, "create")).toEqual([]);
+    await picker.getByRole("button", { name: "Fixture client", exact: true }).click();
+    await expect(picker.getByText("Selected Fixture client")).toBeVisible();
+  }
+  await create.click();
+  await expect(page.getByText(/Invitation created/)).toBeVisible();
+  expect(await bodies(page, "target-choices")).toEqual([
+    { sourceId: "project-alpha:secondary", kind: "client", publicId: "a".repeat(32) },
+    { sourceId: "project-alpha:primary", kind: "client", publicId: "b".repeat(32) },
+  ]);
+  expect(await bodies(page, "create")).toEqual([{ commandId: expect.any(String), expiresAt: expect.any(String),
+    destinationSourceIds: ["project-alpha:secondary", "project-alpha:primary"], targetChoices: [
+      { sourceId: "project-alpha:secondary", kind: "client", publicId: "a".repeat(32), choice: "c".repeat(64) },
+      { sourceId: "project-alpha:primary", kind: "client", publicId: "b".repeat(32), choice: "d".repeat(64) },
+    ] }]);
+  expect(await bodies(page, "create-email")).toEqual([]);
+  expect(await bodies(page, "reveal")).toEqual([]);
+});
+
+test("changing destinations discards a delayed target proof", async ({ page }) => {
+  await render(page, "target-stale", "?dialog=1");
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  const business = page.getByRole("checkbox", { name: "Ledge Top Technologies" });
+  await business.check();
+  await page.getByRole("radio", { name: "Existing client", exact: true }).check();
+  const picker = page.getByRole("group", { name: "Ledge Top Technologies", exact: true });
+  await picker.getByRole("searchbox").fill("Fixture");
+  await picker.getByRole("button", { name: "Search", exact: true }).click();
+  await picker.getByRole("button", { name: "Fixture client", exact: true }).click();
+  await expect.poll(async () => (await bodies(page, "target-choices")).length).toBe(1);
+  await business.uncheck();
+  await business.check();
+  await page.evaluate(() => {
+    const release = (window as Window & { release?: () => void }).release;
+    if (typeof release !== "function") throw new Error("Missing delayed target fixture release");
+    release();
+  });
+  await expect(picker.getByRole("searchbox")).toHaveValue("");
+  await expect(picker.getByText(/Selected/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Create invitation" })).toBeDisabled();
+  expect(await bodies(page, "create")).toEqual([]);
+});
+
+test("an ineligible selected business cannot silently fall back to a new client", async ({ page }) => {
+  await render(page, "target-one-source", "?dialog=1");
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  await page.getByRole("checkbox", { name: "Ledge Top Technologies" }).check();
+  await page.getByRole("radio", { name: "Existing client", exact: true }).check();
+  await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+  await expect(page.getByRole("radio", { name: "Existing client", exact: true })).toBeChecked();
+  await expect(page.getByText("Existing records are unavailable for Ledge Top Drone Services.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create invitation" })).toBeDisabled();
+  expect(await bodies(page, "create")).toEqual([]);
+});
+
+test("targeted denial keeps the original command on dialog reopen", async ({ page }) => {
+  await render(page, "target-denied", "?dialog=1");
+  const trigger = page.getByRole("button", { name: "Onboard client" });
+  await trigger.click();
+  await page.getByRole("checkbox", { name: "Ledge Top Technologies" }).check();
+  await page.getByRole("radio", { name: "New client with an existing organization" }).check();
+  const picker = page.getByRole("group", { name: "Ledge Top Technologies", exact: true });
+  await picker.getByRole("searchbox").fill("Fixture");
+  await picker.getByRole("button", { name: "Search", exact: true }).click();
+  await picker.getByRole("button", { name: "Fixture organization", exact: true }).click();
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await expect(page.getByText("The invitation result isn't confirmed.")).toBeVisible();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await trigger.click();
+  const [command] = await bodies(page, "create");
+  expect(command?.targetChoices).toEqual([{ sourceId: "project-alpha:secondary", kind: "organization",
+    publicId: "a".repeat(32), choice: "c".repeat(64) }]);
+  await expect(page.getByText(command?.commandId as string, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create invitation" })).toHaveCount(0);
+  expect(await bodies(page, "create")).toHaveLength(1);
+  expect(await bodies(page, "create-email")).toEqual([]);
+  expect(await bodies(page, "reveal")).toEqual([]);
+});
+
+test("a targeted submission can be read without offering ordinary approval", async ({ page }) => {
+  await render(page, "target-review-held");
+  await openSubmission(page, "Reviewed Client");
+  await expect(page.getByRole("heading", { name: "Review Reviewed Client", exact: true })).toBeVisible();
+  await expect(page.getByText("Needs existing-record review.")).toBeVisible();
+  await expect(page.getByRole("button", { name: /approve/i })).toHaveCount(0);
+  expect(await bodies(page, "enrollment-choices")).toEqual([]);
+  expect(await bodies(page, "approve")).toEqual([]);
+  expect(await bodies(page, "approve-shared-company")).toEqual([]);
 });
 
 test("reviewers find pending submissions in the inbox, page through them and open one without copying an ID", async ({ page }) => {
@@ -560,6 +870,108 @@ async function prepareExpiringInvitation(page: Page, mode: string) {
   await render(page, mode, "?dialog=1", true);
   await page.getByRole("button", { name: "Onboard client" }).click();
   const dialog = page.getByRole("dialog", { name: "Onboard client" });
+  await dialog.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
+  const localExpiry = await page.evaluate(() => {
+    const end = new Date(Date.now() + 3 * 60_000);
+    const local = new Date(end.getTime() - end.getTimezoneOffset() * 60_000);
+    return local.toISOString().slice(0, 16);
+  });
+  await dialog.getByLabel("Link expires").fill(localExpiry);
+  await dialog.getByRole("button", { name: "Create invitation" }).click();
+  const reveal = dialog.getByRole("button", { name: "Generate and Copy" });
+  await expect(reveal).toBeEnabled();
+  const [create] = await bodies(page, "create");
+  return { dialog, reveal, create: create!, expiresAt: new Date(create!.expiresAt as string).getTime() };
+}
+
+const copiedAndOpened = (page: Page) => page.evaluate(() => {
+  const fixture = window as Window & { copied?: string[]; opened?: string[] };
+  return { copies: fixture.copied?.length ?? 0, opens: fixture.opened?.length ?? 0 };
+});
+
+for (const closed of [false, true]) {
+  test(`expired invitation loses copy and open actions while ${closed ? "closed" : "open"}`, async ({ page }) => {
+    const { dialog, reveal, create } = await prepareExpiringInvitation(page, "destination-copy-expiry");
+    await reveal.click();
+    await expect(dialog.getByRole("heading", { name: "One-time link ready" })).toBeVisible();
+    await expect.poll(() => copiedAndOpened(page)).toEqual({ copies: 1, opens: 0 });
+    if (closed) await dialog.getByRole("button", { name: "Close" }).click();
+    await page.clock.fastForward(4 * 60_000);
+    if (closed) await page.getByRole("button", { name: "Onboard client" }).click();
+    await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+    await expect(dialog.getByText(String(create.commandId), { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: /^(Copy link|Open form|Create one-time link|Generate and Copy|Create invitation)/ })).toHaveCount(0);
+    expect(await copiedAndOpened(page)).toEqual({ copies: 1, opens: 0 });
+    expect(await bodies(page, "create")).toEqual([create]);
+    expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+  });
+}
+
+for (const action of ["Copy link", "Open form in a new tab"]) {
+  test(`expired invitation blocks ${action} before its timer fires`, async ({ page }) => {
+    const { dialog, reveal, expiresAt } = await prepareExpiringInvitation(page, "destination-copy-expiry");
+    await reveal.click();
+    const button = dialog.getByRole("button", { name: action });
+    await expect(button).toBeVisible();
+    await expect.poll(() => copiedAndOpened(page)).toEqual({ copies: 1, opens: 0 });
+    const stale = await button.elementHandle();
+    await page.clock.setSystemTime(expiresAt + 1);
+    await stale!.evaluate(element => (element as HTMLButtonElement).click());
+    await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+    expect(await copiedAndOpened(page)).toEqual({ copies: 1, opens: 0 });
+    expect(await bodies(page, "create")).toHaveLength(1);
+    expect(await bodies(page, "reveal")).toHaveLength(1);
+  });
+}
+
+test("reveal arriving after expiry offers no link or clipboard write", async ({ page }) => {
+  const { dialog, reveal, create, expiresAt } = await prepareExpiringInvitation(page, "destination-copy-expiry-delayed");
+  await reveal.click();
+  await expect.poll(async () => await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+  await page.clock.setSystemTime(expiresAt + 1);
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeEnabled();
+  await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "One-time link ready" })).toHaveCount(0);
+  expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+  expect(await bodies(page, "create")).toEqual([create]);
+  expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+});
+
+test("reveal with mismatching expiry stays uncertain without another create or reveal", async ({ page }) => {
+  const { dialog, reveal, create } = await prepareExpiringInvitation(page, "destination-copy-expiry-mismatch");
+  await reveal.click();
+  await expect(dialog.getByText("The link result isn't confirmed.", { exact: false })).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  await expect(dialog.getByText("The link result isn't confirmed.", { exact: false })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /^(Copy link|Open form|Create one-time link|Generate and Copy|Create invitation)/ })).toHaveCount(0);
+  expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+  expect(await bodies(page, "create")).toEqual([create]);
+  expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+});
+
+test("latched expiry survives a backward clock step before the reveal reply", async ({ page }) => {
+  const { dialog, reveal, create, expiresAt } = await prepareExpiringInvitation(page, "destination-copy-expiry-delayed");
+  await reveal.click();
+  await expect.poll(async () => await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+  await page.clock.fastForward(4 * 60_000);
+  await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+  await page.clock.setSystemTime(expiresAt - 30_000);
+  await page.evaluate(() => (window as Window & { release?: () => void }).release?.());
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeEnabled();
+  await expect(dialog.getByText("This invitation has expired.", { exact: false })).toBeVisible();
+  await expect(dialog.getByText(String(create.commandId), { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "One-time link ready" })).toHaveCount(0);
+  expect(await copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
+  expect(await bodies(page, "create")).toEqual([create]);
+  expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
+});
+
+async function prepareLegacyExpiringInvitation(page: Page, mode: string) {
+  await render(page, mode, "?dialog=1", true);
+  await page.getByRole("button", { name: "Onboard client" }).click();
+  const dialog = page.getByRole("dialog", { name: "Onboard client" });
   await chooseScope(page);
   const localExpiry = await page.evaluate(() => {
     const end = new Date(Date.now() + 3 * 60_000);
@@ -574,14 +986,9 @@ async function prepareExpiringInvitation(page: Page, mode: string) {
   return { dialog, reveal, create: create!, expiresAt: new Date(create!.expiresAt as string).getTime() };
 }
 
-const copiedAndOpened = (page: Page) => page.evaluate(() => {
-  const fixture = window as Window & { copied?: string[]; opened?: string[] };
-  return { copies: fixture.copied?.length ?? 0, opens: fixture.opened?.length ?? 0 };
-});
-
 for (const closed of [false, true]) {
-  test(`expired invitation loses copy and open actions while ${closed ? "closed" : "open"}`, async ({ page }) => {
-    const { dialog, reveal, create } = await prepareExpiringInvitation(page, "invitation-expiry");
+  test(`expired legacy invitation loses copy and open actions while ${closed ? "closed" : "open"}`, async ({ page }) => {
+    const { dialog, reveal, create } = await prepareLegacyExpiringInvitation(page, "invitation-expiry");
     await reveal.click();
     await expect(dialog.getByRole("heading", { name: "One-time link ready" })).toBeVisible();
     await expect.poll(() => copiedAndOpened(page)).toEqual({ copies: 0, opens: 0 });
@@ -598,8 +1005,8 @@ for (const closed of [false, true]) {
 }
 
 for (const action of ["Copy link", "Open form in a new tab"]) {
-  test(`expired invitation blocks ${action} before its timer fires`, async ({ page }) => {
-    const { dialog, reveal, expiresAt } = await prepareExpiringInvitation(page, "invitation-expiry");
+  test(`expired legacy invitation blocks ${action} before its timer fires`, async ({ page }) => {
+    const { dialog, reveal, expiresAt } = await prepareLegacyExpiringInvitation(page, "invitation-expiry");
     await reveal.click();
     const button = dialog.getByRole("button", { name: action });
     await expect(button).toBeVisible();
@@ -614,8 +1021,8 @@ for (const action of ["Copy link", "Open form in a new tab"]) {
   });
 }
 
-test("reveal arriving after expiry offers no link or clipboard write", async ({ page }) => {
-  const { dialog, reveal, create, expiresAt } = await prepareExpiringInvitation(page, "invitation-expiry-delayed");
+test("legacy reveal arriving after expiry offers no link or clipboard write", async ({ page }) => {
+  const { dialog, reveal, create, expiresAt } = await prepareLegacyExpiringInvitation(page, "invitation-expiry-delayed");
   await reveal.click();
   await expect.poll(async () => await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
   await page.clock.setSystemTime(expiresAt + 1);
@@ -628,8 +1035,8 @@ test("reveal arriving after expiry offers no link or clipboard write", async ({ 
   expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
 });
 
-test("reveal with mismatching expiry stays uncertain without another create or reveal", async ({ page }) => {
-  const { dialog, reveal, create } = await prepareExpiringInvitation(page, "invitation-expiry-mismatch");
+test("legacy reveal with mismatching expiry stays uncertain without another create or reveal", async ({ page }) => {
+  const { dialog, reveal, create } = await prepareLegacyExpiringInvitation(page, "invitation-expiry-mismatch");
   await reveal.click();
   await expect(dialog.getByText("The link result isn't confirmed.", { exact: false })).toBeVisible();
   await dialog.getByRole("button", { name: "Close" }).click();
@@ -641,8 +1048,8 @@ test("reveal with mismatching expiry stays uncertain without another create or r
   expect(await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
 });
 
-test("latched expiry survives a backward clock step before the reveal reply", async ({ page }) => {
-  const { dialog, reveal, create, expiresAt } = await prepareExpiringInvitation(page, "invitation-expiry-delayed");
+test("legacy latched expiry survives a backward clock step before the reveal reply", async ({ page }) => {
+  const { dialog, reveal, create, expiresAt } = await prepareLegacyExpiringInvitation(page, "invitation-expiry-delayed");
   await reveal.click();
   await expect.poll(async () => await bodies(page, "reveal")).toEqual([{ commandId: create.commandId }]);
   await page.clock.fastForward(4 * 60_000);
@@ -659,7 +1066,7 @@ test("latched expiry survives a backward clock step before the reveal reply", as
 });
 
 test("legacy reveal with a different link fragment only offers the validated manual code", async ({ page }) => {
-  const { dialog, reveal, create } = await prepareExpiringInvitation(page, "legacy-mismatched-link");
+  const { dialog, reveal, create } = await prepareLegacyExpiringInvitation(page, "legacy-mismatched-link");
   await reveal.click();
   await expect(dialog.getByRole("heading", { name: "Invitation code ready" })).toBeVisible();
   await expect(dialog.getByRole("button", { name: /^(Copy link|Open form|Create one-time link)/ })).toHaveCount(0);

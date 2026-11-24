@@ -214,6 +214,9 @@ export type Env = Omit<
   CLIENT_ONBOARDING_ADMIN_ORIGIN?: string;
   /** Deployment secret containing the bounded AES-GCM handoff keyring. */
   CLIENT_ONBOARDING_HANDOFF_KEYRING?: string;
+  CLIENT_ONBOARDING_INVITE_DESTINATION_BINDINGS?: string;
+  CLIENT_ONBOARDING_INVITE_TARGET_CHOICES_ENABLED?: string;
+  CLIENT_ONBOARDING_INVITE_TARGET_ISSUANCE_ENABLED?: string;
   /** Default-off pending Operations staff invitations; does not admit accounts. */
   NATIVE_STAFF_ONBOARDING_CREATE_ENABLED?: string;
   /** Staging-only, default-off pending Operations staff claim endpoint. */

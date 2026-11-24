@@ -538,6 +538,9 @@ async function dispatchClientOnboardingStaff(c: any) {
     database: c.env.OPS_DB,
     operationsOrigins: c.env.OPERATIONS_ORIGINS,
     handoffKeyringJson: c.env.CLIENT_ONBOARDING_HANDOFF_KEYRING,
+    inviteDestinationBindingsJson: c.env.CLIENT_ONBOARDING_INVITE_DESTINATION_BINDINGS,
+    inviteTargetChoicesEnabled: c.env.CLIENT_ONBOARDING_INVITE_TARGET_CHOICES_ENABLED,
+    inviteTargetIssuanceEnabled: c.env.CLIENT_ONBOARDING_INVITE_TARGET_ISSUANCE_ENABLED,
     // Onboarding opens in the client portal. Public links retain their own
     // configured origin so existing delivery URLs are not changed here.
     recipientOrigin: c.env.DELIVERY_BASE_URL,

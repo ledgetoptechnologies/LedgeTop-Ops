@@ -1,13 +1,17 @@
 import { createRoot } from "react-dom/client";
+import { useEffect, useState } from "react";
 import "@ltds/ui/styles.css";
 import "../../src/client/styles.css";
 import { ClientOnboardingStaff } from "../../src/client/ClientOnboardingStaff";
-import { OnboardClientButton } from "../../src/client/OnboardClientButton";
+import { ClientOnboardingDialogProvider, OnboardClientButton } from "../../src/client/OnboardClientButton";
 
 type Call = { path: string; body: unknown };
 const calls: Call[] = [];
 let createdFixture: { commandId: string; expiresAt: string } | null = null;
-const fixtureWindow = window as Window & { onboardingCalls?: Call[]; onboardingMode?: string; copied?: string[]; opened?: string[]; release?: () => void };
+const fixtureActor = "fixture-staff";
+const fixtureExpiry = "2099-01-01T00:00:00.000Z";
+const fixtureWindow = window as Window & { onboardingCalls?: Call[]; onboardingMode?: string; copied?: string[]; opened?: string[]; release?: () => void;
+  onboardingActor?: string; onboardingSessionExpiry?: string };
 fixtureWindow.onboardingCalls = calls;
 fixtureWindow.copied = [];
 fixtureWindow.opened = [];
@@ -17,11 +21,16 @@ const laterId = "88888888-8888-4888-8888-888888888888";
 const invitationId = "11111111-1111-4111-8111-111111111111";
 const primary = "project-alpha:primary", secondary = "project-alpha:secondary";
 let approved = false, activationReads = 0, approvalAttempts = 0, sessionReads = 0, choiceReads = 0, sharedSearchHeld = false;
+let targetChoiceReads = 0;
 const denied = () => Response.json({ error: "client_onboarding_denied" }, { status: 403 });
 // Delayed modes hold the write until the test calls window.release().
 const held = () => new Promise<void>(resolve => { fixtureWindow.release = resolve; });
 
-Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => { fixtureWindow.copied!.push(value); } } });
+let clipboardAttempts = 0;
+Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => {
+  if (++clipboardAttempts === 1 && mode === "destination-copy-blocked") throw new Error("fixture_clipboard_blocked");
+  fixtureWindow.copied!.push(value);
+} } });
 window.open = ((url?: string | URL) => { fixtureWindow.opened!.push(String(url)); return null; }) as typeof window.open;
 
 const fields = (business: boolean) => ({ clientType: business ? "business" : "consumer", name: business ? "Dana Business" : "Reviewed Client",
@@ -32,6 +41,8 @@ window.fetch = async (input, init) => {
   const path = String(input);
   const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
   calls.push({ path, body });
+  if (path === "/api/session/status") return Response.json({ userId: fixtureWindow.onboardingActor ?? fixtureActor,
+    serverTime: new Date().toISOString(), expiresAt: fixtureWindow.onboardingSessionExpiry ?? fixtureExpiry });
   const route = path.split("/").at(-1);
   if (route === "session") {
     sessionReads += 1;
@@ -43,7 +54,7 @@ window.fetch = async (input, init) => {
     if (mode === "refresh-unavailable" && sessionReads > 1) return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
     return Response.json({ csrfToken: String(sessionReads % 10).repeat(64),
       verifiedUntil: mode === "short-session" ? new Date(Date.now() + 60_000).toISOString()
-        : mode === "advancing-session" ? new Date(Date.now() + 60 * 60_000).toISOString() : "2099-01-01T00:00:00.000Z" });
+        : mode === "advancing-session" ? new Date(Date.now() + 60 * 60_000).toISOString() : fixtureWindow.onboardingSessionExpiry ?? fixtureExpiry });
   }
   if (route === "inbox") {
     if (mode === "inbox-denied") return Response.json({ error: "client_onboarding_denied" }, { status: 403 });
@@ -58,6 +69,7 @@ window.fetch = async (input, init) => {
   if (route === "review" && mode === "review-disabled") return Response.json({ error: "not_found" }, { status: 404 });
   if (route === "review") return Response.json({ invitationId, submissionId: body.submissionId, fieldsSha256: "e".repeat(64),
     submittedAt: "2098-01-01T00:00:00.000Z", targetClientRecordId: body.submissionId === laterId ? "client:existing-1" : null,
+    ...(mode === "target-review-held" ? { targetApprovalPending: true } : {}),
     scopes: [{ businessAreaId: "area:onboarding", divisionId: null }], fields: { ...fields(body.submissionId === businessId), ...(body.submissionId === laterId ? { name: "Later Client" } : {}) } });
   if (route === "enrollment-choices") choiceReads += 1;
   if (route === "enrollment-choices" && mode === "choices-denied") return denied();
@@ -76,9 +88,24 @@ window.fetch = async (input, init) => {
   }
   if (route === "scope-choices") {
     if (mode === "scopes-unavailable") return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
-    return Response.json({ scopes: mode === "no-scopes" ? [] : [
+    return Response.json({ ...(mode.startsWith("destination-copy") || mode.startsWith("email-") ? {
+        destinationSourceIds: mode === "destination-copy-denied" ? [secondary, primary] : [primary] } : {}),
+      ...(mode === "email-gate-off" ? {} : mode === "email-malformed-gate" ? { inviteMailIssuanceAvailable: "true" }
+        : mode.startsWith("email-") || mode === "destination-copy-denied" ? { inviteMailIssuanceAvailable: true } : {}),
+      ...(mode.startsWith("target-") ? { destinationSourceIds: [secondary, primary],
+        targetDestinationSourceIds: mode === "target-one-source" ? [secondary] : [secondary, primary], inviteMailIssuanceAvailable: true } : {}),
+      scopes: mode === "no-scopes" ? [] : [
       { businessAreaId: "area:drone", name: "Drone Services", allowAreaWide: true, divisions: [{ divisionId: "division:inspections", name: "Inspections" }] },
       { businessAreaId: "area:tech", name: "Technologies", allowAreaWide: false, divisions: [{ divisionId: "division:web", name: "Web" }] }] });
+  }
+  if (route === "target-search" && mode.startsWith("target-")) {
+    const publicId = (body.sourceId === secondary ? "a" : "b").repeat(32);
+    return Response.json({ targets: [{ sourceId: body.sourceId, kind: body.kind, publicId,
+      displayName: body.kind === "client" ? "Fixture client" : "Fixture organization" }], nextCursor: null });
+  }
+  if (route === "target-choices" && mode.startsWith("target-")) {
+    if (++targetChoiceReads === 1 && mode === "target-stale") await held();
+    return Response.json({ choice: (body.sourceId === secondary ? "c" : "d").repeat(64) });
   }
   if (route === "approve") {
     approvalAttempts += 1;
@@ -111,8 +138,15 @@ window.fetch = async (input, init) => {
   if (route === "approve-shared-company") { approved = true; return Response.json({ decisionId: body.planId, planId: body.planId, outcome: "approved",
     invitationId, submissionId: body.submissionId, clientRecordId: "55555555-5555-4555-8555-555555555555", clientRecordVersion: 1,
     organizationRecordId: "org:ltds", organizationRecordVersion: 6, relationshipVersion: 1, replayed: false, members: [], portalActivation: "pending" }); }
+  if (route === "create-email") {
+    if (mode === "email-delayed") await held();
+    if (mode === "email-denied") return denied();
+    const mailStatus = ["sent", "failed", "unknown"].find(status => mode === `email-${status}`) ?? "queued";
+    return Response.json({ invitationId, expiresAt: body.expiresAt, requestSha256: "c".repeat(64), state: "pending",
+      mailStatus: mode === "email-malformed-receipt" ? "unexpected" : mailStatus });
+  }
   if (route === "create") {
-    if (mode === "create-denied") return denied();
+    if (mode === "create-denied" || mode === "target-denied" || mode === "destination-copy-denied") return denied();
     if (mode === "delayed-create") await held();
     createdFixture = { commandId: body.commandId, expiresAt: body.expiresAt };
     return Response.json({ invitationId, expiresAt: body.expiresAt, requestSha256: "c".repeat(64), state: "pending" });
@@ -123,11 +157,25 @@ window.fetch = async (input, init) => {
     const revealExpiry = mode.endsWith("expiry-mismatch")
       ? new Date(Date.parse(createdFixture.expiresAt) + 60_000).toISOString() : createdFixture.expiresAt;
     if (mode === "uncertain") return Response.json({ error: "client_onboarding_unavailable" }, { status: 503 });
+    const fragment = (mode === "destination-copy-mismatched-link" || mode === "legacy-mismatched-link" ? "e" : "d").repeat(64);
     return Response.json({ commandId: body.commandId, invitationId, expiresAt: revealExpiry, invitationSecret: "d".repeat(64),
-      recipientUrl: mode === "no-link" ? null : `https://portal.example.test/onboarding/${invitationId}#${(mode === "legacy-mismatched-link" ? "e" : "d").repeat(64)}` });
+      recipientUrl: mode === "no-link" || mode === "destination-copy-no-link" ? null : `https://portal.example.test/onboarding/${invitationId}#${fragment}` });
   }
   return Response.json({ error: "not_found" }, { status: 404 });
 };
 
-createRoot(document.getElementById("root")!).render(location.search === "?dialog=1"
-  ? <main><h1>Client Hub</h1><OnboardClientButton /></main> : <ClientOnboardingStaff />);
+function RoutedOnboardingFixture() {
+  const [showHub, setShowHub] = useState(() => location.search === "?dialog=route");
+  useEffect(() => {
+    const onRoute = () => setShowHub(location.search === "?dialog=route");
+    window.addEventListener("popstate", onRoute);
+    return () => window.removeEventListener("popstate", onRoute);
+  }, []);
+  return showHub ? <main><h1>Client Hub</h1><OnboardClientButton /></main>
+    : <main><h1>Review submissions</h1><ClientOnboardingStaff /></main>;
+}
+
+createRoot(document.getElementById("root")!).render(<ClientOnboardingDialogProvider key={fixtureActor} actorId={fixtureActor}>
+  {location.search === "?dialog=route" ? <RoutedOnboardingFixture /> : location.search === "?dialog=1"
+    ? <main><h1>Client Hub</h1><OnboardClientButton /></main> : <ClientOnboardingStaff />}
+</ClientOnboardingDialogProvider>);

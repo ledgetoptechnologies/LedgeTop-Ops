@@ -58,6 +58,7 @@ import { OperationsNotifications } from "./OperationsNotifications";
 import { OperationsFeedback } from "./OperationsFeedback";
 import { InvitationApprovals } from "./InvitationApprovals";
 import { ClientOnboardingStaff } from "./ClientOnboardingStaff";
+import { ClientOnboardingDialogProvider } from "./OnboardClientButton";
 import { endpoint as onboardingStaffEndpoint, json as onboardingStaffJson, validSession as validOnboardingStaffSession } from "./onboarding-staff-api";
 import "./StaffInbox.css";
 import { loadInvitationAdministrationAccess, type InvitationAdministrationAccess } from "./invitation-administration-api";
@@ -542,6 +543,7 @@ export function OperationsApp() {
           <OperationsSidebar variant="drawer" groups={sidebarGroups} page={page} onNavigate={navigate} />
         </div>
       </div>}
+      <ClientOnboardingDialogProvider key={session.user.id} actorId={session.user.id}>
       <main className={`ops-main${viewerRoute && page === "viewer" ? " ops-viewer-main" : ""}`}>
         <OperationsBreadcrumb groups={sidebarGroups} page={page} onNavigate={navigate} />
         {onboardingReview ? <h1 ref={onboardingHeading} tabIndex={-1}>Review submissions</h1>
@@ -571,6 +573,7 @@ export function OperationsApp() {
         {page === "account" && <AccountPage user={session.user} />}
         {page === "intel" && session.capabilities?.intel?.enabled === true && <IntelPage />}
       </main>
+      </ClientOnboardingDialogProvider>
     </div>
   );
 }

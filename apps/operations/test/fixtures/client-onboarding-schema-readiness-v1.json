@@ -1,0 +1,1014 @@
+{
+ "canonicalVersion": "sqlite-schema-tokens-v1",
+ "baseline": "apps/operations/migrations 0001 through 0248",
+ "digests": {
+  "strippedSqlSha256": "SHA-256 of the stored text when Wrangler's splitter removed comments",
+  "sourceSqlSha256": "SHA-256 of the stored text when the migration file was applied unsplit",
+  "strippedTupleSha256": "SHA-256 of JSON.stringify([type,name,tbl_name,sql]) in the stripped form: this tuple's share of the earlier pin",
+  "canonicalTupleSha256": "SHA-256 of JSON.stringify([canonicalVersion,canonical tuple]): the same for both forms"
+ },
+ "inventories": {
+  "target": {
+   "strippedTextPin": "b6be16ff958e4a23048f107b4aa5a4c7d41b25d7c296d463bf381b565b525873",
+   "sourceTextSha256": "2b612e4b204a6b253d383f5fd0f3c7e6d172aadec6c3ed2bbc4f72e38c361282",
+   "canonicalPin": "767a41b0f73ab6afd5828e78384eb0a0db6bd0ea1e151ed93d75cd268292b8e8",
+   "tuples": [
+    {
+     "type": "index",
+     "name": "client_onboarding_invitations_issuer",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "61693185a8c9954578d8ccdeb35c40b326857b061b1e87609f5db8ceefcb8e91",
+     "sourceSqlSha256": "61693185a8c9954578d8ccdeb35c40b326857b061b1e87609f5db8ceefcb8e91",
+     "strippedTupleSha256": "65adf71b2417beec3dc52740c783cb6a5071719138be18cbbf12ca2208f38bfb",
+     "canonicalTupleSha256": "b2e52c421db559ba35ba29b7102be4415d2d392f98421b0ddcb1ecacc431caba"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_decisions_1",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "a8b8765b8aa602d2dd850abf30ed7cce9c0048d0b8c306cb71e5e4c0431a04ea",
+     "canonicalTupleSha256": "3e9d678db79cf3ee591c3212d2c3560d6a486207a0f76e00ea2eab762bb24b62"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_decisions_2",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "7c86e558e157a3b75d7565512aa44e4cbe648ad806abe03f6fc797ba9ccb549d",
+     "canonicalTupleSha256": "189b3d293d2b1e8209aa51a99fa7c797b06ca1e3e4c20514f43750adf46cc8f5"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_handoffs_1",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "b22381b70278281c061afd6f8ac96a907eddb34e4203923834f151d77bc56951",
+     "canonicalTupleSha256": "849198a09c565cc9abe2453fe9ec895ae2b60b049b23c7145718b700edfd9fbc"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_handoffs_2",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "dd7c25b5da45a362c1747c69b869c54b82a4cc167e9331a9ee3a44100107a25b",
+     "canonicalTupleSha256": "c0395157422bb57ddcccd652dfc5d7931fb0d68cfda4ef8a87d5e0d6b1ab137c"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_invitations_1",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "d6f68687400bc795c669883b43feebcaa3ea4821a5c324d250cdacfdf5ac30b0",
+     "canonicalTupleSha256": "6cbe9c181e35f6c6f20e1b0bb2b9641fbb4ec5073a0cdf9165b0098310769295"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_issuance_commands_1",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "452c5e4b0c50beed30c908b393a28d3542f9169d4a5d4a48177db71bca63d827",
+     "canonicalTupleSha256": "14f20ddad66cae0db1e3cc46851a92ec599c6244c505b5f12d10c88a84328aae"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_issuance_commands_2",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "9863932cb5f4e51253f88dc8e86a75ae313f6b0a496dd3f3db35d53176c7333a",
+     "canonicalTupleSha256": "5d57d2bfff9cdc44da20e1f676ff8690b8fc0a919ee16ac6735be7be1c3a3a5a"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_target_proofs_1",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "a88009ddcadecfc75ed9e51fd62533774f53821ed884f7fe183d55e1e7010c9e",
+     "canonicalTupleSha256": "cba6ab7ec11b937f5c9862cecabd2e0c1554eb352d51be1003ef577ff44aac5d"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_decisions",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "059d77f8ffe8dc3338070f0935269317a994fec01702be24e1f971f6d0853659",
+     "sourceSqlSha256": "059d77f8ffe8dc3338070f0935269317a994fec01702be24e1f971f6d0853659",
+     "strippedTupleSha256": "817ac484c70d8f1a9c02d1a6e4b662504fe2b4c145df9904662f2f410c200bda",
+     "canonicalTupleSha256": "8fcdbe7cddf17c4c8ee13bc8b749f7f07d0b0121806ae4b7284c9de3194e617a"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_handoffs",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "4350492909ceb51b8ffe66ea4ff8101a73af6d098454345fd868ee7a50724d2b",
+     "sourceSqlSha256": "4350492909ceb51b8ffe66ea4ff8101a73af6d098454345fd868ee7a50724d2b",
+     "strippedTupleSha256": "413524fc32c8f44cdd94af15a9d019138cc5dd37c3114123c027c5ac913089bf",
+     "canonicalTupleSha256": "a68c830a625e28a92a74ce50f17d6e7ee7a21d5014bdf33f34aaae3ab68330a8"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_invitations",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "20bf2401380088b177cb2e6fecf84f26bd578af8798b2ac096717feb40ee3c67",
+     "sourceSqlSha256": "20bf2401380088b177cb2e6fecf84f26bd578af8798b2ac096717feb40ee3c67",
+     "strippedTupleSha256": "95615e0f58b02ca8dfe957c2780078554c2290e84a8a1b08ddfa07b376488932",
+     "canonicalTupleSha256": "eceef8e1501fa8448d2536403db4267ce0bcb3eac0cc7c1be50663ec9ce1d47c"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_issuance_commands",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "83f50184a10eabc6867117305eba62dabd250b3b23190338060726fbec53e1dd",
+     "sourceSqlSha256": "2c750decf29334c6c1afa6c00d6994c60379abf9c1e057910db0aed9ca977f4f",
+     "strippedTupleSha256": "e6877411cb73c15ddce3e0e72356af46ae538904c1a68d81b8b68ebaf1b7ccb2",
+     "canonicalTupleSha256": "315c116ff49c5290b0e5dba984767d6b03db0c3e4de063720573d8b53e810454"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_target_proofs",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": "596db661d00450c2bf6a91140542fe5a30063150863352bd76529171ac862fb2",
+     "sourceSqlSha256": "596db661d00450c2bf6a91140542fe5a30063150863352bd76529171ac862fb2",
+     "strippedTupleSha256": "10473fad4d3a5e714f416bcbb95aa35240b6bc3c47d5a38443afb5427e4a4c11",
+     "canonicalTupleSha256": "dde2f427c9665cf57b797f23fd923e6cafae2bc403b212e463dc1b2f6f8701cd"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_insert_guard",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "16e1b2116924837da2309a6e6ac971743406a5cdf2110a92efaab562f9bebf99",
+     "sourceSqlSha256": "16e1b2116924837da2309a6e6ac971743406a5cdf2110a92efaab562f9bebf99",
+     "strippedTupleSha256": "052c10e9d171307366c386a1afbd5886c0fb44c626dbe4452e54475ca03a2881",
+     "canonicalTupleSha256": "559df5f5196e4d63cf4a9f22e496bbe8a05ac73d46312d1622b8b6755392a21a"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_legacy_insert_guard",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "441f66791abd7ae35194662e06c78ebe0ab2feaa517f7e60729c082ce8285298",
+     "sourceSqlSha256": "441f66791abd7ae35194662e06c78ebe0ab2feaa517f7e60729c082ce8285298",
+     "strippedTupleSha256": "25aac8b87c44aa6599c9aef6a14f6f69d6cb5a378a1cdb68d289b65ad470a6d8",
+     "canonicalTupleSha256": "8d15e88460c54eab7cd9fda753b785a5256d13a58c44d71f74f7315f8c2daebe"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_no_delete",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "6c1a33f8c1356f4918a63a485baff61ae6f0735530d8a36dc0ddd32ccc4ab79a",
+     "sourceSqlSha256": "6c1a33f8c1356f4918a63a485baff61ae6f0735530d8a36dc0ddd32ccc4ab79a",
+     "strippedTupleSha256": "2cc3e5c538ed3d9d66f0623f077d05d4a0a4306a20422e074016dc3af11f3f9c",
+     "canonicalTupleSha256": "6d24bcd998d536adcf71dc7d44b81d818ad818d84f287ead23f6b73afb6d4f79"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_no_update",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "2b0e80322425b366b9eeecad98c19fccd490217d6483e85a2b450281460a5c60",
+     "sourceSqlSha256": "2b0e80322425b366b9eeecad98c19fccd490217d6483e85a2b450281460a5c60",
+     "strippedTupleSha256": "fa808c9de2c11c477f47497327d0c20dafdbe852b795128eeba59f0e14b0f5a0",
+     "canonicalTupleSha256": "8aee1dbc584e05f91cc3b91399933f930ffe97e5d8962c63e9a22336f27e3040"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_protocol_exclusive",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "c4fa5e73add8546671fd8c627731827656f2fa5f876969bb76448f9958622c93",
+     "sourceSqlSha256": "c4fa5e73add8546671fd8c627731827656f2fa5f876969bb76448f9958622c93",
+     "strippedTupleSha256": "422b66c780d4e3bfa36c6f2ac03bfd966d3b1a9feb5646443bef149118ab009c",
+     "canonicalTupleSha256": "fb4b45044d0afe9a5777cbcfbedbdab8d4a326c73601bf9becf8eb9b079d94a8"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_shared_insert_guard",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "84cd0c2c12092b235893967048a20db8e3fd57c3b330682ad1538ec71189144b",
+     "sourceSqlSha256": "84cd0c2c12092b235893967048a20db8e3fd57c3b330682ad1538ec71189144b",
+     "strippedTupleSha256": "9034ab8205212dab4bbcb5e4f49d7ab895a80015c05646de98d1a2e45b6b287a",
+     "canonicalTupleSha256": "932d15f86ad58c1adafb378ea8e5668316b05fcec94a73dfb9d352a7aa2bb7a6"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_destination_approval_exact",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "91b307f1441f5e73f281c8387574c25e000d5f86692d867898c3d10c4e36c55e",
+     "sourceSqlSha256": "91b307f1441f5e73f281c8387574c25e000d5f86692d867898c3d10c4e36c55e",
+     "strippedTupleSha256": "d8337de8a2aa9bdca07462aa6227578102c43ebd3e2c1c5629418343449567eb",
+     "canonicalTupleSha256": "609c11d62326e1405d570d35e6116251af0195066ce3bc2ff0df40dcbb3e7b7a"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_destination_intent_exact",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "a5621e1ded40dc899163a1e8060bb2e7552216f4bb2c3fa49c843e75dc1e898b",
+     "sourceSqlSha256": "a5621e1ded40dc899163a1e8060bb2e7552216f4bb2c3fa49c843e75dc1e898b",
+     "strippedTupleSha256": "1a8149ee7828027abf5c3f40c5cd3548bd7de06e9c0bb477371ec525d23f0d87",
+     "canonicalTupleSha256": "08cf6ff50fd69df5baecdff5fb1a5343de9c9a4c3abe405b0e9fa5f8ae9bd8f5"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_handoffs_insert_guard",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "b2e8b15c4231f05b76cbb109a1f1164f280b88d1a7f05f3c09fe2d2f19526b84",
+     "sourceSqlSha256": "b2e8b15c4231f05b76cbb109a1f1164f280b88d1a7f05f3c09fe2d2f19526b84",
+     "strippedTupleSha256": "84f9923b9c27eb5f45f3a8d7afdffdc37fcd780a68a4ae467a85b42b72ad6d26",
+     "canonicalTupleSha256": "26da93ea9b1f3f67cf46354c1790ac046889cce0ff22762ba65452c10b531a22"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_handoffs_no_delete",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "8e7006046a0ff7a9b7c6c4177c74c5d73372b859c1e6a596b2b9ba0c43ad06a8",
+     "sourceSqlSha256": "8e7006046a0ff7a9b7c6c4177c74c5d73372b859c1e6a596b2b9ba0c43ad06a8",
+     "strippedTupleSha256": "994f8d8a5b42a43b7f387687791d5f0e91ec79c62df95e367d7676d14a0e7f85",
+     "canonicalTupleSha256": "34cf23c1b1f354d47f6d080fc6894a75658f7c76c5ad8fa34fc2c87467f7a70f"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_handoffs_no_update",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "d7300294e4e0f05bc6a33adf7d7e5bb0a11a0c046b4eb89097e4a89c1da628f8",
+     "sourceSqlSha256": "d7300294e4e0f05bc6a33adf7d7e5bb0a11a0c046b4eb89097e4a89c1da628f8",
+     "strippedTupleSha256": "0ed27c927cd89bc94b34a6ae09c7e81e2929c29c5368497b08809efc0fca4ec6",
+     "canonicalTupleSha256": "a0d421da72b55b7bc0fc4da4c7ba555c07079dc0e3de7497e147df48d53bec6e"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invitations_insert_guard",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "a1d7f0d118c6160800355b26b26f4cc0150707da05e87477a89420a6c0462ef9",
+     "sourceSqlSha256": "a1d7f0d118c6160800355b26b26f4cc0150707da05e87477a89420a6c0462ef9",
+     "strippedTupleSha256": "0dc07ba32503d85a3a0e16fe012a148f58e51d4c96f1d2f3c3bc789dafa1e515",
+     "canonicalTupleSha256": "c04cf3a289ca3423f3808bf0ea12c48d3f4d34c17f938e506e0148e2febf6c61"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invitations_no_delete",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "3ffdecb81c4bc29fc9694e5bd5517be641807bcd43ecbbd4040a85370cdd80bb",
+     "sourceSqlSha256": "3ffdecb81c4bc29fc9694e5bd5517be641807bcd43ecbbd4040a85370cdd80bb",
+     "strippedTupleSha256": "fbc4f4445206b871cdf6a7873faeed15071d98bf7a2c01b300ce4b677cc9fee7",
+     "canonicalTupleSha256": "837d5f5f0cb662114ff762d4631515d61cb426d901e72269ae94306f3caf20d1"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invitations_update_guard",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "d6fb77971cc9b063196077a6803e52d7481eaf101ab8c28d1509eb9f2999087f",
+     "sourceSqlSha256": "d6fb77971cc9b063196077a6803e52d7481eaf101ab8c28d1509eb9f2999087f",
+     "strippedTupleSha256": "feb0ce5e8fc83e934d820e5317e7d23bfd5780643a2f48b9e79c46cf32d221f6",
+     "canonicalTupleSha256": "76b34f82356b095be68a89a3862f20f830a9115b7403d19d1a445eaa4a572695"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_issuance_commands_authority",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "c6599f0faec599a17c3da545f0c9ccd8683622984852a5ceca72aa5dee8400c6",
+     "sourceSqlSha256": "c6599f0faec599a17c3da545f0c9ccd8683622984852a5ceca72aa5dee8400c6",
+     "strippedTupleSha256": "dea5803bea0edd6cdb4623942a552e965fc9ef7f02baf171cfb67b5bdc56745e",
+     "canonicalTupleSha256": "a32ff54730f1056842247eec9b3a713300ae2720e9e6e5ecd468f9dd604aecc4"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_issuance_commands_insert_guard",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "701a844229364ee342d45bded5e6ed17cbb4a9ae266f16f4e408ad3bc72b4fa3",
+     "sourceSqlSha256": "701a844229364ee342d45bded5e6ed17cbb4a9ae266f16f4e408ad3bc72b4fa3",
+     "strippedTupleSha256": "2e34d22b8bc96a560eeab51f2ddb762ccf6d664e981e1881174857310ce5e7b4",
+     "canonicalTupleSha256": "0abebed91d61cf9507db7934b192e415ec4be8679b784abb34a1f964a6ddf776"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_issuance_commands_no_delete",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "913dffad3e202b80c0d76c0730493052a3df498af3b5a4b4dd6fbc8a52a38e5f",
+     "sourceSqlSha256": "913dffad3e202b80c0d76c0730493052a3df498af3b5a4b4dd6fbc8a52a38e5f",
+     "strippedTupleSha256": "d189307a28db133a05ae5641d475a43abbefa6dbe38b122cdab2380dbed5bc41",
+     "canonicalTupleSha256": "a7a5e144e49d427d1cb718c2f973d0e3b6077b72d9b8f3ccb9e9d1e960217090"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_issuance_commands_no_update",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "7319a09a022e7d89bb3dc4663601c3d4781a806535f3cef095006817a9b9183c",
+     "sourceSqlSha256": "7319a09a022e7d89bb3dc4663601c3d4781a806535f3cef095006817a9b9183c",
+     "strippedTupleSha256": "974fe359142a23ed2f1fc0382165be717ec0d7cd0cccef43f176e65c8bb180b8",
+     "canonicalTupleSha256": "a1760d626abb40dd69afcdf73811880096c6a512cebbea9c4de626166fd2d8d4"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_portal_activation_stage",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "746db43dfe55333633f743ecb66e13f7b33b372ac702ee4b7fd610070100f1c0",
+     "sourceSqlSha256": "746db43dfe55333633f743ecb66e13f7b33b372ac702ee4b7fd610070100f1c0",
+     "strippedTupleSha256": "04103433c070cae51ffa0a214ef350f30e8d97cef3b6088b3f2723a955db3334",
+     "canonicalTupleSha256": "4a49a4c352a122e8149ec8aeef5a26945dd14a8a51c6f21428217ad053e21bc7"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_shared_decision_live_evidence",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "34a32bca131ee797159a67634686f430493e3d21cee5d28cc953b57ab01a1d5c",
+     "sourceSqlSha256": "34a32bca131ee797159a67634686f430493e3d21cee5d28cc953b57ab01a1d5c",
+     "strippedTupleSha256": "746ef4e31860f24e0ac68e9aebf12493f92f82d1a3390fe40d1b5960730869c5",
+     "canonicalTupleSha256": "3b2297d5fa2f9b001c7a8f987ff42098424ebca984de8e27b5a5f64341991011"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_shared_decision_live_plan",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "6e291a63b4ecfeffd17f07f0458ac942b8765109ab42a35437c632d43792917f",
+     "sourceSqlSha256": "6e291a63b4ecfeffd17f07f0458ac942b8765109ab42a35437c632d43792917f",
+     "strippedTupleSha256": "601e39668c4b495fb3e6ba107c29f4e872f60c92f9ecc9a6f32d315eb9266679",
+     "canonicalTupleSha256": "2ad725e3a0015395a6fb71c75707a85a02588ad6663feccd9486c580bb7db680"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_approval_held",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "2b862e8231603cf53da00a2a93af455f5f9b17633f69e032c00f43798ce429ee",
+     "sourceSqlSha256": "2b862e8231603cf53da00a2a93af455f5f9b17633f69e032c00f43798ce429ee",
+     "strippedTupleSha256": "7bf58869b5290137c70c6b9c818c51dcd50785d3b08da36c8d4447ed77932e47",
+     "canonicalTupleSha256": "755deabe728963f97502abab94459d77a64ef9d177619394a920c8c53230e58b"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_handoff_complete",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "cd2ebae67a63e13cd7af968109bebe05f4d5e5cab7aeeb3d482c1ff186aba6bf",
+     "sourceSqlSha256": "cd2ebae67a63e13cd7af968109bebe05f4d5e5cab7aeeb3d482c1ff186aba6bf",
+     "strippedTupleSha256": "fcc99692e88f17fe195b090986b9c4939e86e9837790f50bbf0f4103c16893c3",
+     "canonicalTupleSha256": "ac3d2d20248096520383ca56ab6b650657e68cf6ef19eac76579a5342faeb87f"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_intent_exact",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "77e80b19c7d0bfa138328e76a2b3eac40b85849a2c14a19a3e69aadb5d3a988c",
+     "sourceSqlSha256": "77e80b19c7d0bfa138328e76a2b3eac40b85849a2c14a19a3e69aadb5d3a988c",
+     "strippedTupleSha256": "058c2822305dd271ecf88b2e75932f100c1c4d3cd150ed1ddc15ca9a5b4a47f2",
+     "canonicalTupleSha256": "def700e45d9f748b71c0063bbe18e7e0367350c4b70ffe8cdb98da95d3253e5a"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_proof_insert_guard",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": "3dfb5249b1cd3ca1c826c45cb8026dc8261bf698b2b5cf015233186027304721",
+     "sourceSqlSha256": "3dfb5249b1cd3ca1c826c45cb8026dc8261bf698b2b5cf015233186027304721",
+     "strippedTupleSha256": "0d2779b157d1a8b59fb32723c6272b5fd2d61f4ed64bea24bfc6d32d320c220f",
+     "canonicalTupleSha256": "4e52a4d94cd354561a354f6c258bdc365ce6ce3aee759628572b75c942fd90e3"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_proof_no_delete",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": "5a19a8d289fb46a7a49f5ac4565e0a15e73e3252ec17a2b9b436e64008a70f2d",
+     "sourceSqlSha256": "5a19a8d289fb46a7a49f5ac4565e0a15e73e3252ec17a2b9b436e64008a70f2d",
+     "strippedTupleSha256": "3eb8c98541abac0d00142bb8e516e71731b1fb7d62660b17f85801713afecc86",
+     "canonicalTupleSha256": "fe8af54805eaaa2879cc71d0d28bfc676cb7ef9c4502f4252a532b3b5c0d4a6f"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_proof_no_update",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": "8f15a1b3645dcc07e1808fa29e8e8a39548b6792c644f8869325fe1b7484a04d",
+     "sourceSqlSha256": "8f15a1b3645dcc07e1808fa29e8e8a39548b6792c644f8869325fe1b7484a04d",
+     "strippedTupleSha256": "42a20390d125c503ee0a8034b15678f3f456645d6cdb7effa5d65165c67e10f9",
+     "canonicalTupleSha256": "b1db28b20620a676253c6584d00eebb750f43a46b49514707c3775ee55515bc8"
+    },
+    {
+     "type": "view",
+     "name": "client_onboarding_live_issuances",
+     "table": "client_onboarding_live_issuances",
+     "strippedSqlSha256": "3e902ba389b9602a2f60c8ae321b8e258bcc88d7560ad55d9f98e85cc1a7d54d",
+     "sourceSqlSha256": "e2f006a7f4195fb9ca59a7c7c5ab3989efc26899fe93db1a6711d32819288b25",
+     "strippedTupleSha256": "a46b2516df8968f31cbb7dba1768223fa1adf5a1d95155ae07282947d54b92af",
+     "canonicalTupleSha256": "b6bb2a1bedc4da6853b821707819fa9a8b840e2948377573f250173dad3e8315"
+    }
+   ]
+  },
+  "destination": {
+   "strippedTextPin": "9ac1831914cc6857ddd41df7fff9cd2de4d8a52f0ddd69fb23fab9d18af7f77d",
+   "sourceTextSha256": "9ac1831914cc6857ddd41df7fff9cd2de4d8a52f0ddd69fb23fab9d18af7f77d",
+   "canonicalPin": "5946bd6e92dad21883e56b8cc854bb6072e271490c26be64aa99f883f8d5f36e",
+   "tuples": [
+    {
+     "type": "column",
+     "name": "destination_intent_json",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "a77980512677a7106c3284432ab79ea51fa4b31fef1ba49e530493d0b626be1b",
+     "sourceSqlSha256": "a77980512677a7106c3284432ab79ea51fa4b31fef1ba49e530493d0b626be1b",
+     "strippedTupleSha256": "47f6a70abf843bba40ffcf858950610628c7913ff7e5f9d3eb50d1be1f4d1e9a",
+     "canonicalTupleSha256": "0feb2b2b8af68c5b89686806f3aff8de961a5e8fcc570f0c64a8808361c46515"
+    },
+    {
+     "type": "column",
+     "name": "destination_issuance_sha256",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "a77980512677a7106c3284432ab79ea51fa4b31fef1ba49e530493d0b626be1b",
+     "sourceSqlSha256": "a77980512677a7106c3284432ab79ea51fa4b31fef1ba49e530493d0b626be1b",
+     "strippedTupleSha256": "6ed568f5daea1d97520b9384feecbb0455c0988811786e48fc60990404ae5654",
+     "canonicalTupleSha256": "72b70a1af284d1295ca02f9bb53f044c23bc78ca6092c59b5e4cfbb95e832580"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_destination_approval_exact",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "91b307f1441f5e73f281c8387574c25e000d5f86692d867898c3d10c4e36c55e",
+     "sourceSqlSha256": "91b307f1441f5e73f281c8387574c25e000d5f86692d867898c3d10c4e36c55e",
+     "strippedTupleSha256": "d8337de8a2aa9bdca07462aa6227578102c43ebd3e2c1c5629418343449567eb",
+     "canonicalTupleSha256": "609c11d62326e1405d570d35e6116251af0195066ce3bc2ff0df40dcbb3e7b7a"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_destination_intent_exact",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "a5621e1ded40dc899163a1e8060bb2e7552216f4bb2c3fa49c843e75dc1e898b",
+     "sourceSqlSha256": "a5621e1ded40dc899163a1e8060bb2e7552216f4bb2c3fa49c843e75dc1e898b",
+     "strippedTupleSha256": "1a8149ee7828027abf5c3f40c5cd3548bd7de06e9c0bb477371ec525d23f0d87",
+     "canonicalTupleSha256": "08cf6ff50fd69df5baecdff5fb1a5343de9c9a4c3abe405b0e9fa5f8ae9bd8f5"
+    }
+   ]
+  },
+  "mail": {
+   "strippedTextPin": "4579b255a43bb5ddfa6e4fa49212b1cdb003c72541b15a90da1acb925eebd746",
+   "sourceTextSha256": "e3e72fef68689042217f51b09dfad9954732bea44efd6569f77fc67294ee3df8",
+   "canonicalPin": "5d5e0cb9b3a25e28bc19a333578be235f169969b8c83664b6a01a7c9ab74a102",
+   "tuples": [
+    {
+     "type": "index",
+     "name": "client_onboarding_invitations_issuer",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "61693185a8c9954578d8ccdeb35c40b326857b061b1e87609f5db8ceefcb8e91",
+     "sourceSqlSha256": "61693185a8c9954578d8ccdeb35c40b326857b061b1e87609f5db8ceefcb8e91",
+     "strippedTupleSha256": "65adf71b2417beec3dc52740c783cb6a5071719138be18cbbf12ca2208f38bfb",
+     "canonicalTupleSha256": "b2e52c421db559ba35ba29b7102be4415d2d392f98421b0ddcb1ecacc431caba"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_decisions_1",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "a8b8765b8aa602d2dd850abf30ed7cce9c0048d0b8c306cb71e5e4c0431a04ea",
+     "canonicalTupleSha256": "3e9d678db79cf3ee591c3212d2c3560d6a486207a0f76e00ea2eab762bb24b62"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_decisions_2",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "7c86e558e157a3b75d7565512aa44e4cbe648ad806abe03f6fc797ba9ccb549d",
+     "canonicalTupleSha256": "189b3d293d2b1e8209aa51a99fa7c797b06ca1e3e4c20514f43750adf46cc8f5"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_handoffs_1",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "b22381b70278281c061afd6f8ac96a907eddb34e4203923834f151d77bc56951",
+     "canonicalTupleSha256": "849198a09c565cc9abe2453fe9ec895ae2b60b049b23c7145718b700edfd9fbc"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_handoffs_2",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "dd7c25b5da45a362c1747c69b869c54b82a4cc167e9331a9ee3a44100107a25b",
+     "canonicalTupleSha256": "c0395157422bb57ddcccd652dfc5d7931fb0d68cfda4ef8a87d5e0d6b1ab137c"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_invitations_1",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "d6f68687400bc795c669883b43feebcaa3ea4821a5c324d250cdacfdf5ac30b0",
+     "canonicalTupleSha256": "6cbe9c181e35f6c6f20e1b0bb2b9641fbb4ec5073a0cdf9165b0098310769295"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_invite_mail_outbox_1",
+     "table": "client_onboarding_invite_mail_outbox",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "b358adbe7ed6bf85c81043736cf8d45feaf92d3893984311f05360f2a3e515d5",
+     "canonicalTupleSha256": "b7ffa3e7f6a16601895da2289e6c51348d0b969df9b0fb6c1a8d018a1ae7dc88"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_invite_mail_outbox_2",
+     "table": "client_onboarding_invite_mail_outbox",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "c695197e4609a9390b552968f06faa9bf0efe5e496458a2ce1f6ef6e82a38c69",
+     "canonicalTupleSha256": "f3a540749426557e20a36bc9ebe9834ea6a7f2cd6c8834a5f23d7895e35eada4"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_invite_mail_outbox_3",
+     "table": "client_onboarding_invite_mail_outbox",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "d143d0787dd741c274df6756d575309a4102086d7ad0c4425ff8cfb1bf7020e6",
+     "canonicalTupleSha256": "0bc448d412ef15083b61029e6f8eccbb098c227947b6cfa4ae5418d35fdb8372"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_issuance_commands_1",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "452c5e4b0c50beed30c908b393a28d3542f9169d4a5d4a48177db71bca63d827",
+     "canonicalTupleSha256": "14f20ddad66cae0db1e3cc46851a92ec599c6244c505b5f12d10c88a84328aae"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_issuance_commands_2",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "9863932cb5f4e51253f88dc8e86a75ae313f6b0a496dd3f3db35d53176c7333a",
+     "canonicalTupleSha256": "5d57d2bfff9cdc44da20e1f676ff8690b8fc0a919ee16ac6735be7be1c3a3a5a"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_reveal_audit_1",
+     "table": "client_onboarding_reveal_audit",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "1af3151994635210235de9a3a7fd45e10e4cf7a8e4ac34b4745e797318b532e4",
+     "canonicalTupleSha256": "23fb0357665de90536d25a16882217e3cf5ee644980d96a02aa9d545ab0ef1fd"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_reveal_consumptions_1",
+     "table": "client_onboarding_reveal_consumptions",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "c5ea3fd25a28bda17d89cb61538ba7a3197d303dd8805ca9b693afe0fdda1510",
+     "canonicalTupleSha256": "8b3975099d1c58cfa9fe065d77870169fbbaed5f010118ccba0e3cfe8816d7cf"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_reveal_consumptions_2",
+     "table": "client_onboarding_reveal_consumptions",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "d689e9d2cd16549ae7b7e05ba2d84032bbb8168da1967c5035dde4e613f3027c",
+     "canonicalTupleSha256": "eb07cda273007c8e5d5fbf71ad227934909c1625d1f35c88c333075382e19d22"
+    },
+    {
+     "type": "index",
+     "name": "sqlite_autoindex_client_onboarding_target_proofs_1",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": null,
+     "sourceSqlSha256": null,
+     "strippedTupleSha256": "a88009ddcadecfc75ed9e51fd62533774f53821ed884f7fe183d55e1e7010c9e",
+     "canonicalTupleSha256": "cba6ab7ec11b937f5c9862cecabd2e0c1554eb352d51be1003ef577ff44aac5d"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_decisions",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "059d77f8ffe8dc3338070f0935269317a994fec01702be24e1f971f6d0853659",
+     "sourceSqlSha256": "059d77f8ffe8dc3338070f0935269317a994fec01702be24e1f971f6d0853659",
+     "strippedTupleSha256": "817ac484c70d8f1a9c02d1a6e4b662504fe2b4c145df9904662f2f410c200bda",
+     "canonicalTupleSha256": "8fcdbe7cddf17c4c8ee13bc8b749f7f07d0b0121806ae4b7284c9de3194e617a"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_handoffs",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "4350492909ceb51b8ffe66ea4ff8101a73af6d098454345fd868ee7a50724d2b",
+     "sourceSqlSha256": "4350492909ceb51b8ffe66ea4ff8101a73af6d098454345fd868ee7a50724d2b",
+     "strippedTupleSha256": "413524fc32c8f44cdd94af15a9d019138cc5dd37c3114123c027c5ac913089bf",
+     "canonicalTupleSha256": "a68c830a625e28a92a74ce50f17d6e7ee7a21d5014bdf33f34aaae3ab68330a8"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_invitations",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "20bf2401380088b177cb2e6fecf84f26bd578af8798b2ac096717feb40ee3c67",
+     "sourceSqlSha256": "20bf2401380088b177cb2e6fecf84f26bd578af8798b2ac096717feb40ee3c67",
+     "strippedTupleSha256": "95615e0f58b02ca8dfe957c2780078554c2290e84a8a1b08ddfa07b376488932",
+     "canonicalTupleSha256": "eceef8e1501fa8448d2536403db4267ce0bcb3eac0cc7c1be50663ec9ce1d47c"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_invite_mail_outbox",
+     "table": "client_onboarding_invite_mail_outbox",
+     "strippedSqlSha256": "27e680e47b81f60a53f4b68b70d6011912ebd9ff6756bf9a14233db4e6f3568d",
+     "sourceSqlSha256": "27e680e47b81f60a53f4b68b70d6011912ebd9ff6756bf9a14233db4e6f3568d",
+     "strippedTupleSha256": "599d4feda883656c9fd7f14ec796862bcd8035cdf2f112f18888e249313b85c9",
+     "canonicalTupleSha256": "5721a0f94638c903af506c2cbd85866ef0890216b543d9c519dc1a06a45183a9"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_issuance_commands",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "83f50184a10eabc6867117305eba62dabd250b3b23190338060726fbec53e1dd",
+     "sourceSqlSha256": "2c750decf29334c6c1afa6c00d6994c60379abf9c1e057910db0aed9ca977f4f",
+     "strippedTupleSha256": "e6877411cb73c15ddce3e0e72356af46ae538904c1a68d81b8b68ebaf1b7ccb2",
+     "canonicalTupleSha256": "315c116ff49c5290b0e5dba984767d6b03db0c3e4de063720573d8b53e810454"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_reveal_audit",
+     "table": "client_onboarding_reveal_audit",
+     "strippedSqlSha256": "1569083b44482515fb19f6fe02b2d68d8a0c6000ca2277d3955c8fa792815320",
+     "sourceSqlSha256": "1569083b44482515fb19f6fe02b2d68d8a0c6000ca2277d3955c8fa792815320",
+     "strippedTupleSha256": "d80d27d99e047535271bf2b9190fb640c4f1215863ea36214cd6381d15065a8b",
+     "canonicalTupleSha256": "784027c1e13b7011fb9c0d7bc5e962421a8ecaea57db8ee7f17dc29e41744dec"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_reveal_consumptions",
+     "table": "client_onboarding_reveal_consumptions",
+     "strippedSqlSha256": "aef09b19b8c72c840b28d19777b38b134dce34f6419a8e94774990536bcf2680",
+     "sourceSqlSha256": "aef09b19b8c72c840b28d19777b38b134dce34f6419a8e94774990536bcf2680",
+     "strippedTupleSha256": "bc8e42b57733359dd7ba5cedd821e08596908f770f899a09f8fbfb9e80e831ed",
+     "canonicalTupleSha256": "cb12749e6e8a7f0f0a7b3784798d93f2b3a67f6e9b04e26c9e91f4d9ba40f2ef"
+    },
+    {
+     "type": "table",
+     "name": "client_onboarding_target_proofs",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": "596db661d00450c2bf6a91140542fe5a30063150863352bd76529171ac862fb2",
+     "sourceSqlSha256": "596db661d00450c2bf6a91140542fe5a30063150863352bd76529171ac862fb2",
+     "strippedTupleSha256": "10473fad4d3a5e714f416bcbb95aa35240b6bc3c47d5a38443afb5427e4a4c11",
+     "canonicalTupleSha256": "dde2f427c9665cf57b797f23fd923e6cafae2bc403b212e463dc1b2f6f8701cd"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_insert_guard",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "16e1b2116924837da2309a6e6ac971743406a5cdf2110a92efaab562f9bebf99",
+     "sourceSqlSha256": "16e1b2116924837da2309a6e6ac971743406a5cdf2110a92efaab562f9bebf99",
+     "strippedTupleSha256": "052c10e9d171307366c386a1afbd5886c0fb44c626dbe4452e54475ca03a2881",
+     "canonicalTupleSha256": "559df5f5196e4d63cf4a9f22e496bbe8a05ac73d46312d1622b8b6755392a21a"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_legacy_insert_guard",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "441f66791abd7ae35194662e06c78ebe0ab2feaa517f7e60729c082ce8285298",
+     "sourceSqlSha256": "441f66791abd7ae35194662e06c78ebe0ab2feaa517f7e60729c082ce8285298",
+     "strippedTupleSha256": "25aac8b87c44aa6599c9aef6a14f6f69d6cb5a378a1cdb68d289b65ad470a6d8",
+     "canonicalTupleSha256": "8d15e88460c54eab7cd9fda753b785a5256d13a58c44d71f74f7315f8c2daebe"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_no_delete",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "6c1a33f8c1356f4918a63a485baff61ae6f0735530d8a36dc0ddd32ccc4ab79a",
+     "sourceSqlSha256": "6c1a33f8c1356f4918a63a485baff61ae6f0735530d8a36dc0ddd32ccc4ab79a",
+     "strippedTupleSha256": "2cc3e5c538ed3d9d66f0623f077d05d4a0a4306a20422e074016dc3af11f3f9c",
+     "canonicalTupleSha256": "6d24bcd998d536adcf71dc7d44b81d818ad818d84f287ead23f6b73afb6d4f79"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_no_update",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "2b0e80322425b366b9eeecad98c19fccd490217d6483e85a2b450281460a5c60",
+     "sourceSqlSha256": "2b0e80322425b366b9eeecad98c19fccd490217d6483e85a2b450281460a5c60",
+     "strippedTupleSha256": "fa808c9de2c11c477f47497327d0c20dafdbe852b795128eeba59f0e14b0f5a0",
+     "canonicalTupleSha256": "8aee1dbc584e05f91cc3b91399933f930ffe97e5d8962c63e9a22336f27e3040"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_protocol_exclusive",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "c4fa5e73add8546671fd8c627731827656f2fa5f876969bb76448f9958622c93",
+     "sourceSqlSha256": "c4fa5e73add8546671fd8c627731827656f2fa5f876969bb76448f9958622c93",
+     "strippedTupleSha256": "422b66c780d4e3bfa36c6f2ac03bfd966d3b1a9feb5646443bef149118ab009c",
+     "canonicalTupleSha256": "fb4b45044d0afe9a5777cbcfbedbdab8d4a326c73601bf9becf8eb9b079d94a8"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_decisions_shared_insert_guard",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "84cd0c2c12092b235893967048a20db8e3fd57c3b330682ad1538ec71189144b",
+     "sourceSqlSha256": "84cd0c2c12092b235893967048a20db8e3fd57c3b330682ad1538ec71189144b",
+     "strippedTupleSha256": "9034ab8205212dab4bbcb5e4f49d7ab895a80015c05646de98d1a2e45b6b287a",
+     "canonicalTupleSha256": "932d15f86ad58c1adafb378ea8e5668316b05fcec94a73dfb9d352a7aa2bb7a6"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_destination_approval_exact",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "91b307f1441f5e73f281c8387574c25e000d5f86692d867898c3d10c4e36c55e",
+     "sourceSqlSha256": "91b307f1441f5e73f281c8387574c25e000d5f86692d867898c3d10c4e36c55e",
+     "strippedTupleSha256": "d8337de8a2aa9bdca07462aa6227578102c43ebd3e2c1c5629418343449567eb",
+     "canonicalTupleSha256": "609c11d62326e1405d570d35e6116251af0195066ce3bc2ff0df40dcbb3e7b7a"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_destination_intent_exact",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "a5621e1ded40dc899163a1e8060bb2e7552216f4bb2c3fa49c843e75dc1e898b",
+     "sourceSqlSha256": "a5621e1ded40dc899163a1e8060bb2e7552216f4bb2c3fa49c843e75dc1e898b",
+     "strippedTupleSha256": "1a8149ee7828027abf5c3f40c5cd3548bd7de06e9c0bb477371ec525d23f0d87",
+     "canonicalTupleSha256": "08cf6ff50fd69df5baecdff5fb1a5343de9c9a4c3abe405b0e9fa5f8ae9bd8f5"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_handoffs_insert_guard",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "b2e8b15c4231f05b76cbb109a1f1164f280b88d1a7f05f3c09fe2d2f19526b84",
+     "sourceSqlSha256": "b2e8b15c4231f05b76cbb109a1f1164f280b88d1a7f05f3c09fe2d2f19526b84",
+     "strippedTupleSha256": "84f9923b9c27eb5f45f3a8d7afdffdc37fcd780a68a4ae467a85b42b72ad6d26",
+     "canonicalTupleSha256": "26da93ea9b1f3f67cf46354c1790ac046889cce0ff22762ba65452c10b531a22"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_handoffs_no_delete",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "8e7006046a0ff7a9b7c6c4177c74c5d73372b859c1e6a596b2b9ba0c43ad06a8",
+     "sourceSqlSha256": "8e7006046a0ff7a9b7c6c4177c74c5d73372b859c1e6a596b2b9ba0c43ad06a8",
+     "strippedTupleSha256": "994f8d8a5b42a43b7f387687791d5f0e91ec79c62df95e367d7676d14a0e7f85",
+     "canonicalTupleSha256": "34cf23c1b1f354d47f6d080fc6894a75658f7c76c5ad8fa34fc2c87467f7a70f"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_handoffs_no_update",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "d7300294e4e0f05bc6a33adf7d7e5bb0a11a0c046b4eb89097e4a89c1da628f8",
+     "sourceSqlSha256": "d7300294e4e0f05bc6a33adf7d7e5bb0a11a0c046b4eb89097e4a89c1da628f8",
+     "strippedTupleSha256": "0ed27c927cd89bc94b34a6ae09c7e81e2929c29c5368497b08809efc0fca4ec6",
+     "canonicalTupleSha256": "a0d421da72b55b7bc0fc4da4c7ba555c07079dc0e3de7497e147df48d53bec6e"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invitations_insert_guard",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "a1d7f0d118c6160800355b26b26f4cc0150707da05e87477a89420a6c0462ef9",
+     "sourceSqlSha256": "a1d7f0d118c6160800355b26b26f4cc0150707da05e87477a89420a6c0462ef9",
+     "strippedTupleSha256": "0dc07ba32503d85a3a0e16fe012a148f58e51d4c96f1d2f3c3bc789dafa1e515",
+     "canonicalTupleSha256": "c04cf3a289ca3423f3808bf0ea12c48d3f4d34c17f938e506e0148e2febf6c61"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invitations_no_delete",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "3ffdecb81c4bc29fc9694e5bd5517be641807bcd43ecbbd4040a85370cdd80bb",
+     "sourceSqlSha256": "3ffdecb81c4bc29fc9694e5bd5517be641807bcd43ecbbd4040a85370cdd80bb",
+     "strippedTupleSha256": "fbc4f4445206b871cdf6a7873faeed15071d98bf7a2c01b300ce4b677cc9fee7",
+     "canonicalTupleSha256": "837d5f5f0cb662114ff762d4631515d61cb426d901e72269ae94306f3caf20d1"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invitations_update_guard",
+     "table": "client_onboarding_invitations",
+     "strippedSqlSha256": "d6fb77971cc9b063196077a6803e52d7481eaf101ab8c28d1509eb9f2999087f",
+     "sourceSqlSha256": "d6fb77971cc9b063196077a6803e52d7481eaf101ab8c28d1509eb9f2999087f",
+     "strippedTupleSha256": "feb0ce5e8fc83e934d820e5317e7d23bfd5780643a2f48b9e79c46cf32d221f6",
+     "canonicalTupleSha256": "76b34f82356b095be68a89a3862f20f830a9115b7403d19d1a445eaa4a572695"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invite_mail_immutable",
+     "table": "client_onboarding_invite_mail_outbox",
+     "strippedSqlSha256": "83a940e3f16d025acac35d6c7a95ac1fb985b708216ee2b8bda578083c503175",
+     "sourceSqlSha256": "83a940e3f16d025acac35d6c7a95ac1fb985b708216ee2b8bda578083c503175",
+     "strippedTupleSha256": "dc3e0de87954e2c20adedfba90d9b9effc96fd61b55289284919b9132891c8f7",
+     "canonicalTupleSha256": "9161e92d5eb28278ff099241c94d6629bad4965daf2cc81d42d4db409f031d9a"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invite_mail_insert_guard",
+     "table": "client_onboarding_invite_mail_outbox",
+     "strippedSqlSha256": "5858d133b7e390c94197ec2ed7983989af0f29e2e73c63915e241df3a044ab52",
+     "sourceSqlSha256": "5858d133b7e390c94197ec2ed7983989af0f29e2e73c63915e241df3a044ab52",
+     "strippedTupleSha256": "cc301800e56aa29dbcc06f1e0096d0355417447ce48514367bcf5eb7449c1b43",
+     "canonicalTupleSha256": "e587a9cad5155a79747c79712f1d316005139f4ca89919edea5a5559eea2c675"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invite_mail_no_delete",
+     "table": "client_onboarding_invite_mail_outbox",
+     "strippedSqlSha256": "01fa454ff1b324f532b891b390f6e86e06d1c5ae6bb5900fe02dd72acc62d0b2",
+     "sourceSqlSha256": "01fa454ff1b324f532b891b390f6e86e06d1c5ae6bb5900fe02dd72acc62d0b2",
+     "strippedTupleSha256": "9690e0a904e341e3909d058e1e9eeaeac34995052aac766c0255bc0f77ffb610",
+     "canonicalTupleSha256": "7d381ef88d0f12e84a1a9082121f1e0b73022d106c62b586cf79f48e0d2c574e"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invite_mail_no_staff_reveal",
+     "table": "client_onboarding_reveal_consumptions",
+     "strippedSqlSha256": "c2dce767f964a50cb4b6714cb31c28760424e560e4e25eff8d88d73b02eb6ce0",
+     "sourceSqlSha256": "c2dce767f964a50cb4b6714cb31c28760424e560e4e25eff8d88d73b02eb6ce0",
+     "strippedTupleSha256": "1a46d39c25d9ee508bc5ac661202589ca6274b87c5257b08592825b40d2b6d98",
+     "canonicalTupleSha256": "86e1b7ab47dd96892cc9026ee20e52dfe16b9da89e02b00ff5c16ec414736d88"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invite_mail_no_staff_reveal_audit",
+     "table": "client_onboarding_reveal_audit",
+     "strippedSqlSha256": "59c878e3ab5f393dc8371a2dfbc69dfa6b45de52fa566e7547e515a9866eb9e7",
+     "sourceSqlSha256": "59c878e3ab5f393dc8371a2dfbc69dfa6b45de52fa566e7547e515a9866eb9e7",
+     "strippedTupleSha256": "832d4d2e61fa8e3cb70e4fd36561d9da4af1219a8ef8854eb14777b7cf789fc9",
+     "canonicalTupleSha256": "857e141466df6d0374524e804f66e7334f407c7adcdf2194dce3b1ee89988c48"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_invite_mail_transition",
+     "table": "client_onboarding_invite_mail_outbox",
+     "strippedSqlSha256": "ab7574b72d2f7bbf3a12fc0db81511ffa4a14cd08133ed57d5db27066eb0ed45",
+     "sourceSqlSha256": "ab7574b72d2f7bbf3a12fc0db81511ffa4a14cd08133ed57d5db27066eb0ed45",
+     "strippedTupleSha256": "2328054b50985063297b303ce08ecdef19b19be47e88ea55d2a004d915773ce1",
+     "canonicalTupleSha256": "7035c70633b6508dd15f8cc979e07615b9e8cea167dc5a24619d933e27179e6f"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_issuance_commands_authority",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "c6599f0faec599a17c3da545f0c9ccd8683622984852a5ceca72aa5dee8400c6",
+     "sourceSqlSha256": "c6599f0faec599a17c3da545f0c9ccd8683622984852a5ceca72aa5dee8400c6",
+     "strippedTupleSha256": "dea5803bea0edd6cdb4623942a552e965fc9ef7f02baf171cfb67b5bdc56745e",
+     "canonicalTupleSha256": "a32ff54730f1056842247eec9b3a713300ae2720e9e6e5ecd468f9dd604aecc4"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_issuance_commands_insert_guard",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "701a844229364ee342d45bded5e6ed17cbb4a9ae266f16f4e408ad3bc72b4fa3",
+     "sourceSqlSha256": "701a844229364ee342d45bded5e6ed17cbb4a9ae266f16f4e408ad3bc72b4fa3",
+     "strippedTupleSha256": "2e34d22b8bc96a560eeab51f2ddb762ccf6d664e981e1881174857310ce5e7b4",
+     "canonicalTupleSha256": "0abebed91d61cf9507db7934b192e415ec4be8679b784abb34a1f964a6ddf776"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_issuance_commands_no_delete",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "913dffad3e202b80c0d76c0730493052a3df498af3b5a4b4dd6fbc8a52a38e5f",
+     "sourceSqlSha256": "913dffad3e202b80c0d76c0730493052a3df498af3b5a4b4dd6fbc8a52a38e5f",
+     "strippedTupleSha256": "d189307a28db133a05ae5641d475a43abbefa6dbe38b122cdab2380dbed5bc41",
+     "canonicalTupleSha256": "a7a5e144e49d427d1cb718c2f973d0e3b6077b72d9b8f3ccb9e9d1e960217090"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_issuance_commands_no_update",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "7319a09a022e7d89bb3dc4663601c3d4781a806535f3cef095006817a9b9183c",
+     "sourceSqlSha256": "7319a09a022e7d89bb3dc4663601c3d4781a806535f3cef095006817a9b9183c",
+     "strippedTupleSha256": "974fe359142a23ed2f1fc0382165be717ec0d7cd0cccef43f176e65c8bb180b8",
+     "canonicalTupleSha256": "a1760d626abb40dd69afcdf73811880096c6a512cebbea9c4de626166fd2d8d4"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_portal_activation_stage",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "746db43dfe55333633f743ecb66e13f7b33b372ac702ee4b7fd610070100f1c0",
+     "sourceSqlSha256": "746db43dfe55333633f743ecb66e13f7b33b372ac702ee4b7fd610070100f1c0",
+     "strippedTupleSha256": "04103433c070cae51ffa0a214ef350f30e8d97cef3b6088b3f2723a955db3334",
+     "canonicalTupleSha256": "4a49a4c352a122e8149ec8aeef5a26945dd14a8a51c6f21428217ad053e21bc7"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_reveal_audit_insert_guard",
+     "table": "client_onboarding_reveal_audit",
+     "strippedSqlSha256": "c154cfde1c7b991dfdb4fa61b07f1518966c87b2ef0e149658a326e96780551d",
+     "sourceSqlSha256": "c154cfde1c7b991dfdb4fa61b07f1518966c87b2ef0e149658a326e96780551d",
+     "strippedTupleSha256": "ecc4616a547fbf2e23e3f5c2fbbf02fe7488024da75084e29abf739e9fb1f2fd",
+     "canonicalTupleSha256": "75c81c719e21a6472ea4e481c72a5620d108c8c5ec56d82be2ec0a0fa04cdd28"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_reveal_audit_no_delete",
+     "table": "client_onboarding_reveal_audit",
+     "strippedSqlSha256": "2263d68ad64ff34c5ed336bd1280a2a0a28cd8c674ecfd8bd374689e14376168",
+     "sourceSqlSha256": "2263d68ad64ff34c5ed336bd1280a2a0a28cd8c674ecfd8bd374689e14376168",
+     "strippedTupleSha256": "e7fff6413e3b4b4f92fd8f48ff563ef95f146bc1f618594512df2c969b5abd32",
+     "canonicalTupleSha256": "33973267f132bd08b353cc4fc9e927f1565bac42b4f45ef4f8f727a1a4a9ff34"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_reveal_audit_no_update",
+     "table": "client_onboarding_reveal_audit",
+     "strippedSqlSha256": "3e2bae67fe082558f0b825ba1d405388050c05582493cafc7fd6058b6bc39483",
+     "sourceSqlSha256": "3e2bae67fe082558f0b825ba1d405388050c05582493cafc7fd6058b6bc39483",
+     "strippedTupleSha256": "285d6edf7d72f8c0d668b505b87b4aa7d02f6e3a82508a75ae8437be2195bdee",
+     "canonicalTupleSha256": "e75c6234cc2e465912146e4d786be19008abdce58878b4f06ad19c2d9c26a56a"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_reveal_consumptions_insert_guard",
+     "table": "client_onboarding_reveal_consumptions",
+     "strippedSqlSha256": "5ed751da07c2bb2ef5df4f36ecfc2b41d3797bb488f54cda0f8162b7151148ba",
+     "sourceSqlSha256": "5ed751da07c2bb2ef5df4f36ecfc2b41d3797bb488f54cda0f8162b7151148ba",
+     "strippedTupleSha256": "a51f813434ce958077cd20f573c54263b5ac49fbea6c18c66aa171debf157feb",
+     "canonicalTupleSha256": "ba47618dfeff465462776a52097b33a1f92675a071fa68cb0b65fc235b100d88"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_reveal_consumptions_no_delete",
+     "table": "client_onboarding_reveal_consumptions",
+     "strippedSqlSha256": "967cbdf14b6b730a587b952843d12b8d5dba30b17f907a50491c33003fa1b4eb",
+     "sourceSqlSha256": "967cbdf14b6b730a587b952843d12b8d5dba30b17f907a50491c33003fa1b4eb",
+     "strippedTupleSha256": "cc45da8d5cc56c44f08cc7821ee425bafcfe10539441d20e7037017e194edee0",
+     "canonicalTupleSha256": "447641034fa04e05a0c921cf4e1e91deea80088b11d6d12ce8fcb3581748374f"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_reveal_consumptions_no_update",
+     "table": "client_onboarding_reveal_consumptions",
+     "strippedSqlSha256": "08c0831216993a94d890ace6eb970bdd2f8b6777890c3cbe3b21bc4fe4543b0a",
+     "sourceSqlSha256": "08c0831216993a94d890ace6eb970bdd2f8b6777890c3cbe3b21bc4fe4543b0a",
+     "strippedTupleSha256": "9e405080aaade5198bb9d831b671f5b5b6ee877a62937319ccdaf9d63bf8bcc2",
+     "canonicalTupleSha256": "2f713d8885b6846521b55c593f8a3bbac4a64790f6babdf3248d586a055d753d"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_shared_decision_live_evidence",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "34a32bca131ee797159a67634686f430493e3d21cee5d28cc953b57ab01a1d5c",
+     "sourceSqlSha256": "34a32bca131ee797159a67634686f430493e3d21cee5d28cc953b57ab01a1d5c",
+     "strippedTupleSha256": "746ef4e31860f24e0ac68e9aebf12493f92f82d1a3390fe40d1b5960730869c5",
+     "canonicalTupleSha256": "3b2297d5fa2f9b001c7a8f987ff42098424ebca984de8e27b5a5f64341991011"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_shared_decision_live_plan",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "6e291a63b4ecfeffd17f07f0458ac942b8765109ab42a35437c632d43792917f",
+     "sourceSqlSha256": "6e291a63b4ecfeffd17f07f0458ac942b8765109ab42a35437c632d43792917f",
+     "strippedTupleSha256": "601e39668c4b495fb3e6ba107c29f4e872f60c92f9ecc9a6f32d315eb9266679",
+     "canonicalTupleSha256": "2ad725e3a0015395a6fb71c75707a85a02588ad6663feccd9486c580bb7db680"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_approval_held",
+     "table": "client_onboarding_decisions",
+     "strippedSqlSha256": "2b862e8231603cf53da00a2a93af455f5f9b17633f69e032c00f43798ce429ee",
+     "sourceSqlSha256": "2b862e8231603cf53da00a2a93af455f5f9b17633f69e032c00f43798ce429ee",
+     "strippedTupleSha256": "7bf58869b5290137c70c6b9c818c51dcd50785d3b08da36c8d4447ed77932e47",
+     "canonicalTupleSha256": "755deabe728963f97502abab94459d77a64ef9d177619394a920c8c53230e58b"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_handoff_complete",
+     "table": "client_onboarding_handoffs",
+     "strippedSqlSha256": "cd2ebae67a63e13cd7af968109bebe05f4d5e5cab7aeeb3d482c1ff186aba6bf",
+     "sourceSqlSha256": "cd2ebae67a63e13cd7af968109bebe05f4d5e5cab7aeeb3d482c1ff186aba6bf",
+     "strippedTupleSha256": "fcc99692e88f17fe195b090986b9c4939e86e9837790f50bbf0f4103c16893c3",
+     "canonicalTupleSha256": "ac3d2d20248096520383ca56ab6b650657e68cf6ef19eac76579a5342faeb87f"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_intent_exact",
+     "table": "client_onboarding_issuance_commands",
+     "strippedSqlSha256": "77e80b19c7d0bfa138328e76a2b3eac40b85849a2c14a19a3e69aadb5d3a988c",
+     "sourceSqlSha256": "77e80b19c7d0bfa138328e76a2b3eac40b85849a2c14a19a3e69aadb5d3a988c",
+     "strippedTupleSha256": "058c2822305dd271ecf88b2e75932f100c1c4d3cd150ed1ddc15ca9a5b4a47f2",
+     "canonicalTupleSha256": "def700e45d9f748b71c0063bbe18e7e0367350c4b70ffe8cdb98da95d3253e5a"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_proof_insert_guard",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": "3dfb5249b1cd3ca1c826c45cb8026dc8261bf698b2b5cf015233186027304721",
+     "sourceSqlSha256": "3dfb5249b1cd3ca1c826c45cb8026dc8261bf698b2b5cf015233186027304721",
+     "strippedTupleSha256": "0d2779b157d1a8b59fb32723c6272b5fd2d61f4ed64bea24bfc6d32d320c220f",
+     "canonicalTupleSha256": "4e52a4d94cd354561a354f6c258bdc365ce6ce3aee759628572b75c942fd90e3"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_proof_no_delete",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": "5a19a8d289fb46a7a49f5ac4565e0a15e73e3252ec17a2b9b436e64008a70f2d",
+     "sourceSqlSha256": "5a19a8d289fb46a7a49f5ac4565e0a15e73e3252ec17a2b9b436e64008a70f2d",
+     "strippedTupleSha256": "3eb8c98541abac0d00142bb8e516e71731b1fb7d62660b17f85801713afecc86",
+     "canonicalTupleSha256": "fe8af54805eaaa2879cc71d0d28bfc676cb7ef9c4502f4252a532b3b5c0d4a6f"
+    },
+    {
+     "type": "trigger",
+     "name": "client_onboarding_target_proof_no_update",
+     "table": "client_onboarding_target_proofs",
+     "strippedSqlSha256": "8f15a1b3645dcc07e1808fa29e8e8a39548b6792c644f8869325fe1b7484a04d",
+     "sourceSqlSha256": "8f15a1b3645dcc07e1808fa29e8e8a39548b6792c644f8869325fe1b7484a04d",
+     "strippedTupleSha256": "42a20390d125c503ee0a8034b15678f3f456645d6cdb7effa5d65165c67e10f9",
+     "canonicalTupleSha256": "b1db28b20620a676253c6584d00eebb750f43a46b49514707c3775ee55515bc8"
+    },
+    {
+     "type": "view",
+     "name": "client_onboarding_live_issuances",
+     "table": "client_onboarding_live_issuances",
+     "strippedSqlSha256": "3e902ba389b9602a2f60c8ae321b8e258bcc88d7560ad55d9f98e85cc1a7d54d",
+     "sourceSqlSha256": "e2f006a7f4195fb9ca59a7c7c5ab3989efc26899fe93db1a6711d32819288b25",
+     "strippedTupleSha256": "a46b2516df8968f31cbb7dba1768223fa1adf5a1d95155ae07282947d54b92af",
+     "canonicalTupleSha256": "b6bb2a1bedc4da6853b821707819fa9a8b840e2948377573f250173dad3e8315"
+    }
+   ]
+  }
+ }
+}
