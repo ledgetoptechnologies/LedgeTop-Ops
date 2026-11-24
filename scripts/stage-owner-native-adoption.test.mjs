@@ -1,18 +1,21 @@
 // Focused synthetic control-flow/request regressions. No SQLite, Miniflare, JWT keys or provider transport.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync} from 'node:fs';
-import {tmpdir} from 'node:os';
+import { appendFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
-import {
-  STAGE_PINS, STAGE_OWNER_ADOPTION_TARGET_STAFF_ID as TARGET,
+import { readStageOwnerAdoptionSourceMigrations as readCurrentSource } from './stage-owner-native-adoption.mjs';
+import { historicalOperations0244Fixture, loadHistoricalStageOwnerAdoption } from './test-fixtures/historical-operations-0244.mjs';
+
+const historical = historicalOperations0244Fixture();
+const {
+  STAGE_PINS, STAGE_OWNER_ADOPTION_TARGET_STAFF_ID: TARGET,
   assertStageOwnerAdoptionPinsProvisioned, readStageOwnerAdoptionSourceMigrations,
   assertStageOwnerAdoptionSourceMigrations, STAGE_OWNER_ADOPTION_MIGRATIONS,
   readStageOwnerAdoptionSnapshot, buildStageOwnerAdoptionPlan,
   stageOwnerAdoptionConsentEnvelope, prepareStageOwnerAdoption, executeStageOwnerAdoption,
-} from './stage-owner-native-adoption.mjs';
+} = loadHistoricalStageOwnerAdoption(historical);
+after(historical.cleanup);
 
 const canonical = v => Array.isArray(v) ? `[${v.map(canonical).join(',')}]`
   : v === null || typeof v !== 'object' ? JSON.stringify(v)
@@ -152,32 +155,33 @@ test('one compiled atomic request gates every write and final receipt on fresh J
   assert.ok(writes.at(-1).sql.includes('THEN ? ELSE NULL'));assert.equal(writes.at(-1).params[2],claims.verifiedUntil);
 });
 
-test('the migration pin is the exact 0244 chain: the 0243 chain and a tampered 0244 are refused', () => {
+test('the exact 0244 pin refuses current 0247/0248, the 0243 prefix, and changed 0244 bytes', t => {
   const pin = STAGE_OWNER_ADOPTION_MIGRATIONS;
   assert.equal(pin.count, 236);
   assert.equal(pin.last, '0244_staff_operations_access_writer.sql');
-  const current = readStageOwnerAdoptionSourceMigrations();
-  assert.equal(assertStageOwnerAdoptionSourceMigrations(current), current);
-  const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../apps/operations/migrations');
-  const copy = (skip, tamper) => {
-    const directory = mkdtempSync(path.join(tmpdir(), 'stage-adoption-chain-'));
-    for (const name of readdirSync(source).filter(name => /^\d{4}_.+\.sql$/u.test(name) && name !== skip))
-      copyFileSync(path.join(source, name), path.join(directory, name));
-    if (tamper) writeFileSync(path.join(directory, tamper), Buffer.concat([readFileSync(path.join(source, tamper)), Buffer.from('-- tampered', 'utf8')]));
-    return directory;
-  };
-  const old = copy('0244_staff_operations_access_writer.sql'), tampered = copy(null, '0244_staff_operations_access_writer.sql');
-  try {
-    const oldChain = readStageOwnerAdoptionSourceMigrations(old);
-    assert.equal(oldChain.names.length, 235);
-    assert.throws(() => assertStageOwnerAdoptionSourceMigrations(oldChain), /source_migration_chain_changed/u);
-    const tamperedChain = readStageOwnerAdoptionSourceMigrations(tampered);
-    assert.equal(tamperedChain.names.length, pin.count); assert.equal(tamperedChain.names.at(-1), pin.last);
-    assert.equal(tamperedChain.namesSha256, pin.namesSha256);
-    assert.notEqual(tamperedChain.contentsSha256, pin.contentsSha256);
-    assert.throws(() => assertStageOwnerAdoptionSourceMigrations(tamperedChain), /source_migration_chain_changed/u);
-    // Each pin field alone is fail-closed.
-    for (const field of ['count', 'last', 'namesSha256', 'contentsSha256'])
-      assert.throws(() => assertStageOwnerAdoptionSourceMigrations(current, { ...pin, [field]: field === 'count' ? 235 : 'x' }), /source_migration_chain_changed/u);
-  } finally { rmSync(old, { recursive: true, force: true }); rmSync(tampered, { recursive: true, force: true }); }
+  const frozen = readStageOwnerAdoptionSourceMigrations();
+  assert.equal(assertStageOwnerAdoptionSourceMigrations(frozen), frozen);
+  const current = readCurrentSource();
+  assert.equal(current.names.length, 238);
+  assert.throws(() => assertStageOwnerAdoptionSourceMigrations(current), /source_migration_chain_changed/u);
+
+  const old = historicalOperations0244Fixture();
+  t.after(old.cleanup);
+  unlinkSync(path.join(old.migrations, pin.last));
+  const oldChain = readStageOwnerAdoptionSourceMigrations(old.migrations);
+  assert.equal(oldChain.names.length, 235);
+  assert.throws(() => assertStageOwnerAdoptionSourceMigrations(oldChain), /source_migration_chain_changed/u);
+
+  const tampered = historicalOperations0244Fixture();
+  t.after(tampered.cleanup);
+  appendFileSync(path.join(tampered.migrations, pin.last), '-- tampered');
+  const tamperedChain = readStageOwnerAdoptionSourceMigrations(tampered.migrations);
+  assert.equal(tamperedChain.names.length, pin.count);
+  assert.equal(tamperedChain.names.at(-1), pin.last);
+  assert.equal(tamperedChain.namesSha256, pin.namesSha256);
+  assert.notEqual(tamperedChain.contentsSha256, pin.contentsSha256);
+  assert.throws(() => assertStageOwnerAdoptionSourceMigrations(tamperedChain), /source_migration_chain_changed/u);
+
+  for (const field of ['count', 'last', 'namesSha256', 'contentsSha256'])
+    assert.throws(() => assertStageOwnerAdoptionSourceMigrations(frozen, { ...pin, [field]: field === 'count' ? 235 : 'x' }), /source_migration_chain_changed/u);
 });

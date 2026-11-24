@@ -21,6 +21,7 @@ import { createOps0227To0244CloudflareProvider } from './production-ops-0227-024
 import {
   OPS_0227_0244_FIXTURE_PATH, OPS_0227_0244_ORDERED_NAMES, buildOps0227To0244WireFixture, buildOpsChainDatabase, serializeFixture,
 } from './production-ops-0227-0244-wire-fixture.mjs';
+import { historicalOperations0244Fixture } from './test-fixtures/historical-operations-0244.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -108,12 +109,22 @@ async function execute(file, options = {}) {
   } finally { receipt.close(); provider.close(); }
 }
 
-test('committed wire fixture is exactly the Wrangler split + local full-chain compile of the pinned files', () => {
-  const derived = serializeFixture(buildOps0227To0244WireFixture());
+test('committed wire fixture rebuilds from the exact historical chain and rejects the current source', t => {
+  const historical = historicalOperations0244Fixture();
+  const link = path.join(path.dirname(historical.migrations), 'node_modules');
+  let linked = false;
+  t.after(() => {
+    try { if (linked) fs.unlinkSync(link); }
+    finally { historical.cleanup(); }
+  });
+  fs.symlinkSync(path.join(ROOT, 'apps/operations/node_modules'), link, process.platform === 'win32' ? 'junction' : 'dir');
+  linked = true;
+  const derived = serializeFixture(buildOps0227To0244WireFixture({ root: historical.root }));
   const committed = fs.readFileSync(OPS_0227_0244_FIXTURE_PATH, 'utf8');
   assert.equal(derived, committed);
   assert.equal(hash(Buffer.from(committed)), OPS_0227_0244_FIXTURE_SHA256);
   assert.deepEqual(OPS_0227_0244_FILES.map(file => file.name), [...OPS_0227_0244_ORDERED_NAMES]);
+  assert.throws(() => buildOps0227To0244WireFixture(), /source_inventory_unexpected/u);
 });
 
 test('plan pins exact ordered names, per-file hashes, and the 226 -> 236 ledger', () => {
@@ -123,8 +134,11 @@ test('plan pins exact ordered names, per-file hashes, and the 226 -> 236 ledger'
     assert.equal(hash(fs.readFileSync(path.join(ROOT, 'apps/operations/migrations', file.name))), file.sha256);
   }
   const names = fs.readdirSync(path.join(ROOT, 'apps/operations/migrations')).filter(name => name.endsWith('.sql')).sort();
+  assert.deepEqual(names.slice(OPS_0227_0244_FINAL_LEDGER.count), [
+    '0247_client_onboarding_destination_target_proofs.sql', '0248_client_onboarding_invite_mail_outbox.sql',
+  ]);
   assert.equal(hash(names.slice(0, 226).join('\n')), OPS_0227_0244_PRIOR_LEDGER.namesSha256);
-  assert.equal(hash(names.join('\n')), OPS_0227_0244_FINAL_LEDGER.namesSha256);
+  assert.equal(hash(names.slice(0, OPS_0227_0244_FINAL_LEDGER.count).join('\n')), OPS_0227_0244_FINAL_LEDGER.namesSha256);
   assert.match(plan.planSha256, /^[a-f0-9]{64}$/u);
   const actual = JSON.parse(fs.readFileSync(path.join(ROOT,
     'scripts/production-auto-migration-profile/installed-schema-preservation-v1/actual-metadata-evidence.fixture.json'), 'utf8'));
