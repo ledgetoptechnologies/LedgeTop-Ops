@@ -292,7 +292,11 @@ test('undo of an import is exactly what was imported, or nothing', async t => {
       if (where === 'public link' && change.endsWith('elsewhere')) continue;
       const { store: open_, scope, database, request } = await open(t);
       const sent = [];
-      const store = createMarksStore({ request: (path, init) => { sent.push([init.method, path, init.body && JSON.parse(init.body)]); return request(path, init); } });
+      let accessLoss = 0;
+      const store = createMarksStore({
+        request: (path, init) => { sent.push([init.method, path, init.body && JSON.parse(init.body)]); return request(path, init); },
+        onViewerAccessLost: () => { accessLoss++; },
+      });
       await store.setScope(where === 'session' ? scope('client', 'client-a') : { mode: 'temporary', key: 'public' });
       const before = await store.create(pin('Before'));
       const marks = ['a', 'b', 'c'].map(name => ({ ...pin(name), id: randomUUID() }));
@@ -309,7 +313,10 @@ test('undo of an import is exactly what was imported, or nothing', async t => {
       if (where === 'session') {
         assert.deepEqual(sent[0], ['POST', '/api/v1/marks/batch/delete', { marks: imported }], 'the ids and revisions the import returned');
         assert.equal(database.prepare('SELECT count(*) n FROM viewer_marks WHERE deleted_at IS NULL').get().n, change.startsWith('edited') ? 4 : 3, 'rolled back whole');
+      } else {
+        assert.deepEqual(sent, [], 'temporary marks never use the signed API');
       }
+      assert.equal(accessLoss, 0, 'an import conflict is not lost Viewer access');
       assert.deepEqual(store.state.marks.map(mark => mark.name).sort(), change.startsWith('edited') ? ['Before', 'Edited', 'a', 'c'] : ['Before', 'a', 'c']);
       assert.match(store.state.message, /changed since/);
       // It cannot be done any more, so it does not block the one before it.

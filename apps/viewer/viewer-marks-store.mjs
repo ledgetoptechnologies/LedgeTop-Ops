@@ -371,7 +371,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
             op.tried?.();
             value = await checkDoubt(scope, op);
             if (value === undefined) throw new MarksError('not_saved', 0);
-          } else if (!again && op.mine && ([404, 409].includes(error.status)
+          } else if (!scope.temporary && !again && op.mine && ([404, 409].includes(error.status)
             || (op.refused && error.status === 400 && error.code === 'mark_category_not_found'))) {
             error.loaded = true;
             try { await load(scope); }
@@ -403,7 +403,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         hideInaccessibleMarks(error);
       } else {
         state.message = MESSAGES[error.code] || 'Could not save the change. Try again.';
-        if (!error.loaded && (error.status === 409 || error.status === 404 || error.code === 'mark_category_not_found')) {
+        // Temporary marks live only in this tab. A local conflict needs no signed reload.
+        if (!scope.temporary && !error.loaded
+          && (error.status === 409 || error.status === 404 || error.code === 'mark_category_not_found')) {
           await load(scope).catch(readError => {
             if (scope.live() && accessLost(readError) && !staleRefusal(readError)) hideInaccessibleMarks(readError);
           });
