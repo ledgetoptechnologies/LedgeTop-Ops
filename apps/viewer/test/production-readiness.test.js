@@ -3,13 +3,18 @@
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
 const fs = require('node:fs');
+const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn, spawnSync } = require('node:child_process');
+const { execFile, spawn, spawnSync } = require('node:child_process');
+const { DatabaseSync } = require('node:sqlite');
+const { promisify } = require('node:util');
 const test = require('node:test');
 const { MIGRATIONS, openDatabase } = require('../server/database');
-const { readRuntimeRevision } = require('../server/runtimeIdentity');
+const { ProcessingRepository } = require('../server/processingRepository');
+const { ProviderCredentials } = require('../server/providerCredentials');
+const { readRuntimeRevision, REVISION_HEADER, SCHEMA_HEADER } = require('../server/runtimeIdentity');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 
@@ -121,6 +126,123 @@ test('production readiness verifies the live policy and signed catalog without e
   });
   assert.notEqual(liveWithoutExactModel.status, 0);
   assert.match(liveWithoutExactModel.stderr, /--live-capability requires an exact --model id or alias/);
+});
+
+test('production readiness --require-processing checks a synthetic SQLite store without writing', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-processing-readiness-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const processingRoot = path.join(root, 'processing');
+  const storage = ['datasets', 'models', 'cache', 'trash'];
+  for (const mount of storage) fs.mkdirSync(path.join(processingRoot, mount), { recursive: true });
+
+  const databasePath = path.join(root, 'viewer.sqlite');
+  const providerId = 'readiness-fixture-provider';
+  const providerKey = '3c'.repeat(32);
+  const providerToken = 'synthetic-provider-credential';
+  const database = openDatabase(databasePath);
+  const workerAt = new Date().toISOString();
+  try {
+    const processing = new ProcessingRepository(database);
+    const credentials = new ProviderCredentials({ processing, keys: { 'provider-v1': providerKey } });
+    const sealed = credentials.seal(providerId, providerToken);
+    processing.upsertProvider({
+      id: providerId, type: 'nodeodm', displayName: 'Readiness fixture',
+      endpoint: 'http://127.0.0.1:1', enabled: true,
+      credentialCiphertext: sealed.ciphertext, credentialKeyId: sealed.keyId,
+      capabilities: { options: ['pc-ept', '3d-tiles', 'gltf'].map((name) => ({ name })) },
+      capabilityFingerprint: 'synthetic-fingerprint',
+    });
+    processing.recordWorkerHeartbeat('readiness-fixture-worker', { at: workerAt });
+    // A writer that accidentally constructs the repository would insert these presets.
+    database.exec('DELETE FROM processing_presets; PRAGMA journal_mode=DELETE');
+  } finally {
+    database.close();
+  }
+
+  // Test only the CLI and the local database here. No worker or provider is running.
+  const expectedHost = 'viewer.example.test';
+  const opsBaseUrl = 'https://ops.example.test';
+  const schemaVersion = MIGRATIONS.at(-1).version;
+  const revision = readRuntimeRevision() || 'unavailable';
+  let requests = 0;
+  const server = http.createServer((req, res) => {
+    requests += 1;
+    if (req.headers.host !== expectedHost) return res.writeHead(421).end();
+    if (req.url === '/') return res.writeHead(302, { location: opsBaseUrl + '/' }).end();
+    if (req.url === '/api/admin/session') return res.writeHead(404).end();
+    if (req.url === '/api/v1/models') return res.end(JSON.stringify({ models: [] }));
+    if (req.url !== '/api/v1/health' && req.url !== '/api/v1/ready') return res.writeHead(404).end();
+    res.writeHead(200, {
+      'Cache-Control': 'no-store',
+      [REVISION_HEADER]: revision,
+      [SCHEMA_HEADER]: String(schemaVersion),
+    }).end(JSON.stringify({ ok: true }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+
+  const env = {
+    // Do not inherit live application configuration or credentials.
+    ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+    NODE_NO_WARNINGS: '1',
+    NODE_ENV: 'production',
+    DATA_DIR: root,
+    DATABASE_PATH: databasePath,
+    PROCESSING_ROOT: processingRoot,
+    PROCESSING_PLATFORM_ENABLED: 'true',
+    PROVIDER_CREDENTIALS_KEY: providerKey,
+    STORAGE_RESERVE_BYTES: '1',
+    STORAGE_RESERVE_PERCENT: '1',
+    EXPECTED_HOST: expectedHost,
+    PUBLIC_BASE_URL: 'https://' + expectedHost,
+    OPS_BASE_URL: opsBaseUrl,
+    ALLOWED_EMBED_ORIGINS: opsBaseUrl,
+    WEBODM_ENABLED: 'false',
+    EMERGENCY_ADMIN_ENABLED: 'false',
+    SESSION_SECRET: 'synthetic-processing-readiness-session-secret',
+    SERVICE_AUTH_SECRET: 'synthetic-processing-readiness-service-secret',
+    PROXY_SHARED_SECRET: 'synthetic-processing-readiness-proxy-secret',
+    VIEWER_READINESS_BASE_URL: 'http://127.0.0.1:' + server.address().port,
+  };
+  const runReadiness = () => promisify(execFile)(process.execPath,
+    ['scripts/production-readiness.mjs', '--require-processing'],
+    { cwd: repositoryRoot, env, encoding: 'utf8', timeout: 20_000 });
+  const assertUnchanged = (before) => {
+    assert.ok(fs.readFileSync(databasePath).equals(before), 'readiness must leave the SQLite file byte-identical');
+    for (const suffix of ['-journal', '-wal', '-shm']) assert.equal(fs.existsSync(databasePath + suffix), false);
+  };
+
+  const beforeClean = fs.readFileSync(databasePath);
+  const clean = await runReadiness();
+  assert.equal(clean.stderr, '');
+  const output = JSON.parse(clean.stdout);
+  assert.equal(output.ok, true);
+  assert.deepEqual(output.build, { revision, schemaVersion });
+  assert.deepEqual(output.processing.lifecycleCounts, []);
+  assert.equal(output.processing.workerAt, workerAt);
+  assert.equal(output.processing.enabledProviders, 1);
+  assert.deepEqual(Object.keys(output.processing.spaces), storage);
+  assert.ok(!clean.stdout.includes(providerToken) && !clean.stdout.includes(providerKey));
+  assertUnchanged(beforeClean);
+
+  const writer = new DatabaseSync(databasePath);
+  try {
+    writer.prepare('INSERT INTO storage_mutations (id, mutation_type, entity_type, entity_id, trash_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('failed-fixture-journal', 'trash', 'dataset', 'fixture-dataset', 'fixture-trash', 'failed', workerAt, workerAt);
+  } finally {
+    writer.close();
+  }
+  const requestsBeforeHold = requests;
+  const beforeHold = fs.readFileSync(databasePath);
+  await assert.rejects(runReadiness, (error) => {
+    assert.equal(error.code, 1);
+    assert.equal(error.stdout, '');
+    assert.match(error.stderr, /storage lifecycle mutations require operator repair/);
+    return true;
+  });
+  assert.equal(requests, requestsBeforeHold, 'failed journal must stop readiness before HTTP probes');
+  assertUnchanged(beforeHold);
 });
 
 test('production readiness exercises an exact protected Ops browser capability without leaking credentials', async (t) => {

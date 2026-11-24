@@ -175,7 +175,7 @@ test('scoped refresh ignores a move-racing response and reconciles only its own 
   let resolveTasks, resolveFolders, paintCount = 0;
   const entry = { folders: [], loading: false };
   const context = {
-    projectDataGeneration: 0, projectArtifactsRefreshId: null, workspaceLoads: 0,
+    projectDataGeneration: 0, projectArtifactsRefreshId: null, outputFences: new Map(), workspaceLoads: 0,
     can: () => true, document: { hidden: false }, folderAuthorizationGuard: () => () => true, console,
     state: { section: 'dashboard', selectedProjectId: 'p', expandedTaskId: 'one', projectQuery: 'search', tasks: [first, other], busy: false, taskDetails: {} },
     folderCache: new Map([['p', entry]]),
@@ -197,6 +197,22 @@ test('scoped refresh ignores a move-racing response and reconciles only its own 
   assert.deepEqual(Array.from(context.state.tasks), [other, current]);
   assert.equal(context.state.expandedTaskId, 'one'); assert.equal(context.state.projectQuery, 'search');
   assert.equal(entry.folders.length, 1); assert.equal(paintCount, 1);
+  // An artifact read that began before a public link published a model keeps its other data, not its outputs, and stays queued.
+  context.projectArtifactsRefreshId = new Set(['p']);
+  let resolveOutputs;
+  context.pagedApi = path => new Promise(resolve => { if (path.includes('/outputs')) resolveOutputs = resolve; else if (path.includes('/datasets')) resolve({ datasets: [] }); else resolveTasks = resolve; });
+  context.state.datasets = [];
+  const published = { id: 'output', projectId: 'p', status: 'published', viewSessionUrl: '/view' }, finished = { ...current, status: 'published' };
+  context.state.outputs = [published];
+  refresh = context.refreshProjectData('p');
+  context.outputFences.set('p', 1);
+  resolveTasks({ tasks: [finished] }); resolveFolders({ folders: [] }); resolveOutputs({ outputs: [{ ...published, status: 'ready', viewSessionUrl: null }] }); await refresh;
+  assert.equal(context.state.tasks.at(-1), finished); assert.deepEqual([...context.state.outputs], [published]);
+  assert.deepEqual([...context.projectArtifactsRefreshId], ['p']);
+  // The next read, started after the link, commits.
+  refresh = context.refreshProjectData('p');
+  resolveTasks({ tasks: [finished] }); resolveFolders({ folders: [] }); resolveOutputs({ outputs: [{ ...published, reportUrl: '/report' }] }); await refresh;
+  assert.equal(context.state.outputs[0].reportUrl, '/report'); assert.equal(context.projectArtifactsRefreshId.size, 0);
   // A project still loading its folders is skipped; its own load paints it.
   entry.loading = true;
   assert.equal(await context.refreshProjectData('p'), false);

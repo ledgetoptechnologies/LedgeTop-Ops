@@ -55,7 +55,7 @@ internal static class EmployeeClientTests
 
     private static async Task RoundTrip() {
         using var fixture = new Fixture(realProcess: true);
-        const string source = "Clients/Ben Hamblin/中 #?.jpg";
+        const string source = "Clients/Sample Client/中 #?.jpg";
         const string cursor = "opaque.selector+%?&=";
         var handler = new Handler((request, _) => {
             Assert(request.Method == HttpMethod.Get && request.RequestUri!.Host == "ops.example.invalid");

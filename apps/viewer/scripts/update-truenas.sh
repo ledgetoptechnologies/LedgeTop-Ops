@@ -83,13 +83,16 @@ if [[ -n "$api_id" && "${VIEWER_UPDATE_ALLOW_ACTIVE:-0}" != 1 ]]; then
     const {DatabaseSync}=require("node:sqlite"),{config}=require("./server/config");
     const db=new DatabaseSync(config.databasePath,{readOnly:true});
     const checks=[
-      ["nonterminal attempts","SELECT COUNT(*) n FROM processing_attempts WHERE status NOT IN (\"ready_for_review\",\"failed\",\"cancelled\",\"published\")"],
-      ["processing jobs","SELECT COUNT(*) n FROM processing_jobs WHERE status=\"leased\""],
-      ["derivative jobs","SELECT COUNT(*) n FROM derivative_jobs WHERE status=\"leased\""],
-      ["dataset operations","SELECT COUNT(*) n FROM dataset_operations WHERE status=\"leased\""],
-      ["storage mutations","SELECT COUNT(*) n FROM storage_mutations WHERE status IN (\"intent\",\"fs_applied\")"],
+      ["nonterminal attempts","SELECT COUNT(*) n FROM processing_attempts WHERE status NOT IN (?,?,?,?)","ready_for_review","failed","cancelled","published"],
+      ["processing jobs","SELECT COUNT(*) n FROM processing_jobs WHERE status=?","leased"],
+      ["derivative jobs","SELECT COUNT(*) n FROM derivative_jobs WHERE status=?","leased"],
+      ["dataset operations","SELECT COUNT(*) n FROM dataset_operations WHERE status=?","leased"],
+      ["storage mutations","SELECT COUNT(*) n FROM storage_mutations WHERE status IN (?,?)","intent","fs_applied"],
     ];
-    const active=checks.map(([name,sql])=>[name,Number(db.prepare(sql).get().n)]).filter(([,n])=>n>0);db.close();
+    let active;
+    try {
+      active=checks.map(([name,sql,...statuses])=>[name,Number(db.prepare(sql).get(...statuses).n)]).filter(([,n])=>n>0);
+    } finally { db.close(); }
     if(active.length){console.error(active.map(([name,n])=>`${name}: ${n}`).join(", "));process.exit(3);}
   '; then
     fail "active durable work exists; keep Ops admission paused and let work settle, or set VIEWER_UPDATE_ALLOW_ACTIVE=1 only for emergency recovery"
