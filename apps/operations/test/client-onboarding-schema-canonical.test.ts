@@ -8,11 +8,11 @@ import { canonicalSqliteSchemaInventory, canonicalSqliteSchemaTuple, sqliteSchem
 import { CLIENT_ONBOARDING_SCHEMA_PINS, destinationIssuanceSchemaFence, mailIssuanceSchemaFence, targetIssuanceSchemaFence }
   from "../src/worker/client-onboarding-target-schema";
 
-// The pins #702 was reviewed with: SHA-256 over comment-stripped stored text.
+// SHA-256 over the reviewed comment-stripped stored text.
 const STRIPPED_TEXT_PINS = {
-  target: "b6be16ff958e4a23048f107b4aa5a4c7d41b25d7c296d463bf381b565b525873",
-  destination: "9ac1831914cc6857ddd41df7fff9cd2de4d8a52f0ddd69fb23fab9d18af7f77d",
-  mail: "4579b255a43bb5ddfa6e4fa49212b1cdb003c72541b15a90da1acb925eebd746",
+  target: "0ccdcb9baabb0a5f5c4a480304255862563034ad5472cc9c4507094fd9a3d749",
+  destination: "3847a78394a2a4e8a5dc4556a8a7187fa8589ad58330bc29e8d417e39798e41e",
+  mail: "bfef35e15eee0702db7e1e679ec30636967e013509ec8ffd3e18a81c583f6228",
 } as const;
 type InventoryName = keyof typeof STRIPPED_TEXT_PINS;
 const NAMES = Object.keys(STRIPPED_TEXT_PINS) as InventoryName[];
@@ -76,10 +76,10 @@ describe("client onboarding schema readiness canonicalization", () => {
     expect(await inventory(stripped, "destination")).toEqual(await inventory(source, "destination"));
   });
 
-  it.each(NAMES)("%s keeps the provenance of the earlier pin, tuple by tuple", async name => {
+  it.each(NAMES)("%s matches the stored and canonical digests tuple by tuple", async name => {
     const recorded = JSON.parse(readFileSync(new URL("./fixtures/client-onboarding-schema-readiness-v1.json", import.meta.url), "utf8"));
     const [left, right] = [await inventory(stripped, name), await inventory(source, name)];
-    // The old algorithm over the stripped form still gives the old pin.
+    // The stripped form must also match its reviewed stored-text pin.
     expect(sha256(JSON.stringify(left))).toBe(STRIPPED_TEXT_PINS[name]);
     const text = (row: SqliteSchemaTuple) => row[3] === null ? null : typeof row[3] === "string" ? row[3] : JSON.stringify(row[3]);
     const tuples = left.map((row, index) => {

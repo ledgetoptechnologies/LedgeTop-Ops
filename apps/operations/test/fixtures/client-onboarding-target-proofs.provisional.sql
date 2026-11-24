@@ -4,10 +4,13 @@ ALTER TABLE client_onboarding_issuance_commands ADD COLUMN target_intent_json TE
 CREATE TRIGGER client_onboarding_target_intent_exact BEFORE INSERT ON client_onboarding_issuance_commands
 WHEN NEW.target_intent_json IS NOT NULL
 BEGIN
-  SELECT CASE WHEN json_valid(NEW.target_intent_json)<>1 THEN RAISE(ABORT,'invalid target intent') END;
-  SELECT CASE WHEN json_type(NEW.target_intent_json)<>'array' OR json_array_length(NEW.target_intent_json) NOT BETWEEN 1 AND 2
-    OR NEW.destination_intent_json IS NULL THEN RAISE(ABORT,'invalid target intent') END;
-  SELECT CASE WHEN EXISTS (SELECT 1 FROM json_each(NEW.target_intent_json) target
+  SELECT RAISE(ABORT,'invalid target intent')
+  WHERE json_valid(NEW.target_intent_json)<>1;
+  SELECT RAISE(ABORT,'invalid target intent')
+  WHERE json_type(NEW.target_intent_json)<>'array' OR json_array_length(NEW.target_intent_json) NOT BETWEEN 1 AND 2
+    OR NEW.destination_intent_json IS NULL;
+  SELECT RAISE(ABORT,'invalid target intent')
+  WHERE EXISTS (SELECT 1 FROM json_each(NEW.target_intent_json) target
     WHERE target.type<>'object' OR (SELECT count(*) FROM json_each(target.value))<>3
       OR coalesce(json_extract(target.value,'$.kind'),'') NOT IN ('client','organization')
       OR coalesce(json_type(target.value,'$.publicId'),'')<>'text'
@@ -16,8 +19,7 @@ BEGIN
       OR NOT EXISTS (SELECT 1 FROM json_each(NEW.destination_intent_json) destination
         WHERE json_extract(destination.value,'$.sourceId')=json_extract(target.value,'$.sourceId'))
       OR (target.key=1 AND json_extract(target.value,'$.sourceId')<>'project-alpha:primary'))
-    OR (SELECT count(DISTINCT json_extract(value,'$.sourceId')) FROM json_each(NEW.target_intent_json))<>json_array_length(NEW.target_intent_json)
-    THEN RAISE(ABORT,'invalid target intent') END;
+    OR (SELECT count(DISTINCT json_extract(value,'$.sourceId')) FROM json_each(NEW.target_intent_json))<>json_array_length(NEW.target_intent_json);
 END;
 
 CREATE TABLE client_onboarding_target_proofs (
