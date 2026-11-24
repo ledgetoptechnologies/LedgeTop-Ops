@@ -214,13 +214,22 @@ Execute mode works as follows:
 Exit codes:
 
 - 0: complete, dry run passed, or reconciled.
-- 1: stopped, refused, or reconciliation required.
+- 1: stopped, refused, or reconciliation required. Also a run that ends without
+  settling, which prints `ops_0227_0244:command_line_unsettled`.
 - 2: cancelled.
 
 ## Receipt and stop behaviour
 
 The receipt is a JSON file. The tool creates it exclusively and rewrites it in
-full after every phase, so a stop always leaves a complete partial receipt. It
+full after every phase, so a stop always leaves a complete partial receipt. Each
+rewrite goes to `<receipt>.next` first and replaces the receipt only when it is
+proven, so the last complete receipt stays in place. Before the first file is
+sent, an execute run also saves `<receipt>.pre-apply.json` once: the proven
+starting point, with the start counts, the schema digest and the ledger. An
+error before the ordered run starts (for example a missing token, or a failed
+target check) is recorded as `refused`, phase `command-line`, with zero writes.
+A process that is killed, or ends without settling, leaves its last saved receipt
+(empty if there was none yet), perhaps with a `.next` file beside it. The receipt
 contains:
 
 - the plan hash and the fixture hash;
@@ -254,6 +263,57 @@ apply step records one of these outcomes:
 
 A failed read after an apply is treated the same way as an ambiguous apply. The
 tool never retries a batch, and it never sends a file twice in one process.
+
+## When the receipt cannot be saved
+
+A receipt write counts only after every byte is written to `<receipt>.next`,
+flushed, closed and read back equal, the file has replaced the receipt, the folder
+has been flushed (not on Windows, which has no way to), and the receipt has been
+read back equal. After a failure the process never writes that
+receipt again. One local wait exists: on Windows, a replacement refused because
+another program holds a file open (EPERM, EACCES or EBUSY) is tried again with the
+same file for at most 15 seconds, and only while both files still hold exactly the
+expected bytes. Nothing is sent or read remotely meanwhile. The refusals and the
+time are logged, and recorded in `receiptWaits` of the next saved receipt (a wait of
+the last write is only logged). No migration batch and no other
+request is ever sent twice. Do not open the receipt files during a run. The
+previous complete receipt normally stays in place, and
+`.next` holds whatever was written. A receipt that was not saved is never
+reported as a success: the exit code is 1, whatever the run reached, and stderr
+has its own line.
+
+| What failed | stdout summary | stderr | Exit |
+|---|---|---|---|
+| A receipt write in the ordered run, before any file was sent in this run | `stopped`, `receipt_write_failed` | `ops_0227_0244:receipt_write_failed` | 1 |
+| A receipt write in the ordered run, after a file was sent | `reconciliation-required`, `reconciliation_required:receipt_write_failed`, with `writesPerformed` | `ops_0227_0244:receipt_write_failed` | 1 |
+| A receipt write after the run had already stopped | the stop's own status and code | `ops_0227_0244:receipt_write_failed` | 1 |
+| The receipt of a refusal or a cancelled run | the refusal's own status and code | `ops_0227_0244:refusal_receipt_write_failed` | 1 |
+| The receipt of an error | none | the error, then `ops_0227_0244:refusal_receipt_write_failed` | 1 |
+
+A result or an error whose receipt cannot be closed would add
+`ops_0227_0244:receipt_close_failed` in the same way. The file receipt holds
+nothing open between writes, so it does not raise it.
+
+The run stops at the failure: no later file is read or sent. After a file was
+sent, the database holds at least the confirmed files (`writesPerformed`), and the
+saved receipt is the one from before the failed write: it may still say
+`sending` for a file that landed. That includes a failure on the last write of a
+run that reached 236. Do not retry. The exit code and stderr decide, not the
+file. If only the last check after the replacement failed, the receipt can be
+newer, even `complete`.
+
+Only the receipt of an execute run that ended (`stopped`,
+`reconciliation-required` or `complete`) or a pre-apply receipt is accepted as a
+baseline. An unfinished receipt (status `running`) never is, whatever it holds. The
+pre-apply receipt is accepted by reconcile only while the ledger is still where it
+was before the first file, and never for a resume: it says nothing about what its
+run sent. After any step was sent, the state is resolved from the live ledger and
+schema, read from the primary, in a reviewed manual reconciliation.
+
+A successful exit and an independent read-back from the primary are both needed
+before a run counts as done. A final receipt beside exit code 1 needs
+reconciliation. On Windows the folder cannot be flushed, so after a power loss the
+previous complete receipt can reappear.
 
 ## Reconcile and resume
 
@@ -487,8 +547,17 @@ node --test scripts/production-ops-0227-0244-ordered-once.test.mjs
 ```
 
 ```powershell
+node --test scripts/production-ops-0227-0244-cli-entry.test.mjs
+```
+
+```powershell
 node --test scripts/production-ops-0227-0244-copied-226-fixture.test.mjs
 ```
+
+The command-line tests start the real command as a child process with the real
+provider and a fake token. A preload records and refuses every network attempt,
+or answers Cloudflare requests from a local SQLite file. They need no npm
+dependencies, except the cases inside the ordered-once test file.
 
 The tests are offline. One test is skipped unless
 `OPS_0227_0244_PRODUCTION_SHAPED_SQLITE` names a private production-shaped 226

@@ -26,7 +26,7 @@ source package nor a public demo was created or shared during this review.
   ranges/host addresses and TrueNAS installation paths. These are not access
   credentials, but disclose installation details and must be customized for
   another operator instead of pointing their instance at the existing service.
-- `serve-all.sh` contains an actual client/job photo-directory path. Omit this
+- `serve-all.sh` needs `PHOTOS_DIR` set by the operator. Omit this
   legacy development helper from an external snapshot, or replace it with a
   generic, reviewed local-only example. It starts development file servers and
   is not the production deployment path.

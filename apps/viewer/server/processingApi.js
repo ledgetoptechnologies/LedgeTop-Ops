@@ -420,7 +420,8 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.post('/api/v1/processing/outputs/:id/shares',authorize('viewer.shares.create'),mutate,async(req,res,next)=>{
     try {
       const b=req.body||{};
-      if(!onlyKeys(b,['label','password','expiresAt','permissions','displayUnits','publishIfReady','selectedAssetKinds','allowExistingAccessUpdate','allowedViews']))
+      if(!onlyKeys(b,['label','password','expiresAt','permissions','displayUnits','publishIfReady','selectedAssetKinds','allowExistingAccessUpdate','allowedViews','expectedProjectId'])
+        ||(b.expectedProjectId!==undefined&&(typeof b.expectedProjectId!=='string'||!b.expectedProjectId)))
         return error(res,400,'invalid_share');
       for(const flag of ['publishIfReady','allowExistingAccessUpdate'])
         if(b[flag]!==undefined&&typeof b[flag]!=='boolean')return error(res,400,'invalid_share');
@@ -456,6 +457,8 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       const body=processing.transaction(()=>{
         const output=processing.getModelOutput(req.params.id),state=outputShareState(output);
         if(!state)reject(409,'output_changed');
+        // The workspace names the project whose clients staff were shown. A task in another project by now is not published to its clients.
+        if(b.expectedProjectId!==undefined&&output.projectId!==b.expectedProjectId)reject(409,'output_project_changed');
         const principal=processing.getAdminSessionByHash(auth.hashToken(String(req.get('authorization')).replace(/^Bearer\s+/i,'')));
         if(!principal||!processing.adminSessionLive(principal)||principal.revokedAt)reject(401,'authentication_required');
         if(!principal.permissions.includes('viewer.shares.create'))reject(403,'permission_denied');

@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
+const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const test = require('node:test');
@@ -213,6 +214,65 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(processingRunbook, /Do not use `mv`, do not remove the old named volume/);
   assert.match(processingRunbook, /\.ltds-viewer-storage-root/);
   assert.doesNotMatch(processingRunbook, /--profile processing/);
+});
+
+test('TrueNAS update checks the running image database read-only and blocks active durable work', (t) => {
+  const script = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'update-truenas.sh'), 'utf8');
+  const inline = /if ! docker exec "\$api_id" node -e '([\s\S]*?)'; then/.exec(script)?.[1];
+  assert.ok(inline, 'exercise the exact inline check that runs in the old image');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-update-journals-'));
+  const databasePath = path.join(root, 'viewer.sqlite');
+  const writable = new DatabaseSync(databasePath);
+  writable.exec(`
+    CREATE TABLE processing_attempts(status TEXT);
+    CREATE TABLE processing_jobs(status TEXT);
+    CREATE TABLE derivative_jobs(status TEXT);
+    CREATE TABLE dataset_operations(status TEXT);
+    CREATE TABLE storage_mutations(status TEXT);
+    INSERT INTO processing_attempts VALUES ('ready_for_review'), ('failed'), ('cancelled'), ('published');
+    INSERT INTO processing_jobs VALUES ('completed');
+    INSERT INTO derivative_jobs VALUES ('completed');
+    INSERT INTO dataset_operations VALUES ('completed');
+    INSERT INTO storage_mutations VALUES ('completed');
+  `);
+
+  const readOnly = new DatabaseSync(databasePath, { readOnly: true });
+  t.after(() => { readOnly.close(); writable.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const errors = [];
+  const stopped = new Error('update refused');
+  let exitCode;
+  function runCheck() {
+    vm.runInNewContext(inline, {
+      require(name) {
+        if (name === './server/config') return { config: { databasePath } };
+        assert.equal(name, 'node:sqlite');
+        return { DatabaseSync };
+      },
+      console: { error(message) { errors.push(message); } },
+      process: { exit(code) { exitCode = code; throw stopped; } },
+    });
+  }
+
+  runCheck();
+  assert.equal(exitCode, undefined);
+  assert.deepEqual(errors, []);
+  writable.exec(`
+    INSERT INTO processing_attempts VALUES ('running');
+    INSERT INTO processing_jobs VALUES ('leased');
+    INSERT INTO derivative_jobs VALUES ('leased');
+    INSERT INTO dataset_operations VALUES ('leased');
+    INSERT INTO storage_mutations VALUES ('intent'), ('fs_applied');
+  `);
+  assert.throws(runCheck, (error) => error === stopped);
+  assert.equal(exitCode, 3);
+  assert.deepEqual(errors, [
+    'nonterminal attempts: 1, processing jobs: 1, derivative jobs: 1, dataset operations: 1, storage mutations: 2',
+  ]);
+  assert.equal(readOnly.prepare('SELECT COUNT(*) AS count FROM storage_mutations').get().count, 3);
+
+  writable.exec('DROP TABLE storage_mutations');
+  assert.throws(runCheck, /no such table: storage_mutations/);
 });
 
 test('actual API shutdown closes admission and waits for HTTP and owned work before SQLite in either completion order', async () => {

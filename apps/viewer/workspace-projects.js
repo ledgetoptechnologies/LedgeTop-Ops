@@ -20,7 +20,7 @@ import { createWorkspaceNavigationWork, workspaceNavigationState } from './works
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -61,6 +61,13 @@ if(initialView.selectedProjectId&&initialView.selectedFolderId)treeReveals.set(i
 let folderAuthorizationGeneration=0,activeFolderMutation=null;
 let projectDataGeneration=0,projectRefreshTimer=null,projectRefreshBusy=false,projectPaintPending=false,workspaceLoads=0;
 let projectArtifactsRefreshId=null;
+// Projects whose outputs changed here (a public link published a model). A list read that started earlier
+// must not put that project's old rows back; everything else in the read still commits.
+const outputFences=new Map();
+function fencedOutputs(incoming,fences){
+  const changed=output=>outputFences.get(output.projectId)!==fences.get(output.projectId);
+  return [...incoming.filter(output=>!changed(output)),...state.outputs.filter(changed)];
+}
 let draggedFolderTask=null,folderUndo=null,folderUndoTimer=null,treeDragHover=null,treeDragExpandTimer=null;
 function isProjectOpen(projectId){return state.section==='dashboard'&&Boolean(projectId)&&(projectId===state.selectedProjectId||treeState.projects.has(projectId))}
 function openProjectIds(){return state.projects.filter(project=>isProjectOpen(project.id)).map(project=>project.id)}
@@ -189,7 +196,9 @@ function canShareOutput(output) {
 }
 async function openShareModal(projectId,onlyOutputId=null){
   state.clientNativeAccess=null;state.clientDirectAccess=null;
-  const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
+  // A task's Share stays that task's Share: what it was opened on is fixed now, not looked up again after a refresh.
+  const openedTask=onlyOutputId?state.tasks.find(task=>task.id===state.outputs.find(output=>output.id===onlyOutputId)?.taskId):null;
+  const context={projectId,onlyOutputId,taskId:openedTask?.id||null,taskName:openedTask?.displayName||'',id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
   const token=state.token,subject=state.adminSession?.subject;
   const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
     &&modalContent.querySelector('.share-columns')?.dataset.shareContext===context.id;
@@ -240,8 +249,9 @@ async function openShareModal(projectId,onlyOutputId=null){
 }
 function injectProjectShareCard(projectId){
   const target=modalContent.querySelector('[data-legacy-project-shares]');if(!target)return;
-  const shares=state.projectShares[projectId]||[];
-  target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project access is shared through Operations clients only. Existing public project links remain active until you revoke them.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views</small></div>${badge(share.revokedAt?'revoked':'active')}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
+  const shares=state.projectShares[projectId]||[],tab=modalContent.querySelector('#share-tab-public');
+  if(tab)tab.textContent=publicTabLabel(shares);
+  target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project links cannot be created. A link marked active opens the project until it expires or you revoke it.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views · ${publicLinkState(share)==='expired'?`Expired ${esc(dateTime(share.expiresAt))}`:share.expiresAt?`Expires ${esc(dateTime(share.expiresAt))}`:'No expiry'}</small></div>${badge(publicLinkState(share))}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
   bindProjectShareCard(projectId);
 }
 function bindProjectShareCard(projectId){
@@ -630,6 +640,33 @@ function scheduleProjectRefresh(delay){
   },delay??8000);
 }
 
+// Link lists for the outputs that are published now, not when the read began. Every local change (a new link, an
+// edit, a Share dialog's own read) stores a new array, so a list that changed meanwhile is newer than this read.
+function currentShares(published,results,before){
+  const read=new Map(published.map((output,index)=>[output.id,results[index].value?.shares||[]])),next={};
+  for(const output of state.outputs)if(output.activePublished)next[output.id]=read.get(output.id)||state.shares[output.id]||[];
+  for(const [id,shares] of Object.entries(state.shares))if(shares!==before[id])next[id]=shares;
+  return next;
+}
+// Reads one project's outputs again from any section, whether or not the project is open or a full load is running.
+async function refreshProjectOutputs(projectId){
+  const token=state.token,session=state.adminSession,fence=outputFences.get(projectId);
+  const current=()=>Boolean(token)&&token===state.token&&session===state.adminSession&&fence===outputFences.get(projectId);
+  try{
+    const result=await pagedApi(`/api/v1/processing/outputs?projectId=${encodeURIComponent(projectId)}`,'outputs',{recoveryGuard:current});
+    if(!current())return;
+    state.outputs=[...state.outputs.filter(item=>item.projectId!==projectId),...result.outputs];
+    const detail=state.taskDetails[state.expandedTaskId]?.task;
+    if(detail&&detail.projectId===projectId)detail.outputs=result.outputs.filter(item=>item.taskId===detail.id);
+    if(state.section==='dashboard')projectPaintPending=patchProjectTree(projectId)||projectPaintPending;
+  }catch(error){
+    if(!current())return;
+    // The open project's next poll, or opening the project, reads them again.
+    projectArtifactsRefreshId=new Set([...(projectArtifactsRefreshId||[]),projectId]);
+    if(error.status!==401)console.warn('Project output refresh failed',error.message);
+  }
+}
+
 // Refreshes every open project's tasks and folders, one project at a time.
 async function refreshProjectWorkspace(includeArtifacts=false){
   const projectIds=openProjectIds();
@@ -653,7 +690,7 @@ async function refreshProjectData(projectId){
   if(!entry||entry.loading)return false;
   const artifacts=Boolean(projectArtifactsRefreshId?.has(projectId));
   const authorized=folderAuthorizationGuard(projectId);
-  const generation=projectDataGeneration;
+  const generation=projectDataGeneration,fence=outputFences.get(projectId);
   const current=()=>authorized()&&generation===projectDataGeneration&&!state.busy&&!workspaceLoads&&!document.hidden&&folderCache.get(projectId)===entry;
   if(!current())return false;
   try{
@@ -673,13 +710,14 @@ async function refreshProjectData(projectId){
     projectDataGeneration++;
     state.tasks=[...state.tasks.filter(task=>task.projectId!==projectId),...tasks];
     if(datasetResult)state.datasets=[...state.datasets.filter(item=>item.projectId!==projectId),...datasetResult.datasets];
-    if(outputResult){
+    const outputsCurrent=fence===outputFences.get(projectId);
+    if(outputResult&&outputsCurrent){
       state.outputs=[...state.outputs.filter(item=>item.projectId!==projectId),...outputResult.outputs];
       const detail=state.taskDetails[state.expandedTaskId]?.task;
       if(detail&&detail.projectId===projectId)detail.outputs=outputResult.outputs.filter(item=>item.taskId===detail.id);
     }
     entry.folders=folders;entry.error=null;
-    if(artifacts)projectArtifactsRefreshId.delete(projectId);
+    if(artifacts&&outputsCurrent)projectArtifactsRefreshId.delete(projectId);
     const selectionPending=syncSelectedTaskFolder(projectId);
     return patchProjectTree(projectId)||selectionPending;
   }catch(error){
@@ -1689,8 +1727,8 @@ function associationProjectId(item){return item?.projectId||item?.project_id||nu
 function portalAccountId(item){return item?.accountId||item?.account_id||null}
 function clientProjectKey(project){return JSON.stringify([project.id,portalAccountId(project)])}
 function clientProjectLabel(project){return `${project.clientName||project.client_name||'Client'} — ${project.name||project.projectName||project.project_name||project.id} · ${project.nativeTarget?`${project.nativeTarget.sourceId} · ${project.accountName}`:project.accountName||portalAccountId(project)}`}
-function clientAccessSnapshot(){
-  const access=state.clientAccess||{projects:[],associations:[],grants:[]},native=state.clientNativeAccess;
+function clientAccessSnapshot(legacy=state.clientAccess,native=state.clientNativeAccess){
+  const access=legacy||{projects:[],associations:[],grants:[]};
   if(!native)return access;
   const projects=(native.targets||[]).map(target=>({id:JSON.stringify([target.sourceId,target.workspaceId,target.projectPublicId]),accountId:target.workspaceId,accountName:target.workspaceName,clientName:target.workspaceName,projectName:target.projectName,nativeTarget:target}));
   return {...access,projects:[...(access.projects||[]),...projects],
@@ -1747,8 +1785,11 @@ function legacyClientSharePanel(output,onlyOutputId){
 }
 function directShareContext(onlyOutputId){
   const projectId=state.shareContext.projectId,project=state.projects.find(item=>item.id===projectId);
+  const taskId=onlyOutputId?state.shareContext.taskId||null:null,task=taskId?state.tasks.find(item=>item.id===taskId):null;
   return {projectId,projectName:project?.displayName||'this project',tasks:shareableTasks(projectId,state.tasks,state.outputs),
-    taskId:onlyOutputId?state.outputs.find(output=>output.id===onlyOutputId)?.taskId||null:null};
+    entry:onlyOutputId?'task':'project',taskId,taskName:onlyOutputId?state.shareContext.taskName||'':'',
+    // The task and the model it was opened on must both still be there, in this project.
+    targetMissing:Boolean(onlyOutputId)&&!(task?.projectId===projectId&&state.outputs.some(output=>output.id===onlyOutputId&&output.taskId===taskId))};
 }
 function directClientShareCard(onlyOutputId){
   const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
@@ -1790,6 +1831,7 @@ function bindDirectShare(form,projectId,onlyOutputId){
   // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
   form.onsubmit=async event=>{
     event.preventDefault();if(form.shareBusy)return;
+    if(directShareContext(onlyOutputId).targetMissing){if(form.reviewing)setReviewing(false);summary.textContent=SHARE_TARGET_MISSING;return}
     let bodies,target;try{target=read();bodies=target.bodies()}catch(error){summary.textContent=error.message;if(form.reviewing)setReviewing(false);return}
     if(!form.reviewing){
       const body=bodies[0];
@@ -1884,22 +1926,40 @@ function shareSettingsSummary(share){
   const labels=shareViewLabels(),views=share.allowedViews===null||share.allowedViews===undefined?'All available views':share.allowedViews.map(view=>labels[view]||view).join(', ');
   return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.hasPassword?'Password protected':'No password'} · ${share.expiresAt?`Expires ${dateTime(share.expiresAt)}`:'No expiry'}`;
 }
+// One rule for a public link everywhere in the dialog, the server's own (publicShareLive, projectShareLive):
+// an unreadable expiry is expired.
+function publicLinkState(share,now=Date.now()){
+  return share.revokedAt?'revoked':share.expiresAt&&!(Date.parse(share.expiresAt)>now)?'expired':'active';
+}
+// Links that still open count on the tab, so a live link is never hidden behind it.
+function publicTabLabel(shares){
+  const live=(shares||[]).filter(share=>publicLinkState(share)==='active').length;
+  return live?`Public link (${live})`:'Public link';
+}
 function shareModal(projectId,onlyOutputId=null){
   const project=state.projects.find(item=>item.id===projectId),selected=state.outputs.find(output=>output.id===onlyOutputId),checking=state.shareContext?.loading===true;
-  const mode=onlyOutputId&&state.shareContext?.mode==='public'?'public':'internal';
+  const mode=state.shareContext?.mode==='public'?'public':'internal',task=state.tasks.find(item=>item.id===selected?.taskId);
   if(!onlyOutputId)visibleShareResult(projectId,onlyOutputId);
   const result=onlyOutputId&&visibleShareResult(projectId,onlyOutputId)?card('Public link',`<div class="share-result"><input readonly aria-label="New public link" value="${esc(state.lastShareUrl)}"><button class="primary-button" data-action="copy-share" data-url="${esc(state.lastShareUrl)}">Copy</button></div><p class="form-note">Link created successfully. You can copy this link again from its saved entry.</p>`):'';
   let publicCards='';
   if(selected){
     const output=selected,preflight=state.sharePreflight[output.id],ready=!output.activePublished,mayCreate=can('viewer.shares.create')&&(!ready||can('viewer.processing.publish'));
-    const blocked=Boolean(preflight?.error),views=availableShareViews(output),warning=preflight?.existingAccessUpdateRequired?'Activating this version can update existing model/client access and project links. Confirmation is required before creating the link.':ready?'This model is private. Create public link activates its verified public derivatives and creates a revocable link.':'Links follow this model’s latest published version.';
+    const blocked=Boolean(preflight?.error),views=availableShareViews(output),warning=preflight?.existingAccessUpdateRequired?'Activating this version can update existing model/client access and project links, and shows this task to every client who has the whole project. Confirmation is required before creating the link.':ready?'This model is private. Create public link publishes it, which also shows this task to every client who has the whole project.':'Links follow this model’s latest published version.';
     const form=checking?empty('Checking share eligibility…'):mayCreate&&!blocked&&views.length?
       `<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt',`type="datetime-local" value="${esc(newLinkExpiry())}"`)}${shareViewControls(output)}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras"> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`:
       blocked?empty('Sharing eligibility could not be verified. Close and reopen Share to retry.'):empty(mayCreate?'No verified views are available for this link.':'Creating a link requires share permission and, for private ready models, activation permission.');
-    const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(share.revokedAt?'revoked':share.expiresAt&&Date.parse(share.expiresAt)<=Date.now()?'expired':'active')}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
+    const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(publicLinkState(share))}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
     publicCards=card(output.displayName||'Model',form+list);
   }
-  openModal(`Share ${selected?.displayName||project?.displayName||'model'}`,`${onlyOutputId?`<div class="row-actions" role="tablist" aria-label="Sharing audience"><button class="secondary-button" data-share-mode="public" role="tab" id="share-tab-public" aria-controls="share-panel-public" tabindex="${mode==='public'?0:-1}" aria-selected="${mode==='public'}">Public link</button><button class="secondary-button" data-share-mode="internal" role="tab" id="share-tab-internal" aria-controls="share-panel-internal" tabindex="${mode==='internal'?0:-1}" aria-selected="${mode==='internal'}">Client Workspace</button></div>`:'<p class="form-note">Share this whole project or only chosen tasks with a client’s portal account. Public links are separate: create one from a task’s Share button.</p>'}<div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" ${onlyOutputId?'role="tabpanel" id="share-panel-internal" aria-labelledby="share-tab-internal"':''} ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div>${onlyOutputId?`<div data-share-mode-panel="public" role="tabpanel" id="share-panel-public" aria-labelledby="share-tab-public" ${mode==='public'?'':'hidden'}><p class="form-note">No Operations account or client workspace is required. Anyone with the link can access its allowed content.</p>${result}${publicCards}</div>`:'<div data-legacy-project-shares></div>'}</div>`,'wide-modal');
+  // A project and a task open the same dialog: the same two tabs, in the Data page's order, starting on Client Workspace.
+  const tab=(name,label)=>`<button class="secondary-button" data-share-mode="${name}" role="tab" id="share-tab-${name}" aria-controls="share-panel-${name}" tabindex="${mode===name?0:-1}" aria-selected="${mode===name}">${label}</button>`;
+  const publicPanel=onlyOutputId
+    ?`<p class="form-note">No Operations account or client workspace is required. Anyone with the link can access its allowed content.</p>${result}${publicCards}`
+    :'<p class="form-note">A public link opens one task. Use Share on that task to create one.</p><div data-legacy-project-shares></div>';
+  // A refresh of an open dialog replaces its content: keyboard focus on a tab or Close goes back to the same control.
+  const active=document.activeElement,focusKey=!active||!modal.open||!modalContent.contains(active)?null:/^share-tab-/.test(active.id)?`#${active.id}`:active.classList.contains('modal-close')?'.modal-close':null;
+  openModal(onlyOutputId?`Share task: ${task?.displayName||selected?.displayName||'Model'}`:`Share project: ${project?.displayName||'Project'}`,`<div class="row-actions" role="tablist" aria-label="Sharing audience">${tab('public',publicTabLabel(selected?state.shares[selected.id]:null))}${tab('internal','Client Workspace')}</div><div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" role="tabpanel" id="share-panel-internal" aria-labelledby="share-tab-internal" ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div><div data-share-mode-panel="public" role="tabpanel" id="share-panel-public" aria-labelledby="share-tab-public" ${mode==='public'?'':'hidden'}>${publicPanel}</div></div>`,'wide-modal');
+  if(focusKey)modalContent.querySelector(focusKey)?.focus();
   bindShareModal(projectId,onlyOutputId);
 }
 // A new public link starts with a 30-day end and without camera positions; staff can change both. Existing links keep theirs.
@@ -1953,9 +2013,73 @@ async function retrieveShareLink(element){
     }
   }catch(error){popup?.close();const unavailable=error.status===409&&/share_link_unavailable|original link cannot be recovered/i.test(error.message);toast(unavailable?'The original URL is not recoverable. The existing link has not been changed or revoked; create a separate link if needed.':error.message,true)}finally{element.disabled=false}
 }
-async function confirmSharedVersionUpdate(){
-  return dialogs.confirm('Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links include newly activated tasks. Continue and create the public link?',
-    {title:'Update existing shared access?',submitLabel:'Activate and create link'});
+// One Share, as it was when the person pressed the button: the sign-in, the dialog and the exact model, task and project.
+// Checked after every await, so nothing read for one is used, asked or sent for another.
+function shareFence(form,output,projectId){
+  const token=state.token,subject=state.adminSession?.subject,context=state.shareContext,known=state.tasks.some(task=>task.id===output.taskId);
+  const authority=()=>state.token===token&&state.adminSession?.subject===subject;
+  const dialog=()=>authority()&&state.shareContext===context&&modal.open&&form.isConnected;
+  const task=()=>state.tasks.find(item=>item.id===output.taskId);
+  const moved=()=>Boolean(dialog()&&task()&&task().projectId!==projectId);
+  return {context,authority,dialog,moved,sameShare:()=>authority()&&state.shareContext===context&&modal.open,live:()=>dialog()&&can('viewer.shares.create')&&(output.activePublished||can('viewer.processing.publish'))
+    &&state.outputs.some(item=>item.id===output.id&&item.taskId===output.taskId&&item.modelId===output.modelId)
+    &&(known?task()?.projectId===projectId:true)};
+}
+// All three lists are read now, never taken from when the dialog opened. What cannot be read is unknown, not nobody.
+async function publicationAudience(output,projectId){
+  if(!can('viewer.client_grants.manage'))return {clients:[],complete:false,text:publishAudienceText([],{complete:false})};
+  const lists=(value,...names)=>names.every(name=>Array.isArray(value?.[name]))?value:null;
+  const [direct,legacy,native]=(await Promise.allSettled([loadDirectClientAccess(api,projectId),api('/api/v1/workspace/client-grants'),api('/api/v1/workspace/native-client-grants')]))
+    .map(result=>result.status==='fulfilled'?result.value:null);
+  const older=lists(legacy,'projects','associations','grants'),connected=lists(native,'targets','grants');
+  const complete=Boolean(can('viewer.client_grants.manage')&&direct&&!direct.grantsIncomplete&&older&&connected),clients=new Map();
+  for(const client of direct?publishAudience(direct,{projectId,taskId:output.taskId}):[])clients.set(client.key,client);
+  // Older Operations shares follow the model.
+  const access=clientAccessSnapshot(older,connected),own=(access.associations||[]).filter(item=>output.modelId&&associationModelId(item)===output.modelId);
+  const ids=new Set(own.map(item=>item.id)),projects=new Set(own.map(associationProjectId));
+  for(const grant of access.grants||[]){
+    if((grant.status||'active')!=='active')continue;
+    if(!((grant.scopeType||grant.scope_type)==='task'?ids.has(grant.associationId||grant.association_id):projects.has(grant.projectId||grant.project_id)))continue;
+    // A connected workspace is the same client as its direct share; an older account has no such link.
+    const id=portalAccountId(grant)||grant.id,key=grant.native?JSON.stringify([grant.source_id,grant.workspace_id]):JSON.stringify(['account',id]);
+    if(!clients.has(key))clients.set(key,{key,name:grant.clientName||grant.client_name||'a client',id});
+  }
+  const all=[...clients.values()];
+  return {clients:all.map(client=>client.key).sort(),complete,text:publishAudienceText(publishAudienceNames(all),{complete})};
+}
+// Before a public link publishes a model: which clients gain the task, and what an existing version's links gain.
+// Asked again if that grew while the question was open, so what is sent is what was answered.
+async function confirmPublication(output,projectId,existingAccess,fence){
+  let answered=null;
+  for(let round=0;round<4;round++){
+    const audience=await publicationAudience(output,projectId);
+    if(!fence.live())return false;
+    const grew=answered&&(audience.clients.some(key=>!answered.clients.includes(key))||answered.complete&&!audience.complete);
+    if(answered?!grew:!existingAccess&&!audience.text)return true;
+    if(round===3)break;
+    const asking=`${answered?'Client access changed while you were deciding. ':''}${audience.text}`;
+    const agreed=existingAccess
+      ?await dialogs.confirm(`${asking?`${asking} `:''}Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links and clients who have the whole project also get newly activated tasks. Continue and create the public link?`,
+        {title:'Update existing shared access?',submitLabel:'Activate and create link'})
+      :await dialogs.confirm(asking,{title:'Publish this task?',submitLabel:'Publish and create link'});
+    if(!agreed||!fence.live())return false;
+    answered=audience;
+  }
+  throw new Error('Client access keeps changing, so nothing was shared. Try again in a moment.');
+}
+// The task is in another project now, with other clients: nothing was shared, and Share opens again there.
+async function reopenMovedShare(output,projectId,fence){
+  const name=state.tasks.find(task=>task.id===output.taskId)?.displayName||'This task';
+  let moved=null;
+  try{const result=await api(`/api/v1/tasks/${encodeURIComponent(output.taskId)}`);if(result?.task?.id===output.taskId&&result.task.projectId!==projectId)moved=result.task;}catch{}
+  if(!fence.dialog()){if(fence.authority())toast(`${name} moved to another project. Nothing was shared.`,true);return}
+  if(!moved)return toast(`${name} moved to another project. Nothing was shared. Close Share and open it again.`,true);
+  state.tasks=state.tasks.map(task=>task.id===moved.id?{...task,...moved}:task);
+  state.outputs=state.outputs.map(item=>item.taskId===moved.id?{...item,projectId:moved.projectId}:item);
+  toast(`${name} moved to ${state.projects.find(project=>project.id===moved.projectId)?.displayName||'another project'}. Nothing was shared. Check who will see it and create the link again.`,true);
+  const opening=openShareModal(moved.projectId,output.id);
+  if(state.shareContext)state.shareContext.mode='public';
+  await opening;
 }
 async function createOutputShare(form,projectId,onlyOutputId){
   if(form.shareBusy||form.shareSaved||!onlyOutputId)return;
@@ -1971,15 +2095,27 @@ async function createOutputShare(form,projectId,onlyOutputId){
     if(input.password)body.password=input.password;
     const inputSignature=JSON.stringify(body);
     fields=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);for(const [element] of fields)element.disabled=true;
-    if(form.shareRequest?.inputSignature===inputSignature)body={...form.shareRequest.body};
-    else if(!output.activePublished){
-      body.publishIfReady=true;
-      if(state.sharePreflight[output.id]?.existingAccessUpdateRequired){
-        if(!await confirmSharedVersionUpdate())return;
-        body.allowExistingAccessUpdate=true;
+    const fence=shareFence(form,output,projectId);
+    const stopped=()=>fence.moved()?reopenMovedShare(output,projectId,fence):undefined;
+    if(form.shareRequest?.inputSignature===inputSignature){
+      // The earlier send may have been applied. Replayed as it was if it published; otherwise asked again, still with its own key.
+      body={...form.shareRequest.body};
+      if(body.publishIfReady&&!output.activePublished){
+        let current;
+        try{current=await api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)}catch{throw new Error('Could not check whether the link was created. Try again.')}
+        if(!fence.live())return await stopped();
+        if(typeof current?.publicationRequired!=='boolean')throw new Error('Could not check whether the link was created. Try again.');
+        if(current.publicationRequired&&!await confirmPublication(output,projectId,body.allowExistingAccessUpdate===true,fence))return await stopped();
       }
     }
-    if(!modal.open||!form.isConnected)return;
+    else if(!output.activePublished){
+      if(fence.moved())return await stopped();
+      body.publishIfReady=true;body.expectedProjectId=projectId;
+      const existingAccess=Boolean(state.sharePreflight[output.id]?.existingAccessUpdateRequired);
+      if(!await confirmPublication(output,projectId,existingAccess,fence))return await stopped();
+      if(existingAccess)body.allowExistingAccessUpdate=true;
+    }
+    if(!fence.live())return await stopped();
     const send=()=>{
       const serialized=JSON.stringify(body);
       // Retain the key for the same payload after an uncertain network outcome.
@@ -1988,22 +2124,40 @@ async function createOutputShare(form,projectId,onlyOutputId){
       return api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`,{
         method:'POST',body,headers:{'Idempotency-Key':form.shareRequest.key}});
     };
+    // A refusal ends that request; only an unanswered one keeps its payload and key for a retry.
+    const refused=error=>error.status>=400&&error.status<500&&error.status!==408;
     let result;
-    try{result=await send()}catch(error){
-      if(error.status!==409||error.message!=='existing_access_update_confirmation_required'||body.allowExistingAccessUpdate)throw error;
-      if(!await confirmSharedVersionUpdate()||!modal.open||!form.isConnected)return;
-      body.allowExistingAccessUpdate=true;
-      result=await send();
+    try{
+      try{result=await send()}catch(error){
+        if(error.status!==409||error.message!=='existing_access_update_confirmation_required'||body.allowExistingAccessUpdate)throw error;
+        if(!fence.live()||!await confirmPublication(output,projectId,true,fence)){delete form.shareRequest;return await stopped()}
+        body.allowExistingAccessUpdate=true;
+        result=await send();
+      }
+    }catch(error){
+      if(refused(error))delete form.shareRequest;
+      if(error.status===409&&error.message==='output_project_changed')return await reopenMovedShare(output,projectId,fence);
+      throw error;
     }
-    rememberShareResult(result,projectId,output.id);
-    form.shareSaved=true;if(state.shareContext)state.shareContext.mode='public';
+    if(!fence.authority())return;
+    // The link exists: its model's rows are updated wherever the person is now. Only the dialog it was asked from shows it.
+    const here=fence.sameShare();
+    if(here){rememberShareResult(result,projectId,output.id);if(fence.context)fence.context.mode='public'}
+    form.shareSaved=true;
     state.shares[output.id]=[result.share,...(state.shares[output.id]||[]).filter(share=>share.id!==result.share.id)];
     state.sharePreflight[output.id]={...state.sharePreflight[output.id],publicationRequired:false,existingAccessUpdateRequired:false,error:null};
-    output.activePublished=true;output.status='published';
+    // Opening a published model needs the server's view address, and a list read while the link was
+    // being made may have replaced these rows: complete the current row, then read the project again.
+    for(const row of new Set([output,...state.outputs.filter(item=>item.id===output.id)])){
+      row.activePublished=true;row.status='published';row.viewSessionUrl||=`/api/v1/processing/outputs/${encodeURIComponent(row.id)}/view-sessions`;
+    }
+    if(body.publishIfReady){
+      const changed=output.projectId||projectId;outputFences.set(changed,(outputFences.get(changed)||0)+1);void refreshProjectOutputs(changed);
+    }
     delete form.shareRequest;
-    toast('Public link created. Use Copy to share it.');
+    toast(here?'Public link created. Use Copy to share it.':`Public link created for ${state.tasks.find(task=>task.id===output.taskId)?.displayName||output.displayName||'the model'}. Open its Share to copy it.`);
     // Clipboard is a separate explicit action, never part of creation success.
-    if(modal.open&&form.isConnected){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
+    if(fence.dialog()){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
   }catch(error){toast(error.message,true)}
   finally{form.shareBusy=false;if(form.isConnected&&!form.shareSaved){for(const [element,disabled] of fields)element.disabled=disabled;if(submit)submit.disabled=false}}
 }
@@ -2020,7 +2174,7 @@ function clientGrantRevocationMessage(result,native){
 }
 function bindShareModal(projectId,onlyOutputId,{preserveDirectForm=false}={}){
   modalContent.querySelectorAll('[data-share-mode]').forEach(element=>element.onclick=()=>{
-    if(!onlyOutputId||!state.shareContext)return;
+    if(!state.shareContext)return;
     const mode=element.dataset.shareMode==='public'?'public':'internal';state.shareContext.mode=mode;
     modalContent.querySelectorAll('[data-share-mode]').forEach(button=>{button.setAttribute('aria-selected',String(button.dataset.shareMode===mode));button.tabIndex=button.dataset.shareMode===mode?0:-1});
     modalContent.querySelectorAll('[data-share-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.shareModePanel!==mode);
@@ -2086,10 +2240,10 @@ async function performLegacyUpload(form){const files=[...form.elements.files.fil
 async function pagedApi(path,key,options){const items=[],seen=new Set();let cursor=null;do{const separator=path.includes('?')?'&':'?',page=await api(`${path}${separator}limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`,options);items.push(...(page[key]||[]));cursor=page.nextCursor||null;if(cursor&&seen.has(cursor))throw Error(`Pagination cursor repeated for ${key}`);if(cursor)seen.add(cursor)}while(cursor);return{[key]:items}}
 async function pagedStorage(){let first=null,cursor=null;const items=[],seen=new Set();do{const page=await api(`/api/v1/storage?limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);if(!first)first=page;items.push(...(page.trash?.items||[]));cursor=page.trash?.nextCursor||null;if(cursor&&seen.has(cursor))throw Error('Pagination cursor repeated for trash');if(cursor)seen.add(cursor)}while(cursor);return{...(first||{}),trash:{...(first?.trash||{}),items,nextCursor:null}}}
 async function refreshTrash(){state.trashLoadError=null;render();try{state.storage=await pagedStorage()}catch(error){state.trashLoadError=error.message}render()}
-async function load(){const generation=++projectDataGeneration, token=state.token, session=state.adminSession;
+async function load(){const generation=++projectDataGeneration, token=state.token, session=state.adminSession, fences=new Map(outputFences);
   workspaceLoads++;
   const current=()=>generation===projectDataGeneration&&token===state.token&&session===state.adminSession;
-  try{const previousStorage=state.storage,requests=[pagedApi('/api/v1/projects','projects'),pagedApi('/api/v1/datasets','datasets'),pagedApi('/api/v1/tasks','tasks'),api('/api/v1/processing/providers?limit=100'),api('/api/v1/processing/presets'),pagedApi('/api/v1/processing/outputs','outputs'),pagedStorage(),can('viewer.storage.purge')?pagedApi('/api/v1/storage/mutations?status=failed','mutations'):Promise.resolve({mutations:[]}),api('/api/v1/processing/ready'),api('/api/v1/workspace/client-grants'),pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives'),api('/api/v1/diagnostics/runs?limit=20')],results=await Promise.allSettled(requests);if(!current())return;if(!state.token)return access();[state.projects,state.datasets,state.tasks,state.providers,state.presets,state.outputs,state.failedMutations,state.ready,state.clientAccess,state.operations,state.derivativeJobs]=[results[0].value?.projects||[],results[1].value?.datasets||[],results[2].value?.tasks||[],results[3].value?.providers||[],results[4].value?.presets||[],results[5].value?.outputs||[],results[7].value?.mutations||[],results[8].value||null,results[9].value||null,results[10].value?.operations||[],results[11].value?.derivatives||[]];if(results[6].status==='fulfilled'){state.storage=results[6].value;state.trashLoadError=null}else{state.storage=previousStorage;state.trashLoadError=results[6].reason?.message||'Storage service unavailable'}if(results[12].status==='fulfilled'){state.diagnosticRuns=results[12].value?.runs||[];state.diagnosticRunsCursor=results[12].value?.nextCursor||null;state.diagnosticRunsError=null}else{state.diagnosticRunsError=results[12].reason?.message||'Processing run history is unavailable'}validateWorkspaceView();syncWorkspaceView('replace');const published=state.outputs.filter(output=>output.activePublished),shareResults=await Promise.allSettled(published.map(output=>api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)));if(!current())return;state.shares=Object.fromEntries(published.map((output,index)=>[output.id,shareResults[index].value?.shares||[]]));const okay=state.ready?.ok===true;setWorkspaceHealth({dot:document.querySelector('#nav-health-dot'),label:document.querySelector('#nav-health-label'),foot:document.querySelector('.workspace-nav-foot')},okay);render();hydrateExpandedTask();scheduleOperationRefresh()}finally{workspaceLoads--;scheduleProjectRefresh();}
+  try{const previousStorage=state.storage,requests=[pagedApi('/api/v1/projects','projects'),pagedApi('/api/v1/datasets','datasets'),pagedApi('/api/v1/tasks','tasks'),api('/api/v1/processing/providers?limit=100'),api('/api/v1/processing/presets'),pagedApi('/api/v1/processing/outputs','outputs'),pagedStorage(),can('viewer.storage.purge')?pagedApi('/api/v1/storage/mutations?status=failed','mutations'):Promise.resolve({mutations:[]}),api('/api/v1/processing/ready'),api('/api/v1/workspace/client-grants'),pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives'),api('/api/v1/diagnostics/runs?limit=20')],results=await Promise.allSettled(requests);if(!current())return;if(!state.token)return access();[state.projects,state.datasets,state.tasks,state.providers,state.presets,state.outputs,state.failedMutations,state.ready,state.clientAccess,state.operations,state.derivativeJobs]=[results[0].value?.projects||[],results[1].value?.datasets||[],results[2].value?.tasks||[],results[3].value?.providers||[],results[4].value?.presets||[],fencedOutputs(results[5].value?.outputs||[],fences),results[7].value?.mutations||[],results[8].value||null,results[9].value||null,results[10].value?.operations||[],results[11].value?.derivatives||[]];if(results[6].status==='fulfilled'){state.storage=results[6].value;state.trashLoadError=null}else{state.storage=previousStorage;state.trashLoadError=results[6].reason?.message||'Storage service unavailable'}if(results[12].status==='fulfilled'){state.diagnosticRuns=results[12].value?.runs||[];state.diagnosticRunsCursor=results[12].value?.nextCursor||null;state.diagnosticRunsError=null}else{state.diagnosticRunsError=results[12].reason?.message||'Processing run history is unavailable'}validateWorkspaceView();syncWorkspaceView('replace');const published=state.outputs.filter(output=>output.activePublished),sharesBefore={...state.shares},shareResults=await Promise.allSettled(published.map(output=>api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)));if(!current())return;state.shares=currentShares(published,shareResults,sharesBefore);const okay=state.ready?.ok===true;setWorkspaceHealth({dot:document.querySelector('#nav-health-dot'),label:document.querySelector('#nav-health-label'),foot:document.querySelector('.workspace-nav-foot')},okay);render();hydrateExpandedTask();scheduleOperationRefresh()}finally{workspaceLoads--;scheduleProjectRefresh();}
 }
 function access(){content.innerHTML='<div class="auth-state"><div><p class="eyebrow">Secure workspace</p><h2>Open Viewer from Ledge Top Operations</h2><p>This workspace reuses your Operations identity and has no separate login.</p></div></div>'}
 
