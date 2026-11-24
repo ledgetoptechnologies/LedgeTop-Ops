@@ -369,7 +369,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // Opens the card of a saved mark.
   function select(id, { focus = true } = {}) {
     const mark = store.find(id);
-    if (!mark || mode !== 'idle' || unsaved()) return;
+    if (!view.map || !mark || mode !== 'idle' || unsaved()) return;
     draft = null;
     selectedId = id;
     picked = null;
@@ -743,7 +743,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       drawFinish.disabled = drawing.positions.length < need;
       drawUndo.disabled = !drawing.positions.length;
     }
-    coordForm.hidden = !state.ready;
+    coordForm.hidden = !state.ready || !view.map;
     coordPlace.hidden = !writable;
 
     // Editor
@@ -790,6 +790,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         h(document, 'small', { text: [category?.name, !mark.mine ? (mark.author === 'staff' ? 'From project staff' : 'From a client')
           : mark.visibility === 'client' && mark.shareAccount ? accountLabel(mark.shareAccount)
             : mark.visibility !== defaultVisibility() && VISIBILITY_LABEL[mark.visibility]].filter(Boolean).join(' · ') }));
+      if (!view.map) return h(document, 'li', {}, icon, text);
       const button = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'aria-current': mark.id === selectedId ? 'true' : false }, icon, text);
       on(button, 'click', () => select(mark.id));
       return h(document, 'li', {}, button);
@@ -874,13 +875,23 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       const restore = h(document, 'button', { type: 'button', text: 'Restore', 'aria-label': 'Restore ' + mark.name,
         'data-restore-mark': mark.id, disabled: state.busy });
       on(restore, 'click', async () => {
-        const held = store.hold(), stays = focusKeeper(), pressed = document.activeElement === restore;
-        const back = await store.restore(mark);
-        if (!held.live()) return;
-        if (back) { reveal(back); render(); }
-        if (pressed && stays() && boxOpen && tab === 'deleted') {
-          const retry = [...deletedList.querySelectorAll('[data-restore-mark]')].find(button => button.dataset.restoreMark === mark.id);
-          (retry || activeTab())?.focus?.({ preventScroll: true });
+        const held = store.hold(), pressed = document.activeElement === restore;
+        let focusMoved = false;
+        const watchFocus = ({ target }) => { if (target !== restore && target !== document.body) focusMoved = true; };
+        if (pressed) document.addEventListener('focusin', watchFocus);
+        try {
+          const back = await store.restore(mark);
+          if (!held.live()) return;
+          if (back) { reveal(back); render(); }
+          // Repainting detaches the pressed control. An unrelated open draft is
+          // kept, and any focus the person chose during the request is respected.
+          if (pressed && !focusMoved && boxOpen && tab === 'deleted'
+            && [restore, document.body, null, undefined].includes(document.activeElement)) {
+            const retry = [...deletedList.querySelectorAll('[data-restore-mark]')].find(button => button.dataset.restoreMark === mark.id);
+            (retry || activeTab())?.focus?.({ preventScroll: true });
+          }
+        } finally {
+          if (pressed) document.removeEventListener('focusin', watchFocus);
         }
       });
       return h(document, 'li', {}, icon, h(document, 'span', { class: 'viewer-mark-list-name' }, h(document, 'span', { text: mark.name }),
@@ -1011,12 +1022,14 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   };
   on(coordForm, 'submit', event => {
     event.preventDefault();
+    if (!canWrite()) return;
     const point = typedPoint();
-    if (!point || !canWrite() || unsaved()) return;
+    if (!point || unsaved()) return;
     layer.focus({ type: 'Point', coordinates: point });
     startDraft({ type: 'Point', coordinates: point });
   });
   on(coordGo, 'click', () => {
+    if (!view.map) return;
     const point = typedPoint();
     if (point) layer.focus({ type: 'Point', coordinates: point });
   });
@@ -1155,6 +1168,10 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
   // Whether the last change can be undone now; an unsaved edit is said to be in the way.
   const undoNow = () => Boolean(store.state.undo.length) && !store.state.busy && !unsaved();
+  function focusOutsideUndoBar() {
+    if (boxOpen) activeTab()?.focus?.({ preventScroll: true });
+    else layer.focusStop();
+  }
   async function undoLast({ focus = false } = {}) {
     if (!undoNow()) return false;
     const entry = store.state.undo.at(-1), held = store.hold(), stays = focusKeeper(), pressed = document.activeElement === barUndo;
@@ -1169,11 +1186,15 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       await readDeleted();
     } else if (held.live()) {
       // The offer may be gone by now: what went wrong is said, with another try if there can be one.
+      if (store.state.failure === 'undo_target_changed') renderBar();
+      else barEntry = entry;
       clearTimer();
-      barEntry = entry;
       barError = store.state.message;
       render();
-      if (pressed && stays()) (barUndo.hidden ? barClose : barUndo).focus?.({ preventScroll: true });
+      if (pressed && stays()) {
+        if (undoBar.hidden) focusOutsideUndoBar();
+        else (barUndo.hidden ? barClose : barUndo).focus?.({ preventScroll: true });
+      }
     }
     return ok;
   }
@@ -1181,8 +1202,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(barUndo, 'click', () => undoLast({ focus: true }));
   on(barClose, 'click', () => {
     hideBar();
-    if (boxOpen) activeTab()?.focus?.({ preventScroll: true });
-    else layer.focusStop();
+    focusOutsideUndoBar();
   });
   for (const type of ['mouseenter', 'focusin']) on(undoBar, type, () => { barHeld = true; clearTimer(); });
   for (const type of ['mouseleave', 'focusout']) on(undoBar, type, event => {
@@ -1233,8 +1253,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       const parsed = geoJsonToMarks(JSON.parse(text), { categories: store.state.categories.filter(category => category.mine), newId,
         visibility: defaultVisibility(), defaultColor: DEFAULT_STYLE.color });
       if (!parsed.marks.length) { message('No points, lines or areas were found in that file.'); return; }
-      const count = await store.importMarks(parsed);
-      if (count && held.live()) reveal(...parsed.marks);
+      const count = await store.importMarks(parsed, { onImported: imported => { if (held.live()) reveal(...imported); } });
       // What the store says of it comes first: it may not be possible to undo it.
       if (count && held.live()) message(store.state.message || `Imported ${count} mark${count === 1 ? '' : 's'}${parsed.skipped ? `; skipped ${parsed.skipped} unsupported` : ''}.`);
     } catch (error) {

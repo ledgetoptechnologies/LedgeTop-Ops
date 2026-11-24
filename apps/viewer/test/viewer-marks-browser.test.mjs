@@ -576,3 +576,59 @@ test('marks: a client can withdraw a shared pin from an open staff map', { timeo
     assert.equal(await client.evaluate("document.querySelector('.viewer-mark-form [name=name]').value"), 'Unsaved staff pin');
   });
 });
+
+test('marks: expired Restore keeps an open staff draft and respects a change of focus', { timeout: 90000 }, async t => {
+  const { app, database } = marksApi();
+  t.after(() => database.close());
+  let delayRestore = false, resume;
+  const route = (request, response) => {
+    if (delayRestore && request.method === 'POST' && request.url.endsWith('/restore')) {
+      delayRestore = false;
+      resume = () => { resume = undefined; app(request, response); };
+    } else app(request, response);
+  };
+  await withBrowser(t, { app: route }, async h => {
+    const { client, waitFor } = h;
+    try {
+      await h.load('?mode=staff');
+      const ids = await client.evaluate(`(async () => {
+        const ids = [];
+        for (const name of ['First pin', 'Second pin']) {
+          const pin = await marks.store.create({ name, color: '#1565c0', geometry: { type: 'Point', coordinates: [-87, 43.05] } });
+          await marks.store.remove(pin);
+          ids.push(pin.id);
+        }
+        return ids;
+      })()`);
+      await h.press('.viewer-mark-layers');
+      await h.press('[data-tab=deleted]');
+      await waitFor("document.querySelectorAll('[data-restore-mark]').length === 2 && !marks.store.state.busy", 'deleted marks loaded');
+      await client.evaluate('marks.mapContextMenu({ lat: 43.0503, lng: -87.0003 }), 0');
+      await h.type('.viewer-mark-form [name=name]', 'Unsaved staff pin');
+      const beginExpiredRestore = id => {
+        database.prepare('UPDATE viewer_marks SET deleted_at=? WHERE id=?').run('2020-01-01T00:00:00.000Z', id);
+        return client.evaluate(`(() => {
+          const button = document.querySelector('[data-restore-mark="${id}"]');
+          button.focus();
+          button.click();
+        })()`);
+      };
+      const finished = id => waitFor(`!document.querySelector('[data-restore-mark="${id}"]') && !marks.store.state.busy`, 'expired row removed');
+      await beginExpiredRestore(ids[0]);
+      await finished(ids[0]);
+      assert.equal(await client.evaluate('document.activeElement.dataset.tab'), 'deleted');
+
+      delayRestore = true;
+      await beginExpiredRestore(ids[1]);
+      await waitFor(() => Promise.resolve(Boolean(resume)), 'Restore request held');
+      await client.evaluate("document.querySelector('[data-tab=categories]').focus(), 0");
+      resume();
+      await finished(ids[1]);
+      assert.equal(await client.evaluate('document.activeElement.dataset.tab'), 'categories');
+      assert.equal(await client.evaluate("document.querySelector('.viewer-mark-form [name=name]').value"), 'Unsaved staff pin');
+      assert.equal(await h.editorOpen(), true);
+    } finally {
+      resume?.();
+    }
+  });
+});
