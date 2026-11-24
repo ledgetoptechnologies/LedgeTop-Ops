@@ -23,7 +23,7 @@ function declaration(name){
 }
 const names=['clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
   'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
-  'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
+  'createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','publicLinkState','publicTabLabel','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
   const state={token:'signed-in',projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
@@ -33,12 +33,12 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   let sequence=0,respond=async(path,options)=>options.method==='POST'
     ?{share:{id:'share',permissions:{view:true,download:false}},viewUrl:'https://viewer.test/view/capability'}
     :path.endsWith('/client-grants')?state.clientAccess:{shares:[],publicationRequired:true,existingAccessUpdateRequired:false,eligibleAssetKinds:['glb']};
-  const clientPanel={innerHTML:''},modal={open:true,close(){this.open=false}},modalContent={
+  const document={activeElement:null},clientPanel={innerHTML:''},modal={open:true,close(){this.open=false}},modalContent={
     querySelector:selector=>selector==='.share-columns'?{dataset:{shareContext:state.shareContext?.id}}:selector==='[data-client-share-panel]'?clientPanel:null,
-    querySelectorAll:selector=>selector==='[data-action="copy-share"]'?copyButtons:[],
+    contains:()=>false,querySelectorAll:selector=>selector==='[data-action="copy-share"]'?copyButtons:[],
   };
   const esc=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
-  const context=vm.createContext({...directClientShare,state,modal,modalContent,crypto:{randomUUID:()=>`request-${++sequence}`},
+  const context=vm.createContext({...directClientShare,document,state,modal,modalContent,crypto:{randomUUID:()=>`request-${++sequence}`},
     can:permission=>permissions.includes(permission),esc,dateTime:value=>value,card:(title,body)=>`<section><h3>${esc(title)}</h3>${body}</section>`,
     empty:text=>`<p>${esc(text)}</p>`,field:(label,name,attrs='')=>`<label>${esc(label)}<input name="${name}" ${attrs}></label>`,
     badge:value=>`<span>${esc(value)}</span>`,button:(action,id,label)=>`<button data-action="${action}" data-id="${id}">${label}</button>`,
@@ -53,7 +53,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   const form={dataset:{outputId:'output'},isConnected:true,elements:{label:{value:''},password:{value:''},expiresAt:{value:''},
     measure:{checked:true},cameras:{checked:true},download:{checked:false}},button:{disabled:false},querySelector(){return this.button},
     querySelectorAll(selector){return selector==='input[name="allowedViews"]'?[{checked:true,value:'model'}]:[]}};
-  return {context,state,output,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
+  return {context,document,state,output,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
     respond(fn){respond=fn},respondNative(fn){nativeRespond=fn},respondDirect(fn){directRespond=fn},html:()=>rendered.at(-1)?.html||''};
 }
 
@@ -443,9 +443,77 @@ test('whole-project client scope requires current and future publications',()=>{
 test('project sharing has no public creation form or public task forms',async()=>{
   const f=fixture();f.context.shareModal('project');f.context.bindProjectShareCard('project');
   assert.doesNotMatch(f.html(),/project-share-form|class="manage-form share-form"|Create public link|Create whole-project link/);
-  assert.match(f.html(),/whole project or only chosen tasks with a client’s portal account/);
+  assert.match(f.html(),/A public link opens one task\. Use Share on that task to create one\./);
   assert.match(f.html(),/data-legacy-project-shares/);assert.equal(f.calls.length,0);
   await f.context.createOutputShare(f.form,'project',null);assert.equal(f.calls.length,0);
+});
+
+test('a project and a task open the same Share dialog: same tabs, same order, starting on Client Workspace',()=>{
+  const frame=f=>({title:f.rendered.at(-1).title,
+    tabs:[...f.html().matchAll(/data-share-mode="([^"]+)" role="tab" id="([^"]+)" aria-controls="([^"]+)" tabindex="([^"]+)" aria-selected="([^"]+)">([^<]+)</g)].map(match=>match.slice(1)),
+    panels:[...f.html().matchAll(/data-share-mode-panel="([^"]+)" role="tabpanel" id="([^"]+)" aria-labelledby="([^"]+)" (hidden)?/g)].map(match=>match.slice(1))});
+  const f=fixture();f.state.tasks[0].displayName='North wall';f.output.displayName='odm_textured_model.glb';
+  f.context.shareModal('project');const project=frame(f);
+  f.context.shareModal('project','output');const task=frame(f);
+  assert.equal(project.title,'Share project: Site');assert.equal(task.title,'Share task: North wall');
+  assert.deepEqual(task.tabs,project.tabs);assert.deepEqual(task.panels,project.panels);
+  assert.deepEqual(project.tabs.map(item=>[item[5],item[4]]),[['Public link','false'],['Client Workspace','true']]);
+  assert.deepEqual(project.panels.map(item=>[item[0],item[3]]),[['internal',undefined],['public','hidden']]);
+  // Both dialogs switch tabs, and a refresh of the dialog keeps the chosen tab.
+  const tabs=['public','internal'].map(mode=>({dataset:{shareMode:mode},tabIndex:0,setAttribute(){},focus(){},click(){this.onclick()}}));
+  const panels=['public','internal'].map(mode=>({dataset:{shareModePanel:mode},hidden:false}));
+  f.modalContent.querySelectorAll=selector=>selector==='[data-share-mode]'?tabs:selector==='[data-share-mode-panel]'?panels:[];
+  f.context.bindShareModal('project',null);tabs[0].onclick();
+  assert.deepEqual(panels.map(panel=>panel.hidden),[false,true]);
+  f.context.shareModal('project');assert.deepEqual(frame(f).panels.map(item=>[item[0],item[3]]),[['internal','hidden'],['public',undefined]]);
+});
+
+test('the Public link tab counts only links that still open',()=>{
+  const f=fixture(),past='2020-01-01T00:00:00Z';
+  assert.equal(f.context.publicTabLabel(null),'Public link');
+  assert.equal(f.context.publicTabLabel([{revokedAt:past},{expiresAt:past}]),'Public link');
+  assert.equal(f.context.publicTabLabel([{},{expiresAt:'2999-01-01T00:00:00Z'},{revokedAt:past}]),'Public link (2)');
+  f.state.shares.output=[{id:'one',permissions:{}}];f.context.shareModal('project','output');
+  assert.match(f.html(),/data-share-mode="public"[^>]*>Public link \(1\)</);
+});
+
+test('the tab count, task rows and old project rows use one rule, the server rule, for a live link',()=>{
+  const f=fixture(),at=Date.parse('2026-06-01T00:00:00Z'),state=share=>f.context.publicLinkState(share,at);
+  for(const [share,expected] of [[{},'active'],[{expiresAt:'2026-06-01T00:00:01Z'},'active'],[{expiresAt:'2026-06-01T00:00:00Z'},'expired'],
+    [{expiresAt:'not a date'},'expired'],[{revokedAt:'2026-05-01T00:00:00Z'},'revoked'],[{revokedAt:'2026-05-01T00:00:00Z',expiresAt:'2026-05-02T00:00:00Z'},'revoked']])assert.equal(state(share),expected);
+  const past='2020-01-01T00:00:00Z',later='2999-01-01T00:00:00Z',rows=[{id:'live',expiresAt:later},{id:'over',expiresAt:past},{id:'gone',revokedAt:past},{id:'open'}];
+  const target={innerHTML:''},tab={textContent:''};
+  f.modalContent.querySelector=selector=>selector==='[data-legacy-project-shares]'?target:selector==='#share-tab-public'?tab:null;
+  f.state.projectShares.project=rows;vm.runInContext(declaration('injectProjectShareCard'),f.context);f.context.injectProjectShareCard('project');
+  assert.equal(tab.textContent,'Public link (2)');
+  assert.deepEqual([...target.innerHTML.matchAll(/<span>(active|expired|revoked)<\/span>/g)].map(match=>match[1]),['active','expired','revoked','active']);
+  assert.match(target.innerHTML,/Expired 2020-01-01T00:00:00Z/);assert.match(target.innerHTML,/Expires 2999-01-01T00:00:00Z/);assert.match(target.innerHTML,/No expiry/);
+  assert.match(target.innerHTML,/A link marked active opens the project until it expires or you revoke it/);assert.doesNotMatch(target.innerHTML,/remain active until you revoke/);
+  f.modalContent.querySelector=()=>null;f.state.shares.output=rows.map(row=>({...row,permissions:{}}));f.context.shareModal('project','output');
+  assert.deepEqual([...f.html().matchAll(/<span>(active|expired|revoked)<\/span>/g)].map(match=>match[1]),['active','expired','revoked','active']);
+});
+
+for(const [label,id,close] of [['the Public link tab','share-tab-public',false],['Close','',true]])test(`late project links keep keyboard focus on ${label}`,async()=>{
+  const f=fixture();let settle;
+  f.respond(path=>path.endsWith('/public-shares')?new Promise(resolve=>{settle=resolve}):Promise.resolve({shares:[]}));
+  const old={id,classList:{contains:name=>close&&name==='modal-close'},focus(){throw new Error('the replaced control was focused')}},fresh={focused:0,focus(){this.focused++}};
+  const opening=f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  // The person moved to the control, and chose the tab, while the links were still loading.
+  f.document.activeElement=old;f.modalContent.contains=element=>element===old;
+  if(!close)f.state.shareContext.mode='public';
+  const query=f.modalContent.querySelector;f.modalContent.querySelector=selector=>selector===(close?'.modal-close':'#share-tab-public')?fresh:query(selector);
+  settle({shares:[{id:'live'}]});await opening;
+  assert.equal(f.rendered.length,2);assert.equal(fresh.focused,1);
+  assert.match(f.html(),close?/data-share-mode="internal"[^>]*aria-selected="true"/:/data-share-mode="public"[^>]*aria-selected="true"/);
+});
+
+test('a dialog refresh moves focus only when the person was on its tabs or Close, never when opening or from outside',()=>{
+  const f=fixture(),moves=[];f.modalContent.querySelector=selector=>/^#share-tab|^.modal-close/.test(selector)?{focus(){moves.push(selector)}}:null;
+  const tab={id:'share-tab-internal',classList:{contains:()=>false}};
+  f.document.activeElement=tab;f.context.shareModal('project');assert.deepEqual(moves,[],'focus outside the dialog');
+  f.modalContent.contains=()=>true;f.modal.open=false;f.context.shareModal('project');assert.deepEqual(moves,[],'first opening');
+  f.modal.open=true;f.document.activeElement={id:'other',classList:{contains:()=>false}};f.context.shareModal('project');assert.deepEqual(moves,[],'another control');
+  f.document.activeElement=tab;f.context.shareModal('project');assert.deepEqual(moves,['#share-tab-internal']);
 });
 
 test('new link result is bound to its project, output and share identity',async()=>{
