@@ -81,13 +81,13 @@ test('the runbook states the rollback rule',()=>{
   const text=fs.readFileSync(path.join(root,'docs/RELEASING.md'),'utf8');
   const section=text.slice(text.indexOf('### Rollback after schema 46'),text.indexOf('## Updating the production host'));
   const flat=section.replace(/\s+/g,' ');
-  for(const value of ['PROCESSING_PLATFORM_ENABLED=false','Rule: pause first','viewer-worker','A plain container restart keeps the old value','`Config/viewer.env` alone is not enough','backup'])assert.ok(flat.includes(value),value);
+  for(const value of ['PROCESSING_PLATFORM_ENABLED=false','go back only to an image that was rehearsed for this','is not proof that it keeps anything','`/app/source-commit.txt`','viewer-worker','A plain container restart keeps the old value','`Config/viewer.env` alone is not enough','backup'])assert.ok(flat.includes(value),value);
   // The line the steps tell a person to look for is the line the worker prints.
   const line='Processing worker is idle because PROCESSING_PLATFORM_ENABLED=false';
   assert.ok(flat.includes(line));assert.ok(fs.readFileSync(path.join(root,'server/worker.js'),'utf8').includes(line));
   const order=['set `PROCESSING_PLATFORM_ENABLED`','Look at the `viewer-worker` log','Only now move `latest` back','Before turning processing back on'].map(value=>flat.indexOf(value));
   assert.ok(order.every((value,index)=>value>0&&(index===0||value>order[index-1])),String(order));
-  assert.ok(flat.includes(script.match(/^retention_module=(\S+)$/m)[1]));
+  assert.ok(!flat.includes('gcpUploadRetention.js'),'a module name is never the check');
 });
 
 test('a view-only worker purges nothing and cleans no upload cache',async t=>{

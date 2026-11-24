@@ -154,7 +154,8 @@ steps in this order:
 5. To resume, unset the variable (or set it to `false`). The next merge to
    `main` moves `latest` forward again.
 
-Going back past schema 46: turn on the pause and check it before step 4. See
+Going back past schema 46: use the recorded rollback image, or turn on the
+pause and check it before step 4. See
 [Rollback after schema 46](#rollback-after-schema-46).
 
 Reverting on `main` is the other way to move `latest` back for good. Rolling back
@@ -171,15 +172,28 @@ without keeping their CSV files, and deletes upload caches this release keeps
 on purpose. Its API does the same when staff delete or purge. Those files
 cannot be recovered from the database. Retained originals are not touched.
 
-**Rule: pause first.** A restart pulls whatever `latest` is and starts its
-worker at once, so no check inside the new image or an update script can help.
-The pause is `PROCESSING_PLATFORM_ENABLED=false` in the host settings. Older
-releases obey it: their worker stays idle, and the processing, upload, delete
-and purge routes are off. Viewing still works. Keep it on from before the
-rollback until a release with retention runs again.
+A restart pulls whatever `latest` is and starts its worker at once. No check
+inside the new image or an update script can protect a rollback.
 
-Fixing forward, or going back to a release that has schema 46 retention, needs
-no pause. Prefer that.
+**Rule: go back only to an image that was rehearsed for this.** Use the first
+that applies:
+
+1. Fix forward.
+2. Roll back to the recorded rollback image, by digest. It must be a release
+   that removes neither originals nor upload caches, and its exact digest must
+   have passed on staging: on a synthetic store migrated to schema 46, through
+   first start, restart and recreate.
+3. Fallback: pause first, then an older image. The pause is
+   `PROCESSING_PLATFORM_ENABLED=false` in the host settings. Older releases obey
+   it: their worker stays idle, and the processing, upload, delete and purge
+   routes are off. Viewing still works. Use it only when it was rehearsed with
+   that exact image on a migrated synthetic store: the value is `false` before
+   the first start, the worker is idle, the write routes are off, and nothing is
+   removed through a restart and a recreate. Keep the pause on from before the
+   rollback until a release with proven retention runs again.
+
+A file or module existing in an image is not proof that it keeps anything. The
+proof is the staging record of that exact digest and commit.
 
 #### Steps for someone who restarts the containers
 
@@ -208,10 +222,10 @@ start them again, and keep the database, `trash` and `cache` as they are.
 
 All of these must be true:
 
-- Both containers run a release with retention: the file
-  `/app/server/gcpUploadRetention.js` exists in `viewer-api` and in
-  `viewer-worker`.
-- `latest`, or the pinned digest, is that release too, so the next restart does
+- Both containers run an image whose exact digest has a staging record for
+  retention on a migrated store. `/app/source-commit.txt` in `viewer-api` and in
+  `viewer-worker` is the commit in that record.
+- `latest`, or the pinned digest, is that same image, so the next restart does
   not bring the older one back.
 - Both containers are healthy, and the API log shows no database error.
 
@@ -227,8 +241,9 @@ the upgrade is not in it.
 #### What the updater adds
 
 `scripts/update-truenas.sh` is not used by a plain restart. Where it is used,
-its automatic rollback starts an image without retention view-only, and it
-refuses to update to such an image while processing is on.
+its automatic rollback starts an image without the retention module view-only,
+and it refuses to update to such an image while processing is on. The check can
+only refuse. An image that passes it still needs the staging record above.
 
 ## Updating the production host
 

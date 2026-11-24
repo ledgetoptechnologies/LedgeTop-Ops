@@ -64,7 +64,8 @@ fi
 
 # Releases that keep original GCP source files (schema 46) ship this module. An
 # older release would purge trash and upload caches without keeping them. An
-# image that cannot be checked counts as older.
+# image that cannot be checked counts as older. This can only refuse: the module
+# being there is not proof of retention (docs/RELEASING.md).
 retention_module=/app/server/gcpUploadRetention.js
 retention_aware() {
   docker run --rm --network none --pull never --entrypoint node "$1" -e 'process.exit(require("node:fs").existsSync(process.argv[1])?0:3)' "$retention_module" >/dev/null 2>&1
