@@ -2,7 +2,7 @@
 
 const { signViewerEvent } = require('./viewerEvents');
 const { randomUUID } = require('node:crypto');
-const { validDirectGrantInput, validDirectSnapshot, directListQuery } = require('./directClientGrantContract');
+const { validReplaces, validDirectGrantInput, validDirectSnapshot, directListQuery } = require('./directClientGrantContract');
 
 const REMOTE_PATH = '/api/viewer/workspace/client-grants';
 const LOCAL_PATH = '/api/v1/workspace/client-grants';
@@ -123,12 +123,13 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
           && typeof payload.error === 'string' && payload.error.length > 0 && payload.error.length <= 500
           && !/[\u0000-\u001f\u007f]/.test(payload.error))
           return res.status(status).json({ error: payload.error, code: payload.code,
-            ...(typeof payload.grantId === 'string' && ID.test(payload.grantId) ? { grantId: payload.grantId } : {}) });
+            ...(typeof payload.grantId === 'string' && ID.test(payload.grantId) ? { grantId: payload.grantId } : {}),
+            ...(payload.grants !== undefined && validReplaces(payload.grants) ? { grants: payload.grants } : {}) });
         return res.status(status).json({ error: 'Operations rejected the client access request', code: 'operations_request_failed' });
       }
       stage = 'response_schema';
       if (!(connection === 'direct' ? validDirectSnapshot(payload, action) : connection === 'native' ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
-      const status = connection === 'direct' && action === 'revoke' && payload.sessionRevocation.pending
+      const status = connection === 'direct' && ['create', 'revoke'].includes(action) && payload.sessionRevocation?.pending
         ? 202 : action === 'create' && !payload.replayed ? 201 : 200;
       return res.status(status).json(payload);
     } catch {

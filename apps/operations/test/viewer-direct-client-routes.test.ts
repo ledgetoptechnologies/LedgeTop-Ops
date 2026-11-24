@@ -88,6 +88,16 @@ describe("staff direct Viewer grant routes",()=>{
   const response=await app()("",mutation());expect(response.status).toBe(409);
   expect(await response.json()).toEqual({error:"Client already has this share",code:"duplicate_active_grant",grantId:"grant-existing"});
  });
+ it("answers a replacement with 202 while anything is pending, and share_changed with the current shares",async()=>{
+  const request=app();
+  for(const [pending,replayed,status] of [[true,false,202],[true,true,202],[false,false,201],[false,true,200]] as const){
+   mock.create.mockResolvedValueOnce({grant:{grantId:"grant-one"},replayed,sessionRevocation:{pending,revokedGrants:1}});
+   expect((await request("",mutation())).status).toBe(status);
+  }
+  mock.create.mockRejectedValueOnce(new DirectViewerGrantError(409,"share_changed","Changed",undefined,[{grantId:"grant-two",grantVersion:3}]));
+  const response=await request("",mutation());expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({error:"Changed",code:"share_changed",grants:[{grantId:"grant-two",grantVersion:3}]});
+ });
  it("accurately distinguishes pending revocation from completed idempotent revocation",async()=>{
   mock.revoke.mockResolvedValueOnce({success:true,replayed:false,sessionRevocation:{pending:true}});
   const request=app();expect((await request("/grant-one",mutation("DELETE",{}))).status).toBe(202);

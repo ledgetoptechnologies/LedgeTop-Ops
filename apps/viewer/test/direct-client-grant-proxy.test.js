@@ -83,6 +83,30 @@ test('direct create validates explicit future scope and typed fields before sign
   assert.equal(envelopes.length, 1);
 });
 
+test('a replacement list is checked before signing, and its answer is typed', async t => {
+  const list = [{ grantId: 'grant-old', grantVersion: 2 }], answer = extra => ({ grant, replayed: false, ...extra });
+  for (const [payload, status] of [[answer({ sessionRevocation: { pending: true, revokedGrants: 1 } }), 202], [answer({ sessionRevocation: { pending: false, revokedGrants: 1 } }), 201],
+    [{ ...answer({ sessionRevocation: { pending: false, revokedGrants: 1 } }), replayed: true }, 200], [answer(), 201],
+    [answer({ sessionRevocation: { pending: 'no' } }), 502], [answer({ sessionRevocation: { pending: false, revokedGrants: -1 } }), 502], [answer({ sessionRevocation: null }), 502]]) {
+    const { request, envelopes } = await fixture(t, () => json(payload));
+    assert.equal((await request(PATH, { method: 'POST', body: { ...input, replaces: list } })).status, status, JSON.stringify(payload));
+    assert.deepEqual(envelopes[0].grant.replaces, list);
+  }
+  const { request, envelopes } = await fixture(t, () => json(answer()));
+  assert.equal((await request(PATH, { method: 'POST', body: { ...input, replaces: [] } })).status, 201); envelopes.length = 0;
+  for (const replaces of [null, {}, [null], [{ grantId: 'grant-old' }], [{ ...list[0], extra: 1 }], [{ ...list[0], grantVersion: 0 }], [{ ...list[0], grantId: 'bad id' }], [...list, ...list],
+    Array.from({ length: 101 }, (_, index) => ({ grantId: `grant-${index}`, grantVersion: 1 }))])
+    assert.equal((await request(PATH, { method: 'POST', body: { ...input, replaces } })).status, 400, JSON.stringify(replaces).slice(0, 80));
+  assert.equal((await request(PATH, { method: 'POST', body: { ...input, scopeType: 'task', taskId: 'task', includeFuturePublished: false, replaces: list } })).status, 400);
+  assert.equal(envelopes.length, 0);
+  // The refusal carries the current shares, and only well-formed ones.
+  for (const [grants, expected] of [[list, list], [[], []], [[{ ...list[0], clientDisplayName: 'private' }], undefined], ['x', undefined]]) {
+    const refused = await fixture(t, () => json({ error: 'Changed', code: 'share_changed', grants }, { status: 409 }));
+    const response = await refused.request(PATH, { method: 'POST', body: { ...input, replaces: list } });
+    assert.equal(response.status, 409); assert.deepEqual(await response.json(), { error: 'Changed', code: 'share_changed', ...(expected ? { grants: expected } : {}) });
+  }
+});
+
 test('direct revoke uses path grant id, optional bounded reason and requires a typed completion', async t => {
   const receipt = { success: true, replayed: true, sessionRevocation: { pending: true } };
   const { request, envelopes } = await fixture(t, () => json(receipt, { status: 202 }));

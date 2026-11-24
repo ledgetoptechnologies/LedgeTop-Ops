@@ -91,12 +91,21 @@ function restrictedReceiptLiveSql(grantTable:string){const g=`${grantTable}.`,j=
    AND ${j('$.recipientAuthorityPin.workspaceId')}=${g}workspace_id AND ${j('$.recipientAuthorityPin.sourceId')}=${g}source_id
    AND (json_type(receipt.response_json,'$.grant.expiresAt')='null'
     OR ${expiryJulianSql(j('$.grant.expiresAt'))}>julianday('now')))`;}
+/** The shares a new one takes the place of: exact ids and versions, unique. */
+const replacesSchema=z.array(z.object({grantId:opaque,grantVersion:z.number().int().min(1)}).strict()).max(100)
+ .refine(list=>new Set(list.map(item=>item.grantId)).size===list.length)
+ .transform(list=>[...list].sort((left,right)=>left.grantId<right.grantId?-1:1));
+export type DirectViewerReplaced={grantId:string;grantVersion:number};
+/** Written to revoke_reason only by a replacement's own version-matching revocation; DELETE refuses the prefix. */
+const REPLACED_PREFIX='replaced:';
 const inputSchema=z.object({sourceId:source,workspaceId:opaque,viewerProjectId:opaque,taskId:opaque.nullable(),
  scopeType:z.enum(['project','task']),includeFuturePublished:z.boolean(),confirmedScope:z.literal(true),
- expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict(),selection:selectionSchema.optional()}).strict()
- .refine(g=>g.scopeType==='project'?g.taskId===null&&g.includeFuturePublished:g.taskId!==null&&!g.includeFuturePublished&&g.selection===undefined);
+ expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict(),selection:selectionSchema.optional(),replaces:replacesSchema.optional()}).strict()
+ .refine(g=>g.scopeType==='project'?g.taskId===null&&g.includeFuturePublished:g.taskId!==null&&!g.includeFuturePublished&&g.selection===undefined&&g.replaces===undefined);
 export class DirectViewerGrantError extends HTTPException {
- constructor(status:400|403|404|409|503,public readonly code:string,message:string,public readonly grantId?:string){super(status,{message,cause:{code}});}
+ constructor(status:400|403|404|409|503,public readonly code:string,message:string,public readonly grantId?:string,
+  /** For share_changed: the client's current shares in the project, for the next attempt. */
+  public readonly grants?:DirectViewerReplaced[]){super(status,{message,cause:{code}});}
 }
 function fail(status:400|403|404|409|503,code:string,message:string):never{throw new DirectViewerGrantError(status,code,message);}
 function db(env:Env){return env.DELIVERY_DB.withSession('first-primary');}
@@ -476,11 +485,40 @@ function mutationStatements(database:Pick<D1Database,'prepare'>,principal:StaffP
  .bind(principal.id,idempotencyKey,action,fingerprint,id,JSON.stringify(storedResponse),now),
  database.prepare(`INSERT INTO viewer_direct_client_grant_audit VALUES(?,?,?,?,?,?,?)`)
  .bind(crypto.randomUUID(),id,action,principal.id,idempotencyKey,JSON.stringify(response),now)];}
+/** Every listed share, and no other, was revoked by this very batch, and no other share of this client in this project is
+ * active. Bound as: marker, count, marker, source, workspace, project, listed, count, source, workspace, project. */
+const REPLACEMENT_PROOF_SQL=`
+ AND (SELECT count(*) FROM viewer_direct_client_grants marked WHERE marked.revoke_reason=?)=?
+ AND (SELECT count(*) FROM viewer_direct_client_grants marked WHERE marked.revoke_reason=? AND marked.status='revoked'
+  AND marked.source_id=? AND marked.workspace_id=? AND marked.viewer_project_id=?
+  AND EXISTS(SELECT 1 FROM json_each(?) item WHERE json_extract(item.value,'$.grantId')=marked.id AND json_extract(item.value,'$.grantVersion')=marked.grant_version))=?
+ AND NOT EXISTS(SELECT 1 FROM viewer_direct_client_grants other WHERE other.source_id=? AND other.workspace_id=? AND other.viewer_project_id=? AND other.status='active')`;
+type ShareTarget={sourceId:string;workspaceId:string;viewerProjectId:string};
+async function requireCurrentShares(database:Pick<D1Database,'prepare'>,g:ShareTarget,replaces:DirectViewerReplaced[]){
+ const rows=(await database.prepare(`SELECT id grantId,grant_version grantVersion FROM viewer_direct_client_grants
+  WHERE source_id=? AND workspace_id=? AND viewer_project_id=? AND status='active' ORDER BY id LIMIT 101`)
+  .bind(g.sourceId,g.workspaceId,g.viewerProjectId).all<DirectViewerReplaced>()).results.map(row=>({grantId:row.grantId,grantVersion:row.grantVersion}));
+ if(JSON.stringify(rows.sort((left,right)=>left.grantId<right.grantId?-1:1))!==JSON.stringify(replaces))
+  throw new DirectViewerGrantError(409,'share_changed','This client’s shares in the project changed. Check them and try again',undefined,rows);
+}
+async function remainingShares(database:Pick<D1Database,'prepare'>,g:ShareTarget,listed:string){
+ return await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND ${effectiveGrantSql()}
+  AND id NOT IN (SELECT json_extract(item.value,'$.grantId') FROM json_each(?) item)`).bind(g.sourceId,g.workspaceId,listed).first<number>('n')??0;
+}
+/** Deliver what can be delivered now; the rest stays queued for the existing drain, and is said to be pending. */
+async function drainReplaced(env:Env,replaces:DirectViewerReplaced[]){
+ const listed=JSON.stringify(replaces);
+ if(replaces.length)await drainDirectViewerClientGrantRevocations(env,{limit:25,grantIds:replaces.map(item=>item.grantId)});
+ const open=await db(env).prepare(`SELECT count(*) n FROM viewer_direct_client_grant_revocations WHERE status<>'complete'
+  AND EXISTS(SELECT 1 FROM json_each(?) item WHERE json_extract(item.value,'$.grantId')=grant_id AND json_extract(item.value,'$.grantVersion')=grant_version)`)
+  .bind(listed).first<number>('n');
+ return {pending:(open??0)>0,revokedGrants:replaces.length};
+}
 export async function createDirectViewerClientGrant(input:{env:Env;principal:StaffPrincipal;grant:unknown;idempotencyKey:string;request:Request})
- :Promise<{grant:DirectViewerClientGrantPublicResult;replayed:boolean}>{
+ :Promise<{grant:DirectViewerClientGrantPublicResult;replayed:boolean;sessionRevocation?:{pending:boolean;revokedGrants:number}}>{
  const {env,principal}=input;await manage(env,principal);const parsed=inputSchema.safeParse(input.grant);
  if(!parsed.success||!key.safeParse(input.idempotencyKey).success)fail(400,'invalid_request','Invalid Viewer sharing request');
- const g=parsed.data,fingerprint=await sha256(JSON.stringify(['direct.create',g]));
+ const {replaces,...g}=parsed.data,fingerprint=await sha256(JSON.stringify(replaces?['direct.replace',g,replaces]:['direct.create',g]));
  const prior=await receipt(env,principal.id,input.idempotencyKey,fingerprint);
  if(prior){
   const priorPin=createReceiptAuthorityPin(prior.response);
@@ -495,7 +533,8 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    if(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))
     fail(409,'relationship_missing','Client authority changed; refresh the client connection');
   }
-  return {grant:createReceiptGrant(prior.response,prior.grantId,g.selection),replayed:true};
+  const grant=createReceiptGrant(prior.response,prior.grantId,g.selection);
+  return {grant,replayed:true,...(replaces?{sessionRevocation:await drainReplaced(env,replaces)}:{})};
  }
  // After the replay check, so an already committed request still replays; before any read or write.
  const expiresAt=canonicalExpiry(g.expiresAt);
@@ -516,20 +555,33 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  if(g.taskId&&(catalog.tasks.length!==1||catalog.tasks[0]?.id!==g.taskId))fail(409,'task_not_published','Task is not published in this project');
  // Recheck recipient authority after the remote catalog request, then pin it in the INSERT itself.
  const {row,guard,operationsAuthority,pin}=await recipient(env,g.sourceId,g.workspaceId),database=db(env),id=crypto.randomUUID(),now=new Date().toISOString();
- const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
- AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
- if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);
- const count=await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND ${effectiveGrantSql()}`)
- .bind(g.sourceId,g.workspaceId).first<number>('n');
+ const listed=JSON.stringify(replaces??[]),marker=`${REPLACED_PREFIX}${id}`;
+ if(replaces)await requireCurrentShares(database,g,replaces);
+ else{
+  const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
+  AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
+  if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);
+ }
  // Real limit, not a listing artefact: the client portal reads all of one client's grants per request.
  // Checked here for a clear early answer and again inside the INSERT so concurrent creates cannot pass it.
- if((count??0)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
+ if(await remainingShares(database,g,listed)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
  const result={grantId:id,sourceId:g.sourceId,workspaceId:g.workspaceId,viewerProjectId:g.viewerProjectId,taskId:g.taskId,scopeType:g.scopeType,
  includeFuturePublished:g.includeFuturePublished,permissions:g.permissions,expiresAt,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:row.display_name};
  try{await database.batch([
+ // A replacement is one batch. The marker names this attempt's fresh id and is written only where id, version, client,
+ // project and active status all match; the immutability trigger keeps a revoked row, and so the marker, as it is.
+ ...(replaces?[
+  database.prepare(`UPDATE viewer_direct_client_grants SET status='revoked',revoked_at=?,revoked_by_staff_id=?,revoke_reason=?,updated_at=?
+   WHERE source_id=? AND workspace_id=? AND viewer_project_id=? AND status='active'
+   AND EXISTS(SELECT 1 FROM json_each(?) item WHERE json_extract(item.value,'$.grantId')=viewer_direct_client_grants.id
+    AND json_extract(item.value,'$.grantVersion')=viewer_direct_client_grants.grant_version)`)
+   .bind(now,principal.id,marker,now,g.sourceId,g.workspaceId,g.viewerProjectId,listed),
+  database.prepare(`INSERT OR IGNORE INTO viewer_direct_client_grant_revocations(grant_id,grant_version,created_at)
+   SELECT id,grant_version,? FROM viewer_direct_client_grants WHERE revoke_reason=? AND status='revoked'`).bind(now,marker),
+ ]:[]),
  database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
  can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
- SELECT ?,?,?,?,?,?,?,?,?,?,?,1,'active',?,?,? WHERE (${guard.sql})
+ SELECT ?,?,?,?,?,?,?,?,?,?,?,1,'active',?,?,? WHERE (${guard.sql})${replaces?REPLACEMENT_PROOF_SQL:''}
  AND (SELECT count(*) FROM viewer_direct_client_grants cap WHERE cap.source_id=? AND cap.workspace_id=? AND ${effectiveGrantSql('cap')})<?
  AND EXISTS(${recipientSql(env)} AND w.id=? AND w.project_alpha_source_id=?
  AND checkpoint.active_generation_id=? AND checkpoint.source_sequence=? AND root.source_version=?
@@ -554,19 +606,32 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    WHERE authority.client_authority_id=claim.client_authority_id AND authority.workspace_id=w.id AND authority.state='active'
      AND authority.target_id=? AND authority.target_revision=? AND authority.ownership_epoch=? AND authority.root_kind=w.root_type)`:''})`)
  .bind(id,g.sourceId,g.workspaceId,g.viewerProjectId,g.taskId,g.scopeType,+g.includeFuturePublished,+g.permissions.measure,+g.permissions.cameras,+g.permissions.download,
- g.selection?RESTRICTED_GRANT_EXPIRY:result.expiresAt,principal.id,now,now,...guard.bindings,g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
+ g.selection?RESTRICTED_GRANT_EXPIRY:result.expiresAt,principal.id,now,now,...guard.bindings,
+ ...(replaces?[marker,replaces.length,marker,g.sourceId,g.workspaceId,g.viewerProjectId,listed,replaces.length,g.sourceId,g.workspaceId,g.viewerProjectId]:[]),
+ g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
  g.workspaceId,g.sourceId,row.active_generation_id,row.source_sequence,row.root_version,
  row.claim_authority_id,row.claim_source_id,row.claim_source_workspace_id,row.claim_ownership_epoch,
  ...(operationsAuthority?[operationsAuthority.targetId,operationsAuthority.targetRevision,operationsAuthority.ownershipEpoch]:[])),
  ...mutationStatements(database,principal,input.idempotencyKey,fingerprint,id,'grant.create',result,now,
    (g.selection ? {version:3,grant:result,recipientAuthorityPin:pin,selection:g.selection}
-    : {version:1,grant:result,recipientAuthorityPin:pin}) satisfies CreateReceiptEnvelope)]);
+    : {version:1,grant:result,recipientAuthorityPin:pin}) satisfies CreateReceiptEnvelope),
+ ...(replaces?[database.prepare(`INSERT INTO viewer_direct_client_grant_audit(id,grant_id,action,actor_staff_id,idempotency_key,details_json,created_at)
+  SELECT lower(hex(randomblob(16))),id,'grant.revoke',?,?,json_object('success',json('true'),'replacedBy',?),? FROM viewer_direct_client_grants WHERE revoke_reason=?`)
+  .bind(principal.id,input.idempotencyKey,id,now,marker)]:[])]);
  }catch(error){const replay=await receipt(env,principal.id,input.idempotencyKey,fingerprint);if(replay){
    const current=await recipient(env,g.sourceId,g.workspaceId),priorPin=createReceiptAuthorityPin(replay.response);
    if((priorPin&&JSON.stringify(priorPin)!==JSON.stringify(current.pin))
     ||(!priorPin&&(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))))
     fail(409,'relationship_missing','Client authority changed; refresh the client connection');
-   return {grant:createReceiptGrant(replay.response,replay.grantId,g.selection),replayed:true};}
+   return {grant:createReceiptGrant(replay.response,replay.grantId,g.selection),replayed:true,...(replaces?{sessionRevocation:await drainReplaced(env,replaces)}:{})};}
+  if(replaces){
+   // The batch changed nothing. Say why by reading again, in this order; anything else is not guessed.
+   await requireCurrentShares(database,g,replaces);
+   const current=await recipient(env,g.sourceId,g.workspaceId);
+   if(JSON.stringify([current.pin,current.row])!==JSON.stringify([pin,row]))fail(409,'relationship_missing','Client connection changed; refresh before sharing');
+   if(await remainingShares(database,g,listed)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
+   throw error;
+  }
   const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
    AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
   if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);
@@ -575,12 +640,12 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
   if((active??0)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
   if(error instanceof Error&&/FOREIGN KEY|direct-viewer-recipient-invalid/.test(error.message))fail(409,'relationship_missing','Client connection changed; refresh before sharing');
   throw error;}
- return {grant:result,replayed:false};
+ return {grant:result,replayed:false,...(replaces?{sessionRevocation:await drainReplaced(env,replaces)}:{})};
 }
-export async function drainDirectViewerClientGrantRevocations(env:Env,options:{limit?:number;grantId?:string}={}){
+export async function drainDirectViewerClientGrantRevocations(env:Env,options:{limit?:number;grantId?:string;grantIds?:string[]}={}){
  const database=db(env),limit=Math.min(100,Math.max(1,options.limit??25));const rows=await database.prepare(`SELECT grant_id,grant_version FROM viewer_direct_client_grant_revocations
- WHERE status='pending' AND (? IS NULL OR grant_id=?) ORDER BY created_at,grant_id LIMIT ?`)
- .bind(options.grantId??null,options.grantId??null,limit).all<{grant_id:string;grant_version:number}>();
+ WHERE status='pending' AND (? IS NULL OR grant_id=?) AND (? IS NULL OR grant_id IN (SELECT value FROM json_each(?))) ORDER BY created_at,grant_id LIMIT ?`)
+ .bind(options.grantId??null,options.grantId??null,options.grantIds?1:null,JSON.stringify(options.grantIds??[]),limit).all<{grant_id:string;grant_version:number}>();
  for(const row of rows.results){try{await viewerServiceClient(env).revokePublishedSessionSourceAuthorization({
   sourceAuthorization:{type:'direct_client_grant',id:row.grant_id,version:row.grant_version},idempotencyKey:`direct-revoke:${row.grant_id}:${row.grant_version}`});
   await database.prepare(`UPDATE viewer_direct_client_grant_revocations SET status='complete',attempts=attempts+1,last_error=NULL,completed_at=?
@@ -591,7 +656,8 @@ export async function drainDirectViewerClientGrantRevocations(env:Env,options:{l
 }
 export async function revokeDirectViewerClientGrant(input:{env:Env;principal:StaffPrincipal;grantId:string;reason:string;idempotencyKey:string;request:Request}){
  const {env,principal}=input;await manage(env,principal);
- if(!opaque.safeParse(input.grantId).success||!key.safeParse(input.idempotencyKey).success||!z.string().trim().min(1).max(240).safeParse(input.reason).success)
+ if(!opaque.safeParse(input.grantId).success||!key.safeParse(input.idempotencyKey).success||!z.string().trim().min(1).max(240).safeParse(input.reason).success
+  ||input.reason.trim().toLowerCase().startsWith(REPLACED_PREFIX))
   fail(400,'invalid_request','Invalid Viewer revocation');
  const fingerprint=await sha256(JSON.stringify(['direct.revoke',input.grantId,input.reason]));
  const prior=await receipt(env,principal.id,input.idempotencyKey,fingerprint),database=db(env);
