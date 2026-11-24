@@ -194,6 +194,26 @@ test('resolution: without download the imagery stays under the screen cap on eve
   assert.equal(sizes.length, 6);
 });
 
+test('what leaves the page without download is the sheet at screen resolution and nothing finer: Print, Save PDF and the preview', async () => {
+  for (const area of ['whole', 'property']) for (const output of ['finalJpeg', 'finalPdf', 'preview']) {
+    const sizes = [], blobs = [], factory = pixelCanvasFactory([]);
+    const m = modelOf({ orthoGsd: 0.01, policy: () => orthoPrintPolicy({ accessAvailable: true, measure: true, download: false }), screen: () => ({ x: 300, y: 200 }), maxPixels: 300_000,
+      createCanvas: (w, h) => { sizes.push([w, h]); const c = factory(w, h); c.toBlob = (cb, type) => { blobs.push([c.width, type]); cb(new Blob([JPEG])); }; return c; } });
+    if (area === 'property') await m.model.toggle(FARM);
+    if (output === 'preview') await m.model.draw({ dpi: 60 }); else await m.model[output]();
+    // Two canvases only: the sheet, and the imagery that went on it.
+    assert.equal(sizes.length, 2, `${area} ${output}`);
+    assert.ok(Math.max(...sizes[1]) <= 300, `${area} ${output}: imagery ${sizes[1]}`);
+    assert.deepEqual(blobs, output === 'preview' ? [] : [[sizes[0][0], 'image/jpeg']], 'only the whole sheet is ever encoded');
+  }
+  // No other way out: one encoder call, one download (the PDF), no raw image.
+  const code = readFileSync(new URL('../print-page.mjs', import.meta.url), 'utf8') + readFileSync(new URL('../print-sheet.mjs', import.meta.url), 'utf8');
+  assert.equal(code.match(/\.toBlob\(/g).length, 1);
+  assert.equal(code.match(/download: /g).length, 1);
+  assert.match(code, /href: url, download: pdf\.filename/);
+  assert.doesNotMatch(code, /toDataURL|image\/png|image\/tiff|encodePrintGeoTiff|exportOrthoPrint|renderOrthoPrint/);
+});
+
 test('contours: traced for the sheet, kept while nothing changes, and only in the legend when drawn', async () => {
   const asked = [];
   const m = modelOf({ traceContours: async (extent, cell) => { asked.push([extent, cell]); return { features: [{ coords: [500060, 4700150, 500390, 4700150], isIndex: true, label: '800ft' }], interval: 2, units: 'imperial' }; } });

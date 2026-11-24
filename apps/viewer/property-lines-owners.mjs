@@ -158,20 +158,26 @@ function unionAreaM2(parcels, budget = UNION_WORK) {
       if (!inside.size) area += (x - start) * (high - low);
     }
   }
-  return area > 0 ? area : null;
+  return area;
 }
 
-// One parcel's area when its rings are sound: the signed ring sum and the area
-// actually covered agree. Crossed, doubled or overlapping rings do not, and
-// have no area to state. Cached per parcel object, like the label geometry.
-const soundAreaCache = new WeakMap();
-function soundAreaM2(parcel) {
-  if (!soundAreaCache.has(parcel)) {
-    const signed = parcelAreaM2(parcel), covered = signed == null ? null : unionAreaM2([parcel]);
-    soundAreaCache.set(parcel, covered != null && Math.abs(signed - covered) <= 0.5 + signed * 1e-5 ? signed : null);
+// One parcel's rings: sound when the signed ring sum and the ground actually
+// covered agree. Crossed, doubled or overlapping rings do not; 'unverified' is
+// past the work budget. Only a sound parcel has an area to state. Cached per
+// parcel object, like the label geometry.
+const soundnessCache = new WeakMap();
+function soundness(parcel) {
+  if (!soundnessCache.has(parcel)) {
+    const signed = parcelAreaM2(parcel), covered = signed == null ? 0 : unionAreaM2([parcel]);
+    const state = covered == null ? 'unverified' : signed != null && Math.abs(signed - covered) <= 0.5 + signed * 1e-5 ? 'sound' : 'unsound';
+    soundnessCache.set(parcel, { state, area: state === 'sound' ? signed : null });
   }
-  return soundAreaCache.get(parcel);
+  return soundnessCache.get(parcel);
 }
+const soundAreaM2 = parcel => soundness(parcel).area;
+
+/** 'sound', 'unsound' or 'unverified': whether a closed parcel's rings describe one piece of ground. */
+export function parcelSoundness(parcel) { return soundness(parcel).state; }
 
 // Two parcels with the same rings, whatever their start corner, direction or
 // order: stacked records (condominium units), one piece of land.
@@ -203,7 +209,7 @@ export function outlineAreaM2(outline, { merged = true, covered = null } = {}) {
   }
   const parcels = outline.parcels.length > 1 ? [...new Map(outline.parcels.map(parcel => [shapeKey(parcel), parcel])).values()] : outline.parcels;
   if (parcels.some(parcel => soundAreaM2(parcel) == null)) return null;
-  return parcels.length === 1 ? soundAreaM2(parcels[0]) : unionAreaM2(parcels);
+  return parcels.length === 1 ? soundAreaM2(parcels[0]) : unionAreaM2(parcels) || null;
 }
 
 // "≈ 40.2 ac": one decimal from 1 acre, two below, square feet under 0.1
