@@ -443,10 +443,12 @@ describe("client Viewer authorization", () => {
       const headers = init?.headers as Record<string, string>;
       serviceKeys.push(headers["Idempotency-Key"]!);
       const body = JSON.parse(String(init?.body));
+      expect(body.permissions).toEqual({ view: true, measure: true, cameras: false, download: false });
+      expect(body).toHaveProperty("expiresAt");
       return Response.json({
         share: {
           id: "share-created", modelId: "viewer-model-one", versionPolicy: "latest", modelVersionId: null,
-          hasPassword: true, permissions: { view: true, measure: true, cameras: true, download: false },
+          hasPassword: true, permissions: body.permissions,
           label: "Engineer", createdBy: "identity-one", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
           expiresAt: body.expiresAt, revokedAt: null, revokedBy: null, revokeReason: null, accessCount: 0, lastAccessedAt: null,
           displayUnits: "imperial", shareClass: "client", sourceAuthorization: body.sourceAuthorization,

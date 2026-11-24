@@ -5,7 +5,7 @@ const { trackedRouter } = require('./httpRequestLifecycle');
 const store = require('./store');
 const shareStore = require('./shareStore');
 const auth = require('./auth');
-const {revisionMatches,assetAllowed}=require('./publicSharePolicy');
+const {revisionMatches,assetAllowed,NEW_SHARE_DAYS}=require('./publicSharePolicy');
 const { requireAdmin } = require('./adminAuth');
 const { toClientConfig } = require('./api');
 const { config } = require('./config');
@@ -60,6 +60,7 @@ function sharedViewerConfig(project, share) {
   }, SHARE_SESSION_TTL_MS);
   if (share.modelId) return toViewerConfig(project, { assetToken,assetFilter:asset=>assetAllowed(share,asset.kind) });
   const result = toClientConfig(project);
+  if (!assetAllowed(share, 'shots')) result.assets.shots = null;
   const prefix = `/session-assets/${encodeURIComponent(assetToken)}`;
   for (const [kind, value] of Object.entries(result.assets || {})) {
     if (kind !== 'pointCloudFormat' && typeof value === 'string' && value.startsWith('/assets/')) {
@@ -83,15 +84,14 @@ router.post('/api/models/:id/share-links', requireAdmin, async (req, res) => {
     passwordHash = await auth.hashPassword(String(body.password));
   }
 
-  let expiresAt = null;
-  const days = Number(body.expiresDays);
-  if (Number.isFinite(days) && days > 0) {
-    expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
-  }
+  // Left out: the same 30 days as every new link. No end is an explicit null.
+  const days = body.expiresDays === undefined ? NEW_SHARE_DAYS : body.expiresDays;
+  if (days !== null && !(typeof days === 'number' && days > 0 && days <= 36500)) return res.status(400).json({ error: 'expiresDays must be a positive number, or null for no end' });
+  const expiresAt = days === null ? null : new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 
   const permissions = {
     measure: !(body.permissions && body.permissions.measure === false),
-    cameras: !(body.permissions && body.permissions.cameras === false),
+    cameras: body.permissions?.cameras === true,
   };
 
   const share = shareStore.create({ viewerProjectId: project.id, tokenHash, passwordHash, expiresAt, permissions });

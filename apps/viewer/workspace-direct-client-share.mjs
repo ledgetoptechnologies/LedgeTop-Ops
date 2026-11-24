@@ -137,8 +137,36 @@ export function directGrantRows(access,{projectId,tasks,taskId=null,dateTime=val
     // An expired share gives no access, but it still holds its place until it is revoked.
     const expired=Boolean(grant.expiresAt)&&!(Date.parse(grant.expiresAt)>now);
     const details=[what,grant.permissions?`Can ${permissionList(grant.permissions)}`:null,
-      expired?`Expired ${dateTime(grant.expiresAt)}; revoke it to share this again`:grant.expiresAt?`Expires ${dateTime(grant.expiresAt)}`:'No expiry',
+      expired?`Expired${Number.isNaN(Date.parse(grant.expiresAt))?', end date unknown':` ${dateTime(grant.expiresAt)}`}; revoke it to share this again`:grant.expiresAt?`Expires ${dateTime(grant.expiresAt)}`:'No expiry',
       grant.createdAt?`Shared ${dateTime(grant.createdAt)}`:null].filter(Boolean).join(' · ');
     return `<div class="manage-row"><div><strong>${esc(grant.clientDisplayName||'Client')}</strong><small>${esc(details)}</small></div><span class="status ${expired?'expired':'active'}">${expired?'expired':'active'}</span><div><button class="secondary-button" data-action="revoke-direct-client-grant" data-id="${esc(grant.grantId)}">Revoke</button></div></div>`;
   }).join('')}</div>`;
+}
+
+// Who a publication adds: clients whose live share covers this task once it is published.
+// A task share can outlive its model, so a task being published again counts too.
+export function publishAudience(access,{projectId,taskId,now=Date.now()}){
+  const clients=new Map();
+  for(const grant of access.grants){
+    if(grant.revokedAt||grant.viewerProjectId!==projectId||grant.expiresAt&&!(Date.parse(grant.expiresAt)>now))continue;
+    if(grant.scopeType==='project'||grant.scopeType==='task'&&grant.taskId===taskId)
+      clients.set(directClientKey(grant),{key:directClientKey(grant),name:grant.clientDisplayName||'a client',id:grant.workspaceId});
+  }
+  return [...clients.values()];
+}
+const NAMED_CLIENTS=5;
+// One line per client, in name order. Clients that share a name carry the end of their id, as in the client search.
+export function publishAudienceNames(clients){
+  const fold=name=>name.toLocaleLowerCase(),count=new Map();
+  for(const client of clients)count.set(fold(client.name),(count.get(fold(client.name))||0)+1);
+  return clients.map(client=>count.get(fold(client.name))>1?`${client.name} (ref ${String(client.id||client.key).slice(-6)})`:client.name)
+    .sort((left,right)=>left.localeCompare(right));
+}
+// Nothing to say only when every list was read in full and no client gains the task.
+export function publishAudienceText(names,{complete}){
+  if(!names.length)return complete?'':'Client access could not be checked. Publishing this task shows it to every client who has the whole project.';
+  const shown=names.slice(0,NAMED_CLIENTS),more=names.length-shown.length;
+  const parts=more?[...shown,`${more} other client${more===1?'':'s'}`]:shown;
+  const list=parts.length>1?`${parts.slice(0,-1).join(', ')} and ${parts.at(-1)}`:parts[0];
+  return `Publishing this task shows it to ${list}.${complete?'':' Some client access could not be checked: any other client who has the whole project will see it too.'}`;
 }

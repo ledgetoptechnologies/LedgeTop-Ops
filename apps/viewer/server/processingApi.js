@@ -39,8 +39,8 @@ function pageQuery(req) { const raw=String(req.query.limit||'50');if(!/^\d{1,3}$
 function publicStorageSpace(value) { return {availableBytes:Number(value.available),totalBytes:Number(value.total),reserveBytes:Number(value.reserve),requiredBytes:Number(value.required),sufficient:Boolean(value.ok)}; }
 function publicImportPreview(preview) { return {...preview,destinationSpace:publicStorageSpace(preview.destinationSpace)}; }
 const shareVault=require('./shareTokenVault');
-const {VIEW_KINDS}=require('./publicSharePolicy');
-function adminShareView(share){return{id:share.id,modelId:share.modelId,label:share.label,permissions:share.permissions,allowedViews:share.allowedViews,linkRecoverable:Boolean(share.tokenCiphertext),hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
+const {VIEW_KINDS,newSharePermissions,effectiveSharePermissions,newShareExpiry}=require('./publicSharePolicy');
+function adminShareView(share){return{id:share.id,modelId:share.modelId,label:share.label,permissions:effectiveSharePermissions(share.permissions),allowedViews:share.allowedViews,linkRecoverable:Boolean(share.tokenCiphertext),hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
 function adminProjectShareView(share){return{id:share.id,projectId:share.projectId,label:share.label,permissions:share.permissions,hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,versionPolicy:share.versionPolicy,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
 function workspaceSessionView(session,accessToken){return{...(accessToken?{accessToken}:{}),session:{id:session.id,subject:session.subject,permissions:session.permissions,displayUnits:session.displayUnits,expiresAt:session.expiresAt},units:{default:config.defaultUnits,resolved:session.displayUnits},controllerOrigin:session.controllerOrigin};}
 function onlyKeys(value,allowed){return value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every((key)=>allowed.includes(key));}
@@ -109,9 +109,19 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       :sha256Hex(Buffer.concat([Buffer.from(`${req.method}\n${req.originalUrl}\n`),rawBody]));
     const durableOperation=/^\/api\/v1\/(?:admin\/uploads\/[^/]+\/finalize|dataset-imports\/(?:preview|adopt|copy)|processing\/(?:catalog-imports\/(?:scans|candidates\/[^/]+\/map)|outputs\/[^/]+\/(?:lod-recovery-attempts|companion-repair-attempts)))$/.test(req.path);
     const shareReceipt=shareReceiptDefinition(req);
-    const reservation=durableOperation
-      ?processing.reserveSubjectOperationReceipt({subject:req.actorId,key,method:req.method,path:req.originalUrl,requestHash})
-      :processing.reserveAdminIdempotency({sessionId:req.adminPrincipal.id,key,method:req.method,path:req.originalUrl,requestHash});
+    const outputShare=shareReceipt?.scope==='model-public-share';
+    const receiptOnlyHeader=req.get('X-Viewer-Share-Receipt-Only');
+    if(receiptOnlyHeader!==undefined&&(!outputShare||receiptOnlyHeader!=='true'))return error(res,400,'invalid_share_receipt_request');
+    const receiptOnly=receiptOnlyHeader==='true';
+    const request={sessionId:req.adminPrincipal.id,key,method:req.method,path:req.originalUrl,requestHash};
+    let reservation;
+    if(receiptOnly){
+      res.setHeader('Cache-Control','no-store');
+      reservation={created:false,record:processing.getAdminIdempotency(request.sessionId,key)};
+      if(!reservation.record)return error(res,404,'share_receipt_missing');
+    }else if(outputShare)reservation=processing.reserveOutputShareReceipt(request);
+    else if(durableOperation)reservation=processing.reserveSubjectOperationReceipt({subject:req.actorId,...request});
+    else reservation=processing.reserveAdminIdempotency(request);
     if(!reservation.created){
       const r=reservation.record,storedHash=r.request_sha256||r.request_hash;
       if(r.method!==req.method||r.path!==req.originalUrl||storedHash!==requestHash)return error(res,409,'idempotency_conflict');
@@ -124,9 +134,12 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
         if(r.response_status===202&&body?.operation?.id){res.setHeader('Location',`/api/v1/operations/${body.operation.id}`);res.setHeader('Retry-After','2');}
         return r.response_status===204?res.status(204).end():res.status(r.response_status).json(body);
       }
+      // An expired claim cannot finalize a new claim. A receipt read leaves it unchanged.
+      if(receiptOnly&&processing.adminIdempotencyClaimExpired(r))return error(res,404,'share_receipt_missing');
+      if(outputShare)res.setHeader('Retry-After','2');
       return error(res,409,'idempotency_in_progress');
     }
-    req.adminIdempotency={sessionId:req.adminPrincipal.id,key,requestHash};
+    req.adminIdempotency={sessionId:request.sessionId,key,requestHash,claimedAt:reservation.claimedAt};
     let finalized=false;
     const finish=(body)=>{
       if(finalized||req.adminIdempotencyCompleted||res.statusCode>=500)return;
@@ -135,7 +148,10 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       const stored=shareReceipt&&res.statusCode===201&&body&&typeof body==='object'
         ?Object.fromEntries(Object.entries(body).filter(([name])=>name!=='viewUrl'))
         :body;
-      processing.completeAdminIdempotency(req.adminPrincipal.id,key,res.statusCode,stored);
+      if(outputShare){
+        const recorded=processing.completeOutputShareReceipt(req.adminIdempotency,res.statusCode,stored);
+        if(recorded&&res.statusCode>=400&&!res.headersSent)res.setHeader('X-Viewer-Share-Receipt-Recorded','true');
+      }else processing.completeAdminIdempotency(request.sessionId,key,res.statusCode,stored);
     };
     const originalJson=res.json.bind(res),originalEnd=res.end.bind(res);
     res.json=(body)=>{finish(body);return originalJson(body);};
@@ -420,20 +436,21 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.post('/api/v1/processing/outputs/:id/shares',authorize('viewer.shares.create'),mutate,async(req,res,next)=>{
     try {
       const b=req.body||{};
-      if(!onlyKeys(b,['label','password','expiresAt','permissions','displayUnits','publishIfReady','selectedAssetKinds','allowExistingAccessUpdate','allowedViews']))
+      if(!onlyKeys(b,['label','password','expiresAt','permissions','displayUnits','publishIfReady','selectedAssetKinds','allowExistingAccessUpdate','allowedViews','expectedProjectId'])
+        ||(b.expectedProjectId!==undefined&&(typeof b.expectedProjectId!=='string'||!b.expectedProjectId)))
         return error(res,400,'invalid_share');
       for(const flag of ['publishIfReady','allowExistingAccessUpdate'])
         if(b[flag]!==undefined&&typeof b[flag]!=='boolean')return error(res,400,'invalid_share');
       if(b.selectedAssetKinds!==undefined&&(!Array.isArray(b.selectedAssetKinds)||!b.selectedAssetKinds.length
         ||b.selectedAssetKinds.some(kind=>!publicDerivativeKind(kind))))return error(res,400,'invalid_published_assets');
       if(b.password!==undefined&&b.password!==''&&String(b.password).length<8)return error(res,400,'password_too_short');
-      const expiry=b.expiresAt?Date.parse(b.expiresAt):null;
-      if(b.expiresAt&&(!Number.isFinite(expiry)||expiry<=Date.now()))return error(res,400,'invalid_expiry');
-      const expiresAt=expiry?new Date(expiry).toISOString():null;
+      const expiresAt=newShareExpiry(b.expiresAt);
+      if(expiresAt===undefined)return error(res,400,'invalid_expiry');
       if(b.displayUnits!==undefined&&!validUnits(b.displayUnits))return error(res,400,'invalid_units');
-      const permissions=b.permissions||{view:true,measure:true,cameras:true,download:false};
-      if(!onlyKeys(permissions,['view','measure','cameras','download'])||permissions.view!==true
-        ||Object.values(permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');
+      const requested=b.permissions===undefined||b.permissions===null?{view:true}:b.permissions;
+      if(!onlyKeys(requested,['view','measure','cameras','download'])||requested.view!==true
+        ||Object.values(requested).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');
+      const permissions=newSharePermissions(requested);
       const initial=outputShareState(processing.getModelOutput(req.params.id));
       if(!initial)return error(res,404,'published_output_not_found');
       const availableViews=Object.keys(VIEW_KINDS).filter(view=>VIEW_KINDS[view].some(kind=>(b.selectedAssetKinds||initial.eligibleAssetKinds).includes(kind)));
@@ -456,6 +473,8 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       const body=processing.transaction(()=>{
         const output=processing.getModelOutput(req.params.id),state=outputShareState(output);
         if(!state)reject(409,'output_changed');
+        // The workspace names the project whose clients staff were shown. A task in another project by now is not published to its clients.
+        if(b.expectedProjectId!==undefined&&output.projectId!==b.expectedProjectId)reject(409,'output_project_changed');
         const principal=processing.getAdminSessionByHash(auth.hashToken(String(req.get('authorization')).replace(/^Bearer\s+/i,'')));
         if(!principal||!processing.adminSessionLive(principal)||principal.revokedAt)reject(401,'authentication_required');
         if(!principal.permissions.includes('viewer.shares.create'))reject(403,'permission_denied');
@@ -487,7 +506,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
         const result={share:adminShareView(share)};
         // Never persist the capability URL/token. Persist success before COMMIT
         // so a lost response replays the same link without a second publication.
-        processing.completeAdminIdempotency(req.adminIdempotency.sessionId,req.adminIdempotency.key,201,result);
+        if(!processing.completeOutputShareReceipt(req.adminIdempotency,201,result))reject(409,'idempotency_in_progress');
         return result;
       });
       req.adminIdempotencyCompleted=true;
@@ -530,7 +549,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       // Password hashing yields; recheck the administrative session before committing.
       if(!admin(req))return error(res,401,'authentication_required');
       if(!['viewer.shares.read','viewer.shares.create'].every(p=>req.adminPrincipal.permissions.includes(p)))return error(res,403,'permission_denied');
-      const updated=repository.transaction(()=>{const result=repository.updatePublicShare(share.id,{...patch,invalidateAuthorization:true});if(result)repository.audit({actorType:'admin',actorId:req.actorId,action:'share.updated',entityType:'share',entityId:share.id,details:{fields:Object.keys(patch)}});return result;});
+      const updated=repository.transaction(()=>{const result=repository.updatePublicShare(share.id,{...patch,invalidateAuthorization:true},{mergePermissions:true});if(result)repository.audit({actorType:'admin',actorId:req.actorId,action:'share.updated',entityType:'share',entityId:share.id,details:{fields:Object.keys(patch)}});return result;});
       return updated?res.json({share:adminShareView(updated)}):error(res,409,'share_changed');
     }catch(e){next(e);}
   });

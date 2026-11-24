@@ -14,10 +14,10 @@ export function validateDialogValues(fields, values) {
 export function createWorkspaceDialogs(doc = document) {
   let active = null;
   let sequence = 0;
-  function form({ title, message = '', fields = [], submitLabel = 'Save', destructive = false }) {
+  function form({ title, message = '', fields = [], submitLabel = 'Save', destructive = false, signal }) {
     // Ignore duplicate actions while a decision is pending; never stack unrelated
     // mutation prompts or queue a stale action after the first one completes.
-    if (active) return Promise.resolve(null);
+    if (active || signal?.aborted) return Promise.resolve(null);
     return new Promise(resolve => {
       const previous = doc.activeElement;
       const parentDialog = previous?.closest?.('dialog[open]');
@@ -86,6 +86,7 @@ export function createWorkspaceDialogs(doc = document) {
         finished = true;
         parentDialog?.removeEventListener('close', abort);
         doc.defaultView?.removeEventListener('pagehide', abort);
+        signal?.removeEventListener('abort', abort);
         if (dialog.open) dialog.close();
         dialog.remove();
         active = null;
@@ -100,6 +101,7 @@ export function createWorkspaceDialogs(doc = document) {
       dialog.addEventListener('close', abort);
       parentDialog?.addEventListener('close', abort);
       doc.defaultView?.addEventListener('pagehide', abort);
+      signal?.addEventListener('abort', abort, { once: true });
       formElement.addEventListener('submit', event => {
         event.preventDefault();
         const values = Object.fromEntries([...inputs].map(([name, input]) => [name, input.value]));

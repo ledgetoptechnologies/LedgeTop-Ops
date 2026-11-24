@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { businessLabel, clientSearchPath, loadDirectShareWorkspace, nextActiveOption, projectSearchPath, QUICK_SHARE_RESULT_LIMIT, searchDirectShareClients, searchReady, chicagoEndOfDay, chicagoToday, directShareBody, futureChicagoEndOfDay, grantsForTarget, permissionSentence,
-  publicLinkDayRange, publicLinkExpiry, validViewerCatalogProjects, validViewerCatalogTasks,
+  defaultPublicLinkDay, publicLinkDayRange, publicLinkExpiry, validViewerCatalogProjects, validViewerCatalogTasks,
   type DirectShareGrant, type ViewerShareTarget } from "../src/client/ViewerQuickShare";
 
 const project = { viewerProjectId: "vp-1", name: "Seawall survey" };
@@ -126,6 +126,14 @@ describe("Viewer quick share", () => {
     expect(publicLinkExpiry("2026-10-26", lateEvening)).toBeNull();
     // Three minutes before Chicago midnight, today's end is too close; the first day offered is tomorrow.
     expect(publicLinkDayRange(Date.parse("2026-10-28T04:57:00Z")).min).toBe("2026-10-28");
+  });
+
+  it("starts a new public link on the latest allowed last day, 30 days out, on either side of a daylight-saving change", () => {
+    for (const at of ["2026-10-28T03:00:00Z", "2026-11-01T05:30:00Z", "2026-02-20T18:00:00Z", "2026-03-08T07:59:00Z"]) {
+      const now = Date.parse(at), end = Date.parse(publicLinkExpiry(defaultPublicLinkDay(now), now)!);
+      expect(end).toBeLessThanOrEqual(now + 30 * 24 * 60 * 60 * 1000);
+      expect(end).toBeGreaterThan(now + 28.9 * 24 * 60 * 60 * 1000);
+    }
   });
 
   it("describes permissions and the business line in plain words", () => {

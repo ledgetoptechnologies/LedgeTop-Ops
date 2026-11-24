@@ -61,7 +61,7 @@ function create(record) {
     accessCount: 0,
     lastAccessedAt: null,
     createdAt: now,
-    permissions: { measure: true, cameras: true },
+    permissions: { measure: true, cameras: false },
     ...record,
   };
   persist();

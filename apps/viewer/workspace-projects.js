@@ -20,7 +20,7 @@ import { createWorkspaceNavigationWork, workspaceNavigationState } from './works
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -175,9 +175,11 @@ const workspaceController=window.opener&&!window.opener.closed?window.opener:nul
 const reviewSessionController=new ReviewSessionController({origin:location.origin,storage:sessionStorage,issueGrant:({sessionMode,attemptId,outputId},{signal}={})=>api(sessionMode==='published'?`/api/v1/processing/outputs/${encodeURIComponent(outputId)}/view-sessions`:`/api/v1/attempts/${encodeURIComponent(attemptId)}/review-sessions`,{method:'POST',body:{},signal}),measurementRequest:createMeasurementCalculationBroker({origin:location.origin,getAuthorization:()=>({accessToken:state.token,session:state.adminSession})})});
 let workspaceRenewal=null;
 let workspaceAuthorizationClearing=false;
+let publicationAuthorityGeneration=0;
+const publicationReads=new Set();
 const navigationWork=createWorkspaceNavigationWork({windowRef:window});
 function currentWorkspaceNavigationState(){return workspaceNavigationState({newTask:activeNewTask?.navigationState,gcpWorkspaces:state.gcpWorkspaces,taskDetails:state.taskDetails,work:navigationWork.snapshot(),legacySelectedFileCount:modalContent.querySelector('#upload-form input[type="file"]')?.files?.length||0});}
-const workspaceRecovery=createWorkspaceRecovery({getSession:()=>({session:state.adminSession,accessToken:state.token,controllerOrigin:sessionStorage.getItem(OPS_ORIGIN_KEY)}),getView:workspaceView,getNavigationState:currentWorkspaceNavigationState,onPopupBlocked:({continueInCurrentTab,navigationState})=>renderCurrentTabRecoveryOffer({container:document.querySelector('dialog.workspace-recovery[open]'),navigationState,continueInCurrentTab}),install:installWorkspaceSession,onFatal:()=>{workspaceAuthorizationClearing=false;clearWorkspaceAuthorization('revoked');},onPaused:()=>{reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{workspaceAuthorizationClearing=false;storageUsagePoll.sync();scheduleOperationRefresh();toast('Access restored. Your workspace and upload can continue.');}});
+const workspaceRecovery=createWorkspaceRecovery({getSession:()=>({session:state.adminSession,accessToken:state.token,controllerOrigin:sessionStorage.getItem(OPS_ORIGIN_KEY)}),getView:workspaceView,getNavigationState:currentWorkspaceNavigationState,onPopupBlocked:({continueInCurrentTab,navigationState})=>renderCurrentTabRecoveryOffer({container:document.querySelector('dialog.workspace-recovery[open]'),navigationState,continueInCurrentTab}),install:installWorkspaceSession,onFatal:()=>{workspaceAuthorizationClearing=false;clearWorkspaceAuthorization('revoked');},onPaused:()=>{invalidatePublicationAuthority();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{workspaceAuthorizationClearing=false;storageUsagePoll.sync();scheduleOperationRefresh();toast('Access restored. Your workspace and upload can continue.');}});
 let orthophotoPool=null;
 const storageUsagePoll=createStorageUsagePoll({
   shouldPoll:()=>Boolean(state.token&&state.section==='diagnostics'&&!document.hidden&&(state.storage?.usage?.status==='pending'||state.storage?.usage?.refreshing)),
@@ -202,6 +204,7 @@ async function openShareModal(projectId,onlyOutputId=null){
   const token=state.token,subject=state.adminSession?.subject;
   const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
     &&modalContent.querySelector('.share-columns')?.dataset.shareContext===context.id;
+  state.shareContext?.publicationConfirmation?.abort();
   state.shareContext=context;
   const taskIds=new Set(state.tasks.filter(task=>task.projectId===projectId).map(task=>task.id));
   const outputs=state.outputs.filter(output=>taskIds.has(output.taskId)&&(!onlyOutputId||output.id===onlyOutputId)
@@ -251,7 +254,7 @@ function injectProjectShareCard(projectId){
   const target=modalContent.querySelector('[data-legacy-project-shares]');if(!target)return;
   const shares=state.projectShares[projectId]||[],tab=modalContent.querySelector('#share-tab-public');
   if(tab)tab.textContent=publicTabLabel(shares);
-  target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project links cannot be created. A link marked active opens the project until it expires or you revoke it.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views · ${publicLinkState(share)==='expired'?`Expired ${esc(dateTime(share.expiresAt))}`:share.expiresAt?`Expires ${esc(dateTime(share.expiresAt))}`:'No expiry'}</small></div>${badge(publicLinkState(share))}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
+  target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project links cannot be created. A link marked active opens the project until it expires or you revoke it.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views · ${share.expiresAt&&Number.isNaN(Date.parse(share.expiresAt))?(publicLinkState(share)==='expired'?'Expired, end date unknown':'End date unknown'):publicLinkState(share)==='expired'?`Expired ${esc(dateTime(share.expiresAt))}`:share.expiresAt?`Expires ${esc(dateTime(share.expiresAt))}`:'No expiry'}</small></div>${badge(publicLinkState(share))}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
   bindProjectShareCard(projectId);
 }
 function bindProjectShareCard(projectId){
@@ -328,18 +331,34 @@ function clientAccessDiagnostic(error){
     requestId:typeof error?.requestId==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(error.requestId)?error.requestId:null};
 }
 function validOpsOrigin(value){try{const parsed=new URL(value);return parsed.protocol==='https:'&&parsed.origin===value&&parsed.pathname==='/'&&!parsed.search&&!parsed.hash?value:null}catch{return null}}
+function invalidatePublicationAuthority(){
+  publicationAuthorityGeneration++;
+  for(const controller of publicationReads)controller.abort();
+  state.shareContext?.publicationConfirmation?.abort();
+}
+function publicationAuthorityLive(){
+  return Boolean(state.token&&state.adminSession&&!workspaceAuthorizationClearing&&!workspaceRecovery.isPaused()
+    &&!workspaceRenewal?.paused&&Date.parse(state.adminSession.expiresAt)>Date.now());
+}
 function beginWorkspaceReauthorization(){if(!state.adminSession||!state.token||!validOpsOrigin(sessionStorage.getItem(OPS_ORIGIN_KEY)))return false;void workspaceRecovery.pause();return true}
-function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidateFolderAuthorization();const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
-async function workspaceFetch(path,init={}){
+function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidatePublicationAuthority();invalidateFolderAuthorization();const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;state.pendingOutputShares?.clear();state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
+async function workspaceFetch(path,init={},beforeDispatch){
   await workspaceRecovery.wait(init.signal);
   if(workspaceRenewal&&workspaceRenewal.expiresAtMs<=Date.now()){
     const renewed=await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
     if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
     if(!renewed)throw responseError('authorization_required',401);
   }
-  let requestToken=state.token,requestSession=state.adminSession;
-  let response=await fetch(path,{...init,headers:{...init.headers,Authorization:`Bearer ${requestToken}`}});
-  if(response.status!==401)return response;
+  let requestToken,requestSession;
+  const dispatch=()=>{
+    requestToken=state.token;requestSession=state.adminSession;
+    return fetch(path,{...init,headers:{...init.headers,Authorization:`Bearer ${requestToken}`}});
+  };
+  if(beforeDispatch)(await beforeDispatch())();
+  let response=await dispatch();
+  const isRecordedReceipt=response=>(Boolean(beforeDispatch)||init.headers?.['X-Viewer-Share-Receipt-Only']==='true')
+    &&(response.headers?.get('Idempotency-Replayed')==='true'||response.headers?.get('X-Viewer-Share-Receipt-Recorded')==='true');
+  if(response.status!==401||isRecordedReceipt(response))return response;
   // Renewal retains the bearer but replaces the authenticated session envelope.
   // A response from before that renewal must not revoke the newer authority.
   if(requestToken===state.token&&requestSession===state.adminSession){
@@ -351,9 +370,9 @@ async function workspaceFetch(path,init={}){
       await workspaceRecovery.wait(init.signal);
     }else if(!state.token||!state.adminSession)return response;
   }else if(!state.token||!state.adminSession)return response;
-  requestToken=state.token;requestSession=state.adminSession;
-  response=await fetch(path,{...init,headers:{...init.headers,Authorization:`Bearer ${requestToken}`}});
-  if(response.status===401){
+  if(beforeDispatch)(await beforeDispatch())();
+  response=await dispatch();
+  if(response.status===401&&!isRecordedReceipt(response)){
     if(requestToken!==state.token||requestSession!==state.adminSession){
       // Bounded replay: never loop through repeated renewals, and do not return
       // a stale401 to api(), which would clear the latest valid workspace.
@@ -363,13 +382,49 @@ async function workspaceFetch(path,init={}){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal,recoveryGuard}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const assertRequestCurrent=()=>{if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});};let response;if(recoveryGuard){assertRequestCurrent();response=await fetch(path,init);assertRequestCurrent()}else response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}assertRequestCurrent();if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return payload}
+async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){
+  const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};
+  if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();
+  if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}
+  const assertRequestCurrent=()=>{
+    if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});
+  };
+  let response;
+  if(recoveryGuard){
+    assertRequestCurrent();
+    response=await fetch(path,init);
+    assertRequestCurrent();
+  }else response=await workspaceFetch(path,init,beforeDispatch);
+  let payload;
+  try{payload=await response.json()}catch{}
+  assertRequestCurrent();
+  if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){
+    if(response.status===401)clearWorkspaceAuthorization();
+    throw Object.assign(responseError('Operations client access request failed',response.status),
+      clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));
+  }
+  const shareRequest=Boolean(beforeDispatch)||init.headers['X-Viewer-Share-Receipt-Only']==='true';
+  const receiptReplayed=shareRequest&&response.headers?.get('Idempotency-Replayed')==='true';
+  const receiptRecorded=shareRequest&&response.headers?.get('X-Viewer-Share-Receipt-Recorded')==='true';
+  if(!response.ok&&(receiptReplayed||receiptRecorded)){
+    if(typeof payload?.code!=='string'||!payload.code)
+      throw new Error('The link request outcome could not be read. Retry to check it.');
+    throw Object.assign(responseError(payload.message||payload.error||'The earlier share request was refused.',response.status),
+      {code:payload.code,receiptReplayed,receiptRecorded:true});
+  }
+  if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}
+  if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);
+  if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),
+    payload?.code?{code:payload.code,grantId:payload.grantId}:{});
+  if(beforeDispatch&&response.status!==201)throw new Error('The link request outcome could not be read. Retry to check it.');
+  return receiptReplayed?{...payload,receiptReplayed:true}:payload;
+}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message,onFailure){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');let submitted=false;try{const result=await api(path,options);submitted=true;toast(typeof message==='function'?message(result):message);await load();return result}catch(error){onFailure?.(error,{submitted});toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
 async function trashMutation(promptText,path,message){if(state.busy||!await dialogs.confirm(promptText,{title:'Move to Recycle Bin',submitLabel:'Move to Recycle Bin',destructive:true})||state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');try{const result=await api(path,{method:'DELETE',body:{}});await load();toast(message,false,{label:'View Recycle Bin',run:()=>navigateWorkspace({section:'trash'},'push')});return result}catch(error){toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 function consumeReauthorizationState(){const value=new URLSearchParams(location.hash.slice(1)).get('reauthorize');if(!value)return true;let pending=null;try{pending=JSON.parse(sessionStorage.getItem(REAUTH_STATE_KEY)||'null')}catch{}sessionStorage.removeItem(REAUTH_STATE_KEY);const valid=/^[A-Za-z0-9_-]{32,128}$/.test(value)&&pending?.nonce===value&&Number.isFinite(pending?.createdAt)&&Date.now()-pending.createdAt>=0&&Date.now()-pending.createdAt<=5*60*1000;if(valid&&pending?.view)applyWorkspaceView(pending.view);return valid}
-function installWorkspaceSession(envelope){const checked=validateWorkspaceSessionEnvelope({...envelope,accessToken:envelope.accessToken||state.token});if(envelope.accessToken){state.token=envelope.accessToken;sessionStorage.setItem(TOKEN_KEY,state.token)}sessionStorage.setItem(OPS_ORIGIN_KEY,checked.controllerOrigin);workspaceAuthorizationClearing=false;invalidateFolderAuthorization();state.adminSession=checked.session;reviewSessionController.setAuthenticatedSubject(checked.session.subject);workspaceRenewal?.dispose();workspaceRenewal=new WorkspaceSessionRenewal({controllerWindow:workspaceController,envelope,accessToken:state.token,onSession:value=>{invalidateFolderAuthorization();state.adminSession=value.session;repaintFolderAuthorization()},onExpired:clearWorkspaceAuthorization,onPaused:()=>{reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{reviewSessionController.setAuthenticatedSubject(state.adminSession.subject);storageUsagePoll.sync();scheduleOperationRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000);}}});workspaceRenewal.start()}
+function installWorkspaceSession(envelope){invalidatePublicationAuthority();const checked=validateWorkspaceSessionEnvelope({...envelope,accessToken:envelope.accessToken||state.token});if(envelope.accessToken){state.token=envelope.accessToken;sessionStorage.setItem(TOKEN_KEY,state.token)}sessionStorage.setItem(OPS_ORIGIN_KEY,checked.controllerOrigin);workspaceAuthorizationClearing=false;invalidateFolderAuthorization();state.adminSession=checked.session;reviewSessionController.setAuthenticatedSubject(checked.session.subject);workspaceRenewal?.dispose();workspaceRenewal=new WorkspaceSessionRenewal({controllerWindow:workspaceController,envelope,accessToken:state.token,onSession:value=>{invalidateFolderAuthorization();state.adminSession=value.session;if(!can('viewer.client_grants.manage'))invalidatePublicationAuthority();repaintFolderAuthorization()},onExpired:clearWorkspaceAuthorization,onPaused:()=>{invalidatePublicationAuthority();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{reviewSessionController.setAuthenticatedSubject(state.adminSession.subject);storageUsagePoll.sync();scheduleOperationRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000);}}});workspaceRenewal.start()}
 async function redeemGrant(){const parts=location.pathname.split('/').filter(Boolean),grant=parts[0]==='workspace'&&parts[1]&&parts[1]!=='active'?decodeURIComponent(parts[1]):null;if(!grant)return false;if(!consumeReauthorizationState())throw responseError('invalid reauthorization state',400);const response=await fetch('/api/v1/admin-sessions/redeem',{method:'POST',headers:{'Content-Type':'application/json',...(state.token?{Authorization:`Bearer ${state.token}`}:{})},body:JSON.stringify({grant})});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization('unauthorized');throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Grant redemption failed (${response.status})`,response.status);installWorkspaceSession(body);syncWorkspaceView('replace');return true}
 async function restoreWorkspaceSession(){if(!state.token)return false;const response=await fetch('/api/v1/admin-sessions/current',{headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json'}});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Session check failed (${response.status})`,response.status);installWorkspaceSession(body);return true}
 
@@ -1727,8 +1782,8 @@ function associationProjectId(item){return item?.projectId||item?.project_id||nu
 function portalAccountId(item){return item?.accountId||item?.account_id||null}
 function clientProjectKey(project){return JSON.stringify([project.id,portalAccountId(project)])}
 function clientProjectLabel(project){return `${project.clientName||project.client_name||'Client'} — ${project.name||project.projectName||project.project_name||project.id} · ${project.nativeTarget?`${project.nativeTarget.sourceId} · ${project.accountName}`:project.accountName||portalAccountId(project)}`}
-function clientAccessSnapshot(){
-  const access=state.clientAccess||{projects:[],associations:[],grants:[]},native=state.clientNativeAccess;
+function clientAccessSnapshot(legacy=state.clientAccess,native=state.clientNativeAccess){
+  const access=legacy||{projects:[],associations:[],grants:[]};
   if(!native)return access;
   const projects=(native.targets||[]).map(target=>({id:JSON.stringify([target.sourceId,target.workspaceId,target.projectPublicId]),accountId:target.workspaceId,accountName:target.workspaceName,clientName:target.workspaceName,projectName:target.projectName,nativeTarget:target}));
   return {...access,projects:[...(access.projects||[]),...projects],
@@ -1832,8 +1887,9 @@ function bindDirectShare(form,projectId,onlyOutputId){
   form.onsubmit=async event=>{
     event.preventDefault();if(form.shareBusy)return;
     if(directShareContext(onlyOutputId).targetMissing){if(form.reviewing)setReviewing(false);summary.textContent=SHARE_TARGET_MISSING;return}
-    let bodies,target;try{target=read();bodies=target.bodies()}catch(error){summary.textContent=error.message;if(form.reviewing)setReviewing(false);return}
+    let bodies,target;try{target=read();bodies=target.bodies()}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
     if(!form.reviewing){
+      summary.textContent=target.summary;
       const body=bodies[0];
       form.querySelector('[data-direct-review-text]').textContent=directShareReviewText({summary:target.summary,permissions:body.permissions,expiresAt:body.expiresAt,dateTime});
       setReviewing(true);form.querySelector('[data-direct-send]').focus();return;
@@ -1841,7 +1897,7 @@ function bindDirectShare(form,projectId,onlyOutputId){
     // Inputs stay frozen while sending so the summary always matches what is being shared.
     const controls=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);
     for(const [element] of controls)element.disabled=true;
-    form.shareBusy=true;form.requestKeys||=new Map();let shared=0;summary.textContent=`Sharing… ${target.summary}`;
+    form.shareBusy=true;form.requestKeys||=new Map();let shared=0,refusal='';summary.textContent=`Sharing… ${target.summary}`;
     try{
       for(const body of bodies){
         const serialized=JSON.stringify(body);if(!form.requestKeys.has(serialized))form.requestKeys.set(serialized,crypto.randomUUID());
@@ -1850,8 +1906,10 @@ function bindDirectShare(form,projectId,onlyOutputId){
       toast(bodies.length>1?`Shared ${shared} tasks with the client`:'Shared with the client');
     }catch(error){
       toast(directShareErrorText(error),true);
-      if(live())summary.textContent=(shared?`Shared ${shared} of ${bodies.length}. Share again to finish; already shared tasks are not duplicated. `:'')+directShareErrorText(error);
+      refusal=(shared?`Shared ${shared} of ${bodies.length}. Share again to finish; already shared tasks are not duplicated. `:'')+directShareErrorText(error);
     }finally{form.shareBusy=false;if(form.isConnected){for(const [element,disabled] of controls)element.disabled=disabled;if(shared!==bodies.length)setReviewing(false)}}
+    // After the form is open again, which shows its choices: the reason stays until one of them changes.
+    if(refusal&&live())summary.textContent=refusal;
     // A partial share keeps the form and its retry keys exactly as they were.
     if(shared!==bodies.length||!live())return;
     try{const result=await loadDirectClientAccess(api,projectId);if(result&&live())state.clientDirectAccess=result}catch{}
@@ -1924,7 +1982,7 @@ function selectedShareViews(form){
 }
 function shareSettingsSummary(share){
   const labels=shareViewLabels(),views=share.allowedViews===null||share.allowedViews===undefined?'All available views':share.allowedViews.map(view=>labels[view]||view).join(', ');
-  return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.hasPassword?'Password protected':'No password'} · ${share.expiresAt?`Expires ${dateTime(share.expiresAt)}`:'No expiry'}`;
+  return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.hasPassword?'Password protected':'No password'} · ${!share.expiresAt?'No expiry':Number.isNaN(Date.parse(share.expiresAt))?'End date unknown':`Expires ${dateTime(share.expiresAt)}`}`;
 }
 // One rule for a public link everywhere in the dialog, the server's own (publicShareLive, projectShareLive):
 // an unreadable expiry is expired.
@@ -1946,7 +2004,7 @@ function shareModal(projectId,onlyOutputId=null){
     const output=selected,preflight=state.sharePreflight[output.id],ready=!output.activePublished,mayCreate=can('viewer.shares.create')&&(!ready||can('viewer.processing.publish'));
     const blocked=Boolean(preflight?.error),views=availableShareViews(output),warning=preflight?.existingAccessUpdateRequired?'Activating this version can update existing model/client access and project links, and shows this task to every client who has the whole project. Confirmation is required before creating the link.':ready?'This model is private. Create public link publishes it, which also shows this task to every client who has the whole project.':'Links follow this model’s latest published version.';
     const form=checking?empty('Checking share eligibility…'):mayCreate&&!blocked&&views.length?
-      `<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt','type="datetime-local"')}${shareViewControls(output)}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`:
+      `<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt',`type="datetime-local" value="${esc(newLinkExpiry())}"`)}${shareViewControls(output)}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras"> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`:
       blocked?empty('Sharing eligibility could not be verified. Close and reopen Share to retry.'):empty(mayCreate?'No verified views are available for this link.':'Creating a link requires share permission and, for private ready models, activation permission.');
     const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(publicLinkState(share))}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
     publicCards=card(output.displayName||'Model',form+list);
@@ -1962,6 +2020,9 @@ function shareModal(projectId,onlyOutputId=null){
   if(focusKey)modalContent.querySelector(focusKey)?.focus();
   bindShareModal(projectId,onlyOutputId);
 }
+// A new public link starts with a 30-day end and without camera positions; staff can change both. Existing links keep theirs.
+const PUBLIC_LINK_DAYS=30;
+function newLinkExpiry(now=Date.now()){return shareExpiryInput(new Date(now+PUBLIC_LINK_DAYS*24*60*60*1000).toISOString())}
 function shareExpiryInput(value){
   if(!value)return '';const date=new Date(value);if(!Number.isFinite(date.getTime()))return '';
   return new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);
@@ -1971,13 +2032,18 @@ function editShareModal(projectId,outputId,shareId){
   if(!output||!share||share.revokedAt||!can('viewer.shares.read')||!can('viewer.shares.create'))return;
   openModal('Edit public link',`<form id="share-edit-form" class="manage-form">${field('Link label','label',`maxlength="120" value="${esc(share.label||'')}"`)}<label><span>Password</span><select name="passwordAction"><option value="keep">Keep current password setting</option><option value="set">Set or replace password</option><option value="remove">Remove password</option></select></label><label data-password-input hidden><span>New password</span><input name="password" type="password" minlength="8" autocomplete="new-password" disabled></label>${field('Expiry (optional)','expiresAt',`type="datetime-local" value="${esc(shareExpiryInput(share.expiresAt))}"`)}${shareViewControls(output,share.allowedViews??null)}<label class="check"><input name="measure" type="checkbox" ${share.permissions?.measure?'checked':''}> Temporary measurements (not saved to the project)</label><label class="check"><input name="cameras" type="checkbox" ${share.permissions?.cameras?'checked':''}> Camera positions</label><label class="check"><input name="download" type="checkbox" ${share.permissions?.download?'checked':''}> Downloads, including model report</label><p class="form-note">The URL stays the same. Password and permission changes apply to existing sessions. Link version behavior stays unchanged.</p><button class="primary-button" type="submit">Save link settings</button><p role="status"></p></form>`,'wide-modal');
   const form=modalContent.querySelector('#share-edit-form');bindShareViewControls(form);
+  const permissionsAtOpen={...share.permissions};
   form.elements.passwordAction.onchange=()=>{const setting=form.elements.passwordAction.value==='set';form.querySelector('[data-password-input]').hidden=!setting;form.elements.password.disabled=!setting;form.elements.password.required=setting;};
   form.onsubmit=async event=>{
     event.preventDefault();if(form.shareBusy||form.shareSaved||!form.isConnected||!modal.open)return;
     let fields=[];const status=form.querySelector('[role="status"]');
     try{
       if(!can('viewer.shares.read')||!can('viewer.shares.create'))throw new Error('Editing public links requires share permissions.');
-      const body={label:form.elements.label.value,expiresAt:form.elements.expiresAt.value===shareExpiryInput(share.expiresAt)?share.expiresAt||null:form.elements.expiresAt.value?new Date(form.elements.expiresAt.value).toISOString():null,permissions:{view:share.permissions?.view!==false,measure:form.elements.measure.checked,cameras:form.elements.cameras.checked,download:form.elements.download.checked}};
+      const body={label:form.elements.label.value,expiresAt:form.elements.expiresAt.value===shareExpiryInput(share.expiresAt)?share.expiresAt||null:form.elements.expiresAt.value?new Date(form.elements.expiresAt.value).toISOString():null};
+      const permissions=Object.fromEntries(['measure','cameras','download']
+        .filter(name=>form.elements[name].checked!==Boolean(permissionsAtOpen[name]))
+        .map(name=>[name,form.elements[name].checked]));
+      if(Object.keys(permissions).length)body.permissions={view:true,...permissions};
       if(form.shareViewsChanged)body.allowedViews=selectedShareViews(form);
       if(form.elements.passwordAction.value==='set'){if(form.elements.password.value.length<8)throw new Error('Use at least eight characters for the password.');body.password=form.elements.password.value}
       if(form.elements.passwordAction.value==='remove')body.password=null;
@@ -2010,9 +2076,93 @@ async function retrieveShareLink(element){
     }
   }catch(error){popup?.close();const unavailable=error.status===409&&/share_link_unavailable|original link cannot be recovered/i.test(error.message);toast(unavailable?'The original URL is not recoverable. The existing link has not been changed or revoked; create a separate link if needed.':error.message,true)}finally{element.disabled=false}
 }
-async function confirmSharedVersionUpdate(){
-  return dialogs.confirm('Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links and clients who have the whole project also get newly activated tasks. Continue and create the public link?',
-    {title:'Update existing shared access?',submitLabel:'Activate and create link'});
+// One Share, as it was when the person pressed the button: the sign-in, the dialog and the exact model, task and project.
+// Checked after every await, so nothing read for one is used, asked or sent for another.
+function shareFence(form,output,projectId){
+  const token=state.token,subject=state.adminSession?.subject,context=state.shareContext,known=state.tasks.some(task=>task.id===output.taskId);
+  const sessionId=state.adminSession?.id,generation=publicationAuthorityGeneration;
+  const authority=()=>publicationAuthorityLive()&&generation===publicationAuthorityGeneration
+    &&state.token===token&&state.adminSession?.subject===subject&&state.adminSession?.id===sessionId;
+  const dialog=()=>authority()&&state.shareContext===context&&modal.open&&form.isConnected;
+  const task=()=>state.tasks.find(item=>item.id===output.taskId);
+  const moved=()=>Boolean(dialog()&&task()&&task().projectId!==projectId);
+  return {context,authority,dialog,moved,sameShare:()=>authority()&&state.shareContext===context&&modal.open,live:()=>dialog()&&can('viewer.shares.create')&&(output.activePublished||can('viewer.processing.publish'))
+    &&state.outputs.some(item=>item.id===output.id&&item.taskId===output.taskId&&item.modelId===output.modelId)
+    &&(known?task()?.projectId===projectId:true)};
+}
+// All three lists are read now, never taken from when the dialog opened. What cannot be read is unknown, not nobody.
+async function publicationAudience(output,projectId){
+  const token=state.token,session=state.adminSession,generation=publicationAuthorityGeneration;
+  const unknown=()=>({clients:[],complete:false,text:publishAudienceText([],{complete:false})});
+  const current=()=>publicationAuthorityLive()&&generation===publicationAuthorityGeneration&&state.token===token
+    &&state.adminSession===session&&can('viewer.client_grants.manage');
+  if(!current())return unknown();
+  const lists=(value,...names)=>names.every(name=>Array.isArray(value?.[name]))?value:null;
+  const controller=new AbortController();
+  publicationReads.add(controller);
+  const read=path=>api(path,{signal:controller.signal});
+  let direct,legacy,native;
+  try{
+    [direct,legacy,native]=(await Promise.allSettled([loadDirectClientAccess(read,projectId),read('/api/v1/workspace/client-grants'),read('/api/v1/workspace/native-client-grants')]))
+      .map(result=>result.status==='fulfilled'?result.value:null);
+  }finally{publicationReads.delete(controller)}
+  if(!current())return unknown();
+  const older=lists(legacy,'projects','associations','grants'),connected=lists(native,'targets','grants');
+  const complete=Boolean(can('viewer.client_grants.manage')&&direct&&!direct.grantsIncomplete&&older&&connected),clients=new Map();
+  for(const client of direct?publishAudience(direct,{projectId,taskId:output.taskId}):[])clients.set(client.key,client);
+  // Older Operations shares follow the model.
+  const access=clientAccessSnapshot(older,connected),own=(access.associations||[]).filter(item=>output.modelId&&associationModelId(item)===output.modelId);
+  const ids=new Set(own.map(item=>item.id)),projects=new Set(own.map(associationProjectId));
+  for(const grant of access.grants||[]){
+    if((grant.status||'active')!=='active')continue;
+    if(!((grant.scopeType||grant.scope_type)==='task'?ids.has(grant.associationId||grant.association_id):projects.has(grant.projectId||grant.project_id)))continue;
+    // A connected workspace is the same client as its direct share; an older account has no such link.
+    const id=portalAccountId(grant)||grant.id,key=grant.native?JSON.stringify([grant.source_id,grant.workspace_id]):JSON.stringify(['account',id]);
+    if(!clients.has(key))clients.set(key,{key,name:grant.clientName||grant.client_name||'a client',id});
+  }
+  const all=[...clients.values()];
+  return {clients:all.map(client=>client.key).sort(),complete,text:publishAudienceText(publishAudienceNames(all),{complete})};
+}
+// Before a public link publishes a model: which clients gain the task, and what an existing version's links gain.
+// Asked again if that grew while the question was open, so what is sent is what was answered.
+async function confirmPublication(output,projectId,existingAccess,fence,answered=null){
+  for(let round=0;round<4;round++){
+    const audience=await publicationAudience(output,projectId);
+    if(!fence.live())return false;
+    const grew=answered&&(audience.clients.some(key=>!answered.clients.includes(key))||answered.complete&&!audience.complete||existingAccess&&!answered.existingAccess);
+    if(answered?!grew:!existingAccess&&!audience.text)return {...audience,existingAccess};
+    if(round===3)break;
+    const asking=`${answered?'Client access changed while you were deciding. ':''}${audience.text}`;
+    const controller=audience.clients.length&&fence.context?new AbortController():null;
+    if(controller)fence.context.publicationConfirmation=controller;
+    let agreed;
+    try{
+      const signal=controller?{signal:controller.signal}:{};
+      agreed=existingAccess
+        ?await dialogs.confirm(`${asking?`${asking} `:''}Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links and clients who have the whole project also get newly activated tasks. Continue and create the public link?`,
+          {title:'Update existing shared access?',submitLabel:'Activate and create link',...signal})
+        :await dialogs.confirm(asking,{title:'Publish this task?',submitLabel:'Publish and create link',...signal});
+    }finally{
+      if(controller&&fence.context.publicationConfirmation===controller)delete fence.context.publicationConfirmation;
+    }
+    if(!agreed||!fence.live())return false;
+    answered={...audience,existingAccess};
+  }
+  throw new Error('Client access keeps changing, so nothing was shared. Try again in a moment.');
+}
+// The task is in another project now, with other clients: nothing was shared, and Share opens again there.
+async function reopenMovedShare(output,projectId,fence){
+  const name=state.tasks.find(task=>task.id===output.taskId)?.displayName||'This task';
+  let moved=null;
+  try{const result=await api(`/api/v1/tasks/${encodeURIComponent(output.taskId)}`);if(result?.task?.id===output.taskId&&result.task.projectId!==projectId)moved=result.task;}catch{}
+  if(!fence.dialog()){if(fence.authority())toast(`${name} moved to another project. Nothing was shared.`,true);return}
+  if(!moved)return toast(`${name} moved to another project. Nothing was shared. Close Share and open it again.`,true);
+  state.tasks=state.tasks.map(task=>task.id===moved.id?{...task,...moved}:task);
+  state.outputs=state.outputs.map(item=>item.taskId===moved.id?{...item,projectId:moved.projectId}:item);
+  toast(`${name} moved to ${state.projects.find(project=>project.id===moved.projectId)?.displayName||'another project'}. Nothing was shared. Check who will see it and create the link again.`,true);
+  const opening=openShareModal(moved.projectId,output.id);
+  if(state.shareContext)state.shareContext.mode='public';
+  await opening;
 }
 async function createOutputShare(form,projectId,onlyOutputId){
   if(form.shareBusy||form.shareSaved||!onlyOutputId)return;
@@ -2028,32 +2178,122 @@ async function createOutputShare(form,projectId,onlyOutputId){
     if(input.password)body.password=input.password;
     const inputSignature=JSON.stringify(body);
     fields=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);for(const [element] of fields)element.disabled=true;
-    if(form.shareRequest?.inputSignature===inputSignature)body={...form.shareRequest.body};
-    else if(!output.activePublished){
-      body.publishIfReady=true;
-      if(state.sharePreflight[output.id]?.existingAccessUpdateRequired){
-        if(!await confirmSharedVersionUpdate())return;
-        body.allowExistingAccessUpdate=true;
+    const fence=shareFence(form,output,projectId);
+    const stopped=()=>fence.moved()?reopenMovedShare(output,projectId,fence):undefined;
+    const path=`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`;
+    const pending=state.pendingOutputShares??=new Map();
+    const sessionId=state.adminSession?.id;
+    let request=pending.get(output.id),consent=null,result,receiptRecovered=false;
+    if(request?.busy)return;
+    if(request&&(request.subject!==state.adminSession?.subject||request.sessionId!==sessionId))
+      throw new Error('A previous request is unresolved. Review the existing links before creating another.');
+
+    const stillCurrent=()=>{
+      if(!fence.live())throw Object.assign(new Error('The share dialog or its authorization changed.'),{code:'share_dispatch_cancelled'});
+    };
+    const dispatch=async(receiptOnly=false)=>{
+      const sending=request;
+      sending.busy=true;
+      try{
+        const outcome=await api(path,{
+          method:'POST',body:JSON.parse(sending.serialized),
+          headers:{'Idempotency-Key':sending.key,...(receiptOnly?{'X-Viewer-Share-Receipt-Only':'true'}:{})},
+          beforeDispatch:async()=>{
+            stillCurrent();
+            if(!receiptOnly&&body.publishIfReady){
+              consent=await confirmPublication(output,projectId,body.allowExistingAccessUpdate===true,fence,consent);
+              if(!consent)throw Object.assign(new Error('Publication was not confirmed.'),{code:'share_dispatch_cancelled'});
+            }
+            const approvedSession=state.adminSession;
+            return ()=>{
+              stillCurrent();
+              if(state.adminSession!==approvedSession)
+                throw Object.assign(new Error('Workspace access changed. Review the share again.'),{code:'share_dispatch_cancelled'});
+              if(!receiptOnly&&body.publishIfReady&&consent.clients.length&&!can('viewer.client_grants.manage'))
+                throw Object.assign(new Error('Client access changed. Review the share again.'),{code:'share_dispatch_cancelled'});
+              if(!receiptOnly)sending.dispatched=true;
+            };
+          },
+        });
+        if(typeof outcome?.share?.id!=='string'||!outcome.share.id.trim()||(receiptOnly&&!outcome.receiptReplayed))
+          throw new Error('The link request outcome could not be read. Retry to check it.');
+        return outcome;
+      }finally{sending.busy=false}
+    };
+    const makeRequest=()=>({
+      serialized:JSON.stringify(body),key:crypto.randomUUID(),inputSignature,sessionId,
+      subject:state.adminSession?.subject,busy:false,dispatched:false,
+    });
+    if(request){
+      try{result=await dispatch(true);receiptRecovered=true}catch(error){
+        if(error.code==='idempotency_in_progress')
+          throw new Error('The previous link request is still being processed. Try again to check it.');
+        if(error.status!==404||error.code!=='share_receipt_missing'||error.receiptReplayed){
+          if(error.code==='share_dispatch_cancelled')return await stopped();
+          if(error.receiptRecorded&&error.status>=400&&error.status<500){
+            pending.delete(output.id);
+            if(error.status===409&&error.code==='output_project_changed')return await reopenMovedShare(output,projectId,fence);
+            if(error.status===409&&error.code==='existing_access_update_confirmation_required')
+              state.sharePreflight[output.id]={...state.sharePreflight[output.id],existingAccessUpdateRequired:true};
+          }
+          throw error;
+        }
+      }
+      if(!result){
+        if(request.inputSignature!==inputSignature){
+          const retry=await dialogs.confirm('The previous request used different settings. Retry it with its original settings?',{
+            title:'Retry previous link request?',submitLabel:'Retry previous request',
+          });
+          if(!retry||!fence.live())return await stopped();
+        }
+        body=JSON.parse(request.serialized);
+      }
+    }else{
+      if(!output.activePublished){
+        if(fence.moved())return await stopped();
+        body.publishIfReady=true;body.expectedProjectId=projectId;
+        if(state.sharePreflight[output.id]?.existingAccessUpdateRequired)body.allowExistingAccessUpdate=true;
+      }
+      request=makeRequest();
+      pending.set(output.id,request);
+    }
+    if(!result){
+      try{
+        try{result=await dispatch()}catch(error){
+          if(!error.receiptRecorded||error.status!==409||error.code!=='existing_access_update_confirmation_required'||body.allowExistingAccessUpdate)throw error;
+          body.allowExistingAccessUpdate=true;
+          request=makeRequest();
+          pending.set(output.id,request);
+          result=await dispatch();
+        }
+      }catch(error){
+        if(!request.dispatched||error.receiptRecorded&&error.status>=400&&error.status<500)pending.delete(output.id);
+        if(error.code==='share_dispatch_cancelled')return await stopped();
+        if(error.receiptRecorded&&error.status===409&&error.code==='output_project_changed')return await reopenMovedShare(output,projectId,fence);
+        if(error.code==='idempotency_in_progress')throw new Error('The previous link request is still being processed. Try again to check it.');
+        throw error;
       }
     }
-    if(!modal.open||!form.isConnected)return;
-    const send=()=>{
-      const serialized=JSON.stringify(body);
-      // Retain the key for the same payload after an uncertain network outcome.
-      // A consent/body change is a new logical request with a new key.
-      if(form.shareRequest?.serialized!==serialized)form.shareRequest={serialized,key:crypto.randomUUID(),body:{...body},inputSignature};
-      return api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`,{
-        method:'POST',body,headers:{'Idempotency-Key':form.shareRequest.key}});
-    };
-    let result;
-    try{result=await send()}catch(error){
-      if(error.status!==409||error.message!=='existing_access_update_confirmation_required'||body.allowExistingAccessUpdate)throw error;
-      if(!await confirmSharedVersionUpdate()||!modal.open||!form.isConnected)return;
-      body.allowExistingAccessUpdate=true;
-      result=await send();
+    pending.delete(output.id);
+    if(!fence.authority())return;
+    if(receiptRecovered||result.receiptReplayed){
+      form.shareSaved=true;
+      clearShareResult(result.share.id,'model');
+      const changed=output.projectId||projectId;
+      outputFences.set(changed,(outputFences.get(changed)||0)+1);
+      toast('The previous link request completed. Check the current link in Share.');
+      await refreshProjectOutputs(changed);
+      if(fence.sameShare()&&!fence.moved()){
+        const opening=openShareModal(projectId,onlyOutputId);
+        if(state.shareContext)state.shareContext.mode='public';
+        await opening;
+      }
+      return;
     }
-    rememberShareResult(result,projectId,output.id);
-    form.shareSaved=true;if(state.shareContext)state.shareContext.mode='public';
+    // The link exists: its model's rows are updated wherever the person is now. Only the dialog it was asked from shows it.
+    const here=fence.sameShare();
+    if(here){rememberShareResult(result,projectId,output.id);if(fence.context)fence.context.mode='public'}
+    form.shareSaved=true;
     state.shares[output.id]=[result.share,...(state.shares[output.id]||[]).filter(share=>share.id!==result.share.id)];
     state.sharePreflight[output.id]={...state.sharePreflight[output.id],publicationRequired:false,existingAccessUpdateRequired:false,error:null};
     // Opening a published model needs the server's view address, and a list read while the link was
@@ -2064,10 +2304,9 @@ async function createOutputShare(form,projectId,onlyOutputId){
     if(body.publishIfReady){
       const changed=output.projectId||projectId;outputFences.set(changed,(outputFences.get(changed)||0)+1);void refreshProjectOutputs(changed);
     }
-    delete form.shareRequest;
-    toast('Public link created. Use Copy to share it.');
+    toast(here?'Public link created. Use Copy to share it.':`Public link created for ${state.tasks.find(task=>task.id===output.taskId)?.displayName||output.displayName||'the model'}. Open its Share to copy it.`);
     // Clipboard is a separate explicit action, never part of creation success.
-    if(modal.open&&form.isConnected){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
+    if(fence.dialog()){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
   }catch(error){toast(error.message,true)}
   finally{form.shareBusy=false;if(form.isConnected&&!form.shareSaved){for(const [element,disabled] of fields)element.disabled=disabled;if(submit)submit.disabled=false}}
 }

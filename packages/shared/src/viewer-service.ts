@@ -551,6 +551,7 @@ export class ViewerServiceError extends Error {
       | "authentication_failed"
       | "unavailable"
       | "invalid_response"
+      | "invalid_request"
       | "not_found"
       | "conflict",
     readonly status = 503,
@@ -1103,9 +1104,11 @@ export class ViewerServiceClient {
     idempotencyKey: string;
     createdBy: string;
     label?: string | null;
-    expiresAt?: string | null;
+    /** Always said: an instant, or null for no end. The Viewer's own default (30 days) is for callers that say nothing. */
+    expiresAt: string | null;
     displayUnits?: ViewerDisplayUnits;
     password?: string;
+    /** Camera positions and downloads are on only when chosen. */
     permissions?: { view: true; measure?: boolean; cameras?: boolean; download?: boolean };
     shareClass?: "staff" | "client";
     sourceAuthorization?: {
@@ -1116,15 +1119,20 @@ export class ViewerServiceClient {
       expiresAt: string | null;
     };
   }): Promise<ViewerPublicShareCreation> {
+    // Checked as it arrives, types aside: nothing but an explicit null may become a link with no end.
+    if (input.expiresAt !== null && (typeof input.expiresAt !== "string" || !Number.isFinite(Date.parse(input.expiresAt))))
+      throw new ViewerServiceError("A public link needs an end, or an explicit null for no end", "invalid_request", 400);
     const path = `/api/v1/models/${encodeURIComponent(input.modelId)}/shares`;
+    const permissions = { view: true as const, measure: input.permissions?.measure !== false,
+      cameras: input.permissions?.cameras === true, download: input.permissions?.download === true };
     const body = JSON.stringify({
       versionPolicy: "latest",
       createdBy: input.createdBy,
       label: input.label || null,
-      expiresAt: input.expiresAt || null,
+      expiresAt: input.expiresAt,
       displayUnits: input.displayUnits || "imperial",
       ...(input.password ? { password: input.password } : {}),
-      permissions: input.permissions || { view: true, measure: true, cameras: true, download: false },
+      permissions,
       shareClass: input.shareClass || "staff",
       ...(input.sourceAuthorization ? { sourceAuthorization: input.sourceAuthorization } : {}),
     });
@@ -1133,10 +1141,9 @@ export class ViewerServiceClient {
     const token = typeof payload?.token === "string" ? payload.token : "";
     const viewUrl = assertViewerUrl(payload?.viewUrl, this.origin, `/view/${encodeURIComponent(token)}`);
     const embedUrl = assertViewerUrl(payload?.embedUrl, this.origin, `/embed/${encodeURIComponent(token)}`);
-    const expectedPermissions = input.permissions || { view: true, measure: true, cameras: true, download: false };
-    const expiryMatches = input.expiresAt
-      ? share?.expiresAt !== null && Date.parse(share?.expiresAt || "") === Date.parse(input.expiresAt)
-      : share?.expiresAt === null;
+    const expiryMatches = input.expiresAt === null
+      ? share?.expiresAt === null
+      : typeof share?.expiresAt === "string" && Date.parse(share.expiresAt) === Date.parse(input.expiresAt);
     if (!payload || !share || !viewUrl || !embedUrl || share.modelId !== input.modelId ||
       share.modelVersionId !== null || !expiryMatches || share.hasPassword !== Boolean(input.password) ||
       share.shareClass !== (input.shareClass || "staff") ||
@@ -1144,9 +1151,9 @@ export class ViewerServiceClient {
         share.sourceAuthorization.version !== input.sourceAuthorization.version ||
         share.sourceAuthorization.subject !== input.sourceAuthorization.subject ||
         share.sourceAuthorization.expiresAt !== input.sourceAuthorization.expiresAt)) ||
-      share.permissions.view !== true || share.permissions.measure !== (expectedPermissions.measure !== false) ||
-      share.permissions.cameras !== (expectedPermissions.cameras !== false) ||
-      share.permissions.download !== (expectedPermissions.download === true) ||
+      share.permissions.view !== true || share.permissions.measure !== permissions.measure ||
+      share.permissions.cameras !== permissions.cameras ||
+      share.permissions.download !== permissions.download ||
       token.length < 20 || token.length > 512 || !/^[A-Za-z0-9_-]+$/.test(token))
       throw new ViewerServiceError("3D Viewer returned an invalid public share", "invalid_response");
     return { share, viewUrl, embedUrl };
