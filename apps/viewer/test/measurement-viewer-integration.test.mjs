@@ -32,15 +32,16 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
   const windowRef=new Element(),documentRef={defaultView:windowRef,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   documentRef.body=documentRef.createElement('body');documentRef.head=documentRef.createElement('head');
   const panel=documentRef.createElement('section'),canvas=documentRef.createElement('canvas'),host=documentRef.createElement('div'),tools=[];
-  let mode='model',permitted=true,picks=0;
+  let mode='model',permitted=true,picks=0,clock=1000;
   const context=()=>({mode,element:canvas,host,pick:e=>{picks++;return[e.clientX,e.clientY,0];},project:p=>p.slice(0,2)});
   const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,openSurfaceDialog:()=>{},document:documentRef,crypto,structuredClone,AbortController,DOMException,console,
-    setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,performance:{now:()=>1000},window:windowRef});
+    setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,performance:{now:()=>clock},window:windowRef});
   vm.runInContext(uiSource.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
   const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permitted,toolChanged:value=>tools.push(value),coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p,calculateSurface:()=>{},resolveDisplayVertices});
   const controls=panel.children[0],svg=()=>host.children.find(node=>node.tagName==='SVG');
   workspace.tick();
-  return{workspace,canvas,windowRef,controls,svg,tools,panel,setMode:value=>{mode=value;},setPermission:value=>{permitted=value;},picks:()=>picks,
+  const draftBar=()=>host.children.find(node=>node.className==='measurement-draft-bar');
+  return{workspace,canvas,windowRef,controls,svg,draftBar,tools,panel,advance:ms=>{clock+=ms;},setMode:value=>{mode=value;},setPermission:value=>{permitted=value;},picks:()=>picks,
     click(x,y,extra={}){canvas.fire('pointerdown',event(x,y,extra));canvas.fire('pointerup',event(x,y,extra));}};
 }
 
@@ -115,6 +116,9 @@ test('cursor preview uses its own edge lengths and finishing preserves only comm
 
 test('Escape cancels an unsaved outline without creating a measurement',async()=>{
   const f=fixture();f.workspace.setTool('area');f.click(10,10);f.click(100,10);f.click(100,100);
+  // One stray Escape never loses a long outline; a second one discards it.
+  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  assert.equal(f.workspace.isDrawing(),true);assert.match(f.panel.children[1].textContent,/Press Esc again to discard/);
   f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
   assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,0);f.workspace.dispose();
 });
@@ -184,4 +188,103 @@ test('map screenshots preserve transparent tiles and reject cross-origin-tainted
   assert.ok(draws.length===0||draws.every(draw=>draw.alpha===0),'zero-opacity imagery must not become opaque in exports');
   styles.get(tile).opacity='1';canvas.toDataURL=()=>{throw new Error('SecurityError');};
   await assert.rejects(scope.measurementViewContext().capture(),/basemap prevents browser image export|screenshot/i);
+});
+
+test('Escape discards a two-point draft at once',async()=>{
+  const f=fixture();f.workspace.setTool('area');f.click(10,10);f.click(100,10);
+  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  assert.equal(f.workspace.isDrawing(),false);f.workspace.dispose();
+});
+
+test('the floating draft bar shows only while drawing and its Undo, Cancel and Finish act on the draft',async()=>{
+  const f=fixture(),bar=f.draftBar(),press=action=>bar.fire('click',{target:{closest:selector=>selector==='[data-draft]'?{dataset:{draft:action}}:null}});
+  assert.ok(bar,'the bar is mounted beside the overlay');assert.equal(bar.hidden,true);
+  assert.match(bar.innerHTML,/Undo point/);assert.match(bar.innerHTML,/Cancel/);assert.match(bar.innerHTML,/Finish/);
+  f.workspace.setTool('area');f.workspace.tick();assert.equal(bar.hidden,false);
+  f.click(10,10);f.click(100,10);f.click(100,100);f.click(10,100);
+  await press('undo');assert.equal(f.workspace.getDraft().vertices.length,3);
+  await press('finish');await flush();
+  assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1);f.workspace.tick();assert.equal(bar.hidden,true);
+  f.workspace.setTool('distance');f.click(10,10);await press('cancel');await flush();
+  assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1);f.workspace.dispose();
+});
+
+test('Delete asks once before removing a saved measurement',async()=>{
+  const f=fixture(),id=crypto.randomUUID();
+  await f.workspace.store.save({id,name:'North pile',kind:'polygon',collection:'spatial3d',vertices:[[10,10,0],[20,10,0],[20,20,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+  const button={dataset:{m:'delete'},textContent:'Delete',setAttribute(){}},click=()=>f.controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?button:selector==='[data-record]'?{dataset:{record:id}}:null}});
+  await click();await flush();
+  assert.equal(f.workspace.store.records.has(id),true);assert.equal(button.textContent,'Confirm delete');assert.match(f.panel.children[1].textContent,/Confirm delete to remove North pile/);
+  f.advance(600);await click();await flush();
+  assert.equal(f.workspace.store.records.has(id),false);assert.match(f.panel.children[1].textContent,/North pile deleted/);f.workspace.dispose();
+});
+
+test('a double-click or held key on Delete never confirms it; only a separate later click deletes',async()=>{
+  const f=fixture(),id=crypto.randomUUID();
+  await f.workspace.store.save({id,name:'South pile',kind:'polygon',collection:'spatial3d',vertices:[[10,10,0],[20,10,0],[20,20,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+  const button={dataset:{m:'delete'},textContent:'Delete',setAttribute(){}},click=(detail=1)=>f.controls.fire('click',{detail,target:{closest:selector=>selector==='[data-m]'?button:selector==='[data-record]'?{dataset:{record:id}}:null}});
+  await click(1);await flush();assert.equal(button.textContent,'Confirm delete');
+  await click(2);await flush();assert.equal(f.workspace.store.records.has(id),true,'the second half of a double-click is ignored');
+  f.advance(100);await click(0);await flush();assert.equal(f.workspace.store.records.has(id),true,'a repeated Enter right after arming is ignored');
+  f.advance(600);await click(0);await flush();assert.equal(f.workspace.store.records.has(id),false,'a deliberate keyboard confirmation deletes');
+  f.workspace.dispose();
+});
+
+test('the floating Undo is hidden while editing a saved measurement and never removes its points',async()=>{
+  const f=fixture(),bar=f.draftBar(),press=action=>bar.fire('click',{target:{closest:selector=>selector==='[data-draft]'?{dataset:{draft:action}}:null}});
+  const id=crypto.randomUUID(),vertices=[[10,10,0],[100,10,0],[100,100,0],[10,100,0]];
+  await f.workspace.store.save({id,name:'Edit me',kind:'polygon',collection:'spatial3d',vertices,coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+  // Enter edit mode the way a person does: the row's Edit action.
+  const editButton={dataset:{m:'edit-record'},textContent:'Edit',setAttribute(){}};
+  f.controls.fire('click',{detail:1,target:{closest:selector=>selector==='[data-m]'?editButton:selector==='[data-record]'?{dataset:{record:id}}:null}});await flush();
+  f.workspace.tick();
+  const undo=bar.querySelector('[data-draft="undo"]');
+  assert.equal(f.workspace.exportDraft()?.editing,true);assert.equal(bar.hidden,false);assert.equal(undo.hidden,true,'Undo is hidden while editing');
+  await press('undo');await flush();
+  assert.equal(f.workspace.getDraft().vertices.length,4,'Undo does nothing to an edited shape');
+  f.workspace.dispose();
+});
+
+test('new drafts get unique names, and Volume drafts are named as stockpiles',async()=>{
+  const f=fixture();
+  await f.workspace.store.save({id:crypto.randomUUID(),name:'Polygon 3',kind:'polygon',collection:'spatial3d',vertices:[[10,10,0],[20,10,0],[20,20,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+  f.workspace.setTool('area');assert.equal(f.workspace.getDraft().name,'Polygon 4');f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  f.workspace.setTool('distance');assert.equal(f.workspace.getDraft().name,'Distance 1');f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  f.workspace.setTool('volume');
+  assert.equal(f.workspace.isDrawing(),true,'Volume starts a draft in this fixture');assert.equal(f.workspace.getDraft().name,'Stockpile 1');assert.match(f.panel.children[1].textContent,/Outline the base of the pile/);
+  f.workspace.dispose();
+});
+
+test('an Escape on one draft never carries over to the next draft or to a changed draft',async()=>{
+  const f=fixture(),bar=f.draftBar(),press=action=>bar.fire('click',{target:{closest:selector=>selector==='[data-draft]'?{dataset:{draft:action}}:null}});
+  const escape=()=>f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));
+  // Arm Escape, then finish with the bar instead: the next draft must ask again.
+  f.workspace.setTool('area');f.click(10,10);f.click(100,10);f.click(100,100);escape();await flush();assert.equal(f.workspace.isDrawing(),true);
+  await press('finish');await flush();assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1);
+  f.workspace.setTool('area');f.click(20,20);f.click(120,20);f.click(120,120);escape();await flush();
+  assert.equal(f.workspace.isDrawing(),true,'the second draft is not discarded by the Escape from the first draft');
+  // Arm Escape, then add a point: the changed draft must ask again.
+  f.click(20,120);escape();await flush();
+  assert.equal(f.workspace.isDrawing(),true,'adding a point resets the question');
+  escape();await flush();assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1);f.workspace.dispose();
+});
+
+test('a held Escape key cannot answer its own discard question',async()=>{
+  const f=fixture();f.workspace.setTool('area');f.click(10,10);f.click(100,10);f.click(100,100);
+  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  for(let i=0;i<5;i++)f.windowRef.fire('keydown',event(0,0,{key:'Escape',repeat:true}));await flush();
+  assert.equal(f.workspace.isDrawing(),true,'auto-repeat keeps the shape');
+  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  assert.equal(f.workspace.isDrawing(),false,'a separate second press discards');f.workspace.dispose();
+});
+
+test('Enter and Space on a focused button act on that button, not on the drawing shortcuts',async()=>{
+  const f=fixture();f.workspace.setTool('area');f.click(10,10);f.click(100,10);f.click(100,100);
+  const onButton=extra=>event(0,0,{...extra,target:{closest:selector=>/button/.test(selector)?{}:null}});
+  f.windowRef.fire('keydown',onButton({key:'Enter'}));await flush();
+  assert.equal(f.workspace.isDrawing(),true,'Enter on a focused button does not finish the shape');assert.equal(f.workspace.store.records.size,0);
+  const space=onButton({key:' ',code:'Space'});f.windowRef.fire('keydown',space);await flush();
+  assert.equal(space.stopped,undefined,'Space on a focused button is left to the button');
+  f.windowRef.fire('keydown',event(0,0,{key:'Enter'}));await flush();
+  assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1,'Enter on the view still finishes');f.workspace.dispose();
 });
