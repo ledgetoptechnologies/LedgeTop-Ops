@@ -18,7 +18,7 @@ const ownList = {
 };
 const list = (marks = [], categories = [], next = null) => ({ marks, categories, next });
 
-test('a shared refresh checks all pages and clears withdrawn or refused rows quietly', async () => {
+test('a shared refresh checks all pages and quietly clears withdrawn rows', async () => {
   let current = list([clientPin], [clientCategory]);
   const reads = [];
   const store = createMarksStore({ request: async (path, init) => {
@@ -26,7 +26,6 @@ test('a shared refresh checks all pages and clears withdrawn or refused rows qui
     if (path === base) return Response.json(ownList);
     if (path.endsWith('?after=page-2')) return Response.json(current);
     if (current instanceof Error) throw current;
-    if (current === 'denied') return Response.json({ code: 'marks_unavailable' }, { status: 403 });
     return Response.json(list([], [], 'page-2'));
   } });
   await store.setScope(scope('staff'));
@@ -43,16 +42,85 @@ test('a shared refresh checks all pages and clears withdrawn or refused rows qui
   assert.deepEqual(reads, [[base + '/shared', 'GET'], [base + '/shared?after=page-2', 'GET']]);
   assert.deepEqual(store.state.marks, [owned]);
   assert.deepEqual(store.state.categories, []);
-  current = list([clientPin], [clientCategory]);
-  await store.refreshShared();
-  assert.ok(store.find(clientPin.id));
-  current = 'denied';
-  await store.refreshShared();
-  assert.deepEqual(store.state.marks, [owned]);
-  assert.deepEqual(store.state.categories, []);
   assert.equal(store.state.message, 'Existing outcome');
   assert.equal(store.state.undo, undo);
   assert.equal(store.state.recoveredChange, recovered);
+});
+
+test('a later shared page failure keeps only the newly confirmed prefix and the owned list', async () => {
+  const nextPin = mark('new-client-pin');
+  let next = false;
+  const store = createMarksStore({ request: async path => {
+    if (path === base) return Response.json(ownList);
+    if (!next) return Response.json(list([clientPin], [clientCategory]));
+    if (path.endsWith('?after=page-2')) return Response.json({ code: 'retry_later' }, { status: 503 });
+    return Response.json(list([nextPin], [], 'page-2'));
+  } });
+  await store.setScope(scope('staff'));
+  next = true;
+  await store.refreshShared();
+  assert.deepEqual(store.state.marks, [owned, nextPin]);
+  assert.deepEqual(store.state.categories, []);
+  assert.match(store.state.message, /Some shared marks could not be loaded/);
+  assert.equal(store.canWrite(), true);
+});
+
+test('a timeout on a later shared page keeps the confirmed prefix', async () => {
+  const nextPin = mark('confirmed-before-timeout');
+  let next = false, expire, pending;
+  const store = createMarksStore({
+    later: work => { expire = work; return () => {}; },
+    request: async path => {
+      if (path === base) return Response.json(ownList);
+      if (!next) return Response.json(list([clientPin], [clientCategory]));
+      if (path.endsWith('?after=page-2')) {
+        pending();
+        return new Promise(() => {});
+      }
+      return Response.json(list([nextPin], [], 'page-2'));
+    },
+  });
+  await store.setScope(scope('staff'));
+  next = true;
+  const reachedLaterPage = new Promise(resolve => { pending = resolve; });
+  const refreshing = store.refreshShared();
+  await reachedLaterPage;
+  expire();
+  await refreshing;
+  assert.deepEqual(store.state.marks, [owned, nextPin]);
+  assert.match(store.state.message, /Some shared marks could not be loaded/);
+});
+
+test('explicit access or identity refusal clears owned controls and every row, including an earlier shared page', async () => {
+  for (const code of ['marks_unavailable', 'mark_identity_required']) {
+    let refused = false;
+    const capabilities = { ...ownList.capabilities, visibility: ['private', 'client'] };
+    const store = createMarksStore({ request: async (path, init) => {
+      if (path === base && init.method === 'GET') return Response.json({ ...ownList, capabilities });
+      if (path === base && init.method === 'POST') return Response.json({ mark: mark('new-owned', true) }, { status: 201 });
+      if (path === base + '/audiences') return Response.json({ audiences: [{ id: 'client' }] });
+      if (path === base + '/deleted') return Response.json({ marks: [mark('deleted-owned', true)] });
+      if (path.endsWith('?after=page-2')) return Response.json({ code }, { status: 403 });
+      return Response.json(list([clientPin], [clientCategory], refused ? 'page-2' : null));
+    } });
+    await store.setScope(scope('staff'));
+    await store.create({ ...owned, id: 'new-owned' });
+    await store.loadDeleted();
+    assert.equal(store.state.audiences.length, 1);
+    assert.equal(store.state.deleted.length, 1);
+    assert.equal(store.state.undo.length, 1);
+    refused = true;
+    await store.refreshShared();
+    const { ready, marks, categories, audiences, deleted, undo, recoveredChange, message, failure } = store.state;
+    assert.deepEqual({ ready, marks, categories, audiences, deleted, undo, recoveredChange, failure },
+      { ready: false, marks: [], categories: [], audiences: [], deleted: [], undo: [], recoveredChange: null, failure: code });
+    assert.match(message, /hidden until access is restored/);
+    assert.equal(store.canWrite(), false);
+    refused = false;
+    await store.setScope(scope('staff'));
+    assert.deepEqual(store.state.marks, [owned, clientPin]);
+    assert.equal(store.canWrite(), true);
+  }
 });
 
 test('a shared read cannot overwrite a write or reappear after a scope change', async () => {

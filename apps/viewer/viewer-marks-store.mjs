@@ -32,6 +32,7 @@ const MESSAGES = {
   restore_unavailable: 'That mark is no longer available to restore.',
   still_recoverable: 'It is in Recently deleted, not deleted for good.',
   undo_moved: 'That mark changed since, so this was not undone.',
+  undo_target_changed: 'A newer change was recovered. Choose Undo again to undo it.',
   undo_unclear: 'Some of those marks changed meanwhile. The list was reloaded.',
   import_unsure: 'The import was saved, but part of it changed since, so it cannot be undone.',
   saved_after_all: 'The change before this one was saved after all. Try again for this one.',
@@ -54,6 +55,8 @@ class MarksError extends Error {
 const UNKNOWN = Symbol('unknown');
 // Thrown into a continuation whose scope was replaced; run() drops it silently.
 class ScopeEnded extends Error {}
+const accessLost = error => error.status === 401 || ['marks_unavailable', 'mark_identity_required'].includes(error.code)
+  || (error.code === 'marks_request_failed' && error.status === 403);
 
 export function createMarksStore({ request = globalThis.fetch, newId = () => crypto.randomUUID(), onChange = () => {},
   later = (work, ms) => { const id = globalThis.setTimeout(work, ms); return () => globalThis.clearTimeout(id); } } = {}) {
@@ -70,6 +73,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   const emit = () => onChange(state);
   const temporary = () => context?.mode === 'temporary';
   const find = id => state.marks.find(mark => mark.id === id) || null;
+  const readOnlyCapabilities = () => ({ write: false, staff: false, visibility: ['private'] });
+
+  function hideInaccessibleMarks(error) {
+    Object.assign(state, {
+      ready: false, marks: [], categories: [], audiences: [], deleted: [], starters: [], undo: [],
+      capabilities: readOnlyCapabilities(), recoveredChange: null, failure: error.code,
+      message: 'Marks are hidden until access is restored.',
+    });
+  }
 
   // One owner's view of the store. Every change holds the scope it started in:
   // requests use that scope's token and signal, and check() ends a continuation
@@ -141,6 +153,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     do {
       const page = await scope.api('/shared' + (next ? '?after=' + encodeURIComponent(next) : ''));
       scope.check();
+      if (!Array.isArray(page?.marks) || !Array.isArray(page.categories)) throw new Error('Incomplete shared marks page');
       receive(page);
       count += page.marks.length;
       next = page.next;
@@ -180,7 +193,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       if (next) state.message ||= `Only the first ${count} marks shared with you are shown.`;
     } catch (error) {
       scope.check();
-      if (error.code === 'marks_unavailable' || error.code === 'mark_identity_required') throw error;
+      if (accessLost(error)) throw error;
       state.message ||= 'Some shared marks could not be loaded. Reload the page to try again.';
     }
     if (!first) {
@@ -196,7 +209,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   }
 
   // Activity in this tab may write independent marks while this read is in flight.
-  // Only replace others' rows from a current, complete shared response.
+  // As on a full reload, a confirmed prefix replaces the previous shared rows
+  // so a failure on a later page cannot keep rows that may have been withdrawn.
   async function refreshShared() {
     if (context?.mode !== 'session' || !state.ready || !state.capabilities.shared
       || state.loading || state.busy || state.blocked || sharedRefresh) return;
@@ -204,26 +218,38 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     sharedRefresh = refresh;
     const scope = currentScope(refresh.signal);
     const token = context.token?.();
-    const stopTimeout = later(() => refresh.abort(), READ_MS);
+    let timedOut = false, current = false;
+    const stopTimeout = later(() => { timedOut = true; refresh.abort(); }, READ_MS);
     const marks = [], categories = new Map();
+    let received = false, partial = false, refusal = null;
     try {
       await readSharedPages(scope, page => {
+        received = true;
         marks.push(...page.marks);
         for (const category of page.categories) categories.set(category.id, category);
       });
     } catch (error) {
-      if (!scope.live() || ![401, 403].includes(error.status)) return;
-      // An authoritative refusal applies to the whole shared list, even if an earlier page answered.
-      marks.length = 0;
-      categories.clear();
+      if (!scope.live() && !timedOut) return;
+      if (accessLost(error)) refusal = error;
+      else if (received) partial = true;
+      else return;
     } finally {
       stopTimeout();
-      if (sharedRefresh === refresh) sharedRefresh = null;
+      current = sharedRefresh === refresh;
+      if (current) sharedRefresh = null;
     }
-    if (!scope.live() || context.token?.() !== token) return;
+    if (!current || context.token?.() !== token) return;
+    if (refusal) {
+      hideInaccessibleMarks(refusal);
+      emit();
+      return;
+    }
     const nextMarks = addUnseen(state.marks.filter(mark => mark.mine), marks);
     const nextCategories = byName(addUnseen(state.categories.filter(category => category.mine), [...categories.values()]));
-    if (JSON.stringify(nextMarks) === JSON.stringify(state.marks) && JSON.stringify(nextCategories) === JSON.stringify(state.categories)) return;
+    const notice = partial && !state.message;
+    if (notice) state.message = 'Some shared marks could not be loaded. Reload the page to try again.';
+    if (!notice && JSON.stringify(nextMarks) === JSON.stringify(state.marks)
+      && JSON.stringify(nextCategories) === JSON.stringify(state.categories)) return;
     Object.assign(state, { marks: nextMarks, categories: nextCategories });
     emit();
   }
@@ -242,7 +268,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       await op.look?.(scope);
     } catch (error) {
       scope.check();
-      if (['marks_unavailable', 'mark_identity_required'].includes(error.code)) throw error;
+      if (accessLost(error)) throw error;
       doubt = op;
       throw new MarksError('answer_unknown', 0);
     }
@@ -326,9 +352,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
             value = await checkDoubt(scope, op);
             if (value === undefined) throw new MarksError('not_saved', 0);
           } else if (!again && [404, 409].includes(error.status) && op.mine) {
-            await load(scope).catch(() => {});
-            scope.check();
             error.loaded = true;
+            try { await load(scope); }
+            catch (readError) {
+              scope.check();
+              if (accessLost(readError)) throw readError;
+              // The old list cannot say whether the request already succeeded.
+              throw error;
+            }
+            scope.check();
             if (!op.mine()) throw error;
             // By the same evidence: not being in the list says nothing by itself.
             value = await checkDoubt(scope, op, { read: false });
@@ -343,17 +375,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     } catch (error) {
       if (!scope.live()) return false;
       state.failure = error.code || 'failed';
-      if (error.code === 'marks_unavailable') {
-        state.message = 'Marks are hidden until access is restored.';
-        state.marks = [];
-        state.categories = [];
-        state.deleted = [];
-        state.starters = [];
-        state.ready = false;
-        state.undo = [];
+      if (accessLost(error)) {
+        hideInaccessibleMarks(error);
       } else {
         state.message = MESSAGES[error.code] || 'Could not save the change. Try again.';
-        if (!error.loaded && (error.status === 409 || error.status === 404 || ['mark_identity_required', 'mark_category_not_found'].includes(error.code))) await load(scope).catch(() => {});
+        if (!error.loaded && (error.status === 409 || error.status === 404 || error.code === 'mark_category_not_found')) {
+          await load(scope).catch(readError => {
+            if (scope.live() && accessLost(readError)) hideInaccessibleMarks(readError);
+          });
+        }
       }
       return false;
     } finally {
@@ -403,13 +433,16 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       ({ mark } = await scope.api('/' + encodeURIComponent(deleted.id) + '/restore', 'POST', { revision: deleted.revision }));
     } catch (error) {
       if (!['mark_not_found', 'mark_revision_conflict'].includes(error.code)) throw error;
-      await readDeletedRows(scope).catch(() => {});
+      await readDeletedRows(scope).catch(readError => { if (accessLost(readError)) throw readError; });
       scope.check();
-      if (error.code === 'mark_not_found') throw new MarksError('restore_unavailable', 404);
+      if (error.code === 'mark_not_found') {
+        state.deleted = state.deleted.filter(item => item.id !== deleted.id || item.revision !== deleted.revision);
+        throw new MarksError('restore_unavailable', 404);
+      }
       throw error;
     }
     scope.check();
-    if (!find(mark.id)) state.marks = [...state.marks, mark];
+    state.marks = find(mark.id) ? state.marks.map(row => row.id === mark.id ? mark : row) : [...state.marks, mark];
     state.deleted = state.deleted.filter(item => item.id !== mark.id);
     return mark;
   }
@@ -419,6 +452,11 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     scope.check();
     state.deleted = marks;
     return marks;
+  }
+
+  function restored(deleted) {
+    const live = find(deleted.id);
+    return live?.mine && live.revision > deleted.revision ? live : undefined;
   }
 
   const store = {
@@ -455,8 +493,11 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       if (next?.mode !== 'session') return true;
       try {
         await load(scope);
-      } catch {
-        if (scope.live()) state.message = 'Marks are unavailable for this session.';
+      } catch (error) {
+        if (scope.live()) {
+          if (accessLost(error) && state.ready) hideInaccessibleMarks(error);
+          else state.message = 'Marks are unavailable for this session.';
+        }
       } finally {
         if (scope.live()) {
           state.loading = false;
@@ -562,9 +603,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     async restore(deleted) {
       if (!state.deleted.some(item => item.id === deleted?.id)) return null;
       let saved = null;
-      const ok = await run(scope => restoreRaw(deleted, scope), { key: 'restore ' + deleted.id, mine: () => Boolean(find(deleted.id)),
-        // Back, as it was or changed since.
-        landed: () => find(deleted.id) || undefined,
+      const landed = () => restored(deleted);
+      const ok = await run(scope => restoreRaw(deleted, scope), { key: 'restore ' + deleted.id, mine: landed, landed,
         done: (mark, answered) => {
           saved = mark;
           state.deleted = state.deleted.filter(item => item.id !== mark.id);
@@ -632,11 +672,12 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         },
         delete: {
           send: async scope => { made = scope.temporary ? await createRaw(entry.before, scope) : await restoreRaw(entry.before, scope); },
-          mine: () => Boolean(find(id)),
-          landed: () => find(id) || undefined,
+          mine: () => restored(entry.before),
+          landed: () => restored(entry.before),
         },
       }[entry.type];
       const ok = await run(async scope => {
+        if (state.undo.at(-1)?.at !== entry.at) throw new MarksError('undo_target_changed', 0);
         if (moved) throw new MarksError('undo_moved', 0);
         await plan.send(scope);
       }, { key: 'undo ' + entry.at, look: plan.look, landed: plan.landed, tried: plan.tried, mine: plan.mine,
@@ -729,12 +770,13 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     },
 
     // categories: new ones the file names; marks reference their ids.
-    async importMarks({ marks, categories = [] }) {
+    async importMarks({ marks, categories = [], retryIdentity }, { onImported } = {}) {
       if (!marks.length) return 0;
-      let count = 0;
+      let importedRows = [];
       // The same file again, after a go that was never answered: with the ids it had then.
       const named = new Map(categories.map(({ id, name, color, icon }) => [id, [name, color, icon]]));
-      const signature = JSON.stringify([marks.map(mark => [{ ...markContent(mark), categoryId: null }, named.get(mark.categoryId) || mark.categoryId || null]), [...named.values()]]);
+      const signature = retryIdentity !== undefined ? 'file ' + retryIdentity
+        : JSON.stringify([marks.map(mark => [{ ...markContent(mark), categoryId: null }, named.get(mark.categoryId) || mark.categoryId || null]), [...named.values()]]);
       if (pendingImport?.signature === signature) ({ marks, categories } = pendingImport);
       // Any of them being there says it was made; only all of them, as they were made, can be undone.
       const asMade = (rows, content) => rows.length === marks.length
@@ -768,13 +810,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       }, { key: 'import ' + signature, makes: true, landed, tried: () => { pendingImport = { signature, marks, categories }; },
         mine: () => pendingImport?.signature === signature && Boolean(landed()), done: ({ rows: imported, exact }) => {
         pendingImport = null;
-        count = imported.length;
+        importedRows = imported;
         if (!exact) { state.message = MESSAGES.import_unsure; return; }
+        const count = imported.length;
         remember({ type: 'import', marks: Object.freeze(imported.map(({ id, revision }) => Object.freeze({ id, revision }))), label: `import ${count} marks`, done: `${count} mark${count === 1 ? '' : 's'} imported` });
       } });
       // Those ids are used up without any of them being there: another go makes its own.
       if (state.failure === 'mark_id_conflict') pendingImport = null;
-      return ok ? count : 0;
+      if (ok) onImported?.(importedRows);
+      return ok ? importedRows.length : 0;
     },
 
     // A draft kept over a reload: what was sent for it before, so it is recognised.

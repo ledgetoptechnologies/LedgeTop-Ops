@@ -73,32 +73,39 @@ export function geoJsonToMarks(input, { categories = [], newId, visibility = 'pr
   if (!Array.isArray(features)) throw new Error('This file is not GeoJSON.');
   const known = new Map(categories.map(category => [category.name.toLowerCase(), category]));
   const added = new Map();
-  const marks = [];
+  const marks = [], intent = [];
   let skipped = 0;
   for (const feature of features) {
     const properties = feature?.properties && typeof feature.properties === 'object' ? feature.properties : {};
     const geometries = simpleGeometries(feature?.geometry);
     if (!geometries.length) { skipped += 1; continue; }
     const categoryName = text(properties.category, 60);
-    let category = categoryName ? known.get(categoryName.toLowerCase()) || added.get(categoryName.toLowerCase()) : null;
+    const categoryKey = categoryName.toLowerCase();
+    let category = categoryKey ? known.get(categoryKey) || added.get(categoryKey) : null;
     const featureColor = color(properties['marker-color']) || color(properties.stroke) || color(properties.fill) || color(properties.color);
     const symbol = isIconKey(properties['marker-symbol']) ? properties['marker-symbol'] : null;
-    if (categoryName && !category) {
+    if (categoryKey && !category) {
       category = { id: newId(), name: categoryName, color: featureColor || defaultColor, icon: symbol || 'pin' };
-      added.set(categoryName.toLowerCase(), category);
+      added.set(categoryKey, category);
     }
     const elevation = Number(properties.elevation_navd88_m);
     const name = text(properties.name ?? properties.title ?? properties.label, 100) || categoryName || 'Imported mark';
     for (const geometry of geometries) {
       if (marks.length >= IMPORT_LIMIT) throw new Error(`Import up to ${IMPORT_LIMIT} marks at a time.`);
-      marks.push({
-        id: newId(), geometry, name, note: note(properties.description ?? properties.notes ?? properties.note),
-        categoryId: category?.id || null, color: featureColor || category?.color || defaultColor,
-        icon: symbol || category?.icon || 'pin', elevationNavd88M: properties.elevation_navd88_m != null
+      const content = {
+        geometry, name, note: note(properties.description ?? properties.notes ?? properties.note),
+        elevationNavd88M: properties.elevation_navd88_m != null
           && Number.isFinite(elevation) && elevation >= -500 && elevation <= 9000 ? elevation : null,
         visibility,
+      };
+      // A new category may already exist on retry. Identify the requested
+      // content before substituting a category id or its inherited styling.
+      intent.push([content, categoryKey, featureColor, symbol]);
+      marks.push({
+        id: newId(), ...content, categoryId: category?.id || null, color: featureColor || category?.color || defaultColor,
+        icon: symbol || category?.icon || 'pin',
       });
     }
   }
-  return { marks, categories: [...added.values()], skipped };
+  return { marks, categories: [...added.values()], skipped, retryIdentity: JSON.stringify([defaultColor, intent]) };
 }
