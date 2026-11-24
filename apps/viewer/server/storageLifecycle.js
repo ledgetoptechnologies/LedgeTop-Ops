@@ -68,12 +68,19 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   }
 }
 
-function reconcileStorageMutations(processing,storage,limit=20){const results=[];for(const mutation of processing.pendingStorageMutations(limit)){try{results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
+function reconcileStorageMutations(processing,storage,limit=20){const results=[];for(const mutation of processing.pendingStorageMutations(limit)){try{processing.touchStorageMutation(mutation.id);results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
 
 function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null}={}){
-  const results=[];
-  for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
+  const results=[],expired=processing.expiredTrash(),max=Math.max(1,Math.min(Number(limit)||20,100)),rotate=expired.length>max;
+  // Items that cannot be purged now stay listed. Continue after the last one tried instead of starting over.
+  if(rotate){
+    expired.sort((a,b)=>a.id<b.id?-1:1);
+    const cursor=processing.trashPurgeCursor(),next=expired.findIndex(item=>item.id>cursor);
+    if(next>0)expired.push(...expired.splice(0,next));
+  }
+  for(const item of expired.slice(0,max)){
     try{
+      if(rotate)processing.advanceTrashPurgeCursor(item.id);
       if(item.entityType==='output'&&require('./outputSupersession').automaticSupersessionTrash(processing,item.id)){results.push({trashId:item.id,status:'deferred',errorCode:'supersession_reverification_required'});continue;}
       if(item.entityType==='project'||item.entityType==='task'){
         const {purgeContainerTrash}=require('./containerLifecycle');
