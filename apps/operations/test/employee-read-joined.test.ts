@@ -149,6 +149,24 @@ describe("joined employee read source acceptance with full migrated D1 and real 
     await database.prepare("UPDATE ops_employee_read_roots SET root_generation=root_generation+1,root_fingerprint=? WHERE root_id=?").bind("e".repeat(64),rootId).run();
     h.fetcher.mockClear();expect((await h.queueCall("/resolve?resourceRef="+selected.resourceRef)).status).toBe(403);expect(h.fetcher).not.toHaveBeenCalled();
   });
+  it("exposes gateway busy only to the authorized queue resolve and suppresses it after revocation", async () => {
+    const h = harness(), selected = await (await h.queueCall("/reference?rootId=" + rootId + "&path=" + encodeURIComponent(relative))).json() as { resourceRef: string };
+    const busy = () => Response.json({ schemaVersion: 1, error: "gateway-busy" }, { status: 503 });
+    h.fetcher.mockImplementationOnce(async () => busy());
+    const ordinary = await h.call(`${base}/roots/${rootId}/manifest?path=${encodeURIComponent(relative)}`);
+    expect(ordinary.status).toBe(503); expect(await ordinary.json()).toEqual({ error: "employee_read_unavailable" });
+    h.fetcher.mockImplementationOnce(async () => busy());
+    const queueBusy = await h.queueCall("/resolve?resourceRef=" + selected.resourceRef);
+    expect(queueBusy.status).toBe(503); expect(await queueBusy.json()).toEqual({ error: "employee_gateway_busy" });
+    expect(queueBusy.headers.get("Cache-Control")).toContain("no-store");
+    h.fetcher.mockImplementationOnce(async () => new Response(new ReadableStream({ async pull(c) {
+      await database.prepare("UPDATE ops_employee_read_grants SET active=0,grant_generation=grant_generation+1 WHERE grant_id=?").bind(grantId).run();
+      c.enqueue(new TextEncoder().encode('{"schemaVersion":1,"error":"gateway-busy"}')); c.close();
+    } }, { highWaterMark: 0 }), { status: 503, headers: { "Content-Type": "application/json" } }));
+    const revoked = await h.queueCall("/resolve?resourceRef=" + selected.resourceRef);
+    expect(revoked.status).toBe(403); expect(await revoked.text()).not.toContain("employee_gateway_busy");
+    expect((await database.prepare("SELECT count(*) n FROM ops_employee_read_content_starts WHERE staff_id=?").bind(staffId).first<{n:number}>())?.n).toBe(0);
+  }, 60_000);
   it("joins real admission, discovery, preparation, exact old grant selection, range content and durable audit", async () => {
     const h = harness(), roots = await h.call(base + "/roots"); expect(roots.status).toBe(200);
     expect(await roots.json()).toEqual({ schemaVersion: 1, roots: [{ rootId, gatewayId, displayName: "Synthetic server files" }] });

@@ -54,10 +54,11 @@ function range(value: string | null, size: number): { start: number; end: number
 
 /** Shared preparation for ordinary read and durable selector resolution; no authority is inferred from a selector. */
 export async function employeeReadManifest(config: ReadConfiguration, dependencies: Readonly<{ database: D1Database; fetch?: typeof fetch }>,
-  proof: EmployeeReadProof, path: string, signal: AbortSignal): Promise<Response> {
+  proof: EmployeeReadProof, path: string, signal: AbortSignal, allowQueueResolveBusy = false): Promise<Response> {
   const response = await readEmployeeGateway(proof, { operation: "manifest", path, expectedSha256: null, range: null, snapshotId: null, cursor: null }, config.gateway, {
     fetch: dependencies.fetch ?? fetch, recheck: p => recheckEmployeeReadAuthority(dependencies.database, p),
     auditContentStart: (p, resource) => recordEmployeeContentStart(dependencies.database, p, resource),
+    allowQueueResolveBusy,
   }, signal);
     if (response.status !== 200) return response;
     const value = await response.json() as { sha256: string; size: number; snapshotId: string; snapshotExpiresAt: number };

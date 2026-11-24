@@ -23,6 +23,7 @@ export type EmployeeGatewayDependencies = Readonly<{
   fetch: typeof fetch;
   recheck: (proof: EmployeeReadProof) => Promise<boolean>;
   auditContentStart: (proof: EmployeeReadProof, selection: EmployeeReadSelection) => Promise<void>;
+  allowQueueResolveBusy?: boolean;
 }>;
 
 const encoder = new TextEncoder();
@@ -104,6 +105,44 @@ async function smallJson(response: Response, maximumBytes: number): Promise<unkn
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
   return parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 }
+// Busy classification must not keep a malformed upstream stream alive indefinitely.
+async function classifyBusy(response: Response, parent: AbortSignal): Promise<boolean> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abortHandler: (() => void) | undefined;
+  const stop = () => {
+    try { void (reader ? reader.cancel() : response.body?.cancel())?.catch(() => {}); } catch { /* preserve denial */ }
+  };
+  try {
+    if (response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+      || response.headers.has("Content-Encoding") || !response.body) return false;
+    reader = response.body.getReader();
+    const limited = new Promise<never>((_, reject) => {
+      abortHandler = () => reject(Error("interrupted"));
+      if (parent.aborted) abortHandler(); else parent.addEventListener("abort", abortHandler, { once: true });
+      timer = setTimeout(() => reject(Error("busy body timeout")), 2000);
+    });
+    const read = async () => {
+      const chunks: Uint8Array[] = []; let count = 0;
+      while (true) {
+        const chunk = await reader!.read(); if (chunk.done) break;
+        count += chunk.value.length; if (count > 128) throw Error("busy body too large");
+        chunks.push(chunk.value);
+      }
+      const bytes = new Uint8Array(count); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+      const value = parseDuplicateFreeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      return exactObject(value, ["schemaVersion", "error"]) && value.schemaVersion === 1 && value.error === "gateway-busy";
+    };
+    return await Promise.race([read(), limited]);
+  } catch { return false; }
+  finally {
+    if (timer) clearTimeout(timer);
+    if (abortHandler) parent.removeEventListener("abort", abortHandler);
+    stop();
+    try { reader?.releaseLock(); } catch { /* pending cancellation retains the reader */ }
+  }
+}
 function exactObject(value: unknown, keys: string[]): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).sort().join(",") === keys.sort().join(",");
@@ -175,6 +214,12 @@ export async function readEmployeeGateway(proof: EmployeeReadProof, selection: E
       headers: { "Content-Type": "application/json", "X-Ops-Read-Key-Id": c.keyId,
         "X-Ops-Read-Time": String(timestamp), "X-Ops-Read-Nonce": nonce, "X-Ops-Read-Signature": signature }, body });
     if (!await valid()) { await discard(upstream); return staticError(403, "employee_read_denied"); }
+    // Expose overload only to the queue resolve flow; unrelated 503s remain generic.
+    if (s.operation === "manifest" && dependencies.allowQueueResolveBusy === true && upstream.status === 503) {
+      const busy = await classifyBusy(upstream, controller.signal);
+      if (!await valid()) return staticError(403, "employee_read_denied");
+      return staticError(503, busy ? "employee_gateway_busy" : "employee_read_unavailable");
+    }
     if ([404, 408, 409, 412, 413, 416, 429, 503, 507].includes(upstream.status)) {
       const status = upstream.status; await discard(upstream); return staticError(status, "employee_read_unavailable");
     }
