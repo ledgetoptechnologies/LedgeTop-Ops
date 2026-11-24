@@ -88,7 +88,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     obstacles, schedule: work => (window.requestAnimationFrame ? window.requestAnimationFrame(work) : work()),
     onViewChange: () => placeCard(),
     describe: mark => [mark.name, categoryById(mark.categoryId)?.name, colorName(mark.color)].filter(Boolean).join(', '),
-    onDraftMove: geometry => { if (draft) { draft.geometry = geometry; writeCoords(); render(); } },
+    onDraftMove: geometry => { if (draft && canWrite()) { draft.geometry = geometry; writeCoords(); render(); } },
   });
 
   // ---- skeleton -------------------------------------------------------------
@@ -115,7 +115,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const undoBar = h(document, 'div', { class: 'viewer-mark-undo', role: 'group', 'aria-label': 'Last change', hidden: true }, barText, barUndo, barClose);
   const moveSave = h(document, 'button', { type: 'button', class: 'viewer-mark-primary', text: 'Save' });
   const moveCancel = h(document, 'button', { type: 'button', text: 'Cancel' });
-  const moveRow = h(document, 'div', { class: 'viewer-mark-row viewer-mark-move' }, moveSave, moveCancel);
+  const moveRow = h(document, 'div', { class: 'viewer-mark-row viewer-mark-move', hidden: true }, moveSave, moveCancel);
   const placeRow = h(document, 'div', { class: 'viewer-mark-row' }, placeHere, severalButton, placeCancel);
   const strip = h(document, 'section', { class: 'viewer-mark-strip', role: 'group', 'aria-label': 'Add mark', hidden: true }, stripTitle, chips, placeRow, drawBar, moveRow);
   const cross = h(document, 'div', { class: 'viewer-mark-cross', 'aria-hidden': 'true', hidden: true });
@@ -246,6 +246,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   // ---- helpers --------------------------------------------------------------
   const canWrite = () => store.canWrite() && Boolean(view.map);
+  const canMoveDraft = () => Boolean(moving && view.map && draft?.id && store.editable(store.find(draft.id)));
   const categoryById = id => store.state.categories.find(category => category.id === id) || null;
   const visibleMarks = () => store.state.marks.filter(visibility.shows);
   const searched = mark => !search || [mark.name, mark.note, categoryById(mark.categoryId)?.name].some(value => value?.toLowerCase().includes(search));
@@ -279,7 +280,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // While a spot is picked or a mark moved with the keys, the map does not also pan with them.
   function syncMapKeys() {
     const keys = getMap()?.keyboard;
-    if (keys) keys[(mode === 'Point' && crosshair) || moving ? 'disable' : 'enable']();
+    if (keys) keys[(mode === 'Point' && crosshair && canWrite()) || canMoveDraft() ? 'disable' : 'enable']();
   }
 
   // The category the next mark starts in: the one picked while placing, else the
@@ -412,7 +413,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   function beginEdit({ move = false } = {}) {
     const mark = store.find(selectedId);
-    if (!mark || !store.editable(mark)) return;
+    if (!canWrite() || !store.editable(mark)) return;
     draft = { ...mark, geometry: structuredClone(mark.geometry) };
     moving = move;
     armedDelete = null;
@@ -692,20 +693,22 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
 
   function renderStrip(writable) {
-    const { state } = store, placing = mode !== 'idle' && writable;
+    const { state } = store, placing = mode !== 'idle' && writable, showMove = canMoveDraft();
     addButton.hidden = !writable || placing || Boolean(draft);
     addButton.disabled = state.busy;
-    strip.hidden = !placing && !moving;
-    strip.setAttribute('aria-label', moving ? 'Move' : 'Add mark');
+    strip.hidden = !placing && !showMove;
+    strip.setAttribute('aria-label', showMove ? 'Move' : 'Add mark');
     cross.hidden = !(placing && mode === 'Point' && crosshair);
     chips.hidden = !placing;
     placeRow.hidden = !placing || Boolean(drawing);
     placeHere.hidden = !crosshair;
     placeHere.disabled = severalButton.disabled = state.busy;
     severalButton.setAttribute('aria-pressed', String(several));
-    moveRow.hidden = !moving;
-    moveSave.disabled = state.busy;
-    stripTitle.textContent = moving ? `Move ${draft?.name || 'mark'}` : placing ? `Add ${TYPE_LABEL[mode].toLowerCase()}` : '';
+    const hideMove = !showMove;
+    if (moveRow.hidden !== hideMove) syncMapKeys();
+    moveRow.hidden = moveCancel.disabled = hideMove;
+    moveSave.disabled = !showMove || state.busy;
+    stripTitle.textContent = showMove ? `Move ${draft.name}` : placing ? `Add ${TYPE_LABEL[mode].toLowerCase()}` : '';
     const focusedChip = [...chips.children].find(chip => chip === document.activeElement)?.dataset.chip;
     chips.replaceChildren(...(placing ? placeChoices().map(choice => {
       const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
@@ -926,7 +929,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(editButton, 'click', () => beginEdit());
   on(moveButton, 'click', () => beginEdit({ move: true }));
   on(moveSave, 'click', () => saveDraft());
-  on(moveCancel, 'click', () => cancelDraft());
+  on(moveCancel, 'click', () => { if (canMoveDraft()) cancelDraft(); });
   on(cancelButton, 'click', () => cancelDraft());
   on(closeButton, 'click', () => closeCard({ focusPin: true }));
   on(drawUndo, 'click', () => { drawing?.positions.pop(); render(); });
@@ -963,9 +966,9 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (event.key === 'Escape') {
       if (picker.isOpen()) picker.close();
       else if (picked) closePick({ focusPin: true });
-      else if (draft) cancelDraft();
-      else if (mode !== 'idle') { setMode('idle'); render(); }
-      else if (selectedId) closeCard({ focusPin: true });
+      else if (draft && canWrite()) cancelDraft();
+      else if (mode !== 'idle' && canWrite()) { setMode('idle'); render(); }
+      else if (selectedId && !card.hidden) closeCard({ focusPin: true });
       else if (boxOpen) showBox(false);
       else return;
       event.preventDefault();
@@ -982,8 +985,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       startPlacing('Point', { cross: true });
       return;
     }
-    const picking = mode === 'Point' && crosshair, step = ARROWS[event.key];
-    if (!picking && !moving) return;
+    const picking = canWrite() && mode === 'Point' && crosshair, movingDraft = canMoveDraft(), step = ARROWS[event.key];
+    if (!picking && !movingDraft) return;
     if (step) {
       const size = event.shiftKey ? 40 : 8;
       event.preventDefault();
@@ -995,7 +998,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       }
     } else if (event.key === 'Enter' && !event.target?.closest?.('button,a,summary')) {
       event.preventDefault();
-      if (moving) return saveDraft();
+      if (movingDraft) return saveDraft();
       const centre = layer.centre();
       if (centre && !store.state.busy) return placeAt(centre);
     }
@@ -1119,7 +1122,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
   on(editor, 'submit', event => { event.preventDefault(); return saveDraft(); });
   async function saveDraft() {
-    if (!draft) return;
+    if (!draft || !canWrite() || (moving && !canMoveDraft())) return;
     // Enter or Save can arrive without a change event: never save the coordinates
     // the field showed before. Invalid text keeps the editor open and writes nothing.
     if (!applyPointCoordinates()) return;
@@ -1131,7 +1134,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const held = store.hold(), open = draft, starter = chosenStarter();
     if (starter) {
       const made = await store.addStarter(starter);
-      if (!made || !held.live() || draft !== open) return;
+      if (!made || !held.live() || draft !== open || !canWrite()) return;
       open.categoryId = changes.categoryId = made.id;
       fillCategoryOptions(categorySelect, made.id, 'None', category => usableCategory(category, made.id));
     }

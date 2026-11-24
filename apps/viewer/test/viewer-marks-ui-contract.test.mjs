@@ -103,3 +103,71 @@ test('a recovered newer action remains in the Undo notice after a stale Undo cli
     marks.dispose();
   }
 });
+
+test('a current Move hides its label and stops accepting actions when Marks access is refused', async () => {
+  const { document, window } = createMiniDocument();
+  const panel = document.createElement('div');
+  const leaflet = createMiniLeaflet(document);
+  const ownedPin = { ...owned, id: 'c7807766-0189-4736-a057-d458e73ee621', mine: true, editable: true,
+    visibility: 'private', note: '', icon: 'pin', revision: 1, elevationNavd88M: null };
+  const sharedPin = { ...ownedPin, id: 'c430748d-90df-477a-b228-e62d26826d7a', name: 'Client pin', mine: false, editable: false };
+  let shared = 'available', writes = 0;
+  const marks = mountViewerMarks({ panel, L: leaflet.L, getMap: () => leaflet.map, request: async (path, init) => {
+    if (init.method !== 'GET') { writes++; return Response.json({}, { status: 500 }); }
+    if (path.endsWith('/shared')) {
+      if (shared === 'transient') throw new TypeError('Network unavailable');
+      if (shared === 'denied') return Response.json({ code: 'marks_unavailable' }, { status: 403 });
+      return Response.json({ marks: shared === 'available' ? [sharedPin] : [], categories: [], next: null });
+    }
+    return Response.json({ marks: [ownedPin], categories: [], capabilities: { write: true, staff: true, visibility: ['private'], shared: true } });
+  } });
+  try {
+    marks.setView({ map: true });
+    await marks.setScope({ mode: 'session', key: 'staff', token: () => 'staff' });
+    const ownedRow = panel.querySelectorAll('.viewer-mark-list-item').find(row => row.textContent === ownedPin.name);
+    await ownedRow.click();
+    const move = panel.querySelector('.viewer-mark-card').querySelectorAll('button').find(button => button.textContent === 'Move');
+    await move.click();
+    const strip = panel.querySelector('.viewer-mark-strip'), moveRow = panel.querySelector('.viewer-mark-move');
+    const [save, cancel] = moveRow.querySelectorAll('button');
+    assert.equal(strip.hidden, false);
+    assert.match(strip.textContent, /Move Owned pin/);
+    assert.equal(leaflet.keyboard.on, false);
+    assert.equal(marks.mapClick({ lat: 43.04, lng: -86.99 }), true);
+    const savedDraft = () => JSON.parse(window.sessionStorage.getItem('ltds-viewer-mark-draft'))?.draft;
+    const draft = savedDraft();
+    assert.deepEqual(draft?.geometry.coordinates, [-86.99, 43.04]);
+
+    shared = 'withdrawn';
+    await marks.store.refreshShared();
+    assert.equal(marks.store.find(sharedPin.id), null);
+    assert.equal(strip.hidden, false);
+    assert.equal(save.disabled, false);
+    shared = 'transient';
+    await marks.store.refreshShared();
+    await window.fire('pagehide', { persisted: true });
+    await window.fire('pageshow', { persisted: true });
+    assert.deepEqual(savedDraft(), draft);
+
+    shared = 'denied';
+    await marks.store.refreshShared();
+    assert.equal(marks.store.canWrite(), false);
+    assert.equal(strip.hidden, true);
+    assert.equal(moveRow.hidden, true);
+    assert.doesNotMatch(strip.textContent, /Owned pin/);
+    assert.equal(save.disabled, true);
+    assert.equal(cancel.disabled, true);
+    assert.equal(leaflet.keyboard.on, true);
+    const denial = marks.store.state.message;
+    // A stale click or keyboard event can still reach a handler even after its control was hidden.
+    panel.querySelector('.viewer-mark-form [name=pointCoordinates]').value = 'Invalid coordinates';
+    await save.fire('click');
+    const enter = await window.fire('keydown', { key: 'Enter' });
+    assert.equal(enter.defaultPrevented, false);
+    assert.equal(marks.store.state.message, denial);
+    assert.deepEqual(savedDraft(), draft);
+    assert.equal(writes, 0);
+  } finally {
+    marks.dispose();
+  }
+});
