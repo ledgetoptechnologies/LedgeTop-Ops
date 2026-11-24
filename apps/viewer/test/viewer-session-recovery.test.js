@@ -56,11 +56,13 @@ function fixture({ controller = true } = {}) {
     measurementWorkspace:{invalidate(_reason,{notify=true}={}){if(measurements.invalidated)return;measurements.invalidations++;measurements.invalidated=true;measurements.records.clear();if(notify)context.measurementAccessLost();},isInvalidated:()=>measurements.invalidated},
     installMeasurementWorkspace(){measurements.installs++;measurements.invalidated=false;},
     viewerProductDownloads:null,
+    viewerMarks: { scopes: [], keeps: [], setScope(scope, { keepDraft }) { this.scopes.push(scope); this.keeps.push(keepDraft); } },
     releaseFailedTileReservations() {},
     pcApi: () => ({ renewAccess: () => resets.push('cloud'), accessUnavailable: () => resets.push('unavailable') }),
     redeemViewerGrant: async () => ({ ...session, expiresAt: new Date(Date.now() + 1_800_000).toISOString() }),
   });
   vm.runInContext(source.slice(source.indexOf('function recoverFailedLodTiles()'), source.indexOf('let sessionRenewalTimer')), context);
+  vm.runInContext(source.slice(source.indexOf('function syncViewerMarks()'), source.indexOf('function syncViewerMarksView()')), context);
   vm.runInContext(source.slice(source.indexOf('function sessionControlWindow()'), source.indexOf('async function bootstrapSession()')), context);
   vm.runInContext(source.slice(source.indexOf('async function handleSessionRenewalMessage'), source.indexOf('if (reviewSessionChannel) reviewSessionChannel.onmessage')), context);
   // Execute the real workspace invalidation callback as well as the actual
@@ -296,6 +298,7 @@ test('exact expiry hides personal data but an obsolete expiry timer cannot hide 
   f.timers.get(f.context.sessionAccessExpiryTimer).fn();
   assert.equal(f.context.sessionAccessState,'unavailable');assert.equal(f.measurements.records.size,0);
   assert.equal(f.context.sessionDiagnostics().reason,'session-expired');
+  assert.deepEqual([f.context.viewerMarks.scopes.at(-1),f.context.viewerMarks.keeps.at(-1)],[null,true],'unsaved marks survive an expired session');
 });
 
 test('unavailable access immediately hides personal records and same-person renewal recreates the private workspace',async()=>{
@@ -322,6 +325,8 @@ test('renewal changing person, audience or immutable version fails closed before
     await f.context.handleSessionRenewalMessage({version:1,type:'ltds-viewer:renew-session',requestId:REQUEST,grant:'11111111-2222-4333-8444-555555555555'},{reviewChannel:true});
     assert.equal(f.context.sessionAccessState,'unavailable',scope);assert.equal(f.context.sessionRenewalBlocked,true,scope);
     assert.equal(f.measurements.records.size,0,scope);assert.equal(f.measurements.installs,0,scope);assert.deepEqual(f.resets,['unavailable'],scope);
+    assert.equal(f.context.viewerMarks.scopes.at(-1),null,scope);
+    assert.equal(f.context.viewerMarks.keeps.at(-1),false,`${scope}: unsaved marks go with refused access`);
     assert.equal(f.context.activeViewerSession,current,scope);assert.equal(f.context.sessionAccessGeneration,0,scope);
     assert.deepEqual(f.propertyLines,['suspend'],scope);
   }

@@ -120,7 +120,7 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissio
     applyProjectConfig() {}, tilesRenderer: null, scheduleLodAvailabilityRefresh() {}, stopLodAvailabilityRefresh() {},
     scheduleSessionRenewal() {}, propertyLines: null, recoverFailedLodTiles() {}, pcApi: () => null, viewerProductDownloads: null,
     measurementDraftRecovery: { capture() {}, hasPending: () => false }, measurementWorkspace: null, viewerSlice: null,
-    syncMeasurementActionVisibility() {}, sessionAccessLabel: () => '',
+    syncMeasurementActionVisibility() {}, syncViewerMarks() {}, sessionAccessLabel: () => '',
   });
   vm.runInContext(SHIPPED, context);
   const doc = fakeDocument();

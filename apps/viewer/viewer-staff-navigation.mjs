@@ -38,6 +38,23 @@ export function hasUnfinishedMeasurements(workspace, recovery) {
       .some(status => status === 'Saving…' || status.startsWith('Not saved:')));
 }
 
+export function openViewerLeaveDialog({ documentRef, description, onClose, onLeave }) {
+  const dialog = documentRef.createElement('dialog');
+  dialog.className = 'staff-leave-dialog';
+  dialog.setAttribute('aria-labelledby', 'staff-leave-title');
+  dialog.setAttribute('aria-describedby', 'staff-leave-description');
+  dialog.innerHTML = '<h2 id="staff-leave-title">Leave this model?</h2><p id="staff-leave-description"></p><div class="actions"><button type="button" data-stay autofocus>Stay</button><button type="button" data-leave>Leave</button></div>';
+  dialog.querySelector('#staff-leave-description').textContent = description;
+  const close = () => { dialog.remove(); onClose(); };
+  dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
+  dialog.querySelector('[data-stay]').addEventListener('click', close);
+  dialog.querySelector('[data-leave]').addEventListener('click', () => { close(); onLeave(); });
+  documentRef.body.append(dialog);
+  dialog.showModal();
+  dialog.querySelector('[data-stay]').focus();
+  return dialog;
+}
+
 /** Guard only same-tab exits; modified/new-tab links leave the draft in this tab. */
 export function installStaffNavigationGuard({ container, links, hasUnfinishedWork,
   documentRef = document, navigate = href => window.location.assign(href) }) {
@@ -51,28 +68,15 @@ export function installStaffNavigationGuard({ container, links, hasUnfinishedWor
       event.preventDefault();
       if (dialog) return;
       const destination = anchor.href;
-      dialog = documentRef.createElement('dialog');
-      dialog.className = 'staff-leave-dialog';
-      dialog.setAttribute('aria-labelledby', 'staff-leave-title');
-      dialog.setAttribute('aria-describedby', 'staff-leave-description');
-      dialog.innerHTML = '<h2 id="staff-leave-title">Leave this model?</h2><p id="staff-leave-description">Your unfinished measurement will be lost.</p><div class="actions"><button type="button" data-stay autofocus>Stay</button><button type="button" data-leave>Leave</button></div>';
-      const current = dialog;
-      const close = () => {
-        if (dialog === current) dialog = null;
-        current.remove();
-        if (anchor.isConnected && !container.hidden && anchor.hasAttribute('href')) anchor.focus();
-      };
-      current.addEventListener('cancel', event => { event.preventDefault(); close(); });
-      current.querySelector('[data-stay]').addEventListener('click', close);
-      current.querySelector('[data-leave]').addEventListener('click', () => {
-        // Renewals can remove/change navigation while this confirmation is open.
-        const allowed = anchor.isConnected && !container.hidden && anchor.href === destination && anchor.hasAttribute('href');
-        close();
-        if (allowed) navigate(destination);
+      dialog = openViewerLeaveDialog({ documentRef, description: 'Your unfinished measurement will be lost.',
+        onClose: () => {
+          dialog = null;
+          if (anchor.isConnected && !container.hidden && anchor.hasAttribute('href')) anchor.focus();
+        },
+        onLeave: () => {
+          if (anchor.isConnected && !container.hidden && anchor.href === destination && anchor.hasAttribute('href')) navigate(destination);
+        },
       });
-      documentRef.body.append(current);
-      current.showModal();
-      current.querySelector('[data-stay]').focus();
     };
     anchor.addEventListener('click', click);
     listeners.push(() => anchor.removeEventListener('click', click));

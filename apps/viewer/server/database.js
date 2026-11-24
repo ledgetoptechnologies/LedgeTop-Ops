@@ -2209,6 +2209,14 @@ const MIGRATIONS = [
     ]) && database.prepare('PRAGMA foreign_key_list(processing_attempt_engine_timing)').all()
       .some(row=>row.table==='processing_attempts'&&row.from==='attempt_id'&&row.to==='id'&&row.on_delete==='CASCADE');
   }},
+  // Viewer Marks (pins, lines, areas and user categories). Ordinal 84 was reserved before
+  // 85 and 86 shipped, so upgraded databases record it after them.
+  {version:84,name:'viewer_coordinate_marks',sql:require('./viewerMarkSchema').VIEWER_MARKS_SQL,
+    verify(database){return require('./viewerMarkSchema').verifyViewerMarksSchema(database);},
+    after(database){
+      if(!this.verify(database))
+        throw Object.assign(new Error('Viewer schema version 84 did not create the Marks tables.'),{code:'viewer_migration_history_conflict'});
+    }},
   // Removing a provider archives its row so historical attempts keep their
   // name and history; removed rows leave the list, new-task choices and polling.
   {version:85,name:'processing_provider_removal',sql:`
