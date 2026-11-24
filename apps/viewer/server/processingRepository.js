@@ -198,6 +198,25 @@ const FOLDER_MOVE_REVISION = `(SELECT COUNT(*) FROM audit_events WHERE entity_ty
 const LIVE_ATTEMPT_STATUSES_SQL = "('pending','admitted','initializing','uploading','committed','queued_upstream','running','ingesting','derivatives')";
 const FOLDER_UNDO_WINDOW_MS = 10_000;
 
+function readProviderCredential(database, id) {
+  const row = database.prepare(`
+    SELECT auth_env_key, credential_ciphertext, credential_key_id, credential_updated_at,
+           credential_revision, credential_cleared, last_probe_credential_revision, last_health
+    FROM processing_providers WHERE id=?
+  `).get(id);
+  if (!row) return null;
+  return {
+    authEnvKey: row.auth_env_key,
+    credentialCiphertext: row.credential_ciphertext,
+    credentialKeyId: row.credential_key_id,
+    credentialUpdatedAt: row.credential_updated_at,
+    credentialRevision: Number(row.credential_revision || 0),
+    credentialCleared: Boolean(row.credential_cleared),
+    lastProbeCredentialRevision: row.last_probe_credential_revision === null ? null : Number(row.last_probe_credential_revision),
+    lastHealth: row.last_health,
+  };
+}
+
 class ProcessingRepository {
   constructor(database, { logMaxBytes = 10 * 1024 * 1024 } = {}) {
     this.database = database;
@@ -492,7 +511,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const provider=this.getProvider(id);if(audit)this.insertAudit({...audit,entityId:id});return provider;});
   }
   getProvider(id) { return this.provider(this.database.prepare('SELECT * FROM processing_providers WHERE id=?').get(id)); }
-  getProviderCredential(id) { const row=this.database.prepare('SELECT auth_env_key,credential_ciphertext,credential_key_id,credential_updated_at,credential_revision,credential_cleared,last_probe_credential_revision,last_health FROM processing_providers WHERE id=?').get(id);return row?{authEnvKey:row.auth_env_key,credentialCiphertext:row.credential_ciphertext,credentialKeyId:row.credential_key_id,credentialUpdatedAt:row.credential_updated_at,credentialRevision:Number(row.credential_revision||0),credentialCleared:Boolean(row.credential_cleared),lastProbeCredentialRevision:row.last_probe_credential_revision===null?null:Number(row.last_probe_credential_revision),lastHealth:row.last_health}:null; }
+  getProviderCredential(id) { return readProviderCredential(this.database, id); }
   listProvidersPage({limit=50,cursor=null}={}) { const n=pageLimit(limit),c=decodeCursor(cursor);const rows=c?this.database.prepare('SELECT * FROM processing_providers WHERE removed_at IS NULL AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?').all(c.createdAt,c.createdAt,c.id,n+1):this.database.prepare('SELECT * FROM processing_providers WHERE removed_at IS NULL ORDER BY created_at DESC,id DESC LIMIT ?').all(n+1);const more=rows.length>n,items=rows.slice(0,n);return{items:items.map((r)=>this.provider(r)),nextCursor:more?encodeCursor(items.at(-1)):null}; }
   listProviders() { return this.listProvidersPage({limit:100}).items; }
   updateProviderMetadata(id,input,audit=null) { return this.transaction(()=>{const current=this.getProvider(id);if(!current)return null;const endpoint=String(input.endpoint??current.endpoint).replace(/\/+$/,''),changedEndpoint=endpoint!==current.endpoint,t=now();if(changedEndpoint&&this.activeProviderAttempts(id)>0)throw Object.assign(new Error('provider has active attempts'),{code:'provider_in_use'});const enabled=changedEndpoint?false:(input.enabled===undefined?current.enabled:input.enabled);if(enabled){const credential=this.getProviderCredential(id);if(!credential?.credentialCiphertext&&credential?.authEnvKey!==NO_AUTH_MARKER)throw Object.assign(new Error('provider credential is required'),{code:'provider_credential_required'});if(credential.lastHealth!=='healthy'||credential.lastProbeCredentialRevision===null||credential.lastProbeCredentialRevision!==credential.credentialRevision)throw Object.assign(new Error('provider probe is required'),{code:'provider_probe_required'});}this.database.prepare(`UPDATE processing_providers SET provider_type=?,display_name=?,endpoint=?,enabled=?,admission_limit=?,capabilities_json=CASE WHEN ? THEN '{}' ELSE capabilities_json END,capability_fingerprint=CASE WHEN ? THEN NULL ELSE capability_fingerprint END,last_health=CASE WHEN ? THEN NULL ELSE last_health END,last_health_at=CASE WHEN ? THEN NULL ELSE last_health_at END,last_probe_credential_revision=CASE WHEN ? THEN NULL ELSE last_probe_credential_revision END,updated_at=? WHERE id=?`).run(input.type??current.type,bounded(input.displayName??current.displayName),endpoint,enabled?1:0,input.admissionLimit??current.admissionLimit,changedEndpoint?1:0,changedEndpoint?1:0,changedEndpoint?1:0,changedEndpoint?1:0,changedEndpoint?1:0,t,id);const provider=this.getProvider(id);if(audit)this.insertAudit({...audit,entityId:id});return provider;}); }
@@ -1616,4 +1635,4 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   retryEvent(id,message,attemptCount){const terminal=attemptCount>=12,t=now(),next=new Date(Date.now()+Math.min(3600_000,5000*2**Math.min(attemptCount,10))).toISOString();this.database.prepare('UPDATE event_outbox SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=?').run(terminal?'failed':'pending',next,bounded(sanitizeLogMessage(message),1000),t,id);}
 }
 
-module.exports = { BUILT_IN_PRESETS, ProcessingRepository };
+module.exports = { BUILT_IN_PRESETS, ProcessingRepository, readProviderCredential };
