@@ -12,6 +12,7 @@ const auth = require('../server/auth');
 const assets = require('../server/assets');
 const { createAssetRateLimiter } = require('../server/assetRateLimiter');
 const { config } = require('../server/config');
+const { hooks } = require('../server/verifiedDelivery');
 const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
 
@@ -39,9 +40,14 @@ async function fixture(t, { accelerated = false, permissions = FULL, big = false
   const server = await new Promise(resolve => { const value = app.listen(0, '127.0.0.1', () => resolve(value)); });
   // Something changes while this response's bytes are being checked.
   const cache = assets.assetIntegrityCache, whole = cache.verifyWholeFile;
-  const during = change => { cache.verifyWholeFile = async function (...args) { const result = await whole.apply(this, args); if (change) { const run = change; change = null; run(); } return result; }; };
+  // After the check of a delivered file (also when nothing is hashed, as for HEAD), or of an accelerated one.
+  const during = change => {
+    const land = () => { if (change) { const run = change; change = null; run(); } };
+    hooks.afterVerify = land;
+    if (accelerated) cache.verifyWholeFile = async function (...args) { const result = await whole.apply(this, args); land(); return result; };
+  };
   t.after(async () => {
-    cache.verifyWholeFile = whole; cache.clear();
+    cache.verifyWholeFile = whole; hooks.afterVerify = null; cache.clear();
     await new Promise(resolve => server.close(resolve));
     assets.setRepository(null); assets.setAssetRateLimiter(createAssetRateLimiter());
     [config.xAccelRedirectPrefix, config.modelsMount] = before;
