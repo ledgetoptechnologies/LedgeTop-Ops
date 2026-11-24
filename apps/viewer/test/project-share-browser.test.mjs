@@ -269,8 +269,18 @@ async function revokeProjectLink(client, runtime, shareId) {
   const endpoint = `/api/v1/project-shares/${shareId}`;
   const deletes = () => runtime.requests.filter(item => item.method === 'DELETE' && item.path === endpoint).length;
   const before = deletes();
+  const selector = JSON.stringify(`#workspace-modal[open] [data-action="revoke-project-share"][data-id="${shareId}"]`);
+  await client.evaluate(`document.querySelector('#workspace-modal[open] #share-tab-public').click()`);
   const open = async () => {
-    await client.evaluate(`document.querySelector('[data-action="revoke-project-share"][data-id="${shareId}"]').click()`);
+    await waitFor(client, `(() => {
+      const button = document.querySelector(${selector});
+      return Boolean(button && !button.disabled && button.getClientRects().length);
+    })()`, 'Visible project revoke button did not become ready');
+    await client.evaluate(`(() => {
+      const button = document.querySelector(${selector});
+      button.focus();
+      button.click();
+    })()`);
     await waitFor(client, `document.querySelector('dialog.workspace-decision[open] h2')?.textContent === 'Revoke project link'`, 'Project revoke confirmation did not open');
     assert.equal(deletes(), before, 'Opening revoke confirmation must not revoke a link');
   };
@@ -313,7 +323,13 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`window.__legacyRow===document.querySelector('[data-action="revoke-project-share"]')`), true, 'Late client response must not replace legacy link controls');
     assert.deepEqual(await client.evaluate(`(() => {const form=document.querySelector('#client-grant-form');return {whole:form.elements.wholeProject.checked,future:form.elements.includeFuturePublished.checked,download:form.elements.download.checked}})()`),
       {whole:false,future:false,download:false}, 'Whole project and future client access require explicit opt-in');
-    await client.evaluate(`document.querySelector('.modal-close').click()`);
+    // A native dialog's close event is queued. Let it finish before any new
+    // confirmation attaches its parent-close listener to the reused dialog.
+    await client.evaluate(`new Promise(resolve => {
+      const dialog = document.querySelector('#workspace-modal[open]');
+      dialog.addEventListener('close', () => resolve(), { once: true });
+      dialog.querySelector('.modal-close').click();
+    })`);
     assert.equal(runtime.requests.slice(start).some(item => item.method !== 'GET'), false, 'Closing Share must not mutate access');
     await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
     await waitFor(client, `document.querySelector('[data-action="revoke-project-share"][data-id="share-existing"]') !== null`, `${viewport.name}: legacy link did not reappear`);
