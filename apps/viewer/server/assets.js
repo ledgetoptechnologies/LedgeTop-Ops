@@ -91,8 +91,8 @@ function viewerSessionAccess(tokenHash, projectId, options) {
 }
 function viewerSessionAccessInSnapshot(tokenHash, projectId, { reviewAllowed = true } = {}) {
   const requestedModelId = canonicalRepository.resolveModelId(projectId);
-  const session = requestedModelId ? canonicalRepository.liveViewerSessionByHash(tokenHash) : null;
-  if (!session) return { live: false, access: null };
+  const session = requestedModelId ? canonicalRepository.getViewerSessionByHash(tokenHash) : null;
+  if (!session || !canonicalRepository.viewerSessionLive(session)) return { live: false, access: null };
   const review = reviewAllowed && session.sessionMode === 'review';
   const model = review
     ? canonicalRepository.getModelVersion(requestedModelId, session.modelVersionId)
