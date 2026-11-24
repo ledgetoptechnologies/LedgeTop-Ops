@@ -4,6 +4,7 @@ const crypto=require('node:crypto');
 const fs=require('node:fs');
 const path=require('node:path');
 const {buildStorageSupersessionManifest,inventoryTree,verifyRetainedClosure,storageSupersessionInventoryIdentity}=require('./retainedManifest');
+const permanentDeletion=require('./permanentDeletion');
 const {applyStorageMutation}=require('./storageLifecycle');
 const {POLICY_REVISION,recoveryPreservation,recoveryRegistrationIdentity}=require('./outputPreservation');
 const sha=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -210,6 +211,7 @@ async function retireSupersededOutputs(processing,storage,{limit=1,signal=null}=
 }
 
 async function purgeSupersededOutputs(processing,storage,{limit=1,signal=null}={}){
+  if(permanentDeletion.permanentDeletionPaused())return [];// purgeExpiredTrash counts these items
   signal=maintenanceSignal(processing,signal);
   const results=[];
   if(signal?.aborted)return results;

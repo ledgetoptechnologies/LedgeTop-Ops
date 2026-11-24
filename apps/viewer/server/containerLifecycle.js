@@ -1,5 +1,6 @@
 'use strict';
 
+const permanentDeletion = require('./permanentDeletion');
 const { applyStorageMutation } = require('./storageLifecycle');
 const { purgeProjectBoundary } = require('./propertyLinesBoundary');
 
@@ -30,6 +31,7 @@ function purgeItem(processing,storage,item,actor,containerId=null){if(!item||ite
 // 2. The container is marked purging in its own committed transaction: from here on nothing in it can be restored.
 // 3. Files and member records are purged, then the container's own record.
 function purgeContainerTrash(processing,storage,containerId,actor){
+  permanentDeletion.refusePermanentDeletion();
   const root=processing.getTrash(containerId);if(!root||!['project','task'].includes(root.entityType))return null;if(root.permanentlyDeletedAt)return root;
   const order={output:0,dataset:1,task:2,project:3},members=()=>processing.listContainerTrashMembers(root.id).sort((a,b)=>(order[a.entityType]??4)-(order[b.entityType]??4));
   for(const item of members()){if(item.entityType!=='dataset'||item.permanentlyDeletedAt)continue;if(processing.hasPendingStorageMutation('dataset',item.entityId))continue;/* its purge already began; let it finish */const heir=processing.datasetTrashHeir(item.entityId,root.id);if(heir&&!processing.moveContainerTrashMember(root.id,heir.id,item.id,actor))return null;}

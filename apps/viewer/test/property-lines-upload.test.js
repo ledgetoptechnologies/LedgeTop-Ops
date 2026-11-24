@@ -2,6 +2,7 @@
 
 // Uploaded boundary files (GeoJSON, KML) as a property-lines source: parsing
 // and sniffing, limits, storage, staff-only routes and project purge.
+const permanentDeletion = require('../server/permanentDeletion');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -129,6 +130,7 @@ function storeFixture(t) {
 }
 
 test('storage path comes from the project id only; replace is atomic and leaves one file', (t) => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const { root, store } = storeFixture(t);
   for (const bad of ['../x', '..', 'a/b', 'a\\b', '', '.hidden', 'x'.repeat(101), 'C:', null]) assert.equal(code(() => store.dirFor(bad)), 'invalid_project', String(bad));
   assert.equal(store.dirFor('project-1'), path.resolve(root, 'property-lines', 'project-1'));
@@ -304,6 +306,7 @@ test('routes: the 20 MB cap is enforced while the body streams in', async (t) =>
 });
 
 test('project purge removes the boundary folder; trash alone keeps it for restore', async (t) => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const { project, processing, boundaries, root } = await routeFixture(t);
   boundaries.save(project.id, parseBoundaryFile(fc([feature({ type: 'Polygon', coordinates: [square()] })])), { bytes: 1, sha256: 'd'.repeat(64) });
   const { trashProjectTree, purgeContainerTrash } = require('../server/containerLifecycle');
