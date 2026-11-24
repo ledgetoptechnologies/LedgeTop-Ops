@@ -71,10 +71,9 @@ test('an edit that was stored but not answered is found again, not called someon
     assert.doesNotMatch(panel.text(), /Someone else|Could not|No answer/);
     assert.deepEqual(rows().map(row => [row.id, row.revision, row.note]), [[id, 2, 'Ladder']]);
     assert.deepEqual([stored(), storage.items.size], [false, storage.items.size]);
-    // It is a change like any other: Undo takes it back.
-    assert.equal(panel.store.state.undo.at(-1).done, 'One changed');
-    assert.equal(await panel.store.undo(), true);
-    assert.deepEqual(rows().map(row => [row.id, row.revision, row.note]), [[id, 3, '']]);
+    // It is there, but not proved to be from here: saved, without an Undo.
+    assert.deepEqual(panel.store.state.undo.map(entry => entry.type), ['create']);
+    assert.doesNotMatch(panel.bar().textContent, /changed/);
   }
 });
 
@@ -187,7 +186,7 @@ test('saving again checks first: the same, or more typed, is one mark and no fal
     assert.deepEqual(rows().map(row => row.note), [more ? 'Second' : 'First'], at);
     if (id) assert.equal(rows()[0].id, id, at);
     if (!more && how !== 'never sent') assert.deepEqual(net.sent.filter(item => !item.startsWith('GET')), [], at + ': already there');
-    assert.equal(panel.store.state.undo.length, kind === 'edit' ? 2 : 1, at);
+    assert.equal(panel.store.state.undo.length, kind === 'new' ? 1 : !more && how !== 'never sent' ? 1 : 2, at);
   }
 });
 
@@ -240,7 +239,7 @@ test('a write that is never answered ends by itself and is checked', async t => 
   await saving;
   assert.deepEqual([panel.store.state.busy, form(panel).hidden, stored()], [false, true, false]);
   assert.deepEqual(rows().map(row => [row.revision, row.note]), [[2, 'Ladder']]);
-  assert.equal(time.pending(), 1, 'only the undo bar is left');
+  assert.equal(time.pending(), 0);
 });
 
 // ---- the store, change by change ---------------------------------------------
@@ -258,6 +257,7 @@ async function open(t, options) {
     // Something happens between the change and the look-up.
     if (!write && net.before) { const before = net.before; net.before = null; await before(); }
     if (!write && net.answer) return net.answer(path, go);
+    if (write && net.how?.status) return Response.json({ code: net.how.code }, { status: net.how.status });
     if (write && net.how === 'late') { net.late.push(go); throw new TypeError('offline'); }
     if (write && net.how === 'never') return new Promise(() => {});
     if (write && net.how === 'refused') throw new TypeError('offline');
@@ -335,12 +335,18 @@ test('every kind of change whose answer was lost is found by the check, once', a
     assert.deepEqual([one.name, count(), store.state.undo.length], ['One', 1, 1]);
     const changed = await run(() => store.update(store.find(one.id), { name: 'Uno', elevationNavd88M: 250.123456 }));
     assert.deepEqual([changed.name, changed.revision, changed.elevationNavd88M], ['Uno', 2, 250.123]);
+    assert.equal(store.state.undo.length, 1, 'found, not proved to be from here');
+    // Undo, of an edit and of a delete.
+    await store.update(store.find(one.id), { name: 'Eins' });
     assert.equal(await run(() => store.undo()), true);
-    assert.deepEqual([store.find(one.id).name, store.state.undo.length], ['One', 1]);
+    assert.deepEqual([store.find(one.id).name, store.state.undo.length], ['Uno', 1]);
     assert.equal(await run(() => store.remove(store.find(one.id))), true);
-    assert.deepEqual([count(), store.state.marks], [0, []]);
+    assert.deepEqual([count(), store.state.marks, store.state.undo.length], [0, [], 1]);
+    await store.loadDeleted();
+    await store.restore(store.state.deleted[0]);
+    await store.remove(store.find(one.id));
     assert.equal(await run(() => store.undo()), true);
-    assert.equal(store.find(one.id).name, 'One');
+    assert.equal(store.find(one.id).name, 'Uno');
     await store.remove(store.find(one.id));
     await store.loadDeleted();
     assert.equal((await run(() => store.restore(store.state.deleted[0]))).id, one.id);
@@ -408,8 +414,10 @@ test('when nothing can be checked, a second go at a pin, a file or a category ad
     await doubt(() => store.remove(one));
     assert.equal(await store.remove(one), true, 'deleting it again');
     assert.equal(count('deleted_at IS NULL AND id=\'' + one.id + '\''), 0);
-    assert.equal(store.state.undo.at(-1).done, one.name + ' deleted');
-    assert.equal(await store.undo(), true);
+    const offered = store.state.undo.at(-1).done === one.name + ' deleted';
+    assert.equal(offered, !arrived, 'an answered one is');
+    if (!offered) { await store.loadDeleted(); assert.ok(await store.restore(store.state.deleted.find(mark => mark.id === one.id))); }
+    else assert.equal(await store.undo(), true);
     assert.ok(store.find(one.id));
   }
 });
@@ -622,7 +630,7 @@ test('a delete, a restore and their undo are recovered at their own version only
     };
     assert.equal(await store.remove(one), !later);
     net.how = null;
-    assert.deepEqual(kinds(), later ? ['create'] : ['create', 'delete']);
+    assert.deepEqual(kinds(), ['create'], 'whose delete it was is not known');
     if (later) assert.match(store.state.message, /no longer there/);
   }
   // Restored, then changed by another: it is back, and Undo would not delete their change.
@@ -638,9 +646,9 @@ test('a delete, a restore and their undo are recovered at their own version only
     net.how = null;
     assert.ok(back, at);
     assert.equal(store.find(one.id).note, changed ? 'Independent' : '', at);
-    if (way === 'list') assert.deepEqual(kinds(), changed ? ['create', 'delete'] : ['create', 'delete', 'create'], at);
+    if (way === 'list') assert.deepEqual(kinds(), ['create', 'delete'], at);
     for (let i = 0; i < 5 && store.state.undo.length; i += 1) await store.undo();
-    assert.equal(count(), changed ? 1 : 0, at + ': an independent change is not deleted');
+    assert.equal(count(), 1, at + ': neither an independent change nor another\'s restore is taken back');
   }
 });
 
@@ -653,7 +661,7 @@ test('Undo does not write over or delete a change made elsewhere, also one read 
     await other.update(other.find(one.id), { note: 'Independent' });
     await store.refresh();
     assert.equal(await store.undo(), false, kind);
-    assert.match(store.state.message, /Someone else changed this mark/);
+    assert.match(store.state.message, /changed since, so this was not undone/);
     assert.deepEqual([store.find(one.id).note, count()], ['Independent', 1]);
   }
   // One's own steps, also through Undo and back, stay undoable to the start.
@@ -755,5 +763,93 @@ test('a Save does not write over a change that was read while the editor was ope
     await panel.save();
     assert.equal(form(panel).hidden, true, at);
     assert.deepEqual(rows().map(row => [row.id, row.note]), [[id, 'Mine']], at);
+  }
+});
+
+test('the same change made by another at the same version counts as saved and is never taken back', async t => {
+  const meddling = async (setup, work) => { const other = await setup.fresh(); await work(other); };
+  const begin = async (...names) => {
+    const setup = await beside(t), made = [];
+    for (const name of names) made.push(await setup.store.create(point(name)));
+    return { ...setup, made };
+  };
+  // An edit: ours never left, theirs is the same.
+  {
+    const setup = await begin('One'), { store, net, made: [one], kinds } = setup;
+    net.how = 'refused';
+    net.before = () => meddling(setup, other => other.update(other.find(one.id), { note: 'Same' }));
+    assert.equal((await store.update(one, { note: 'Same' })).revision, 2, 'it is as wanted');
+    net.how = null;
+    assert.deepEqual(kinds(), ['create']);
+    for (let i = 0; i < 3 && store.state.undo.length; i += 1) await store.undo();
+    await setup.other.refresh();
+    assert.equal(setup.other.find(one.id)?.note, 'Same', 'their change stays');
+  }
+  // More typed on top of it: Undo goes back to theirs, not behind it.
+  {
+    const setup = await begin('One'), { store, net, made: [one] } = setup;
+    net.how = 'refused';
+    net.down = true;
+    assert.equal(await store.update(one, { note: 'Same' }), null);
+    net.how = null;
+    net.down = false;
+    await meddling(setup, other => other.update(other.find(one.id), { note: 'Same' }));
+    assert.equal((await store.update(one, { note: 'Same and more' })).revision, 3);
+    assert.equal(await store.undo(), true);
+    assert.equal(store.find(one.id).note, 'Same');
+    for (let i = 0; i < 3 && store.state.undo.length; i += 1) await store.undo();
+    await setup.other.refresh();
+    assert.equal(setup.other.find(one.id)?.note, 'Same');
+  }
+  // An undo of an edit, a delete, a restore, an undo of a delete.
+  for (const what of ['undo edit', 'delete', 'restore', 'undo delete']) {
+    const setup = await begin('One'), { store, net, made: [one], kinds } = setup;
+    if (what === 'undo edit') await store.update(one, { note: 'x' });
+    if (what === 'restore' || what === 'undo delete') { await store.remove(one); await store.loadDeleted(); }
+    net.how = 'refused';
+    net.before = () => meddling(setup, async other => {
+      if (what === 'undo edit') await other.update(other.find(one.id), { note: '' });
+      else if (what === 'delete') await other.remove(other.find(one.id));
+      else { await other.loadDeleted(); await other.restore(other.state.deleted[0]); }
+    });
+    const ok = what === 'delete' ? await store.remove(one) : what === 'restore' ? await store.restore(store.state.deleted[0]) : await store.undo();
+    net.how = null;
+    assert.ok(ok, what);
+    assert.ok(!kinds().includes(what === 'delete' ? 'delete' : 'update'), what);
+    const wanted = what === 'delete' ? 0 : 1;
+    assert.equal(setup.count(), wanted, what);
+    for (let i = 0; i < 4 && store.state.undo.length; i += 1) await store.undo();
+    assert.equal(setup.count(), wanted, what + ': theirs is not taken back');
+  }
+});
+
+test('missing from the live list after a definite answer never clears Undo history', async t => {
+  for (const kind of ['permanent', 'soft']) for (const conflict of [404, 409]) for (const before of [false, true]) {
+    const at = [kind, conflict, before].join();
+    const { store, net, kinds, count } = await beside(t);
+    const one = await store.create(point('One'));
+    await store.update(one, { note: 'x' });
+    const seen = store.find(one.id);
+    // Perhaps with a change of one's own that was never answered.
+    if (before) {
+      net.how = 'late';
+      net.down = true;
+      assert.equal(await store.update(seen, { note: 'y' }), null);
+      net.down = false;
+    }
+    const had = kinds();
+    net.how = { status: conflict, code: conflict === 404 ? 'mark_not_found' : 'mark_revision_conflict' };
+    net.answer = async (path, go) => {
+      if (path !== '/api/v1/marks') return go();
+      const data = await (await go()).json();
+      return Response.json({ ...data, marks: [] });
+    };
+    assert.equal(await store.remove(seen, { permanent: kind === 'permanent' }), false, at);
+    net.how = null;
+    net.answer = null;
+    assert.deepEqual(kinds(), had, at);
+    assert.equal(count(), 1);
+    await store.refresh();
+    assert.ok(store.find(one.id), at);
   }
 });

@@ -30,6 +30,7 @@ const MESSAGES = {
   mark_id_conflict: 'Someone else changed this mark. The list was reloaded.',
   mark_gone: 'That mark is no longer there. The list was reloaded.',
   still_recoverable: 'It is in Recently deleted, not deleted for good.',
+  undo_moved: 'That mark changed since, so this was not undone.',
   undo_unclear: 'Some of those marks changed meanwhile. The list was reloaded.',
   import_unsure: 'The import was saved, but part of it changed since, so it cannot be undone.',
   saved_after_all: 'The change before this one was saved after all. Try again for this one.',
@@ -184,9 +185,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   const based = current => (own(current.id) ? find(current.id) : current);
 
   // Was it made? If that cannot be found out either, it stays in doubt.
-  async function checkDoubt(scope, op) {
+  async function checkDoubt(scope, op, { read = true } = {}) {
     try {
-      await load(scope);
+      if (read) await load(scope);
       scope.check();
       await op.look?.(scope);
     } catch (error) {
@@ -208,7 +209,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     doubt = null;
     const value = await checkDoubt(scope, again ? op : earlier);
     if (again || value === undefined) return again ? value : undefined;
-    earlier.done?.(value);
+    earlier.done?.(value, false);
     // Perhaps this was meant as the same thing again: the person sees it before more is added.
     if (op.makes) throw new MarksError('saved_after_all', 0);
     return undefined;
@@ -245,9 +246,6 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     };
   }
 
-  // A restored mark, as the restore made it.
-  const restored = before => { const now = find(before.id); return Boolean(now) && now.revision === before.revision + 1 && sameMark(now, before); };
-
   // Undo entries made of the version before an undone change are now about this one.
   function follow(id, from, to) {
     state.undo = state.undo.map(entry => (entry.id === id && entry.revision === from ? { ...entry, revision: to } : entry));
@@ -256,7 +254,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   // Runs one change; on failure explains it and reloads when the data moved underneath us.
   // A change without an answer is looked up: found, it counts as made. op says how:
   //   landed() what the change made, if it is there now, or that this does not say
-  //   look(scope) reads what else that takes    done(value) once, when it was made
+  //   look(scope) reads what else that takes    done(value, answered) once, when it was made
+  // Found without an answer, it is as wanted, but may be another tab's: then no Undo, which
+  // would take theirs back. A new id is only ever one's own.
   //   tried() it went out unanswered    mine() what is in its way is itself, from before
   //   key the same for a second go at it    makes it adds something each time it is sent
   async function run(send, op = {}) {
@@ -267,9 +267,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     state.failure = '';
     emit();
     try {
-      let value = doubt ? await settleDoubt(scope, op) : undefined;
+      let value = doubt ? await settleDoubt(scope, op) : undefined, answered = false;
       for (let again = false; value === undefined; again = true) {
-        try { value = (await send(scope)) ?? true; }
+        try { value = (await send(scope)) ?? true; answered = true; }
         catch (error) {
           scope.check();
           if (error.code === 'answer_unknown') {
@@ -281,12 +281,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
             scope.check();
             error.loaded = true;
             if (!op.mine()) throw error;
-            value = op.landed?.();
+            // By the same evidence: not being in the list says nothing by itself.
+            value = await checkDoubt(scope, op, { read: false });
           } else throw error;
         }
       }
       scope.check();
-      op.done?.(value);
+      // Only an answer or evidence gets here.
+      if (value === UNKNOWN) throw new MarksError('answer_unknown', 0);
+      op.done?.(value, answered);
       return scope.live();
     } catch (error) {
       if (!scope.live()) return false;
@@ -419,9 +422,10 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           if (!own(mark.id)) throw new MarksError('mark_id_conflict', 0);
           return now;
         },
-        done: made => {
+        done: (made, answered) => {
           saved = made;
           attempts.delete(mark.id);
+          if (!answered && made.revision !== 1) return;
           remember({ type: 'create', id: saved.id, revision: saved.revision, label: 'add ' + saved.name, done: saved.name + ' added' });
         } });
       return ok ? saved : null;
@@ -429,10 +433,12 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
 
     async update(current, changes, { sending, revision = current?.revision } = {}) {
       if (!find(current?.id)) return null;
-      let saved = null, base = current;
+      let saved = null, base = current, before = current;
       const { id } = current, next = { ...current, ...changes };
       const ok = await run(scope => {
         base = own(id) ? find(id) : { ...current, revision };
+        // On top of what may be another tab's: Undo goes back to that, not behind it.
+        before = own(id) ? base : current;
         sending?.({ revision: base.revision, ...markContent(next) });
         return updateRaw(base, changes, scope);
       },
@@ -444,12 +450,13 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           if (now?.revision !== base.revision) throw new MarksError(now ? 'mark_revision_conflict' : 'mark_gone', 0);
           return undefined;
         },
-        done: made => {
+        done: (made, answered) => {
         saved = made;
         attempts.delete(id);
+        if (!answered) return;
         const moved = JSON.stringify(saved.geometry) !== JSON.stringify(current.geometry)
           && ['name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility'].every(field => (saved[field] ?? null) === (current[field] ?? null));
-        remember({ type: 'update', id: current.id, revision: saved.revision, before: current, label: 'edit ' + current.name, done: saved.name + (moved ? ' moved' : ' changed') });
+        remember({ type: 'update', id: current.id, revision: saved.revision, before, label: 'edit ' + current.name, done: saved.name + (moved ? ' moved' : ' changed') });
       } });
       return ok ? saved : null;
     },
@@ -469,11 +476,11 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           // Not what was asked for, or not this one's doing: nothing to undo comes of it.
           throw new MarksError(permanent ? 'still_recoverable' : 'mark_gone', 0);
         },
-        done: () => {
+        done: (_, answered) => {
           // For good: nothing about it can be undone any more.
           // An import is undone whole or not at all.
           if (permanent) state.undo = state.undo.filter(entry => entry.id !== current.id && entry.before?.id !== current.id && !entry.marks?.some(mark => mark.id === current.id));
-          else remember({ type: 'delete', before: current, revision: base.revision, label: 'delete ' + current.name, done: current.name + ' deleted' });
+          else if (answered) remember({ type: 'delete', before: current, revision: base.revision, label: 'delete ' + current.name, done: current.name + ' deleted' });
         } });
     },
 
@@ -488,14 +495,14 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     },
     async restore(deleted) {
       if (!state.deleted.some(item => item.id === deleted?.id)) return null;
-      let saved = null, exact = true;
+      let saved = null;
       const ok = await run(scope => restoreRaw(deleted, scope), { key: 'restore ' + deleted.id, mine: () => Boolean(find(deleted.id)),
-        landed: () => { exact = restored(deleted); return find(deleted.id) || undefined; },
-        done: mark => {
+        // Back, as it was or changed since.
+        landed: () => find(deleted.id) || undefined,
+        done: (mark, answered) => {
           saved = mark;
           state.deleted = state.deleted.filter(item => item.id !== mark.id);
-          // Back, but changed by someone since: Undo would delete their change.
-          if (!exact) return;
+          if (!answered) return;
           follow(mark.id, deleted.revision, mark.revision);
           remember({ type: 'create', id: saved.id, revision: saved.revision, label: 'restore ' + saved.name, done: saved.name + ' restored' });
         } });
@@ -510,7 +517,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       const id = entry.id ?? entry.before?.id, current = find(id), before = entry.before && body(entry.before);
       // What it would take back is not what is there any more.
       const moved = ['create', 'update'].includes(entry.type) && current && current.revision !== entry.revision && !own(id);
-      let base = current, exact = true, made = null, gone = null;
+      let base = current, made = null, gone = null;
       const went = departure(id, () => base?.revision);
       const plan = {
         create: {
@@ -552,27 +559,27 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           },
           tried: () => { if (base) attempted(id, base.revision, before); },
           mine: () => own(id),
-          landed: () => { made = own(id) && sameMark(find(id), before) ? find(id) : null; return made || undefined; },
+          landed: () => (own(id) && sameMark(find(id), before) ? find(id) : undefined),
         },
         delete: {
           send: async scope => { made = scope.temporary ? await createRaw(entry.before, scope) : await restoreRaw(entry.before, scope); },
           mine: () => Boolean(find(id)),
-          landed: () => { exact = restored(entry.before); made = find(id); return made || undefined; },
+          landed: () => find(id) || undefined,
         },
       }[entry.type];
       const ok = await run(async scope => {
-        if (moved) throw new MarksError('mark_revision_conflict', 409);
+        if (moved) throw new MarksError('undo_moved', 0);
         await plan.send(scope);
       }, { key: 'undo ' + entry.at, look: plan.look, landed: plan.landed, tried: plan.tried, mine: plan.mine,
-        done: () => {
+        done: (_, answered) => {
           // By order: deleting a category rewrites entries.
           state.undo = state.undo.filter(item => item.at !== entry.at);
           if (entry.type === 'update') attempts.delete(id);
-          if (made && exact) follow(id, entry.before.revision, made.revision);
+          if (answered && made) follow(id, entry.before.revision, made.revision);
         } });
       if (!held.live()) return false;
       // A change that has moved underneath can never be undone; anything else can be tried again.
-      const never = ['mark_revision_conflict', 'mark_not_found', 'mark_edit_forbidden', 'mark_category_not_found', 'import_changed'].includes(state.failure);
+      const never = ['mark_revision_conflict', 'mark_not_found', 'mark_edit_forbidden', 'mark_category_not_found', 'import_changed', 'undo_moved'].includes(state.failure);
       if (ok || never) state.undo = state.undo.filter(item => item.at !== entry.at);
       emit();
       return ok;

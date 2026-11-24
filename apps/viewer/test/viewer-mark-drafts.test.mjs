@@ -395,7 +395,8 @@ test('a save the network refuses says so and keeps what was typed; one that arri
     assert.doesNotMatch(panel.text(), /Someone else|Could not/, at);
     assert.equal(stored(storage), false, at);
     assert.deepEqual(rows(), [[kind === 'new' ? 1 : 2, 'Ladder']], at + ': no copy');
-    assert.equal(panel.store.state.undo.length, undo + 1, at);
+    // Found without an answer, an edit is not proved to be from here: no Undo of it.
+    assert.equal(panel.store.state.undo.length, undo + (kind === 'edit' && how !== 'never sent' ? 0 : 1), at);
     const [{ id }] = panel.store.state.marks, second = page();
     await second.marks.setScope(person);
     assert.deepEqual([form(second).hidden, second.store.state.marks.map(mark => mark.id)], [true, [id]], at + ': the same mark after a reload');
