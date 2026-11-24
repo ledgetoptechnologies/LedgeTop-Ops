@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const path = require('node:path');
 const { validCameraFilename } = require('./cameraPhotos');
+const { modelDeleted, grantVersionId } = require('./modelDeletion');
 
 function now() {
   return new Date().toISOString();
@@ -583,7 +584,17 @@ class ViewerRepository {
     };
   }
 
+  modelDeleted(modelId, modelVersionId = null) {
+    return modelDeleted(this.database, modelId, modelVersionId);
+  }
+
+  assertModelNotDeleted(modelId, modelVersionId = null) {
+    if (this.modelDeleted(modelId, modelVersionId))
+      throw Object.assign(new Error('the model is in the Recycle Bin'), { code: 'model_deleted' });
+  }
+
   createPublicShare(input) {
+    this.assertModelNotDeleted(input.modelId, input.modelVersionId);
     const id = input.id || crypto.randomUUID();
     const timestamp = now();
     this.database.prepare(`INSERT INTO public_shares(
@@ -699,7 +710,10 @@ class ViewerRepository {
 
   publicShareLive(share, at = Date.now()) {
     if (!share || share.revokedAt) return false;
-    return !share.expiresAt || Date.parse(share.expiresAt) > at;
+    // Only an expiry that is known to be in the future keeps it alive; one that cannot be read does not.
+    if (share.expiresAt && !(Date.parse(share.expiresAt) > at)) return false;
+    // A stored link is refused while its model is in the Recycle Bin.
+    return !(share.modelId && this.modelDeleted(share.modelId, share.modelVersionId));
   }
 
   recordPublicShareAccess(id) {
@@ -789,6 +803,7 @@ class ViewerRepository {
   }
 
   createSessionGrant({ modelId, modelVersionId = null, reviewAttemptId = null, sessionMode = 'published', sourceAuthorization: authorization = null, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
+    this.assertModelNotDeleted(modelId, modelVersionId);
     this.pruneAuthState();
     const id = crypto.randomUUID();
     const timestamp = now();
@@ -824,7 +839,8 @@ class ViewerRepository {
   redeemSessionGrant(id, at = Date.now()) {
     return this.transaction(() => {
       const row = this.database.prepare('SELECT * FROM session_grants WHERE id=?').get(id);
-      if (!row || row.redeemed_at || Date.parse(row.expires_at) <= at) return null;
+      if (!row || row.redeemed_at || !(Date.parse(row.expires_at) > at)) return null;
+      if (this.modelDeleted(row.model_id, grantVersionId(row))) return null;
       if (row.source_authorization_id && this.database.prepare(`SELECT 1
         FROM revoked_published_session_authorizations
         WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`
@@ -877,6 +893,7 @@ class ViewerRepository {
     const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
     if (sessionMode !== 'published' && sourceId !== null)
       throw new TypeError('source authorization is only valid for published sessions');
+    if (this.modelDeleted(modelId, modelVersionId)) return null;
     const inserted = this.database.prepare(`INSERT INTO viewer_sessions(
       id,token_hash,model_id,model_version_id,review_attempt_id,session_mode,
       source_authorization_type,source_authorization_id,source_authorization_version,
@@ -899,7 +916,9 @@ class ViewerRepository {
   }
 
   viewerSessionLive(session, at = Date.now()) {
-    if (!session || session.revokedAt || Date.parse(session.expiresAt) <= at) return false;
+    if (!session || session.revokedAt || !(Date.parse(session.expiresAt) > at)) return false;
+    // So is a stored session, whoever it was issued to.
+    if (this.modelDeleted(session.modelId, session.modelVersionId)) return false;
     if (session.sourceAuthorization && this.database.prepare(`SELECT 1 FROM revoked_published_session_authorizations
       WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`)
       .get(session.sourceAuthorization.type, session.sourceAuthorization.id, session.sourceAuthorization.version)) return false;
