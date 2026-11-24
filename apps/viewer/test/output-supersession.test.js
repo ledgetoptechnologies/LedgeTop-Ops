@@ -240,7 +240,7 @@ test('worker shutdown aborts both supersession passes and joins every lane and m
       db:{close(){events.push('db-close');}},console:{log(){},error(){events.push('failure');}},process:processState,
     });
     await new Promise(resolve=>setImmediate(resolve));
-    assert.deepEqual(lanes.map(value=>value.name),['dataset-operation','processing','provider-health','derivative','measurement','event','viewer-acceptance-ack','import-cleanup']);
+    assert.deepEqual(lanes.map(value=>value.name),['dataset-operation','processing','provider-health','derivative','measurement','event','viewer-acceptance-ack','import-cleanup','content-chunk-backfill']);
     if(failed)lanes[0].reject(Error('synthetic lane failure'));else lanes[0].resolve();
     await new Promise(resolve=>setImmediate(resolve));
     assert.equal(events.includes('db-close'),false,'a sibling lane still owns work');
