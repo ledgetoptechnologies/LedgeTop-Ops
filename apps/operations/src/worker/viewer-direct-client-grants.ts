@@ -519,30 +519,29 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  const {env,principal}=input;await manage(env,principal);const parsed=inputSchema.safeParse(input.grant);
  if(!parsed.success||!key.safeParse(input.idempotencyKey).success)fail(400,'invalid_request','Invalid Viewer sharing request');
  const {replaces,...g}=parsed.data,fingerprint=await sha256(JSON.stringify(replaces?['direct.replace',g,replaces]:['direct.create',g]));
- const prior=await receipt(env,principal.id,input.idempotencyKey,fingerprint);
- if(prior){
-  const priorPin=createReceiptAuthorityPin(prior.response);
-  if(priorPin){
-   const current=await recipient(env,g.sourceId,g.workspaceId);
-   if(JSON.stringify(priorPin)!==JSON.stringify(current.pin))
-    fail(409,'relationship_missing','Client authority changed; refresh the client connection');
-  }else{
-   // Pre-pin receipts cannot establish that a share was created for a later
-   // Operations owner. Preserve replay only for currently native recipients.
-   const current=await recipient(env,g.sourceId,g.workspaceId);
-   if(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))
-    fail(409,'relationship_missing','Client authority changed; refresh the client connection');
-  }
+ const readCommittedResult=async()=>{
+  const prior=await receipt(env,principal.id,input.idempotencyKey,fingerprint);
+  if(!prior)return null;
+  const priorPin=createReceiptAuthorityPin(prior.response),current=await recipient(env,g.sourceId,g.workspaceId);
+  // Pre-pin receipts cannot establish that a share was created for a later Operations owner.
+  if((priorPin&&JSON.stringify(priorPin)!==JSON.stringify(current.pin))
+   ||(!priorPin&&(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))))
+   fail(409,'relationship_missing','Client authority changed; refresh the client connection');
   const grant=createReceiptGrant(prior.response,prior.grantId,g.selection);
   return {grant,replayed:true,...(replaces?{sessionRevocation:await drainReplaced(env,replaces)}:{})};
- }
+ };
+ const prior=await readCommittedResult();if(prior)return prior;
  // After the replay check, so an already committed request still replays; before any read or write.
  const expiresAt=canonicalExpiry(g.expiresAt);
  if(expiresAt===undefined)fail(400,'expired_at_invalid','Expiration is outside the supported range');
  if(expiresAt!==null&&Date.parse(expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
- let catalog;
- try{catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{}),...(g.selection?{selection:g.selection,validateSelection:true}:{})});}
- catch(error){
+ try{
+  const catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{}),...(g.selection?{selection:g.selection,validateSelection:true}:{})});
+  if(catalog.project.id!==g.viewerProjectId)fail(409,'task_not_in_project','Viewer project does not match');
+  if(g.taskId&&(catalog.tasks.length!==1||catalog.tasks[0]?.id!==g.taskId))fail(409,'task_not_published','Task is not published in this project');
+ }catch(error){
+  // A competing replacement can commit while this request waits for the Viewer.
+  if(replaces){const replay=await readCommittedResult();if(replay)return replay;}
   if(error instanceof ViewerServiceError){
    if(error.code==='unsupported')fail(409,'selection_unsupported','The Viewer must be updated before it can share part of a project');
    if(error.code==='not_found')fail(409,g.taskId?'task_not_published':g.selection?'selection_not_in_project':'relationship_missing',g.taskId
@@ -551,8 +550,6 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
   }
   throw error;
  }
- if(catalog.project.id!==g.viewerProjectId)fail(409,'task_not_in_project','Viewer project does not match');
- if(g.taskId&&(catalog.tasks.length!==1||catalog.tasks[0]?.id!==g.taskId))fail(409,'task_not_published','Task is not published in this project');
  // Recheck recipient authority after the remote catalog request, then pin it in the INSERT itself.
  const {row,guard,operationsAuthority,pin}=await recipient(env,g.sourceId,g.workspaceId),database=db(env),id=crypto.randomUUID(),now=new Date().toISOString();
  const listed=JSON.stringify(replaces??[]),marker=`${REPLACED_PREFIX}${id}`;
@@ -621,13 +618,8 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  ...(replaces?[database.prepare(`INSERT INTO viewer_direct_client_grant_audit(id,grant_id,action,actor_staff_id,idempotency_key,details_json,created_at)
   SELECT lower(hex(randomblob(16))),id,'grant.revoke',?,?,json_object('success',json('true'),'replacedBy',?),? FROM viewer_direct_client_grants WHERE revoke_reason=?`)
   .bind(principal.id,input.idempotencyKey,id,now,marker)]:[])]);
- }catch(error){const committed=async()=>{const replay=await receipt(env,principal.id,input.idempotencyKey,fingerprint);if(!replay)return null;
-   const current=await recipient(env,g.sourceId,g.workspaceId),priorPin=createReceiptAuthorityPin(replay.response);
-   if((priorPin&&JSON.stringify(priorPin)!==JSON.stringify(current.pin))
-    ||(!priorPin&&(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))))
-    fail(409,'relationship_missing','Client authority changed; refresh the client connection');
-   return {grant:createReceiptGrant(replay.response,replay.grantId,g.selection),replayed:true,...(replaces?{sessionRevocation:await drainReplaced(env,replaces)}:{})};};
-  const replay=await committed();if(replay)return replay;
+ }catch(error){
+  const replay=await readCommittedResult();if(replay)return replay;
   if(replaces){
    // This request changed nothing. A conflict seen before the batch stands: the receipt was read after it. Otherwise say
    // why by reading again, in this order, then read the receipt once more; anything else is not guessed.
@@ -639,7 +631,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
     if(JSON.stringify([current.pin,current.row])!==JSON.stringify([pin,row]))fail(409,'relationship_missing','Client connection changed; refresh before sharing');
     await requireRoom();
    }catch(conflict){reason=conflict;}
-   const late=await committed();if(late)return late;
+   const late=await readCommittedResult();if(late)return late;
    throw reason;
   }
   const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?

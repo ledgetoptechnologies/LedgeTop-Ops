@@ -1,5 +1,6 @@
 import {readFileSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
+import {ViewerServiceError} from '@ltds/shared';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
 import type {Env,StaffPrincipal} from '../src/worker/types';
@@ -237,6 +238,35 @@ describe('replacing a client’s shares in a project',()=>{
   const seat=(await row(f,'filler-0')),free=[{grantId:String(seat.id),grantVersion:1}];
   const full=await delayed(f,{viewerProjectId:'filler-project-0',replaces:free},{viewerProjectId:'filler-project-0',replaces:free},'replace-delayed-0004');
   expect(full.value).toEqual({...full.won,replayed:true});
+ },120_000);
+
+ it.each([
+  {identical:true,failure:'unavailable'},
+  {identical:false,failure:'unavailable'},
+  {identical:true,failure:'wrong project'},
+  {identical:false,failure:'wrong project'},
+ ])('checks the receipt after a delayed catalog result ($failure, identical: $identical)',async({identical,failure})=>{
+  const f=await fixture(),first=(await share(f.env)).grant;
+  const mine={selection:only,replaces:[ref(first)]};
+  const peer=identical?mine:{replaces:mine.replaces};
+  const key='replace-catalog-fail-01';
+  let release=()=>{},waiting=()=>{};
+  const held=new Promise<void>(resolve=>{release=resolve;});
+  const reached=new Promise<void>(resolve=>{waiting=resolve;});
+  mocks.catalog.mockImplementationOnce(async()=>{
+   waiting();await held;
+   if(failure==='unavailable')throw new ViewerServiceError('Viewer temporarily unavailable','unavailable',503);
+   return {project:{id:'wrong-project'},tasks:[]};
+  });
+  const pending=share(f.env,mine,key).then(value=>({value}),error=>({error}));
+  await reached;
+  try{
+   const won=await share(f.env,peer,key),landed=await everything(f);
+   release();
+   if(identical)expect(await pending).toEqual({value:{...won,replayed:true}});
+   else expect(await pending).toMatchObject({error:{code:'idempotency_conflict'}});
+   expect(await everything(f)).toBe(landed);
+  }finally{release();}
  },120_000);
 
  it('a receipt that appears while a failed batch is being explained still decides',async()=>{
