@@ -65,7 +65,9 @@ function idempotent(repository) {
     let completed = false;
     const originalJson = res.json.bind(res);
     res.json = (body) => {
-      if (!completed && res.statusCode < 500) {
+      // A refusal because the model is in the Recycle Bin ends when it is
+      // restored, so it is not kept: the same key may be used again then.
+      if (!completed && res.statusCode < 500 && !res.locals.modelDeleted) {
         repository.completeIdempotency(keyId, idempotencyKey, res.statusCode, encrypt(body));
         completed = true;
       }

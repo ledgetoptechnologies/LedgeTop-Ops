@@ -346,8 +346,10 @@ function createApiV1(repository) {
 
   router.post('/api/v1/models/:id/sessions', serviceOnly, idempotentService, (req, res) => {
     const model = repository.getModel(req.params.id);
-    if (!model || model.status !== 'ready' || !model.activeVersion)
+    if (!model || model.status !== 'ready' || !model.activeVersion) {
+      res.locals.modelDeleted = Boolean(model && repository.modelDeleted(model.id));
       return res.status(404).json({ error: 'ready model not found' });
+    }
     const body = req.body || {};
     const sourceAuthorization = body.sourceAuthorization === undefined
       ? null
@@ -405,8 +407,10 @@ function createApiV1(repository) {
     } catch (error) {
       if (error?.code === 'source_authorization_revoked')
         return res.status(409).json({ error: 'sourceAuthorization is revoked' });
-      if (error?.code === 'model_deleted')
+      if (error?.code === 'model_deleted') {
+        res.locals.modelDeleted = true;
         return res.status(404).json({ error: 'ready model not found' });
+      }
       throw error;
     }
     const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
@@ -465,7 +469,10 @@ function createApiV1(repository) {
   router.post('/api/v1/models/:id/shares', serviceOnly, idempotentService, async (req, res, next) => {
     try {
       const model = repository.getModel(req.params.id);
-      if (!model || model.status !== 'ready') return res.status(404).json({ error: 'ready model not found' });
+      if (!model || model.status !== 'ready') {
+        res.locals.modelDeleted = Boolean(model && repository.modelDeleted(model.id));
+        return res.status(404).json({ error: 'ready model not found' });
+      }
       const body = req.body || {};
       const shareClass=body.shareClass===undefined?'staff':body.shareClass,source=body.sourceAuthorization;if(!['staff','client'].includes(shareClass))return res.status(400).json({error:'shareClass must be staff or client'});if(shareClass==='staff'&&source!==undefined&&source!==null)return res.status(400).json({error:'staff shares cannot include sourceAuthorization'});if(shareClass==='client'){if(!config.clientViewerSharesEnabled)return res.status(503).json({error:'client Viewer shares are disabled'});if(!source||typeof source!=='object'||Array.isArray(source)||Object.keys(source).sort().join(',')!=='expiresAt,id,subject,type,version'||source.type!=='client_grant'||typeof source.id!=='string'||!source.id||!Number.isSafeInteger(source.version)||source.version<1||typeof source.subject!=='string'||!source.subject||source.subject.length>512||(source.expiresAt!==null&&(!Number.isFinite(Date.parse(source.expiresAt))||Date.parse(source.expiresAt)<=Date.now())))return res.status(400).json({error:'sourceAuthorization is invalid'});}
       if (body.versionPolicy === 'pinned') {
@@ -511,7 +518,10 @@ function createApiV1(repository) {
         embedUrl: `${base}/embed/${token}`,
       });
     } catch (error) {
-      if (error?.code === 'model_deleted') return res.status(404).json({ error: 'ready model not found' });
+      if (error?.code === 'model_deleted') {
+        res.locals.modelDeleted = true;
+        return res.status(404).json({ error: 'ready model not found' });
+      }
       next(error);
     }
   });
