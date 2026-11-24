@@ -148,8 +148,10 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       const stored=shareReceipt&&res.statusCode===201&&body&&typeof body==='object'
         ?Object.fromEntries(Object.entries(body).filter(([name])=>name!=='viewUrl'))
         :body;
-      if(outputShare)processing.completeOutputShareReceipt(req.adminIdempotency,res.statusCode,stored);
-      else processing.completeAdminIdempotency(request.sessionId,key,res.statusCode,stored);
+      if(outputShare){
+        const recorded=processing.completeOutputShareReceipt(req.adminIdempotency,res.statusCode,stored);
+        if(recorded&&res.statusCode>=400&&!res.headersSent)res.setHeader('X-Viewer-Share-Receipt-Recorded','true');
+      }else processing.completeAdminIdempotency(request.sessionId,key,res.statusCode,stored);
     };
     const originalJson=res.json.bind(res),originalEnd=res.end.bind(res);
     res.json=(body)=>{finish(body);return originalJson(body);};

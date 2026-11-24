@@ -175,9 +175,11 @@ const workspaceController=window.opener&&!window.opener.closed?window.opener:nul
 const reviewSessionController=new ReviewSessionController({origin:location.origin,storage:sessionStorage,issueGrant:({sessionMode,attemptId,outputId},{signal}={})=>api(sessionMode==='published'?`/api/v1/processing/outputs/${encodeURIComponent(outputId)}/view-sessions`:`/api/v1/attempts/${encodeURIComponent(attemptId)}/review-sessions`,{method:'POST',body:{},signal}),measurementRequest:createMeasurementCalculationBroker({origin:location.origin,getAuthorization:()=>({accessToken:state.token,session:state.adminSession})})});
 let workspaceRenewal=null;
 let workspaceAuthorizationClearing=false;
+let publicationAuthorityGeneration=0;
+const publicationReads=new Set();
 const navigationWork=createWorkspaceNavigationWork({windowRef:window});
 function currentWorkspaceNavigationState(){return workspaceNavigationState({newTask:activeNewTask?.navigationState,gcpWorkspaces:state.gcpWorkspaces,taskDetails:state.taskDetails,work:navigationWork.snapshot(),legacySelectedFileCount:modalContent.querySelector('#upload-form input[type="file"]')?.files?.length||0});}
-const workspaceRecovery=createWorkspaceRecovery({getSession:()=>({session:state.adminSession,accessToken:state.token,controllerOrigin:sessionStorage.getItem(OPS_ORIGIN_KEY)}),getView:workspaceView,getNavigationState:currentWorkspaceNavigationState,onPopupBlocked:({continueInCurrentTab,navigationState})=>renderCurrentTabRecoveryOffer({container:document.querySelector('dialog.workspace-recovery[open]'),navigationState,continueInCurrentTab}),install:installWorkspaceSession,onFatal:()=>{workspaceAuthorizationClearing=false;clearWorkspaceAuthorization('revoked');},onPaused:()=>{state.shareContext?.publicationConfirmation?.abort();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{workspaceAuthorizationClearing=false;storageUsagePoll.sync();scheduleOperationRefresh();toast('Access restored. Your workspace and upload can continue.');}});
+const workspaceRecovery=createWorkspaceRecovery({getSession:()=>({session:state.adminSession,accessToken:state.token,controllerOrigin:sessionStorage.getItem(OPS_ORIGIN_KEY)}),getView:workspaceView,getNavigationState:currentWorkspaceNavigationState,onPopupBlocked:({continueInCurrentTab,navigationState})=>renderCurrentTabRecoveryOffer({container:document.querySelector('dialog.workspace-recovery[open]'),navigationState,continueInCurrentTab}),install:installWorkspaceSession,onFatal:()=>{workspaceAuthorizationClearing=false;clearWorkspaceAuthorization('revoked');},onPaused:()=>{invalidatePublicationAuthority();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{workspaceAuthorizationClearing=false;storageUsagePoll.sync();scheduleOperationRefresh();toast('Access restored. Your workspace and upload can continue.');}});
 let orthophotoPool=null;
 const storageUsagePoll=createStorageUsagePoll({
   shouldPoll:()=>Boolean(state.token&&state.section==='diagnostics'&&!document.hidden&&(state.storage?.usage?.status==='pending'||state.storage?.usage?.refreshing)),
@@ -329,8 +331,17 @@ function clientAccessDiagnostic(error){
     requestId:typeof error?.requestId==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(error.requestId)?error.requestId:null};
 }
 function validOpsOrigin(value){try{const parsed=new URL(value);return parsed.protocol==='https:'&&parsed.origin===value&&parsed.pathname==='/'&&!parsed.search&&!parsed.hash?value:null}catch{return null}}
+function invalidatePublicationAuthority(){
+  publicationAuthorityGeneration++;
+  for(const controller of publicationReads)controller.abort();
+  state.shareContext?.publicationConfirmation?.abort();
+}
+function publicationAuthorityLive(){
+  return Boolean(state.token&&state.adminSession&&!workspaceAuthorizationClearing&&!workspaceRecovery.isPaused()
+    &&!workspaceRenewal?.paused&&Date.parse(state.adminSession.expiresAt)>Date.now());
+}
 function beginWorkspaceReauthorization(){if(!state.adminSession||!state.token||!validOpsOrigin(sessionStorage.getItem(OPS_ORIGIN_KEY)))return false;void workspaceRecovery.pause();return true}
-function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;state.shareContext?.publicationConfirmation?.abort();invalidateFolderAuthorization();const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;state.pendingOutputShares?.clear();state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
+function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidatePublicationAuthority();invalidateFolderAuthorization();const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;state.pendingOutputShares?.clear();state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
 async function workspaceFetch(path,init={},beforeDispatch){
   await workspaceRecovery.wait(init.signal);
   if(workspaceRenewal&&workspaceRenewal.expiresAtMs<=Date.now()){
@@ -345,7 +356,8 @@ async function workspaceFetch(path,init={},beforeDispatch){
   };
   if(beforeDispatch)(await beforeDispatch())();
   let response=await dispatch();
-  const isRecordedReceipt=response=>(Boolean(beforeDispatch)||init.headers?.['X-Viewer-Share-Receipt-Only']==='true')&&response.headers?.get('Idempotency-Replayed')==='true';
+  const isRecordedReceipt=response=>(Boolean(beforeDispatch)||init.headers?.['X-Viewer-Share-Receipt-Only']==='true')
+    &&(response.headers?.get('Idempotency-Replayed')==='true'||response.headers?.get('X-Viewer-Share-Receipt-Recorded')==='true');
   if(response.status!==401||isRecordedReceipt(response))return response;
   // Renewal retains the bearer but replaces the authenticated session envelope.
   // A response from before that renewal must not revoke the newer authority.
@@ -370,13 +382,49 @@ async function workspaceFetch(path,init={},beforeDispatch){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const assertRequestCurrent=()=>{if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});};let response;if(recoveryGuard){assertRequestCurrent();response=await fetch(path,init);assertRequestCurrent()}else response=await workspaceFetch(path,init,beforeDispatch);let payload;try{payload=await response.json()}catch{}assertRequestCurrent();if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}const receiptReplayed=(Boolean(beforeDispatch)||init.headers['X-Viewer-Share-Receipt-Only']==='true')&&response.headers?.get('Idempotency-Replayed')==='true';if(!response.ok&&receiptReplayed)throw Object.assign(responseError(payload?.message||payload?.error||'The earlier share request was refused.',response.status),{code:payload?.code,receiptReplayed:true});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});if(beforeDispatch&&response.status!==201)throw new Error('The link request outcome could not be read. Retry to check it.');return receiptReplayed?{...payload,receiptReplayed:true}:payload}
+async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){
+  const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};
+  if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();
+  if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}
+  const assertRequestCurrent=()=>{
+    if(recoveryGuard&&!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});
+  };
+  let response;
+  if(recoveryGuard){
+    assertRequestCurrent();
+    response=await fetch(path,init);
+    assertRequestCurrent();
+  }else response=await workspaceFetch(path,init,beforeDispatch);
+  let payload;
+  try{payload=await response.json()}catch{}
+  assertRequestCurrent();
+  if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){
+    if(response.status===401)clearWorkspaceAuthorization();
+    throw Object.assign(responseError('Operations client access request failed',response.status),
+      clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));
+  }
+  const shareRequest=Boolean(beforeDispatch)||init.headers['X-Viewer-Share-Receipt-Only']==='true';
+  const receiptReplayed=shareRequest&&response.headers?.get('Idempotency-Replayed')==='true';
+  const receiptRecorded=shareRequest&&response.headers?.get('X-Viewer-Share-Receipt-Recorded')==='true';
+  if(!response.ok&&(receiptReplayed||receiptRecorded)){
+    if(typeof payload?.code!=='string'||!payload.code)
+      throw new Error('The link request outcome could not be read. Retry to check it.');
+    throw Object.assign(responseError(payload.message||payload.error||'The earlier share request was refused.',response.status),
+      {code:payload.code,receiptReplayed,receiptRecorded:true});
+  }
+  if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}
+  if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);
+  if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),
+    payload?.code?{code:payload.code,grantId:payload.grantId}:{});
+  if(beforeDispatch&&response.status!==201)throw new Error('The link request outcome could not be read. Retry to check it.');
+  return receiptReplayed?{...payload,receiptReplayed:true}:payload;
+}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message,onFailure){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');let submitted=false;try{const result=await api(path,options);submitted=true;toast(typeof message==='function'?message(result):message);await load();return result}catch(error){onFailure?.(error,{submitted});toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
 async function trashMutation(promptText,path,message){if(state.busy||!await dialogs.confirm(promptText,{title:'Move to Recycle Bin',submitLabel:'Move to Recycle Bin',destructive:true})||state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');try{const result=await api(path,{method:'DELETE',body:{}});await load();toast(message,false,{label:'View Recycle Bin',run:()=>navigateWorkspace({section:'trash'},'push')});return result}catch(error){toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 function consumeReauthorizationState(){const value=new URLSearchParams(location.hash.slice(1)).get('reauthorize');if(!value)return true;let pending=null;try{pending=JSON.parse(sessionStorage.getItem(REAUTH_STATE_KEY)||'null')}catch{}sessionStorage.removeItem(REAUTH_STATE_KEY);const valid=/^[A-Za-z0-9_-]{32,128}$/.test(value)&&pending?.nonce===value&&Number.isFinite(pending?.createdAt)&&Date.now()-pending.createdAt>=0&&Date.now()-pending.createdAt<=5*60*1000;if(valid&&pending?.view)applyWorkspaceView(pending.view);return valid}
-function installWorkspaceSession(envelope){state.shareContext?.publicationConfirmation?.abort();const checked=validateWorkspaceSessionEnvelope({...envelope,accessToken:envelope.accessToken||state.token});if(envelope.accessToken){state.token=envelope.accessToken;sessionStorage.setItem(TOKEN_KEY,state.token)}sessionStorage.setItem(OPS_ORIGIN_KEY,checked.controllerOrigin);workspaceAuthorizationClearing=false;invalidateFolderAuthorization();state.adminSession=checked.session;reviewSessionController.setAuthenticatedSubject(checked.session.subject);workspaceRenewal?.dispose();workspaceRenewal=new WorkspaceSessionRenewal({controllerWindow:workspaceController,envelope,accessToken:state.token,onSession:value=>{invalidateFolderAuthorization();state.adminSession=value.session;if(!can('viewer.client_grants.manage'))state.shareContext?.publicationConfirmation?.abort();repaintFolderAuthorization()},onExpired:clearWorkspaceAuthorization,onPaused:()=>{state.shareContext?.publicationConfirmation?.abort();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{reviewSessionController.setAuthenticatedSubject(state.adminSession.subject);storageUsagePoll.sync();scheduleOperationRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000);}}});workspaceRenewal.start()}
+function installWorkspaceSession(envelope){invalidatePublicationAuthority();const checked=validateWorkspaceSessionEnvelope({...envelope,accessToken:envelope.accessToken||state.token});if(envelope.accessToken){state.token=envelope.accessToken;sessionStorage.setItem(TOKEN_KEY,state.token)}sessionStorage.setItem(OPS_ORIGIN_KEY,checked.controllerOrigin);workspaceAuthorizationClearing=false;invalidateFolderAuthorization();state.adminSession=checked.session;reviewSessionController.setAuthenticatedSubject(checked.session.subject);workspaceRenewal?.dispose();workspaceRenewal=new WorkspaceSessionRenewal({controllerWindow:workspaceController,envelope,accessToken:state.token,onSession:value=>{invalidateFolderAuthorization();state.adminSession=value.session;if(!can('viewer.client_grants.manage'))invalidatePublicationAuthority();repaintFolderAuthorization()},onExpired:clearWorkspaceAuthorization,onPaused:()=>{invalidatePublicationAuthority();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{reviewSessionController.setAuthenticatedSubject(state.adminSession.subject);storageUsagePoll.sync();scheduleOperationRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000);}}});workspaceRenewal.start()}
 async function redeemGrant(){const parts=location.pathname.split('/').filter(Boolean),grant=parts[0]==='workspace'&&parts[1]&&parts[1]!=='active'?decodeURIComponent(parts[1]):null;if(!grant)return false;if(!consumeReauthorizationState())throw responseError('invalid reauthorization state',400);const response=await fetch('/api/v1/admin-sessions/redeem',{method:'POST',headers:{'Content-Type':'application/json',...(state.token?{Authorization:`Bearer ${state.token}`}:{})},body:JSON.stringify({grant})});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization('unauthorized');throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Grant redemption failed (${response.status})`,response.status);installWorkspaceSession(body);syncWorkspaceView('replace');return true}
 async function restoreWorkspaceSession(){if(!state.token)return false;const response=await fetch('/api/v1/admin-sessions/current',{headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json'}});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Session check failed (${response.status})`,response.status);installWorkspaceSession(body);return true}
 
@@ -2032,8 +2080,9 @@ async function retrieveShareLink(element){
 // Checked after every await, so nothing read for one is used, asked or sent for another.
 function shareFence(form,output,projectId){
   const token=state.token,subject=state.adminSession?.subject,context=state.shareContext,known=state.tasks.some(task=>task.id===output.taskId);
-  const sessionId=state.adminSession?.id;
-  const authority=()=>state.token===token&&state.adminSession?.subject===subject&&state.adminSession?.id===sessionId;
+  const sessionId=state.adminSession?.id,generation=publicationAuthorityGeneration;
+  const authority=()=>publicationAuthorityLive()&&generation===publicationAuthorityGeneration
+    &&state.token===token&&state.adminSession?.subject===subject&&state.adminSession?.id===sessionId;
   const dialog=()=>authority()&&state.shareContext===context&&modal.open&&form.isConnected;
   const task=()=>state.tasks.find(item=>item.id===output.taskId);
   const moved=()=>Boolean(dialog()&&task()&&task().projectId!==projectId);
@@ -2043,13 +2092,21 @@ function shareFence(form,output,projectId){
 }
 // All three lists are read now, never taken from when the dialog opened. What cannot be read is unknown, not nobody.
 async function publicationAudience(output,projectId){
-  const token=state.token,session=state.adminSession;
-  if(!can('viewer.client_grants.manage'))return {clients:[],complete:false,text:publishAudienceText([],{complete:false})};
+  const token=state.token,session=state.adminSession,generation=publicationAuthorityGeneration;
+  const unknown=()=>({clients:[],complete:false,text:publishAudienceText([],{complete:false})});
+  const current=()=>publicationAuthorityLive()&&generation===publicationAuthorityGeneration&&state.token===token
+    &&state.adminSession===session&&can('viewer.client_grants.manage');
+  if(!current())return unknown();
   const lists=(value,...names)=>names.every(name=>Array.isArray(value?.[name]))?value:null;
-  const [direct,legacy,native]=(await Promise.allSettled([loadDirectClientAccess(api,projectId),api('/api/v1/workspace/client-grants'),api('/api/v1/workspace/native-client-grants')]))
-    .map(result=>result.status==='fulfilled'?result.value:null);
-  if(state.token!==token||state.adminSession!==session||!can('viewer.client_grants.manage'))
-    return {clients:[],complete:false,text:publishAudienceText([],{complete:false})};
+  const controller=new AbortController();
+  publicationReads.add(controller);
+  const read=path=>api(path,{signal:controller.signal});
+  let direct,legacy,native;
+  try{
+    [direct,legacy,native]=(await Promise.allSettled([loadDirectClientAccess(read,projectId),read('/api/v1/workspace/client-grants'),read('/api/v1/workspace/native-client-grants')]))
+      .map(result=>result.status==='fulfilled'?result.value:null);
+  }finally{publicationReads.delete(controller)}
+  if(!current())return unknown();
   const older=lists(legacy,'projects','associations','grants'),connected=lists(native,'targets','grants');
   const complete=Boolean(can('viewer.client_grants.manage')&&direct&&!direct.grantsIncomplete&&older&&connected),clients=new Map();
   for(const client of direct?publishAudience(direct,{projectId,taskId:output.taskId}):[])clients.set(client.key,client);
@@ -2147,8 +2204,11 @@ async function createOutputShare(form,projectId,onlyOutputId){
               consent=await confirmPublication(output,projectId,body.allowExistingAccessUpdate===true,fence,consent);
               if(!consent)throw Object.assign(new Error('Publication was not confirmed.'),{code:'share_dispatch_cancelled'});
             }
+            const approvedSession=state.adminSession;
             return ()=>{
               stillCurrent();
+              if(state.adminSession!==approvedSession)
+                throw Object.assign(new Error('Workspace access changed. Review the share again.'),{code:'share_dispatch_cancelled'});
               if(!receiptOnly&&body.publishIfReady&&consent.clients.length&&!can('viewer.client_grants.manage'))
                 throw Object.assign(new Error('Client access changed. Review the share again.'),{code:'share_dispatch_cancelled'});
               if(!receiptOnly)sending.dispatched=true;
@@ -2170,10 +2230,10 @@ async function createOutputShare(form,projectId,onlyOutputId){
           throw new Error('The previous link request is still being processed. Try again to check it.');
         if(error.status!==404||error.code!=='share_receipt_missing'||error.receiptReplayed){
           if(error.code==='share_dispatch_cancelled')return await stopped();
-          if(error.receiptReplayed&&error.status>=400&&error.status<500){
+          if(error.receiptRecorded&&error.status>=400&&error.status<500){
             pending.delete(output.id);
-            if(error.status===409&&error.message==='output_project_changed')return await reopenMovedShare(output,projectId,fence);
-            if(error.status===409&&error.message==='existing_access_update_confirmation_required')
+            if(error.status===409&&error.code==='output_project_changed')return await reopenMovedShare(output,projectId,fence);
+            if(error.status===409&&error.code==='existing_access_update_confirmation_required')
               state.sharePreflight[output.id]={...state.sharePreflight[output.id],existingAccessUpdateRequired:true};
           }
           throw error;
@@ -2200,17 +2260,16 @@ async function createOutputShare(form,projectId,onlyOutputId){
     if(!result){
       try{
         try{result=await dispatch()}catch(error){
-          if(error.status!==409||error.message!=='existing_access_update_confirmation_required'||body.allowExistingAccessUpdate)throw error;
+          if(!error.receiptRecorded||error.status!==409||error.code!=='existing_access_update_confirmation_required'||body.allowExistingAccessUpdate)throw error;
           body.allowExistingAccessUpdate=true;
           request=makeRequest();
           pending.set(output.id,request);
           result=await dispatch();
         }
       }catch(error){
-        const pendingOutcome=error.code==='idempotency_in_progress'||error.code==='idempotency_conflict'||error.code==='share_dispatch_cancelled'||error.status===408||error.status===401;
-        if(!request.dispatched||!pendingOutcome&&error.status>=400&&error.status<500)pending.delete(output.id);
+        if(!request.dispatched||error.receiptRecorded&&error.status>=400&&error.status<500)pending.delete(output.id);
         if(error.code==='share_dispatch_cancelled')return await stopped();
-        if(error.status===409&&error.message==='output_project_changed')return await reopenMovedShare(output,projectId,fence);
+        if(error.receiptRecorded&&error.status===409&&error.code==='output_project_changed')return await reopenMovedShare(output,projectId,fence);
         if(error.code==='idempotency_in_progress')throw new Error('The previous link request is still being processed. Try again to check it.');
         throw error;
       }

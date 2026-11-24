@@ -212,6 +212,7 @@ test('a share receipt lookup leaves missing and pending requests unchanged',asyn
   const requestHash=crypto.createHash('sha256').update(`POST\n${route}\n${JSON.stringify(body)}`).digest('hex');
   let response=await c.request({key,body,receiptOnly:true});
   assert.equal(response.status,404);
+  assert.equal(response.headers.get('x-viewer-share-receipt-recorded'),null);
   assert.equal((await response.json()).code,'share_receipt_missing');
   assert.equal(c.processing.getAdminIdempotency(sessionId,key),undefined);
   c.assertPrivate();
@@ -220,6 +221,7 @@ test('a share receipt lookup leaves missing and pending requests unchanged',asyn
   const pending=c.processing.getAdminIdempotency(sessionId,key);
   response=await c.request({key,body,receiptOnly:true});
   assert.equal(response.status,409);
+  assert.equal(response.headers.get('x-viewer-share-receipt-recorded'),null);
   assert.equal((await response.json()).code,'idempotency_in_progress');
   assert.equal(response.headers.get('retry-after'),'2');
   assert.deepEqual(c.processing.getAdminIdempotency(sessionId,key),pending);
@@ -241,7 +243,13 @@ test('replacement requires explicit existing-access consent and keeps old activa
   const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
   const original=c.item,next=c.output();
   const read=await c.request({item:next,method:'GET'});assert.equal((await read.json()).existingAccessUpdateRequired,true);
-  let response=await c.request({item:next});assert.equal(response.status,409);
+  const key=crypto.randomUUID();
+  let response=await c.request({item:next,key});assert.equal(response.status,409);
+  assert.equal(response.headers.get('x-viewer-share-receipt-recorded'),'true');
+  assert.equal((await response.json()).code,'existing_access_update_confirmation_required');
+  response=await c.request({item:next,key,receiptOnly:true});
+  assert.equal(response.status,409);
+  assert.equal(response.headers.get('idempotency-replayed'),'true');
   assert.equal((await response.json()).code,'existing_access_update_confirmation_required');
   c.assertPrivate(next);assert.equal(c.repository.getModel(original.model.id).activeVersionId,original.versionId);
   response=await c.request({item:next,body:{publishIfReady:true,allowExistingAccessUpdate:true}});assert.equal(response.status,201);
