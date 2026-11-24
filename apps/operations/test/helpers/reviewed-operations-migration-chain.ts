@@ -44,6 +44,8 @@ const initialClientMigrations = Object.freeze([
 // Separately reviewed application successors are byte-validated, but never
 // enter the frozen Operations199/Client149 inventories returned by this helper.
 const operationsSuccessors = Object.freeze({
+  "0248_client_onboarding_invite_mail_outbox.sql": "c9d2a0854844f217d778c64ee7ddeac4f2679c71b834fd8fa67262d33802d5b9",
+  "0247_client_onboarding_destination_target_proofs.sql": "2ca2778b0e2380b41e66959f630ec5da6cb6179a66867152db3a1c8d218f2c44",
   "0244_staff_operations_access_writer.sql": "e291acac31395ae7bd22c5b43ed44331ee9f989f074869a92dd26dd69547f815",
   "0243_staff_logs_device_eligibility.sql": "60dee9a1e92fc881d52f2f7d21b0307f6afe1571d07421c929c3e0defea179b5",
   "0242_native_staff_onboarding_approval_actor_authority.sql": "045db046a21b80e42aec764cb693615cca8737a2a0a4686676d60baf15664cee",

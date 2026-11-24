@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { safeRecipientLink, validScopeChoices } from "../src/client/ClientOnboardingStaff";
+import { readTargetPage } from "../src/client/ClientOnboardingTargetPicker";
 import { submissionFromLocation } from "../src/client/ClientOnboardingReview";
 
 const read = (name: string) => readFileSync(new URL(`../src/client/${name}`, import.meta.url), "utf8");
@@ -29,8 +30,8 @@ describe("client onboarding staff UI security boundary", () => {
     expect(safeRecipientLink(`https://portal.example.test/onboarding/${id}#${secret}`, id, secret)).toBe(`https://portal.example.test/onboarding/${id}#${secret}`);
     for (const value of [`http://portal.example.test/onboarding/${id}#${secret}`, `https://portal.example.test/onboarding/other#${secret}`,
       `https://portal.example.test/onboarding/${id}?next=x#${secret}`, `https://user@portal.example.test/onboarding/${id}#${secret}`,
-      `https://portal.example.test/onboarding/${id}#${"e".repeat(64)}`,
-      `https://portal.example.test/onboarding/${id}#short`, `javascript:alert(1)//onboarding/${id}#${secret}`, null, 7])
+      `https://portal.example.test/onboarding/${id}#short`, `https://portal.example.test/onboarding/${id}#${"e".repeat(64)}`,
+      `javascript:alert(1)//onboarding/${id}#${secret}`, null, 7])
       expect(safeRecipientLink(value, id, secret)).toBeNull();
   });
 
@@ -43,6 +44,22 @@ describe("client onboarding staff UI security boundary", () => {
       expect(validScopeChoices(value as Record<string, unknown>)).toBeNull();
     expect(staff).toContain('post(session, "scope-choices", {})');
     expect(staff).not.toMatch(/Business area ID|Existing client record/);
+  });
+
+  it("accepts a bounded target page only for the requested source, kind, and cursor boundary", () => {
+    const sourceId = "project-alpha:secondary", kind = "client";
+    const targets = Array.from({ length: 12 }, (_, i) => ({ sourceId, kind,
+      publicId: i.toString(16).padStart(32, "a"), displayName: "Fixture client" }));
+    const nextCursor = `${targets.at(-1)!.publicId}.${"c".repeat(64)}`;
+    expect(readTargetPage({ targets, nextCursor }, sourceId, kind)).toEqual({ targets, nextCursor });
+    expect(readTargetPage({ targets: [], nextCursor: null }, sourceId, kind)).toEqual({ targets: [], nextCursor: null });
+    expect(readTargetPage({ targets: targets.slice(0, 11), nextCursor }, sourceId, kind)).toBeNull();
+    expect(readTargetPage({ targets, nextCursor: `${targets[0]!.publicId}.${"c".repeat(64)}` }, sourceId, kind)).toBeNull();
+    expect(readTargetPage({ targets: [...targets, targets[0]], nextCursor: null }, sourceId, kind)).toBeNull();
+    expect(readTargetPage({ targets: [targets[0], targets[0]], nextCursor: null }, sourceId, kind)).toBeNull();
+    expect(readTargetPage({ targets, nextCursor, extra: true }, sourceId, kind)).toBeNull();
+    expect(readTargetPage({ targets, nextCursor }, "project-alpha:primary", kind)).toBeNull();
+    expect(readTargetPage({ targets, nextCursor }, sourceId, "organization")).toBeNull();
   });
 
   it("opens only an exact submission UUID from an email link", () => {

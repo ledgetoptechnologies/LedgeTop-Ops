@@ -333,22 +333,29 @@ test('current 0242 Client source successor is refused by the unchanged Client pr
   assert.equal(provider.calls, 0);
 });
 
-test('current Ops source (0227..0231, 0240..0244) matches the Ops section of the regenerated profile', () => {
+test('the pinned 0244 Ops profile accepts its historical inventory and refuses the 0247/0248 source successor', () => {
   const current = readSourceMigrationInventory(COMMIT);
   const currentOperationsNames = current.rows.operations.map((row) => row.name);
-  assert.equal(currentOperationsNames.length, 236);
-  assert.deepEqual(currentOperationsNames.slice(-5), [
-    '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql', '0242_native_staff_onboarding_approval_actor_authority.sql',
-    '0243_staff_logs_device_eligibility.sql', '0244_staff_operations_access_writer.sql',
+  assert.equal(currentOperationsNames.length, 238);
+  assert.deepEqual(currentOperationsNames.slice(-3), [
+    '0244_staff_operations_access_writer.sql', '0247_client_onboarding_destination_target_proofs.sql',
+    '0248_client_onboarding_invite_mail_outbox.sql',
   ]);
-  const common = { ...profile, sourceCommit: COMMIT, app: 'operations', sourceRows: current.rows.operations,
+  const successor = { ...profile, sourceCommit: COMMIT, app: 'operations', sourceRows: current.rows.operations,
     sourceFiles: current.files.operations, localMigrationNames: currentOperationsNames };
+  assert.throws(() => validateApprovedAppendOnlySourceInventory(successor), { code: 'source_inventory_count_mismatch' });
+  // Verify the frozen prefix byte-for-byte independently of full source admission.
+  const historicalCount = manifest.databases.operations.sourceMigrations.length;
+  const common = { ...successor, sourceCommit: APPROVED_SOURCE_COMMIT,
+    sourceRows: successor.sourceRows.slice(0, historicalCount),
+    sourceFiles: successor.sourceFiles.slice(0, historicalCount),
+    localMigrationNames: successor.localMigrationNames.slice(0, historicalCount) };
   assert.equal(validateApprovedAppendOnlySourceInventory(common).length, 236);
   const base = evaluateApprovedAppendOnlyLedger({ ...common, databaseId: PRODUCTION_MIGRATION_TARGET.databases[0].databaseId,
     ledgerRows: baseRows.operations });
   assert.equal(base.status, 'preserved-base-awaiting-entire-approved-append');
   assert.equal(base.installedRowCount, 226);
-  assert.deepEqual(base.appendEnvelope.map((row) => row.name), currentOperationsNames.slice(226));
+  assert.deepEqual(base.appendEnvelope.map((row) => row.name), common.localMigrationNames.slice(226));
   assert.deepEqual(base.appendEnvelope.map((row) => row.ledgerId), [227, 228, 229, 230, 231, 232, 233, 234, 235, 236]);
   const full = evaluateApprovedAppendOnlyLedger({ ...common, databaseId: PRODUCTION_MIGRATION_TARGET.databases[0].databaseId,
     ledgerRows: fullRows.operations });

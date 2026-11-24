@@ -151,23 +151,26 @@ test('synthetic classifier source commit accepts only identical pinned inventori
     sourceRows: source.rows, sourceFiles: changedFiles, now: fresh(fixture) }), /operations_source_bytes_mismatch/);
 });
 
-test('the regenerated profile accepts the complete current 236-file Operations inventory and refuses a successor', () => {
+test('the pinned preservation profile accepts its 0244 inventory and refuses the 0247/0248 source successor', () => {
   const current = readSourceMigrationInventory(SOURCE_COMMIT);
-  assert.equal(current.rows.operations.length, 236);
-  assert.deepEqual(current.rows.operations.slice(-5).map(row => row.name), [
-    '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql', '0242_native_staff_onboarding_approval_actor_authority.sql',
-    '0243_staff_logs_device_eligibility.sql', '0244_staff_operations_access_writer.sql',
+  assert.equal(current.rows.operations.length, 238);
+  assert.deepEqual(current.rows.operations.slice(-3).map(row => row.name), [
+    '0244_staff_operations_access_writer.sql', '0247_client_onboarding_destination_target_proofs.sql',
+    '0248_client_onboarding_invite_mail_outbox.sql',
   ]);
-  const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
-    sourceRows: current.rows, sourceFiles: current.files, now: fresh(fixture) });
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
+    sourceRows: current.rows, sourceFiles: current.files, now: fresh(fixture) }), /preservation_operations_source_inventory_mismatch/u);
+  const historical = profileSubsetFromCurrentHead(current);
+  const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: PROFILE.source.commit,
+    sourceRows: historical.rows, sourceFiles: historical.files, now: fresh(fixture) });
   assert.equal(result.databases.operations.sourceInventoryCount, 236);
   assert.equal(result.databases.operations.pendingSourceNames.length, 10);
   const bytes = Buffer.from('SELECT 1;\n');
   const extra = { name: '0245_unreviewed.sql', sha256: hash(bytes),
     gitBlobOid: createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes])).digest('hex') };
-  assert.throws(() => validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
-    sourceRows: { ...current.rows, operations: [...current.rows.operations, extra] },
-    sourceFiles: { ...current.files, operations: [...current.files.operations, { name: extra.name, bytes }] },
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: PROFILE.source.commit,
+    sourceRows: { ...historical.rows, operations: [...historical.rows.operations, extra] },
+    sourceFiles: { ...historical.files, operations: [...historical.files.operations, { name: extra.name, bytes }] },
     now: fresh(fixture) }), /preservation_operations_source_inventory_mismatch/u);
 });
 

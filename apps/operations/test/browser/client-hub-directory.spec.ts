@@ -673,3 +673,63 @@ for (const onboarding of ["available", "not enabled"] as const)
       await expect(review).toHaveCount(0);
     }
   });
+
+test("the built Operations shell keeps the Client Hub invitation when returning from Review submissions", async ({ page, baseURL }) => {
+  const origin = new URL(baseURL!).origin;
+  await page.route("**/*", route => new URL(route.request().url()).origin === origin ? route.fallback() : route.abort());
+  await mock(page, route => route.fulfill({ json: { clients: [client("org-a", "Acme")], nextCursor: null, capabilities } }),
+    ["team.view", "operations.manage"], []);
+  const verifiedUntil = "2099-01-01T00:00:00.000Z";
+  const invitationId = "11111111-1111-4111-8111-111111111111";
+  const secret = "d".repeat(64);
+  const recipientUrl = `https://portal.example.test/onboarding/${invitationId}#${secret}`;
+  let create: { commandId: string; expiresAt: string } | undefined;
+  const writes: string[] = [];
+  await page.route("**/api/session/status", route => route.fulfill({ json: {
+    userId: "staff-a", serverTime: new Date().toISOString(), expiresAt: verifiedUntil,
+  } }));
+  await page.route("**/api/client-onboarding/staff/**", route => {
+    const action = new URL(route.request().url()).pathname.split("/").at(-1);
+    if (action === "session") return route.fulfill({ json: { csrfToken: "a".repeat(64), verifiedUntil } });
+    if (action === "scope-choices") return route.fulfill({ json: { scopes: [
+      { businessAreaId: "area:drone", name: "Drone Services", allowAreaWide: true, divisions: [] },
+    ] } });
+    if (action === "inbox") return route.fulfill({ json: { submissions: [], nextCursor: null } });
+    if (action === "create") {
+      writes.push(action);
+      create = route.request().postDataJSON();
+      return route.fulfill({ json: { invitationId, expiresAt: create!.expiresAt, requestSha256: "c".repeat(64), state: "pending" } });
+    }
+    if (action === "reveal") {
+      writes.push(action);
+      expect(route.request().postDataJSON()).toEqual({ commandId: create?.commandId });
+      return route.fulfill({ json: { ...create, invitationId, invitationSecret: secret, recipientUrl } });
+    }
+    return route.fulfill({ status: 404, json: { error: "not_found" } });
+  });
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => {
+      (window as Window & { fixtureCopy?: string }).fixtureCopy = value;
+    } } });
+  });
+  await page.goto("/clients");
+  const trigger = page.getByRole("button", { name: "Onboard client", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Onboard client" });
+  await trigger.click();
+  await dialog.getByRole("combobox", { name: "Business area" }).selectOption("area:drone");
+  await dialog.getByRole("combobox", { name: "Division" }).selectOption({ label: "Whole business area" });
+  await dialog.getByRole("button", { name: "Create invitation" }).click();
+  await dialog.getByRole("button", { name: "Create one-time link" }).click();
+  await expect(dialog.getByRole("button", { name: "Copy link" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("link", { name: "Review submissions" }).click();
+  await expect(page.getByRole("heading", { name: "Review submissions" })).toBeFocused();
+  await expect(page).toHaveURL(`${origin}/administration/client-onboarding`);
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await page.goBack();
+  await expect(page).toHaveURL(`${origin}/clients`);
+  await trigger.click();
+  await dialog.getByRole("button", { name: "Copy link" }).click();
+  expect(await page.evaluate(() => (window as Window & { fixtureCopy?: string }).fixtureCopy)).toBe(recipientUrl);
+  expect(writes).toEqual(["create", "reveal"]);
+});

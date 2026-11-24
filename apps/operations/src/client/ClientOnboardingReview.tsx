@@ -109,6 +109,7 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided, 
         const value = await post(session, "review", { submissionId });
         if (!validReview(value) || value.submissionId !== submissionId) throw new Error("invalid_response");
         if (!active) return;
+        setSelectedSources(value.destinationSourceIds ?? []);
         setReview(value);
       } catch (caught) {
         if (!active) return;
@@ -119,7 +120,7 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided, 
     return () => { active = false; };
   }, [session, submissionId, onRefused]);
   useEffect(() => {
-    if (!review) return;
+    if (!review || review.targetApprovalPending) return;
     let active = true;
     setCheckError(""); setAvailable(null); setActivation(undefined);
     void Promise.allSettled([post(session, "enrollment-choices", { submissionId }), post(session, "activation-status", { submissionId })]).then(([choices, status]) => {
@@ -142,24 +143,30 @@ export function ClientOnboardingReviewPanel({ session, submissionId, onDecided, 
     ["Phone", f.phone], ...(business ? [["Company", f.organizationName], ["Company email", f.organizationEmail], ["Company phone", f.organizationPhone]] as Array<[string, string]> : []),
     ["Address", [f.addressLine1, f.addressLine2].filter(Boolean).join(", ")], ["City", f.city], ["State", f.state], ["Postal code", f.postalCode], ["Country", f.country]];
   const finished = decided !== null || (activation !== undefined && activation !== null);
+  const ordinaryApproval = review.targetClientRecordId === null && !review.targetApprovalPending;
 
+  const destinationUnavailable = review.destinationSourceIds?.some(sourceId => available !== null && !available.includes(sourceId));
   return <Card><section className="onboarding-created onboarding-review" aria-labelledby="onboarding-review-title">
     <h2 id="onboarding-review-title">Review {f.name || "submission"}</h2>
     <p className="onboarding-review-meta">Submitted {new Date(review.submittedAt).toLocaleString()}</p>
+    {review.destinationSourceIds && <p>Invited for {destinationList(review.destinationSourceIds)}.</p>}
+    {destinationUnavailable && <p role="alert">An invite destination is unavailable. This submission cannot be approved here.</p>}
     <dl className="onboarding-review-fields">{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || "—"}</dd></div>)}</dl>
-    {review.targetClientRecordId !== null && <p className="onboarding-staff-error" role="status"><strong>Can't be approved here.</strong> This submission updates an existing client, which this review doesn't support yet.</p>}
-    {review.targetClientRecordId === null && activation === undefined && !checkError && <Skeleton variant="text" lines={2} label="Checking review status…" />}
-    {review.targetClientRecordId === null && checkError && <div className="onboarding-staff-error" role="alert"><p>{checkError}</p>
+    {review.targetApprovalPending
+      ? <p className="onboarding-staff-error" role="status"><strong>Needs existing-record review.</strong> Approval for this submission is unavailable here.</p>
+      : review.targetClientRecordId !== null && <p className="onboarding-staff-error" role="status"><strong>Can't be approved here.</strong> This submission updates an existing client, which this review doesn't support yet.</p>}
+    {ordinaryApproval && activation === undefined && !checkError && <Skeleton variant="text" lines={2} label="Checking review status…" />}
+    {ordinaryApproval && checkError && <div className="onboarding-staff-error" role="alert"><p>{checkError}</p>
       <button type="button" className="button-ghost button-small" onClick={() => setCheckRun(value => value + 1)}>Check again</button></div>}
-    {review.targetClientRecordId === null && !finished && activation === null && available !== null && <>
-      <fieldset className="onboarding-destinations"><legend>Which Ledge Top businesses is this client for?</legend>
+    {ordinaryApproval && !finished && activation === null && available !== null && !destinationUnavailable && <>
+      {!review.destinationSourceIds && <fieldset className="onboarding-destinations"><legend>Which Ledge Top businesses is this client for?</legend>
         {available.length === 0 && <p>No Project Alpha businesses are available for this submission.</p>}
         {available.map(sourceId => <label key={sourceId}><input type="checkbox" checked={selectedSources.includes(sourceId)} disabled={locked}
           onChange={event => chooseSource(sourceId, event.target.checked)} />
           {destinationName(sourceId)}</label>)}
         <p className="onboarding-hint">{selectedSources.length === 0 ? "No business selected: the client is approved in Operations only."
           : `A client record is created in ${destinationList(selectedSources)}. Project Alpha stays the owner of documents and finances.`}</p>
-      </fieldset>
+      </fieldset>}
       {business && <fieldset className="onboarding-company-mode"><legend>Company</legend>
         <label><input type="radio" name={`company-${submissionId}`} disabled={locked} checked={companyMode === "new"} onChange={() => chooseMode("new")} />New company “{f.organizationName}”</label>
         <label><input type="radio" name={`company-${submissionId}`} disabled={locked} checked={companyMode === "existing"} onChange={() => chooseMode("existing")} />An existing company in Operations</label>

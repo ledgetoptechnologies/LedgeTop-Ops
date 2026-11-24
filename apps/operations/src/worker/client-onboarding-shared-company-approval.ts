@@ -1,5 +1,5 @@
 import type {AuthenticatedNativeStaffWithAdmissionVersion} from "./native-staff-auth";
-import {readClientOnboardingSubmissionForReview} from "./client-onboarding-review";
+import {readClientOnboardingSubmissionForReview,verifyReviewDestinationIntent} from "./client-onboarding-review";
 import {updateDestinations} from "./native-directory-profile-routes";
 import {readNativeDirectoryDurableRemoteHead,writeSharedCompanyOnboardingMemberProfile,
  type NativeDirectoryDestinationAuthority,type NativeDirectoryClientCreateProfile,type NativeDirectoryScope} from "./native-directory-profile-writer";
@@ -33,10 +33,10 @@ function recording(session:D1DatabaseSession){
 /** One reviewed exact company group, one atomic decision, only selected PA
  * destinations. No parent mutation, email matching, invitation or file grant. */
 export async function approveClientOnboardingSharedCompany(database:D1Database,auth:AuthenticatedNativeStaffWithAdmissionVersion,
- input:Record<string,unknown>,connections:string|undefined){
+ input:Record<string,unknown>,connections:string|undefined,inviteDestinationBindingsJson?:string){
  if(typeof input.planId!=='string'||!UUID.test(input.planId)||typeof input.fieldsSha256!=='string'||!SHA.test(input.fieldsSha256))return deny();
  const review=await readClientOnboardingSubmissionForReview(database,auth,input.submissionId);
- if(review.fieldsSha256!==input.fieldsSha256||review.fields.clientType!=='business'||review.targetClientRecordId!==null)return deny();
+ if(review.targetApprovalPending||review.fieldsSha256!==input.fieldsSha256||review.fields.clientType!=='business'||review.targetClientRecordId!==null)return deny();
  const session=database.withSession('first-primary');
  const plan=await session.prepare(`SELECT * FROM client_onboarding_shared_company_plans WHERE plan_id=? AND submission_id=? AND fields_sha256=?`)
   .bind(input.planId,review.submissionId,review.fieldsSha256).first<Plan>();
@@ -52,6 +52,9 @@ export async function approveClientOnboardingSharedCompany(database:D1Database,a
  const children=(await session.prepare(`SELECT * FROM client_onboarding_shared_company_plan_children WHERE plan_id=? ORDER BY client_record_id`)
   .bind(plan.plan_id).all<Child>()).results;
  if(!children.length||children.length>2)return deny();
+ const destinationIssuanceSha256=review.destinationIntent ? await verifyReviewDestinationIntent(database,auth,review,
+  children.flatMap(child=>(JSON.parse(child.destinations_json) as NativeDirectoryDestinationAuthority[]).map(destination=>destination.sourceId)),
+  inviteDestinationBindingsJson) : undefined;
  const requestSha=await digest(['onboarding-shared-company-approval-v1',plan.plan_id,plan.request_sha256]);
  const saved=await session.prepare(`SELECT decision.receipt_json,activation.state activation_state FROM client_onboarding_shared_company_approvals approval
   JOIN client_onboarding_decisions decision ON decision.decision_id=approval.decision_id
@@ -120,10 +123,11 @@ export async function approveClientOnboardingSharedCompany(database:D1Database,a
   ...childStatements,
   session.prepare(`INSERT INTO client_onboarding_decisions(decision_id,invitation_id,submission_id,fields_sha256,request_sha256,outcome,
    reviewer_staff_id,reviewer_subject,reviewer_email,original_admission_version,original_profile_version,reason,reviewed_fields_json,
-   client_record_id,client_record_version,organization_record_id,organization_record_version,relationship_version,receipt_json)
-   VALUES(?,?,?,?,?,'approved',?,?,?,?,?,'Approved reviewed shared company onboarding',?,?,1,?,?,1,?)`)
+   client_record_id,client_record_version,organization_record_id,organization_record_version,relationship_version,receipt_json${destinationIssuanceSha256?',destination_issuance_sha256':''})
+   VALUES(?,?,?,?,?,'approved',?,?,?,?,?,'Approved reviewed shared company onboarding',?,?,1,?,?,1,?${destinationIssuanceSha256?',?':''})`)
    .bind(plan.plan_id,plan.invitation_id,plan.submission_id,plan.fields_sha256,requestSha,actor.staffId,actor.accessSubject,actor.loginEmail,
-    actor.admissionVersion,actor.profileVersion,JSON.stringify(review.fields),primary.client_record_id,primary.parent_record_id,primary.parent_record_version,JSON.stringify(receipt)),
+    actor.admissionVersion,actor.profileVersion,JSON.stringify(review.fields),primary.client_record_id,primary.parent_record_id,primary.parent_record_version,JSON.stringify(receipt),
+    ...(destinationIssuanceSha256?[destinationIssuanceSha256]:[])),
   session.prepare('INSERT INTO client_onboarding_shared_company_approvals(decision_id,plan_id) VALUES(?,?)').bind(plan.plan_id,plan.plan_id),
   session.prepare('DELETE FROM client_onboarding_shared_company_execution_fences WHERE plan_id=?').bind(plan.plan_id),
  ]);
