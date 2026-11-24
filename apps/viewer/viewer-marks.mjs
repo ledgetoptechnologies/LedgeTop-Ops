@@ -41,6 +41,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // Placing: the category for the next mark, whether several go in a row, and
   // whether the spot is the fixed cross (touch, keyboard) or the pointer.
   let placeChoice = null, several = false, crosshair = false, placed = null;
+  // One go at placing, from + to Cancel: a late answer from an earlier one changes nothing in the next.
+  let placement = null;
 
   const store = createMarksStore({ request, newId, onChange: () => render() });
   const layer = createMarkMapLayer({ L, getMap,
@@ -209,6 +211,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (next !== 'idle') onActivate();
     mode = next;
     drawing = next === 'LineString' || next === 'Polygon' ? { type: next, positions: [], color: styleOf(placeChoice).color } : null;
+    placement = next === 'idle' ? null : {};
     if (next === 'idle') { crosshair = false; several = false; placed = null; }
     const map = getMap();
     if (map?.doubleClickZoom) map.doubleClickZoom[drawing ? 'disable' : 'enable']();
@@ -245,25 +248,34 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
 
   function placeAt(position) {
+    if (placement?.busy) return;
     if (several) return placeQuick(position);
     startDraft({ type: 'Point', coordinates: position });
   }
 
   // Place several: each click is saved as it is and can be undone.
   async function placeQuick(position) {
-    const held = store.hold(), starter = starterOf(placeChoice);
-    if (starter) {
-      const made = await store.addStarter(starter);
-      if (!made || !held.live() || mode !== 'Point') return;
-      placeChoice = made.id;
-    }
-    const category = categoryById(placeChoice);
-    const saved = await store.create({ id: newId(), geometry: { type: 'Point', coordinates: position }, name: nameFor(placeChoice, 'Point'), note: '',
-      categoryId: category?.id || null, ...categoryStyle(category), elevationNavd88M: null, visibility: defaultVisibility() });
-    if (!saved || !held.live()) return;
-    placed = saved;
-    reveal(saved);
-    render();
+    // What was chosen at the click, whatever is picked while it is on its way.
+    const held = store.hold(), mine = placement, clicked = placeChoice, starter = starterOf(clicked);
+    let choice = clicked;
+    mine.busy = true;
+    try {
+      if (starter) {
+        const made = await store.addStarter(starter);
+        if (!made || !held.live()) return;
+        choice = made.id;
+        // Cancelled, or begun again: the category is made, the mark is not.
+        if (placement !== mine) return;
+        if (placeChoice === clicked) placeChoice = choice;
+      }
+      const category = categoryById(choice);
+      const saved = await store.create({ id: newId(), geometry: { type: 'Point', coordinates: position }, name: nameFor(choice, 'Point'), note: '',
+        categoryId: category?.id || null, ...categoryStyle(category), elevationNavd88M: null, visibility: defaultVisibility() });
+      if (!saved || !held.live()) return;
+      reveal(saved);
+      if (placement === mine) placed = saved;
+      render();
+    } finally { mine.busy = false; }
   }
 
   function startDraft(geometry) {
@@ -730,10 +742,21 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   // Keys over the map: M adds, Escape backs out one step, arrows and Enter pick a
   // spot or move the mark.
+  // Where typing goes: a field, or anything editable, however it was made editable.
+  function textHost(target) {
+    const fieldNode = target?.closest?.('input,textarea,select');
+    if (fieldNode) return fieldNode;
+    if (target?.isContentEditable) return target;
+    for (let node = target; node; node = node.parentElement ?? node.parent ?? null) {
+      const value = node.getAttribute?.('contenteditable');
+      if (value !== null && value !== undefined) return value.toLowerCase() === 'false' ? null : node;
+    }
+    return null;
+  }
   const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
   on(window, 'keydown', event => {
     if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || !view.map) return;
-    const typing = event.target?.closest?.('input,textarea,select,[contenteditable=true]');
+    const typing = textHost(event.target);
     if (event.target?.closest?.('dialog[open]') || (typing && !overlay.contains?.(typing))) return;
     // An open photo is in front: Escape is for it.
     if (document.querySelector?.('#photo-modal')?.style.display === 'flex') return;
@@ -858,11 +881,15 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     armedDelete = null;
     const permanent = deleteForGood === current.id;
     deleteForGood = null;
+    const held = store.hold();
     const removed = await store.remove(current, { permanent });
+    if (!held.live()) return;
     // Recently deleted is full: this one can still go, but only for good and only if asked again.
     if (!removed && store.state.failure === 'mark_deleted_full' && selectedId === current.id) deleteForGood = current.id;
     render();
-    if (removed) { closeCard(); await readDeleted(); }
+    // Another card opened meanwhile stays.
+    if (removed && !draft && (!selectedId || selectedId === current.id)) closeCard();
+    if (removed) await readDeleted();
   });
   on(editor, 'submit', event => { event.preventDefault(); return saveDraft(); });
   async function saveDraft() {
@@ -875,10 +902,10 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (Number.isNaN(values.elevationNavd88M)) { more.open = true; message('NAVD88 Elevation must be a number.'); return; }
     if (values.visibility === 'client' && !values.shareAccount) { message('Choose a client account to share with.'); return; }
     const changes = { ...values, icon: keepIcon(draft.icon), geometry: draft.geometry };
-    const starter = chosenStarter();
+    const held = store.hold(), open = draft, starter = chosenStarter();
     if (starter) {
-      const open = draft, made = await store.addStarter(starter);
-      if (!made || draft !== open) return;
+      const made = await store.addStarter(starter);
+      if (!made || !held.live() || draft !== open) return;
       open.categoryId = changes.categoryId = made.id;
       fillCategoryOptions(categorySelect, made.id, 'None', category => usableCategory(category, made.id));
     }
@@ -886,9 +913,11 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const current = store.find(draft.id || draft.newId);
     if (draft.id && !current) { message('That mark is no longer there.'); return; }
     const saved = current ? await store.update(current, changes) : await store.create({ ...changes, id: draft.newId });
-    if (!saved) return;
+    if (!saved || !held.live()) return;
     reveal(saved);
-    const kept = draft?.id === saved.id;
+    // Cancelled, or something else opened meanwhile: the mark is saved, the rest is not this one's to change.
+    if (draft !== open) { render(); return; }
+    const kept = open.id === saved.id;
     closeCard();
     // An edited mark goes back to its card, a new one to its pin.
     if (kept) { selectedId = saved.id; render(); editButton.focus?.({ preventScroll: true }); } else layer.focusPin(saved.id);

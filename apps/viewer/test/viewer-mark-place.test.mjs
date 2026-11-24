@@ -368,3 +368,155 @@ test('taking the panel away takes its pop-ups away', async t => {
   assert.deepEqual(panel.overlay.children, []);
   await panel.dom.window.fire('keydown', { key: 'm' });
 });
+
+// Requests of one kind wait until they are let go.
+function gate() {
+  let waiting = null;
+  return { hold(match) { waiting = { match, promise: Promise.withResolvers(), reached: Promise.withResolvers() }; return waiting.reached.promise; },
+    release() { const was = waiting; waiting = null; was.promise.resolve(); },
+    request: async (path, init) => {
+      const held = waiting;
+      if (held && held.match(path, init)) { held.reached.resolve(); await held.promise.promise; }
+      return fetch(path, { ...init, signal: undefined });
+    } };
+}
+const writes = (path, init) => init.method === 'POST' || init.method === 'PUT';
+
+test('a save that answers late does not touch what was opened since', async t => {
+  const held = gate();
+  const { panel, mark, key, scope } = await open(t, { mount: { request: held.request } });
+  await mark('One');
+  await mark('Two');
+  const card = () => panel.q('.viewer-mark-view').textContent;
+  // Cancelled and another card opened while it is being saved.
+  for (const reopen of ['another', 'the same', 'an edit of another', 'nothing']) {
+    await panel.open('One');
+    await panel.type('[name=note]', 'Saved ' + reopen);
+    const reached = held.hold(writes), saving = panel.save();
+    await reached;
+    await key('Escape');
+    assert.equal(panel.q('.viewer-mark-form').hidden, true);
+    if (reopen === 'another') await panel.show('Two');
+    if (reopen === 'the same') await panel.show('One');
+    if (reopen === 'an edit of another') { await panel.show('Two'); await panel.card('Edit').click(); panel.q('[name=note]').value = 'Typing'; }
+    if (reopen === 'nothing') await panel.q('[aria-label=Close]').click();
+    const focus = panel.dom.document.activeElement, name = card(), hidden = panel.q('.viewer-mark-card').hidden, form = panel.q('.viewer-mark-form').hidden;
+    held.release();
+    await saving;
+    await settle();
+    assert.equal(panel.store.state.marks.find(row => row.name === 'One').note, 'Saved ' + reopen, 'the save itself counts');
+    assert.deepEqual([panel.q('.viewer-mark-card').hidden, panel.q('.viewer-mark-form').hidden], [hidden, form], reopen);
+    assert.ok(panel.dom.document.activeElement === focus, reopen + ': focus stays');
+    if (reopen === 'another') assert.equal(card(), name);
+    if (reopen === 'an edit of another') assert.equal(panel.q('[name=note]').value, 'Typing');
+    if (!panel.q('.viewer-mark-form').hidden) { await panel.card('Cancel').click(); }
+    if (!panel.q('.viewer-mark-card').hidden) await panel.q('[aria-label=Close]').click();
+  }
+  // A new mark, cancelled and placed again meanwhile.
+  await panel.place('43.05, -87');
+  await panel.type('[name=name]', 'Late');
+  const reached = held.hold(writes), saving = panel.save();
+  await reached;
+  await panel.card('Cancel').click();
+  held.release();
+  await saving;
+  assert.ok(panel.store.state.marks.some(row => row.name === 'Late'));
+  await panel.place('43.06, -87');
+  await panel.type('[name=name]', 'Next');
+  assert.equal(panel.q('[name=name]').value, 'Next');
+  await panel.card('Cancel').click();
+  // Another person meanwhile.
+  await panel.open('One');
+  await panel.type('[name=note]', 'For nobody');
+  const again = held.hold(writes), late = panel.save();
+  await again;
+  await panel.marks.setScope(scope('client', 'client-b'));
+  await panel.place('43.07, -87');
+  await panel.type('[name=name]', 'Second person');
+  held.release();
+  await late;
+  await settle();
+  assert.deepEqual([panel.q('.viewer-mark-form').hidden, panel.q('[name=name]').value, panel.store.state.marks], [false, 'Second person', []]);
+});
+
+test('Place several: what was chosen at the click is what is placed, and nothing after Cancel or a new start', async t => {
+  const held = gate();
+  const { panel, add, strip, chip, key, database, category } = await open(t, { mount: { request: held.request } });
+  const starters = (path, init) => path.endsWith('/categories/starter') && init.method === 'POST';
+  const creates = (path, init) => path.endsWith('/marks') && init.method === 'POST';
+  const begin = async name => { await add().click(); await strip('Place several').click(); if (name) await chip(name).click(); };
+  const stored = () => database.prepare('SELECT count(*) n FROM viewer_marks').get().n;
+  // Another chip picked while the suggestion is being made.
+  await begin('Hazard');
+  let reached = held.hold(starters);
+  panel.marks.mapClick({ lat: 43, lng: -87 });
+  await reached;
+  await chip('Water').click();
+  held.release();
+  await settle();
+  const [first] = panel.store.state.marks;
+  assert.deepEqual([first.name, panel.store.state.categories.find(row => row.id === first.categoryId).name], ['Hazard', 'Hazard']);
+  assert.equal(chip('Water').getAttribute('aria-pressed'), 'true', 'the newer choice stays');
+  // Clicks between the two requests do not slip through.
+  await chip('Building').click();
+  reached = held.hold(starters);
+  panel.marks.mapClick({ lat: 43, lng: -87 });
+  await reached;
+  panel.marks.mapClick({ lat: 43.5, lng: -87.5 });
+  held.release();
+  panel.marks.mapClick({ lat: 43.6, lng: -87.6 });
+  await settle();
+  assert.equal(stored(), 2);
+  // Cancelled while the suggestion is being made: no mark, and no mode comes back.
+  await chip('Utility').click();
+  reached = held.hold(starters);
+  panel.marks.mapClick({ lat: 43, lng: -87 });
+  await reached;
+  await strip('Cancel').click();
+  held.release();
+  await settle();
+  assert.deepEqual([stored(), panel.q('.viewer-mark-strip').hidden], [2, true]);
+  // Cancelled and begun again: the old click is not the new placement's.
+  await begin('Equipment');
+  reached = held.hold(starters);
+  panel.marks.mapClick({ lat: 43, lng: -87 });
+  await reached;
+  await strip('Cancel').click();
+  await key('m');
+  assert.equal(panel.q('.viewer-mark-strip').hidden, true, 'not while the earlier one is on its way');
+  held.release();
+  await settle();
+  await begin('Photo spot');
+  await settle();
+  assert.equal(stored(), 2);
+  assert.equal(chip('Photo spot').getAttribute('aria-pressed'), 'true');
+  await strip('Cancel').click();
+  // The mark itself on its way when it is cancelled: it counts, quietly.
+  await category('Own');
+  await begin('Own');
+  reached = held.hold(creates);
+  panel.marks.mapClick({ lat: 43, lng: -87 });
+  await reached;
+  await strip('Cancel').click();
+  held.release();
+  await settle();
+  assert.equal(stored(), 3);
+  assert.deepEqual([panel.q('.viewer-mark-strip').hidden, panel.q('.viewer-mark-card').hidden], [true, true]);
+});
+
+test('keys are the text\'s own anywhere it can be typed, also in parts of an editable region', async t => {
+  const { panel, key } = await open(t);
+  const make = value => { const host = panel.dom.document.createElement('div'); if (value !== undefined) host.setAttribute('contenteditable', value); return host; };
+  const inside = host => { const child = panel.dom.document.createElement('span'); host.append(child); return child; };
+  for (const target of [make('true'), make(''), make('plaintext-only'), make('PLAINTEXT-ONLY'), inside(make('')), inside(make('plaintext-only')), Object.assign(make(), { isContentEditable: true })]) {
+    await key('m', { target });
+    assert.equal(panel.q('.viewer-mark-strip').hidden, true, String(target.getAttribute('contenteditable')));
+  }
+  const island = make('true'), fixed = make('false');
+  island.append(fixed);
+  for (const target of [make(), make('false'), inside(fixed)]) {
+    await key('m', { target });
+    assert.equal(panel.q('.viewer-mark-strip').hidden, false);
+    await key('Escape');
+  }
+});
