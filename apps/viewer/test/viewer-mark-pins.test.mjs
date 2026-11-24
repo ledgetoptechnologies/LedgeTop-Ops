@@ -10,16 +10,19 @@ import { createMiniDocument } from './helpers/mini-dom.mjs';
 import { createMiniLeaflet } from './helpers/mini-leaflet.mjs';
 
 const M1_KEYS = ['pin', 'flag', 'star', 'tree', 'home', 'gate', 'ladder', 'feed', 'water', 'camera', 'warning', 'cross', 'target', 'tower', 'tent', 'vehicle', 'post', 'square'];
+const U1_KEYS = ['blind', 'plot', 'trailcam', 'track', 'rub', 'bed', 'crossing', 'culvert', 'fence', 'park', 'trail', 'corner'];
 const glyphOf = key => pinSvg(key, '#1565c0', 32).match(/stroke-linejoin="round"><path d="([^"]+)"/)[1];
 
-test('every icon key already stored still draws, in one of three shapes, with hunting last in the picker', () => {
-  for (const key of M1_KEYS) assert.ok(Object.hasOwn(MARK_ICONS, key), key);
+test('every icon key already stored still draws, in one of three shapes, under generic groups and names', () => {
+  for (const key of [...M1_KEYS, ...U1_KEYS]) assert.ok(Object.hasOwn(MARK_ICONS, key), key);
   for (const { shape, group, label, path } of Object.values(MARK_ICONS)) {
     assert.ok(['round', 'square', 'diamond'].includes(shape) && label && group);
     assert.match(path, /^[MLHVCSAZmlhvcsaz0-9 .,-]+$/);
   }
   assert.equal(new Set(Object.values(MARK_ICONS).map(icon => icon.path)).size, Object.keys(MARK_ICONS).length, 'no two icons share a drawing');
-  assert.deepEqual(ICONS_BY_GROUP.map(({ group }) => group), ['General', 'Land', 'Access', 'Hunting']);
+  assert.deepEqual(ICONS_BY_GROUP.map(({ group }) => group), ['General', 'Land', 'Access', 'Outdoors']);
+  // Not all clients hunt: nothing in the picker is about it.
+  for (const { label, group } of ICON_CHOICES) assert.doesNotMatch(label + ' ' + group, /hunt|deer|tree stand|blind|food plot|trail camera|sighting|rub|scrape|bedding/i);
   assert.deepEqual(ICON_CHOICES.map(icon => icon.name).sort(), Object.keys(MARK_ICONS).sort(), 'every icon can be picked');
   assert.deepEqual(ICON_CHOICES.map(icon => icon.group), ICONS_BY_GROUP.flatMap(({ group, icons }) => icons.map(() => group)), 'the category list has the same order');
   assert.equal(glyphOf('an-icon-from-later'), glyphOf('pin'), 'an unknown key is drawn as a dot');
@@ -203,6 +206,67 @@ test('in the panel: opening a pin keeps its element, and clicking it again keeps
   assert.deepEqual([panel.store.state.marks[0].icon, panel.store.state.marks[0].color], ['warning', '#c62828']);
   // Colours are spoken by name, and every icon is under its group.
   assert.deepEqual(panel.panel.querySelectorAll('.viewer-mark-swatch').map(node => node.getAttribute('aria-label')), MARK_COLORS.map(item => item.name));
-  assert.deepEqual(panel.panel.querySelectorAll('.viewer-mark-icon-group').map(node => node.textContent), ['General', 'Land', 'Access', 'Hunting']);
+  assert.deepEqual(panel.panel.querySelectorAll('.viewer-mark-icon-group').map(node => node.textContent), ['General', 'Land', 'Access', 'Outdoors']);
   assert.equal(panel.panel.querySelectorAll('.viewer-mark-icon').length, Object.keys(MARK_ICONS).length);
+});
+
+test('a pin not saved yet is no tab stop and takes no keys; the saved ones keep theirs', async () => {
+  const { document, leaflet, layer, pin, selected } = layerFixture();
+  const render = draft => layer.render({ visible: true, marks: [mark('a'), mark('b')], draft, selectedId: null, labels: false, preview: null, drawing: null });
+  render({ ...mark('__draft__'), name: 'Draft', movable: true });
+  const draft = pin('Draft');
+  assert.equal(draft.options.keyboard, false);
+  assert.equal(draft.getElement().tabIndex, undefined, 'Leaflet gives it no tab stop');
+  assert.equal(draft.options.draggable, true, 'it can still be placed with the pointer');
+  assert.deepEqual([pin('a').getElement().tabIndex, pin('b').getElement().tabIndex], [0, -1]);
+  await key(pin('a').getElement(), 'ArrowRight');
+  assert.equal(document.activeElement, pin('b').getElement());
+  await key(pin('b').getElement(), 'ArrowRight');
+  assert.equal(document.activeElement, pin('a').getElement(), 'the arrows pass it by');
+  await key(draft.getElement(), 'Enter');
+  draft.click();
+  assert.deepEqual(selected, []);
+  // Restyled while being placed: still none.
+  render({ ...mark('__draft__'), name: 'Draft', color: '#c62828', movable: true });
+  assert.equal(pin('Draft').getElement().tabIndex, undefined);
+  // With nothing else there is no stop to find.
+  layer.render({ visible: true, marks: [], draft: { ...mark('__draft__'), name: 'Draft', movable: true }, selectedId: null, labels: false, preview: null, drawing: null });
+  assert.equal(leaflet.pins().length, 1);
+});
+
+test('a removed or replaced marker keeps no handlers', async () => {
+  const { leaflet, layer, render, pin, selected, moved } = layerFixture();
+  const ring = [[-87, 43], [-86.99, 43], [-86.99, 43.01], [-87, 43]];
+  const area = mark('area', { geometry: { type: 'Polygon', coordinates: [ring] } });
+  const dead = [];
+  const keep = () => { for (const item of leaflet.drawn()) if (!dead.includes(item)) dead.push(item); };
+  const steps = [
+    () => render([mark('a'), mark('b'), area], { draft: { ...mark('b'), movable: true } }),
+    () => render([mark('a'), area], { draft: { ...area, movable: true } }), // b hidden, corners shown
+    () => render([mark('a'), area]), // corners gone, area redrawn
+    () => render([mark('a'), area], { drawing: { type: 'LineString', positions: [[-87, 43]], color: '#1565c0' } }), // markers replaced by ones that take no input
+    () => render([mark('a', { geometry: area.geometry }), area]), // a point became an area
+    () => render([area], { visible: false }),
+  ];
+  for (const step of steps) { step(); keep(); }
+  for (const item of dead) {
+    assert.deepEqual(Object.values(item.handlers).flat(), [], item.kind);
+    assert.equal(item.label, null);
+    item.click();
+    if (item.element) {
+      for (const name of ['Enter', 'ArrowRight']) assert.deepEqual(await key(item.element, name), { prevented: false, stopped: false });
+      await item.element.fire('focus');
+    }
+  }
+  assert.deepEqual([selected, moved], [[], []]);
+  // Live ones still work, once each.
+  render([mark('a'), mark('b')]);
+  pin('a').click();
+  await key(pin('b').getElement(), 'Enter');
+  assert.deepEqual(selected, ['a', 'b']);
+  for (let i = 0; i < 5; i += 1) render([mark('a', { color: i % 2 ? '#c62828' : '#1565c0' }), mark('b')]);
+  pin('a').click();
+  assert.deepEqual(selected, ['a', 'b', 'a'], 'redrawing adds no second handler');
+  layer.dispose();
+  for (const item of leaflet.made) assert.deepEqual(Object.values(item.handlers).flat(), []);
 });

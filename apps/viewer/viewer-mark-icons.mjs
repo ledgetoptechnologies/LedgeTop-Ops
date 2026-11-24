@@ -2,17 +2,17 @@
 // third-party icon set). A mark stores an icon key and a colour only; its shape
 // and glyph come from this table, so keep existing keys stable.
 // [label, group, shape, glyph]. Glyphs are 24x24 strokes. The picker follows ICON_GROUPS.
-// Shape is a second cue beside the glyph: round for hunting and general, square
-// for built things, diamond for a hazard.
+// Shape is a second cue beside the glyph: round in general, square for built
+// things, diamond for a hazard. Names are generic; a key is only a name in storage.
 const TABLE = {
-  ladder: ['Tree stand', 'Hunting', 'round', 'M9 21V7M15 21V7M9 11h6M9 15h6M9 19h6M4 7h16M19 7V3'],
-  blind: ['Blind', 'Hunting', 'square', 'M4 20V9l8-5 8 5v11zM8 12h8v3H8z'],
-  feed: ['Feeder', 'Hunting', 'round', 'M6 4h12l-2 8H8zM8 12l-3 9M16 12l3 9M12 12v5'],
-  plot: ['Food plot', 'Hunting', 'round', 'M12 20v-9M12 12C12 8 9 6 5 6c0 4 3 6 7 6M12 14c0-3 3-5 7-5 0 4-3 5-7 5M4 20h16'],
-  trailcam: ['Trail camera', 'Hunting', 'square', 'M7 4h10v16H7zM9.5 9.5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M10 16h4M3 8h4M17 8h4'],
-  track: ['Sighting', 'Hunting', 'round', 'M10 4C6 8 5 14 7 19c3-1 4-5 4-9zM14 4c4 4 5 10 3 15-3-1-4-5-4-9z'],
-  rub: ['Rub, scrape', 'Hunting', 'round', 'M8 3v18M16 3v18M11 8l3 3M11 12l3 3M11 4l3 3'],
-  bed: ['Bedding', 'Hunting', 'round', 'M3 14c0-4 4-6 9-6s9 2 9 6-4 5-9 5-9-1-9-5M8 13c2-2 6-2 8 0'],
+  ladder: ['Stand', 'Outdoors', 'round', 'M9 21V7M15 21V7M9 11h6M9 15h6M9 19h6M4 7h16M19 7V3'],
+  blind: ['Shelter', 'Outdoors', 'square', 'M4 20V9l8-5 8 5v11zM8 12h8v3H8z'],
+  feed: ['Feeder', 'Outdoors', 'round', 'M6 4h12l-2 8H8zM8 12l-3 9M16 12l3 9M12 12v5'],
+  plot: ['Planting', 'Outdoors', 'round', 'M12 20v-9M12 12C12 8 9 6 5 6c0 4 3 6 7 6M12 14c0-3 3-5 7-5 0 4-3 5-7 5M4 20h16'],
+  trailcam: ['Field camera', 'Outdoors', 'square', 'M7 4h10v16H7zM9.5 9.5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M10 16h4M3 8h4M17 8h4'],
+  track: ['Wildlife', 'Outdoors', 'round', 'M10 4C6 8 5 14 7 19c3-1 4-5 4-9zM14 4c4 4 5 10 3 15-3-1-4-5-4-9z'],
+  rub: ['Marked trees', 'Outdoors', 'round', 'M8 3v18M16 3v18M11 8l3 3M11 12l3 3M11 4l3 3'],
+  bed: ['Habitat', 'Outdoors', 'round', 'M3 14c0-4 4-6 9-6s9 2 9 6-4 5-9 5-9-1-9-5M8 13c2-2 6-2 8 0'],
   tree: ['Tree', 'Land', 'round', 'M12 3l6 9h-3l4 5H5l4-5H6zM12 17v4'],
   water: ['Water', 'Land', 'round', 'M12 3c3.5 4.5 6 8 6 11a6 6 0 0 1-12 0c0-3 2.5-6.5 6-11z'],
   crossing: ['Crossing', 'Land', 'round', 'M3 9c3-3 6 3 9 0s6 3 9 0M3 16c3-3 6 3 9 0s6 3 9 0'],
@@ -38,7 +38,7 @@ const TABLE = {
 };
 export const MARK_ICONS = Object.freeze(Object.fromEntries(Object.entries(TABLE)
   .map(([key, [label, group, shape, path]]) => [key, Object.freeze({ label, group, shape, path })])));
-export const ICON_GROUPS = Object.freeze(['General', 'Land', 'Access', 'Hunting']);
+export const ICON_GROUPS = Object.freeze(['General', 'Land', 'Access', 'Outdoors']);
 export const markIconName = name => (Object.hasOwn(MARK_ICONS, name) ? name : 'pin');
 
 // Ten named colours. Any other colour a mark has is kept and reads as Custom.

@@ -297,3 +297,69 @@ test('signed-in client: map-click and typed pins survive a reload at full precis
     assert.equal(rows[1].visibility, 'private');
   });
 });
+
+// Keyboard and touch on real Leaflet markers.
+test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
+  await withBrowser(t, {}, async h => {
+    const { client, waitFor } = h;
+    const key = async (name, code) => {
+      for (const type of ['keyDown', 'keyUp']) await client.command('Input.dispatchKeyEvent', { type, key: name, code: code || name, windowsVirtualKeyCode: { Enter: 13, ArrowRight: 39, ArrowLeft: 37, Tab: 9 }[name] });
+    };
+    const place = async (lat, lng, name) => {
+      await h.type('[name=coordinates]', `${lat}, ${lng}`);
+      await h.pressText('Place pin');
+      await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'editor');
+      await h.type('.viewer-mark-form [name=name]', name);
+    };
+    const stops = () => client.evaluate("[...document.querySelectorAll('.viewer-map-mark')].map(p => [p.getAttribute('aria-label').split(',')[0], p.getAttribute('tabindex')])");
+    const centre = () => client.evaluate("map.setView([43.05, -87.0], 19, { animate: false }), [map.getCenter().lat, map.getCenter().lng]");
+    const focused = () => client.evaluate("document.activeElement.getAttribute('aria-label')?.split(',')[0] || document.activeElement.name || null");
+    await h.load();
+    await place(43.05, -87.0002, 'West');
+    await h.pressText('Save');
+    await waitFor('marks.store.state.marks.length === 1', 'first');
+    await place(43.05, -86.9998, 'East');
+    await h.pressText('Save');
+    await waitFor('marks.store.state.marks.length === 2', 'second');
+
+    // One tab stop; the pin being placed is none.
+    await place(43.0502, -87.0, 'New');
+    const before = Object.fromEntries(await stops());
+    assert.deepEqual([before.West, before.East, before.Pin ?? before.New], ['0', '-1', null]);
+    await h.pressText('Close');
+    const view = await centre();
+    await client.evaluate("document.querySelector('.viewer-map-mark[tabindex=\"0\"]').focus(), 0");
+    assert.equal(await focused(), 'West');
+    await key('ArrowRight');
+    assert.equal(await focused(), 'East');
+    await delay(400);
+    assert.deepEqual(await client.evaluate('[map.getCenter().lat, map.getCenter().lng]'), view, 'the arrows move between pins, not the map');
+    assert.deepEqual(await stops(), [['West', '-1'], ['East', '0']]);
+    const element = "window.east = document.activeElement, 0";
+    await client.evaluate(element);
+    await key('Enter');
+    await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'opened by Enter');
+    assert.equal(await client.evaluate("document.querySelector('.viewer-mark-form [name=name]').value"), 'East');
+    assert.equal(await client.evaluate('window.east.isConnected && document.activeElement === window.east'), true, 'the same pin, still focused');
+    await h.pressText('Close');
+
+    // Touch: 44 px around the pin, a tap opens, a swipe from a pin pans and moves nothing.
+    await client.command('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+    await centre();
+    const box = await client.evaluate("(() => { const r = [...document.querySelectorAll('.viewer-map-mark')].find(p => p.getAttribute('aria-label').startsWith('West')).getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()");
+    for (const [dx, dy] of [[-20, -4], [20, -4], [0, -24], [0, 16]]) {
+      assert.equal(await client.evaluate(`document.elementFromPoint(${box[0] + dx}, ${box[1] + dy}).closest('.viewer-map-mark')?.getAttribute('aria-label').split(',')[0]`), 'West', `${dx},${dy}`);
+    }
+    const touch = (type, points) => client.command('Input.dispatchTouchEvent', { type, touchPoints: points });
+    await touch('touchStart', [{ x: box[0], y: box[1] }]);
+    await touch('touchEnd', []);
+    await waitFor("document.querySelector('.viewer-mark-form [name=name]').value === 'West' && !document.querySelector('.viewer-mark-form').hidden", 'opened by tap');
+    await h.pressText('Close');
+    await touch('touchStart', [{ x: box[0], y: box[1] }]);
+    for (let step = 1; step <= 6; step += 1) await touch('touchMove', [{ x: box[0] + step * 12, y: box[1] }]);
+    await touch('touchEnd', []);
+    await delay(500);
+    assert.deepEqual((await h.state()).map(mark => mark.revision), [1, 1], 'a swipe writes nothing');
+    assert.equal(await h.editorOpen(), false);
+  });
+});

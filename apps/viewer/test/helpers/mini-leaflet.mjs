@@ -31,6 +31,7 @@ export function createMiniLeaflet(document) {
     setLatLngs(positions) { this.positions = positions; return this; }
     setZIndexOffset(offset) { this.options.zIndexOffset = offset; return this; }
     on(type, handler) { (this.handlers[type] ||= []).push(handler); return this; }
+    off() { this.handlers = {}; return this; }
     bindTooltip(content, options) { this.label = { text: content.textContent, options }; return this; }
     unbindTooltip() { this.label = null; return this; }
     getLatLng() { return { lat: this.positions[0], lng: this.positions[1] }; }

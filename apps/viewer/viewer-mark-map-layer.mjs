@@ -56,7 +56,13 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
 
   function removeItem(id) {
     const item = items.get(id);
-    for (const layer of item.layers || [item.marker]) { layer.unbindTooltip?.(); group.removeLayer(layer); }
+    // Nothing a marker or its element listens to outlives it.
+    item.listeners?.abort();
+    for (const layer of item.layers || [item.marker]) {
+      layer.unbindTooltip?.();
+      group.removeLayer(layer);
+      layer.off();
+    }
     items.delete(id);
   }
 
@@ -65,7 +71,7 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       event.stopPropagation();
-      if (id !== DRAFT) onSelect(id);
+      onSelect(id);
       return;
     }
     const step = STEPS[event.key];
@@ -78,7 +84,8 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
     syncTabStops();
     items.get(next)?.marker.getElement()?.focus();
   }
-  const pinOrder = () => [...items].filter(([, item]) => item.kind === 'pin' && item.interactive).map(([id]) => id);
+  // A pin not saved yet has nothing to open, so it is not among them.
+  const pinOrder = () => [...items].filter(([id, item]) => item.kind === 'pin' && item.interactive && id !== DRAFT).map(([id]) => id);
   function syncTabStops() {
     const order = pinOrder();
     const current = order.includes(tabStop) ? tabStop : order[0];
@@ -100,15 +107,17 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onDraftMove
     const icon = L.divIcon({ className: 'viewer-map-mark' + (look.selected ? ' selected' : '') + (look.draft ? ' draft' : ''), html, iconSize: size, iconAnchor: anchor });
     const position = latLng(mark.geometry.coordinates);
     if (!item) {
-      const marker = L.marker(position, { icon, draggable: movable, interactive, keyboard: interactive, autoPan: true }).addTo(group);
-      item = { kind: 'pin', interactive, marker };
+      const keyboard = interactive && id !== DRAFT, listeners = new AbortController();
+      const marker = L.marker(position, { icon, draggable: movable, interactive, keyboard, autoPan: true }).addTo(group);
+      item = { kind: 'pin', interactive, marker, listeners };
       items.set(id, item);
       marker.on('dragend', () => { if (item.movable) onDraftMove({ type: 'Point', coordinates: toPosition(marker.getLatLng()) }); });
-      if (interactive) {
-        marker.on('click', event => { L.DomEvent.stop(event); if (id !== DRAFT) onSelect(id); });
-        const element = marker.getElement();
-        element?.addEventListener('keydown', event => pinKeys(event, id));
-        element?.addEventListener('focus', () => { tabStop = id; syncTabStops(); });
+      // Clicking the pin being placed is not a click on the map under it.
+      if (interactive) marker.on('click', event => { L.DomEvent.stop(event); if (id !== DRAFT) onSelect(id); });
+      if (keyboard) {
+        const element = marker.getElement(), { signal } = listeners;
+        element?.addEventListener('keydown', event => pinKeys(event, id), { signal });
+        element?.addEventListener('focus', () => { tabStop = id; syncTabStops(); }, { signal });
       }
     } else {
       item.marker.setLatLng(position);
