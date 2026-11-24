@@ -134,6 +134,107 @@
        border-radius: 6px; padding: 4px 6px; font-size: 12px; font-family: var(--font); flex: 1; min-width: 0;
      }
      .slider-row .val { min-width: 34px; text-align: right; color: var(--brand-muted); }
+
+    #panel-marks { display:grid; gap:8px; }
+    #panel-marks h3 { margin-bottom:0; }
+    #panel-marks button:not(.tool-btn):not(.viewer-mark-swatch):not(.viewer-mark-icon):not(.viewer-mark-list-item) {
+      padding:6px 9px; border-radius:6px; border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.05);
+      color:#e0e0e0; font:600 12px var(--font); cursor:pointer; min-height:32px;
+    }
+    #panel-marks button:disabled { opacity:.5; cursor:default; }
+    #panel-marks .viewer-mark-primary { background:var(--brand-orange); border-color:var(--brand-orange); color:#fff; }
+    #panel-marks :is(input:not([type=checkbox]):not([type=color]),select,textarea) {
+      width:100%; min-width:0; background:rgba(0,0,0,.3); color:#f5f5f5; border:1px solid rgba(255,255,255,.12);
+      border-radius:6px; padding:6px 8px; font:13px var(--font);
+    }
+    #panel-marks :is(button,input,select,textarea,summary):focus-visible { outline:2px solid var(--brand-orange); outline-offset:2px; }
+    .viewer-mark-tools { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+    .viewer-mark-row { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+    .viewer-mark-row > select { flex:1 1 120px; width:auto; }
+    .viewer-mark-coords { display:grid; gap:6px; }
+    .viewer-mark-form { display:grid; gap:8px; padding:10px; border-radius:8px; background:rgba(0,0,0,.22); }
+    .viewer-mark-form h4 { font-size:12px; color:#fff; }
+    .viewer-mark-form label { display:grid; gap:3px; font-size:11px; color:#c0c0c0; }
+    .viewer-mark-form fieldset { border:0; display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+    .viewer-mark-form legend { font-size:11px; color:#c0c0c0; margin-bottom:3px; }
+    .viewer-mark-swatch { width:26px; height:26px; border-radius:50%; border:2px solid rgba(255,255,255,.35); cursor:pointer; padding:0; }
+    .viewer-mark-swatch[aria-pressed=true] { border-color:#fff; box-shadow:0 0 0 2px var(--brand-orange); }
+    .viewer-mark-form input[type=color] { width:32px; height:28px; padding:0; border:0; background:none; }
+    .viewer-mark-icon { width:32px; height:32px; display:grid; place-items:center; padding:0; border-radius:6px; border:1px solid transparent; background:rgba(255,255,255,.04); cursor:pointer; }
+    .viewer-mark-icon[aria-pressed=true] { border-color:var(--brand-orange); }
+    .viewer-mark-readout { overflow-wrap:anywhere; }
+    .viewer-mark-toggle { display:flex; align-items:center; gap:4px; font-size:12px; }
+    .viewer-mark-tabs > button { flex:1 1 0; }
+    #panel-marks .viewer-mark-tabs > button.active { background:rgba(255,255,255,.16); color:#fff; }
+    #panel-marks [role=tabpanel]:not([hidden]) { display:grid; gap:8px; }
+    #panel-marks [role=tabpanel][hidden] { display:none; }
+    .viewer-mark-list { list-style:none; padding:0; display:grid; gap:2px; max-height:40vh; overflow:auto; }
+    .viewer-mark-list li { display:flex; align-items:center; gap:6px; }
+    .viewer-mark-list-item { flex:1; display:flex; align-items:center; gap:8px; min-width:0; padding:6px; border:0; border-radius:6px; background:none; color:#e0e0e0; font:12px var(--font); text-align:left; cursor:pointer; }
+    .viewer-mark-list-item:hover, .viewer-mark-list-item[aria-current=true] { background:rgba(238,80,7,.16); }
+    .viewer-mark-list-icon { flex:none; display:grid; }
+    .viewer-mark-list-name { flex:1; min-width:0; display:grid; overflow-wrap:anywhere; }
+    .viewer-mark-list-name small { color:var(--brand-muted); font-size:10px; }
+    .viewer-mark-category-form input[name=categoryName] { flex:1 1 110px; width:auto; }
+    .viewer-mark-category-form input[type=color] { width:32px; height:30px; padding:0; border:0; background:none; }
+    .viewer-mark-section summary { cursor:pointer; font-size:12px; font-weight:600; color:#e0e0e0; padding:4px 0; }
+    .viewer-map-mark, .viewer-map-area { background:none; border:0; }
+    .viewer-map-mark svg, .viewer-map-area svg { display:block; overflow:visible; }
+    /* At least 44 x 44 to touch, around the body of the pin. */
+    .viewer-map-mark::before { content:''; position:absolute; left:50%; top:calc(50% - 4px); width:44px; height:44px; transform:translate(-50%,-50%); }
+    .viewer-map-mark:focus-visible { outline:3px solid #fff; outline-offset:2px; box-shadow:0 0 0 8px #000; border-radius:6px; }
+    .viewer-mark-icon-group { flex:1 0 100%; }
+    .viewer-map-ghost { background:none; border:0; opacity:.75; }
+    .viewer-map-ghost svg { display:block; overflow:visible; }
+    /* Over the map: add, the strip while placing, the card. */
+    #viewer-marks-ui { position:absolute; inset:0; z-index:118; pointer-events:none; overflow:hidden; }
+    #viewer-marks-ui > * { pointer-events:auto; }
+    #viewer-marks-ui button:not(.viewer-mark-swatch):not(.viewer-mark-icon) { min-height:44px; padding:6px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.2); background:#23272d; color:#f5f5f5; font:600 13px var(--font); cursor:pointer; }
+    #viewer-marks-ui button:disabled { opacity:.5; cursor:default; }
+    #viewer-marks-ui .viewer-mark-primary { background:var(--brand-orange); border-color:var(--brand-orange); color:#fff; }
+    #viewer-marks-ui :is(button,input,select,textarea,summary):focus-visible { outline:3px solid #fff; outline-offset:2px; box-shadow:0 0 0 6px #000; }
+    #viewer-marks-ui :is(input:not([type=color]),select,textarea) { width:100%; min-width:0; min-height:40px; background:#111417; color:#f5f5f5; border:1px solid rgba(255,255,255,.25); border-radius:6px; padding:6px 8px; font:14px var(--font); }
+    #viewer-marks-ui .viewer-mark-add { position:absolute; right:14px; top:64px; width:48px; height:48px; padding:0; border-radius:50%; font-size:24px; box-shadow:0 2px 8px rgba(0,0,0,.6); }
+    .viewer-mark-undo { position:absolute; left:50%; top:14px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; max-width:calc(100% - 24px); padding:6px 8px 6px 14px; border-radius:12px; background:rgba(20,23,27,.97); color:#f5f5f5; box-shadow:0 4px 18px rgba(0,0,0,.6); font:14px var(--font); overflow-wrap:anywhere; }
+    .viewer-mark-undo[hidden] { display:none; }
+    #viewer-marks-ui .viewer-mark-layers { position:absolute; right:14px; top:120px; width:48px; height:48px; padding:0; border-radius:50%; font-size:20px; box-shadow:0 2px 8px rgba(0,0,0,.6); }
+    #viewer-marks-ui .viewer-mark-hidden-count { position:absolute; right:14px; top:176px; border-radius:22px; box-shadow:0 2px 8px rgba(0,0,0,.6); }
+    .viewer-map-group { background:none; border:0; }
+    .viewer-mark-plate { display:flex; align-items:center; justify-content:center; gap:1px; height:36px; min-width:46px; padding:0 4px; box-sizing:border-box; border-radius:18px; background:#14171b; color:#fff; border:2px solid #fff; box-shadow:0 0 0 2px #0b0d10; font:700 13px var(--font); }
+    .viewer-map-group::before { content:''; position:absolute; left:50%; top:50%; width:48px; height:44px; transform:translate(-50%,-50%); }
+    .viewer-map-group:focus-visible { outline:3px solid #fff; outline-offset:3px; box-shadow:0 0 0 8px #000; border-radius:20px; }
+    .viewer-mark-box { position:absolute; right:74px; top:64px; width:340px; max-width:calc(100% - 90px); max-height:calc(100% - 80px); overflow:auto; display:grid; gap:8px; padding:12px; border-radius:12px; background:rgba(20,23,27,.97); color:#f5f5f5; box-shadow:0 4px 18px rgba(0,0,0,.6); font:14px var(--font); }
+    .viewer-mark-box.sheet { left:0; right:0; top:auto; bottom:0; width:auto; max-width:none; max-height:86%; border-radius:14px 14px 0 0; }
+    .viewer-mark-box [role=tabpanel]:not([hidden]) { display:grid; gap:8px; }
+    .viewer-mark-close { margin-left:auto; }
+    .viewer-mark-strip, .viewer-mark-card { position:absolute; display:grid; gap:8px; padding:12px; border-radius:12px; background:rgba(20,23,27,.96); color:#f5f5f5; box-shadow:0 4px 18px rgba(0,0,0,.6); font:14px var(--font); }
+    .viewer-mark-strip[hidden], .viewer-mark-card[hidden], .viewer-mark-box[hidden], .viewer-mark-cross[hidden], #viewer-marks-ui [hidden] { display:none; }
+    .viewer-mark-strip { left:50%; bottom:16px; transform:translateX(-50%); width:min(560px, calc(100% - 24px)); }
+    .viewer-mark-chips { display:flex; gap:6px; overflow-x:auto; padding:4px; }
+    #viewer-marks-ui .viewer-mark-chip { flex:none; display:flex; align-items:center; gap:6px; }
+    #viewer-marks-ui .viewer-mark-chip[aria-pressed=true], #viewer-marks-ui [aria-pressed=true]:not(.viewer-mark-swatch) { border-color:#fff; background:#3a414a; }
+    .viewer-mark-cross { left:50%; top:50%; width:44px; height:44px; transform:translate(-50%,-50%); position:absolute; pointer-events:none !important;
+      background:linear-gradient(#fff,#fff) center/2px 100% no-repeat, linear-gradient(#fff,#fff) center/100% 2px no-repeat; filter:drop-shadow(0 0 1px #000) drop-shadow(0 0 2px #000); }
+    .viewer-mark-card { width:300px; max-width:calc(100% - 16px); max-height:calc(100% - 16px); overflow:auto; left:8px; top:8px; }
+    .viewer-mark-card.sheet { left:0; right:0; top:auto; bottom:0; width:auto; max-width:none; max-height:46%; border-radius:14px 14px 0 0; }
+    .viewer-mark-card.sheet.full { max-height:86%; }
+    .viewer-mark-card .viewer-mark-form { padding:0; background:none; }
+    .viewer-mark-card-head { display:flex; align-items:center; gap:8px; }
+    .viewer-mark-card h4 { margin:0; overflow-wrap:anywhere; }
+    .viewer-mark-view { display:grid; gap:8px; }
+    .viewer-mark-card-note { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .viewer-mark-facts { display:grid; grid-template-columns:auto 1fr; gap:2px 10px; margin:0; font-size:12px; }
+    .viewer-mark-facts dt { color:#b9c0c8; }
+    .viewer-mark-facts dd { margin:0; overflow-wrap:anywhere; }
+    #viewer-marks-ui .viewer-mark-style { display:flex; align-items:center; gap:8px; text-align:left; width:100%; }
+    .viewer-mark-picker { display:grid; gap:8px; max-height:260px; overflow:auto; padding:4px; }
+    #viewer-marks-ui .viewer-mark-swatch, #viewer-marks-ui .viewer-mark-icon { width:44px; height:44px; }
+    @media (prefers-reduced-motion: reduce) { #viewer-marks-ui * { transition:none !important; } }
+    .viewer-mark-vertex { background:#fff; border:2px solid #212121; border-radius:50%; }
+    .leaflet-tooltip.viewer-mark-label { background:rgba(10,10,12,.78); color:#fff; border:0; box-shadow:none; font:600 11px var(--font); padding:2px 6px; }
+    .leaflet-tooltip.viewer-mark-label::before { display:none; }
+    @media (pointer:coarse) { .viewer-mark-vertex { transform:scale(1.4); } #panel-marks button { min-height:40px; } }
+
     #measure-output {
       margin-top: 10px; padding: 10px; border-radius: 8px; background: rgba(0,0,0,0.25);
       font-size: 12px; color: #f5f5f5; min-height: 24px; line-height: 1.5;
@@ -640,6 +741,11 @@
           <p class="hint">View only. The orange outline marks the cut plane. Saved measurements and volume calculations still use the full source surface and their own reference base.</p>
         </div>
 
+        <div class="panel" id="panel-marks" hidden>
+          <h3><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="9.5" r="2.5" stroke="currentColor" stroke-width="2" fill="none"/></svg> Marks</h3>
+          <div data-marks-root></div>
+        </div>
+
         <div class="panel" id="panel-model-report" hidden><h3>Reports</h3><div id="measurement-report-actions" hidden><button class="tool-btn full" id="btn-model-report">Measurements report</button><p class="hint">Your saved measurements, quantities, and overview images.</p></div><div id="model-report-download"></div></div>
         <div class="panel" id="panel-camera">
           <h3><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Camera</h3>
@@ -776,6 +882,7 @@
       <div id="labels-container"></div>
       <div id="leaflet-map"></div>
       <div id="cloud-container"></div>
+      <div id="viewer-marks-ui"></div>
 
       <div id="property-lines-notice" role="note" hidden></div>
       <div id="floating-controls">
