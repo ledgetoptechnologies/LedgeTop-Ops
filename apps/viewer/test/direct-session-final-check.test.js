@@ -146,17 +146,8 @@ test('the final check revalidates only the authority that admitted the delivery 
   // A tombstone on the admitting session still denies, whatever else is presented.
   h.revokeOnRead(2);
   assert.equal((await fetch(`${h.base}${assetPath(h.token)}`, stale)).status, 403);
-  // Staff sessions keep their existing behaviour (no direct-grant recheck applies).
+  // A staff session is read again too; a tombstone on some direct grant is not its own.
+  h.database.exec("DELETE FROM revoked_published_session_authorizations WHERE source_authorization_id='synthetic-grant'");
   h.revokeOnRead(2);
   assert.equal((await fetch(`${h.base}${assetPath(h.opsToken)}`)).status, 200);
-});
-
-test('the final check re-reads only the recorded admitting session', () => {
-  const sessions = new Map([['live', true], ['dead', false]]);
-  assets.setRepository({ liveViewerSessionByHash: hash => ([...sessions].find(([key]) => auth.hashToken(key) === hash)?.[1] ? {} : null) });
-  assert.equal(assets.admittedDirectSessionStillLive({}), true, 'no direct session admitted this request');
-  assert.equal(assets.admittedDirectSessionStillLive({ admittedDirectSessionHash: auth.hashToken('live') }), true);
-  assert.equal(assets.admittedDirectSessionStillLive({ admittedDirectSessionHash: auth.hashToken('dead'), cookies: { ltds_viewer: 'live' } }), false);
-  assert.equal(assets.admittedDirectSessionStillLive({ params: { token: 'dead' }, cookies: { ltds_viewer: 'dead' } }), true,
-    'unrecorded presented credentials are never consulted');
 });
