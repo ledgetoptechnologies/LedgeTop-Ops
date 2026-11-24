@@ -26,7 +26,8 @@ function writePreference(window, key, value) {
 
 // overlay: where the pop-ups over the map go (the card, the strip while placing).
 export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = globalThis.fetch, newId = () => crypto.randomUUID(),
-  onActivate = () => {}, georef = () => null, units = () => 'imperial', fileName = () => 'marks', obstacles = () => [] }) {
+  onActivate = () => {}, onViewerAccessLost = () => {}, focusAfterAccessLoss,
+  georef = () => null, units = () => 'imperial', fileName = () => 'marks', obstacles = () => [] }) {
   const document = panel.ownerDocument, window = document.defaultView;
   const listeners = new AbortController();
   const on = (target, type, handler) => target.addEventListener(type, handler, { signal: listeners.signal });
@@ -36,6 +37,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   let boxOpen = false, picked = null;
   let tab = 'list', search = '', armedDelete = null, categoryDraft = null;
   let sessionScope = false, scopeKey, writtenCoords = null;
+  let hadMarksAccess = false, hadWriteAccess = false;
   let sharedRefreshTimer = null, pageSuspended = false;
   const visibility = createMarkVisibility({ storage: () => window.localStorage });
   // Unsaved work, kept for this person and model. Nothing is kept or cleared until the stored draft was looked at.
@@ -53,6 +55,15 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   let barEntry = null, barTimer = null, barHeld = false, barSeen = null, recoveredSeen = null, barError = '';
 
   const store = createMarksStore({ request, newId, onChange: () => render(),
+    onViewerAccessLost: () => {
+      const held = store.hold();
+      // Finish closing Marks before the Viewer lifecycle can replace its scope.
+      queueMicrotask(() => {
+        if (!held.live()) return;
+        render();
+        onViewerAccessLost();
+      });
+    },
     later: (work, ms) => { const id = window.setTimeout(work, ms); return () => window.clearTimeout(id); } });
   const canRefreshShared = () => sessionScope && store.state.capabilities.shared && store.state.ready
     && !store.state.loading && !store.state.blocked && !pageSuspended && document.visibilityState === 'visible';
@@ -93,7 +104,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   // ---- skeleton -------------------------------------------------------------
   const root = panel.querySelector('[data-marks-root]') || panel;
-  const status = h(document, 'p', { class: 'hint viewer-mark-status', role: 'status', 'aria-live': 'polite' });
+  const status = h(document, 'p', { class: 'hint viewer-mark-status', role: 'status', 'aria-live': 'polite', tabindex: '-1' });
   const addButtons = Object.keys(TYPE_LABEL).map(type => h(document, 'button', { type: 'button', class: 'tool-btn', 'data-add': type, 'aria-pressed': 'false', text: TYPE_LABEL[type] }));
   const tools = h(document, 'div', { class: 'viewer-mark-tools', role: 'toolbar', 'aria-label': 'Add marks' }, ...addButtons);
   const drawCount = h(document, 'span', { class: 'hint' });
@@ -281,6 +292,12 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   function syncMapKeys() {
     const keys = getMap()?.keyboard;
     if (keys) keys[(mode === 'Point' && crosshair && canWrite()) || canMoveDraft() ? 'disable' : 'enable']();
+  }
+
+  function endMarkInput() {
+    if (mode === 'idle' && !moving) return;
+    moving = false;
+    setMode('idle');
   }
 
   // The category the next mark starts in: the one picked while placing, else the
@@ -727,6 +744,13 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   function render() {
     const { state } = store;
+    const active = document.activeElement;
+    const restoreFocus = hadMarksAccess && !state.ready && active
+      && (panel.contains(active) || overlay.contains(active) || active.closest?.('.viewer-map-mark,.viewer-map-area,.viewer-map-group'));
+    const writeAccess = state.ready && state.capabilities.write;
+    if (hadWriteAccess && !writeAccess) endMarkInput();
+    hadMarksAccess = state.ready;
+    hadWriteAccess = writeAccess;
     panel.hidden = !state.ready && !state.loading && !state.message || state.blocked;
     const writable = canWrite();
     status.textContent = state.message || (state.loading ? 'Loading marks…' : '');
@@ -914,6 +938,10 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     placeCard();
     keepDraft();
     syncSharedRefresh();
+    if (restoreFocus && [active, document.body, null, undefined].includes(document.activeElement)) {
+      if (focusAfterAccessLoss) focusAfterAccessLoss();
+      else (view.map && getMap()?.getContainer() || status).focus?.({ preventScroll: true });
+    }
   }
 
 
@@ -1288,6 +1316,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       else if (sessionScope) recovery.read(next.key);
       if (!next || next.key !== scopeKey) {
         draftChecked = false;
+        endMarkInput();
         // Nothing one person typed or picked stays in the panel for the next one.
         draft = null; selectedId = null; mode = 'idle'; drawing = null;
         more.open = false;

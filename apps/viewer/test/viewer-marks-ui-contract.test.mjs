@@ -171,3 +171,59 @@ test('a current Move hides its label and stops accepting actions when Marks acce
     marks.dispose();
   }
 });
+
+test('Marks refusal ends placement and drawing, restoring map input and focus only when lost', async () => {
+  for (const [drawing, movedFocus] of [[false, false], [true, false], [true, true]]) {
+    const { document, window } = createMiniDocument();
+    const panel = document.createElement('div');
+    const fallback = document.createElement('button'), chosen = document.createElement('button');
+    const leaflet = createMiniLeaflet(document);
+    let delayed = false, refuse, zoom = true;
+    leaflet.map.doubleClickZoom = { enable: () => { zoom = true; }, disable: () => { zoom = false; } };
+    const marks = mountViewerMarks({
+      panel, L: leaflet.L, getMap: () => leaflet.map, focusAfterAccessLoss: () => fallback.focus(),
+      request: async path => {
+        if (path.endsWith('/shared')) {
+          if (delayed) return new Promise(resolve => { refuse = resolve; });
+          return Response.json({ marks: [], categories: [], next: null });
+        }
+        return Response.json({ marks: [], categories: [], capabilities: { write: true, staff: true, visibility: ['private'], shared: true } });
+      },
+    });
+    try {
+      const session = { mode: 'session', key: 'staff', token: () => 'staff' };
+      marks.setView({ map: true });
+      await marks.setScope(session);
+      if (drawing) {
+        await panel.querySelector('[data-add=LineString]').click();
+        marks.mapClick({ lat: 43.04, lng: -87 });
+        marks.mapClick({ lat: 43.05, lng: -87 });
+        assert.equal(zoom, false);
+      } else {
+        await window.fire('keydown', { key: 'm' });
+        assert.equal(leaflet.keyboard.on, false);
+      }
+      const strip = panel.querySelector('.viewer-mark-strip');
+      assert.equal(strip.hidden, false);
+      const active = strip.querySelectorAll('button').find(button => button.textContent === (drawing ? 'Finish' : 'Place here'));
+      active.focus();
+      delayed = true;
+      const losing = marks.store.refreshShared();
+      if (movedFocus) chosen.focus();
+      refuse(Response.json({ code: 'mark_identity_required' }, { status: 403 }));
+      await losing;
+      assert.equal(strip.hidden, true);
+      assert.equal(zoom, true);
+      assert.equal(leaflet.keyboard.on, true);
+      assert.equal(marks.mapDoubleClick(), false);
+      assert.equal(document.activeElement, movedFocus ? chosen : fallback);
+
+      delayed = false;
+      await marks.setScope(session);
+      assert.equal(marks.store.canWrite(), true);
+      assert.equal(strip.hidden, true);
+    } finally {
+      marks.dispose();
+    }
+  }
+});

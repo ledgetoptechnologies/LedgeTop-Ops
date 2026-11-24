@@ -176,6 +176,23 @@ test('current-access denial far before expiry is visible without requesting a co
   assert.equal(f.context.tilesRenderer !== null, true);
 });
 
+test('a whole-session denial reported by Marks follows the Viewer authorization path', () => {
+  assert.match(source, /onViewerAccessLost: marksViewerAccessLost,/);
+  const current = fixture();
+  current.context.activeViewerSession.expiresAt = new Date(Date.now() + 1_800_000).toISOString();
+  current.context.marksViewerAccessLost();
+  assert.equal(current.context.sessionAccessState, 'unavailable');
+  assert.equal(current.context.sessionAccessReason, 'authorization-required');
+  assert.equal(current.context.viewerMarks.scopes.at(-1), null);
+  assert.equal(current.posts.length, 0);
+  assert.equal(current.context.sessionDiagnostics().lastFailure.source, 'marks');
+
+  const expiring = fixture();
+  expiring.context.marksViewerAccessLost();
+  assert.equal(expiring.context.sessionAccessState, 'renewing');
+  assert.equal(expiring.posts[0]?.type, 'ltds-viewer:session-expiring');
+});
+
 test('missing controller preserves still-valid personal access and retries transport', () => {
   const f = fixture({ controller: false });
   assert.equal(f.context.requestSessionRenewal('tile-authorization'), false);

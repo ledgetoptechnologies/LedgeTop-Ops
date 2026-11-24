@@ -1603,6 +1603,12 @@ function measurementAccessLost() {
   if (VIEW_MODE === 'session' && SHARE_PERMISSIONS.measure !== false && !sessionRenewalBlocked) requestSessionRenewal('measurements');
 }
 
+function marksViewerAccessLost() {
+  if (VIEW_MODE !== 'session' || SHARE_PERMISSIONS.measure === false || sessionAccessState === 'unavailable') return;
+  recordSessionAccessFailure('marks');
+  requestSessionRenewal('marks-authorization');
+}
+
 function clearSessionRenewalPending(attempt = sessionRenewalAttempt) {
   if (attempt && sessionRenewalAttempt !== attempt) return false;
   if (sessionRenewalResponseTimer) clearTimeout(sessionRenewalResponseTimer);
@@ -2588,6 +2594,8 @@ function installViewerMarks() {
       L, getMap: () => map,
       // Placing or drawing a mark ends any measuring tool first.
       onActivate: () => { if (state.activeTool && state.activeTool !== 'none') setTool('none'); },
+      onViewerAccessLost: marksViewerAccessLost,
+      focusAfterAccessLoss: () => document.querySelector('#view-tabs .tab-btn.active')?.focus({ preventScroll: true }),
       georef: () => PROJECT?.georef || null,
       units: () => DISPLAY_UNITS,
       fileName: () => PROJECT?.title || PROJECT?.id || 'project',
