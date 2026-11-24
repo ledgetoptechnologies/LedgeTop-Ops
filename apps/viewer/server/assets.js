@@ -53,21 +53,14 @@ function safeResolve(root, relPath) {
 // THIS exact project. The referenced share is looked up live on every
 // request (cheap in-memory check) so revoking it takes effect immediately
 // instead of waiting out the session cookie's TTL.
-async function isAuthorizedForProject(req, projectId) {
-  if (isAdminRequest(req)) return true;
+//
+// Answers with what was admitted: the session's own permissions travel with it.
+async function cookieAuthorization(req, projectId) {
+  if (isAdminRequest(req)) return { model: null };
 
   const viewerCookie = req.cookies && req.cookies[VIEWER_COOKIE];
-  const viewer = viewerCookie && canonicalRepository
-    ? canonicalRepository.getViewerSessionByHash(auth.hashToken(viewerCookie))
-    : null;
-  if (canonicalRepository?.viewerSessionLive(viewer) && viewer.permissions?.view !== false) {
-    const requestedModelId = canonicalRepository.resolveModelId(projectId);
-    const model = requestedModelId ? canonicalRepository.getModel(requestedModelId) : null;
-    if (requestedModelId
-      && requestedModelId === viewer.modelId
-      && model?.status === 'ready'
-      && model.activeVersionId === viewer.modelVersionId) return true;
-  }
+  const viewer = viewerCookie ? viewerSessionAccess(auth.hashToken(viewerCookie), projectId, { reviewAllowed: false }).access : null;
+  if (viewer) return viewer;
 
   const cookieVal = req.cookies && req.cookies[SHARE_COOKIE];
   const payload = cookieVal ? auth.verify(cookieVal) : null;
@@ -75,16 +68,47 @@ async function isAuthorizedForProject(req, projectId) {
   if (payload.modelId && canonicalRepository) {
     const requestedModelId = canonicalRepository.resolveModelId(projectId);
     const share = canonicalRepository.getPublicShare(payload.shareId);
-    req.publicShare=share;
-    return requestedModelId === payload.modelId
+    const allowed = requestedModelId === payload.modelId
       && canonicalRepository.publicShareLive(share)
       && revisionMatches(share,payload)
       && await sourceAuthorizationValidator.allows(share)
       && share.modelId === payload.modelId;
+    return allowed ? { model: null, share } : false;
   }
   if (payload.viewerProjectId !== projectId) return false;
   const legacyShare = shareStore.getById(payload.shareId);
-  return shareStore.isLive(legacyShare) && legacyShare.viewerProjectId === projectId;
+  return shareStore.isLive(legacyShare) && legacyShare.viewerProjectId === projectId
+    ? { model: null, cameras: legacyShare.permissions?.cameras !== false } : false;
+}
+
+// What one Viewer session allows for one model, read afresh: at admission, and again right before protected bytes leave.
+// `live` without `access` is a live session that does not cover this model; it is not some other authority.
+function viewerSessionAccess(tokenHash, projectId, { reviewAllowed = true } = {}) {
+  const requestedModelId = canonicalRepository?.resolveModelId(projectId);
+  const session = requestedModelId ? canonicalRepository.getViewerSessionByHash(tokenHash) : null;
+  if (!session || !canonicalRepository.viewerSessionLive(session)) return { live: false, access: null };
+  const review = reviewAllowed && session.sessionMode === 'review';
+  const model = review
+    ? canonicalRepository.getModelVersion(requestedModelId, session.modelVersionId)
+    : canonicalRepository.getModel(requestedModelId);
+  const allowed = session.permissions?.view !== false
+    && session.modelId === requestedModelId
+    && (review
+      ? model?.activeVersion?.id === session.modelVersionId && model.activeVersion.status === 'ready'
+      : model?.status === 'ready' && model.activeVersionId === session.modelVersionId);
+  return { live: true, access: allowed ? {
+    model, review, cameras: session.permissions?.cameras !== false, download: session.permissions?.download === true,
+    viewer: { tokenHash, projectId, reviewAllowed, sessionId: session.id, modelVersionId: session.modelVersionId },
+  } : null };
+}
+
+// Only the session that admitted this response is read again, never another cookie, token or share on the request: still
+// live, the same model version, still allowed to view, and still allowed camera positions when that is what is sent.
+function viewerStillAllows(viewer, { cameras = false } = {}) {
+  if (!viewer) return true;
+  const { access } = viewerSessionAccess(viewer.tokenHash, viewer.projectId, { reviewAllowed: viewer.reviewAllowed });
+  return Boolean(access) && access.viewer.sessionId === viewer.sessionId
+    && access.viewer.modelVersionId === viewer.modelVersionId && (!cameras || access.cameras);
 }
 
 function safeExistingFile(root, relPath) {
@@ -189,19 +213,8 @@ async function pathTokenAuthorization(req, projectId) {
   if (!canonicalRepository) return false;
   const requestedModelId = canonicalRepository.resolveModelId(projectId);
   if (!requestedModelId) return false;
-  const viewer = canonicalRepository.getViewerSessionByHash(auth.hashToken(req.params.token));
-  if (canonicalRepository.viewerSessionLive(viewer)) {
-    const review = viewer.sessionMode === 'review';
-    const model = review
-      ? canonicalRepository.getModelVersion(requestedModelId, viewer.modelVersionId)
-      : canonicalRepository.getModel(requestedModelId);
-    const allowed = viewer.permissions?.view !== false
-      && viewer.modelId === requestedModelId
-      && (review
-        ? model?.activeVersion?.id === viewer.modelVersionId && model.activeVersion.status === 'ready'
-        : model?.status === 'ready' && model.activeVersionId === viewer.modelVersionId);
-    return allowed ? { model, review, cameras: viewer.permissions?.cameras !== false, download: viewer.permissions?.download === true } : false;
-  }
+  const viewer = viewerSessionAccess(auth.hashToken(req.params.token), projectId);
+  if (viewer.live) return viewer.access || false;
   const payload = auth.verify(req.params.token);
   if (!payload) return false;
   if (payload.kind === 'share-asset') {
@@ -255,7 +268,7 @@ function xAccelLocation(abs) {
   return null;
 }
 
-async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true, share = req.publicShare } = {}) {
+async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true, share = null, viewer = null } = {}) {
   const resolved = authorizedModel
     ? { project: authorizedModel, rootPath: canonicalAssetRoot(authorizedModel, req.params.root) }
     : resolveProject(req.params.id, req.params.root);
@@ -277,7 +290,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   // the (possibly slow) integrity check, right before any byte is sent.
   // Responses are never stored by browsers or intermediaries, so a URL stops
   // working as soon as its session/share expires or is revoked.
-  const shareStillAllows=()=>{if(!share)return true;const current=canonicalRepository.getPublicShare(share.id);return canonicalRepository.publicShareLive(current)&&revisionMatches(current,{shareRevision:share.authorizationRevision})&&assetAllowed(current,publishedAsset?.kind);};
+  const stillAllows=()=>{if(!viewerStillAllows(viewer,{cameras:publishedAsset?.kind==='shots'}))return false;if(!share)return true;const current=canonicalRepository.getPublicShare(share.id);return canonicalRepository.publicShareLive(current)&&revisionMatches(current,{shareRevision:share.authorizationRevision})&&assetAllowed(current,publishedAsset?.kind);};
   const requested = String(rel).replaceAll('\\', '/');
   const accelerated = xAccelLocation(abs);
   if (!project.activeVersion || accelerated) {
@@ -285,7 +298,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
     // (only with X_ACCEL_REDIRECT_PREFIX, empty in the shipped compose file)
     // hands the path to the proxy, which reopens it after this check.
     if (project.activeVersion && !await publishedAssetIntegrityAllows(canonicalRepository,project,publishedAsset,requested,abs,req.get('range')))return res.status(404).json({ error: 'asset not found' });
-    if (!shareStillAllows()) return res.status(403).json({ error: 'not authorized' });
+    if (!stillAllows()) return res.status(403).json({ error: 'not authorized' });
     res.setHeader('Cache-Control', 'private, no-store');
     if (accelerated) {
       res.setHeader('X-Accel-Redirect', accelerated);
@@ -305,7 +318,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
     headers: { 'Cache-Control': 'private, no-store' },
     ...integrityDelivery(canonicalRepository, project, publishedAsset, requested, abs, opened),
     onFailure: () => res.status(404).json({ error: 'asset not found' }),
-    beforeSend: () => { if (shareStillAllows()) return true; res.status(403).json({ error: 'not authorized' }); return false; },
+    beforeSend: () => { if (stillAllows()) return true; res.status(403).json({ error: 'not authorized' }); return false; },
     onError: (err) => { if (!res.headersSent) res.status(err.status || 404).json({ error: 'asset not found' }); },
   });
 }
@@ -313,10 +326,9 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
 router.get('/assets/:id/:root/*', async (req, res, next) => {
   const capability=req.cookies?.[VIEWER_COOKIE]||req.cookies?.[SHARE_COOKIE];
   if(capability&&canonicalRepository&&assetRateLimiter.rateLimited(`public-asset:${auth.hashToken(capability)}:${req.ip}:${req.params.id}`,6000,canonicalRepository))return res.status(429).json({error:'too many asset requests'});
-  if (!await isAuthorizedForProject(req, req.params.id)) {
-    return res.status(403).json({ error: 'not authorized' });
-  }
-  return sendAsset(req, res).catch(next);
+  const authorization = await cookieAuthorization(req, req.params.id);
+  if (!authorization) return res.status(403).json({ error: 'not authorized' });
+  return sendAsset(req, res, authorization.model, authorization).catch(next);
 });
 
 // Capability URL used by embedded Viewer sessions and public shares. Keeping
@@ -327,7 +339,7 @@ router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
   if(canonicalRepository&&assetRateLimiter.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000,canonicalRepository))return res.status(429).json({error:'too many asset requests'});
   const authorization = await pathTokenAuthorization(req, req.params.id);
   if (!authorization) return res.status(403).json({ error: 'not authorized' });
-  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly, cameras: authorization.cameras,share:authorization.share }).catch(next);
+  return sendAsset(req, res, authorization.model, authorization).catch(next);
 });
 
 router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next) => {
@@ -346,12 +358,17 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     try { opened = await openForDelivery(absolute); } catch { return res.status(404).json({ error: 'photo not found' }); }
     if (Number(opened.stat.size) !== photo.byteSize) { await opened.handle.close(); return res.status(404).json({ error: 'photo not found' }); }
     const headers = { 'Cache-Control': 'private, no-store', 'Content-Type': photo.contentType, 'X-Content-Type-Options': 'nosniff' };
-    // Share access is re-checked after the (possibly slow) integrity check.
-    const shareStillAllows = async () => { if (!authorization.share) return true; const current = await pathTokenAuthorization(req, req.params.id); if (current?.cameras) return true; res.status(403).json({ error: 'not authorized' }); return false; };
+    // Access is re-checked after the (possibly slow) integrity check.
+    const stillAllows = async () => {
+      const current = authorization.share ? await pathTokenAuthorization(req, req.params.id) : null;
+      if ((!authorization.share || current?.cameras) && viewerStillAllows(authorization.viewer, { cameras: true })) return true;
+      res.status(403).json({ error: 'not authorized' });
+      return false;
+    };
     const accelerated = xAccelLocation(absolute);
     if (accelerated) {
       try { if (!await assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle })) return res.status(404).json({ error: 'photo not found' }); } finally { await opened.handle.close(); }
-      if (!await shareStillAllows()) return undefined;
+      if (!await stillAllows()) return undefined;
       res.set(headers);
       res.setHeader('X-Accel-Redirect', accelerated);
       return res.end();
@@ -363,7 +380,7 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
       verify: (_range, signal, carry) => assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle, signal, carry }),
       regions: () => (assetIntegrityCache.canBuffer(photo.byteSize + 1) ? [{ kind: 'file', offset: 0, size: photo.byteSize, sha256: photo.sha256, toEof: true }] : null),
       onFailure: () => res.status(404).json({ error: 'photo not found' }),
-      beforeSend: shareStillAllows,
+      beforeSend: stillAllows,
       onError: (error) => { if (!res.headersSent) res.status(error.status || 404).json({ error: 'photo not found' }); },
     });
   } catch (error) { return next(error); }
