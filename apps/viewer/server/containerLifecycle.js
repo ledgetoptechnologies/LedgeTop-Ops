@@ -1,5 +1,6 @@
 'use strict';
 
+const permanentDeletion = require('./permanentDeletion');
 const { applyStorageMutation } = require('./storageLifecycle');
 const { purgeProjectBoundary } = require('./propertyLinesBoundary');
 
@@ -75,6 +76,7 @@ function purgeItem(processing,storage,item,actor,containerId=null){if(!item||ite
 // 3. Files and member records are purged, then the container's own record.
 // expired: maintenance, which purges only what is past its date; staff can empty an item earlier.
 function purgeContainerTrash(processing,storage,containerId,actor,{expired=false}={}){
+  permanentDeletion.refusePermanentDeletion();
   const root=processing.getTrash(containerId);if(!root||!['project','task'].includes(root.entityType))return null;if(root.permanentlyDeletedAt)return root;
   if((expired&&!root.purgeStartedAt&&!processing.trashExpired(root))||!processing.containerPurgeAllowed(root,{expired:expired&&!root.purgeStartedAt}))return null;
   const order={output:0,dataset:1,task:2,project:3},members=()=>processing.listContainerTrashMembers(root.id).sort((a,b)=>(order[a.entityType]??4)-(order[b.entityType]??4));

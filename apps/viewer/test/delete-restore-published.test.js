@@ -21,7 +21,11 @@ const { purgeExpiredTrash, reconcileStorageMutations } = require('../server/stor
 
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
-async function fixture(t) {
+const permanentDeletion = require('../server/permanentDeletion');
+
+// Permanent deletion is paused. These tests also cover its guards, so it runs here unless a test asks for the pause.
+async function fixture(t, { paused = false } = {}) {
+  if (!paused) t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-delete-restore-'));
   const config = {
     datasetsMount: path.join(root, 'datasets'), modelsMount: path.join(root, 'models'), cacheMount: path.join(root, 'cache'),
@@ -899,7 +903,7 @@ test('an expired purge that dies at any step is finished by later maintenance, a
 test('a real second process that keeps purging never removes a task that is being deleted and restored', { timeout: 120_000 }, async (t) => {
   const { spawn } = require('node:child_process');
   const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' });
-  const script = `const {openDatabase}=require('./server/database'),{ProcessingRepository}=require('./server/processingRepository'),{StorageManager}=require('./server/storageManager'),{purgeExpiredTrash,reconcileStorageMutations}=require('./server/storageLifecycle');
+  const script = `require('./server/permanentDeletion').permanentDeletionPaused=()=>false;const {openDatabase}=require('./server/database'),{ProcessingRepository}=require('./server/processingRepository'),{StorageManager}=require('./server/storageManager'),{purgeExpiredTrash,reconcileStorageMutations}=require('./server/storageLifecycle');
     const [databasePath,config]=JSON.parse(process.argv[1]),processing=new ProcessingRepository(openDatabase(databasePath)),storage=new StorageManager(config);storage.initialize();
     process.stdout.write('ready\\n');let passes=0;process.on('SIGTERM',()=>{process.stdout.write('passes '+passes+'\\n',()=>process.exit(0));});
     (function pass(){try{reconcileStorageMutations(processing,storage);purgeExpiredTrash(processing,storage);passes+=1;}catch(error){if(!/locked|busy/i.test(error.message))process.stdout.write('error '+error.stack+'\\n');}setImmediate(pass);})();`;
@@ -1621,4 +1625,45 @@ test('a purge whose path and set-aside path both exist removes neither', async (
   assert.deepEqual(f.tree(aside), { 'other.txt': 'other' });
   assert.throws(() => f.storage.setAsideForPurge('trash', trash.relativePath, `${trash.relativePath}.purging`), { code: 'lifecycle_conflict' });
   assert.throws(() => f.storage.setAsideForPurge('models', trash.relativePath, 'x'), { code: 'external_reference' });
+});
+
+// ---- While permanent deletion is paused ----
+
+test('while permanent deletion is paused nothing is purged, and deleting and restoring work as usual', async (t) => {
+  const f = await fixture(t, { paused: true }), w = worker(t, f), { applyStorageMutation } = require('../server/storageLifecycle');
+  for (const whole of [false, true]) {
+    const note = `project ${whole}`, project = f.processing.createProject({ displayName: note }), item = await f.publishedTask(project, note), before = f.snapshot(item), files = filesOf(f, item, before);
+    const trash = whole ? (await f.request('DELETE', `/api/v1/projects/${project.id}`)).body.trash : (await f.remove(item)).body.trash;
+    age(f, trash, 45);
+    const aged = f.processing.getTrash(trash.id);
+    w.maintain();
+    purgeExpiredTrash(f.processing, f.storage);
+    assert.deepEqual(f.processing.getTrash(trash.id), aged, note);
+    assertNothingLost(f, item, files, note);
+    const output = f.processing.activeTrashForEntity('output', item.versionId);
+    for (const target of [f.processing.getTrash(trash.id), output]) {
+      const emptied = await f.request('DELETE', `/api/v1/storage/trash/${target.id}`, { typedId: target.entityId });
+      assert.deepEqual([emptied.status, emptied.body.code], [409, 'permanent_deletion_paused'], note);
+    }
+    assert.throws(() => f.storage.setAsideForPurge('trash', output.relativePath, `${output.relativePath}.purging`), { code: 'permanent_deletion_paused' });
+    assert.equal((await f.request('POST', `/api/v1/storage/trash/${trash.id}/restore`)).status, 200, note);
+    assert.deepEqual(f.state(item), f.IN_REVIEW, note);
+    assert.deepEqual(f.snapshot(item), before, note);
+    await f.publishAgain(item);
+  }
+  // Purges an earlier version left unfinished, of an output whose task is only half deleted: as they were, whoever runs them.
+  for (const status of ['intent', 'failed']) {
+    const project = f.processing.createProject({ displayName: status }), { item, before, trash } = await leftByEarlierVersion(f, project, status), files = filesOf(f, item, before);
+    const output = f.processing.activeTrashForEntity('output', item.versionId), at = new Date().toISOString(), id = crypto.randomUUID();
+    f.database.prepare('DELETE FROM container_trash_members WHERE member_trash_id=?').run(output.id);
+    f.database.prepare("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,status,actor,created_at,updated_at) VALUES (?,'purge','output',?,?,'trash',?,?,'storage-maintenance',?,?)").run(id, item.versionId, output.id, output.relativePath, status, at, at);
+    const journal = f.processing.getStorageMutation(id);
+    age(f, trash, 45);
+    w.maintain();
+    if (status === 'intent') assert.throws(() => applyStorageMutation(w.processing, w.storage, id), { code: 'permanent_deletion_paused' });
+    const retried = await f.request('POST', `/api/v1/storage/mutations/${id}/retry`);
+    assert.equal(retried.status, 409, status);
+    assert.deepEqual(f.processing.getStorageMutation(id), journal, status);
+    assertNothingLost(f, item, files, status);
+  }
 });

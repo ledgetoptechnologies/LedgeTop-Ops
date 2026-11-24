@@ -1,5 +1,6 @@
 'use strict';
 
+const permanentDeletion = require('./permanentDeletion');
 const { sanitizeLogMessage } = require('./processingSecurity');
 
 function exists(storage,rootKey,relativePath){return Boolean(rootKey&&relativePath&&storage.pathExistsStrict(rootKey,relativePath));}
@@ -43,7 +44,7 @@ function moveStep(processing,storage,mutation,{faultAt,supersessionProof}){
 // restore looks, and that is final. They are then removed without the lock, in as many passes as it takes.
 const purging=mutation=>mutation.sourceRelativePath?`${mutation.sourceRelativePath}.purging`:'';
 function setAsideStep(processing,storage,mutation,{supersessionProof}){
-  if(mutation.status!=='intent')return mutation;
+  permanentDeletion.refusePermanentDeletion();if(mutation.status!=='intent')return mutation;
   const sourceExists=exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath),setAside=exists(storage,mutation.sourceRootKey,purging(mutation));
   if(sourceExists&&setAside)throw conflict('purged lifecycle source still exists');
   if(!setAside&&!processing.purgeStillAdmissible(mutation))throw conflict('permanent deletion is no longer allowed');
@@ -70,6 +71,7 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   const id=typeof input==='string'?input:input?.id;
   let mutation=id?processing.getStorageMutation(id):null;
   if(finished(mutation))return mutation;
+  if(mutation.type==='purge')permanentDeletion.refusePermanentDeletion();// the journal stays as it is
   if(faultAt==='after_intent')throw Object.assign(new Error('injected failure after lifecycle intent'),{code:'fault_injected'});
   const options={faultAt,supersessionProof};
   if(mutation.type==='purge'){
@@ -85,9 +87,11 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   return lockedStep(processing,id,current=>completeStep(processing,storage,current));
 }
 
-function reconcileStorageMutations(processing,storage,limit=20){const results=[];for(const mutation of processing.pendingStorageMutations(limit)){try{results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
+function reconcileStorageMutations(processing,storage,limit=20){const results=[],paused=permanentDeletion.permanentDeletionPaused();for(const mutation of processing.pendingStorageMutations(limit,{purges:!paused})){try{results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
 
 function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null}={}){
+  // Before anything is moved or dated anew: every item stays exactly as it is.
+  if(permanentDeletion.permanentDeletionPaused())return processing.expiredTrash().map(item=>({trashId:item.id,status:'skipped',errorCode:permanentDeletion.PAUSED_CODE}));
   const results=[];
   for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
     try{

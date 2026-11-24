@@ -1,13 +1,13 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const account = {
-  id: "legacy-account-opaque", displayName: "Greenwood Client Portal", status: "active",
+  id: "legacy-account-opaque", displayName: "Example Client Portal", status: "active",
   projectAlphaClientId: null, projectAlphaOrganizationId: null, updatedAt: "2026-09-01T12:00:00Z",
   verifiedIdentityCount: 2, activeMemberCount: 2, activeManagerCount: 1, activationState: "unlinked",
 };
 const source = {
-  clientId: "pa-client-opaque", clientName: "St. Joseph project contact", organizationId: "pa-org-opaque",
-  organizationName: "Greenwood Project Management LLC", rootType: "organization", rootPublicId: "pa-org-opaque",
+  clientId: "pa-client-opaque", clientName: "Sample project contact", organizationId: "pa-org-opaque",
+  organizationName: "Example Property Management LLC", rootType: "organization", rootPublicId: "pa-org-opaque",
 };
 
 async function fixture(page: Page, activation: (route: Route) => Promise<unknown>, administrator = true) {
@@ -48,7 +48,7 @@ test("Client Hub stages one exact Project Alpha portal root without treating aut
   await expect(page.getByText("1. Eligibility")).toBeVisible();
   await expect(page.getByText("Workspace creation never grants access by itself.")).toBeVisible();
   await expect(page.getByLabel("Existing client portal account")).toHaveValue(account.id);
-  await page.getByLabel("Project Alpha workspace root").selectOption({ label: "Greenwood Project Management LLC — St. Joseph project contact" });
+  await page.getByLabel("Project Alpha workspace root").selectOption({ label: "Example Property Management LLC — Sample project contact" });
   await expect(page.getByText("2 verified active members · 1 manager.")).toBeVisible();
   await page.getByRole("button", { name: "Review portal setup" }).click();
   await expect(page.getByRole("heading", { name: "Review before creating access" })).toBeVisible();
@@ -56,7 +56,7 @@ test("Client Hub stages one exact Project Alpha portal root without treating aut
   await expect(page.getByText(account.id)).toHaveCount(0);
   await expect(page.getByText(source.rootPublicId)).toHaveCount(0);
   await page.getByRole("button", { name: "Create workspace and memberships" }).click();
-  await expect(page.getByText(/Portal workspace created for Greenwood Client Portal/)).toBeVisible();
+  await expect(page.getByText(/Portal workspace created for Example Client Portal/)).toBeVisible();
   expect(posted).toEqual({ projectAlphaClientId: source.clientId, expectedUpdatedAt: account.updatedAt });
   expect(reads).toBe(2);
 });

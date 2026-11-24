@@ -545,7 +545,7 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
   it("federates exact organization contact history with stable pagination and strict redaction", async () => {
     const occurredAt = "2026-08-27T19:00:00.000Z";
     await ops.batch([
-      ops.prepare("INSERT INTO pa_organizations VALUES('organization-one','project-alpha:primary','Greenwood Project Management LLC',1)"),
+      ops.prepare("INSERT INTO pa_organizations VALUES('organization-one','project-alpha:primary','Example Property Management LLC',1)"),
       ops.prepare("INSERT INTO pa_organizations VALUES('organization-other','project-alpha:primary','Other organization',1)"),
       ops.prepare("INSERT INTO pa_organizations VALUES('organization-one','project-alpha:secondary','Wrong-source organization',1)"),
       ops.prepare("INSERT INTO pa_projection_record_ids VALUES('project-alpha:primary','organization','organization-one')"),
@@ -594,7 +594,7 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
     ]);
     expect(collected.every(event => event.action === "organization.contacts.saved" && event.producer === "operations"
       && event.actor?.type === "staff" && event.resource.type === "organization_operational_contacts"
-      && event.resource.label === "Greenwood Project Management LLC")).toBe(true);
+      && event.resource.label === "Example Property Management LLC")).toBe(true);
     expect(JSON.stringify(collected)).not.toMatch(/late|sibling|wrong-source|private-contact|private@example|snapshot_json|details_json|actor_id/i);
   });
 

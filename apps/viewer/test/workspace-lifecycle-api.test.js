@@ -1,5 +1,6 @@
 'use strict';
 
+const permanentDeletion = require('../server/permanentDeletion');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const express = require('express');
@@ -96,6 +97,7 @@ function readyManagedOutput(context, project, dataset, task, provider, displayNa
 }
 
 test('workspace lifecycle routes enforce guarded archive, recoverable trash, restore, typed purge and failed retry', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t);
   const project = context.processing.createProject({ displayName: 'Output lifecycle' });
   const dataset = finalizedDataset(context, project, 'Output source');
@@ -161,6 +163,7 @@ test('workspace lifecycle routes enforce guarded archive, recoverable trash, res
 });
 
 test('project Delete cascades owned storage into 30-day trash and restore/purge are durable', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), project = context.processing.createProject({ displayName: 'Cascade project' }), dataset = finalizedDataset(context, project, 'Cascade dataset'), task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Cascade task' }), provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Cascade ODM', endpoint: 'http://127.0.0.1:3001', enabled: true }), output = readyManagedOutput(context, project, dataset, task, provider, 'Cascade output'), datasetDirectory = path.join(context.config.datasetsMount, dataset.relativePath);
   let response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200);
   let trash = (await response.json()).trash; assert.equal(trash.entityType, 'project'); assert.ok(Date.parse(trash.purgeAfter) - Date.now() > 29 * 86400_000);
@@ -200,6 +203,7 @@ test('restoring a formerly published output requires explicit republish', async 
 });
 
 test('expired task container trash automatically purges owned files once and preserves shared datasets', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), project = context.processing.createProject({ displayName: 'Task retention' }), shared = finalizedDataset(context, project, 'Shared dataset'), task = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Deleted task' }), sibling = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Sibling task' }), directory = path.join(context.config.datasetsMount, shared.relativePath);
   let response = await context.request('DELETE', `/api/v1/tasks/${task.id}`, {}); assert.equal(response.status, 200); const trash = (await response.json()).trash;
   assert.equal(context.processing.getTask(task.id).status, 'archived'); assert.equal(context.processing.getTask(sibling.id).status, 'draft'); assert.equal(context.processing.getDataset(shared.id).status, 'finalized'); assert.equal(fs.existsSync(directory), true, 'dataset shared by another live task is outside the deleted task ownership boundary');
@@ -211,6 +215,7 @@ test('expired task container trash automatically purges owned files once and pre
 // Duplicate (and Use saved source) let two tasks share one source set. Deleting both puts the set in the second task's
 // trash; restoring the first must bring the set back with it, and no purge may delete a set an active task still uses.
 test('a source set shared by two tasks is restored with either task and never purged while a task uses it', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), project = context.processing.createProject({ displayName: 'Shared source' }), shared = finalizedDataset(context, project, 'Shared photos');
   const original = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original' }), copy = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original (copy)' });
   const directory = path.join(context.config.datasetsMount, shared.relativePath);
@@ -244,6 +249,7 @@ test('a source set shared by two tasks is restored with either task and never pu
 });
 
 test('a task whose source set is trashed without a restorable trash item is refused rather than restored onto missing photos', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t, { initializeStorage: false }), project = context.processing.createProject({ displayName: 'Refused restore' });
   const dataset = context.processing.createDataset({ projectId: project.id, displayName: 'External photos', storageMode: 'external_reference', rootKey: 'imports', relativePath: 'flight' });
   context.processing.finalizeDataset(dataset.id, [], 'c'.repeat(64));
@@ -268,6 +274,7 @@ test('a task whose source set is trashed without a restorable trash item is refu
 const photosInTrash = context => fs.readdirSync(context.config.trashMount, { recursive: true }).some(name => String(name).endsWith('photo.jpg'));
 
 test('purging one deleted task hands a shared source set to the other deleted task instead of deleting its photos', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), project = context.processing.createProject({ displayName: 'Hand-off' }), shared = finalizedDataset(context, project, 'Shared photos');
   const original = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original' }), copy = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Original (copy)' });
   const directory = path.join(context.config.datasetsMount, shared.relativePath);
@@ -289,6 +296,7 @@ test('purging one deleted task hands a shared source set to the other deleted ta
 });
 
 test('with three deleted tasks on one source set, the photos are deleted only with the last of them', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), project = context.processing.createProject({ displayName: 'Three tasks' }), shared = finalizedDataset(context, project, 'Shared photos');
   const tasks = ['First', 'Second', 'Third'].map(displayName => context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName }));
   const trash = [];
@@ -335,6 +343,7 @@ async function deleteTask(context, task) { const response = await context.reques
 const purge = (context, trash, typedId) => context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId });
 
 test('a direct purge of a shared source set is refused while a deleted task can still be restored with it', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { shared, tasks: [first, second] } = await sharedTasks(context, ['First', 'Second']);
   const firstTrash = await deleteTask(context, first), secondTrash = await deleteTask(context, second), datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
   // The set sits in the second task's item. Both deleted tasks can still be restored, so its own purge is refused.
@@ -350,6 +359,7 @@ test('a direct purge of a shared source set is refused while a deleted task can 
 });
 
 test('standalone expiry of a source set hands it to the deleted task that still needs it', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { shared, tasks: [deleted, archived] } = await sharedTasks(context, ['Deleted', 'Archived']);
   const deletedTrash = await deleteTask(context, deleted);
   assert.equal((await context.request('POST', `/api/v1/tasks/${archived.id}/archive`, {})).status, 200);
@@ -367,6 +377,7 @@ test('standalone expiry of a source set hands it to the deleted task that still 
 });
 
 test('standalone expiry deletes a source set once no deleted task can be restored with it', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { shared, tasks: [deleted, archived] } = await sharedTasks(context, ['Deleted', 'Archived']);
   const deletedTrash = await deleteTask(context, deleted);
   assert.equal((await context.request('POST', `/api/v1/tasks/${archived.id}/archive`, {})).status, 200);
@@ -380,6 +391,7 @@ test('standalone expiry deletes a source set once no deleted task can be restore
 
 for (const order of [[0, 1], [1, 0]]) {
   test(`container purges ${order.map(index => ['first', 'second'][index]).join(' then ')} keep a shared set until the last deleted task goes`, async t => {
+    t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
     const context = await fixture(t), { tasks } = await sharedTasks(context, ['First', 'Second']), trash = [];
     for (const task of tasks) trash.push(await deleteTask(context, task));
     assert.equal((await purge(context, trash[order[0]], tasks[order[0]].id)).status, 204);
@@ -394,6 +406,7 @@ for (const order of [[0, 1], [1, 0]]) {
 }
 
 test('three deleted tasks purged first, third, second keep the set until the last one', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { tasks } = await sharedTasks(context, ['First', 'Second', 'Third']), trash = [];
   for (const task of tasks) trash.push(await deleteTask(context, task));
   for (const index of [0, 2]) { assert.equal((await purge(context, trash[index], tasks[index].id)).status, 204); assert.ok(photosInTrash(context)); }
@@ -401,6 +414,7 @@ test('three deleted tasks purged first, third, second keep the set until the las
 });
 
 test('a project purge that holds every user of a shared set deletes it in the same purge', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { project, tasks } = await sharedTasks(context, ['First', 'Second']);
   for (const task of tasks) await deleteTask(context, task);
   const response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200); const projectTrash = (await response.json()).trash;
@@ -415,6 +429,7 @@ function failNextMetadataPurge(context) {
 }
 
 test('an interrupted container purge is never restorable after its photos are gone, and resumes to completion', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { purgeContainerTrash } = require('../server/containerLifecycle');
   const { shared, tasks: [task] } = await sharedTasks(context, ['Only task']);
   const trash = await deleteTask(context, task), datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
@@ -438,6 +453,7 @@ test('an interrupted container purge is never restorable after its photos are go
 });
 
 test('an interrupted manual purge can also be completed by repeating it', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { tasks: [task] } = await sharedTasks(context, ['Only task']);
   const trash = await deleteTask(context, task);
   failNextMetadataPurge(context);
@@ -449,6 +465,7 @@ test('an interrupted manual purge can also be completed by repeating it', async 
 });
 
 test('a deleted task whose purge was interrupted no longer keeps a shared set, and outside users stay protected', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { purgeContainerTrash } = require('../server/containerLifecycle');
   const { shared, tasks: [first, second, third] } = await sharedTasks(context, ['First', 'Second', 'Third']);
   const firstTrash = await deleteTask(context, first), secondTrash = await deleteTask(context, second);
@@ -473,6 +490,7 @@ test('a deleted task whose purge was interrupted no longer keeps a shared set, a
 
 // A container marked purging, before any member is deleted: no direct restore of a member may take it back out.
 test('direct dataset and managed output restores are refused once their container is purging', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), project = context.processing.createProject({ displayName: 'Locked members' }), dataset = finalizedDataset(context, project, 'Synthetic photos');
   const task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Locked task' });
   const provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Synthetic ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
@@ -496,6 +514,7 @@ test('direct dataset and managed output restores are refused once their containe
 });
 
 test('a container purge does not start while a restore of one of its members is still in progress', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { applyStorageMutation } = require('../server/storageLifecycle');
   const { shared, tasks: [task] } = await sharedTasks(context, ['Only task']);
   const trash = await deleteTask(context, task), datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
@@ -517,6 +536,7 @@ const failJournal = (context, id) => context.database.prepare("UPDATE storage_mu
 const retryJournal = (context, id) => context.request('POST', `/api/v1/storage/mutations/${id}/retry`, {});
 
 test('a failed restore blocks a container purge from starting, and cannot be retried out of a purging container', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { shared, tasks: [task] } = await sharedTasks(context, ['Only task']);
   const trash = await deleteTask(context, task), datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
   const restore = context.processing.beginRestoreMutation(datasetTrash.id, 'ops:lifecycle'); failJournal(context, restore.id);
@@ -535,6 +555,7 @@ test('a failed restore blocks a container purge from starting, and cannot be ret
 });
 
 test('a failed dataset purge is retried only when no active or restorable task needs the set', async t => {
+  t.mock.method(permanentDeletion, 'permanentDeletionPaused', () => false);
   const context = await fixture(t), { shared, tasks: [first, second] } = await sharedTasks(context, ['First', 'Second']);
   const firstTrash = await deleteTask(context, first), secondTrash = await deleteTask(context, second), datasetTrash = context.processing.activeTrashForEntity('dataset', shared.id);
   // A synthetic failed purge journal for the set, as left by an older purge that failed part-way.
