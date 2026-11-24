@@ -334,3 +334,60 @@ test('recently deleted lists the person\'s own marks and restores them in place'
   assert.equal(section(panel).parent.hidden, true);
   assert.doesNotMatch(panel.text(), /Gone/);
 });
+
+test('a save the network refuses says so, keeps what was typed and can be tried again', async t => {
+  let fail = null;
+  const request = async (path, init) => {
+    const how = init.method === 'GET' ? null : fail;
+    if (how === 'never sent') throw new TypeError('Failed to fetch');
+    const response = await fetch(path, init);
+    if (how === 'answer lost') { await response.arrayBuffer(); throw new TypeError('Failed to fetch'); }
+    if (how === 'answer cut off') {
+      await response.arrayBuffer();
+      return new Response(new ReadableStream({ start: body => body.error(new TypeError('network error')) }), { status: response.status });
+    }
+    return response;
+  };
+  for (const kind of ['new', 'edit']) for (const how of ['never sent', 'answer lost', 'answer cut off']) {
+    const at = `${kind}, ${how}`;
+    const { page, person, storage, database, requests } = await start(t, { request });
+    const panel = page(), shown = () => panel.q('.viewer-mark-card').textContent;
+    await panel.marks.setScope(person);
+    const rows = () => database.prepare('SELECT revision, document_json FROM viewer_marks').all().map(row => [row.revision, JSON.parse(row.document_json).note]);
+    if (kind === 'edit') {
+      await panel.place('43.05, -87');
+      await panel.type('[name=name]', 'One');
+      await panel.save();
+      requests.length = 0;
+      await panel.open('One');
+      assert.deepEqual(requests, [], 'opening and editing asks for nothing');
+    } else await panel.place('43.05, -87');
+    await panel.type('[name=name]', 'One');
+    await panel.type('[name=note]', 'Ladder');
+    const before = rows(), undo = panel.store.state.undo.length;
+    const still = message => {
+      assert.match(shown(), message, at);
+      assert.deepEqual([form(panel).hidden, panel.q('[name=name]').value, panel.q('[name=note]').value], [false, 'One', 'Ladder'], at);
+      assert.deepEqual([panel.store.state.busy, stored(storage), panel.store.state.undo.length], [false, true, undo], at);
+      assert.ok(!button(panel, 'Save').disabled, at);
+    };
+    fail = how;
+    requests.length = 0;
+    await panel.save();
+    fail = null;
+    assert.equal(requests.length, 1, at + ': one request, not repeated by itself');
+    still(/Could not save the change\. Try again\./);
+    const sent = kind === 'new' ? [[1, 'Ladder']] : [[2, 'Ladder']];
+    assert.deepEqual(rows(), how === 'never sent' ? before : sent, at);
+    await panel.save();
+    if (kind === 'edit' && how !== 'never sent') {
+      // The first one did arrive, so this one is refused, and the one after it is based on that.
+      still(/The list was reloaded/);
+      assert.deepEqual(rows(), sent, at);
+      await panel.save();
+    }
+    assert.equal(form(panel).hidden, true, at);
+    assert.equal(stored(storage), false, at);
+    assert.deepEqual(rows().map(([, note]) => note), ['Ladder'], at + ': no copy');
+  }
+});

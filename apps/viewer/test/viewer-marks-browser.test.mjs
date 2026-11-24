@@ -110,6 +110,22 @@ function recordPage(client, served) {
   };
 }
 
+// The browser can answer before it has a page to drive.
+async function pageTab(port, ms = 8000) {
+  const deadline = Date.now() + ms;
+  let last = 'no page tab';
+  while (Date.now() < deadline) {
+    try {
+      const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) })).json();
+      const url = tabs.find(tab => tab.type === 'page')?.webSocketDebuggerUrl;
+      if (url) return url;
+      last = `no page tab among ${tabs.length}`;
+    } catch (error) { last = error.message; }
+    await delay(50);
+  }
+  assert.fail(`timed out: browser page tab (${last})`);
+}
+
 async function withBrowser(t, { app = null } = {}, run) {
   const binary = executable();
   if (!binary) { t.skip('Chromium is required for the isolated marks check.'); return; }
@@ -134,10 +150,9 @@ async function withBrowser(t, { app = null } = {}, run) {
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-marks-'));
-    browser = spawnBrowser(binary, ['--headless=new', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+    browser = spawnBrowser(binary, ['--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'));
-    const tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-    client = await Cdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl);
+    client = await Cdp.connect(await pageTab(port));
     for (const domain of ['Page', 'Runtime', 'Log', 'Network']) await client.command(domain + '.enable');
     const recorded = recordPage(client, served);
     const waitFor = async (expression, label, ms = 8000) => {
@@ -150,6 +165,8 @@ async function withBrowser(t, { app = null } = {}, run) {
     const button = text => `[...document.querySelectorAll('#panel-marks button, #viewer-marks-ui button')].find(b => b.textContent === ${JSON.stringify(text)} && !b.closest('[hidden]:not(.viewer-mark-box)'))`; // the Marks pop-up may be closed
     const h = {
       client, waitFor, mouse,
+      // What the Marks API was asked since the last load.
+      asked: () => served.map(entry => entry.what).filter(what => what.includes('/api/')).map(what => what.replace(/[0-9a-f-]{36}/, ':id')),
       size: (width, height, mobile = false) => client.command('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }),
       load: async (query = '') => {
         // Only the new document counts: the one being left is ready too, and may still answer.
@@ -327,6 +344,8 @@ test('signed-in client: map-click and typed pins survive a reload at full precis
     await waitFor('marks.store.state.ready && marks.store.state.marks.length === 2', 'marks after second reload');
     assert.deepEqual((await h.state())[1].geometry.coordinates, [-86.99971234, 43.05031234]);
 
+    // Opening and editing a mark asks the server nothing; a save is one request.
+    assert.deepEqual(h.asked(), ['GET /api/v1/marks']);
     // Invalid text, Save without a change event: nothing is written and the editor stays open.
     await openTreeStand();
     await h.setQuietly('.viewer-mark-form [name=pointCoordinates]', 'not a place');
@@ -346,6 +365,7 @@ test('signed-in client: map-click and typed pins survive a reload at full precis
     await h.client.evaluate("document.querySelector('.viewer-mark-form').requestSubmit(), 0");
     await waitFor("document.querySelector('.viewer-mark-form').hidden", 'editor closed after save');
     rows = stored();
+    assert.deepEqual(h.asked(), ['GET /api/v1/marks', 'PUT /api/v1/marks/:id']);
     assert.equal(rows[1].id, treeStand.id);
     assert.equal(rows[1].revision, 3);
     assert.deepEqual(rows[1].geometry.coordinates, [-86.99961234, 43.05041234]);
