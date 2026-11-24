@@ -316,3 +316,46 @@ test('a refusal because the model is deleted is not kept under its idempotency k
     assert.equal((await call(key)).headers.get('idempotency-replayed'), 'true', `${name}: a success is kept`);
   }
 });
+
+test('a stored expiry that cannot be read never keeps a link, session or grant alive', async (t) => {
+  const f = await fixture(t), site = f.makeProject('Project');
+  for (const expiry of ['not-a-date', '2099-13-45T00:00:00.000Z', ' ', '0000', '2099-01-01T00:00:00.000Z-x']) {
+    const item = f.makeTask(site, `Expiry ${expiry}`), stored = f.store(item), pages = await f.openAll(stored);
+    await f.allServed(stored, pages, expiry);
+    const spoil = () => {
+      for (const id of stored.shareIds) f.database.prepare('UPDATE public_shares SET expires_at=? WHERE id=?').run(expiry, id);
+      for (const { id } of Object.values(stored.sessions)) f.database.prepare('UPDATE viewer_sessions SET expires_at=? WHERE id=?').run(expiry, id);
+      for (const id of Object.values(stored.grants)) f.database.prepare('UPDATE session_grants SET expires_at=? WHERE id=?').run(expiry, id);
+    };
+    spoil();
+    await f.allRefused(stored, pages, `${expiry} live model`);
+    assert.equal((await f.staff('DELETE', `/api/v1/tasks/${item.task.id}`)).status, 409);
+    f.reissue(stored);
+    spoil();
+    await f.allRefused(stored, pages, `${expiry} deleted`);
+    assert.equal((await f.restore(f.bin(item))).status, 200);
+    await f.allRefused(stored, pages, `${expiry} restored`);
+    // A link with no expiry, and one in the future, are unaffected.
+    const good = f.store(item);
+    f.database.prepare('UPDATE public_shares SET expires_at=? WHERE id=?').run(new Date(Date.now() + 600_000).toISOString(), good.shareIds[0]);
+    await f.allServed(good, await f.openAll(good), `${expiry} good`);
+  }
+});
+
+test('an older grant that names its version only in its permissions is judged by that version', async (t) => {
+  const f = await fixture(t), site = f.makeProject('Project'), live = f.makeTask(site, 'Live', { incomplete: false }), gone = f.makeTask(site, 'Deleted');
+  f.database.prepare('UPDATE model_outputs SET model_id=? WHERE id=?').run(live.modelId, gone.versionId);
+  f.database.prepare('UPDATE model_versions SET model_id=? WHERE id=?').run(live.modelId, gone.versionId);
+  assert.ok(f.processing.trashTask(gone.task.id, 'ops:test'));
+  const old = f.store(live), dead = f.store({ ...gone, modelId: live.modelId });
+  for (const stored of [old, dead]) for (const id of Object.values(stored.grants)) f.database.prepare('UPDATE session_grants SET model_version_id=NULL WHERE id=?').run(id);
+  // Not even the one whose version happens to be active again is spent or revived.
+  f.database.prepare('UPDATE models SET active_version_id=? WHERE id=?').run(gone.versionId, live.modelId);
+  for (const grant of Object.values(dead.grants)) assert.equal((await f.redeem(grant)).status, 410);
+  f.database.prepare('UPDATE models SET active_version_id=? WHERE id=?').run(live.versionId, live.modelId);
+  for (const grant of Object.values(dead.grants)) assert.equal((await f.redeem(grant)).status, 410);
+  assert.equal((await f.redeem(old.grants.client)).status, 200, 'the live version');
+  assert.ok(f.processing.restoreMetadataEntity(f.bin(gone).id, 'ops:test'));
+  for (const grant of Object.values(dead.grants)) assert.equal(f.database.prepare('SELECT 1 FROM session_grants WHERE id=?').get(grant), undefined, 'revoked');
+  assert.equal((await f.redeem(old.grants.staff)).status, 200, 'the live version after');
+});

@@ -20,6 +20,13 @@ function modelDeleted(database, modelId, modelVersionId = null) {
   return (own.length ? own : rows).some((row) => row.deleted === 1);
 }
 
+// The version a grant opens, as redeeming it reads it: older grants name it only
+// in their permissions.
+function grantVersionId(row) {
+  if (row.model_version_id) return row.model_version_id;
+  try { return JSON.parse(row.permissions_json)?.__versionId || null; } catch { return null; }
+}
+
 // Run in the transaction that takes a task or project out of the Recycle Bin,
 // before it does: every link, session and unredeemed grant that is refused now
 // only because its model is deleted is revoked for good, so that restoring
@@ -34,11 +41,11 @@ function revokeDeletedCapabilities(database, modelIds, { timestamp, actorId = nu
     for (const session of database.prepare('SELECT id,model_version_id FROM viewer_sessions WHERE model_id=? AND revoked_at IS NULL').all(modelId))
       if (modelDeleted(database, modelId, session.model_version_id))
         revoked.sessions += database.prepare('UPDATE viewer_sessions SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at IS NULL').run(timestamp, timestamp, session.id).changes;
-    for (const grant of database.prepare('SELECT id,model_version_id FROM session_grants WHERE model_id=? AND redeemed_at IS NULL').all(modelId))
-      if (modelDeleted(database, modelId, grant.model_version_id))
+    for (const grant of database.prepare('SELECT id,model_version_id,permissions_json FROM session_grants WHERE model_id=? AND redeemed_at IS NULL').all(modelId))
+      if (modelDeleted(database, modelId, grantVersionId(grant)))
         revoked.grants += database.prepare('DELETE FROM session_grants WHERE id=? AND redeemed_at IS NULL').run(grant.id).changes;
   }
   return revoked;
 }
 
-module.exports = { modelDeleted, revokeDeletedCapabilities };
+module.exports = { modelDeleted, grantVersionId, revokeDeletedCapabilities };
