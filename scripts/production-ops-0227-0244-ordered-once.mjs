@@ -489,25 +489,20 @@ class ReceiptWriteFailure extends Error {
   constructor(state, cause) { super(RECEIPT_WRITE_FAILED, { cause }); this.state = state; }
 }
 
-/**
- * Windows refuses to replace, and sometimes to read, a file that another process holds open, such as a virus scanner.
- * No request is in flight while this waits, for at most 15 seconds. Only local file operations are tried again.
- */
-function whileHeldByOthers(operation) {
-  for (let attempt = 0; ; attempt++) {
-    try { return operation(); } catch (error) {
-      if (process.platform !== 'win32' || attempt >= 150 || !['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-    }
-  }
+/** Makes a rename in this folder durable. Windows has no way to flush a folder, so it is skipped there. */
+function syncFolder(folder) {
+  if (process.platform === 'win32') return;
+  const fd = fs.openSync(folder, 'r');
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
 /**
  * Exclusive receipt file. Every write replaces the whole file atomically: the new content goes to `<file>.next`, every
- * byte is written and flushed, the closed file is read back and compared, and only then does it replace the receipt,
- * which is read back once more. The last complete receipt therefore stays in place until a newer one is proven. Any
- * failure is `receipt_write_failed`; the file is then never written again by this process, and `<file>.next` is left
- * as it is. `keep` saves one value, once, as `<file>.pre-apply.json`.
+ * byte is written and flushed, the closed file is read back and compared, and only then does it replace the receipt.
+ * The folder is flushed and the receipt is read back once more. The last complete receipt therefore stays in place
+ * until a newer one is proven, whenever the process stops. Any failure, including a file that another program holds
+ * open, is `receipt_write_failed`. Nothing is tried again: this process never writes the file again, and
+ * `<file>.next` is left as it is. `keep` saves one value, once, as `<file>.pre-apply.json`.
  */
 export function openOps0227To0244Receipt(filename) {
   if (typeof filename !== 'string' || !path.isAbsolute(filename)) fail('receipt_path_invalid');
@@ -517,7 +512,7 @@ export function openOps0227To0244Receipt(filename) {
   }
   const next = `${filename}.next`;
   let current = Buffer.alloc(0), broken = false;
-  const same = (file, bytes) => { if (!whileHeldByOthers(() => fs.readFileSync(file)).equals(bytes)) throw new Error(`${path.basename(file)} differs`); };
+  const same = (file, bytes) => { if (!fs.readFileSync(file).equals(bytes)) throw new Error(`${path.basename(file)} differs`); };
   return {
     write(receipt) {
       if (broken) fail('receipt_write_failed');
@@ -541,7 +536,8 @@ export function openOps0227To0244Receipt(filename) {
         same(next, bytes);
         // Only this process's own last receipt is replaced.
         same(filename, current);
-        whileHeldByOthers(() => fs.renameSync(next, filename));
+        fs.renameSync(next, filename);
+        syncFolder(path.dirname(filename));
         same(filename, bytes);
         current = bytes;
       } catch (cause) { throw new Error(RECEIPT_WRITE_FAILED, { cause }); }

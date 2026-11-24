@@ -2,7 +2,7 @@
 // local node:sqlite file built from this repository's own migrations 0001..0226;
 // no Cloudflare resource is contacted.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -1257,28 +1257,33 @@ test('the receipt writer replaces the receipt only when the new one is proven, a
   assert.equal(reread.error?.message, 'ops_0227_0244:receipt_write_failed');
   assert.ok(reread.stored.equals(encode(value)));
 
-  // Windows only: a file held by another process is tried again for a while; one that stays held fails.
-  const wait = Atomics.wait;
-  let waits = 0;
-  Atomics.wait = (array, index, expected, ms) => { waits++; assert.equal(ms, 100); return 'timed-out'; };
-  try {
-    const windows = process.platform === 'win32';
-    for (const code of ['EPERM', 'EACCES', 'EBUSY']) for (const [refusals, ok] of [[3, windows], [1000, false]]) {
-      const rename = { count: 0 }, read = { count: 0 };
-      waits = 0;
-      const renamed = attempt(() => ({ renameSync: (from, to) => { if (++rename.count <= refusals) throw diskError(code); realFs.renameSync(from, to); } }));
-      assert.equal(renamed.error === null, ok, code);
-      assert.deepEqual([rename.count, waits], ok ? [4, 3] : windows ? [151, 150] : [1, 0], code);
-      assert.ok(renamed.stored.equals(ok ? encode(value) : old), code);
-      waits = 0;
-      const reading = attempt(() => ({ readFileSync: (file, ...rest) => { if (isNext(file) && ++read.count <= refusals) throw diskError(code); return realFs.readFileSync(file, ...rest); } }));
-      assert.equal(reading.error === null, ok, code);
-      assert.deepEqual([read.count, waits], ok ? [4, 3] : windows ? [151, 150] : [1, 0], code);
+  // A file held by another program is a failure at once, with the previous receipt in place. Nothing is tried again.
+  for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+    const calls = { rename: 0, read: 0 };
+    const renamed = attempt(() => ({ renameSync: () => { calls.rename++; throw diskError(code); } }));
+    const reading = attempt(() => ({ readFileSync: (file, ...rest) => { if (isNext(file)) { calls.read++; throw diskError(code); } return realFs.readFileSync(file, ...rest); } }));
+    for (const run of [renamed, reading]) {
+      assert.deepEqual([run.error?.message, run.error?.cause?.code, run.again?.message], ['ops_0227_0244:receipt_write_failed', code, 'ops_0227_0244:receipt_write_failed']);
+      assert.ok(run.stored.equals(old), code);
     }
-    waits = 0;
-    assert.equal(attempt(() => ({ renameSync: () => { throw diskError('ENOSPC'); } })).error?.cause?.code, 'ENOSPC');
-    assert.equal(waits, 0, 'only a held file is tried again');
-  } finally { Atomics.wait = wait; }
+    assert.deepEqual(calls, { rename: 1, read: 1 }, code);
+  }
+  // The folder is flushed after the replacement, where the platform supports it; a failure there is a failed receipt.
+  for (const call of ['openSync', 'fsyncSync']) {
+    const folder = attempt(name => {
+      let renamed = false, folderFd = null;
+      return { renameSync: (from, to) => { realFs.renameSync(from, to); renamed = true; },
+        openSync: (file, ...rest) => {
+          if (!renamed || file !== path.dirname(name)) return realFs.openSync(file, ...rest);
+          if (call === 'openSync') throw diskError('EIO');
+          folderFd = realFs.openSync(file, ...rest);
+          return folderFd;
+        },
+        fsyncSync: fd => { if (call === 'fsyncSync' && renamed && fd === folderFd) throw diskError('EIO'); return realFs.fsyncSync(fd); } };
+    });
+    assert.equal(folder.error?.cause?.code, process.platform === 'win32' ? undefined : 'EIO', call);
+    assert.ok(folder.stored.equals(encode(value)));
+  }
   // The pre-apply receipt is exclusive, proven the same way, and independent of the main receipt.
   const name = receiptPath(), receipt = openOps0227To0244Receipt(name);
   receipt.write(first);
@@ -1287,6 +1292,57 @@ test('the receipt writer replaces the receipt only when the new one is proven, a
   assert.ok(fs.readFileSync(name).equals(old));
   assert.throws(() => receipt.keep(first), /receipt_exists_no_replay/u);
   assert.ok(fs.readFileSync(`${name}.pre-apply.json`).equals(encode(value)));
+});
+
+test('a process that stops at any file operation or any part of a write leaves a complete receipt', () => {
+  const first = { phase: 'first', text: 'y'.repeat(300) }, second = { phase: 'second', text: 'x'.repeat(3000) };
+  const complete = [first, second].map(item => `${JSON.stringify(item, null, 2)}\n`);
+  const stopped = new Set();
+  let finished = false;
+  // Every file operation of one write is a step, and the content goes out 50 bytes at a time.
+  for (let stopAt = 1; !finished && stopAt <= 200; stopAt++) {
+    const name = receiptPath(), receipt = openOps0227To0244Receipt(name);
+    receipt.write(first);
+    let steps = 0, dead = false;
+    const step = (label, operation) => {
+      if (dead || ++steps === stopAt) { if (!dead) stopped.add(label); dead = true; throw new Error('synthetic stop'); }
+      return operation();
+    };
+    try {
+      for (const call of ['openSync', 'fsyncSync', 'closeSync', 'readFileSync', 'renameSync']) fs[call] = (...args) => step(call, () => realFs[call](...args));
+      fs.writeSync = (fd, b, o, n, p) => step('writeSync', () => realFs.writeSync(fd, b, o, Math.min(n, 50), p));
+      receipt.write(second);
+      finished = true;
+    } catch (error) { assert.equal(error.message, 'ops_0227_0244:receipt_write_failed'); } finally { restoreFs(); }
+    assert.ok(complete.includes(fs.readFileSync(name, 'utf8')), `stopped at step ${stopAt}`);
+    if (finished) { assert.equal(fs.readFileSync(name, 'utf8'), complete[1]); assert.ok(steps > 60); }
+  }
+  assert.ok(finished, 'a write that is not stopped completes');
+  assert.deepEqual([...stopped].sort(), ['closeSync', 'fsyncSync', 'openSync', 'readFileSync', 'renameSync', 'writeSync']);
+});
+
+test('a killed process leaves its last complete receipt and its pre-apply receipt', async () => {
+  const tool = pathToFileURL(path.join(ROOT, 'scripts/production-ops-0227-0244-ordered-once.mjs')).href;
+  const script = `const { openOps0227To0244Receipt } = await import(${JSON.stringify(tool)});
+    const receipt = openOps0227To0244Receipt(process.argv[1]);
+    receipt.write({ n: 0 }); receipt.keep({ kept: true }); process.stdout.write('ready');
+    for (let n = 1; ; n++) receipt.write({ n, body: 'x'.repeat(40000) });`;
+  let latest = 0;
+  for (let round = 0; round < 10; round++) {
+    const name = receiptPath();
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, name], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    const started = await Promise.race([new Promise(resolve => child.stdout.once('data', () => resolve(true))), exited.then(() => false)]);
+    assert.equal(started, true, 'the child saved its receipt and its pre-apply receipt');
+    await new Promise(resolve => setTimeout(resolve, 20 + round * 13));
+    child.kill('SIGKILL');
+    await exited;
+    const receipt = readReceipt(name);
+    assert.ok(receipt.n === 0 || receipt.body.length === 40000, 'a complete receipt, whenever the process was killed');
+    latest = Math.max(latest, receipt.n);
+    assert.deepEqual(readReceipt(`${name}.pre-apply.json`), { kept: true });
+  }
+  assert.ok(latest > 0, 'some rounds were killed after later writes');
 });
 
 test('every unsaved receipt of a real-file run leaves the last complete receipt and a usable pre-apply receipt', async () => {

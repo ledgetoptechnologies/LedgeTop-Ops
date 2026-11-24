@@ -267,11 +267,13 @@ tool never retries a batch, and it never sends a file twice in one process.
 ## When the receipt cannot be saved
 
 A receipt write counts only after every byte is written to `<receipt>.next`,
-flushed, closed and read back equal, the file has replaced the receipt, and the
-receipt has been read back equal. After a failure the process never writes that
-receipt again. On Windows a file held open by another program is tried again for
-up to 15 seconds, so do not open the receipt during a run. The previous complete
-receipt normally stays in place, and
+flushed, closed and read back equal, the file has replaced the receipt, the folder
+has been flushed (not on Windows, which has no way to), and the receipt has been
+read back equal. After a failure the process never writes that
+receipt again, and nothing is tried again. On Windows a receipt that another
+program holds open cannot be replaced, and that is such a failure: do not open the
+receipt files during a run. The previous complete receipt normally stays in place,
+and
 `.next` holds whatever was written. A receipt that was not saved is never
 reported as a success: the exit code is 1, whatever the run reached, and stderr
 has its own line.
