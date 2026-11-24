@@ -125,7 +125,7 @@ function migrateProjectFoldersV48(database) {
   database.exec(PROJECT_FOLDERS_V48_SQL);
 }
 
-// Restricted (exclusion-scoped) client credentials are fenced by a per-task
+// Client credentials of a share with a selection are fenced by a per-task
 // generation that only ever increases. Triggers bump it in the same statement
 // transaction as every write that can change whether a published task is
 // eligible: its project, folder, archive/purge state, published model, the

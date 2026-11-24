@@ -1,6 +1,6 @@
 'use strict';
 
-const { canonicalProjectExclusions } = require('./projectExclusions');
+const { canonicalProjectSelection } = require('./projectSelection');
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const text = (value, max = 500) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
@@ -23,17 +23,18 @@ function grantScope(value) {
     && (value.scopeType === 'project' ? value.taskId === null && value.includeFuturePublished === true
       : id(value.taskId) && value.includeFuturePublished === false);
 }
+const selected = value => value.selection === undefined || value.scopeType === 'project' && canonicalProjectSelection(value.selection) !== null;
 function validDirectGrantInput(value) {
-  return exact(value, ['sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt', 'confirmedScope', 'exclusions'])
+  return exact(value, ['sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt', 'confirmedScope', 'selection'])
     && grantScope(value) && value.confirmedScope === true
-    && (value.exclusions === undefined || (value.scopeType === 'project' && canonicalProjectExclusions(value.exclusions) !== null));
+    && selected(value);
 }
 function validDirectGrant(value) {
   return exact(value, ['grantId', 'sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt',
-    'grantVersion', 'revokedAt', 'clientDisplayName', 'createdAt', 'createdBy'])
+    'grantVersion', 'revokedAt', 'clientDisplayName', 'createdAt', 'createdBy', 'selection'])
     && id(value.grantId) && grantScope(value) && Number.isSafeInteger(value.grantVersion) && value.grantVersion > 0
     && date(value.revokedAt) && (value.clientDisplayName === null || text(value.clientDisplayName)) && value.createdAt !== null && date(value.createdAt)
-    && (value.createdBy === undefined || text(value.createdBy));
+    && (value.createdBy === undefined || text(value.createdBy)) && selected(value);
 }
 function validDirectSnapshot(value, action) {
   if (action === 'create') return exact(value, ['grant', 'replayed']) && validDirectGrant(value.grant) && typeof value.replayed === 'boolean';

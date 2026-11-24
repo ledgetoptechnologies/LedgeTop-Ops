@@ -10,12 +10,14 @@ import type {Env,StaffPrincipal} from './types';
 
 const RESTRICTED_GRANT_EXPIRY = '1970-01-01T00:00:00.000Z';
 const scopedId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-const exclusionsSchema = z.object({ version: z.literal(1), folderIds: z.array(scopedId).max(128),
- taskIds: z.array(scopedId).max(128) }).strict().refine(x => x.folderIds.length + x.taskIds.length > 0
-  && x.folderIds.length + x.taskIds.length <= 128).transform(x => ({
-   version: x.version, folderIds: [...new Set(x.folderIds)].sort(), taskIds: [...new Set(x.taskIds)].sort(),
-  }));
-type Exclusions = z.output<typeof exclusionsSchema>;
+const sortedIds = z.array(scopedId).max(128).refine(ids => ids.every((id, index) => index === 0 || ids[index - 1]! < id));
+const MAX_SELECTION = 128;
+const counted = (x: { folderIds: string[]; taskIds: string[] }) => x.folderIds.length + x.taskIds.length > 0 && x.folderIds.length + x.taskIds.length <= MAX_SELECTION;
+/** One canonical form (sorted, unique ids). Anything else is refused, never repaired. */
+const selectionSchema = z.object({ version: z.literal(1), mode: z.enum(['except', 'only']), folderIds: sortedIds, taskIds: sortedIds }).strict().refine(counted);
+/** Receipt version 2 of the unreleased exclusions work: read as `except`, never written. */
+const legacyExclusionsSchema = z.object({ version: z.literal(1), folderIds: sortedIds, taskIds: sortedIds }).strict().refine(counted);
+type Selection = z.output<typeof selectionSchema>;
 const opaque=z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const source=z.string().min(15).max(78).regex(/^project-alpha:[a-z0-9][a-z0-9_-]*$/);
 const key=z.string().min(16).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
@@ -35,14 +37,15 @@ export const DIRECT_VIEWER_GRANTS_PER_CLIENT=100;
 /** An effective grant: active, unrevoked and unexpired. The client-portal read, the create precheck,
  * the in-INSERT cap and the post-write diagnosis all use this one boundary, so expired rows (which never
  * change status) neither show nor count.
- * A restricted (exclusion-scoped) grant keeps the fail-closed RESTRICTED_GRANT_EXPIRY sentinel on its row
- * for older readers; its real lifetime is in its single v2 creation receipt. Such a row is effective only
+ * A grant with a selection keeps the fail-closed RESTRICTED_GRANT_EXPIRY sentinel on its row
+ * for older readers; its real lifetime is in its single v2 or v3 creation receipt. Such a row is effective only
  * while that receipt matches the row and has not expired (restrictedReceiptLiveSql). A row whose receipt is
  * missing, duplicated or does not match neither counts nor issues (resolveRestrictedGrant also rejects it). */
 function effectiveGrantSql(alias?:string){const c=alias?`${alias}.`:'';
- return `${c}status='active' AND ${c}revoked_at IS NULL AND (${c}authorization_expires_at IS NULL
-  OR ${expiryJulianSql(`${c}authorization_expires_at`)}>julianday('now')
-  OR (${c}authorization_expires_at='${RESTRICTED_GRANT_EXPIRY}' AND ${restrictedReceiptLiveSql(alias??'viewer_direct_client_grants')}))`;}
+ const table=alias??'viewer_direct_client_grants';
+ return `${c}status='active' AND ${c}revoked_at IS NULL AND (((${c}authorization_expires_at IS NULL
+   OR ${expiryJulianSql(`${c}authorization_expires_at`)}>julianday('now')) AND NOT ${selectionReceiptSql(table)})
+  OR (${c}authorization_expires_at='${RESTRICTED_GRANT_EXPIRY}' AND ${restrictedReceiptLiveSql(table)}))`;}
 /** Expiry instant (Julian day, UTC) of a stored expiry string, matching expiryMillis. New rows and receipts
  * store canonical UTC (`…Z`); rows written before that may carry any offset the create schema accepts
  * (±HH:MM up to ±23:59). SQLite's own parser rejects offsets above 14 hours, so the offset is applied here
@@ -66,13 +69,20 @@ function canonicalExpiry(value:string|null):string|null|undefined{
  const canonical=new Date(millis).toISOString();
  return CANONICAL_EXPIRY.test(canonical)&&isoExpiry.safeParse(canonical).success?canonical:undefined;
 }
+/** A create receipt that carries a selection belongs to a sentinel row only; on any other row it is a contradiction. */
+function selectionReceiptSql(grantTable:string){return `EXISTS(SELECT 1 FROM viewer_direct_client_grant_mutation_receipts marked
+  WHERE marked.grant_id=${grantTable}.id AND marked.action='grant.create' AND json_valid(marked.response_json)
+   AND (json_extract(marked.response_json,'$.version') IN (2,3) OR json_type(marked.response_json,'$.exclusions') IS NOT NULL
+    OR json_type(marked.response_json,'$.selection') IS NOT NULL))`;}
 /** SQL form of the receipt checks in resolveRestrictedGrant. It is deliberately no stricter than that
  * function, so a grant the issuer would honour always counts toward the cap; a receipt it would reject
  * for a stricter reason can only be over-counted (never issued). */
 function restrictedReceiptLiveSql(grantTable:string){const g=`${grantTable}.`,j=(path:string)=>`json_extract(receipt.response_json,'${path}')`;
  return `(SELECT count(*) FROM viewer_direct_client_grant_mutation_receipts receipt WHERE receipt.grant_id=${g}id AND receipt.action='grant.create')=1
   AND EXISTS(SELECT 1 FROM viewer_direct_client_grant_mutation_receipts receipt WHERE receipt.grant_id=${g}id AND receipt.action='grant.create'
-   AND json_valid(receipt.response_json) AND ${j('$.version')}=2 AND json_type(receipt.response_json,'$.exclusions')='object'
+   AND json_valid(receipt.response_json)
+   AND ((${j('$.version')}=2 AND json_type(receipt.response_json,'$.exclusions')='object' AND json_type(receipt.response_json,'$.selection') IS NULL)
+    OR (${j('$.version')}=3 AND json_type(receipt.response_json,'$.selection')='object' AND json_type(receipt.response_json,'$.exclusions') IS NULL))
    AND ${j('$.grant.grantId')}=${g}id AND ${j('$.grant.viewerProjectId')}=${g}viewer_project_id
    AND ${j('$.grant.scopeType')}='project' AND ${g}scope_type='project' AND ${j('$.grant.grantVersion')}=${g}grant_version
    AND ${j('$.grant.workspaceId')}=${g}workspace_id AND ${j('$.grant.sourceId')}=${g}source_id
@@ -83,8 +93,8 @@ function restrictedReceiptLiveSql(grantTable:string){const g=`${grantTable}.`,j=
     OR ${expiryJulianSql(j('$.grant.expiresAt'))}>julianday('now')))`;}
 const inputSchema=z.object({sourceId:source,workspaceId:opaque,viewerProjectId:opaque,taskId:opaque.nullable(),
  scopeType:z.enum(['project','task']),includeFuturePublished:z.boolean(),confirmedScope:z.literal(true),
- expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict(),exclusions:exclusionsSchema.optional()}).strict()
- .refine(g=>g.scopeType==='project'?g.taskId===null&&g.includeFuturePublished:g.taskId!==null&&!g.includeFuturePublished&&g.exclusions===undefined);
+ expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict(),selection:selectionSchema.optional()}).strict()
+ .refine(g=>g.scopeType==='project'?g.taskId===null&&g.includeFuturePublished:g.taskId!==null&&!g.includeFuturePublished&&g.selection===undefined);
 export class DirectViewerGrantError extends HTTPException {
  constructor(status:400|403|404|409|503,public readonly code:string,message:string,public readonly grantId?:string){super(status,{message,cause:{code}});}
 }
@@ -120,7 +130,7 @@ export interface DirectViewerClientGrantRow {
  id:string;source_id:string;workspace_id:string;viewer_project_id:string;task_id:string|null;scope_type:'project'|'task';
  include_future_published:number;can_measure:number;can_view_cameras:number;can_download:number;authorization_expires_at:string|null;
  grant_version:number;status:'active'|'revoked';created_by_staff_id:string;created_at:string;updated_at:string;revoked_at:string|null;
- revoked_by_staff_id:string|null;revoke_reason:string|null;client_display_name?:string; exclusions?:Exclusions;
+ revoked_by_staff_id:string|null;revoke_reason:string|null;client_display_name?:string; selection?:Selection;
 }
 export type DirectViewerClientGrantPublicResult=ReturnType<typeof directViewerClientGrantView>;
 export type DirectViewerClientRecipientAuthorityPin = Readonly<
@@ -129,11 +139,11 @@ export type DirectViewerClientRecipientAuthorityPin = Readonly<
  | {version:1;mode:'operations_native';sourceId:string;workspaceId:string;sourceWorkspaceId:string;rootType:'organization'|'standalone_client';
     rootPublicId:string;authorityId:string;ownershipEpoch:number;claimOwnershipEpoch:number}>;
 type CreateReceiptEnvelope = Readonly<{version:1;grant:unknown;recipientAuthorityPin:DirectViewerClientRecipientAuthorityPin}
- | {version:2;grant:unknown;recipientAuthorityPin:DirectViewerClientRecipientAuthorityPin;exclusions:Exclusions}>;
+ | {version:3;grant:unknown;recipientAuthorityPin:DirectViewerClientRecipientAuthorityPin;selection:Selection}>;
 export function directViewerClientGrantView(r:DirectViewerClientGrantRow){return {grantId:r.id,sourceId:r.source_id,workspaceId:r.workspace_id,
  viewerProjectId:r.viewer_project_id,taskId:r.task_id,scopeType:r.scope_type,includeFuturePublished:!!r.include_future_published,
  permissions:{measure:!!r.can_measure,cameras:!!r.can_view_cameras,download:!!r.can_download},expiresAt:r.authorization_expires_at,
- grantVersion:r.grant_version,revokedAt:r.revoked_at,createdAt:r.created_at,clientDisplayName:r.client_display_name??null};}
+ grantVersion:r.grant_version,revokedAt:r.revoked_at,createdAt:r.created_at,clientDisplayName:r.client_display_name??null,...(r.selection?{selection:r.selection}:{})};}
 function recipientSql(env:Env){return `SELECT w.id,w.project_alpha_source_id,mapping.source_workspace_id,root.display_name,w.root_type,
  COALESCE(w.pa_organization_public_id,w.pa_client_public_id) root_public_id,
  checkpoint.active_generation_id,checkpoint.source_sequence,root.source_version root_version,
@@ -300,27 +310,39 @@ export async function listDirectViewerClientGrantWorkspace(env:Env,principal:Sta
   if(rows.results.length>DIRECT_VIEWER_GRANT_PAGE_SIZE)grantsNextCursor=grants.at(-1)!.id;
  }
  return {clients,clientsNextCursor,grantsNextCursor,
-  grants:(await Promise.all(grants.map(row => resolveRestrictedGrant(env, row, true)))).map((row, index) => directViewerClientGrantView(row ?? grants[index]!))};
+  grants:(await Promise.all(grants.map(row => resolveRestrictedGrant(env, row, true)))).map((row, index) => directViewerClientGrantView(row
+   // A row whose receipt contradicts it gives no access: staff see it as ended, never as a whole project.
+   ?? { ...grants[index]!, authorization_expires_at: RESTRICTED_GRANT_EXPIRY }))};
+}
+/** The selection an exact v2 or v3 envelope carries; null when the envelope is neither. Mixed or extra keys are neither. */
+function envelopeSelection(envelope: Record<string, unknown>): Selection | null {
+ const shape = Object.keys(envelope).sort().join(',');
+ if (envelope.version === 3 && shape === 'grant,recipientAuthorityPin,selection,version') {
+  const parsed = selectionSchema.safeParse(envelope.selection);
+  return parsed.success ? parsed.data : null;
+ }
+ if (envelope.version === 2 && shape === 'exclusions,grant,recipientAuthorityPin,version') {
+  const parsed = legacyExclusionsSchema.safeParse(envelope.exclusions);
+  return parsed.success ? { version: 1, mode: 'except', folderIds: parsed.data.folderIds, taskIds: parsed.data.taskIds } : null;
+ }
+ return null;
 }
 function validCreateReceiptEnvelope(envelope: Record<string, unknown>): boolean {
- const shape = Object.keys(envelope).sort().join(',');
- if (envelope.version === 1) return shape === 'grant,recipientAuthorityPin,version';
- if (envelope.version !== 2 || shape !== 'exclusions,grant,recipientAuthorityPin,version') return false;
- const parsed = exclusionsSchema.safeParse(envelope.exclusions);
- return parsed.success && JSON.stringify(parsed.data) === JSON.stringify(envelope.exclusions);
+ if (envelope.version === 1) return Object.keys(envelope).sort().join(',') === 'grant,recipientAuthorityPin,version';
+ return envelopeSelection(envelope) !== null;
 }
 
-// The legacy reader sees an expired grant. V2 must prove the exact immutable
-// creation receipt before restoring the effective expiry or applying the scope.
+// An older reader sees an ended grant. A v2 or v3 receipt must prove the exact immutable creation before the
+// effective expiry is restored or the selection applied; on a row without the sentinel it is a contradiction.
 async function resolveRestrictedGrant(env: Env, row: DirectViewerClientGrantRow, includeExpired = false) {
- if (row.authorization_expires_at !== RESTRICTED_GRANT_EXPIRY) return row;
  const receipts = await db(env).prepare(`SELECT response_json FROM viewer_direct_client_grant_mutation_receipts
    WHERE grant_id=? AND action='grant.create' ORDER BY created_at LIMIT 2`).bind(row.id).all<{response_json:string}>();
+ if (row.authorization_expires_at !== RESTRICTED_GRANT_EXPIRY) return receipts.results.some(item => carriesSelection(item.response_json)) ? null : row;
  if (receipts.results.length !== 1) return null;
  let envelope: Record<string, unknown>;
  try { envelope = JSON.parse(receipts.results[0]!.response_json); } catch { return null; }
- if (!envelope || envelope.version !== 2 || !validCreateReceiptEnvelope(envelope)
-   || !validRecipientAuthorityPin(envelope.recipientAuthorityPin)) return null;
+ const selection = envelope && typeof envelope === 'object' && !Array.isArray(envelope) ? envelopeSelection(envelope) : null;
+ if (!selection || !validRecipientAuthorityPin(envelope.recipientAuthorityPin)) return null;
  const grant = envelope.grant;
  if (!validCreateReceiptGrant(grant) || grant.grantId !== row.id || grant.viewerProjectId !== row.viewer_project_id
    || grant.scopeType !== 'project' || row.scope_type !== 'project' || grant.grantVersion !== row.grant_version
@@ -332,7 +354,14 @@ async function resolveRestrictedGrant(env: Env, row: DirectViewerClientGrantRow,
  if (grant.expiresAt !== null && (!Number.isFinite(expiryMillis(grant.expiresAt))
    || (!includeExpired && expiryMillis(grant.expiresAt) <= Date.now()))) return null;
  // A receipt written before canonical storage keeps its original string if it has no canonical form.
- return { ...row, authorization_expires_at: canonicalExpiry(grant.expiresAt) ?? grant.expiresAt, exclusions: exclusionsSchema.parse(envelope.exclusions) };
+ return { ...row, authorization_expires_at: canonicalExpiry(grant.expiresAt) ?? grant.expiresAt, selection };
+}
+/** Deliberately loose: any sign of a selection, however malformed. */
+function carriesSelection(responseJson: string): boolean {
+ try {
+  const value = JSON.parse(responseJson) as Record<string, unknown> | null;
+  return !!value && typeof value === 'object' && (value.version === 2 || value.version === 3 || 'exclusions' in value || 'selection' in value);
+ } catch { return false; }
 }
 
 async function receipt(env:Env,actor:string,idempotencyKey:string,fingerprint:string){
@@ -341,18 +370,18 @@ async function receipt(env:Env,actor:string,idempotencyKey:string,fingerprint:st
  if(row&&row.request_fingerprint!==fingerprint)fail(409,'idempotency_conflict','Idempotency key already used for another request');
  return row?{grantId:row.grant_id,response:JSON.parse(row.response_json)}:null;
 }
-function createReceiptGrant(value:unknown,expectedGrantId:string,exclusions?:Exclusions):DirectViewerClientGrantPublicResult {
+function createReceiptGrant(value:unknown,expectedGrantId:string,selection?:Selection):DirectViewerClientGrantPublicResult {
  if(value&&typeof value==='object'&&!Array.isArray(value)&&('recipientAuthorityPin' in value||'version' in value)){
   const envelope=value as Record<string,unknown>,grant=envelope.grant;
   if(!validCreateReceiptEnvelope(envelope)||!('grant'in envelope)||!('recipientAuthorityPin'in envelope)
-    ||JSON.stringify(exclusions)!==JSON.stringify(envelope.exclusions)
+    ||JSON.stringify(selection??null)!==JSON.stringify(envelopeSelection(envelope))
     ||!validRecipientAuthorityPin(envelope.recipientAuthorityPin)||!validCreateReceiptGrant(grant)
     ||grant.grantId!==expectedGrantId||grant.workspaceId!==envelope.recipientAuthorityPin.workspaceId
     ||grant.sourceId!==envelope.recipientAuthorityPin.sourceId)
    fail(503,'grant_receipt_unavailable','Viewer share receipt is unavailable; contact support');
   return grant;
  }
- if(exclusions!==undefined||!validCreateReceiptGrant(value)||value.grantId!==expectedGrantId)
+ if(selection!==undefined||!validCreateReceiptGrant(value)||value.grantId!==expectedGrantId)
   fail(503,'grant_receipt_unavailable','Viewer share receipt is unavailable; contact support');
  return value;
 }
@@ -458,18 +487,19 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    if(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))
     fail(409,'relationship_missing','Client authority changed; refresh the client connection');
   }
-  return {grant:createReceiptGrant(prior.response,prior.grantId,g.exclusions),replayed:true};
+  return {grant:createReceiptGrant(prior.response,prior.grantId,g.selection),replayed:true};
  }
  // After the replay check, so an already committed request still replays; before any read or write.
  const expiresAt=canonicalExpiry(g.expiresAt);
  if(expiresAt===undefined)fail(400,'expired_at_invalid','Expiration is outside the supported range');
  if(expiresAt!==null&&Date.parse(expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
  let catalog;
- try{catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{}),...(g.exclusions?{exclusions:g.exclusions,validateExclusions:true}:{})});}
+ try{catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{}),...(g.selection?{selection:g.selection,validateSelection:true}:{})});}
  catch(error){
   if(error instanceof ViewerServiceError){
-   if(error.code==='not_found')fail(409,g.taskId?'task_not_published':'relationship_missing',g.taskId
-    ?'This task is not currently published in the selected Viewer project':'This Viewer project is unavailable');
+   if(error.code==='unsupported')fail(409,'selection_unsupported','The Viewer must be updated before it can share part of a project');
+   if(error.code==='not_found')fail(409,g.taskId?'task_not_published':g.selection?'selection_not_in_project':'relationship_missing',g.taskId
+    ?'This task is not currently published in the selected Viewer project':g.selection?'A chosen folder or task is no longer in this Viewer project':'This Viewer project is unavailable');
    fail(503,'viewer_unavailable','Viewer is temporarily unavailable. Please try again.');
   }
   throw error;
@@ -516,19 +546,19 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    WHERE authority.client_authority_id=claim.client_authority_id AND authority.workspace_id=w.id AND authority.state='active'
      AND authority.target_id=? AND authority.target_revision=? AND authority.ownership_epoch=? AND authority.root_kind=w.root_type)`:''})`)
  .bind(id,g.sourceId,g.workspaceId,g.viewerProjectId,g.taskId,g.scopeType,+g.includeFuturePublished,+g.permissions.measure,+g.permissions.cameras,+g.permissions.download,
- g.exclusions?RESTRICTED_GRANT_EXPIRY:result.expiresAt,principal.id,now,now,...guard.bindings,g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
+ g.selection?RESTRICTED_GRANT_EXPIRY:result.expiresAt,principal.id,now,now,...guard.bindings,g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
  g.workspaceId,g.sourceId,row.active_generation_id,row.source_sequence,row.root_version,
  row.claim_authority_id,row.claim_source_id,row.claim_source_workspace_id,row.claim_ownership_epoch,
  ...(operationsAuthority?[operationsAuthority.targetId,operationsAuthority.targetRevision,operationsAuthority.ownershipEpoch]:[])),
  ...mutationStatements(database,principal,input.idempotencyKey,fingerprint,id,'grant.create',result,now,
-   (g.exclusions ? {version:2,grant:result,recipientAuthorityPin:pin,exclusions:g.exclusions}
+   (g.selection ? {version:3,grant:result,recipientAuthorityPin:pin,selection:g.selection}
     : {version:1,grant:result,recipientAuthorityPin:pin}) satisfies CreateReceiptEnvelope)]);
  }catch(error){const replay=await receipt(env,principal.id,input.idempotencyKey,fingerprint);if(replay){
    const current=await recipient(env,g.sourceId,g.workspaceId),priorPin=createReceiptAuthorityPin(replay.response);
    if((priorPin&&JSON.stringify(priorPin)!==JSON.stringify(current.pin))
     ||(!priorPin&&(current.pin.mode==='operations_native'||await workspaceHasClaimHistory(env,g.workspaceId))))
     fail(409,'relationship_missing','Client authority changed; refresh the client connection');
-   return {grant:createReceiptGrant(replay.response,replay.grantId,g.exclusions),replayed:true};}
+   return {grant:createReceiptGrant(replay.response,replay.grantId,g.selection),replayed:true};}
   const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
    AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
   if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);

@@ -534,6 +534,25 @@ describe("direct client delivery service boundary",()=>{
   await expect(client.clientDeliveryCatalog({projectId,taskId})).rejects.toMatchObject({code:"invalid_response"});
   bad.project.id="another-project";await expect(client.clientDeliveryCatalog({projectId})).rejects.toMatchObject({code:"invalid_response"});
  });
+ it("sends a selection exactly and accepts an answer only from a Viewer that says it applies selections",async()=>{
+  const selection={version:1 as const,mode:"only" as const,folderIds:["00000000-0000-4000-8000-000000000001"],taskIds:[]};
+  const urls:URL[]=[];let answer:()=>Response=()=>Response.json({...catalog(),capabilities:["task_generation_v1","selection_v1"]});
+  const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},(async(input:RequestInfo|URL)=>{urls.push(new URL(String(input)));return answer();}) as typeof fetch);
+  await client.clientDeliveryCatalog({projectId,selection,validateSelection:true});
+  expect(JSON.parse(Buffer.from(urls[0]!.searchParams.get("selectionScope")!,"base64url").toString())).toEqual(selection);
+  expect(urls[0]!.searchParams.get("validateSelection")).toBe("1");
+  for(const capabilities of [undefined,null,"selection_v1",[],["selection_v1"],["task_generation_v1"]]){
+   answer=()=>Response.json({...catalog(),capabilities});
+   await expect(client.clientDeliveryCatalog({projectId,selection})).rejects.toMatchObject({code:"unsupported"});
+  }
+  // An older Viewer refuses the query; that is the same answer. A missing share stays a missing share.
+  answer=()=>new Response("{}",{status:400});await expect(client.clientDeliveryCatalog({projectId,selection})).rejects.toMatchObject({code:"unsupported"});
+  answer=()=>new Response("{}",{status:404});await expect(client.clientDeliveryCatalog({projectId,selection})).rejects.toMatchObject({code:"not_found"});
+  // Without a selection nothing changes.
+  answer=()=>new Response("{}",{status:400});await expect(client.clientDeliveryCatalog({projectId})).rejects.toMatchObject({code:"unavailable"});
+  answer=()=>Response.json(catalog());expect((await client.clientDeliveryCatalog({projectId})).tasks).toHaveLength(1);
+  expect(urls.at(-1)!.searchParams.has("selectionScope")).toBe(false);
+ });
  it("rejects duplicate rows, oversized pages and single-task continuation",async()=>{
   let payload:unknown=catalog();const client=new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},async()=>Response.json(payload));
   const duplicate=catalog();duplicate.tasks.push(duplicate.tasks[0]!);payload=duplicate;

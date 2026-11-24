@@ -2,6 +2,7 @@ import {readFileSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
+import {ViewerServiceError} from '@ltds/shared';
 import {sha256} from '../src/worker/crypto';
 import type {Env,StaffPrincipal} from '../src/worker/types';
 const mocks=vi.hoisted(()=>({catalog:vi.fn(),scope:vi.fn(),proof:vi.fn(),guard:vi.fn()}));
@@ -276,11 +277,11 @@ describe('direct Viewer grant listing',()=>{
  });
 });
 
-// Restricted (exclusion-scoped) grants keep the fail-closed 1970 sentinel on the row; their real lifetime is
-// in the single v2 creation receipt. The cap counts them only while that receipt matches and is unexpired.
+// Grants with a selection keep the fail-closed 1970 sentinel on the row; their real lifetime is
+// in the single v2 or v3 creation receipt. The cap counts them only while that receipt matches and is unexpired.
 describe('direct Viewer per-client cap with restricted grants',()=>{
  const PAST='2020-01-01T00:00:00.000Z',FUTURE='2099-01-01T00:00:00.000Z',SENTINEL='1970-01-01T00:00:00.000Z';
- type Receipt='live'|'live-no-expiry'|'expired'|'missing'|'duplicate'|'wrong-version'|'wrong-workspace'|'wrong-permissions'|'v1';
+ type Receipt='v3'|'v3-except'|'v3-unsorted'|'v3-extra'|'v3-mixed'|'v2-selection'|'v3-exclusions'|'v3-no-selection'|'v3-bad-mode'|'live'|'live-no-expiry'|'expired'|'missing'|'duplicate'|'wrong-version'|'wrong-workspace'|'wrong-permissions'|'v1';
  let receiptSequence=0;
  function envelope(id:string,viewerProjectId:string,expiresAt:string|null,kind:Receipt){
   const now=new Date().toISOString();
@@ -289,6 +290,12 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
    grantVersion:kind==='wrong-version'?2:1,revokedAt:null,createdAt:now,clientDisplayName:'One'};
   const pin={version:1,mode:'native_source',sourceId:'project-alpha:primary',workspaceId:'ws-one',sourceWorkspaceId:'source-ws-one',
    rootType:'standalone_client',rootPublicId:'root-ws-one'};
+  const one='00000000-0000-4000-8000-000000000001',two='00000000-0000-4000-8000-000000000002';
+  const exclusions={version:1,folderIds:[],taskIds:[one]},only={version:1,mode:'only',folderIds:[one],taskIds:[two]};
+  const shapes:Record<string,unknown>={'v3':{selection:only},'v3-except':{selection:{...only,mode:'except'}},'v3-unsorted':{selection:{...only,folderIds:[two,one]}},
+   'v3-extra':{selection:only,note:'x'},'v3-mixed':{selection:only,exclusions},'v3-exclusions':{exclusions},'v3-no-selection':{},'v3-bad-mode':{selection:{...only,mode:'all'}}};
+  if(kind in shapes)return {version:3,grant,recipientAuthorityPin:pin,...shapes[kind] as object};
+  if(kind==='v2-selection')return {version:2,grant,recipientAuthorityPin:pin,selection:only};
   return kind==='v1'?{version:1,grant,recipientAuthorityPin:pin}
    :{version:2,grant,recipientAuthorityPin:pin,exclusions:{version:1,folderIds:[],taskIds:['00000000-0000-4000-8000-000000000001']}};
  }
@@ -384,11 +391,11 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
  // 14 hours, so storage is canonical UTC and older stored offsets are applied by hand on read.
  const OFFSET_FUTURE='2099-01-01T00:00:00+15:00',OFFSET_FUTURE_UTC='2098-12-31T09:00:00.000Z';
  const OFFSET_FAR='2099-01-01T00:00:00-23:59',OFFSET_FAR_UTC='2099-01-01T23:59:00.000Z';
- const exclusions={version:1 as const,folderIds:[],taskIds:['00000000-0000-4000-8000-000000000002']};
+ const selection={version:1 as const,mode:'except' as const,folderIds:[],taskIds:['00000000-0000-4000-8000-000000000002']};
  const createWith=(env:Env,idempotencyKey:string,viewerProjectId:string,expiresAt:string|null,restricted:boolean)=>createDirectViewerClientGrant({env,principal,
   idempotencyKey,request:new Request('https://ops.example.test/'),grant:{sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId,taskId:null,
    scopeType:'project',includeFuturePublished:true,confirmedScope:true,expiresAt,permissions:{measure:true,cameras:false,download:false},
-   ...(restricted?{exclusions}:{})}});
+   ...(restricted?{selection}:{})}});
  const issuableExpiry=async(env:Env)=>Object.fromEntries((await readDirectViewerClientGrants(env,{sourceId:'project-alpha:primary',workspaceId:'ws-one'}))
   .map(row=>[row.id,row.authorization_expires_at]));
  it('stores a non-UTC offset expiry as canonical UTC, and list, mint selection, replay and the cap agree on it',async()=>{
@@ -504,6 +511,78 @@ describe('direct Viewer per-client cap with restricted grants',()=>{
   expect(race.state.raced).toBe(true);expect(created.replayed).toBe(false);expect(await issuable(env)).toHaveLength(100);
  },120_000);
 });
+describe('direct Viewer selections in receipts',()=>{
+ const SENTINEL='1970-01-01T00:00:00.000Z',one='00000000-0000-4000-8000-000000000001',two='00000000-0000-4000-8000-000000000002';
+ const pin={version:1,mode:'native_source',sourceId:'project-alpha:primary',workspaceId:'ws-one',sourceWorkspaceId:'source-ws-one',rootType:'standalone_client',rootPublicId:'root-ws-one'};
+ const only={version:1,mode:'only',folderIds:[one],taskIds:[two]},exclusions={version:1,folderIds:[one],taskIds:[]};
+ const read=(env:Env)=>readDirectViewerClientGrants(env,{sourceId:'project-alpha:primary',workspaceId:'ws-one'});
+ async function seed(database:D1Database,id:string,expiry:string|null,receipt:((grant:object)=>unknown)|null,scope:'project'|'task'='project'){
+  const now=new Date().toISOString(),task=scope==='task'?'viewer-task':null;
+  const grant={grantId:id,sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId:`project-${id}`,taskId:task,scopeType:scope,includeFuturePublished:scope==='project',
+   permissions:{measure:true,cameras:false,download:false},expiresAt:null,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:'One'};
+  await database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+   can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+   VALUES(?,'project-alpha:primary','ws-one',?,?,?,?,1,0,0,?,1,'active','staff-one',?,?)`).bind(id,grant.viewerProjectId,task,scope,scope==='project'?1:0,expiry,now,now).run();
+  if(receipt)await database.prepare(`INSERT INTO viewer_direct_client_grant_mutation_receipts VALUES('staff-one',?,'grant.create','fingerprint',?,?,?)`)
+   .bind(`selection-${id}`,id,JSON.stringify(receipt(grant)),now).run();
+ }
+ it('reads v2 as except, reads and writes v3, and refuses every mixed or malformed shape, on both sides of the sentinel',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  const envelope=(version:number,extra:object)=>(grant:object)=>({version,grant,recipientAuthorityPin:pin,...extra});
+  await seed(database,'a-v2',SENTINEL,envelope(2,{exclusions}));
+  await seed(database,'b-v3-only',SENTINEL,envelope(3,{selection:only}));
+  await seed(database,'c-v3-except',SENTINEL,envelope(3,{selection:{...only,mode:'except'}}));
+  await seed(database,'d-plain-raw',null,grant=>grant);
+  await seed(database,'e-plain-v1',null,envelope(1,{}));
+  await seed(database,'f-task',null,envelope(1,{}),'task');
+  await seed(database,'g-plain-none',null,null);
+  const refused:Array<[string,string|null,((grant:object)=>unknown)|null]>=[
+   ['r-v2-selection',SENTINEL,envelope(2,{selection:only})],['r-v3-exclusions',SENTINEL,envelope(3,{exclusions})],
+   ['r-v3-both',SENTINEL,envelope(3,{selection:only,exclusions})],['r-v2-both',SENTINEL,envelope(2,{selection:only,exclusions})],
+   ['r-v3-neither',SENTINEL,envelope(3,{})],['r-v2-neither',SENTINEL,envelope(2,{})],['r-v3-extra',SENTINEL,envelope(3,{selection:only,note:'x'})],
+   ['r-v3-unsorted',SENTINEL,envelope(3,{selection:{...only,folderIds:[two,one]}})],['r-v3-mode',SENTINEL,envelope(3,{selection:{...only,mode:'all'}})],
+   ['r-v3-empty',SENTINEL,envelope(3,{selection:{...only,folderIds:[],taskIds:[]}})],['r-v4',SENTINEL,envelope(4,{selection:only})],
+   ['r-sentinel-v1',SENTINEL,envelope(1,{})],['r-sentinel-raw',SENTINEL,grant=>grant],['r-sentinel-none',SENTINEL,null],
+   ['r-open-v2',null,envelope(2,{exclusions})],['r-open-v3',null,envelope(3,{selection:only})],['r-open-keys',null,grant=>({...grant,selection:only})],
+   ['r-dated-v3','2099-01-01T00:00:00.000Z',envelope(3,{selection:only})]];
+  for(const [id,expiry,receipt] of refused)await seed(database,id,expiry,receipt);
+  const rows=await read(env);
+  expect(Object.fromEntries(rows.map(row=>[row.id,row.selection??null]))).toEqual({'a-v2':{...exclusions,mode:'except'},'b-v3-only':only,
+   'c-v3-except':{...only,mode:'except'},'d-plain-raw':null,'e-plain-v1':null,'f-task':null,'g-plain-none':null});
+  // Staff see the selection of the shares that have one; refused rows are listed as ended, never as a whole project.
+  const listed=(await listDirectViewerClientGrantWorkspace(env,principal,{include:'grants'})).grants;
+  const by=Object.fromEntries(listed.map(grant=>[grant.grantId,grant]));
+  expect(by['b-v3-only']).toMatchObject({selection:only,expiresAt:null});expect(by['a-v2']).toMatchObject({selection:{...exclusions,mode:'except'}});
+  expect(by['d-plain-raw']).not.toHaveProperty('selection');
+  for(const [id] of refused){expect(by[id]).not.toHaveProperty('selection');}
+  for(const id of ['r-v3-both','r-sentinel-v1'])expect(by[id]!.expiresAt).toBe(SENTINEL);
+  for(const id of ['r-open-v2','r-open-v3','r-open-keys','r-dated-v3'])expect(Date.parse(by[id]!.expiresAt!)).toBeLessThan(Date.now());
+ },120_000);
+ it('writes v3 with the sentinel, replays only the same selection, and reports what the Viewer refused',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  const create=(key:string,selection:unknown,project='viewer-project')=>createDirectViewerClientGrant({env,principal,idempotencyKey:key,request:new Request('https://ops.example.test/'),
+   grant:{sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId:project,taskId:null,scopeType:'project',includeFuturePublished:true,confirmedScope:true,
+    expiresAt:null,permissions:{measure:true,cameras:false,download:false},...(selection===undefined?{}:{selection})}});
+  mocks.catalog.mockResolvedValueOnce({project:{id:'viewer-project'},tasks:[]});
+  const created=await create('selection-create-00001',only);
+  expect(mocks.catalog).toHaveBeenLastCalledWith({projectId:'viewer-project',selection:only,validateSelection:true});
+  const row=await database.prepare('SELECT authorization_expires_at expiry,scope_type scope,include_future_published future FROM viewer_direct_client_grants WHERE id=?').bind(created.grant.grantId).first();
+  expect(row).toEqual({expiry:SENTINEL,scope:'project',future:1});
+  const stored=JSON.parse((await database.prepare('SELECT response_json FROM viewer_direct_client_grant_mutation_receipts WHERE grant_id=?').bind(created.grant.grantId).first<string>('response_json'))!);
+  expect(Object.keys(stored).sort()).toEqual(['grant','recipientAuthorityPin','selection','version']);expect(stored.version).toBe(3);expect(stored.selection).toEqual(only);
+  expect((await read(env)).map(item=>item.selection)).toEqual([only]);
+  expect(await create('selection-create-00001',only)).toEqual({grant:created.grant,replayed:true});
+  await expect(create('selection-create-00001',{...only,mode:'except'})).rejects.toMatchObject({code:'idempotency_conflict'});
+  for(const broken of [{...only,mode:'all'},{...only,folderIds:[two,one]},{...only,folderIds:[one,one]},{...only,folderIds:[],taskIds:[]},{...only,extra:1},{...exclusions}])
+   await expect(create('selection-broken-00001',broken,'another-project')).rejects.toMatchObject({status:400});
+  mocks.catalog.mockRejectedValueOnce(new ViewerServiceError('old','unsupported'));
+  await expect(create('selection-unsupported-1',only,'another-project')).rejects.toMatchObject({status:409,code:'selection_unsupported'});
+  mocks.catalog.mockRejectedValueOnce(new ViewerServiceError('gone','not_found',404));
+  await expect(create('selection-elsewhere-01',only,'another-project')).rejects.toMatchObject({status:409,code:'selection_not_in_project'});
+  expect(await database.prepare('SELECT count(*) n FROM viewer_direct_client_grants').first<number>('n')).toBe(1);
+ },120_000);
+});
+
 describe('direct Viewer picker authorization is unchanged',()=>{
  for(const include of [undefined,'all','clients','grants'] as const)
   for(const denied of ['viewer.view','viewer.manage'] as const)for(const kind of ['not-global','denied-global'] as const)

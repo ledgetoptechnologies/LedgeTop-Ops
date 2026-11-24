@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ViewerServiceError } from "@ltds/shared";
 import type { DirectClientViewerAuthorizationV1, DirectClientViewerSessionRequestV1 } from "@ltds/shared";
 import type { Env } from "../src/worker/types";
 
@@ -182,16 +183,16 @@ describe("direct Viewer folder paths",()=>{
   });
 });
 
-describe("restricted (exclusion) grants and the Viewer task authorization generation",()=>{
-  const exclusions={version:1 as const,folderIds:["folder-hidden"],taskIds:[]};
-  const restrictedRow=()=>({...row(),scope_type:"project",task_id:null,exclusions});
+describe("grants with a selection and the Viewer task authorization generation",()=>{
+  const selection={version:1 as const,mode:"only" as const,folderIds:["00000000-0000-4000-8000-000000000009"],taskIds:[]};
+  const restrictedRow=()=>({...row(),scope_type:"project",task_id:null,selection});
   const catalogAt=(generation?:number,modelVersionId="version-one")=>({schemaVersion:1,project:{id:"project-one",displayName:"Property survey"},
     tasks:[{...task,modelVersionId,...(generation===undefined?{}:{authorizationGeneration:generation})}],nextCursor:null});
-  it("mints only with the exact captured generation and passes exclusions to every catalog read",async()=>{
+  it("mints only with the exact captured generation and passes the selection to every catalog read",async()=>{
     mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(7));
     expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:true});
-    expect(mock.create.mock.calls[0]![0].restrictedScope).toEqual({version:1,projectId:"project-one",taskId:"task-one",generation:7,exclusions});
-    for(const call of mock.catalog.mock.calls)expect(call[0].exclusions).toEqual(exclusions);
+    expect(mock.create.mock.calls[0]![0].restrictedScope).toEqual({version:1,projectId:"project-one",taskId:"task-one",generation:7,selection});
+    for(const call of mock.catalog.mock.calls)expect(call[0].selection).toEqual(selection);
   });
   it("fails closed when an older Viewer returns no generation for a restricted grant",async()=>{
     mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(undefined));
@@ -211,6 +212,25 @@ describe("restricted (exclusion) grants and the Viewer task authorization genera
     expect(mock.create).toHaveBeenCalledTimes(1);
     expect(await issueDirectClientViewerSession(env(),{...session,idempotencyKey:"direct-client-session-fresh-key-01"})).toMatchObject({ok:true});
     expect(mock.create.mock.calls[1]![0].restrictedScope.generation).toBe(9);
+  });
+  it("binds every credential to the exact selection: another one never replays it",async()=>{
+    mock.rows.mockResolvedValue([restrictedRow()]);mock.catalog.mockResolvedValue(catalogAt(7));
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:true});
+    for(const other of [{...selection,mode:"except" as const},{...selection,taskIds:["00000000-0000-4000-8000-000000000008"]}]){
+      mock.rows.mockResolvedValue([{...restrictedRow(),selection:other}]);
+      expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false,code:"denied"});
+    }
+    expect(mock.create).toHaveBeenCalledTimes(1);
+  });
+  it("a Viewer that does not support selections hides only those shares; plain shares still list",async()=>{
+    const plain={...row(),id:"grant-plain",scope_type:"project",task_id:null};
+    mock.rows.mockResolvedValue([restrictedRow(),plain]);
+    mock.catalog.mockImplementation(async(input:{selection?:unknown})=>{if(input.selection)throw new ViewerServiceError("unsupported","unsupported");return catalogAt(undefined);});
+    const listed=await listDirectClientViewerItems(env(),auth);
+    expect(listed).toMatchObject({ok:true});
+    expect((listed as {items:Array<{grantId:string}>}).items.map(item=>item.grantId)).toEqual(["grant-plain"]);
+    mock.rows.mockResolvedValue([restrictedRow()]);
+    expect(await issueDirectClientViewerSession(env(),session)).toMatchObject({ok:false});expect(mock.create).not.toHaveBeenCalled();
   });
   it("an unrestricted grant keeps its existing contract without a generation",async()=>{
     mock.catalog.mockResolvedValue(catalogAt(undefined));

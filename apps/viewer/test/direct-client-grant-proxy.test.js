@@ -53,6 +53,24 @@ test('direct list forwards the name-ordered picker and grant paging fields and a
   }
 });
 
+test('a selection is checked before signing and on the way back, only on a whole-project grant', async t => {
+  const a = '00000000-0000-4000-8000-000000000001', b = '00000000-0000-4000-8000-000000000002';
+  const selection = { version: 1, mode: 'only', folderIds: [a], taskIds: [b] };
+  const { request, envelopes } = await fixture(t, () => json({ grant: { ...grant, selection }, replayed: false }));
+  const response = await request(PATH, { method: 'POST', body: { ...input, selection } });
+  assert.equal(response.status, 201); assert.deepEqual((await response.json()).grant.selection, selection);
+  assert.deepEqual(envelopes[0].grant.selection, selection);
+  for (const broken of [null, {}, { ...selection, mode: 'all' }, { ...selection, folderIds: [b, a] }, { ...selection, taskIds: [b, b] }, { ...selection, folderIds: [], taskIds: [] }, { ...selection, extra: 1 }])
+    assert.equal((await request(PATH, { method: 'POST', body: { ...input, selection: broken } })).status, 400, JSON.stringify(broken));
+  assert.equal((await request(PATH, { method: 'POST', body: { ...input, scopeType: 'task', taskId: 'task', includeFuturePublished: false, selection } })).status, 400);
+  assert.equal((await request(PATH, { method: 'POST', body: { ...input, exclusions: selection } })).status, 400);
+  assert.equal(envelopes.length, 1);
+  for (const bad of [{ ...grant, selection: { ...selection, mode: 'all' } }, { ...grant, scopeType: 'task', taskId: 'task', includeFuturePublished: false, selection }]) {
+    const rejected = await fixture(t, () => json({ ...list, grants: [bad] })); assert.equal((await rejected.request()).status, 502);
+  }
+  const listed = await fixture(t, () => json({ ...list, grants: [{ ...grant, selection }] })); assert.equal((await listed.request()).status, 200);
+});
+
 test('direct create validates explicit future scope and typed fields before signing', async t => {
   const { request, envelopes } = await fixture(t, () => json({ grant, replayed: false }));
   // The actual Viewer workspace posts the grant fields directly. Only the

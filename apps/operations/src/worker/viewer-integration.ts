@@ -372,9 +372,9 @@ export async function listViewerClientGrants(env: Env, principal: StaffPrincipal
   return rows.results;
 }
 
-// Whole-project client access is a direct Viewer grant (with exclusions) made from
+// Whole-project client access is a direct Viewer grant (with a selection) made from
 // the Viewer's Share project dialog. Legacy project-scope grants through an
-// Operations or connected-workspace project cannot carry exclusions, so new ones
+// Operations or connected-workspace project cannot carry a selection, so new ones
 // are refused here for every caller; existing ones stay listed and revocable,
 // exact task grants are unchanged, and idempotent replays of earlier creates still answer.
 function legacyProjectScope(scopeType: string): boolean { return scopeType === "project"; }

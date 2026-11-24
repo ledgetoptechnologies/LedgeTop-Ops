@@ -56,7 +56,7 @@ async function fixture(){
 afterEach(async()=>{await Promise.all(active.splice(0).map(value=>value.dispose()));});
 
 describe("native Viewer grant mutations",()=>{
-  it("refuses new legacy whole-project grants (they cannot carry exclusions) and writes nothing",async()=>{
+  it("refuses new legacy whole-project grants (they cannot carry a selection) and writes nothing",async()=>{
     const {database,env}=await fixture();
     const project={...grant,scopeType:"project" as const,associationId:null,includeFuturePublished:true};
     await expect(createNativeViewerClientGrant({env,principal,grant:project as never,idempotencyKey:"native-create-project-0001",request}))

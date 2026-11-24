@@ -72,7 +72,7 @@ async function decodeCursor(env: Env, raw: string, scope: string): Promise<Curso
 async function grantScope(context: {contextVersion:string;identityId:string;workspaceId:string;sourceId:string}, rows: Row[]) {
   return sha256(JSON.stringify([context.sourceId,context.workspaceId,context.identityId,context.contextVersion,
     rows.map(row=>[row.id,row.grant_version,row.viewer_project_id,row.task_id,row.scope_type,row.authorization_expires_at,
-      row.can_measure,row.can_view_cameras,row.can_download,...(row.exclusions ? [row.exclusions] : [])])]));
+      row.can_measure,row.can_view_cameras,row.can_download,...(row.selection ? [row.selection] : [])])]));
 }
 
 export function directViewerProjectKey(sourceId:string,workspaceId:string,viewerProjectId:string):Promise<string>{
@@ -114,8 +114,8 @@ export async function listDirectClientViewerItems(env: Env, request: DirectClien
       const row=rows[index]!;
       let catalog;
       try { catalog=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,
-        ...(row.scope_type==="task"?{taskId:row.task_id!}:{}),...(after?{cursor:after}:{}),exclusions:row.exclusions,limit:25}); }
-      catch(error){if(error instanceof ViewerServiceError&&error.code==="not_found"){index++;after=null;continue;}throw error;}
+        ...(row.scope_type==="task"?{taskId:row.task_id!}:{}),...(after?{cursor:after}:{}),selection:row.selection,limit:25}); }
+      catch(error){if(error instanceof ViewerServiceError&&(error.code==="not_found"||(row.selection&&error.code==="unsupported"))){index++;after=null;continue;}throw error;}
       // Opaque grouping key: a one-way digest bound to this source and workspace, so the raw Viewer project id never
       // reaches the client, keys differ across workspaces, and no route accepts it as an address.
       const projectKey=await directViewerProjectKey(input.sourceId,input.workspaceId,row.viewer_project_id);
@@ -143,13 +143,13 @@ export async function issueDirectClientViewerSession(env: Env, request: DirectCl
     const rawRows=await readDirectViewerClientGrants(env,{sourceId:input.sourceId,workspaceId:input.workspaceId,grantId:input.grantId});
     const rows=[] as Row[];for(const candidate of rawRows)if(await grantAuthorizedForContext(env,context,candidate))rows.push(candidate);
     const row=rows.find(row=>row.id===input.grantId);if(!row || (row.scope_type==="task"&&row.task_id!==input.taskId))return failure("denied");
-    const client=viewerServiceClient(env),catalog=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,exclusions:row.exclusions,limit:1});
+    const client=viewerServiceClient(env),catalog=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,selection:row.selection,limit:1});
     const task=catalog.tasks[0];if(!task || task.id!==input.taskId)return failure("denied");
-    // Restricted grants bind every credential to the Viewer's exact task authorization
+    // Grants with a selection bind every credential to the Viewer's exact task authorization
     // generation. A missing generation (older Viewer) fails closed; a changed one makes
     // replay of an older receipt or intent mismatch, so only a fresh issue can succeed.
-    const generation=row.exclusions?task.authorizationGeneration:undefined;
-    if(row.exclusions&&(!Number.isSafeInteger(generation)||generation!<1))return failure("denied");
+    const generation=row.selection?task.authorizationGeneration:undefined;
+    if(row.selection&&(!Number.isSafeInteger(generation)||generation!<1))return failure("denied");
     const scope=await grantScope(context,[row]);
     const fingerprint=await sha256(JSON.stringify([scope,input.taskId,task.modelId,task.modelVersionId,input.displayUnits,
       ...(generation!==undefined?[generation]:[])]));
@@ -191,10 +191,10 @@ export async function issueDirectClientViewerSession(env: Env, request: DirectCl
       audience:"client",idempotencyKey:key,authorizationExpiresAt:new Date(deadline).toISOString(),displayUnits:input.displayUnits,
       permissions:{view:true,measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1,personalMeasurements:true},
       sourceAuthorization:{type:"direct_client_grant",id:row.id,version:row.grant_version},
-      ...(row.exclusions ? { restrictedScope:{version:1,projectId:row.viewer_project_id,taskId:input.taskId,generation:generation!,exclusions:row.exclusions} as const } : {})});
+      ...(row.selection ? { restrictedScope:{version:1,projectId:row.viewer_project_id,taskId:input.taskId,generation:generation!,selection:row.selection} as const } : {})});
     // Publication can change in Viewer while the remote session is being minted.
     // Do not return a capability for a task/version no longer in the allowed set.
-    const latest=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,exclusions:row.exclusions,limit:1});
+    const latest=await client.clientDeliveryCatalog({projectId:row.viewer_project_id,taskId:input.taskId,selection:row.selection,limit:1});
     if(latest.tasks[0]?.modelId!==task.modelId||latest.tasks[0]?.modelVersionId!==task.modelVersionId
       ||(generation!==undefined&&latest.tasks[0]?.authorizationGeneration!==generation))return failure("denied");
     if(!await recheck())return failure("denied");

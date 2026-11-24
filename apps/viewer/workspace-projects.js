@@ -1825,7 +1825,7 @@ function clientShareCard(output,onlyOutputId){
   if(onlyOutputId&&(!output?.activePublished||output.status!=='published')){
     form=empty('Direct Operations client sharing is not available for this private ready model yet. Its verified activation and exact Operations association must be connected first; creating a public link is a separate choice, not a prerequisite for client access.');
   }else if(!onlyOutputId){
-    // Whole-project access is a direct grant (with exclusions); the server refuses new legacy project grants.
+    // Whole-project access is a direct grant (with a selection); the server refuses new legacy project grants.
     form=empty('New whole-project shares are direct client shares.');
   }else if(onlyOutputId&&!associations.length){
     form=empty('No unique Operations association matches this model. Set up its model association in Operations first. Other models and entire client projects will not be granted access here.');

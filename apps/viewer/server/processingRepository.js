@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const path = require('node:path');
-const { canonicalProjectExclusions, projectExclusionPredicate } = require('./projectExclusions');
+const { canonicalProjectSelection, projectSelectionPredicate } = require('./projectSelection');
 const { storageTrashRetentionMs } = require('./storageRetention');
 const { compareUtf8, safeRelativePath, sanitizeLogMessage } = require('./processingSecurity');
 const { odmGcpList } = require('./gcpOdm');
@@ -901,17 +901,17 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   modelOutput(row){if(!row)return null;const model=this.database.prepare('SELECT display_name FROM models WHERE id=?').get(row.model_id);return{id:row.id,modelId:row.model_id,taskId:row.task_id,attemptId:row.attempt_id,projectId:row.project_id,displayName:model?.display_name||'',rootKey:row.root_key,relativePath:row.relative_path,storageMode:row.storage_mode||'managed',status:row.status,byteSize:Number(row.byte_size||0),assetCount:Number(row.asset_count||0),createdAt:row.created_at,updatedAt:row.updated_at,archivedAt:row.archived_at,trashedAt:row.trashed_at};}
   getModelOutput(id){return this.modelOutput(this.database.prepare('SELECT * FROM model_outputs WHERE id=?').get(id));}
   activePublishedProjectTask(row){return row&&{projectId:row.project_id,projectDisplayName:row.project_display_name,projectDefaultUnits:row.project_default_units,taskId:row.task_id,taskDisplayName:row.task_display_name,taskCreatedAt:row.task_created_at,modelId:row.model_id,modelDisplayName:row.model_display_name,modelVersionId:row.model_version_id,attemptId:row.attempt_id,publishedAt:row.published_at};}
-  validateProjectExclusions(projectId, value) {
-    const exclusions = canonicalProjectExclusions(value);
+  validateProjectSelection(projectId, value) {
+    const selection = canonicalProjectSelection(value);
     const project = this.getProject(projectId);
-    if (!exclusions || project?.status !== 'active' || !this.database.prepare(
-      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_folders'",
-    ).get()) return null;
-    const folder = this.database.prepare('SELECT 1 FROM project_folders WHERE project_id=? AND id=?');
+    if (!selection || project?.status !== 'active') return null;
+    const folders = Boolean(this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_folders'").get());
+    if (!folders && (selection.mode === 'except' || selection.folderIds.length)) return null;
+    const folder = folders ? this.database.prepare('SELECT 1 FROM project_folders WHERE project_id=? AND id=?') : null;
     const task = this.database.prepare('SELECT 1 FROM processing_tasks WHERE project_id=? AND id=? AND purged_at IS NULL');
-    if (!exclusions.folderIds.every(id => folder.get(projectId, id))
-      || !exclusions.taskIds.every(id => task.get(projectId, id))) return null;
-    return exclusions;
+    if (!selection.folderIds.every(id => folder.get(projectId, id))
+      || !selection.taskIds.every(id => task.get(projectId, id))) return null;
+    return selection;
   }
 
   getActivePublishedProjectTask(projectId, taskId, options) {
@@ -942,7 +942,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     }
     return paths;
   }
-  listActivePublishedProjectTasksPage(projectId,{limit=50,cursor=null,strictPublished=false,exclusions}={}){const scope=projectExclusionPredicate(this.database,exclusions);strictPublished ||= exclusions !== undefined;const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[projectId,...scope.args],after=c?' AND (t.created_at<? OR (t.created_at=? AND t.id<?))':'';if(c)args.push(c.createdAt,c.createdAt,c.id);const rows=this.database.prepare(`SELECT
+  listActivePublishedProjectTasksPage(projectId,{limit=50,cursor=null,strictPublished=false,selection}={}){const scope=projectSelectionPredicate(this.database,selection);strictPublished ||= selection !== undefined;const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[projectId,...scope.args],after=c?' AND (t.created_at<? OR (t.created_at=? AND t.id<?))':'';if(c)args.push(c.createdAt,c.createdAt,c.id);const rows=this.database.prepare(`SELECT
       p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
       t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
       m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,
@@ -1622,7 +1622,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   retryEvent(id,message,attemptCount){const terminal=attemptCount>=12,t=now(),next=new Date(Date.now()+Math.min(3600_000,5000*2**Math.min(attemptCount,10))).toISOString();this.database.prepare('UPDATE event_outbox SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=?').run(terminal?'failed':'pending',next,bounded(sanitizeLogMessage(message),1000),t,id);}
 }
 
-function activePublishedProjectTaskRow(database,projectId,taskId,{strictPublished=false,exclusions}={}){const scope=projectExclusionPredicate(database,exclusions);strictPublished ||= exclusions !== undefined;return database.prepare(`SELECT
+function activePublishedProjectTaskRow(database,projectId,taskId,{strictPublished=false,selection}={}){const scope=projectSelectionPredicate(database,selection);strictPublished ||= selection !== undefined;return database.prepare(`SELECT
       p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
       t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,
       m.id AS model_id,m.display_name AS model_display_name,m.active_version_id AS model_version_id,

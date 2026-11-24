@@ -4,11 +4,11 @@ const { DatabaseSync } = require('node:sqlite');
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { ProcessingRepository } = require('../server/processingRepository');
-const { canonicalProjectExclusions } = require('../server/projectExclusions');
+const { canonicalProjectSelection } = require('../server/projectSelection');
 const { TASK_AUTHORIZATION_GENERATIONS_V88_SQL } = require('../server/database');
 
 const id = sequence => `00000000-0000-4000-8000-${String(sequence).padStart(12, '0')}`;
-const mask = { version: 1, folderIds: [id(1)], taskIds: [id(15)] };
+const mask = { version: 1, mode: 'except', folderIds: [id(1)], taskIds: [id(15)] };
 
 function fixture(t) {
   const db = new DatabaseSync(':memory:');
@@ -49,18 +49,22 @@ function fixture(t) {
   return { db, repo: new ProcessingRepository(db) };
 }
 
-test('scope is bounded, canonical, and rejects incompatible or malformed forms', () => {
-  assert.deepEqual(canonicalProjectExclusions({
-    version: 1, folderIds: [id(3), id(1), id(3)], taskIds: [id(15)],
-  }), { version: 1, folderIds: [id(1), id(3)], taskIds: [id(15)] });
-  for (const input of [null, { ...mask, version: 2 }, { ...mask, taskIds: ['name'] },
-    { ...mask, unexpected: true }, { ...mask, folderIds: Array(128).fill(id(1)) },
-    { ...mask, folderIds: [], taskIds: [] }]) assert.equal(canonicalProjectExclusions(input), null);
+test('a selection is bounded and has one canonical form; nothing is repaired', () => {
+  for (const mode of ['except', 'only']) {
+    const value = { version: 1, mode, folderIds: [id(1), id(3)], taskIds: [id(15)] };
+    assert.deepEqual(canonicalProjectSelection(value), value);
+    const most = Array.from({ length: 128 }, (_, index) => id(index + 1));
+    assert.deepEqual(canonicalProjectSelection({ ...value, folderIds: [], taskIds: most }).taskIds, most);
+    for (const broken of [null, [], 'x', {}, { ...value, version: 2 }, { ...value, mode: 'all' }, { ...value, mode: undefined }, { ...value, extra: true },
+      { version: 1, folderIds: [id(1)], taskIds: [] }, { ...value, taskIds: ['name'] }, { ...value, taskIds: null }, { ...value, folderIds: [id(3), id(1)] },
+      { ...value, folderIds: [id(1), id(1)] }, { ...value, folderIds: ['ABCDEF00-0000-4000-8000-000000000001'] }, { ...value, folderIds: [], taskIds: [] },
+      { ...value, folderIds: [id(200)], taskIds: most }]) assert.equal(canonicalProjectSelection(broken), null, JSON.stringify(broken)?.slice(0, 90));
+  }
 });
 
 test('exact and paged reads agree before pagination and preserve independent legacy access', t => {
   const { repo } = fixture(t);
-  const scope = { strictPublished: true, exclusions: mask, limit: 1 };
+  const scope = { strictPublished: true, selection: mask, limit: 1 };
   const first = repo.listActivePublishedProjectTasksPage('project', scope);
   assert.deepEqual(first.items.map(row => row.taskId), [id(12)]);
   assert.ok(first.nextCursor);
@@ -71,12 +75,12 @@ test('exact and paged reads agree before pagination and preserve independent leg
     assert.equal(repo.getActivePublishedProjectTask('project', id(sequence), { strictPublished: true }).taskId,
       id(sequence));
   }
-  assert.equal(repo.getActivePublishedProjectTask('project', id(11), { ...scope, exclusions: null }), undefined);
+  assert.equal(repo.getActivePublishedProjectTask('project', id(11), { ...scope, selection: null }), undefined);
 });
 
-test('current ancestry follows moves while explicit task exclusions survive them', t => {
+test('current ancestry follows moves while explicit task choices survive them', t => {
   const { db, repo } = fixture(t);
-  const scope = { strictPublished: true, exclusions: mask };
+  const scope = { strictPublished: true, selection: mask };
   const move = db.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?');
   move.run(id(2), id(12));
   move.run(id(3), id(13));
@@ -90,16 +94,93 @@ test('current ancestry follows moves while explicit task exclusions survive them
 });
 
 
-test('staff validation accepts only exclusion targets in the active exact project', t => {
-  const { db, repo } = fixture(t);
-  assert.deepEqual(repo.validateProjectExclusions('project', mask), mask);
-  assert.equal(repo.validateProjectExclusions('other', mask), null);
-  assert.equal(repo.validateProjectExclusions('project', { ...mask, folderIds: [id(6)] }), null);
-  db.prepare("UPDATE processing_tasks SET purged_at='now' WHERE id=?").run(id(15));
-  assert.equal(repo.validateProjectExclusions('project', mask), null);
+// 11 unfiled; 12 in folder 3; 13 in 2 (inside 1); 14 in 1; 15 in 3; 16 cyclic; 17 cross-project parent; 18 missing folder.
+const visible = (repo, selection) => [11, 12, 13, 14, 15, 16, 17, 18].filter(sequence =>
+  repo.getActivePublishedProjectTask('project', id(sequence), { strictPublished: true, selection }));
+const paged = (repo, selection) => {
+  const seen = []; let cursor = null;
+  do { const page = repo.listActivePublishedProjectTasksPage('project', { limit: 2, cursor, strictPublished: true, selection }); seen.push(...page.items.map(row => Number(row.taskId.slice(-2)))); cursor = page.nextCursor; } while (cursor);
+  return seen.sort();
+};
+const pick = (mode, folders, tasks) => ({ version: 1, mode, folderIds: folders.map(id), taskIds: tasks.map(id) });
+for (const [label, selection, expected] of [
+  ['only a top folder takes its subfolders', pick('only', [1], []), [13, 14]],
+  ['only a subfolder leaves its parent out', pick('only', [2], []), [13]],
+  ['only one task', pick('only', [], [12]), [12]],
+  ['only a task inside a folder that was not chosen', pick('only', [], [13]), [13]],
+  ['only an unfiled task', pick('only', [], [11]), [11]],
+  ['only a folder and a task elsewhere', pick('only', [3], [14]), [12, 14, 15]],
+  ['only a broken folder shows nothing', pick('only', [4], []), []],
+  ['only a folder of another project shows nothing', pick('only', [6], []), []],
+  ['only a folder that does not exist shows nothing', pick('only', [999], []), []],
+  ['only a chosen task whose own folder is broken is still that task', pick('only', [], [16, 18]), [16, 18]],
+  ['except a top folder', pick('except', [1], []), [11, 12, 15]],
+  ['except a subfolder keeps its parent', pick('except', [2], []), [11, 12, 14, 15]],
+  ['except one task', pick('except', [], [12]), [11, 13, 14, 15]],
+  ['except a folder and a task', pick('except', [1], [15]), [11, 12]],
+]) test(`selection: ${label}`, t => {
+  const { repo } = fixture(t);
+  assert.deepEqual(visible(repo, selection), expected);
+  assert.deepEqual(paged(repo, selection), expected, 'list pages agree with exact reads');
 });
 
-test('restricted grant expiry, redemption and active sessions recheck current exact scope', t => {
+test('a chosen folder follows the folder: tasks moved, folders moved, and tasks published later', t => {
+  const { db, repo } = fixture(t), only = pick('only', [1], []), except = pick('except', [1], []);
+  const move = db.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?');
+  move.run(id(2), id(12)); assert.deepEqual(visible(repo, only), [12, 13, 14]);
+  move.run(id(3), id(12)); assert.deepEqual(visible(repo, only), [13, 14]);
+  move.run(null, id(13)); assert.deepEqual(visible(repo, only), [14]); assert.deepEqual(visible(repo, except), [11, 12, 13, 15]);
+  db.prepare('UPDATE project_folders SET parent_id=? WHERE id=?').run(id(1), id(3));
+  assert.deepEqual(visible(repo, only), [12, 14, 15], 'a folder moved inside brings its tasks');
+  db.prepare("UPDATE model_outputs SET status='ready' WHERE task_id=?").run(id(15));
+  assert.deepEqual(visible(repo, only), [12, 14], 'not while unpublished');
+  db.prepare("UPDATE model_outputs SET status='published' WHERE task_id=?").run(id(15));
+  assert.deepEqual(visible(repo, only), [12, 14, 15], 'and again once published');
+  db.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(id(15));
+  assert.deepEqual(visible(repo, only), [12, 14], 'never from the Recycle Bin');
+  db.prepare("UPDATE projects SET status='archived'").run(); assert.deepEqual(visible(repo, only), []);
+});
+
+test('folders nested to the limit are followed, deeper ones show nothing', t => {
+  const { db, repo } = fixture(t);
+  for (let depth = 0; depth < 17; depth++) db.prepare("INSERT INTO project_folders VALUES (?, 'project', ?, 'Deep')").run(id(300 + depth), depth ? id(299 + depth) : null);
+  const move = db.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?');
+  move.run(id(315), id(12)); // depth 16
+  assert.deepEqual(visible(repo, pick('only', [300], [])), [12]);
+  move.run(id(316), id(12)); // depth 17
+  assert.deepEqual(visible(repo, pick('only', [300], [])), []);
+  assert.equal(visible(repo, pick('except', [3], [])).includes(12), false);
+});
+
+test('without the folder schema only an explicit task choice means anything', t => {
+  const { db, repo } = fixture(t);
+  db.exec('DROP TABLE project_folders');
+  assert.deepEqual(visible(repo, pick('only', [], [12])), [12]);
+  for (const selection of [pick('only', [1], []), pick('only', [1], [12]), pick('except', [], [12]), pick('except', [1], [])]) assert.deepEqual(visible(repo, selection), []);
+  assert.deepEqual(repo.validateProjectSelection('project', pick('only', [], [12])), pick('only', [], [12]));
+  for (const selection of [pick('only', [1], []), pick('except', [], [12])]) assert.equal(repo.validateProjectSelection('project', selection), null);
+});
+
+test('a malformed selection shows nothing anywhere', t => {
+  const { repo } = fixture(t);
+  for (const selection of [null, {}, [], { ...mask, mode: 'all' }, { version: 1, folderIds: [id(1)], taskIds: [] }, { ...mask, folderIds: [id(3), id(1)] }]) {
+    assert.deepEqual(visible(repo, selection), []); assert.deepEqual(paged(repo, selection), []);
+    assert.equal(repo.validateProjectSelection('project', selection), null);
+  }
+});
+
+test('staff validation accepts only targets in the active exact project', t => {
+  const { db, repo } = fixture(t);
+  assert.deepEqual(repo.validateProjectSelection('project', mask), mask);
+  assert.equal(repo.validateProjectSelection('other', mask), null);
+  assert.equal(repo.validateProjectSelection('project', { ...mask, folderIds: [id(6)] }), null);
+  db.prepare("UPDATE processing_tasks SET purged_at='now' WHERE id=?").run(id(15));
+  assert.equal(repo.validateProjectSelection('project', mask), null);
+});
+
+for (const mode of ['except', 'only']) test(`restricted grant expiry, redemption and active sessions recheck current exact scope: ${mode}`, t => {
+  // Task 12 starts inside folder 3; folder 2 is out of both selections.
+  const mask = mode === 'except' ? pick('except', [1], [15]) : pick('only', [3], []);
   const { ViewerRepository } = require('../server/repository');
   const { db } = fixture(t);
   db.exec(`
@@ -126,7 +207,7 @@ test('restricted grant expiry, redemption and active sessions recheck current ex
     permissions: { view: true }, expiresAt: new Date(Date.now() + 60000).toISOString(),
   };
   const generation = () => db.prepare('SELECT generation FROM task_authorization_generations WHERE task_id=?').get(id(12)).generation;
-  const scopeNow = () => ({ version: 1, projectId: project, taskId: id(12), generation: generation(), exclusions: mask });
+  const scopeNow = () => ({ version: 1, projectId: project, taskId: id(12), generation: generation(), selection: mask });
   const restrictedScope = scopeNow();
   const restricted = { ...grant, restrictedScope };
   const move = db.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?');
@@ -191,7 +272,7 @@ test('Client D1 receipt strategy denies restricted rows to the exact old reader'
   create.run('restricted', null, 'project', 1, marker);
   db.prepare(`INSERT INTO viewer_direct_client_grant_mutation_receipts VALUES
     ('staff','synthetic-key','grant.create','fingerprint','restricted',?,'now')`)
-    .run(JSON.stringify({ version: 2, exclusions: mask, grant: { expiresAt: null } }));
+    .run(JSON.stringify({ version: 3, selection: mask, grant: { expiresAt: null } }));
   db.exec('COMMIT');
   const legacyPredicate = `authorization_expires_at IS NULL OR datetime(authorization_expires_at)>datetime('now')`;
   const grants = db.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=?
@@ -221,7 +302,8 @@ function sessionTables(db) {
   `);
 }
 
-test('mint compares the captured generation, eligibility and tombstone inside one write transaction', t => {
+for (const mode of ['except', 'only']) test(`mint compares the captured generation, eligibility and tombstone inside one write transaction: ${mode}`, t => {
+  const mask = mode === 'except' ? pick('except', [1], [15]) : pick('only', [3], []);
   const { ViewerRepository } = require('../server/repository');
   const { db } = fixture(t);
   sessionTables(db);
@@ -235,7 +317,7 @@ test('mint compares the captured generation, eligibility and tombstone inside on
     modelId: id(112), modelVersionId: id(212), subject: 'client:synthetic', audience: 'client',
     sourceAuthorization: { type: 'direct_client_grant', id: id(700), version },
     permissions: { view: true }, expiresAt: new Date(Date.now() + 60000).toISOString(),
-    restrictedScope: { version: 1, projectId: project, taskId: id(12), generation: captured, exclusions: mask },
+    restrictedScope: { version: 1, projectId: project, taskId: id(12), generation: captured, selection: mask },
   });
 
   // The eligibility read and the INSERT run while SQLite holds the write transaction.

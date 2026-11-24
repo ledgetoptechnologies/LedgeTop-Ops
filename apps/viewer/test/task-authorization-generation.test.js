@@ -183,7 +183,7 @@ test('a missing generation row denies every restricted check', t => {
   assert.equal(currentTaskAuthorizationGeneration(db, 't'), null);
   const session = { audience: 'client', sessionMode: 'published', modelId: 'm', modelVersionId: 'v',
     sourceAuthorization: { type: 'direct_client_grant', id: 'g', version: 1 },
-    restrictedScope: { version: 1, projectId: id(1), taskId: id(2), generation: 1, exclusions: { version: 1, folderIds: [], taskIds: [id(3)] } } };
+    restrictedScope: { version: 1, projectId: id(1), taskId: id(2), generation: 1, selection: { version: 1, mode: 'except', folderIds: [], taskIds: [id(3)] } } };
   assert.equal(restrictedSessionAllows(db, session), false);
   const noTable = new DatabaseSync(':memory:');
   t.after(() => noTable.close());
@@ -226,7 +226,7 @@ test('live restricted liveness reads tombstone, generation and eligibility in on
   const session = repo.createViewerSession({ tokenHash: 'restricted', modelId: M, modelVersionId: V, audience: 'client', subject: 'client:synthetic',
     sourceAuthorization: { type: 'direct_client_grant', id: 'grant', version: 1 }, permissions: { view: true },
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    restrictedScope: { version: 1, projectId: P, taskId: T, generation, exclusions: { version: 1, folderIds: [FB], taskIds: [] } } });
+    restrictedScope: { version: 1, projectId: P, taskId: T, generation, selection: { version: 1, mode: 'except', folderIds: [FB], taskIds: [] } } });
   assert.equal(repo.viewerSessionLive(session), true);
 
   // Another connection commits a move into the excluded folder between the
