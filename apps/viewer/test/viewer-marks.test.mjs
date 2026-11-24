@@ -85,6 +85,22 @@ async function openApi(t, options) {
 
 const names = request => async token => (await request(token)).body.marks.map(mark => mark.name).sort();
 
+test('batch status reads only the signed owner’s reserved IDs, including permanent deletions', async t => {
+  const { session, request } = await openApi(t);
+  const owner = session('client', 'owner'), staff = session('ops', 'owner');
+  const live = point({ visibility: 'staff' }), deleted = point(), missing = point();
+  for (const mark of [live, deleted]) assert.equal((await request(owner, 'POST', '', mark)).status, 201);
+  assert.equal((await request(owner, 'DELETE', deleted.id, { revision: 1, permanent: true })).status, 204);
+  const payload = { ids: [live.id, deleted.id, missing.id] };
+  const status = await request(owner, 'POST', 'batch/status', payload);
+  assert.equal(status.status, 200);
+  assert.equal(status.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(new Set(status.body.reservedIds), new Set([live.id, deleted.id]));
+  assert.deepEqual((await request(staff, 'POST', 'batch/status', payload)).body, { reservedIds: [] });
+  assert.equal((await request('expired', 'POST', 'batch/status', payload)).status, 403);
+  assert.equal((await request(owner, 'POST', 'batch/status', { ids: ['bad'] })).status, 400);
+});
+
 test('marks nobody shared stay with their owner, whatever else is asked for or already stored', async t => {
   const { session, request, db } = await openApi(t);
   const people = {

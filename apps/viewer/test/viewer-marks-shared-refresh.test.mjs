@@ -93,9 +93,12 @@ test('a timeout on a later shared page keeps the confirmed prefix', async () => 
 
 test('explicit access or identity refusal clears owned controls and every row, including an earlier shared page', async () => {
   for (const code of ['marks_unavailable', 'mark_identity_required']) {
-    let refused = false;
+    let refused = false, lost = 0;
     const capabilities = { ...ownList.capabilities, visibility: ['private', 'client'] };
-    const store = createMarksStore({ request: async (path, init) => {
+    const store = createMarksStore({ onViewerAccessLost: () => {
+      assert.equal(store.state.ready, false);
+      lost++;
+    }, request: async (path, init) => {
       if (path === base && init.method === 'GET') return Response.json({ ...ownList, capabilities });
       if (path === base && init.method === 'POST') return Response.json({ mark: mark('new-owned', true) }, { status: 201 });
       if (path === base + '/audiences') return Response.json({ audiences: [{ id: 'client' }] });
@@ -116,11 +119,22 @@ test('explicit access or identity refusal clears owned controls and every row, i
       { ready: false, marks: [], categories: [], audiences: [], deleted: [], undo: [], recoveredChange: null, failure: code });
     assert.match(message, /hidden until access is restored/);
     assert.equal(store.canWrite(), false);
+    assert.equal(lost, code === 'marks_unavailable' ? 1 : 0);
     refused = false;
     await store.setScope(scope('staff'));
     assert.deepEqual(store.state.marks, [owned, clientPin]);
     assert.equal(store.canWrite(), true);
   }
+});
+
+test('Viewer access loss is reported even when the initial Marks list was never available', async () => {
+  let lost = 0;
+  const store = createMarksStore({ onViewerAccessLost: () => { lost++; },
+    request: async () => Response.json({ code: 'marks_unavailable' }, { status: 403 }) });
+  await store.setScope(scope('staff'));
+  assert.equal(store.state.ready, false);
+  assert.match(store.state.message, /unavailable for this session/);
+  assert.equal(lost, 1);
 });
 
 test('a shared read cannot overwrite a write or reappear after a scope change', async () => {

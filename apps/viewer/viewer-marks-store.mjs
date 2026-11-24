@@ -33,7 +33,7 @@ const MESSAGES = {
   restore_unavailable: 'That mark is no longer available to restore.',
   still_recoverable: 'It is in Recently deleted, not deleted for good.',
   undo_moved: 'That mark changed since, so this was not undone.',
-  undo_target_changed: 'A newer change was recovered. Choose Undo again to undo it.',
+  undo_target_changed: 'A change was recovered. Review the action and choose Undo again.',
   undo_unclear: 'Some of those marks changed meanwhile. The list was reloaded.',
   import_unsure: 'The import was saved, but part of it changed since, so it cannot be undone.',
   saved_after_all: 'The change before this one was saved after all. Try again for this one.',
@@ -56,15 +56,17 @@ class MarksError extends Error {
 const UNKNOWN = Symbol('unknown');
 // Thrown into a continuation whose scope was replaced; run() drops it silently.
 class ScopeEnded extends Error {}
-const accessLost = error => error.status === 401 || ['marks_unavailable', 'mark_identity_required'].includes(error.code)
-  || (error.code === 'marks_request_failed' && error.status === 403);
+const viewerAccessLost = error => error.code !== 'mark_identity_required' && (error.status === 401
+  || error.code === 'marks_unavailable' || (error.code === 'marks_request_failed' && error.status === 403));
+const accessLost = error => error.code === 'mark_identity_required' || viewerAccessLost(error);
 
-export function createMarksStore({ request = globalThis.fetch, newId = () => crypto.randomUUID(), onChange = () => {},
+export function createMarksStore({ request = globalThis.fetch, newId = () => crypto.randomUUID(), onChange = () => {}, onViewerAccessLost = () => {},
   later = (work, ms) => { const id = globalThis.setTimeout(work, ms); return () => globalThis.clearTimeout(id); } } = {}) {
   let context = null, controller = null, sharedRefresh = null;
   // Changes not answered, by mark: what was sent and what it was based on. And the one
   // that could not be checked either, if any: nothing else is sent before it is.
-  let attempts = new Map(), doubt = null, pendingImport = null;
+  let attempts = new Map(), doubt = null;
+  const pendingImports = new Map();
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
     marks: [], categories: [], audiences: [], deleted: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
@@ -76,12 +78,13 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   const find = id => state.marks.find(mark => mark.id === id) || null;
   const readOnlyCapabilities = () => ({ write: false, staff: false, visibility: ['private'] });
 
-  function hideInaccessibleMarks(error) {
+  function hideInaccessibleMarks(error, message = 'Marks are hidden until access is restored.') {
     Object.assign(state, {
       ready: false, marks: [], categories: [], audiences: [], deleted: [], starters: [], undo: [],
       capabilities: readOnlyCapabilities(), recoveredChange: null, failure: error.code,
-      message: 'Marks are hidden until access is restored.',
+      message,
     });
+    if (viewerAccessLost(error)) onViewerAccessLost();
   }
 
   // One owner's view of the store. Every change holds the scope it started in:
@@ -93,17 +96,17 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     const check = () => { if (signal.aborted) throw new ScopeEnded(); };
     return {
       live, check, temporary: held?.mode === 'temporary',
-      async api(path, method = 'GET', body) {
+      async api(path, method = 'GET', body, { readOnly = method === 'GET' } = {}) {
         check();
         const token = held?.token?.();
         if (!token) throw new MarksError('marks_unavailable', 403);
-        const text = body && JSON.stringify(body), write = method !== 'GET';
+        const text = body && JSON.stringify(body);
         // Reading the list at the start may take its time; nothing waits for it.
-        const limit = write ? Math.max(WRITE_MS, (text?.length || 0) / BYTES_PER_MS) : state.busy ? READ_MS : 0;
+        const limit = readOnly ? (state.busy ? READ_MS : 0) : Math.max(WRITE_MS, (text?.length || 0) / BYTES_PER_MS);
         try { return await bounded(limit, signal, own => answer(path, method, token, text, own, check)); }
         catch (error) {
           check();
-          if (write && !(error instanceof MarksError && error.status < 500)) throw new MarksError('answer_unknown', 0);
+          if (!readOnly && !(error instanceof MarksError && error.status < 500)) throw new MarksError('answer_unknown', 0);
           throw error;
         }
       },
@@ -486,7 +489,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       controller?.abort();
       controller = new AbortController();
       attempts = new Map();
-      doubt = pendingImport = null;
+      doubt = null;
+      pendingImports.clear();
       context = next;
       const scope = currentScope();
       Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], undo: [], recoveredChange: null,
@@ -499,7 +503,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         await load(scope);
       } catch (error) {
         if (scope.live()) {
-          if (accessLost(error) && state.ready) hideInaccessibleMarks(error);
+          if (accessLost(error)) hideInaccessibleMarks(error, state.ready ? undefined : 'Marks are unavailable for this session.');
           else state.message = 'Marks are unavailable for this session.';
         }
       } finally {
@@ -681,7 +685,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         },
       }[entry.type];
       const ok = await run(async scope => {
-        if (state.undo.at(-1)?.at !== entry.at) throw new MarksError('undo_target_changed', 0);
+        if (state.undo.at(-1) !== entry) throw new MarksError('undo_target_changed', 0);
         if (moved) throw new MarksError('undo_moved', 0);
         await plan.send(scope);
       }, { key: 'undo ' + entry.at, look: plan.look, landed: plan.landed, tried: plan.tried, mine: plan.mine,
@@ -742,7 +746,10 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         state.categories = state.categories.filter(row => row.id !== category.id);
         const without = mark => (mark?.categoryId === category.id ? { ...mark, categoryId: null } : mark);
         state.marks = state.marks.map(without);
-        state.undo = state.undo.map(item => (item.before ? { ...item, before: without(item.before) } : item));
+        state.undo = state.undo.map(item => {
+          const before = without(item.before);
+          return before === item.before ? item : { ...item, before };
+        });
       };
       if (temporary()) done();
       else {
@@ -781,7 +788,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       const named = new Map(categories.map(({ id, name, color, icon }) => [id, [name, color, icon]]));
       const signature = retryIdentity !== undefined ? 'file ' + retryIdentity
         : JSON.stringify([marks.map(mark => [{ ...markContent(mark), categoryId: null }, named.get(mark.categoryId) || mark.categoryId || null]), [...named.values()]]);
-      if (pendingImport?.signature === signature) ({ marks, categories } = pendingImport);
+      const pending = pendingImports.get(signature);
+      if (pending) ({ marks, categories } = pending);
       // Any of them being there says it was made; only all of them, as they were made, can be undone.
       const asMade = (rows, content) => rows.length === marks.length
         && rows.every((row, index) => row.mine && row.revision === 1 && row.id === marks[index].id && (!content || sameMark(row, marks[index])));
@@ -811,23 +819,23 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         }
         // Sent again, the server answers with what is there now, which may have been changed since.
         return { rows: imported, exact: asMade(imported, false) };
-      }, { key: 'import ' + signature, makes: true, landed, tried: () => { pendingImport = { signature, marks, categories }; },
-        mine: () => pendingImport?.signature === signature && Boolean(landed()),
+      }, { key: 'import ' + signature, makes: true, landed, tried: () => { pendingImports.set(signature, { marks, categories }); },
+        mine: () => pendingImports.has(signature) && Boolean(landed()),
         async refused(scope, error) {
-          if (pendingImport?.signature !== signature || !state.capabilities.write
-            || !['mark_category_name_taken', 'mark_category_id_conflict', 'mark_id_conflict'].includes(error.code)) return;
-          // The live list was refreshed and contains none of these IDs. Check
-          // Recently deleted too, before allowing another explicit import.
-          const deleted = await scope.api('/deleted').catch(readError => {
+          if (!pendingImports.has(signature) || !state.capabilities.write
+            || !['mark_category_name_taken', 'mark_category_id_conflict', 'mark_category_not_found', 'mark_id_conflict'].includes(error.code)) return;
+          // Only a single snapshot of all owned IDs can distinguish absence
+          // from a mark moving between live and deleted during readback.
+          const ids = marks.map(mark => mark.id);
+          const status = await scope.api('/batch/status', 'POST', { ids }, { readOnly: true }).catch(readError => {
             if (accessLost(readError)) throw readError;
             return null;
           });
           scope.check();
-          const ids = new Set(marks.map(mark => mark.id));
-          if (Array.isArray(deleted?.marks) && !deleted.marks.some(mark => ids.has(mark.id))) pendingImport = null;
+          if (Array.isArray(status?.reservedIds) && !status.reservedIds.length) pendingImports.delete(signature);
         },
         done: ({ rows: imported, exact }) => {
-        pendingImport = null;
+        pendingImports.delete(signature);
         importedRows = imported;
         if (!exact) { state.message = MESSAGES.import_unsure; return; }
         const count = imported.length;

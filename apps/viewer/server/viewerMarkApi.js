@@ -28,12 +28,13 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
       }
       return res.status(403).json({ code: 'mark_identity_required' });
     }
-    const reading = ['GET', 'HEAD'].includes(req.method);
+    const batchStatus = req.method === 'POST' && /^\/batch\/status\/?$/.test(req.path);
+    const reading = ['GET', 'HEAD'].includes(req.method) || batchStatus;
     if (repository.rateLimited(`viewer-mark-${reading ? 'read' : 'write'}:${principal.audience}:${principal.subject}`, reading ? 240 : 180, 60_000)) {
       return res.status(429).json({ code: 'mark_rate_limited' });
     }
     req.markPrincipal = principal;
-    marks.touchAccount(principal);
+    if (!batchStatus) marks.touchAccount(principal);
     next();
   });
   const revisionOnly = body => {
@@ -66,6 +67,10 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
     if (!req.body || typeof req.body !== 'object' || Object.keys(req.body).some(key => key !== 'marks')) throw markError('invalid_mark_batch');
     marks.deleteMany(req.markPrincipal, req.body.marks);
     res.status(204).end();
+  });
+  router.post('/batch/status', (req, res) => {
+    if (!req.body || typeof req.body !== 'object' || Object.keys(req.body).some(key => key !== 'ids')) throw markError('invalid_mark_batch');
+    res.json({ reservedIds: marks.reservedImportIds(req.markPrincipal, req.body.ids) });
   });
   router.post('/categories', (req, res) => {
     const result = marks.createCategory(req.markPrincipal, req.body);

@@ -286,6 +286,17 @@ class ViewerMarkRepository {
 
   create(principal, input) { return this.transaction(() => this.insert(principal, input)); }
 
+  // One SQLite snapshot covers live marks, deletions and retained IDs. An
+  // empty result says none of these IDs belongs to this person on this model.
+  reservedImportIds(principal, ids) {
+    if (!Array.isArray(ids) || !ids.length || ids.length > LIMITS.batch
+      || ids.some(id => typeof id !== 'string' || !UUID.test(id))) throw markError('invalid_mark_batch');
+    const keys = ids.map(id => id.toLowerCase());
+    return this.database.prepare(`SELECT id FROM viewer_marks
+      WHERE model_id=? AND owner_audience=? AND owner_subject=? AND id IN (SELECT value FROM json_each(?))`)
+      .all(...this.owner(principal), JSON.stringify(keys)).map(row => row.id);
+  }
+
   // Import: its new categories and all its marks land together, or nothing does.
   createMany(principal, { marks, categories = [] }) {
     if (!Array.isArray(marks) || !marks.length || marks.length > LIMITS.batch
