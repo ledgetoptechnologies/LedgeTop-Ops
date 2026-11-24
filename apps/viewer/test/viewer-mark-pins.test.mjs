@@ -66,7 +66,7 @@ function layerFixture(options = {}) {
   const leaflet = createMiniLeaflet(document);
   const selected = [], moved = [];
   const layer = createMarkMapLayer({ L: leaflet.L, getMap: () => leaflet.map, onSelect: id => selected.push(id), onDraftMove: geometry => moved.push(geometry), ...options });
-  const render = (marks, more = {}) => layer.render({ visible: true, marks, draft: null, selectedId: null, labels: false, preview: null, drawing: null, ...more });
+  const render = (marks, more = {}) => layer.render({ visible: true, marks, draft: null, selectedId: null, labels: 'off', preview: null, drawing: null, ...more });
   // The pin being placed has no name on the map; it is found by what it is spoken as.
   const pin = id => leaflet.pins().find(item => (item.label?.text ?? item.getElement().getAttribute('aria-label')) === id);
   return { document, leaflet, layer, render, pin, selected, moved };
@@ -149,7 +149,7 @@ test('while drawing, pins take no input, and nothing is left behind when the map
   assert.deepEqual(selected, ['a']);
   render([mark('a')], { visible: false });
   assert.deepEqual(leaflet.drawn(), []);
-  assert.deepEqual(Object.values(leaflet.mapHandlers).map(handlers => handlers.size), [0, 0, 0, 0]);
+  assert.deepEqual(Object.values(leaflet.mapHandlers).map(handlers => handlers.size).filter(Boolean), []);
   render([mark('a')]);
   assert.equal(leaflet.pins().length, 1);
   layer.dispose();
@@ -215,7 +215,7 @@ test('in the panel: opening a pin keeps its element, and clicking it again keeps
 
 test('a pin not saved yet is no tab stop and takes no keys; the saved ones keep theirs', async () => {
   const { document, leaflet, layer, pin, selected } = layerFixture();
-  const render = draft => layer.render({ visible: true, marks: [mark('a'), mark('b')], draft, selectedId: null, labels: false, preview: null, drawing: null });
+  const render = draft => layer.render({ visible: true, marks: [mark('a'), mark('b')], draft, selectedId: null, labels: 'off', preview: null, drawing: null });
   render({ ...mark('__draft__'), name: 'Draft', movable: true });
   const draft = pin('Draft');
   assert.equal(draft.options.keyboard, false);
@@ -233,13 +233,13 @@ test('a pin not saved yet is no tab stop and takes no keys; the saved ones keep 
   render({ ...mark('__draft__'), name: 'Draft', color: '#c62828', movable: true });
   assert.equal(pin('Draft').getElement().tabIndex, undefined);
   // With nothing else there is no stop to find.
-  layer.render({ visible: true, marks: [], draft: { ...mark('__draft__'), name: 'Draft', movable: true }, selectedId: null, labels: false, preview: null, drawing: null });
+  layer.render({ visible: true, marks: [], draft: { ...mark('__draft__'), name: 'Draft', movable: true }, selectedId: null, labels: 'off', preview: null, drawing: null });
   assert.equal(leaflet.pins().length, 1);
 });
 
 test('a removed or replaced marker keeps no handlers', async () => {
   const { leaflet, layer, render, pin, selected, moved } = layerFixture();
-  const ring = [[-87, 43], [-86.99, 43], [-86.99, 43.01], [-87, 43]];
+  const ring = [[-87, 43], [-86.998, 43], [-86.998, 43.001], [-87, 43]];
   const area = mark('area', { geometry: { type: 'Polygon', coordinates: [ring] } });
   const dead = [];
   const keep = () => { for (const item of leaflet.drawn()) if (!dead.includes(item)) dead.push(item); };
@@ -276,7 +276,7 @@ test('a removed or replaced marker keeps no handlers', async () => {
 
 test('a pin being placed has no name on the map, not even on hover', () => {
   const { leaflet, layer, pin } = layerFixture();
-  for (const labels of [false, true]) {
+  for (const labels of ['off', 'selected', 'on']) {
     layer.render({ visible: true, marks: [mark('a')], draft: { ...mark('__draft__'), name: 'Pin', movable: true }, selectedId: null, labels, preview: null, drawing: null });
     const draft = leaflet.pins().find(item => item.options.icon.className.includes('draft'));
     assert.equal(draft.label, null);
@@ -287,10 +287,10 @@ test('a pin being placed has no name on the map, not even on hover', () => {
 
 test('labels that are on stay through focus and blur, and redrawing binds nothing again', async () => {
   const { leaflet, render, pin } = layerFixture();
-  const area = mark('area', { geometry: { type: 'Polygon', coordinates: [[[-87, 43], [-86.99, 43], [-86.99, 43.01], [-87, 43]]] } });
-  render([mark('a'), area], { labels: false });
+  const area = mark('area', { geometry: { type: 'Polygon', coordinates: [[[-87, 43], [-86.998, 43], [-86.998, 43.001], [-87, 43]]] } });
+  render([mark('a'), area], { labels: 'off' });
   assert.deepEqual(leaflet.shown(), []);
-  render([mark('a'), area], { labels: true });
+  render([mark('a'), area], { labels: 'on' });
   assert.deepEqual(leaflet.shown(), ['a', 'area']);
   const element = pin('a').getElement();
   for (const type of ['focus', 'blur', 'focus']) {
@@ -298,15 +298,15 @@ test('labels that are on stay through focus and blur, and redrawing binds nothin
     assert.deepEqual(leaflet.shown(), ['a', 'area'], type);
   }
   assert.equal(pin('a').label.open, false, 'its name is not shown twice');
-  for (let i = 0; i < 10; i += 1) render([mark('a', { name: 'a' + i, color: i % 2 ? '#c62828' : '#1565c0' }), area], { labels: i % 2 === 0, selectedId: i % 3 ? 'a' : null });
+  for (let i = 0; i < 10; i += 1) render([mark('a', { name: 'a' + i, color: i % 2 ? '#c62828' : '#1565c0' }), area], { labels: i % 2 ? 'off' : 'on', selectedId: i % 3 ? 'a' : null });
   assert.equal(pin('a9').binds, 1);
   assert.equal(pin('a9').label.text, 'a9', 'renamed in place');
-  render([mark('a', { name: 'Moved', geometry: { type: 'Point', coordinates: [-87.5, 43.5] } })], { labels: true });
+  render([mark('a', { name: 'Moved', geometry: { type: 'Point', coordinates: [-86.999, 43.0005] } })], { labels: 'on' });
   const [kept] = leaflet.drawn().filter(item => item.kind === 'tooltip');
-  assert.deepEqual([leaflet.shown(), kept.positions], [['Moved'], [43.5, -87.5]]);
+  assert.deepEqual([leaflet.shown(), kept.positions], [['Moved'], [43.0005, -86.999]]);
   render([]);
   assert.deepEqual(leaflet.shown(), []);
-  render([mark('a')], { labels: false });
+  render([mark('a')], { labels: 'off' });
   await pin('a').getElement().fire('focus');
   assert.equal(pin('a').label.open, true, 'with labels off the name still comes on hover and focus');
 });

@@ -13,23 +13,27 @@ const TYPE_LABEL = { Point: 'Pin', LineString: 'Line', Polygon: 'Area' };
 const VISIBILITY_LABEL = { staff: 'Me and project staff', private: 'Only me', internal: 'Staff only', client: 'A client account' };
 const ACCOUNT_TYPE = { model_association: 'Client association', direct_client_grant: 'Client grant' };
 const accountLabel = key => { const [type, id = ''] = String(key).split(/:(.*)/s); return `${ACCOUNT_TYPE[type] || 'Client'} …${id.slice(-6)}`; };
-const LABELS_KEY = 'ltds.viewer.marks.labels';
+const LABELS_KEY = 'ltds.viewer.marks.labels', GROUP_KEY = 'ltds.viewer.marks.group';
+const LABEL_MODES = { on: 'On', selected: 'Selected', off: 'Off' };
 
-function readLabelsPreference(window) {
-  try { return window.localStorage?.getItem(LABELS_KEY) !== 'off'; } catch { return true; }
+function readPreference(window, key, allowed, fallback) {
+  try { const value = window.localStorage?.getItem(key); return allowed.includes(value) ? value : fallback; } catch { return fallback; }
 }
-function writeLabelsPreference(window, on) {
-  try { window.localStorage?.setItem(LABELS_KEY, on ? 'on' : 'off'); } catch { /* per-viewer convenience only */ }
+function writePreference(window, key, value) {
+  try { window.localStorage?.setItem(key, value); } catch { /* per-viewer convenience only */ }
 }
 
 // overlay: where the pop-ups over the map go (the card, the strip while placing).
 export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = globalThis.fetch, newId = () => crypto.randomUUID(),
-  onActivate = () => {}, georef = () => null, units = () => 'imperial', fileName = () => 'marks' }) {
+  onActivate = () => {}, georef = () => null, units = () => 'imperial', fileName = () => 'marks', obstacles = () => [] }) {
   const document = panel.ownerDocument, window = document.defaultView;
   const listeners = new AbortController();
   const on = (target, type, handler) => target.addEventListener(type, handler, { signal: listeners.signal });
   let view = { map: false }, mode = 'idle', drawing = null, draft = null, selectedId = null, preview = null;
-  let labels = readLabelsPreference(window), tab = 'list', search = '', armedDelete = null, categoryDraft = null;
+  let labels = readPreference(window, LABELS_KEY, Object.keys(LABEL_MODES), 'selected'), grouping = readPreference(window, GROUP_KEY, ['on', 'off'], 'on') === 'on';
+  // The Marks pop-up, and the list for several marks on one spot.
+  let boxOpen = false, picked = null;
+  let tab = 'list', search = '', armedDelete = null, categoryDraft = null;
   let sessionScope = false, scopeKey, writtenCoords = null;
   const visibility = createMarkVisibility({ storage: () => window.localStorage });
   // Unsaved work, kept for this person and model. Nothing is kept or cleared until the stored draft was looked at.
@@ -46,7 +50,14 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   const store = createMarksStore({ request, newId, onChange: () => render() });
   const layer = createMarkMapLayer({ L, getMap,
-    onSelect: id => { if (draft && draft.id === id) nameInput.focus?.(); else select(id, { focus: false }); },
+    onSelect: (id, { pointer = false } = {}) => {
+      if (draft && draft.id === id) { nameInput.focus?.(); return; }
+      // Two pins under one finger: ask rather than guess. Groups already do.
+      const near = pointer && !grouping && mode === 'idle' && selectedId !== id ? layer.near(id, coarse() ? 24 : 13) : [];
+      if (near.length > 1) openPick(near); else select(id, { focus: false });
+    },
+    onGroup: ids => openPick(ids),
+    obstacles, schedule: work => (window.requestAnimationFrame ? window.requestAnimationFrame(work) : work()),
     onViewChange: () => placeCard(),
     describe: mark => [mark.name, categoryById(mark.categoryId)?.name, colorName(mark.color)].filter(Boolean).join(', '),
     onDraftMove: geometry => { if (draft) { draft.geometry = geometry; writeCoords(); render(); } },
@@ -128,11 +139,12 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   // List
   const searchInput = h(document, 'input', { type: 'search', name: 'markSearch', autocomplete: 'off', 'aria-label': 'Search marks', placeholder: 'Search' });
-  const labelsToggle = h(document, 'input', { type: 'checkbox' });
+  const labelsSelect = h(document, 'select', { name: 'labels', 'aria-label': 'Labels' }, ...Object.entries(LABEL_MODES).map(([value, text]) => h(document, 'option', { value, text })));
+  const groupToggle = h(document, 'input', { type: 'checkbox', name: 'group' });
   const undoButton = h(document, 'button', { type: 'button', text: 'Undo' });
   // What is hidden is always said, and leads to where it can be shown again.
   const hiddenButton = h(document, 'button', { type: 'button', class: 'viewer-mark-hidden-count' });
-  const listHead = h(document, 'div', { class: 'viewer-mark-row viewer-mark-list-head' }, hiddenButton, undoButton);
+  const listHead = h(document, 'div', { class: 'viewer-mark-row viewer-mark-list-head' }, undoButton);
   const list = h(document, 'ul', { class: 'viewer-mark-list', 'aria-label': 'Marks' });
 
   // Categories
@@ -160,7 +172,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const showAllButton = h(document, 'button', { type: 'button', text: 'Show all' });
   const hideAllButton = h(document, 'button', { type: 'button', text: 'Hide all' });
   const categoryTools = h(document, 'div', { class: 'viewer-mark-row' }, showAllButton, hideAllButton,
-    h(document, 'label', { class: 'viewer-mark-toggle' }, labelsToggle, h(document, 'span', { text: 'Labels' })));
+    h(document, 'label', { class: 'viewer-mark-toggle' }, h(document, 'span', { text: 'Labels' }), labelsSelect),
+    h(document, 'label', { class: 'viewer-mark-toggle' }, groupToggle, h(document, 'span', { text: 'Group' })));
 
   // Import / export
   const exportButton = h(document, 'button', { type: 'button', text: 'Export GeoJSON' });
@@ -182,9 +195,24 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     h(document, 'button', { type: 'button', role: 'tab', 'data-tab': name, 'aria-controls': `viewer-marks-${name}`, text }));
   const tabs = h(document, 'div', { class: 'viewer-mark-row viewer-mark-tabs', role: 'tablist', 'aria-label': 'Marks' }, ...tabButtons);
 
-  root.replaceChildren(status, tools, coordForm, listHead, tabs, ...Object.values(sections), exchange);
+  const openBox = h(document, 'button', { type: 'button', class: 'viewer-mark-open', text: 'Marks', 'aria-expanded': 'false' });
+  root.replaceChildren(status, tools, openBox);
 
-  overlay.append(addButton, cross, strip, card);
+  // One Marks pop-up, from the map or the sidebar.
+  const boxButton = h(document, 'button', { type: 'button', class: 'viewer-mark-layers', 'aria-label': 'Marks', title: 'Marks (L)', 'aria-expanded': 'false', text: '\u2630' });
+  const boxClose = h(document, 'button', { type: 'button', class: 'viewer-mark-close', 'aria-label': 'Close marks', text: '\u00d7' });
+  const boxMessage = h(document, 'p', { class: 'hint', role: 'status', 'aria-live': 'polite' });
+  const box = h(document, 'section', { class: 'viewer-mark-box', role: 'dialog', 'aria-label': 'Marks', hidden: true },
+    h(document, 'div', { class: 'viewer-mark-card-head' }, h(document, 'h4', { text: 'Marks' }), boxClose), boxMessage, listHead, tabs, ...Object.values(sections), coordForm, exchange);
+
+  // Several marks on one spot
+  const pickTitle = h(document, 'h4'), pickList = h(document, 'ul', { class: 'viewer-mark-list', 'aria-label': 'Marks here' });
+  const pickZoom = h(document, 'button', { type: 'button', text: 'Zoom in' });
+  const pickClose = h(document, 'button', { type: 'button', class: 'viewer-mark-close', 'aria-label': 'Close list', text: '\u00d7' });
+  const pick = h(document, 'section', { class: 'viewer-mark-card viewer-mark-pick', role: 'dialog', 'aria-label': 'Marks here', hidden: true },
+    h(document, 'div', { class: 'viewer-mark-card-head' }, pickTitle, pickClose), pickList, pickZoom);
+
+  overlay.append(addButton, boxButton, hiddenButton, cross, strip, card, pick, box);
 
   // ---- helpers --------------------------------------------------------------
   const canWrite = () => store.canWrite() && Boolean(view.map);
@@ -240,6 +268,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   function startPlacing(type, { cross: useCross = false } = {}) {
     if (!canWrite() || store.state.busy || unsaved()) return;
     closeCard();
+    if (narrow()) boxOpen = false;
     placeChoice = onlyShown();
     setMode(type);
     crosshair = type === 'Point' && useCross;
@@ -309,6 +338,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (!mark || mode !== 'idle' || unsaved()) return;
     draft = null;
     selectedId = id;
+    picked = null;
+    if (narrow()) boxOpen = false;
     armedDelete = null;
     deleteForGood = null;
     moving = false;
@@ -318,6 +349,30 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     render();
     if (narrow()) layer.keepAbove(mark.geometry, 0.46);
     (editButton.hidden ? closeButton : editButton).focus?.({ preventScroll: true });
+  }
+
+  // ---- several marks on one spot, and the Marks pop-up ------------------------
+  function openPick(ids) {
+    if (mode !== 'idle' || unsaved()) return;
+    closeCard();
+    picked = [...ids];
+    if (narrow()) boxOpen = false;
+    render();
+    (pickList.querySelector('button') || pickClose).focus?.({ preventScroll: true });
+  }
+  function closePick({ focusPin = false } = {}) {
+    const [id] = picked || [];
+    picked = null;
+    render();
+    if (focusPin && id) layer.focusPin(id);
+  }
+  function showBox(next, { to = tab } = {}) {
+    if (next && narrow()) { if (unsaved()) return; closeCard(); picked = null; if (mode !== 'idle') setMode('idle'); }
+    boxOpen = next;
+    tab = to;
+    render();
+    (next ? tabButtons.find(button => button.dataset.tab === tab) : view.map ? boxButton : openBox)?.focus?.({ preventScroll: true });
+    return next && readDeleted();
   }
 
   function beginEdit({ move = false } = {}) {
@@ -349,6 +404,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   function closeCard({ focusPin = false } = {}) {
     const id = selectedId;
     draft = null;
+    picked = null;
     selectedId = null;
     armedDelete = null;
     deleteForGood = null;
@@ -362,18 +418,22 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // ---- where the card goes ----------------------------------------------------
   const NARROW = 640;
   const narrow = () => (getMap()?.getSize?.().x ?? Infinity) <= NARROW;
-  function placeCard() {
-    if (card.hidden) return;
-    const size = getMap()?.getSize?.(), geometry = draft?.geometry || store.find(selectedId)?.geometry;
-    const sheet = narrow();
-    card.classList.toggle('sheet', sheet);
-    card.classList.toggle('full', sheet && Boolean(draft));
+  function placeBeside(element, geometry, full) {
+    const size = getMap()?.getSize?.(), sheet = narrow();
+    element.classList.toggle('sheet', sheet);
+    element.classList.toggle('full', sheet && full);
     const point = !sheet && size && geometry ? layer.anchor(geometry) : null;
-    if (!point) { card.style.left = card.style.top = ''; return; }
-    const width = card.offsetWidth || 300, height = card.offsetHeight || 260, gap = 28, edge = 8;
+    if (!point) { element.style.left = element.style.top = ''; return; }
+    const width = element.offsetWidth || 300, height = element.offsetHeight || 260, gap = 28, edge = 8;
     const right = point[0] + gap + width + edge <= size.x;
-    card.style.left = `${Math.max(edge, right ? point[0] + gap : point[0] - gap - width)}px`;
-    card.style.top = `${Math.max(edge, Math.min(point[1] - 60, size.y - height - edge))}px`;
+    element.style.left = `${Math.max(edge, right ? point[0] + gap : point[0] - gap - width)}px`;
+    element.style.top = `${Math.max(edge, Math.min(point[1] - 60, size.y - height - edge))}px`;
+  }
+  function placeCard() {
+    if (!card.hidden) placeBeside(card, draft?.geometry || store.find(selectedId)?.geometry, Boolean(draft));
+    if (!pick.hidden) placeBeside(pick, store.find(picked[0])?.geometry, false);
+    box.classList.toggle('sheet', narrow());
+    box.classList.toggle('full', narrow());
   }
 
   // ---- unsaved work ---------------------------------------------------------
@@ -518,6 +578,29 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       { id: null, name: 'No category', ...DEFAULT_STYLE }];
   }
 
+  function renderBox() {
+    const { state } = store, ready = state.ready && !state.blocked;
+    if (!ready) boxOpen = false;
+    box.hidden = !boxOpen;
+    boxButton.hidden = !ready || !view.map;
+    openBox.hidden = !ready;
+    for (const button of [boxButton, openBox]) button.setAttribute('aria-expanded', String(boxOpen));
+    boxMessage.textContent = boxOpen ? state.message : '';
+    boxMessage.hidden = !boxMessage.textContent;
+    const here = (picked || []).map(id => store.find(id)).filter(mark => mark && visibility.shows(mark));
+    if (picked && here.length < 2) picked = null;
+    pick.hidden = !picked || !view.map || !ready;
+    pickTitle.textContent = pick.hidden ? '' : `${here.length} marks here`;
+    pickList.replaceChildren(...(pick.hidden ? [] : here.map(mark => {
+      const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
+      icon.innerHTML = markBadge(mark);
+      const button = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item' }, icon, h(document, 'span', { class: 'viewer-mark-list-name' },
+        h(document, 'span', { text: mark.name }), h(document, 'small', { text: categoryById(mark.categoryId)?.name || '' })));
+      on(button, 'click', () => select(mark.id, { focus: false }));
+      return h(document, 'li', {}, button);
+    })));
+  }
+
   function renderStrip(writable) {
     const { state } = store, placing = mode !== 'idle' && writable;
     addButton.hidden = !writable || placing || Boolean(draft);
@@ -603,9 +686,11 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
     // List
     const hiddenCount = state.marks.length - visibleMarks().length;
-    hiddenButton.hidden = !hiddenCount;
+    hiddenButton.hidden = !hiddenCount || !view.map || !state.ready || state.blocked;
     hiddenButton.textContent = `${hiddenCount} hidden`;
-    labelsToggle.checked = labels;
+    labelsSelect.value = labels;
+    groupToggle.checked = grouping;
+    renderBox();
     const lastUndo = state.undo.at(-1);
     undoButton.hidden = !lastUndo;
     undoButton.disabled = state.busy;
@@ -623,7 +708,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       return h(document, 'li', {}, button);
     });
     list.replaceChildren(...rows);
-    listHead.hidden = !state.ready || !hiddenCount && !state.undo.length;
+    listHead.hidden = !state.ready || !state.undo.length;
     searchInput.hidden = !state.marks.length;
 
     // Categories
@@ -714,7 +799,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const draftShown = !existing || visibility.shows(existing);
     const ghost = mode === 'Point' && !crosshair && writable ? styleOf(placeChoice) : null;
     layer.render({ ghost, visible: Boolean(view.map && state.ready && !state.blocked), marks: visibleMarks(), draft: editable && draftShown ? { ...draft, movable: !draft.id || moving, ...(draft.id ? {} : { id: '__draft__' }) } : null,
-      selectedId, labels, preview, drawing });
+      selectedId, labels, group: grouping, preview, drawing });
     placeCard();
     keepDraft();
   }
@@ -755,21 +840,28 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
   const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
   on(window, 'keydown', event => {
-    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || !view.map) return;
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || (!view.map && !boxOpen)) return;
     const typing = textHost(event.target);
     if (event.target?.closest?.('dialog[open]') || (typing && !overlay.contains?.(typing))) return;
     // An open photo is in front: Escape is for it.
     if (document.querySelector?.('#photo-modal')?.style.display === 'flex') return;
     if (event.key === 'Escape') {
       if (picker.isOpen()) picker.close();
+      else if (picked) closePick({ focusPin: true });
       else if (draft) cancelDraft();
       else if (mode !== 'idle') { setMode('idle'); render(); }
       else if (selectedId) closeCard({ focusPin: true });
+      else if (boxOpen) showBox(false);
       else return;
       event.preventDefault();
       return;
     }
     if (typing) return;
+    if ((event.key === 'l' || event.key === 'L') && store.state.ready) {
+      event.preventDefault();
+      void showBox(!boxOpen);
+      return;
+    }
     if ((event.key === 'm' || event.key === 'M') && mode === 'idle' && !draft && canWrite()) {
       event.preventDefault();
       startPlacing('Point', { cross: true });
@@ -870,7 +962,12 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(starterAll, 'click', async () => {
     for (const starter of store.starters()) if (!await store.addStarter(starter)) return;
   });
-  on(hiddenButton, 'click', () => { tab = 'categories'; render(); });
+  on(hiddenButton, 'click', () => showBox(true, { to: 'categories' }));
+  on(boxButton, 'click', () => showBox(!boxOpen));
+  on(openBox, 'click', () => showBox(!boxOpen));
+  on(boxClose, 'click', () => showBox(false));
+  on(pickClose, 'click', () => closePick({ focusPin: true }));
+  on(pickZoom, 'click', () => { const here = picked.map(id => store.find(id)).filter(Boolean); closePick(); layer.zoomTo(here.map(mark => mark.geometry)); });
   on(showAllButton, 'click', () => { visibility.showAll(); shownChanged(); });
   on(hideAllButton, 'click', () => { visibility.hideAll(); shownChanged(); });
   on(searchInput, 'input', () => { search = searchInput.value.trim().toLowerCase(); render(); });
@@ -923,7 +1020,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (kept) { selectedId = saved.id; render(); editButton.focus?.({ preventScroll: true }); } else layer.focusPin(saved.id);
   }
 
-  on(labelsToggle, 'change', () => { labels = labelsToggle.checked; writeLabelsPreference(window, labels); render(); });
+  on(labelsSelect, 'change', () => { labels = labelsSelect.value; writePreference(window, LABELS_KEY, labels); render(); });
+  on(groupToggle, 'change', () => { grouping = groupToggle.checked; writePreference(window, GROUP_KEY, grouping ? 'on' : 'off'); render(); });
   on(undoButton, 'click', async () => { if (unsaved()) return; closeCard(); if (await store.undo()) await readDeleted(); });
 
   on(categoryForm, 'submit', async event => {
@@ -1001,6 +1099,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         more.open = false;
         preview = null; placeChoice = null; several = false; crosshair = false; placed = null;
         picker.close({ focus: false });
+        boxOpen = false; picked = null;
         search = ''; tab = 'list'; armedDelete = null; categoryDraft = null; moving = false; deleteForGood = null;
         showCategoryIcon(DEFAULT_STYLE.icon);
         categoryColor.value = DEFAULT_STYLE.color;
@@ -1019,6 +1118,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       view = next || { map: false };
       if (!view.map && mode !== 'idle') setMode('idle');
       if (!view.map && moving) cancelDraft();
+      if (!view.map) picked = null;
       restoreDraft();
       render();
     },
@@ -1052,7 +1152,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       layer.dispose();
       listeners.abort();
       panel.hidden = true;
-      for (const element of [addButton, cross, strip, card]) element.remove();
+      for (const element of [addButton, boxButton, hiddenButton, cross, strip, card, pick, box]) element.remove();
     },
   };
 }

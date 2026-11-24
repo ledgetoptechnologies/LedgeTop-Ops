@@ -69,6 +69,8 @@ export function createMiniLeaflet(document) {
     getSize: () => size, getCenter: () => centre,
     latLngToContainerPoint: ([lat, lng]) => ({ x: size.x / 2 + (lng - centre.lng) / PX, y: size.y / 2 - (lat - centre.lat) / PX }),
     containerPointToLatLng: ([x, y]) => ({ lat: centre.lat - (y - size.y / 2) * PX, lng: centre.lng + (x - size.x / 2) * PX }),
+    project: ([lat, lng]) => ({ x: lng / PX * 2 ** (zoom - 18), y: -lat / PX * 2 ** (zoom - 18) }),
+    getMaxZoom: () => 28, setZoom: next => { zoom = next; fire('zoomend'); },
     panBy: ([x, y]) => { centre = { lat: centre.lat - y * PX, lng: centre.lng + x * PX }; fire('move'); },
     setView: ([lat, lng]) => { centre = { lat, lng }; }, fitBounds() {},
     doubleClickZoom: { enable() {}, disable() {} } };
@@ -92,5 +94,5 @@ export function createMiniLeaflet(document) {
     ...drawn().filter(layer => layer.label?.options.permanent && layer.label.open).map(layer => layer.label.text)].sort();
   return { L, map, drawn, made, shown, mapHandlers, fire, keyboard, setZoom: next => { zoom = next; fire('zoomend'); }, setSize: (x, y) => { size = { x, y }; fire('resize'); }, centre: () => centre,
     ghosts: () => markers('viewer-map-ghost'),
-    pins: () => markers('viewer-map-mark'), corners: () => markers('viewer-mark-vertex'), areaGlyphs: () => markers('viewer-map-area') };
+    groups: () => markers('viewer-map-group'), pins: () => markers('viewer-map-mark'), corners: () => markers('viewer-mark-vertex'), areaGlyphs: () => markers('viewer-map-area') };
 }

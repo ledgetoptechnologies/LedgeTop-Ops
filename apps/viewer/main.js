@@ -2579,6 +2579,12 @@ function installViewerMarks() {
     viewerMarks = mountViewerMarks({
       panel: document.getElementById('panel-marks'),
       overlay: document.getElementById('viewer-marks-ui'),
+      // Names already on the map (owners, acreage), in the map's own pixels: mark labels give way to them.
+      obstacles: () => {
+        const frame = map?.getContainer().getBoundingClientRect(), names = map?.getPane('propertyLineLabels')?.querySelectorAll('.property-line-label') || [];
+        return [...names].map(node => node.getBoundingClientRect()).filter(box => box.width && box.height)
+          .map(box => ({ x: box.left - frame.left, y: box.top - frame.top, width: box.width, height: box.height }));
+      },
       L, getMap: () => map,
       // Placing or drawing a mark ends any measuring tool first.
       onActivate: () => { if (state.activeTool && state.activeTool !== 'none') setTool('none'); },

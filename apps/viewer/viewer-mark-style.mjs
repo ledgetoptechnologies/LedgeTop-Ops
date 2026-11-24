@@ -53,4 +53,9 @@ export function mapStroke(mark, { selected = false } = {}) {
   return { casing: { color: '#0b0d10', weight: weight + 3, opacity: 0.85 },
     line: { color, weight, ...(mark.geometry.type === 'Polygon' ? { fillColor: color, fillOpacity: 0.2 } : {}) } };
 }
+// Several marks on one spot: a plate with two of them and how many there are.
+export function groupPlate(marks) {
+  return { html: `<span class="viewer-mark-plate">${marks.slice(0, 2).map(mark => pinSvg(mark.icon, mark.color, 14)).join('')}<b>${Number(marks.length)}</b></span>`,
+    size: [46, 36], anchor: [23, 18] };
+}
 export const areaGlyph = mark => ({ html: glyphSvg(mark.icon, mark.color, 22), size: [22, 22], anchor: [11, 11] });

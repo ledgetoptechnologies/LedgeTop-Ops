@@ -107,7 +107,7 @@ async function withBrowser(t, { app = null } = {}, run) {
       assert.fail(`timed out: ${label}`);
     };
     const mouse = (type, x, y, extra = {}) => client.command('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, ...extra });
-    const button = text => `[...document.querySelectorAll('#panel-marks button, #viewer-marks-ui button')].find(b => b.textContent === ${JSON.stringify(text)} && !b.closest('[hidden]'))`;
+    const button = text => `[...document.querySelectorAll('#panel-marks button, #viewer-marks-ui button')].find(b => b.textContent === ${JSON.stringify(text)} && !b.closest('[hidden]:not(.viewer-mark-box)'))`; // the Marks pop-up may be closed
     const h = {
       client, waitFor, mouse,
       size: (width, height, mobile = false) => client.command('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }),
@@ -122,6 +122,7 @@ async function withBrowser(t, { app = null } = {}, run) {
       // Sets a field's text without firing input/change, like typing then pressing Enter at once.
       setQuietly: (selector, value) => client.evaluate(`document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)}, 0`),
       type: (selector, value) => client.evaluate(`(() => { const i = document.querySelector(${JSON.stringify(selector)}); i.value = ${JSON.stringify(value)}; i.dispatchEvent(new Event('input')); })()`),
+      labels: mode => client.evaluate(`(() => { const s = document.querySelector('[name=labels]'); s.value = '${mode}'; s.dispatchEvent(new Event('change')); })()`),
       state: () => client.evaluate('JSON.parse(JSON.stringify(marks.store.state.marks))'),
       editorOpen: () => client.evaluate("!document.querySelector('.viewer-mark-form').hidden"),
       status: () => client.evaluate("document.querySelector('.viewer-mark-status').textContent"),
@@ -143,7 +144,8 @@ test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeou
   await h.load();
   assert.equal(await client.evaluate("document.getElementById('panel-marks').hidden"), false);
 
-  // Click to place a pin, label it and save.
+  // Click to place a pin, label it and save. Only the selected mark has a label unless they are on.
+  await h.labels('on');
   await h.pressText('Pin');
   const [x, y] = await h.mapPoint(43.05, -87.0);
   await h.click(x, y);
@@ -156,7 +158,8 @@ test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeou
   assert.equal(saved.name, 'North <b>gate</b>');
   assert.ok(Math.abs(saved.elevationNavd88M - 250) < 0.01, 'NAVD88 elevation stored in metres');
   assert.ok(Math.abs(saved.geometry.coordinates[1] - 43.05) < 1e-5);
-  assert.equal(await client.evaluate("document.querySelector('.viewer-mark-label')?.textContent"), 'North <b>gate</b>', 'labels are text');
+  // Names are put on the map once it has settled.
+  await waitFor("[...document.querySelectorAll('.viewer-mark-label')].some(label => label.textContent === 'North <b>gate</b>')", 'labels are text');
   assert.equal(await client.evaluate("document.querySelector('.viewer-mark-label b')"), null);
 
   // A drag without Move pans the map and writes nothing.
@@ -200,7 +203,7 @@ test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeou
   assert.equal((await h.state())[2].geometry.coordinates[0].length, 4);
 
   // Labels toggle and list zoom.
-  await client.evaluate("document.querySelector('.viewer-mark-toggle input').click(), 0");
+  await h.labels('off');
   // Leaflet fades tooltips out over 200 ms before removing them.
   await waitFor("document.querySelectorAll('.viewer-mark-label').length === 0", 'labels off');
   assert.equal(await client.evaluate("document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item').length"), 3);
@@ -371,5 +374,42 @@ test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
     await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'draft from a hold');
     await h.pressText('Cancel');
     assert.equal((await h.state()).length, 2);
+  });
+});
+
+// Grouping, the list for one spot, and the Marks pop-up on real Leaflet.
+test('marks: several on one spot and the Marks pop-up', { timeout: 90000 }, async t => {
+  await withBrowser(t, {}, async h => {
+    const { client, waitFor } = h;
+    await h.load();
+    for (const [lng, name] of [[-87, 'One'], [-87.00001, 'Two'], [-86.999, 'Apart']]) {
+      await h.type('[name=coordinates]', `43.05, ${lng}`);
+      await h.pressText('Place pin');
+      await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'editor');
+      await h.type('.viewer-mark-form [name=name]', name);
+      await h.pressText('Save');
+      await waitFor("document.querySelector('.viewer-mark-form').hidden", 'saved');
+    }
+    await client.evaluate('map.setView([43.05, -86.9995], 18, { animate: false }), 0');
+    await waitFor("document.querySelectorAll('.viewer-map-group').length === 1", 'grouped');
+    assert.equal(await client.evaluate("document.querySelector('.viewer-map-group b').textContent"), '2');
+    assert.equal(await client.evaluate("document.querySelectorAll('.viewer-map-mark').length"), 1);
+    const [x, y] = await client.evaluate("(() => { const r = document.querySelector('.viewer-map-group').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()");
+    await h.click(x, y);
+    await waitFor("!document.querySelector('.viewer-mark-pick').hidden", 'list');
+    assert.deepEqual(await client.evaluate("[...document.querySelectorAll('.viewer-mark-pick .viewer-mark-list-item')].map(b => b.textContent).sort()"), ['One', 'Two']);
+    await h.pressText('Zoom in');
+    await waitFor("document.querySelectorAll('.viewer-map-group').length === 0 && document.querySelectorAll('.viewer-map-mark').length >= 2", 'apart after zooming in');
+    // Labels never cover a pin.
+    await h.labels('on');
+    await delay(300);
+    assert.equal(await client.evaluate("(() => { const boxes = s => [...document.querySelectorAll(s)].map(e => e.getBoundingClientRect()); const hit = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom; return boxes('.viewer-mark-label').some((l, i) => boxes('.viewer-mark-label').some((m, j) => i !== j && hit(l, m))); })()"), false);
+    // The pop-up, on a computer and on a phone.
+    await h.press('.viewer-mark-layers');
+    await waitFor("!document.querySelector('.viewer-mark-box').hidden", 'pop-up');
+    await h.size(375, 740, true);
+    await delay(200);
+    const fits = await client.evaluate("(() => { const r = document.querySelector('.viewer-mark-box').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1; })()");
+    assert.equal(fits, true);
   });
 });

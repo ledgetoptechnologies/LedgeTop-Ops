@@ -38,17 +38,20 @@ export async function openMarksPanel(t, { rateLimited = () => false, maxRequestB
   };
   const requests = [];
   const request = (path, init) => fetch(base + path, { ...init, redirect: 'follow' });
-  const mount = ({ dom = createMiniDocument(), units = () => 'imperial', map = true, request = null, georef = () => null } = {}) => {
+  const mount = ({ dom = createMiniDocument(), units = () => 'imperial', map = true, request = null, georef = () => null, group = false, obstacles } = {}) => {
+    // Most tests put several marks on one spot; those about groups ask for them.
+    if (!group) { try { dom.window.localStorage.setItem('ltds.viewer.marks.group', 'off'); } catch { /* a test of blocked storage */ } }
     const panel = dom.document.createElement('div'), sidebar = dom.document.createElement('div'), overlay = dom.document.createElement('div');
     panel.append(sidebar, overlay);
     const leaflet = createMiniLeaflet(dom.document);
-    const marks = mountViewerMarks({ panel: sidebar, overlay, L: leaflet.L, getMap: () => leaflet.map, units, georef,
+    const marks = mountViewerMarks({ panel: sidebar, overlay, L: leaflet.L, getMap: () => leaflet.map, units, georef, ...(obstacles && { obstacles }),
       request: (path, init) => { requests.push([init.method, path]); return (request || fetch)(base + path, { ...init, redirect: 'follow' }); } });
     if (map) marks.setView({ map: true });
     const q = selector => panel.querySelector(selector);
     const card = text => q('.viewer-mark-card').querySelectorAll('button').find(node => node.textContent === text);
     return { dom, panel, sidebar, overlay, marks, leaflet, card, store: marks.store, q,
-      button: text => panel.querySelectorAll('button').find(node => node.textContent === text),
+      // The panel's own Undo, not the one beside Place several.
+      button: text => panel.querySelectorAll('button').filter(node => node.textContent === text).sort((a, b) => Number(Boolean(b.closest('.viewer-mark-list-head'))) - Number(Boolean(a.closest('.viewer-mark-list-head'))))[0],
       text: () => panel.textContent,
       values: () => [...panel.querySelectorAll('input'), ...panel.querySelectorAll('textarea')].map(node => node.value).join('\n'),
       async type(selector, value) { q(selector).value = value; await q(selector).fire('input'); },
