@@ -84,6 +84,7 @@ function recordPage(client, served) {
   const short = (value, max = 300) => String(value ?? '').replace(/http:\/\/127\.0\.0\.1:\d+/g, '').slice(0, max);
   return {
     start(query) { from = client.events.length; served.length = 0; navigated = query; },
+    committed: loaderId => client.events.slice(from).some(({ method, params }) => method === 'Page.frameNavigated' && !params.frame.parentId && params.frame.loaderId === loaderId),
     async report() {
       const lines = [`navigated to /${navigated}`], requests = new Map();
       for (const { method, params } of client.events.slice(from)) {
@@ -101,7 +102,7 @@ function recordPage(client, served) {
       for (const { what, how } of requests.values()) lines.push(`request ${what}: ${how}`);
       for (const { what, how } of served) lines.push(`server ${what}: ${how}`);
       const page = `(() => { const state = window.marks?.store.state; return JSON.stringify({ at: location.pathname + location.search, readyState: document.readyState,
-        body: Boolean(document.body), ready: document.body?.dataset.ready, map: typeof window.map, marks: state && { ready: state.ready, loading: state.loading, busy: state.busy, message: state.message, count: state.marks.length },
+        body: Boolean(document.body), ready: document.body?.dataset.ready, old: Boolean(document.leftByTest), map: typeof window.map, marks: state && { ready: state.ready, loading: state.loading, busy: state.busy, message: state.message, count: state.marks.length },
         kept: Object.keys(sessionStorage), form: document.querySelector('.viewer-mark-form')?.hidden }); })()`;
       lines.push(`page: ${await client.evaluate(page).catch(error => 'not readable: ' + short(error.message))}`);
       return lines.join('\n  ');
@@ -141,7 +142,8 @@ async function withBrowser(t, { app = null } = {}, run) {
     const recorded = recordPage(client, served);
     const waitFor = async (expression, label, ms = 8000) => {
       const deadline = Date.now() + ms;
-      while (Date.now() < deadline) { if (await client.evaluate(expression)) return; await delay(50); }
+      const met = typeof expression === 'function' ? expression : () => client.evaluate(expression);
+      while (Date.now() < deadline) { if (await met()) return; await delay(50); }
       assert.fail(`timed out: ${label}\n  ${await recorded.report()}`);
     };
     const mouse = (type, x, y, extra = {}) => client.command('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, ...extra });
@@ -150,10 +152,15 @@ async function withBrowser(t, { app = null } = {}, run) {
       client, waitFor, mouse,
       size: (width, height, mobile = false) => client.command('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }),
       load: async (query = '') => {
+        // Only the new document counts: the one being left is ready too, and may still answer.
+        await client.evaluate('document.leftByTest = true, 0');
         recorded.start(query);
-        const { errorText } = await client.command('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/${query}` });
-        if (errorText) assert.fail(`navigation failed: ${errorText}\n  ${await recorded.report()}`);
-        await waitFor("document.body?.dataset.ready === 'true'", 'page ready');
+        const { errorText, loaderId } = await client.command('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/${query}` });
+        if (errorText || !loaderId) assert.fail(`navigation failed: ${errorText || 'no new document'}\n  ${await recorded.report()}`);
+        await waitFor(() => recorded.committed(loaderId), 'new page committed');
+        await waitFor(() => client.evaluate("!document.leftByTest && document.body?.dataset.ready === 'true'")
+          // The old document's context can go away under the question.
+          .catch(error => { if (/execution context|find .*context|navigated/i.test(error.message)) return false; throw error; }), 'page ready');
       },
       click: async (x, y) => { await mouse('mousePressed', x, y); await mouse('mouseReleased', x, y); },
       mapPoint: (lat, lng) => client.evaluate(`(() => { const p = map.latLngToContainerPoint([${lat}, ${lng}]), r = map.getContainer().getBoundingClientRect(); return [r.left + p.x, r.top + p.y]; })()`),
