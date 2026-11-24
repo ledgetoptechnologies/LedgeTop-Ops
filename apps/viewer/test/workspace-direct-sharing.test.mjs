@@ -91,6 +91,73 @@ test('dedicated ready sharing offers explicit link creation without publish UX o
   assert.equal(f.calls.every(call=>!call.options.method||call.options.method==='GET'),true);
 });
 
+test('creating a link for a private model says clients with the whole project get it too, and a task Share never offers the project first',async()=>{
+  const f=fixture();f.state.tasks[0].displayName='North wall';f.respondDirect(async()=>({clients:[],grants:[],clientsNextCursor:null}));
+  await f.context.openShareModal('project','output');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.html()+f.clientPanel.innerHTML;
+  assert.match(html,/This model is private\. Create public link publishes it, which also shows this task to every client who has the whole project\./);
+  assert.match(html,/“North wall” is not published yet/);assert.doesNotMatch(html,/name="scope" value="project" checked/);
+  f.state.sharePreflight.output={existingAccessUpdateRequired:true,eligibleAssetKinds:['glb']};f.context.shareModal('project','output');
+  assert.match(f.html(),/shows this task to every client who has the whole project\. Confirmation is required/);
+  let asked='';f.context.dialogs.confirm=async text=>{asked=text;return false};await f.context.confirmSharedVersionUpdate();
+  assert.match(asked,/clients who have the whole project also get newly activated tasks/);
+  Object.assign(f.output,{status:'published',activePublished:true});f.state.sharePreflight={};f.context.shareModal('project','output');
+  assert.match(f.html(),/Links follow this model’s latest published version\./);assert.doesNotMatch(f.html(),/not published yet/);
+});
+
+for(const gone of ['output row','task','task moved to another project','every row'])for(const when of ['before the client panel is built','before a later panel rebuild'])
+test(`a task Share never becomes a project Share when its target disappears: ${gone}, ${when}`,async()=>{
+  const f=fixture();Object.assign(f.output,{status:'published',activePublished:true});f.state.tasks[0].displayName='North wall';
+  // Another task stays shareable, so falling back to the project form would look normal.
+  f.state.tasks.push({id:'other',projectId:'project',displayName:'South wall'});
+  const other={id:'other-output',taskId:'other',projectId:'project',status:'published',activePublished:true};f.state.outputs.push(other);
+  const grants=[{grantId:'g-1',viewerProjectId:'project',scopeType:'project',taskId:null,revokedAt:null,clientDisplayName:'Acme',expiresAt:null}];let direct;
+  f.respondDirect(()=>new Promise(resolve=>{direct=()=>resolve({clients:[],grants,clientsNextCursor:null})}));
+  await f.context.openShareModal('project','output');
+  const vanish=()=>{
+    if(gone==='output row')f.state.outputs=[other];
+    else if(gone==='task')f.state.tasks=f.state.tasks.slice(1);
+    else if(gone==='every row'){f.state.outputs=[];f.state.tasks=[]}
+    else f.state.tasks=[{...f.state.tasks[0],projectId:'elsewhere'},f.state.tasks[1]];
+  };
+  const before=when==='before the client panel is built';if(before)vanish();
+  direct();await new Promise(resolve=>setImmediate(resolve));
+  if(!before){
+    assert.match(f.clientPanel.innerHTML,/name="scope" value="tasks" checked/);assert.match(f.clientPanel.innerHTML,/value="task" checked> North wall/);
+    vanish();f.context.rerenderClientSharePanel('project','output');
+  }
+  const html=f.clientPanel.innerHTML;
+  assert.match(html,/no longer in this project/);assert.doesNotMatch(html,/direct-client-grant-form|name="scope"|The whole project<\/label>/);
+  assert.match(html,/data-action="revoke-direct-client-grant" data-id="g-1"/,'existing access can still be revoked');
+  assert.equal(f.calls.some(call=>call.options?.method==='POST'),false);
+});
+test('a task Share opened without its model row offers no form, and a form already open sends nothing once its task is gone',async()=>{
+  const f=fixture();f.state.outputs=[];f.respondDirect(async()=>({clients:[],grants:[],clientsNextCursor:null}));
+  await f.context.openShareModal('project','output');await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.html()+f.clientPanel.innerHTML,/no longer in this project/);assert.doesNotMatch(f.html()+f.clientPanel.innerHTML,/name="scope"/);
+
+  const g=fixture();Object.assign(g.output,{status:'published',activePublished:true});g.state.clientDirectAccess={clients:[],grants:[]};
+  g.state.shareContext={id:'context',projectId:'project',taskId:'task',taskName:'North wall'};
+  g.context.bindClientPicker=(_root,options)=>{options.onSelect({sourceId:'s',workspaceId:'w',displayName:'Acme'});return{dispose(){}}};
+  const summary={textContent:''},review={hidden:true},reviewButton={hidden:false},box={dataset:{},onclick:null,textContent:'',focus(){}};
+  const form={isConnected:true,elements:{client:{value:JSON.stringify(['s','w'])},confirmedScope:{checked:true},includeLater:{checked:true,disabled:true},expiresAt:{value:''},measure:{checked:true},cameras:{checked:false},download:{checked:false}},
+    querySelector:selector=>({'[data-direct-summary]':summary,'[data-direct-review]':review,'[data-direct-review-button]':reviewButton,'input[name="scope"]:checked':{value:'tasks'}})[selector]||box,
+    querySelectorAll:selector=>selector==='input[name="taskId"]'?[{value:'task',checked:true}]:[]};
+  g.context.bindDirectShare(form,'project','output');form.elements.confirmedScope.checked=true;
+  await form.onsubmit({preventDefault(){}});assert.equal(form.reviewing,true,'the form works while its task is there');
+  g.state.outputs=[];await form.onsubmit({preventDefault(){}});
+  assert.equal(summary.textContent,directClientShare.SHARE_TARGET_MISSING);assert.equal(g.calls.some(call=>call.options?.method==='POST'),false);
+  g.state.outputs=[g.output];await form.onsubmit({preventDefault(){}});
+  g.state.tasks=[];await form.onsubmit({preventDefault(){}});
+  assert.equal(g.calls.some(call=>call.options?.method==='POST'),false);
+});
+test('a project Share is unaffected by task rows coming and going',async()=>{
+  const f=fixture();f.respondDirect(async()=>({clients:[],grants:[],clientsNextCursor:null}));f.state.outputs=[];f.state.tasks=[];
+  await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.html()+f.clientPanel.innerHTML;
+  assert.match(html,/name="scope" value="project" checked/);assert.doesNotMatch(html,/no longer in this project/);
+});
+
 test('public preflight settles while optional Operations client lookup remains pending',async()=>{
   const f=fixture();f.respond(path=>path.endsWith('/client-grants')?new Promise(()=>{}):Promise.resolve({shares:[],publicationRequired:true}));
   await f.context.openShareModal('project','output');
