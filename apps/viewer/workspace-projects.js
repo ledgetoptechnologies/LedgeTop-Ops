@@ -1964,7 +1964,7 @@ function shareFence(form,output,projectId){
   const dialog=()=>authority()&&state.shareContext===context&&modal.open&&form.isConnected;
   const task=()=>state.tasks.find(item=>item.id===output.taskId);
   const moved=()=>Boolean(dialog()&&task()&&task().projectId!==projectId);
-  return {authority,dialog,moved,live:()=>dialog()&&can('viewer.shares.create')&&(output.activePublished||can('viewer.processing.publish'))
+  return {context,authority,dialog,moved,sameShare:()=>authority()&&state.shareContext===context&&modal.open,live:()=>dialog()&&can('viewer.shares.create')&&(output.activePublished||can('viewer.processing.publish'))
     &&state.outputs.some(item=>item.id===output.id&&item.taskId===output.taskId&&item.modelId===output.modelId)
     &&(known?task()?.projectId===projectId:true)};
 }
@@ -2015,7 +2015,7 @@ async function reopenMovedShare(output,projectId,fence){
   const name=state.tasks.find(task=>task.id===output.taskId)?.displayName||'This task';
   let moved=null;
   try{const result=await api(`/api/v1/tasks/${encodeURIComponent(output.taskId)}`);if(result?.task?.id===output.taskId&&result.task.projectId!==projectId)moved=result.task;}catch{}
-  if(!fence.dialog())return;
+  if(!fence.dialog()){if(fence.authority())toast(`${name} moved to another project. Nothing was shared.`,true);return}
   if(!moved)return toast(`${name} moved to another project. Nothing was shared. Close Share and open it again.`,true);
   state.tasks=state.tasks.map(task=>task.id===moved.id?{...task,...moved}:task);
   state.outputs=state.outputs.map(item=>item.taskId===moved.id?{...item,projectId:moved.projectId}:item);
@@ -2083,15 +2083,17 @@ async function createOutputShare(form,projectId,onlyOutputId){
       throw error;
     }
     if(!fence.authority())return;
-    rememberShareResult(result,projectId,output.id);
-    form.shareSaved=true;if(state.shareContext)state.shareContext.mode='public';
+    // The link exists: its model's rows are updated wherever the person is now. Only the dialog it was asked from shows it.
+    const here=fence.sameShare();
+    if(here){rememberShareResult(result,projectId,output.id);if(fence.context)fence.context.mode='public'}
+    form.shareSaved=true;
     state.shares[output.id]=[result.share,...(state.shares[output.id]||[]).filter(share=>share.id!==result.share.id)];
     state.sharePreflight[output.id]={...state.sharePreflight[output.id],publicationRequired:false,existingAccessUpdateRequired:false,error:null};
     output.activePublished=true;output.status='published';
     delete form.shareRequest;
-    toast('Public link created. Use Copy to share it.');
+    toast(here?'Public link created. Use Copy to share it.':`Public link created for ${state.tasks.find(task=>task.id===output.taskId)?.displayName||output.displayName||'the model'}. Open its Share to copy it.`);
     // Clipboard is a separate explicit action, never part of creation success.
-    if(modal.open&&form.isConnected){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
+    if(fence.dialog()){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
   }catch(error){toast(error.message,true)}
   finally{form.shareBusy=false;if(form.isConnected&&!form.shareSaved){for(const [element,disabled] of fields)element.disabled=disabled;if(submit)submit.disabled=false}}
 }

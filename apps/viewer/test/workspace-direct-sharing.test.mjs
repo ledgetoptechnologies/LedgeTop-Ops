@@ -274,6 +274,34 @@ for(const changed of ['token','person'])test(`a link that answers after the ${ch
   await f.context.createOutputShare(f.form,'project','output');
   assert.equal(f.state.lastShareUrl,null);assert.deepEqual(f.state.shares,{});assert.equal(f.output.activePublished,false);assert.equal(f.rendered.length,0);
 });
+for(const [label,leave,same] of [
+  ['closed',f=>{f.modal.open=false;f.form.isConnected=false},false],
+  ['switched to another task',f=>{f.state.shareContext={id:'another',mode:'internal',projectId:'project',onlyOutputId:'other'};f.form.isConnected=false},false],
+  ['closed and opened again on the same task',f=>{f.state.shareContext={id:'again',mode:'internal',projectId:'project',onlyOutputId:'output'};f.form.isConnected=false},false],
+  ['redrawn by a late read',f=>{f.form.isConnected=false},true]])
+test(`a link that answers after its dialog was ${label} is saved for its model and leaves other dialogs alone`,async()=>{
+  const f=askFixture([]);f.state.tasks[0].displayName='North wall';f.state.shareContext={id:'mine',mode:'internal',projectId:'project',onlyOutputId:'output'};
+  const mine=f.state.shareContext;let done;f.respondPost(()=>new Promise(resolve=>{done=resolve}));
+  const pending=f.context.createOutputShare(f.form,'project','output');await new Promise(resolve=>setImmediate(resolve));assert.equal(f.posts().length,1);
+  const rendered=f.rendered.length;leave(f);
+  done({share:{id:'share',expiresAt:null},viewUrl:'https://viewer.test/view/secret'});await pending;
+  // The model's own cache is updated: the link exists and the model is published.
+  assert.deepEqual([...f.state.shares.output].map(item=>item.id),['share']);assert.equal(f.state.sharePreflight.output.publicationRequired,false);
+  assert.equal(f.output.activePublished,true);assert.equal(f.output.status,'published');
+  assert.equal(f.rendered.length,rendered,'no dialog is drawn over');
+  if(same){assert.equal(mine.mode,'public');assert.equal(f.state.lastShareUrl,'https://viewer.test/view/secret');}
+  else{
+    if(f.state.shareContext!==mine)assert.equal(f.state.shareContext.mode,'internal','the open dialog keeps its tab');
+    assert.equal(mine.mode,'internal');assert.equal(f.state.lastShareUrl,null);assert.equal(f.state.lastShareResult,undefined);
+    assert.match(f.notices.at(-1)[0],/Public link created for North wall/);assert.doesNotMatch(f.notices.at(-1)[0],/Use Copy/);
+  }
+});
+test('a refusal for a moved task, after its dialog closed, still says nothing was shared',async()=>{
+  const f=askFixture([]);f.state.tasks[0].displayName='North wall';let reopened=0;f.context.openShareModal=async()=>{reopened++};
+  f.respondPost(async()=>{f.modal.open=false;f.form.isConnected=false;throw Object.assign(new Error('output_project_changed'),{status:409})});
+  await f.context.createOutputShare(f.form,'project','output');
+  assert.equal(reopened,0);assert.match(f.notices.at(-1)[0],/North wall moved to another project\. Nothing was shared/);
+});
 test('losing the right to see client shares while they are read makes the list incomplete',async()=>{
   const f=askFixture([]);let allowed=true;const base=f.context.can;f.context.can=name=>name==='viewer.client_grants.manage'?allowed:base(name);
   f.legacy=async()=>{allowed=false;return{projects:[],associations:[],grants:[]}};f.answer=false;
@@ -500,7 +528,7 @@ test('double submit is suppressed while creation is pending and close suppresses
   const pending=f.context.createOutputShare(f.form,'project','output');await new Promise(resolve=>setImmediate(resolve));
   await f.context.createOutputShare(f.form,'project','output');assert.equal(f.posts().length,1);
   f.modal.close();f.form.isConnected=false;done({share:{id:'share'},viewUrl:'https://viewer.test/view/success'});await pending;
-  assert.equal(f.modal.open,false);assert.equal(f.state.lastShareUrl,'https://viewer.test/view/success');
+  assert.equal(f.modal.open,false);assert.equal(f.state.lastShareUrl,null);assert.deepEqual([...f.state.shares.output].map(item=>item.id),['share'],'the link is in the saved list');
 });
 
 test('copy failure cannot create another link and preserves manual-copy URL',async()=>{
