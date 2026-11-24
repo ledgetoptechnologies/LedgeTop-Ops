@@ -551,6 +551,7 @@ export class ViewerServiceError extends Error {
       | "authentication_failed"
       | "unavailable"
       | "invalid_response"
+      | "invalid_request"
       | "not_found"
       | "conflict",
     readonly status = 503,
@@ -1118,6 +1119,9 @@ export class ViewerServiceClient {
       expiresAt: string | null;
     };
   }): Promise<ViewerPublicShareCreation> {
+    // Checked as it arrives, types aside: nothing but an explicit null may become a link with no end.
+    if (input.expiresAt !== null && (typeof input.expiresAt !== "string" || !Number.isFinite(Date.parse(input.expiresAt))))
+      throw new ViewerServiceError("A public link needs an end, or an explicit null for no end", "invalid_request", 400);
     const path = `/api/v1/models/${encodeURIComponent(input.modelId)}/shares`;
     const permissions = { view: true as const, measure: input.permissions?.measure !== false,
       cameras: input.permissions?.cameras === true, download: input.permissions?.download === true };
@@ -1125,7 +1129,7 @@ export class ViewerServiceClient {
       versionPolicy: "latest",
       createdBy: input.createdBy,
       label: input.label || null,
-      expiresAt: input.expiresAt || null,
+      expiresAt: input.expiresAt,
       displayUnits: input.displayUnits || "imperial",
       ...(input.password ? { password: input.password } : {}),
       permissions,
@@ -1137,9 +1141,9 @@ export class ViewerServiceClient {
     const token = typeof payload?.token === "string" ? payload.token : "";
     const viewUrl = assertViewerUrl(payload?.viewUrl, this.origin, `/view/${encodeURIComponent(token)}`);
     const embedUrl = assertViewerUrl(payload?.embedUrl, this.origin, `/embed/${encodeURIComponent(token)}`);
-    const expiryMatches = input.expiresAt
-      ? share?.expiresAt !== null && Date.parse(share?.expiresAt || "") === Date.parse(input.expiresAt)
-      : share?.expiresAt === null;
+    const expiryMatches = input.expiresAt === null
+      ? share?.expiresAt === null
+      : typeof share?.expiresAt === "string" && Date.parse(share.expiresAt) === Date.parse(input.expiresAt);
     if (!payload || !share || !viewUrl || !embedUrl || share.modelId !== input.modelId ||
       share.modelVersionId !== null || !expiryMatches || share.hasPassword !== Boolean(input.password) ||
       share.shareClass !== (input.shareClass || "staff") ||
