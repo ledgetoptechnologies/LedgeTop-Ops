@@ -154,6 +154,9 @@ steps in this order:
 5. To resume, unset the variable (or set it to `false`). The next merge to
    `main` moves `latest` forward again.
 
+Going back past schema 46: turn on the pause and check it before step 4. See
+[Rollback after schema 46](#rollback-after-schema-46).
+
 Reverting on `main` is the other way to move `latest` back for good. Rolling back
 the image does not prove the older image is compatible with a newer database
 schema; check that before rolling back. The
@@ -162,31 +165,70 @@ was built. For older images, pin the digest on the host instead (section 2).
 
 ### Rollback after schema 46
 
-Schema 46 keeps original GCP source files. An older release ignores it: its
+Schema 46 keeps original GCP source files. An older release ignores it. Its
 worker runs at start and every hour, deletes expired Recycle Bin datasets
 without keeping their CSV files, and deletes upload caches this release keeps
 on purpose. Its API does the same when staff delete or purge. Those files
 cannot be recovered from the database. Retained originals are not touched.
 
-Rule: never run an older release with processing on against a store that a
-schema 46 release has opened. Use the first of these that applies:
+**Rule: pause first.** A restart pulls whatever `latest` is and starts its
+worker at once, so no check inside the new image or an update script can help.
+The pause is `PROCESSING_PLATFORM_ENABLED=false` in the host settings. Older
+releases obey it: their worker stays idle, and the processing, upload, delete
+and purge routes are off. Viewing still works. Keep it on from before the
+rollback until a release with retention runs again.
 
-1. Fix forward, or roll back to a release that has schema 46 retention.
-2. Roll back to an older release view-only. Set `PROCESSING_PLATFORM_ENABLED=false`
-   in `Config/viewer.env` first. The older worker then stays idle and the
-   processing, upload, delete and purge routes are off; viewing still works.
-   Check the `viewer-worker` log for `Processing worker is idle` before
-   anything else. Keep it so until a release with retention runs, then set
-   the value back.
-3. If an older release must run with processing, stop both services, keep the
-   current database, cache and trash, and restore the pre-upgrade backup of the
-   database and storage together. Work done since the upgrade is not in it.
+Fixing forward, or going back to a release that has schema 46 retention, needs
+no pause. Prefer that.
 
-`scripts/update-truenas.sh` enforces this. Its automatic rollback starts an
-image without retention view-only, and it refuses to update to such an image
-while processing is on. Nothing enforces it for a plain `docker compose up`, the
-TrueNAS app page or a pinned digest, so set the value first. A failed or
-view-only rollback is not a reason to turn processing back on.
+#### Steps for someone who restarts the containers
+
+Do these in order. Stop if a check fails.
+
+1. In the host settings for the Viewer app, set `PROCESSING_PLATFORM_ENABLED`
+   to `false`. Use the place Compose takes the value from (the app's own
+   settings, or the file given with `--env-file`). `Config/viewer.env` alone is
+   not enough: the Compose file sets this variable itself and wins over it.
+2. Apply it while the current release is still the one that starts. Recreate
+   both containers (`docker compose up -d`, or save and redeploy the app). A
+   plain container restart keeps the old value.
+3. Look at the `viewer-worker` log. It must say `Processing worker is idle
+   because PROCESSING_PLATFORM_ENABLED=false`. If it does not, the pause is not
+   on. Go back to step 1.
+4. Only now move `latest` back (the steps above) or change the pinned digest,
+   and restart.
+5. Look at the `viewer-worker` log again. It must show the same line.
+6. Leave the value alone. Restarts and host reboots are safe while it is
+   `false`.
+
+If an older release ran without the pause: stop both containers now, do not
+start them again, and keep the database, `trash` and `cache` as they are.
+
+#### Before turning processing back on
+
+All of these must be true:
+
+- Both containers run a release with retention: the file
+  `/app/server/gcpUploadRetention.js` exists in `viewer-api` and in
+  `viewer-worker`.
+- `latest`, or the pinned digest, is that release too, so the next restart does
+  not bring the older one back.
+- Both containers are healthy, and the API log shows no database error.
+
+Then set the value back to `true` and recreate both containers. The worker log
+must no longer say it is idle.
+
+#### If an older release must run with processing
+
+Stop both containers, keep the current database, cache and trash, and restore
+the pre-upgrade backup of the database and storage together. Work done since
+the upgrade is not in it.
+
+#### What the updater adds
+
+`scripts/update-truenas.sh` is not used by a plain restart. Where it is used,
+its automatic rollback starts an image without retention view-only, and it
+refuses to update to such an image while processing is on.
 
 ## Updating the production host
 
