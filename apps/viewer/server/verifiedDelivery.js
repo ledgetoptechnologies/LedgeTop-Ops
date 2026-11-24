@@ -31,6 +31,13 @@
 //   on a visible change, which is no weaker than res.sendFile reopening the
 //   path. Backfilling chunk records is the fix and a separate follow-up.
 //
+// Authorization: a route's `beforeSend` decides after the last await that
+// precedes the response. With a body that is the moment before its first
+// write, once the first bytes are read and checked and, for a small streamed
+// file, once its identity is re-confirmed; headers are set only then. Without
+// one (HEAD, 304, 412, 416) it is right before the response is dispatched. A
+// body that has started is not interrupted; the next request is refused.
+//
 // Busy handling: when buffer budget or the check queue is exhausted
 // (integrity_busy), a request that has not sent any body byte gets 503 with
 // Retry-After: 1 and none of the response headers set for the file. Once body
@@ -139,28 +146,32 @@ function waitForDrain(res, signal) {
 
 // Streams [start, start+len) from `handle`, holding back the last chunk until
 // the descriptor identity is re-confirmed. Throws on change or truncation.
-async function pump(res, handle, identity, start, len, signal) {
+async function pump(res, handle, identity, start, len, signal, begin) {
   const end = start + len;
   let position = start;
-  let held = null;
+  let held = null, begun = false;
   while (position < end) {
     if (signal.aborted) return;
     const buffer = Buffer.allocUnsafe(Math.min(CHUNK_BYTES, end - position));
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
     if (!bytesRead) throw new Error('asset truncated during delivery');
     position += bytesRead;
-    if (held && !res.write(held)) await waitForDrain(res, signal);
+    if (held) {
+      if (!begun && !(begun = await begin())) return;
+      if (!res.write(held)) await waitForDrain(res, signal);
+    }
     held = buffer.subarray(0, bytesRead);
   }
   if (signal.aborted) return;
   if (fileIdentity(await handle.stat({ bigint: true })) !== identity) throw new Error('asset changed during delivery');
+  if (!begun && !await begin()) return;
   res.end(held || undefined);
 }
 
 // Writes [start, end] from registered regions, each one exactly-verified
 // bytes (see assetIntegrityCache.verifiedSlice). Throws on mismatch or gap.
-async function sendRegions(res, cache, filePath, stat, handle, regions, start, end, signal, carry) {
-  let position = start;
+async function sendRegions(res, cache, filePath, stat, handle, regions, start, end, signal, carry, begin) {
+  let position = start, begun = false;
   for (const region of regions) {
     if (signal.aborted) return;
     if (region.offset > position || region.offset + region.size <= position) throw new Error('asset region table does not cover the response');
@@ -168,6 +179,7 @@ async function sendRegions(res, cache, filePath, stat, handle, regions, start, e
     const piece = await cache.verifiedSlice(filePath, stat, region, position, sliceEnd, { handle, signal, carry });
     if (!piece) throw new Error('asset bytes failed verification during delivery');
     try {
+      if (!begun && !(begun = await begin())) return;
       if (!res.write(piece.bytes)) await waitForDrain(res, signal);
     } finally {
       piece.release();
@@ -187,8 +199,9 @@ function abortError(error) { return error?.name === 'AbortError'; }
 //   verify(range|null, signal) -> Promise<boolean>; range is the exact
 //     {start,end} served for a 206, null when the whole file is served.
 //   onFailure()      -> route response for failed integrity (before any byte)
-//   beforeSend()     -> optional; re-checks authorization after the (possibly
-//                       slow) verification; returns false after responding.
+//   beforeSend()     -> optional; re-checks authorization after the last wait
+//                       before the response (see top); returns false after
+//                       responding.
 //   onError(error)   -> route response for 412/416, like a sendFile callback.
 //   headers          -> route headers applied once verification has passed.
 //   regions(start,end) -> registered regions covering the body, in order, to
@@ -258,12 +271,14 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
     if (controller.signal.aborted || res.headersSent) return;
     if (verified && hooks.afterVerify) await hooks.afterVerify({ filePath, range });
     if (!verified || fileIdentity(await handle.stat({ bigint: true })) !== identity) return onFailure();
-    if (beforeSend && !await beforeSend()) return;
-    if (controller.signal.aborted || res.headersSent) return;
+    const allowed = async () => (!beforeSend || Boolean(await beforeSend())) && !controller.signal.aborted && !res.headersSent;
 
     const setHeaderNames = [...[...routeHeaders.values()].map(([name]) => name), ...defaults.map(([name]) => name), 'Content-Range', 'Content-Length'];
-    for (const [name, value] of routeHeaders.values()) res.setHeader(name, value);
-    for (const [name, value] of defaults) res.setHeader(name, value);
+    const setHeaders = () => { for (const [name, value] of [...routeHeaders.values(), ...defaults]) res.setHeader(name, value); };
+    if (outcome === 412 || outcome === 304 || outcome === 416) {
+      if (!await allowed()) return;
+      setHeaders();
+    }
     if (outcome === 412) return onError(httpError(412));
     if (outcome === 304) {
       for (const name of ['Content-Encoding', 'Content-Language', 'Content-Length', 'Content-Range', 'Content-Type']) res.removeHeader(name);
@@ -276,17 +291,25 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
     }
     let start = 0, len = size;
     if (outcome === 206) {
-      res.statusCode = 206;
-      res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
       start = range.start;
       len = range.end - range.start + 1;
     }
-    res.setHeader('Content-Length', len);
-    if (req.method === 'HEAD') return res.end();
+    // Nothing is awaited between the decision and what the caller sends next.
+    const begin = async () => {
+      if (!await allowed()) return false;
+      setHeaders();
+      if (outcome === 206) {
+        res.statusCode = 206;
+        res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
+      }
+      res.setHeader('Content-Length', len);
+      return true;
+    };
+    if (req.method === 'HEAD') return await begin() ? res.end() : undefined;
     try {
-      if (plan) await sendRegions(res, cache, filePath, stat, handle, plan, start, start + len - 1, controller.signal, carry);
+      if (plan) await sendRegions(res, cache, filePath, stat, handle, plan, start, start + len - 1, controller.signal, carry, begin);
       else if (carry?.deferred) throw new Error('deferred region checks need a region plan');
-      else await pump(res, handle, identity, start, len, controller.signal);
+      else await pump(res, handle, identity, start, len, controller.signal, begin);
     } catch (error) {
       if (busyError(error) && !res.headersSent && !controller.signal.aborted) {
         for (const name of setHeaderNames) res.removeHeader(name);
