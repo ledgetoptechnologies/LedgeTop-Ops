@@ -202,11 +202,10 @@ test('a person\'s own marks have a size limit, for adding, importing, growing an
   assert.throws(() => repository.update(person, small.id, { ...big(), id: small.id, revision: 1 }), { code: 'mark_storage_limit' });
   assert.equal(bytes(), before);
   // Shrinking is always possible.
-  for (const mark of repository.list(person).filter(row => row.name === 'Big').slice(0, 2)) {
-    assert.ok(repository.update(person, mark.id, { id: mark.id, geometry: { type: 'Point', coordinates: [-87, 43] }, name: 'Small', color: '#1565c0', revision: 1 }));
-  }
+  const [large] = repository.list(person).filter(row => row.geometry.type === 'LineString');
+  assert.ok(repository.update(person, large.id, { id: large.id, geometry: { type: 'Point', coordinates: [-87, 43] }, name: 'Small', color: '#1565c0', revision: 1 }));
   const gone = seed.mark('client-a', { visibility: 'private', deletedAt: new Date().toISOString(), changes: { geometry: bigLine, note: bigNote } });
-  repository.create(person, big());
+  assert.throws(() => { for (;;) repository.create(person, big()); }, { code: 'mark_storage_limit' });
   assert.throws(() => repository.restore(person, gone, 1), { code: 'mark_storage_limit' });
 });
 
@@ -278,9 +277,6 @@ test('undoing a large import is one request, and a failed undo can be tried agai
     assert.equal(store.state.undo.length, 1, 'still there');
     assert.equal(live(), 400);
   }
-  await store.update(store.find(marks[5].id), { name: 'Edited since' });
-  await store.remove(store.find(marks[6].id));
-  store.state.undo = store.state.undo.filter(entry => entry.type === 'import');
   sent.length = 0;
   assert.equal(await store.undo(), true, store.state.message);
   assert.deepEqual(sent, [['POST', '/api/v1/marks/batch/delete']]);
@@ -291,6 +287,68 @@ test('undoing a large import is one request, and a failed undo can be tried agai
   database.prepare('UPDATE viewer_marks SET revision=9 WHERE id=?').run(only.id);
   assert.equal(await store.undo(), false);
   assert.equal(store.state.undo.length, 1);
+});
+
+test('undo of an import is exactly what was imported, or nothing', async t => {
+  for (const where of ['session', 'public link']) {
+    for (const change of ['edited here', 'edited elsewhere', 'deleted here', 'deleted elsewhere']) {
+      if (where === 'public link' && change.endsWith('elsewhere')) continue;
+      const { store: open_, scope, database, request } = await open(t);
+      const sent = [];
+      const store = createMarksStore({ request: (path, init) => { sent.push([init.method, path, init.body && JSON.parse(init.body)]); return request(path, init); } });
+      await store.setScope(where === 'session' ? scope('client', 'client-a') : { mode: 'temporary', key: 'public' });
+      const before = await store.create(pin('Before'));
+      const marks = ['a', 'b', 'c'].map(name => ({ ...pin(name), id: randomUUID() }));
+      await store.importMarks({ marks });
+      const imported = marks.map(mark => ({ id: mark.id, revision: store.find(mark.id).revision }));
+      const other = change.endsWith('elsewhere') ? await open_(scope('client', 'client-a')) : store;
+      if (change.startsWith('edited')) await other.update(other.find(marks[1].id), { name: 'Edited' });
+      else await other.remove(other.find(marks[1].id));
+      // The page may know about it or not; either way the import is not undone in part.
+      if (change === 'edited elsewhere') await store.refresh();
+      store.state.undo = store.state.undo.filter(entry => entry.type !== 'update' && entry.type !== 'delete');
+      sent.length = 0;
+      assert.equal(await store.undo(), false, `${where} ${change}`);
+      if (where === 'session') {
+        assert.deepEqual(sent[0], ['POST', '/api/v1/marks/batch/delete', { marks: imported }], 'the ids and revisions the import returned');
+        assert.equal(database.prepare('SELECT count(*) n FROM viewer_marks WHERE deleted_at IS NULL').get().n, change.startsWith('edited') ? 4 : 3, 'rolled back whole');
+      }
+      assert.deepEqual(store.state.marks.map(mark => mark.name).sort(), change.startsWith('edited') ? ['Before', 'Edited', 'a', 'c'] : ['Before', 'a', 'c']);
+      assert.match(store.state.message, /changed since/);
+      // It cannot be done any more, so it does not block the one before it.
+      assert.deepEqual(store.state.undo.map(entry => entry.id), [before.id]);
+      assert.equal(await store.undo(), true);
+    }
+  }
+});
+
+test('a refresh that fails part way never brings back what its owner withdrew', async t => {
+  for (const withdraw of ['made private', 'deleted']) {
+    const { store: open_, scope, seed, request } = await open(t);
+    const own = seed.mark('staff-person', { audience: 'ops', visibility: 'private', changes: { name: 'Own' } });
+    const client = await open_(scope('client', 'client-a'));
+    const category = await client.saveCategory({ name: 'Withdrawn category', color: '#1565c0', icon: 'flag' });
+    const mark = await client.create(pin('Withdrawn', { visibility: 'staff', categoryId: category.id }));
+    // Later than the withdrawn one, so it would be on the first page and these on the second.
+    for (let i = 0; i < LIMITS.pageRows + 5; i += 1) seed.mark('client-b', { createdAt: '2027-01-01T00:00:00.000Z' });
+    let fail = false;
+    const staff = createMarksStore({ request: (path, init) => (fail && path.includes('after=') ? Promise.resolve(new Response('x', { status: 500 })) : request(path, init)) });
+    await staff.setScope(scope('ops', 'staff-person'));
+    assert.ok(staff.find(mark.id));
+    const total = staff.state.marks.length;
+    if (withdraw === 'deleted') await client.remove(client.find(mark.id));
+    else await client.update(client.find(mark.id), { visibility: 'private' });
+    fail = true;
+    await staff.refresh();
+    assert.equal(staff.find(mark.id), null, withdraw);
+    assert.ok(!staff.state.categories.some(row => row.name === 'Withdrawn category'));
+    assert.ok(staff.find(own), 'own marks stay');
+    assert.equal(staff.state.marks.length, LIMITS.pageRows + 1, 'own marks and the page that was read, nothing older');
+    assert.match(staff.state.message, /Some shared marks/);
+    fail = false;
+    await staff.refresh();
+    assert.equal(staff.state.marks.length, total - 1);
+  }
 });
 
 test('batch delete is all or nothing and the owner\'s only', async t => {
