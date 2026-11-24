@@ -703,7 +703,7 @@ function worker(t, f) {
   storage.initialize();
   t.after(() => database.close());
   const processing = new ProcessingRepository(database);
-  return { processing, storage, maintain: () => [reconcileStorageMutations(processing, storage), purgeExpiredTrash(processing, storage)] };
+  return { database, processing, storage, maintain: () => [reconcileStorageMutations(processing, storage), purgeExpiredTrash(processing, storage)] };
 }
 // Every file an item has, wherever it is now: in place or in the bin.
 function contents(f) {
@@ -722,7 +722,7 @@ function assertNothingLost(f, item, files, note) {
 }
 // Runs fn as a process that dies at one step: just before or just after its
 // n-th step that can change the database or the files. Nothing runs after that.
-const CHANGES = /^(trash|retrash|renew|archive|restore|begin|complete|mark|move|add|refresh|claim|finish|fail|purge|remove)/;
+const CHANGES = /^(trash|retrash|renew|archive|restore|begin|complete|mark|move|add|refresh|claim|finish|fail|purge|remove|setAside)/;
 class Crash extends Error {}
 function crashAt(f, at, fn) {
   let calls = 0, dead = false;
@@ -1084,6 +1084,8 @@ test('a permanent deletion left unfinished or failed by an earlier version remov
 
 test('the worker finishing a move the request is making changes nothing for either', async (t) => {
   const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f), exists = f.storage.pathExistsStrict;
+  // While the request moves files the worker waits; here it gives up at once, as after its five seconds.
+  w.database.exec('PRAGMA busy_timeout=0');
   for (const step of ['delete', 'restore']) {
     for (let at = 1; at <= 9; at += 1) {
       const note = `${step} ${at}`, item = await f.publishedTask(project, note), before = f.snapshot(item);
@@ -1158,11 +1160,16 @@ test('a project delete that dies at any step, with photos no task uses and a tas
         assertOneOwner(f, note);
         w.maintain();
       }
+      // The first task was deleted before its project: it is still on its own if the project's delete had not reached it.
+      const apart = f.processing.listContainerTrashMembers(root.id).every((member) => member.entityId !== first.task.id);
       const restored = await f.request('POST', `/api/v1/storage/trash/${root.id}/restore`);
       assert.equal(restored.status, 200, `${note} ${JSON.stringify(restored.body)}`);
+      // Whatever the project's delete took is back with the project.
+      assert.equal(f.bin(second), null, note);
+      assert.equal(Boolean(f.bin(first)), apart, note);
+      if (apart) assert.equal((await f.restore(first)).status, 200, note);
       for (const [index, item] of [first, second].entries()) {
         // A task the delete had not reached is as it was; a restored one is in review.
-        if (f.bin(item)) assert.equal((await f.restore(item)).status, 200, note);
         assert.deepEqual(f.snapshot(item), before[index], note);
         assert.ok(['published', 'ready_for_review'].includes(f.state(item).task), note);
       }
@@ -1281,4 +1288,337 @@ test('photos of a deleted project whose move is still running keep it from being
   assert.equal((await restore()).status, 200);
   assert.deepEqual(f.tree(loose.directory), { 'photo.jpg': 'Loose photo' });
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM storage_trash WHERE permanently_deleted_at IS NULL').get().n, 0);
+});
+
+// ---- A project's delete and restore, interrupted ----
+
+test('restoring a project whose delete died at any step brings back every task that delete took, without staff help', async (t) => {
+  const f = await fixture(t), w = worker(t, f);
+  let at = 0, died = true;
+  while (died) {
+    at += 1;
+    const note = `step ${at}`, project = f.processing.createProject({ displayName: `Project ${note}` }), items = [];
+    for (const name of ['one', 'two', 'three']) items.push(await f.publishedTask(project, `${note} ${name}`));
+    const before = items.map(f.snapshot);
+    died = crashAt(f, at, (processing, storage) => lifecycle.trashProjectTree(processing, storage, project.id, 'ops:test'));
+    const root = f.processing.activeTrashForEntity('project', project.id);
+    // Never archived without being in the project's item.
+    const members = root ? f.processing.listContainerTrashMembers(root.id).map((member) => member.entityId) : [];
+    for (const item of items) assert.equal(f.processing.getTask(item.task.id).status === 'archived', members.includes(item.task.id), note);
+    if (!root) continue;
+    w.maintain();
+    const restored = await f.request('POST', `/api/v1/storage/trash/${root.id}/restore`);
+    assert.equal(restored.status, 200, `${note} ${JSON.stringify(restored.body)}`);
+    for (const [index, item] of items.entries()) {
+      assert.equal(f.bin(item), null, note);
+      assert.ok(['published', 'ready_for_review'].includes(f.state(item).task), note);
+      assert.deepEqual(f.snapshot(item), before[index], note);
+    }
+    assert.equal(f.database.prepare('SELECT COUNT(*) n FROM storage_trash WHERE permanently_deleted_at IS NULL').get().n, 0, note);
+  }
+  assert.ok(at > 20, `${at} steps`);
+});
+
+test('a project whose restore died at any step can be deleted again: it is in the bin, and comes back without loss', async (t) => {
+  const f = await fixture(t), w = worker(t, f);
+  let at = 0, died = true, halfRestored = 0;
+  while (died) {
+    at += 1;
+    const note = `step ${at}`, project = f.processing.createProject({ displayName: `Project ${note}` }), raw = f.link(project), items = [];
+    for (const name of ['one', 'two', 'three']) items.push(await f.publishedTask(project, `${note} ${name}`));
+    const before = items.map(f.snapshot), trash = (await f.request('DELETE', `/api/v1/projects/${project.id}`)).body.trash;
+    age(f, trash, 10);
+    died = crashAt(f, at, (processing, storage) => lifecycle.restoreContainerTrash(processing, storage, trash.id, 'ops:test'));
+    let late = null;
+    if (f.processing.getProject(project.id).status === 'active' && !f.processing.getTrash(trash.id).permanentlyDeletedAt) {
+      halfRestored += 1;
+      late = f.link(project);
+      const live = items.find((item) => f.processing.getTask(item.task.id).status !== 'archived');
+      if (live) assert.equal((await f.remove(live)).status, 409, `${note}: a task is not deleted on its own while its project is in the bin`);
+    }
+    w.maintain();
+    const removed = await f.request('DELETE', `/api/v1/projects/${project.id}`);
+    assert.equal(removed.status, 200, `${note} ${JSON.stringify(removed.body)}`);
+    assert.equal(f.processing.getProject(project.id).status, 'archived', note);
+    for (const link of [raw, late].filter(Boolean)) assert.equal((await fetch(`${f.base}/api/project-share/${link}`)).status, 410, note);
+    assertComplete(f, removed.body.trash, project.id, note);
+    assertOneOwner(f, note);
+    w.maintain();
+    const restored = await f.request('POST', `/api/v1/storage/trash/${removed.body.trash.id}/restore`);
+    assert.equal(restored.status, 200, `${note} ${JSON.stringify(restored.body)}`);
+    for (const [index, item] of items.entries()) {
+      assert.deepEqual(f.state(item), f.IN_REVIEW, note);
+      assert.deepEqual(f.snapshot(item), before[index], note);
+    }
+    assert.equal(f.database.prepare('SELECT COUNT(*) n FROM storage_trash WHERE permanently_deleted_at IS NULL').get().n, 0, note);
+  }
+  assert.ok(at > 20 && halfRestored > 3, `${at} steps, ${halfRestored} half restored`);
+});
+
+test('a half-restored project with running work, or whose item is being purged, is not deleted again', async (t) => {
+  const f = await fixture(t);
+  for (const reason of ['running', 'purging']) {
+    const project = f.processing.createProject({ displayName: reason }), item = await f.publishedTask(project, reason), trash = (await f.request('DELETE', `/api/v1/projects/${project.id}`)).body.trash;
+    assert.ok(f.processing.restoreMetadataEntity(trash.id, 'ops:test', { finalizeTrash: false }));
+    if (reason === 'running') f.database.prepare("UPDATE processing_tasks SET status='processing' WHERE id=?").run(item.task.id);
+    else f.database.prepare('UPDATE storage_trash SET purge_started_at=? WHERE id=?').run(new Date().toISOString(), trash.id);
+    age(f, trash, 10);
+    const purgeAfter = f.processing.getTrash(trash.id).purgeAfter;
+    assert.equal(f.processing.trashProject(project.id, 'ops:test'), null, reason);
+    assert.equal((await f.request('DELETE', `/api/v1/projects/${project.id}`)).status, 409, reason);
+    assert.equal(f.processing.getProject(project.id).status, 'active', reason);
+    assert.equal(f.processing.getTrash(trash.id).purgeAfter, purgeAfter, reason);
+  }
+});
+
+test('a task an earlier version archived but did not put in its project\'s item comes back, or goes, with the project', async (t) => {
+  const f = await fixture(t), w = worker(t, f);
+  for (const way of ['restore', 'restore from half restored', 'expire', 'empty the task alone']) {
+    const project = f.processing.createProject({ displayName: way }), item = await f.publishedTask(project, way), other = await f.publishedTask(project, `${way} other`), before = [f.snapshot(item), f.snapshot(other)], files = filesOf(f, item, before[0]);
+    const root = (await f.request('DELETE', `/api/v1/projects/${project.id}`)).body.trash;
+    f.database.prepare('DELETE FROM container_trash_members WHERE container_trash_id=? AND entity_id=?').run(root.id, item.task.id);
+    if (way === 'expire') {
+      age(f, f.bin(item), 45);
+      f.database.prepare('UPDATE storage_trash SET created_at=(SELECT created_at FROM storage_trash r WHERE r.id=?) WHERE id=?').run(root.id, f.bin(item).id);
+      // Its own date is past, but the project's is not.
+      w.maintain();
+      assertNothingLost(f, item, files, way);
+      assert.ok(f.processing.listContainerTrashMembers(root.id).some((member) => member.entityId === item.task.id), way);
+    }
+    if (way === 'restore from half restored') assert.ok(f.processing.restoreMetadataEntity(root.id, 'ops:test', { finalizeTrash: false }));
+    if (way === 'empty the task alone') {
+      // What maintenance decides again in the transaction that would start it.
+      f.database.prepare("UPDATE storage_trash SET purge_after='2020-01-01T00:00:00.000Z' WHERE id=?").run(f.bin(item).id);
+      assert.equal(f.processing.beginContainerPurge(f.bin(item).id, 'storage-maintenance', { expired: true }), null, way);
+      // Nor does the project's restore count as finished while a task it took is still in the bin.
+      f.database.prepare("UPDATE projects SET status='active' WHERE id=?").run(project.id);
+      assert.equal(f.processing.finishMetadataRestore(root.id), null, way);
+      const otherTrash = f.bin(other), closed = (value) => f.database.prepare('UPDATE storage_trash SET permanently_deleted_at=? WHERE id=?').run(value, otherTrash.id);
+      closed(new Date().toISOString());
+      assert.equal(f.processing.finishMetadataRestore(root.id), null, `${way}: the task outside the item`);
+      assert.ok(f.processing.addContainerTrashMember(root.id, f.bin(item).id));
+      assert.equal(f.processing.finishMetadataRestore(root.id), null, `${way}: the task in the item`);
+      closed(null);
+    }
+    const restored = await f.request('POST', `/api/v1/storage/trash/${root.id}/restore`);
+    assert.equal(restored.status, 200, `${way} ${JSON.stringify(restored.body)}`);
+    for (const [index, value] of [item, other].entries()) {
+      assert.deepEqual(f.state(value), f.IN_REVIEW, way);
+      assert.deepEqual(f.snapshot(value), before[index], way);
+    }
+  }
+});
+
+test('an output of a half-deleted task restored on its own, then deleted and restored with the task, can be published', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), { item, before } = await leftByEarlierVersion(f, project, 'Left');
+  assert.equal((await f.request('POST', `/api/v1/storage/trash/${f.processing.activeTrashForEntity('output', item.versionId).id}/restore`)).status, 200);
+  assert.equal((await f.remove(item)).status, 200);
+  assert.equal(f.processing.activeTrashForEntity('output', item.versionId).originalStatus, 'ready', 'the case under test');
+  assert.equal((await f.restore(item)).status, 200);
+  assert.deepEqual(f.state(item), f.IN_REVIEW);
+  assert.deepEqual(f.snapshot(item), before);
+  await f.publishAgain(item);
+});
+
+test('an output restored on its own and then archived stays archived when its task is deleted and restored', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), { item } = await leftByEarlierVersion(f, project, 'Left');
+  assert.equal((await f.request('POST', `/api/v1/storage/trash/${f.processing.activeTrashForEntity('output', item.versionId).id}/restore`)).status, 200);
+  assert.ok(f.processing.archiveModelOutput(item.versionId, 'ops:test'));
+  assert.equal((await f.remove(item)).status, 200);
+  assert.equal((await f.restore(item)).status, 200);
+  assert.deepEqual([f.state(item).task, f.state(item).active, f.state(item).output], ['draft', false, 'archived']);
+});
+
+test('a project\'s delete archives a task only together with putting it in that project\'s item', async (t) => {
+  const f = await fixture(t), [project, elsewhere] = ['One', 'Two'].map((displayName) => f.processing.createProject({ displayName })), item = await f.publishedTask(project, 'Task');
+  const other = f.processing.trashProject(elsewhere.id, 'ops:test'), within = (containerId) => f.processing.trashTask(item.task.id, 'ops:test', { withinProjectTrash: true, containerId });
+  assert.equal(within(other.id), null, 'its own project is not deleted');
+  const root = f.processing.trashProject(project.id, 'ops:test');
+  for (const containerId of [other.id, 'missing']) assert.throws(() => within(containerId), { code: 'lifecycle_conflict' }, containerId);
+  assert.deepEqual([f.state(item).task, f.state(item).bin], ['published', false], 'nothing of it was done');
+  assert.ok(within(root.id));
+  assert.deepEqual(f.processing.listContainerTrashMembers(root.id).map((member) => member.entityId), [item.task.id]);
+  // Again, once that project is half restored: not through the old item, and not on its own.
+  assert.ok(f.processing.restoreMetadataEntity(root.id, 'ops:test', { finalizeTrash: false }));
+  assert.equal(within(root.id), null);
+  assert.equal(f.processing.trashTask(item.task.id, 'ops:test'), null);
+});
+
+// ---- Two processes, one journal ----
+
+// The files of one photo set or output, and the record that says where they are.
+function storedEntity(f, item, entityType) {
+  const entityId = entityType === 'dataset' ? item.dataset.id : item.versionId, directory = entityType === 'dataset' ? item.dataset.directory : item.directory, read = () => f.tree(directory), kept = read();
+  return {
+    entityType, entityId,
+    status: () => (entityType === 'dataset' ? f.processing.getDataset(entityId) : f.processing.getModelOutput(entityId)).status,
+    assertLive: (note) => { assert.deepEqual(read(), kept, `${note}: files in place`); assert.notEqual(entityType === 'dataset' ? f.processing.getDataset(entityId).status : f.processing.getModelOutput(entityId).status, 'trashed', note); },
+    assertBinned: (note) => {
+      const trash = f.processing.activeTrashForEntity(entityType, entityId);
+      assert.ok(trash, `${note}: in the bin`);
+      assert.equal(read(), null, `${note}: moved`);
+      assert.deepEqual(f.tree(path.join(f.config.trashMount, ...trash.relativePath.split('/'))), kept, `${note}: files in the bin`);
+    },
+    begin: (type) => (type === 'trash' ? (entityType === 'dataset' ? f.processing.beginTrashMutation(entityId, 'ops:test') : f.processing.moveOutputToTrash(entityId, 'ops:test')) : type === 'restore' ? f.processing.beginRestoreMutation(f.processing.activeTrashForEntity(entityType, entityId).id, 'ops:test') : f.processing.beginPurgeMutation(f.processing.activeTrashForEntity(entityType, entityId).id, 'ops:test')),
+  };
+}
+
+test('a process that comes late with an old copy of a journal never moves files the other process has moved back', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f), { applyStorageMutation } = require('../server/storageLifecycle');
+  for (const entityType of ['dataset', 'output']) {
+    // Photos with a failed purge are not restored until staff retry it.
+    for (const late of entityType === 'dataset' ? ['trash', 'restore'] : ['trash', 'restore', 'purge']) {
+      const note = `${entityType} ${late}`, item = await f.publishedTask(project, note);
+      if (entityType === 'dataset') f.database.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(item.task.id);
+      const stored = storedEntity(f, item, entityType), run = (type) => applyStorageMutation(f.processing, f.storage, stored.begin(type));
+      // What the worker read when it started its pass.
+      const readByWorker = (type) => { stored.begin(type); const [copy] = w.processing.pendingStorageMutations(); assert.deepEqual([copy.type, copy.status, copy.entityId], [type, 'intent', stored.entityId], note); return copy; };
+      let copy;
+      if (late === 'trash') {
+        copy = readByWorker('trash');
+        reconcileStorageMutations(f.processing, f.storage);
+        run('restore');
+        stored.assertLive(note);
+        assert.equal(applyStorageMutation(w.processing, w.storage, copy).status, 'complete', note);
+        stored.assertLive(note);
+        run('trash');
+        stored.assertBinned(note);
+        assert.equal(applyStorageMutation(w.processing, w.storage, copy).status, 'complete', note);
+        stored.assertBinned(note);
+      } else if (late === 'restore') {
+        run('trash');
+        copy = readByWorker('restore');
+        reconcileStorageMutations(f.processing, f.storage);
+        run('trash');
+        stored.assertBinned(note);
+        assert.equal(applyStorageMutation(w.processing, w.storage, copy).status, 'complete', note);
+        stored.assertBinned(note);
+        run('restore');
+        stored.assertLive(note);
+        assert.equal(applyStorageMutation(w.processing, w.storage, copy).status, 'complete', note);
+        stored.assertLive(note);
+      } else {
+        // A purge the other process refused and recorded as failed: it was restored since.
+        run('trash');
+        copy = readByWorker('purge');
+        f.processing.failStorageMutation(copy.id, 'lifecycle_conflict', 'synthetic');
+        run('restore');
+        assert.equal(applyStorageMutation(w.processing, w.storage, copy).status, 'failed', note);
+        stored.assertLive(note);
+        run('trash');
+        assert.equal(applyStorageMutation(w.processing, w.storage, copy).status, 'failed', note);
+        stored.assertBinned(note);
+      }
+      assert.equal(f.database.prepare("SELECT COUNT(*) n FROM storage_mutations WHERE entity_id=? AND status NOT IN ('complete','failed')").get(stored.entityId).n, 0, note);
+    }
+  }
+});
+
+test('while one process checks and moves files, the other can neither finish that journal nor start the opposite one', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f), { applyStorageMutation } = require('../server/storageLifecycle');
+  // Here the other process gives up at once instead of after its five seconds.
+  f.database.exec('PRAGMA busy_timeout=0');
+  for (const entityType of ['dataset', 'output']) {
+    for (const type of ['trash', 'restore']) {
+      for (const point of ['first check', 'second check', 'before the move', 'after the move']) {
+        const note = `${entityType} ${type} ${point}`, item = await f.publishedTask(project, note);
+        if (entityType === 'dataset') f.database.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(item.task.id);
+        const stored = storedEntity(f, item, entityType), opposite = type === 'trash' ? 'restore' : 'trash';
+        if (type === 'restore') applyStorageMutation(f.processing, f.storage, stored.begin('trash'));
+        const mutation = stored.begin(type), outcomes = [];
+        // The other process: finish the journal, then undo it.
+        const attempt = () => { try { applyStorageMutation(f.processing, f.storage, mutation.id); applyStorageMutation(f.processing, f.storage, stored.begin(opposite)); outcomes.push('undone'); } catch (error) { outcomes.push(error.code); } };
+        const exists = w.storage.pathExistsStrict, move = w.storage.moveExact;
+        let checks = 0;
+        w.storage.pathExistsStrict = function check(...args) { const result = exists.apply(this, args); checks += 1; if (checks === { 'first check': 1, 'second check': 2 }[point]) attempt(); return result; };
+        w.storage.moveExact = function moving(...args) { if (point === 'before the move') attempt(); const result = move.apply(this, args); if (point === 'after the move') attempt(); return result; };
+        assert.equal(applyStorageMutation(w.processing, w.storage, mutation).status, 'complete', note);
+        w.storage.pathExistsStrict = exists;
+        w.storage.moveExact = move;
+        assert.deepEqual(outcomes, ['ERR_SQLITE_ERROR'], note);
+        if (type === 'trash') stored.assertBinned(note); else stored.assertLive(note);
+        applyStorageMutation(f.processing, f.storage, stored.begin(opposite));
+        if (type === 'trash') stored.assertLive(note); else stored.assertBinned(note);
+      }
+    }
+  }
+});
+
+test('a move or removal whose process dies is finished from the files, by whichever process comes next', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f), { applyStorageMutation } = require('../server/storageLifecycle');
+  const died = () => Object.assign(new Error('synthetic crash'), { code: 'EIO' });
+  for (const type of ['trash', 'restore', 'purge']) {
+    const item = await f.publishedTask(project, type), stored = storedEntity(f, item, 'output');
+    if (type !== 'trash') applyStorageMutation(f.processing, f.storage, stored.begin('trash'));
+    const trash = f.processing.activeTrashForEntity('output', item.versionId), mutation = stored.begin(type), method = type === 'purge' ? 'setAsideForPurge' : 'moveExact', original = f.storage[method];
+    f.storage[method] = function dying(...args) { original.apply(this, args); throw died(); };
+    assert.throws(() => applyStorageMutation(f.processing, f.storage, mutation), { code: 'EIO' }, type);
+    f.storage[method] = original;
+    assert.equal(f.processing.getStorageMutation(mutation.id).status, 'intent', type);
+    assert.equal(f.database.isTransaction, false, type);
+    if (type === 'purge') {
+      // The files are out of the way, so no restore can find half of them.
+      assert.equal(f.processing.beginRestoreMutation(trash.id, 'ops:test'), null);
+      assert.deepEqual(fs.readdirSync(path.join(f.config.trashMount, 'model-output')).map((name) => name.endsWith('.purging')), [true]);
+      // While files are removed, the other process can still write; and it may remove the same files.
+      const removeExact = f.storage.removeExact, admissible = f.processing.purgeStillAdmissible;
+      let wrote = 0;
+      // What is already out of the way is removed whatever is decided later: part of it may be gone.
+      f.processing.purgeStillAdmissible = () => false;
+      f.storage.removeExact = () => { throw Object.assign(new Error('synthetic I/O error'), { code: 'EIO' }); };
+      reconcileStorageMutations(f.processing, f.storage);
+      assert.equal(f.processing.getStorageMutation(mutation.id).status, 'intent', 'not removed yet, so not done');
+      f.storage.removeExact = function removing(...args) { w.database.prepare("UPDATE storage_trash SET byte_size=byte_size WHERE id='none'").run(); w.storage.removeExact(...args); wrote += 1; throw Object.assign(new Error('gone'), { code: 'ENOENT' }); };
+      reconcileStorageMutations(f.processing, f.storage);
+      f.storage.removeExact = removeExact;
+      f.processing.purgeStillAdmissible = admissible;
+      assert.equal(wrote, 1);
+      assert.ok(f.processing.getTrash(trash.id).permanentlyDeletedAt);
+      assert.deepEqual(fs.readdirSync(path.join(f.config.trashMount, 'model-output')), []);
+    } else {
+      reconcileStorageMutations(w.processing, w.storage);
+      if (type === 'trash') stored.assertBinned(type); else stored.assertLive(type);
+      if (type === 'trash') applyStorageMutation(f.processing, f.storage, stored.begin('restore'));
+    }
+    assert.equal(f.processing.getStorageMutation(mutation.id).status, 'complete', type);
+  }
+});
+
+test('a journal that another process finishes just before this one gets the lock is left alone', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f), { applyStorageMutation } = require('../server/storageLifecycle');
+  for (const type of ['trash', 'restore', 'purge']) {
+    for (const step of [1, 2, 3]) {
+      const note = `${type} ${step}`, item = await f.publishedTask(project, note), stored = storedEntity(f, item, 'output');
+      if (type !== 'trash') applyStorageMutation(f.processing, f.storage, stored.begin('trash'));
+      const mutation = stored.begin(type), transaction = w.processing.transaction;
+      let steps = 0;
+      w.processing.transaction = function locked(...args) {
+        steps += 1;
+        if (steps === step) {
+          applyStorageMutation(f.processing, f.storage, mutation.id);
+          if (type !== 'purge') applyStorageMutation(f.processing, f.storage, stored.begin(type === 'trash' ? 'restore' : 'trash'));
+        }
+        return transaction.apply(this, args);
+      };
+      assert.equal(applyStorageMutation(w.processing, w.storage, mutation).status, 'complete', note);
+      w.processing.transaction = transaction;
+      if (type !== 'purge') { if ((type === 'trash') === (steps >= step)) stored.assertLive(note); else stored.assertBinned(note); }
+      else assert.deepEqual(f.database.prepare("SELECT COUNT(*) n FROM storage_trash WHERE entity_id=? AND permanently_deleted_at IS NULL").get(item.versionId).n, 0, note);
+    }
+  }
+});
+
+test('a purge whose path and set-aside path both exist removes neither', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), item = await f.publishedTask(project), stored = storedEntity(f, item, 'output'), { applyStorageMutation } = require('../server/storageLifecycle');
+  applyStorageMutation(f.processing, f.storage, stored.begin('trash'));
+  const trash = f.processing.activeTrashForEntity('output', item.versionId), aside = path.join(f.config.trashMount, ...`${trash.relativePath}.purging`.split('/'));
+  fs.mkdirSync(aside);
+  fs.writeFileSync(path.join(aside, 'other.txt'), 'other');
+  const mutation = stored.begin('purge');
+  assert.throws(() => applyStorageMutation(f.processing, f.storage, mutation), { code: 'lifecycle_conflict' });
+  assert.equal(f.processing.getStorageMutation(mutation.id).status, 'failed');
+  stored.assertBinned('both');
+  assert.deepEqual(f.tree(aside), { 'other.txt': 'other' });
+  assert.throws(() => f.storage.setAsideForPurge('trash', trash.relativePath, `${trash.relativePath}.purging`), { code: 'lifecycle_conflict' });
+  assert.throws(() => f.storage.setAsideForPurge('models', trash.relativePath, 'x'), { code: 'external_reference' });
 });

@@ -99,9 +99,13 @@ test('trash restore and purge recover when a process dies before recording the f
 });
 
 test('overlapping lifecycle reconcilers converge to one metadata transition',(t)=>{
-  const context=fixture(t),{db,processing,storage}=context,{dataset}=storedDataset(context,'Concurrent reconciliation'),mutation=processing.beginTrashMutation(dataset.id,'ops:1'),move=storage.moveExact.bind(storage);let nested=false;
-  storage.moveExact=(...args)=>{const result=move(...args);if(!nested){nested=true;applyStorageMutation(processing,storage,mutation.id);}return result;};
+  const context=fixture(t),{root,db,processing,storage}=context,{dataset}=storedDataset(context,'Concurrent reconciliation'),mutation=processing.beginTrashMutation(dataset.id,'ops:1'),move=storage.moveExact.bind(storage);let nested=null;
+  // The other process, on its own connection, while this one moves the files: it has to wait for the move to be recorded.
+  const otherDatabase=openDatabase(path.join(root,'viewer.sqlite'));t.after(()=>otherDatabase.close());otherDatabase.exec('PRAGMA busy_timeout=0');const other=new ProcessingRepository(otherDatabase);
+  storage.moveExact=(...args)=>{const result=move(...args);if(!nested)nested=reconcileStorageMutations(other,storage);return result;};
   const completed=applyStorageMutation(processing,storage,mutation.id);
+  assert.deepEqual(nested.map((row)=>[row.id,row.status,row.errorCode]),[[mutation.id,'failed','ERR_SQLITE_ERROR']]);
+  assert.equal(applyStorageMutation(other,storage,mutation).status,'complete','a late copy of the journal changes nothing');
   assert.equal(completed.status,'complete');
   assert.equal(processing.getDataset(dataset.id).status,'trashed');
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM storage_trash WHERE entity_id=? AND permanently_deleted_at IS NULL').get(dataset.id).count,1);

@@ -15,10 +15,10 @@ function addMember(processing,container,item){if(!item||!processing.addContainer
 function trashTaskTree(processing,storage,taskId,actor,container=null){
   assertNotPurging(container);assertNotPurging(processing.activeTrashForEntity('task',taskId));
   if(processing.hasPendingTaskMove(taskId,'restore'))throw conflict('a restore of this task is still finishing');
-  const taskTrash=processing.trashTask(taskId,actor,{withinProjectTrash:container?.entityType==='project'});
+  const taskTrash=processing.trashTask(taskId,actor,{withinProjectTrash:container?.entityType==='project',containerId:container?.id??null});
   if(!taskTrash)throw Object.assign(new Error('task has active processing work'),{code:'task_not_trashable'});
   const root=container||taskTrash,items=[],add=item=>{addMember(processing,root,item);items.push(item);};
-  if(container)add(taskTrash);
+  if(container)items.push(taskTrash);
   const owned=processing.taskOwnedEntities(taskId);
   for(const item of processing.interruptedTaskTrash(taskTrash,root.id))add(item);
   for(const outputId of owned.outputs)add(trashOutput(processing,storage,outputId,actor));
@@ -53,6 +53,8 @@ function restoreContainerTrash(processing,storage,containerId,actor){let root=pr
   // A task on its own comes back only into an active project. Check that before restoring any shared source set, so a
   // refused restore never leaves a set out of the Recycle Bin with nothing left to purge it.
   if(root.entityType==='task'){const task=processing.getTask(root.entityId);if(processing.getProject(task?.projectId)?.status!=='active')return null;}
+  // Tasks of the project that an earlier version's delete archived but did not get into the item come back with it.
+  if(root.entityType==='project')for(const item of processing.interruptedProjectTasks(root))if(!processing.addContainerTrashMember(root.id,item.id))return null;
   // A delete that stopped partway: wait for moves still in progress, and take back what it moved outside this item.
   const deletedTasks=[...(root.entityType==='task'?[root]:[]),...processing.listContainerTrashMembers(root.id).filter(item=>item.entityType==='task'&&!item.permanentlyDeletedAt)];
   if(deletedTasks.some(item=>processing.hasPendingTaskMove(item.entityId,'trash'))||(root.entityType==='project'&&processing.hasPendingProjectMove(root.entityId,'trash')))return null;
