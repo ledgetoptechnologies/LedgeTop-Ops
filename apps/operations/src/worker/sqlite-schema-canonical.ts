@@ -20,11 +20,11 @@ export type SqliteSchemaTuple = readonly [type: string, name: string, table: str
 
 const refuse = (): never => { throw Error("sqlite_schema_text_unrecognized"); };
 const SPACE = /[ \t\n\f\r]+/y;
-const WORD = /[A-Za-z_\u0080-﻾＀-￿][A-Za-z0-9_$\u0080-￿]*/y;
+const WORD = /[A-Za-z_\u0080-\ufefe\uff00-\uffff][A-Za-z0-9_$\u0080-\uffff]*/y;
 const BLOB = /[xX]'(?:[0-9a-fA-F]{2})*'/y;
 const NUMBER = /0[xX][0-9a-fA-F]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?/y;
 const OPERATOR = /->>|->|\|\||<<|>>|<=|<>|>=|==|!=|[-()+*/%=<>&~|;,.]/y;
-const WORD_CHARACTER = /[A-Za-z0-9_$\u0080-￿]/;
+const WORD_CHARACTER = /[A-Za-z0-9_$\u0080-\uffff]/;
 
 function match(pattern: RegExp, sql: string, at: number): string | null {
   pattern.lastIndex = at;

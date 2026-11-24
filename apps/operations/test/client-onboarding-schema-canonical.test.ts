@@ -328,7 +328,7 @@ describe("client onboarding schema readiness canonicalization", () => {
 
   it.each([["unterminated block comment", "CREATE TABLE t(a) /* x"], ["unterminated string", "CREATE TABLE t(a DEFAULT 'x)"],
     ["unterminated identifier", 'CREATE TABLE t("a)'], ["NUL", "CREATE TABLE t(a\u0000)"], ["NUL in a literal", "CREATE TABLE t(a DEFAULT '\u0000')"],
-    ["BOM", "CREATE TABLE t(﻿a)"], ["vertical tab", "CREATE TABLE t(a\v)"], ["bound variable", "CREATE TABLE t(a DEFAULT ?1)"],
+    ["BOM", "CREATE TABLE t(\ufeffa)"], ["vertical tab", "CREATE TABLE t(a\v)"], ["bound variable", "CREATE TABLE t(a DEFAULT ?1)"],
     ["malformed number", "CREATE TABLE t(a DEFAULT 1abc)"], ["malformed blob", "CREATE TABLE t(a DEFAULT x'abc')"],
   ])("refuses unrecognized text: %s", (_label, sql) => {
     expect(() => canonicalSqliteSchemaTuple(object("table", "t", sql))).toThrow("sqlite_schema_text_unrecognized");
