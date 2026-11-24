@@ -24,11 +24,19 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
       if(mutation.type==='trash'||mutation.type==='restore'){
         const sourceExists=exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath),destinationExists=exists(storage,mutation.destinationRootKey,mutation.destinationRelativePath);
         if(sourceExists&&destinationExists)throw conflict('lifecycle source and destination both exist');
+        if(mutation.type==='trash'){
+          // A crash after the move can leave the journal at intent. This also
+          // recovers older versions that moved before retention was introduced.
+          const retainedSource=!sourceExists&&destinationExists?
+            {...mutation,sourceRootKey:mutation.destinationRootKey,sourceRelativePath:mutation.destinationRelativePath}:mutation;
+          require('./gcpDatasetRetention').retainDatasetGcpOriginals(processing,storage,retainedSource);
+        }
         if(sourceExists&&!destinationExists){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);storage.moveExact(mutation.sourceRootKey,mutation.sourceRelativePath,mutation.destinationRootKey,mutation.destinationRelativePath);}
         else if(!sourceExists&&!destinationExists&&!mutation.allowAbsentSource)throw conflict('lifecycle source and destination are both absent');
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation,{destinationRelativePath:!sourceExists&&!destinationExists?'':mutation.destinationRelativePath});
       }else if(mutation.type==='purge'){
+        require('./gcpDatasetRetention').retainDatasetGcpOriginals(processing,storage,mutation);
         if(exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath)){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);storage.removeExact(mutation.sourceRootKey,mutation.sourceRelativePath);}
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation);
@@ -36,6 +44,13 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
     }
     const current=processing.getStorageMutation(mutation.id);
     if(current?.status==='fs_applied'){
+      // Reconciliation may resume an effect applied by an older version. Do
+      // not finalize purge metadata without retained originals. A moved tree
+      // must be read from its trash destination, not its now-absent old path.
+      if(current.entityType==='dataset'&&['trash','purge'].includes(current.type)){
+        const source=current.type==='trash'?{...current,sourceRootKey:current.destinationRootKey,sourceRelativePath:current.destinationRelativePath}:current;
+        require('./gcpDatasetRetention').retainDatasetGcpOriginals(processing,storage,source);
+      }
       if(current.type==='trash'||current.type==='restore'){
         const sourceExists=exists(storage,current.sourceRootKey,current.sourceRelativePath),destinationExists=exists(storage,current.destinationRootKey,current.destinationRelativePath);
         if(sourceExists||(!destinationExists&&!current.allowAbsentSource))throw conflict('lifecycle filesystem state does not match the applied journal');
@@ -53,12 +68,19 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   }
 }
 
-function reconcileStorageMutations(processing,storage,limit=20){const results=[];for(const mutation of processing.pendingStorageMutations(limit)){try{results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
+function reconcileStorageMutations(processing,storage,limit=20){const results=[];for(const mutation of processing.pendingStorageMutations(limit)){try{processing.touchStorageMutation(mutation.id);results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
 
 function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null}={}){
-  const results=[];
-  for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
+  const results=[],expired=processing.expiredTrash(),max=Math.max(1,Math.min(Number(limit)||20,100)),rotate=expired.length>max;
+  // Items that cannot be purged now stay listed. Continue after the last one tried instead of starting over.
+  if(rotate){
+    expired.sort((a,b)=>a.id<b.id?-1:1);
+    const cursor=processing.trashPurgeCursor(),next=expired.findIndex(item=>item.id>cursor);
+    if(next>0)expired.push(...expired.splice(0,next));
+  }
+  for(const item of expired.slice(0,max)){
     try{
+      if(rotate)processing.advanceTrashPurgeCursor(item.id);
       if(item.entityType==='output'&&require('./outputSupersession').automaticSupersessionTrash(processing,item.id)){results.push({trashId:item.id,status:'deferred',errorCode:'supersession_reverification_required'});continue;}
       if(item.entityType==='project'||item.entityType==='task'){
         const {purgeContainerTrash}=require('./containerLifecycle');

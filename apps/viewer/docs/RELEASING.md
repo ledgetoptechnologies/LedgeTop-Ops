@@ -154,11 +154,96 @@ steps in this order:
 5. To resume, unset the variable (or set it to `false`). The next merge to
    `main` moves `latest` forward again.
 
+Going back past schema 46: use the recorded rollback image, or turn on the
+pause and check it before step 4. See
+[Rollback after schema 46](#rollback-after-schema-46).
+
 Reverting on `main` is the other way to move `latest` back for good. Rolling back
 the image does not prove the older image is compatible with a newer database
 schema; check that before rolling back. The
 attestation must still exist, so this works for 90 days after that candidate
 was built. For older images, pin the digest on the host instead (section 2).
+
+### Rollback after schema 46
+
+Schema 46 keeps original GCP source files. An older release ignores it. Its
+worker runs at start and every hour, deletes expired Recycle Bin datasets
+without keeping their CSV files, and deletes upload caches this release keeps
+on purpose. Its API does the same when staff delete or purge. Those files
+cannot be recovered from the database. Retained originals are not touched.
+
+A restart pulls whatever `latest` is and starts its worker at once. No check
+inside the new image or an update script can protect a rollback.
+
+**Rule: go back only to an image that was rehearsed for this.** Use the first
+that applies:
+
+1. Fix forward.
+2. Roll back to the recorded rollback image, by digest. It must be a release
+   that removes neither originals nor upload caches, and its exact digest must
+   have passed on staging: on a synthetic store migrated to schema 46, through
+   first start, restart and recreate.
+3. Fallback: pause first, then an older image. The pause is
+   `PROCESSING_PLATFORM_ENABLED=false` in the host settings. Older releases obey
+   it: their worker stays idle, and the processing, upload, delete and purge
+   routes are off. Viewing still works. Use it only when it was rehearsed with
+   that exact image on a migrated synthetic store: the value is `false` before
+   the first start, the worker is idle, the write routes are off, and nothing is
+   removed through a restart and a recreate. Keep the pause on from before the
+   rollback until a release with proven retention runs again.
+
+A file or module existing in an image is not proof that it keeps anything. The
+proof is the staging record of that exact digest and commit.
+
+#### Steps for someone who restarts the containers
+
+Do these in order. Stop if a check fails.
+
+1. In the host settings for the Viewer app, set `PROCESSING_PLATFORM_ENABLED`
+   to `false`. Use the place Compose takes the value from (the app's own
+   settings, or the file given with `--env-file`). `Config/viewer.env` alone is
+   not enough: the Compose file sets this variable itself and wins over it.
+2. Apply it while the current release is still the one that starts. Recreate
+   both containers (`docker compose up -d`, or save and redeploy the app). A
+   plain container restart keeps the old value.
+3. Look at the `viewer-worker` log. It must say `Processing worker is idle
+   because PROCESSING_PLATFORM_ENABLED=false`. If it does not, the pause is not
+   on. Go back to step 1.
+4. Only now move `latest` back (the steps above) or change the pinned digest,
+   and restart.
+5. Look at the `viewer-worker` log again. It must show the same line.
+6. Leave the value alone. Restarts and host reboots are safe while it is
+   `false`.
+
+If an older release ran without the pause: stop both containers now, do not
+start them again, and keep the database, `trash` and `cache` as they are.
+
+#### Before turning processing back on
+
+All of these must be true:
+
+- Both containers run an image whose exact digest has a staging record for
+  retention on a migrated store. `/app/source-commit.txt` in `viewer-api` and in
+  `viewer-worker` is the commit in that record.
+- `latest`, or the pinned digest, is that same image, so the next restart does
+  not bring the older one back.
+- Both containers are healthy, and the API log shows no database error.
+
+Then set the value back to `true` and recreate both containers. The worker log
+must no longer say it is idle.
+
+#### If an older release must run with processing
+
+Stop both containers, keep the current database, cache and trash, and restore
+the pre-upgrade backup of the database and storage together. Work done since
+the upgrade is not in it.
+
+#### What the updater adds
+
+`scripts/update-truenas.sh` is not used by a plain restart. Where it is used,
+its automatic rollback starts an image without the retention module view-only,
+and it refuses to update to such an image while processing is on. The check can
+only refuse. An image that passes it still needs the staging record above.
 
 ## Updating the production host
 
