@@ -247,12 +247,18 @@ test('a write that is never answered ends by itself and is checked', async t => 
 async function open(t, options) {
   const setup = await openMarksPanel(t, options), timers = new Map();
   let now = 0, next = 1;
-  const net = { how: null, down: false, hangReads: false, sent: [] };
+  const net = { how: null, down: false, hangReads: false, sent: [], before: null, answer: null, late: [],
+    deliver: async () => { for (const go of net.late.splice(0)) await (await go()).arrayBuffer(); } };
   const request = async (path, init) => {
     const write = init.method !== 'GET';
     net.sent.push(init.method + ' ' + path.replace('/api/v1/marks', ''));
     if (!write && net.hangReads) return new Promise(() => {});
     if (!write && net.down) throw new TypeError('offline');
+    const go = () => setup.request(path, { ...init, signal: undefined });
+    // Something happens between the change and the look-up.
+    if (!write && net.before) { const before = net.before; net.before = null; await before(); }
+    if (!write && net.answer) return net.answer(path, go);
+    if (write && net.how === 'late') { net.late.push(go); throw new TypeError('offline'); }
     if (write && net.how === 'never') return new Promise(() => {});
     if (write && net.how === 'refused') throw new TypeError('offline');
     const response = await setup.request(path, { ...init, signal: undefined });
@@ -442,4 +448,312 @@ test('nothing of a change without an answer reaches the next person', async t =>
   net.sent.length = 0;
   assert.equal((await store.create(point('Mine'))).name, 'Mine');
   assert.deepEqual([net.sent, store.state.marks.map(mark => mark.name), count()], [['POST '], ['Mine'], 2]);
+});
+
+// ---- independent changes meanwhile --------------------------------------------
+// Another tab or device of the same person, on its own store.
+async function beside(t, options) {
+  const setup = await open(t, options);
+  const other = createMarksStore({ request: (path, init) => setup.request(path, { ...init, signal: undefined }) });
+  await other.setScope(setup.scope('client', 'client-a'));
+  return { ...setup, other, fresh: async () => { await other.refresh(); return other; },
+    kinds: () => setup.store.state.undo.map(entry => entry.type) };
+}
+const texts = (...names) => names.map(name => ({ ...point(name), id: randomUUID() }));
+
+test('an import that was changed since is reported, and Undo takes nothing of it', async t => {
+  for (const change of ['edited', 'edited and put back', 'deleted']) for (const when of ['before the check', 'after the check failed', 'before it is sent again']) {
+    const at = `${change}, ${when}`;
+    const { store, net, fresh, count, kinds } = await beside(t);
+    const marks = texts('a', 'b', 'c');
+    const meddle = async () => {
+      const other = await fresh(), row = other.state.marks.find(mark => mark.name === 'b');
+      if (change === 'deleted') await other.remove(row);
+      else {
+        const edited = await other.update(row, { note: 'Independent' });
+        if (change === 'edited and put back') await other.update(edited, { note: '' });
+      }
+    };
+    const again = () => store.importMarks({ marks: marks.map(mark => ({ ...mark, id: randomUUID() })) });
+    let made;
+    if (when === 'before the check') {
+      net.how = 'lost';
+      net.before = meddle;
+      made = await store.importMarks({ marks });
+    } else if (when === 'after the check failed') {
+      net.how = 'lost';
+      net.down = true;
+      assert.equal(await store.importMarks({ marks }), 0);
+      net.down = false;
+      net.how = null;
+      await meddle();
+      made = await again();
+    } else {
+      net.how = 'late';
+      assert.equal(await store.importMarks({ marks }), 0);
+      assert.equal(store.state.message, 'Could not save the change. Try again.');
+      net.how = null;
+      await net.deliver();
+      await meddle();
+      made = await again();
+    }
+    net.how = null;
+    assert.equal(made, change === 'deleted' ? 2 : 3, at);
+    assert.match(store.state.message, /cannot be undone/, at);
+    assert.deepEqual(kinds(), [], at);
+    assert.equal(await store.undo(), false);
+    assert.equal(count(), change === 'deleted' ? 2 : 3, at + ': none went, none was added');
+    if (change === 'edited') assert.equal(store.state.marks.find(mark => mark.name === 'b').note, 'Independent');
+  }
+  // Untouched, it can be undone as before.
+  const { store, net, count, kinds } = await beside(t);
+  net.how = 'lost';
+  assert.equal(await store.importMarks({ marks: texts('a', 'b') }), 2);
+  net.how = null;
+  assert.deepEqual(kinds(), ['import']);
+  assert.equal(await store.undo(), true);
+  assert.equal(count(), 0);
+});
+
+test('matching content at a later version is not one\'s own change', async t => {
+  // Stored, then changed and put back to exactly that by another.
+  const { store, net, fresh } = await beside(t);
+  const one = await store.create(point('One'));
+  net.how = 'lost';
+  net.down = true;
+  assert.equal(await store.update(one, { note: 'Mine' }), null);
+  net.how = null;
+  net.down = false;
+  let other = await fresh();
+  await other.update(other.find(one.id), { note: 'Independent' });
+  await other.update(other.find(one.id), { note: 'Mine' });
+  assert.equal(await store.update(one, { note: 'Mine and more' }), null);
+  assert.equal(store.state.failure, 'mark_revision_conflict');
+  assert.deepEqual([store.find(one.id).note, store.find(one.id).revision], ['Mine', 4], 'not written over');
+  // A new mark whose save arrived and was then changed by another.
+  for (const when of ['before the check', 'before it is sent again']) {
+    const id = randomUUID(), mark = { ...point('New'), id };
+    const meddle = async () => { other = await fresh(); await other.update(other.find(id), { note: 'Independent' }); };
+    if (when === 'before the check') { net.how = 'lost'; net.before = meddle; assert.equal(await store.create(mark), null); }
+    else {
+      net.how = 'late';
+      assert.equal(await store.create(mark), null);
+      net.how = null;
+      await net.deliver();
+      await meddle();
+      assert.equal(await store.create(mark), null);
+    }
+    net.how = null;
+    assert.equal(store.state.failure, 'mark_id_conflict', when);
+    assert.match(store.state.message, /Someone else changed this mark/);
+    assert.equal(store.find(id).note, 'Independent');
+    assert.ok(!store.state.undo.some(entry => entry.id === id), when);
+  }
+});
+
+test('deleting for good counts as done only when the owner\'s lists say it is gone', async t => {
+  const begin = async () => {
+    const setup = await beside(t);
+    const one = await setup.store.create(point('One'));
+    const changed = await setup.store.update(one, { note: 'x' });
+    return { ...setup, changed, id: one.id };
+  };
+  // Done.
+  for (const down of [false, true]) {
+    const { store, net, changed, kinds } = await begin();
+    net.how = 'lost';
+    net.down = down;
+    assert.equal(await store.remove(changed, { permanent: true }), !down);
+    if (down) {
+      assert.match(store.state.message, /No answer/);
+      assert.deepEqual(kinds(), ['create', 'update']);
+      net.how = null;
+      net.down = false;
+      assert.equal(await store.remove(changed, { permanent: true }), true);
+    }
+    assert.deepEqual([kinds(), store.state.marks], [[], []]);
+  }
+  // Only put in Recently deleted, by another.
+  {
+    const { store, net, changed, id, fresh, kinds, count } = await begin();
+    net.how = 'refused';
+    net.before = async () => { const other = await fresh(); await other.remove(other.find(id)); };
+    assert.equal(await store.remove(changed, { permanent: true }), false);
+    net.how = null;
+    assert.match(store.state.message, /Recently deleted/);
+    assert.deepEqual(kinds(), ['create', 'update']);
+    assert.deepEqual(store.state.deleted.map(mark => mark.id), [id]);
+    assert.equal(count("document_json<>'{}'"), 1, 'nothing is lost');
+  }
+  // Not in the list, but still there; not readable; the list of deleted not answered; no write access.
+  for (const odd of ['hidden', 'deleted list fails', 'single read fails', 'read only']) {
+    const { store, net, changed, id, kinds, database } = await begin();
+    net.how = odd === 'hidden' ? 'refused' : 'lost';
+    net.answer = async (path, go) => {
+      const url = path.replace('/api/v1/marks', '');
+      if (url === '' && ['hidden', 'read only'].includes(odd)) {
+        const data = await (await go()).json();
+        return Response.json({ ...data, marks: [], capabilities: { ...data.capabilities, write: odd !== 'read only' } });
+      }
+      if (url === '/deleted' && odd === 'deleted list fails') return new Response('x', { status: 500 });
+      if (url === '/' + id && odd === 'single read fails') return Response.json({ code: 'busy' }, { status: 503 });
+      return go();
+    };
+    const had = kinds();
+    assert.equal(await store.remove(changed, { permanent: true }), false, odd);
+    net.how = null;
+    net.answer = null;
+    assert.match(store.state.message, odd === 'hidden' ? /Could not save/ : /No answer/, odd);
+    if (odd !== 'read only') assert.deepEqual(kinds(), had, odd);
+    assert.equal(database.prepare("SELECT document_json<>'{}' n FROM viewer_marks WHERE id=?").get(id).n, odd === 'hidden' ? 1 : 0);
+  }
+});
+
+test('a delete, a restore and their undo are recovered at their own version only', async t => {
+  // Deleted by another at a later version: no Undo that is not one's own.
+  for (const later of [false, true]) {
+    const { store, net, fresh, kinds } = await beside(t);
+    const one = await store.create(point('One'));
+    net.how = 'refused';
+    net.before = async () => {
+      const other = await fresh();
+      if (later) await other.update(other.find(one.id), { note: 'Independent' });
+      await other.remove(other.find(one.id));
+    };
+    assert.equal(await store.remove(one), !later);
+    net.how = null;
+    assert.deepEqual(kinds(), later ? ['create'] : ['create', 'delete']);
+    if (later) assert.match(store.state.message, /no longer there/);
+  }
+  // Restored, then changed by another: it is back, and Undo would not delete their change.
+  for (const way of ['list', 'undo']) for (const changed of [false, true]) {
+    const at = [way, changed].join();
+    const { store, net, fresh, kinds, count } = await beside(t);
+    const one = await store.create(point('One'));
+    await store.remove(one);
+    await store.loadDeleted();
+    net.how = 'lost';
+    if (changed) net.before = async () => { const other = await fresh(); await other.update(other.find(one.id), { note: 'Independent' }); };
+    const back = way === 'list' ? await store.restore(store.state.deleted[0]) : await store.undo();
+    net.how = null;
+    assert.ok(back, at);
+    assert.equal(store.find(one.id).note, changed ? 'Independent' : '', at);
+    if (way === 'list') assert.deepEqual(kinds(), changed ? ['create', 'delete'] : ['create', 'delete', 'create'], at);
+    for (let i = 0; i < 5 && store.state.undo.length; i += 1) await store.undo();
+    assert.equal(count(), changed ? 1 : 0, at + ': an independent change is not deleted');
+  }
+});
+
+test('Undo does not write over or delete a change made elsewhere, also one read since', async t => {
+  for (const kind of ['create', 'update']) {
+    const { store, fresh, count } = await beside(t);
+    const one = await store.create(point('One'));
+    if (kind === 'update') await store.update(one, { note: 'Mine' });
+    const other = await fresh();
+    await other.update(other.find(one.id), { note: 'Independent' });
+    await store.refresh();
+    assert.equal(await store.undo(), false, kind);
+    assert.match(store.state.message, /Someone else changed this mark/);
+    assert.deepEqual([store.find(one.id).note, count()], ['Independent', 1]);
+  }
+  // One's own steps, also through Undo and back, stay undoable to the start.
+  const { store, count } = await beside(t);
+  const one = await store.create(point('One'));
+  await store.update(one, { note: 'a' });
+  await store.update(store.find(one.id), { note: 'b' });
+  await store.remove(store.find(one.id));
+  await store.refresh();
+  for (const [note, left] of [['b', 1], ['a', 1], ['', 1], [null, 0]]) {
+    assert.equal(await store.undo(), true, String(note));
+    assert.equal(count(), left);
+    if (note !== null) assert.equal(store.find(one.id).note, note);
+  }
+});
+
+test('an undo without an answer is not taken as done on absence or a later match', async t => {
+  // Undo of an import: all in Recently deleted as they were, or it is not known.
+  for (const meddled of [false, true]) {
+    const { store, net, fresh, kinds } = await beside(t);
+    await store.importMarks({ marks: texts('a', 'b') });
+    net.how = meddled ? 'refused' : 'lost';
+    if (meddled) net.before = async () => { const other = await fresh(); for (const mark of [...other.state.marks]) { await other.update(mark, { note: 'x' }); await other.remove(other.find(mark.id)); } };
+    assert.equal(await store.undo(), !meddled);
+    net.how = null;
+    assert.deepEqual(kinds(), meddled ? ['import'] : []);
+  }
+  // Undo of an edit: the same text put there later by another is theirs.
+  const { store, net, fresh, kinds } = await beside(t);
+  const one = await store.create(point('One'));
+  await store.update(one, { note: 'Mine' });
+  net.how = 'refused';
+  net.before = async () => { const other = await fresh(); await other.update(other.find(one.id), { note: 'x' }); await other.update(other.find(one.id), { note: '' }); };
+  assert.equal(await store.undo(), false);
+  net.how = null;
+  assert.equal(store.find(one.id).revision, 4);
+  assert.equal(await store.undo(), false, 'and it is not written over');
+  assert.equal(store.find(one.id).revision, 4);
+  assert.deepEqual(kinds(), ['create']);
+});
+
+test('a reload takes a stored edit for one\'s own at its own version only', async t => {
+  for (const kind of ['edit', 'new']) for (const change of ['edited', 'edited and put back']) {
+    const at = [kind, change].join();
+    const { net, rows, page, one, mount, scope } = await start(t);
+    const panel = kind === 'edit' ? await one() : await page();
+    if (kind === 'edit') await panel.open('One'); else await panel.place('43.05, -87');
+    await panel.type('[name=name]', 'One');
+    await panel.type('[name=note]', 'Mine');
+    net.write = 'lost';
+    net.down = true;
+    await panel.save();
+    net.write = null;
+    net.down = false;
+    const other = mount(), [{ id }] = rows();
+    await other.marks.setScope(scope('client', 'client-a'));
+    await other.store.update(other.store.find(id), { note: 'Independent' });
+    if (change !== 'edited') await other.store.update(other.store.find(id), { note: 'Mine' });
+    const second = await page();
+    assert.match(second.text(), /changed elsewhere/, at);
+    await second.save();
+    assert.equal(rows().find(row => row.id === id).note, change === 'edited' ? 'Independent' : 'Mine', at);
+    assert.equal(rows().length, 2, at + ': kept apart');
+  }
+});
+
+test('a Save does not write over a change that was read while the editor was open', async t => {
+  for (const kind of ['edit', 'new']) for (const how of ['same save', 'another change']) {
+    const at = [kind, how].join();
+    const { net, rows, page, one, mount, scope } = await start(t);
+    const panel = kind === 'edit' ? await one() : await page();
+    const other = mount();
+    const meddle = async id => { await other.marks.setScope(scope('client', 'client-a')); await other.store.update(other.store.find(id), { note: 'Independent' }); };
+    if (kind === 'edit') await panel.open('One'); else await panel.place('43.05, -87');
+    await panel.type('[name=name]', 'One');
+    await panel.type('[name=note]', 'Mine');
+    let id = kind === 'edit' ? rows()[0].id : null;
+    if (how === 'same save') {
+      // Never sent (an edit), or sent and answered by nothing (a new mark), and changed before the look-up.
+      net.write = kind === 'edit' ? 'never sent' : 'lost';
+      net.down = true;
+      await panel.save();
+      net.write = null;
+      id ||= rows()[0].id;
+      await meddle(id);
+      net.down = false;
+      await panel.save();
+    } else {
+      if (kind === 'new') { net.write = 'lost'; net.down = true; await panel.save(); net.write = null; net.down = false; id = rows()[0].id; }
+      await meddle(id);
+      // Something else reads the list again.
+      await panel.store.refresh();
+      await panel.save();
+    }
+    assert.match(shown(panel), /Someone else changed this mark/, at);
+    assert.equal(rows().find(row => row.id === id).note, 'Independent', at);
+    assert.equal(panel.q('[name=note]').value, 'Mine', at);
+    // Told of it, saving again is a decision, as it was.
+    await panel.save();
+    assert.equal(form(panel).hidden, true, at);
+    assert.deepEqual(rows().map(row => [row.id, row.note]), [[id, 'Mine']], at);
+  }
 });

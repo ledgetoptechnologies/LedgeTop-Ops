@@ -16,8 +16,9 @@ export function sameMark(stored, sent) {
   const has = markContent(stored), want = markContent(sent);
   return Object.keys(want).every(field => JSON.stringify(has[field]) === JSON.stringify(want[field]));
 }
-// A later version with exactly what was sent is that change, not someone else's.
-export const sentBefore = (stored, sent) => Boolean(stored && sent?.some(item => stored.revision > item.revision && sameMark(stored, item)));
+// The very version that change would have made, with exactly what was sent. The same
+// content at any later version is not taken for it: someone may have put it back.
+export const sentBefore = (stored, sent) => Boolean(stored && sent?.some(item => stored.revision === item.revision + 1 && sameMark(stored, item)));
 export const SENT_LIMIT = 5;
 
 const text = (value, max) => typeof value === 'string' && value.length <= max;
@@ -56,6 +57,8 @@ export function reconcileMarkDraft(draft, find, newId) {
   const current = existing?.mine && existing.editable && existing.geometry.type === draft.geometry.type ? existing : null;
   if (!draft.id) {
     // The save may have reached the server before its answer was lost.
+    // Changed by someone since: theirs stays, this one becomes a new mark.
+    if (current && current.revision !== 1 && !sentBefore(current, draft.sent)) return { ...draft, newId: newId(), changedElsewhere: true };
     return current ? { ...draft, id: current.id, newId: null, revision: current.revision, changedElsewhere: false }
       : { ...draft, newId: existing ? newId() : draft.newId, changedElsewhere: false };
   }

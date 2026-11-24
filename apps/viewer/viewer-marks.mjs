@@ -6,7 +6,7 @@ import { DEFAULT_STYLE, ICON_CHOICES, categoryBadge, categoryStyle, colorName, k
 import { elevationForDisplay, elevationToMetres, elevationUnit, formatDecimal, formatDms, formatUtm, parseCoordinateInput } from './viewer-mark-coordinates.mjs';
 import { geoJsonToMarks, marksToGeoJson } from './viewer-mark-geojson.mjs';
 import { NO_CATEGORY, categoryOf, createMarkVisibility } from './viewer-mark-visibility.mjs';
-import { createMarkDraftRecovery, markContent, reconcileMarkDraft, sameMark, SENT_LIMIT } from './viewer-mark-draft-recovery.mjs';
+import { createMarkDraftRecovery, reconcileMarkDraft, sameMark, SENT_LIMIT } from './viewer-mark-draft-recovery.mjs';
 
 const TYPE_LABEL = { Point: 'Pin', LineString: 'Line', Polygon: 'Area' };
 // The server says which of these a person may choose; with one choice the field is hidden.
@@ -309,8 +309,10 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       mine.id ||= newId();
       const saved = await store.create({ id: mine.id, geometry: { type: 'Point', coordinates: position }, name: nameFor(choice, 'Point'), note: '',
         categoryId: category?.id || null, ...categoryStyle(category), elevationNavd88M: null, visibility: defaultVisibility() });
-      if (!saved || !held.live()) return;
-      mine.id = null;
+      if (!held.live()) return;
+      // Placed, or changed by someone since it was: the next click is another pin.
+      if (saved || store.state.failure === 'mark_id_conflict') mine.id = null;
+      if (!saved) return;
       reveal(saved);
       render();
     } finally { mine.busy = false; }
@@ -1082,9 +1084,17 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const current = store.find(draft.id || draft.newId);
     if (draft.id && !current) { message('That mark is no longer there.'); return; }
     // Kept with the draft, so that a reload before the answer knows it again.
-    if (sessionScope) open.sent = [...(open.sent || []), { revision: current?.revision || 0, ...markContent({ ...current, ...changes }) }].slice(-SENT_LIMIT);
-    const saved = current ? await store.update(current, changes) : await store.create({ ...changes, id: draft.newId });
-    if (!saved || !held.live()) return;
+    const sending = item => {
+      if (!sessionScope) return;
+      open.sent = [...(open.sent || []), item].slice(-SENT_LIMIT);
+      if (draft === open) keepDraft();
+    };
+    // Based on what was opened, not on what was read since; once told of a change, on that.
+    const refused = store.state.busy, revision = open.told ?? (open.id ? open.revision : null);
+    const saved = current && revision ? await store.update(current, changes, { sending, revision }) : await store.create({ ...changes, id: open.id || open.newId }, { sending });
+    if (!held.live()) return;
+    if (!saved && !refused && ['mark_revision_conflict', 'mark_id_conflict'].includes(store.state.failure)) open.told = store.find(open.id || open.newId)?.revision ?? null;
+    if (!saved) return;
     reveal(saved);
     // Cancelled, or something else opened meanwhile: the mark is saved, the rest is not this one's to change.
     if (draft !== open) { render(); return; }
@@ -1179,7 +1189,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       if (!parsed.marks.length) { message('No points, lines or areas were found in that file.'); return; }
       const count = await store.importMarks(parsed);
       if (count && held.live()) reveal(...parsed.marks);
-      if (count && held.live()) message(`Imported ${count} mark${count === 1 ? '' : 's'}${parsed.skipped ? `; skipped ${parsed.skipped} unsupported` : ''}.`);
+      // What the store says of it comes first: it may not be possible to undo it.
+      if (count && held.live()) message(store.state.message || `Imported ${count} mark${count === 1 ? '' : 's'}${parsed.skipped ? `; skipped ${parsed.skipped} unsupported` : ''}.`);
     } catch (error) {
       if (!held.live()) return;
       message(error instanceof SyntaxError ? 'That file is not valid JSON.' : error.message || 'Could not import that file.');
