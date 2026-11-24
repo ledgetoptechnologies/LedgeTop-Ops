@@ -32,7 +32,9 @@ function decodeSessionPermissions(value) {
     || !restricted || Object.keys(restricted).sort().join(',') !== 'permissions,scope'
     || !restricted.permissions || restricted.permissions.view !== true)
     return { permissions: { view: false }, restrictedScope: null };
-  return { permissions: restricted.permissions, restrictedScope: restrictedSessionScope(restricted.scope) };
+  // A scope that cannot be read, such as one written before selections, is denied; it is never the whole project.
+  const scope = restrictedSessionScope(restricted.scope);
+  return { permissions: scope ? restricted.permissions : { view: false }, restrictedScope: scope };
 }
 
 function finiteVector(value, keys) {

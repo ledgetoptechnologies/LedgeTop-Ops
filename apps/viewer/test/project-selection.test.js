@@ -239,6 +239,19 @@ for (const mode of ['except', 'only']) test(`restricted grant expiry, redemption
   assert.equal(repo.viewerSessionLive(repo.getViewerSessionByHash('restricted')), false);
   const again = repo.createViewerSession({ ...grant, restrictedScope: scopeNow(), tokenHash: 'restricted-again' });
   assert.equal(repo.viewerSessionLive(again), true);
+  // Written before selections, the scope was called `exclusions`. Such a session or grant is denied, never widened to the
+  // whole project and never renewed; a fresh mint by the issuer, which checks the share again, works.
+  const { selection: chosen, ...rest } = scopeNow(), { mode: _mode, ...exclusions } = chosen;
+  const earlier = JSON.stringify({ view: false, restrictedSession: { scope: { ...rest, exclusions }, permissions: { view: true, download: true } } });
+  db.prepare("UPDATE viewer_sessions SET permissions_json=? WHERE token_hash='restricted-again'").run(earlier);
+  const kept = repo.getViewerSessionByHash('restricted-again');
+  assert.equal(repo.viewerSessionLive(kept), false); assert.equal(kept.restrictedScope, null); assert.equal(kept.permissions.view, false);
+  const before = repo.createSessionGrant({ ...grant, restrictedScope: scopeNow() });
+  db.prepare('UPDATE session_grants SET permissions_json=? WHERE id=?').run(earlier, before.id);
+  assert.equal(repo.redeemSessionGrant(before.id), null);
+  const reminted = repo.createViewerSession({ ...repo.redeemSessionGrant(repo.createSessionGrant({ ...grant, restrictedScope: scopeNow() }).id), tokenHash: 'reminted' });
+  assert.equal(repo.viewerSessionLive(reminted), true);
+  db.prepare("UPDATE viewer_sessions SET permissions_json=(SELECT permissions_json FROM viewer_sessions WHERE token_hash='reminted') WHERE token_hash='restricted-again'").run();
   db.prepare('INSERT INTO revoked_published_session_authorizations VALUES (?, ?, ?)').run(
     grant.sourceAuthorization.type, grant.sourceAuthorization.id, grant.sourceAuthorization.version,
   );
