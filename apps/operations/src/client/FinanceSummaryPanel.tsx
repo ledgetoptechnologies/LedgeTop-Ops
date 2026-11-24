@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, Skeleton, StatusPill } from "@ltds/ui";
 import { projectAlphaSourceName, type AdminFinanceSummary, type CompanyFinanceSummary, type FinanceMoneyBucket } from "@ltds/shared";
 import { api, ApiError } from "./api";
@@ -10,6 +10,8 @@ type CompanyCoverage = CompanyFinanceSummary["coverage"];
 export type { AdminFinanceSummary, FinanceMoneyBucket };
 
 const DECIMAL = /^-?\d+(\.\d{1,2})?$/;
+// Coming back to the page refreshes the figures, at most this often.
+const REFRESH_AFTER_MS = 60_000;
 
 /** Formats an exact decimal string without converting it through Number. */
 export function formatAmount(amount: FinanceAmount | null, currency: string): string {
@@ -25,9 +27,11 @@ export function formatAmount(amount: FinanceAmount | null, currency: string): st
 }
 
 export function periodLabel(period: FinancePeriod): string {
-  const from = new Date(`${period.from}T12:00:00`);
-  return Number.isNaN(from.getTime()) ? `${period.from} to ${period.to}`
-    : from.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const from = new Date(`${period.from}T12:00:00`), to = new Date(`${period.to}T12:00:00`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return `${period.from} to ${period.to}`;
+  const sameYear = from.getFullYear() === to.getFullYear();
+  const start = from.toLocaleDateString("en-US", { month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }) });
+  return `${start} – ${to.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
 }
 
 const STATUS_COPY: Record<Exclude<FinanceSourceSummary["status"], "ok">, string> = {
@@ -102,9 +106,12 @@ function SourceCard({ source }: { source: FinanceSourceSummary }) {
 
 export function FinanceSummaryView({ summary }: { summary: AdminFinanceSummary }) {
   const asOf = new Date(summary.asOf), expenseKnown = summary.sources.every(source => source.summary?.coverage.expenseCurrencyKnown ?? true);
+  const missing = summary.sources.filter(source => source.status !== "ok" || !source.summary).map(source => projectAlphaSourceName(source.sourceId));
   return <Card className="finance-panel" title="Finances at a glance"
     action={<span className="finance-asof">{periodLabel(summary.period)}{Number.isNaN(asOf.getTime()) ? "" : ` · as of ${asOf.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`}</span>}>
-    {!summary.complete && <p className="notice warning" role="status">Some figures are incomplete. Totals only include the companies and records shown below.</p>}
+    {!summary.complete && <p className="notice warning" role="status">{missing.length
+      ? `Totals leave out ${missing.join(" and ")} because its figures didn't load. Reload to try again.`
+      : "Some figures are incomplete. Totals only include the records shown below."}</p>}
     {summary.combined && summary.combined.currencies.length > 0 && <section className="finance-combined" aria-label="Combined">
       <h3>Combined{summary.combined.coverageComplete ? "" : " (partial)"}</h3>
       {summary.combined.currencies.map(bucket => <div key={bucket.currency} className="finance-currency">
@@ -113,28 +120,45 @@ export function FinanceSummaryView({ summary }: { summary: AdminFinanceSummary }
       </div>)}
     </section>}
     <div className="finance-sources">{summary.sources.map(source => <SourceCard key={source.sourceId} source={source} />)}</div>
-    <p className="finance-footnote">Read-only figures from Project Alpha. Adjusted income counts payments by their original date with current refunds, disputes and fees; it isn't bank deposits. The recorded operating result is adjusted income minus recorded expenses, not an accounting profit.</p>
+    <p className="finance-footnote">Read-only figures from Project Alpha. Income, payments and expenses cover the dates shown; Outstanding and Overdue are all time. Adjusted income counts payments by their original date with current refunds, disputes and fees; it isn't bank deposits. The recorded operating result is adjusted income minus recorded expenses, not an accounting profit.</p>
   </Card>;
 }
 
 /** Admin-only dashboard panel. Renders nothing unless the session grants finance summary access. */
 export function FinanceSummaryPanel({ enabled }: { enabled: boolean }) {
   const [summary, setSummary] = useState<AdminFinanceSummary | null>(null), [error, setError] = useState(""), [hidden, setHidden] = useState(false);
-  const load = () => {
-    setError(""); setSummary(null);
+  const generation = useRef(0), lastLoad = useRef(0);
+  const load = (background = false) => {
+    const current = ++generation.current;
+    lastLoad.current = Date.now();
+    if (!background) { setError(""); setSummary(null); }
     api<unknown>("/api/admin/finance/summary").then(value => {
+      if (current !== generation.current) return;
       if (!usableSummary(value)) throw new Error("The finance summary could not be verified.");
-      setSummary(value);
+      setError(""); setSummary(value);
     }).catch(caught => {
+      if (current !== generation.current) return;
       if (caught instanceof ApiError && caught.status === 403) { setHidden(true); return; }
-      setError(caught instanceof Error ? caught.message : "The finance summary could not be loaded.");
+      // A failed background refresh leaves the figures on screen; their "as of" time stays true.
+      if (!background) setError(caught instanceof Error ? caught.message : "The finance summary could not be loaded.");
     });
   };
-  useEffect(() => { if (enabled) load(); }, [enabled]);
+  useEffect(() => {
+    if (!enabled) return;
+    load();
+    const refresh = () => { if (document.visibilityState === "visible" && Date.now() - lastLoad.current >= REFRESH_AFTER_MS) load(true); };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      generation.current += 1;
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [enabled]);
   if (!enabled || hidden) return null;
   if (error) return <Card className="finance-panel" title="Finances at a glance">
     <div className="notice error" role="alert"><span>{error}</span></div>
-    <button type="button" className="button-ghost button-small" onClick={load}>Retry</button>
+    <button type="button" className="button-ghost button-small" onClick={() => load()}>Retry</button>
   </Card>;
   if (!summary) return <Card className="finance-panel" title="Finances at a glance"><Skeleton variant="stats" columns={4} label="Loading finance summary…" /></Card>;
   return <FinanceSummaryView summary={summary} />;

@@ -1,7 +1,7 @@
 import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FinanceSummaryView, formatAmount, type AdminFinanceSummary, type FinanceMoneyBucket } from "../src/client/FinanceSummaryPanel";
+import { FinanceSummaryView, formatAmount, periodLabel, type AdminFinanceSummary, type FinanceMoneyBucket } from "../src/client/FinanceSummaryPanel";
 
 const bucket = (overrides: Partial<FinanceMoneyBucket> = {}): FinanceMoneyBucket => ({
   currency: "USD", decimalScale: 2,
@@ -27,6 +27,11 @@ describe("finance summary panel", () => {
     expect(formatAmount("1e5", "USD")).toBe("—");
   });
 
+  it("shows the exact dates the figures cover", () => {
+    expect(periodLabel({ from: "2026-10-07", to: "2026-11-05", dateBasis: "stored-calendar-date" })).toBe("Oct 7 – Nov 5, 2026");
+    expect(periodLabel({ from: "2026-12-12", to: "2027-01-10", dateBasis: "stored-calendar-date" })).toBe("Dec 12, 2026 – Jan 10, 2027");
+  });
+
   it("names companies, never shows missing sources as zero, and explains unconfigured expenses", () => {
     const summary: AdminFinanceSummary = {
       asOf: "2026-10-16T12:02:00.000Z", period, complete: false,
@@ -43,6 +48,8 @@ describe("finance summary panel", () => {
     expect(html).toContain("Ledge Top Technologies");
     expect(html).toContain("Nothing is counted for it.");
     expect(html).toContain("Combined (partial)");
+    expect(html).toContain("Totals leave out Ledge Top Technologies because its figures didn&#x27;t load.");
+    expect(html).toContain("Outstanding and Overdue are all time");
     expect(html).toContain("Expense currency isn&#x27;t configured in Project Alpha.");
     expect(html).toContain("$6,900.00");
     expect(html).toContain("2 open invoices have no currency");
