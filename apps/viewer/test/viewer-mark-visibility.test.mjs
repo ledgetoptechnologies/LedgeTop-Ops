@@ -163,7 +163,6 @@ test('saving, restoring, importing or orphaning a mark never leaves it unseen', 
 
   await panel.show('Loose');
   await panel.card('Delete').click();
-  await panel.card('Tap again to delete').click();
   await eye(panel, NO_CATEGORY).click();
   await panel.q('[data-tab=deleted]').click();
   await panel.q('[aria-label="Restore Loose"]').click();

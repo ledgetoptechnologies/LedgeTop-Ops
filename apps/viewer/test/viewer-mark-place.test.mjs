@@ -93,9 +93,9 @@ test('Place several saves each click, stays, and takes back the last one', async
   assert.deepEqual(panel.store.state.marks.map(mark => mark.name), ['Hazard', 'Hazard 2', 'Hazard 3']);
   assert.equal(database.prepare('SELECT count(*) n FROM viewer_mark_categories').get().n, 1, 'the suggestion is made once');
   assert.deepEqual(requests.map(([method]) => method), ['POST', 'POST', 'POST', 'POST']);
-  assert.match(panel.q('.viewer-mark-strip').textContent, /Hazard 3 added/);
+  assert.match(panel.q('.viewer-mark-undo').textContent, /Hazard 3 added/);
   assert.equal(panel.q('.viewer-mark-card').hidden, true);
-  await panel.q('.viewer-mark-strip').querySelectorAll('button').find(node => node.textContent === 'Undo').click();
+  await panel.q('.viewer-mark-undo').querySelectorAll('button').find(node => node.textContent === 'Undo').click();
   assert.deepEqual(panel.store.state.marks.map(mark => mark.name), ['Hazard', 'Hazard 2']);
   assert.equal(strip('Place several').getAttribute('aria-pressed'), 'true', 'still placing');
   await strip('Cancel').click();
@@ -122,7 +122,7 @@ test('Place several: a click that cannot be saved says why and keeps the mode; a
   await settle();
   assert.equal(panel.q('.viewer-mark-strip').hidden, true);
   assert.deepEqual(panel.store.state.marks, []);
-  assert.doesNotMatch(panel.q('.viewer-mark-strip').textContent, /added/);
+  assert.equal(panel.q('.viewer-mark-undo').hidden, true);
 });
 
 test('touch: the map moves under a fixed cross and Place here places; a tap only pans', async t => {

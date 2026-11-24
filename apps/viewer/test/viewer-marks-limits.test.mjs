@@ -219,16 +219,14 @@ test('when Recently deleted is full, a delete asks first and then deletes only t
   const content = () => database.prepare("SELECT count(*) n FROM viewer_marks WHERE deleted_at IS NOT NULL AND document_json<>'{}'").get().n;
   await panel.show('One more');
   await panel.card('Delete').click();
-  await panel.card('Tap again to delete').click();
   assert.ok(panel.store.find(mark.id), 'refused, nothing happened');
   assert.equal(content(), LIMITS.deleted, 'and nothing older was destroyed');
   assert.match(panel.text(), /Recently deleted is full/);
-  const undo = panel.store.state.undo.length;
   await panel.card('Delete for good').click();
   assert.equal(panel.store.find(mark.id), null);
   assert.equal(content(), LIMITS.deleted);
   assert.equal(database.prepare('SELECT document_json d FROM viewer_marks WHERE id=?').get(mark.id).d, '{}');
-  assert.equal(panel.store.state.undo.length, undo, 'it offers no undo it cannot do');
+  assert.ok(!panel.store.state.undo.some(entry => entry.id === mark.id || entry.before?.id === mark.id), 'it offers no undo it cannot do');
   // The offer does not carry to another mark.
   await panel.show('Kept');
   assert.equal(panel.card('Delete for good'), undefined);

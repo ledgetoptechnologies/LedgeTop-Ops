@@ -319,8 +319,7 @@ test('recently deleted lists the person\'s own marks and restores them in place'
   assert.match(section(panel).textContent, /None in the last 30 days/);
   await panel.show('Gone');
   await panel.card('Delete').click();
-  assert.equal(panel.store.state.marks.length, 1, 'asks twice');
-  await panel.card('Tap again to delete').click();
+  assert.equal(panel.store.state.marks.length, 0);
   assert.match(section(panel).textContent, /Gone/);
   await other.marks.setScope(scope('ops', 'staff-person'));
   await openSection(other);

@@ -83,7 +83,7 @@ export function placeMarkLabels(labels, pins, obstacles) {
   return shown;
 }
 
-export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onGroup = () => {}, obstacles = () => [], schedule = work => work(), onDraftMove = () => {}, onViewChange = () => {}, describe = mark => mark.name }) {
+export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onGroup = () => {}, onDelete = () => {}, obstacles = () => [], schedule = work => work(), onDraftMove = () => {}, onViewChange = () => {}, describe = mark => mark.name }) {
   let group = null, overlay = null, previewLine = null, ghost = null, pointer = null, attachedMap = null, last = null, far = false;
   // One tab stop for all pins: the last one focused, else the first.
   let tabStop = null, labelsDue = false, placingLabels = false;
@@ -177,6 +177,12 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onGroup = (
       event.stopPropagation();
       if (items.get(id)?.kind === 'group') onGroup(items.get(id).ids); else onSelect(id);
       return;
+    }
+    if (event.key === 'Delete') {
+      if (items.get(id)?.kind !== 'pin') return;
+      event.preventDefault();
+      event.stopPropagation();
+      return onDelete(id);
     }
     const step = STEPS[event.key];
     if (!step) return;
@@ -447,6 +453,11 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onGroup = (
     focusPin(id) {
       const item = items.get(id) || [...items.values()].find(row => row.kind === 'group' && row.ids.includes(id));
       item?.marker?.getElement()?.focus?.({ preventScroll: true });
+    },
+    // The pins' tab stop, when what had the focus is gone.
+    focusStop() {
+      const order = pinOrder(), id = order.includes(tabStop) ? tabStop : order[0];
+      items.get(id)?.marker.getElement()?.focus?.({ preventScroll: true });
     },
     // Marks whose points are this close to one on the screen, itself first.
     near(id, distance) {

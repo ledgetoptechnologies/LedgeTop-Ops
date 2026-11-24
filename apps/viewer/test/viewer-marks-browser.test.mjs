@@ -208,11 +208,14 @@ test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeou
   await waitFor("document.querySelectorAll('.viewer-mark-label').length === 0", 'labels off');
   assert.equal(await client.evaluate("document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item').length"), 3);
 
-  // Delete asks twice.
+  // Delete is at once, and the bar takes it back.
   await h.press('#viewer-marks-list .viewer-mark-list-item');
   await h.pressText('Delete');
-  assert.equal((await h.state()).length, 3);
-  await h.pressText('Tap again to delete');
+  await waitFor('marks.store.state.marks.length === 2', 'deleted once');
+  await client.evaluate("document.querySelector('.viewer-mark-undo button').click(), 0");
+  await waitFor('marks.store.state.marks.length === 3', 'taken back');
+  await h.press('#viewer-marks-list .viewer-mark-list-item');
+  await h.pressText('Delete');
   await waitFor('marks.store.state.marks.length === 2', 'deleted');
 
   // Phone width: the panel fits without horizontal scrolling.

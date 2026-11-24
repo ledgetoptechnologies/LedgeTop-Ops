@@ -52,6 +52,7 @@ export async function openMarksPanel(t, { rateLimited = () => false, maxRequestB
     return { dom, panel, sidebar, overlay, marks, leaflet, card, store: marks.store, q,
       // The panel's own Undo, not the one beside Place several.
       button: text => panel.querySelectorAll('button').filter(node => node.textContent === text).sort((a, b) => Number(Boolean(b.closest('.viewer-mark-list-head'))) - Number(Boolean(a.closest('.viewer-mark-list-head'))))[0],
+      bar: () => panel.querySelector('.viewer-mark-undo'),
       text: () => panel.textContent,
       values: () => [...panel.querySelectorAll('input'), ...panel.querySelectorAll('textarea')].map(node => node.value).join('\n'),
       async type(selector, value) { q(selector).value = value; await q(selector).fire('input'); },

@@ -44,9 +44,11 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   let deleteForGood = null;
   // Placing: the category for the next mark, whether several go in a row, and
   // whether the spot is the fixed cross (touch, keyboard) or the pointer.
-  let placeChoice = null, several = false, crosshair = false, placed = null;
+  let placeChoice = null, several = false, crosshair = false;
   // One go at placing, from + to Cancel: a late answer from an earlier one changes nothing in the next.
   let placement = null;
+  // The last change that can be undone, shown for a while after it was made.
+  let barEntry = null, barTimer = null, barHeld = false, barSeen = null;
 
   const store = createMarksStore({ request, newId, onChange: () => render() });
   const layer = createMarkMapLayer({ L, getMap,
@@ -59,6 +61,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       if (near.length > 1) openPick(near); else select(id, { focus: false });
     },
     onGroup: ids => openPick(ids),
+    onDelete: id => { if (mode === 'idle' && !unsaved()) return removeMark(id); },
     obstacles, schedule: work => (window.requestAnimationFrame ? window.requestAnimationFrame(work) : work()),
     onViewChange: () => placeCard(),
     describe: mark => [mark.name, categoryById(mark.categoryId)?.name, colorName(mark.color)].filter(Boolean).join(', '),
@@ -83,14 +86,15 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const severalButton = h(document, 'button', { type: 'button', text: 'Place several', 'aria-pressed': 'false' });
   const placeHere = h(document, 'button', { type: 'button', class: 'viewer-mark-primary', text: 'Place here' });
   const placeCancel = h(document, 'button', { type: 'button', text: 'Cancel' });
-  const placedText = h(document, 'span', { class: 'hint', role: 'status', 'aria-live': 'polite' });
-  const placedUndo = h(document, 'button', { type: 'button', text: 'Undo' });
-  const placedRow = h(document, 'div', { class: 'viewer-mark-row', hidden: true }, placedText, placedUndo);
+  const barText = h(document, 'span', { role: 'status', 'aria-live': 'polite' });
+  const barUndo = h(document, 'button', { type: 'button', text: 'Undo' });
+  const barClose = h(document, 'button', { type: 'button', class: 'viewer-mark-close', 'aria-label': 'Dismiss', text: '\u00d7' });
+  const undoBar = h(document, 'div', { class: 'viewer-mark-undo', role: 'group', 'aria-label': 'Last change', hidden: true }, barText, barUndo, barClose);
   const moveSave = h(document, 'button', { type: 'button', class: 'viewer-mark-primary', text: 'Save' });
   const moveCancel = h(document, 'button', { type: 'button', text: 'Cancel' });
   const moveRow = h(document, 'div', { class: 'viewer-mark-row viewer-mark-move' }, moveSave, moveCancel);
   const placeRow = h(document, 'div', { class: 'viewer-mark-row' }, placeHere, severalButton, placeCancel);
-  const strip = h(document, 'section', { class: 'viewer-mark-strip', role: 'group', 'aria-label': 'Add mark', hidden: true }, stripTitle, chips, placeRow, drawBar, moveRow, placedRow);
+  const strip = h(document, 'section', { class: 'viewer-mark-strip', role: 'group', 'aria-label': 'Add mark', hidden: true }, stripTitle, chips, placeRow, drawBar, moveRow);
   const cross = h(document, 'div', { class: 'viewer-mark-cross', 'aria-hidden': 'true', hidden: true });
 
   const coordInput = h(document, 'input', { name: 'coordinates', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Coordinates', placeholder: '43.0535, -87.9028 · DMS · UTM' });
@@ -214,7 +218,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const pick = h(document, 'section', { class: 'viewer-mark-card viewer-mark-pick', role: 'dialog', 'aria-label': 'Marks here', hidden: true },
     h(document, 'div', { class: 'viewer-mark-card-head' }, pickTitle, pickClose), pickList, pickZoom);
 
-  overlay.append(addButton, boxButton, hiddenButton, cross, strip, card, pick, box);
+  overlay.append(addButton, boxButton, hiddenButton, cross, strip, card, pick, box, undoBar);
 
   // ---- helpers --------------------------------------------------------------
   const canWrite = () => store.canWrite() && Boolean(view.map);
@@ -242,7 +246,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     mode = next;
     drawing = next === 'LineString' || next === 'Polygon' ? { type: next, positions: [], color: styleOf(placeChoice).color } : null;
     placement = next === 'idle' ? null : {};
-    if (next === 'idle') { crosshair = false; several = false; placed = null; }
+    if (next === 'idle') { crosshair = false; several = false; }
     const map = getMap();
     if (map?.doubleClickZoom) map.doubleClickZoom[drawing ? 'disable' : 'enable']();
     syncMapKeys();
@@ -304,7 +308,6 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         categoryId: category?.id || null, ...categoryStyle(category), elevationNavd88M: null, visibility: defaultVisibility() });
       if (!saved || !held.live()) return;
       reveal(saved);
-      if (placement === mine) placed = saved;
       render();
     } finally { mine.busy = false; }
   }
@@ -576,7 +579,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     cardFacts.replaceChildren(...facts.flatMap(([term, value]) => [h(document, 'dt', { text: term }), h(document, 'dd', { text: value })]));
     cardActions.hidden = !editable;
     for (const button of [editButton, moveButton, deleteButton]) { button.hidden = !editable; button.disabled = state.busy; }
-    deleteButton.textContent = deleteForGood === mark.id ? 'Delete for good' : armedDelete === mark.id ? 'Tap again to delete' : 'Delete';
+    deleteButton.textContent = deleteForGood === mark.id ? 'Delete for good' : 'Delete';
   }
 
   // Categories to place into, the last three used first.
@@ -591,6 +594,31 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const starters = visibility.startersHidden() ? [] : store.starters();
     return [...recent, ...own.filter(category => !recent.includes(category)), ...starters.map(starter => ({ ...starter, id: 'starter:' + starter.key })),
       { id: null, name: 'No category', ...DEFAULT_STYLE }];
+  }
+
+  // Every add, edit, move and delete offers Undo for a while; pointing at the bar or
+  // reaching it with the keyboard keeps it there.
+  const BAR_MS = 8000;
+  function clearTimer() { if (barTimer !== null) window.clearTimeout(barTimer); barTimer = null; }
+  function startTimer() {
+    clearTimer();
+    if (barEntry && !barHeld) barTimer = window.setTimeout(() => { barTimer = null; hideBar(); }, BAR_MS);
+  }
+  function hideBar() { clearTimer(); barEntry = null; barHeld = false; undoBar.hidden = true; barText.textContent = ''; }
+  function renderBar() {
+    const { state } = store, top = state.undo.at(-1) || null;
+    // By order, not identity: deleting a category rewrites entries without changing them.
+    if ((top?.at ?? 0) !== (barSeen?.at ?? 0)) {
+      // Newer than what was shown: a change was just made. Going back to an older one is not.
+      const added = top && top.at > (barSeen?.at ?? 0);
+      barSeen = top;
+      if (added) { barEntry = top; startTimer(); } else hideBar();
+    }
+    if (!state.ready || state.blocked) hideBar();
+    undoBar.hidden = !barEntry;
+    if (!barEntry) return;
+    barText.textContent = state.failure && state.message ? `${barEntry.done}. ${state.message}` : barEntry.done;
+    barUndo.disabled = state.busy;
   }
 
   function renderBox() {
@@ -630,9 +658,6 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     severalButton.setAttribute('aria-pressed', String(several));
     moveRow.hidden = !moving;
     moveSave.disabled = state.busy;
-    placedRow.hidden = !placing || !placed;
-    placedText.textContent = placed && placing ? placed.name + ' added' : '';
-    placedUndo.disabled = state.busy;
     stripTitle.textContent = moving ? `Move ${draft?.name || 'mark'}` : placing ? `Add ${TYPE_LABEL[mode].toLowerCase()}` : '';
     const focusedChip = [...chips.children].find(chip => chip === document.activeElement)?.dataset.chip;
     chips.replaceChildren(...(placing ? placeChoices().map(choice => {
@@ -706,6 +731,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     labelsSelect.value = labels;
     groupToggle.checked = grouping;
     renderBox();
+    renderBar();
     const lastUndo = state.undo.at(-1);
     undoButton.hidden = !lastUndo;
     undoButton.disabled = state.busy;
@@ -829,7 +855,6 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(severalButton, 'click', () => { several = !several; render(); });
   on(placeHere, 'click', () => { const centre = layer.centre(); if (centre && mode === 'Point' && !store.state.busy) return placeAt(centre); });
   on(placeCancel, 'click', () => { setMode('idle'); render(); addButton.focus?.(); });
-  on(placedUndo, 'click', async () => { placed = null; await store.undo(); render(); });
   on(editButton, 'click', () => beginEdit());
   on(moveButton, 'click', () => beginEdit({ move: true }));
   on(moveSave, 'click', () => saveDraft());
@@ -855,7 +880,14 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
   const ARROWS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
   on(window, 'keydown', event => {
-    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || (!view.map && !boxOpen)) return;
+    if (event.defaultPrevented || event.altKey || (!view.map && !boxOpen)) return;
+    if (event.ctrlKey || event.metaKey) {
+      // Ctrl+Z is the field's own while typing.
+      if (event.key.toLowerCase() !== 'z' || event.shiftKey || event.target?.closest?.('dialog[open]') || textHost(event.target)) return;
+      if (!store.state.undo.length || mode !== 'idle' || moving || !canWrite()) return;
+      event.preventDefault();
+      return undoLast({ focus: true });
+    }
     const typing = textHost(event.target);
     if (event.target?.closest?.('dialog[open]') || (typing && !overlay.contains?.(typing))) return;
     // An open photo is in front: Escape is for it.
@@ -988,21 +1020,29 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(searchInput, 'input', () => { search = searchInput.value.trim().toLowerCase(); render(); });
   on(deleteButton, 'click', async () => {
     const current = store.find(selectedId);
-    if (!current || !store.editable(current)) return;
-    if (deleteForGood !== current.id && armedDelete !== current.id) { armedDelete = current.id; render(); return; }
-    armedDelete = null;
+    if (current) await removeMark(current.id);
+  });
+  // No question for one mark: it can be undone at once and restored for a while. Only
+  // when that is not possible any more does it ask, and then says so.
+  async function removeMark(id) {
+    const current = store.find(id);
+    if (!current || !store.editable(current) || store.state.busy) return;
     const permanent = deleteForGood === current.id;
     deleteForGood = null;
     const held = store.hold();
     const removed = await store.remove(current, { permanent });
     if (!held.live()) return;
     // Recently deleted is full: this one can still go, but only for good and only if asked again.
-    if (!removed && store.state.failure === 'mark_deleted_full' && selectedId === current.id) deleteForGood = current.id;
+    if (!removed && store.state.failure === 'mark_deleted_full') {
+      if (selectedId !== current.id) select(current.id, { focus: false });
+      deleteForGood = current.id;
+      message(store.state.message || 'Recently deleted is full, so this one could not be brought back.');
+    }
     render();
     // Another card opened meanwhile stays.
-    if (removed && !draft && !picked && (!selectedId || selectedId === current.id)) closeCard();
+    if (removed && !draft && (!selectedId || selectedId === current.id)) { closeCard(); layer.focusStop(); }
     if (removed) await readDeleted();
-  });
+  }
   on(editor, 'submit', event => { event.preventDefault(); return saveDraft(); });
   async function saveDraft() {
     if (!draft) return;
@@ -1037,7 +1077,29 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   on(labelsSelect, 'change', () => { labels = labelsSelect.value; writePreference(window, LABELS_KEY, labels); render(); });
   on(groupToggle, 'change', () => { grouping = groupToggle.checked; writePreference(window, GROUP_KEY, grouping ? 'on' : 'off'); render(); });
-  on(undoButton, 'click', async () => { if (unsaved()) return; closeCard(); if (await store.undo()) await readDeleted(); });
+  async function undoLast({ focus = false } = {}) {
+    const entry = store.state.undo.at(-1);
+    if (!entry || unsaved() || store.state.busy) return false;
+    closeCard();
+    const ok = await store.undo();
+    if (ok) {
+      const back = store.find(entry.before?.id || entry.id);
+      if (back) reveal(back);
+      render();
+      if (focus) { if (back) layer.focusPin(back.id); else layer.focusStop(); }
+      await readDeleted();
+    } else render();
+    return ok;
+  }
+  on(undoButton, 'click', () => undoLast());
+  on(barUndo, 'click', () => undoLast({ focus: true }));
+  on(barClose, 'click', () => { hideBar(); layer.focusStop(); });
+  for (const type of ['mouseenter', 'focusin']) on(undoBar, type, () => { barHeld = true; clearTimer(); });
+  for (const type of ['mouseleave', 'focusout']) on(undoBar, type, event => {
+    if (event.relatedTarget && undoBar.contains?.(event.relatedTarget)) return;
+    barHeld = false;
+    startTimer();
+  });
 
   on(categoryForm, 'submit', async event => {
     event.preventDefault();
@@ -1112,9 +1174,11 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         // Nothing one person typed or picked stays in the panel for the next one.
         draft = null; selectedId = null; mode = 'idle'; drawing = null;
         more.open = false;
-        preview = null; placeChoice = null; several = false; crosshair = false; placed = null;
+        preview = null; placeChoice = null; several = false; crosshair = false;
         picker.close({ focus: false });
         boxOpen = false; picked = null;
+        hideBar();
+        barSeen = null;
         search = ''; tab = 'list'; armedDelete = null; categoryDraft = null; moving = false; deleteForGood = null;
         showCategoryIcon(DEFAULT_STYLE.icon);
         categoryColor.value = DEFAULT_STYLE.color;
@@ -1167,7 +1231,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       layer.dispose();
       listeners.abort();
       panel.hidden = true;
-      for (const element of [addButton, boxButton, hiddenButton, cross, strip, card, pick, box]) element.remove();
+      for (const element of [addButton, boxButton, hiddenButton, cross, strip, card, pick, box, undoBar]) element.remove();
+      clearTimer();
     },
   };
 }

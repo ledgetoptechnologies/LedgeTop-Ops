@@ -173,7 +173,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   const byName = list => [...list].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
   // Someone who begins with their own category is not offered the starters.
   const beganOwn = () => { if (state.starters.length === STARTER_CATEGORIES.length) state.starters = []; };
-  const remember = entry => { state.undo = [...state.undo, entry].slice(-UNDO_LIMIT); };
+  // at: the order changes were made in, so the newest can be told from one gone back to.
+  let changes = 0;
+  const remember = entry => { state.undo = [...state.undo, { ...entry, at: changes += 1 }].slice(-UNDO_LIMIT); };
 
   async function createRaw(mark, scope) {
     const saved = scope.temporary ? localMark(mark) : (await scope.api('', 'POST', body(mark))).mark;
@@ -259,7 +261,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       const ok = await run(async scope => {
         saved = await createRaw(mark, scope);
         scope.check();
-        remember({ type: 'create', id: saved.id, label: 'add ' + saved.name });
+        remember({ type: 'create', id: saved.id, label: 'add ' + saved.name, done: saved.name + ' added' });
       });
       return ok ? saved : null;
     },
@@ -270,7 +272,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       const ok = await run(async scope => {
         saved = await updateRaw(current, changes, scope);
         scope.check();
-        remember({ type: 'update', id: current.id, before: current, label: 'edit ' + current.name });
+        const moved = JSON.stringify(saved.geometry) !== JSON.stringify(current.geometry)
+          && ['name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility'].every(field => (saved[field] ?? null) === (current[field] ?? null));
+        remember({ type: 'update', id: current.id, before: current, label: 'edit ' + current.name, done: saved.name + (moved ? ' moved' : ' changed') });
       });
       return ok ? saved : null;
     },
@@ -281,7 +285,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       return run(async scope => {
         await removeRaw(current, scope, { permanent });
         scope.check();
-        if (!permanent) remember({ type: 'delete', before: current, label: 'delete ' + current.name });
+        // For good: nothing about it can be undone any more.
+        if (permanent) state.undo = state.undo.filter(entry => entry.id !== current.id && entry.before?.id !== current.id);
+        else remember({ type: 'delete', before: current, label: 'delete ' + current.name, done: current.name + ' deleted' });
       });
     },
 
@@ -300,7 +306,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       const ok = await run(async scope => {
         saved = await restoreRaw(deleted, scope);
         scope.check();
-        remember({ type: 'create', id: saved.id, label: 'restore ' + saved.name });
+        remember({ type: 'create', id: saved.id, label: 'restore ' + saved.name, done: saved.name + ' restored' });
       });
       return ok ? saved : null;
     },
@@ -428,7 +434,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           imported = saved.marks;
         }
         count = imported.length;
-        remember({ type: 'import', marks: Object.freeze(imported.map(({ id, revision }) => Object.freeze({ id, revision }))), label: `import ${count} marks` });
+        remember({ type: 'import', marks: Object.freeze(imported.map(({ id, revision }) => Object.freeze({ id, revision }))), label: `import ${count} marks`, done: `${count} mark${count === 1 ? '' : 's'} imported` });
       });
       return ok ? count : 0;
     },
