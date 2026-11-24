@@ -3,6 +3,7 @@ const crypto=require('node:crypto');
 const path=require('node:path');
 const {GcpSourceOriginals,MAX_GCP_SOURCE_BYTES}=require('./gcpSourceOriginals');
 const {readIndexedOriginal}=require('./gcpDatasetRetention');
+const {isUploadFileId}=require('./uploadFileId');
 const isSource=file=>file?.processingRole==='gcp_source'||/\.csv$/i.test(file?.relativePath||'');
 const fail=code=>{throw Object.assign(new Error(code),{code});};
 const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
@@ -11,7 +12,7 @@ const hash=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
 // never completes, before dataset_files exists. Never parse or normalize here.
 function retainUploadedGcpOriginal(processing,storage,upload,file,rawLocation=null){
   if(!isSource(file))return null;
-  if(!/^[A-Za-z0-9_-]{1,128}$/.test(upload?.id||'')||!/^[A-Za-z0-9_-]{1,128}$/.test(file.id||'')||
+  if(!/^[A-Za-z0-9_-]{1,128}$/.test(upload?.id||'')||typeof file.id!=='string'||
     !Number.isSafeInteger(file.byteSize)||file.byteSize<0||
     !/^[a-f0-9]{64}$/.test(file.sha256||'')||!Number.isSafeInteger(upload.chunkSize)||upload.chunkSize<=0)
     fail('gcp_original_upload_invalid');
@@ -34,6 +35,10 @@ function retainUploadedGcpOriginal(processing,storage,upload,file,rawLocation=nu
       {byte_size:file.byteSize,sha256:file.sha256,relative_path:file.relativePath});}
     catch(error){if(['ENOENT','ENOTDIR'].includes(error.code))return null;throw error;}
   }
+  // A session accepted before the shared contract may carry an id that is not
+  // a safe folder name. Never read chunks through it: keep the verified
+  // assembled file, or report it incomplete so its cache and rows stay.
+  if(!isUploadFileId(file.id)){const bytes=assembledBytes();return bytes?retain(bytes):null;}
   const chunks=processing.listChunks(upload.id,file.id),expected=Math.ceil(file.byteSize/upload.chunkSize)||1;
   if(chunks.length<expected){const bytes=assembledBytes();return bytes?retain(bytes):null;}
   if(chunks.length!==expected||chunks.some((row,index)=>row.chunk_index!==index))fail('gcp_original_upload_chunks_invalid');
