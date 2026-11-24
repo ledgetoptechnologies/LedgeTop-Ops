@@ -211,6 +211,92 @@ test('with grouping off, two pins under one finger ask instead of guessing: 13 p
   }
 });
 
+test('the open mark is not among the pins asked about, and the list is by name', async t => {
+  const { panel, add, pick, picks, key } = await open(t);
+  for (const [name, x] of [['b', 0], ['a', 6], ['Open', 3], ['Draft', 4], ['Bee', 2], ['a', 8]]) await add(name, x);
+  panel.q('[name=group]').checked = false;
+  await panel.q('[name=group]').fire('change');
+  const pin = name => panel.leaflet.pins().find(item => item.label.text === name);
+  const names = () => picks().map(text => text.replace(/No category$/, ''));
+  for (const start of ['card', 'editor']) {
+    await panel.show('Open');
+    if (start === 'editor') await panel.card('Edit').click();
+    pin('b').click();
+    assert.deepEqual(names(), ['a', 'a', 'b', 'Bee', 'Draft'], start);
+    assert.equal(panel.q('.viewer-mark-card').hidden, true);
+    await key('Escape');
+    assert.ok(focused(panel, pin('b').getElement()), 'back to the pin that was asked about');
+  }
+  // The same two, always in the same order.
+  const twins = panel.store.state.marks.filter(item => item.name === 'a').map(item => item.id).sort();
+  for (const order of [twins, [...twins].reverse()]) {
+    panel.store.state.marks.sort((x, y) => order.indexOf(x.id) - order.indexOf(y.id));
+    pin('b').click();
+    await pick().querySelector('button.viewer-mark-list-item').click();
+    assert.equal(panel.leaflet.pins().find(item => item.options.icon.className.includes('selected')).getElement().getAttribute('aria-label').split(',')[0], 'a');
+    await panel.card('Edit').click();
+    await panel.type('[name=note]', 'first');
+    await panel.save();
+    await panel.q('[aria-label=Close]').click();
+  }
+  assert.deepEqual(panel.store.state.marks.filter(item => item.note === 'first').map(item => item.id), [twins[0]]);
+  // With only the open one near, there is nothing to ask.
+  const alone = await open(t);
+  await alone.add('One', 0);
+  await alone.add('Two', 5);
+  alone.panel.q('[name=group]').checked = false;
+  await alone.panel.q('[name=group]').fire('change');
+  await alone.panel.show('One');
+  alone.panel.leaflet.pins().find(item => item.label.text === 'Two').click();
+  assert.equal(alone.pick().hidden, true);
+  assert.match(alone.panel.q('.viewer-mark-view').textContent, /Two/);
+});
+
+test('a plate lists by name whatever the order on the map', async t => {
+  const { panel, add, picks } = await open(t);
+  for (const [name, x] of [['Two', 0], ['one', 5], ['Three', 10]]) await add(name, x);
+  await panel.leaflet.groups()[0].click();
+  assert.deepEqual(picks().map(text => text.replace(/No category$/, '')), ['one', 'Three', 'Two']);
+});
+
+test('turning a wide screen narrow leaves one thing open and loses nothing', async t => {
+  const { panel, add, box, pick, key } = await open(t);
+  await add('One', 0);
+  await add('Two', 5);
+  await add('Far', 400);
+  const card = () => panel.q('.viewer-mark-card'), turn = async work => {
+    panel.leaflet.setSize(1200, 800);
+    if (box().hidden) await key('l');
+    await work();
+    assert.equal(box().hidden, false, 'beside it while there is room');
+    panel.leaflet.setSize(390, 700);
+    assert.equal(box().hidden, true);
+  };
+  await turn(() => panel.show('Far'));
+  assert.equal(card().hidden, false);
+  assert.ok(focused(panel, panel.card('Edit')) || !box().contains(panel.dom.document.activeElement));
+  await key('Escape');
+  await turn(() => panel.leaflet.groups()[0].click());
+  assert.equal(pick().hidden, false);
+  await key('Escape');
+  await turn(async () => { await panel.open('Far'); await panel.type('[name=note]', 'Typing'); panel.q('[name=markSearch]').focus(); });
+  assert.deepEqual([card().hidden, panel.q('[name=note]').value], [false, 'Typing']);
+  assert.ok(card().contains(panel.dom.document.activeElement), 'focus does not stay in what closed');
+  await panel.card('Cancel').click();
+  await panel.q('[aria-label=Close]').click();
+  await turn(() => panel.q('[data-add=LineString]').click());
+  panel.marks.mapClick({ lat: 43, lng: -87 });
+  panel.leaflet.setSize(1200, 800);
+  panel.leaflet.setSize(390, 700);
+  assert.match(panel.q('.viewer-mark-strip').textContent, /1 point/);
+  panel.leaflet.setSize(1200, 800);
+  await key('Escape');
+  // The box alone stays.
+  await key('l');
+  panel.leaflet.setSize(390, 700);
+  assert.equal(box().hidden, false);
+});
+
 test('one Marks pop-up: from the map, the sidebar or L; it holds the list, categories, deleted, coordinates and import', async t => {
   const { panel, add, box, key } = await open(t);
   await add('One');
@@ -311,4 +397,26 @@ test('the next person starts with everything closed and nothing of the last one'
   }
   panel.marks.dispose();
   assert.deepEqual(panel.overlay.children, []);
+});
+
+test('a delete that answers late leaves a list opened meanwhile alone', async t => {
+  let held = null;
+  const reached = Promise.withResolvers(), go = Promise.withResolvers();
+  const { panel, add, pick } = await open(t, { request: async (path, init) => {
+    if (held && init.method === 'DELETE') { reached.resolve(); await go.promise; }
+    return fetch(path, { ...init, signal: undefined });
+  } });
+  for (const [name, x] of [['One', 0], ['Two', 5], ['Far', 400]]) await add(name, x);
+  await panel.show('Far');
+  held = true;
+  let going = panel.card('Delete').click();
+  const again = panel.card('Tap again to delete');
+  if (again) going = again.click();
+  await reached.promise;
+  panel.leaflet.groups()[0].click();
+  assert.equal(pick().hidden, false);
+  go.resolve();
+  await going;
+  assert.equal(panel.store.state.marks.length, 2);
+  assert.equal(pick().hidden, false);
 });

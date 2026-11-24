@@ -53,7 +53,9 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     onSelect: (id, { pointer = false } = {}) => {
       if (draft && draft.id === id) { nameInput.focus?.(); return; }
       // Two pins under one finger: ask rather than guess. Groups already do.
-      const near = pointer && !grouping && mode === 'idle' && selectedId !== id ? layer.near(id, coarse() ? 24 : 13) : [];
+      // The open mark is not asked about: it is already open.
+      const near = pointer && !grouping && mode === 'idle' && selectedId !== id
+        ? layer.near(id, coarse() ? 24 : 13).filter(other => other !== selectedId && other !== draft?.id) : [];
       if (near.length > 1) openPick(near); else select(id, { focus: false });
     },
     onGroup: ids => openPick(ids),
@@ -352,6 +354,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
 
   // ---- several marks on one spot, and the Marks pop-up ------------------------
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || (a.id < b.id ? -1 : 1);
   function openPick(ids) {
     if (mode !== 'idle' || unsaved()) return;
     closeCard();
@@ -429,7 +432,19 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     element.style.left = `${Math.max(edge, right ? point[0] + gap : point[0] - gap - width)}px`;
     element.style.top = `${Math.max(edge, Math.min(point[1] - 60, size.y - height - edge))}px`;
   }
+  // A screen that becomes narrow has room for one: what is being worked on the map stays.
+  function oneSheet() {
+    if (!boxOpen || !narrow() || (card.hidden && pick.hidden && strip.hidden)) return;
+    const inside = box.contains(document.activeElement);
+    boxOpen = false;
+    render();
+    if (!inside) return;
+    const next = !card.hidden ? draft ? nameInput : editButton.hidden ? closeButton : editButton
+      : !pick.hidden ? pickList.querySelector('button') || pickClose : strip.querySelector('button');
+    next?.focus?.({ preventScroll: true });
+  }
   function placeCard() {
+    oneSheet();
     if (!card.hidden) placeBeside(card, draft?.geometry || store.find(selectedId)?.geometry, Boolean(draft));
     if (!pick.hidden) placeBeside(pick, store.find(picked[0])?.geometry, false);
     box.classList.toggle('sheet', narrow());
@@ -587,7 +602,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     for (const button of [boxButton, openBox]) button.setAttribute('aria-expanded', String(boxOpen));
     boxMessage.textContent = boxOpen ? state.message : '';
     boxMessage.hidden = !boxMessage.textContent;
-    const here = (picked || []).map(id => store.find(id)).filter(mark => mark && visibility.shows(mark));
+    const here = (picked || []).map(id => store.find(id)).filter(mark => mark && visibility.shows(mark)).sort(byName);
     if (picked && here.length < 2) picked = null;
     pick.hidden = !picked || !view.map || !ready;
     pickTitle.textContent = pick.hidden ? '' : `${here.length} marks here`;
@@ -985,7 +1000,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (!removed && store.state.failure === 'mark_deleted_full' && selectedId === current.id) deleteForGood = current.id;
     render();
     // Another card opened meanwhile stays.
-    if (removed && !draft && (!selectedId || selectedId === current.id)) closeCard();
+    if (removed && !draft && !picked && (!selectedId || selectedId === current.id)) closeCard();
     if (removed) await readDeleted();
   });
   on(editor, 'submit', event => { event.preventDefault(); return saveDraft(); });
