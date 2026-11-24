@@ -656,7 +656,7 @@ test('an item whose permanent deletion an earlier version began: staff are told,
     const response = await f.request(method, route, body);
     assert.equal(response.status, 409, `${method} ${route}`);
     assert.equal(response.body.code, 'purge_started');
-    assert.match(response.body.error, /^Permanent deletion of this Recycle Bin item has already started/);
+    assert.match(response.body.error, /^Permanent deletion of this Recycle Bin item started before it was complete/);
   }
   purgeExpiredTrash(f.processing, f.storage);
   assert.deepEqual(now(), before);
@@ -692,4 +692,425 @@ test('a task whose current output was permanently deleted from the bin comes bac
   assert.equal((await f.restore(item)).status, 200);
   assert.deepEqual([f.state(item).task, f.processing.getTask(item.task.id).activeAttemptId], ['draft', null]);
   assert.equal(f.processing.getModelOutput(item.older.versionId).status, 'ready');
+});
+
+// ---- Maintenance (a separate process) and crashes ----
+
+const lifecycle = require('../server/containerLifecycle');
+// What the worker has: its own connection to the same database and storage.
+function worker(t, f) {
+  const database = openDatabase(path.join(f.root, 'viewer.sqlite')), storage = new StorageManager(f.config);
+  storage.initialize();
+  t.after(() => database.close());
+  const processing = new ProcessingRepository(database);
+  return { processing, storage, maintain: () => [reconcileStorageMutations(processing, storage), purgeExpiredTrash(processing, storage)] };
+}
+// Every file an item has, wherever it is now: in place or in the bin.
+function contents(f) {
+  const found = new Set();
+  for (const root of [f.config.datasetsMount, f.config.modelsMount, f.config.trashMount])
+    for (const name of fs.readdirSync(root, { recursive: true })) { const file = path.join(root, String(name)); if (fs.statSync(file).isFile()) found.add(`${path.basename(file)}:${fs.readFileSync(file, 'utf8')}`); }
+  return found;
+}
+const filesOf = (f, item, before) => before.files.filter(Boolean).flatMap((tree) => Object.entries(tree).map(([name, body]) => `${name}:${body}`));
+function assertNothingLost(f, item, files, note) {
+  const now = contents(f);
+  for (const file of files) assert.ok(now.has(file), `${note}: ${file}`);
+  assert.equal(f.database.prepare('SELECT purged_at FROM processing_tasks WHERE id=?').get(item.task.id).purged_at, null, `${note}: task record`);
+  assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_assets a JOIN model_versions v ON v.id=a.version_id WHERE v.model_id=?').get(item.modelId).n % 3, 0, `${note}: asset records`);
+  assert.ok(f.database.prepare('SELECT COUNT(*) n FROM model_assets a JOIN model_versions v ON v.id=a.version_id WHERE v.model_id=?').get(item.modelId).n >= 3, `${note}: asset records`);
+}
+// Runs fn as a process that dies at one step: just before or just after its
+// n-th step that can change the database or the files. Nothing runs after that.
+const CHANGES = /^(trash|retrash|renew|archive|restore|begin|complete|mark|move|add|refresh|claim|finish|fail|purge|remove)/;
+class Crash extends Error {}
+function crashAt(f, at, fn) {
+  let calls = 0, dead = false;
+  const wrap = (target) => new Proxy(target, { get(object, key) {
+    const value = Reflect.get(object, key);
+    if (typeof value !== 'function') return value;
+    return (...args) => {
+      if (dead) throw new Crash();
+      if (!CHANGES.test(key)) return value.apply(object, args);
+      calls += 1;
+      if (at === calls * 2 - 1) { dead = true; throw new Crash(); }
+      const result = value.apply(object, args);
+      if (at === calls * 2) { dead = true; throw new Crash(); }
+      return result;
+    };
+  } });
+  try { fn(wrap(f.processing), wrap(f.storage)); } catch (error) { if (!dead) throw error; }
+  if (f.database.isTransaction) f.database.exec('ROLLBACK');
+  return dead;
+}
+
+test('maintenance that read an item as expired does not purge it once it was deleted again', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f);
+  const deleteNow = (item) => lifecycle.trashTaskTree(f.processing, f.storage, item.task.id, 'ops:test');
+  for (const kind of ['half deleted', 'half deleted and reprocessed', 'deleted long ago', 'project deleted long ago']) {
+    for (const when of ['expiredTrash', 'getTrash', 'beginContainerPurge']) {
+      const note = `${kind}, ${when}`, half = kind.startsWith('half') ? await leftByEarlierVersion(f, project, note) : null;
+      const item = half ? half.item : await f.publishedTask(project, note), current = kind.endsWith('reprocessed') ? { ...item, ...f.output(f.processing.getTask(item.task.id), 'Reprocessed'), older: item } : item;
+      const owner = kind.startsWith('project') ? f.processing.createProject({ displayName: note }) : null;
+      let target = current;
+      if (owner) target = await f.publishedTask(owner, note);
+      const before = half ? half.before : f.snapshot(target), files = [...filesOf(f, target, before), ...(target === item ? [] : filesOf(f, target, f.snapshot(target)))];
+      if (kind === 'deleted long ago') assert.equal((await f.remove(target)).status, 200);
+      if (owner) lifecycle.trashProjectTree(f.processing, f.storage, owner.id, 'ops:test');
+      const trash = owner ? f.processing.activeTrashForEntity('project', owner.id) : f.bin(target);
+      age(f, trash, 45);
+      // The delete arrives in the middle of the worker's pass.
+      const original = w.processing[when].bind(w.processing);
+      let done = false;
+      w.processing[when] = (...args) => {
+        const listed = when === 'expiredTrash' ? original(...args) : null;
+        if (!done && (when !== 'getTrash' || args[0] === trash.id)) { done = true; if (owner) lifecycle.trashProjectTree(f.processing, f.storage, owner.id, 'ops:test'); else deleteNow(target); }
+        return listed || original(...args);
+      };
+      w.maintain();
+      delete w.processing[when];
+      if (!done) { assert.equal(when, 'beginContainerPurge', note); if (owner) lifecycle.trashProjectTree(f.processing, f.storage, owner.id, 'ops:test'); else deleteNow(target); }
+      assert.equal(f.processing.getTrash(trash.id).purgeStartedAt ?? null, null, note);
+      assertFullWindow(f, trash, note);
+      w.maintain();
+      assertNothingLost(f, target, files, note);
+      const restored = await f.request('POST', `/api/v1/storage/trash/${trash.id}/restore`);
+      assert.equal(restored.status, 200, `${note} ${JSON.stringify(restored.body)}`);
+      assert.equal(f.state(target).task, 'ready_for_review', note);
+      await f.publishAgain(target);
+    }
+  }
+});
+
+test('a delete, or a delete again, that dies at any step loses nothing to the next maintenance, and can be finished', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f);
+  for (const kind of ['republished', 'half deleted', 'half deleted and reprocessed']) {
+    let at = 0, died = true;
+    while (died) {
+      at += 1;
+      const note = `${kind} step ${at}`;
+      let item, before;
+      if (kind === 'republished') { item = await publishNewer(f, await f.publishedTask(project, note)); before = f.snapshot(item); } else {
+        const left = await republishedLeftByEarlierVersion(f, project, note);
+        ({ item, before } = left);
+        if (kind.endsWith('reprocessed')) {
+          const newest = { ...item, ...f.output(f.processing.getTask(item.task.id), 'Reprocessed'), older: item };
+          before = { ...before, files: [...before.files, f.snapshot(newest).files[1]] };
+          item = newest;
+        }
+        age(f, left.trash, 45);
+      }
+      const files = filesOf(f, item, before);
+      died = crashAt(f, at, (processing, storage) => lifecycle.trashTaskTree(processing, storage, item.task.id, 'ops:test'));
+      w.maintain();
+      w.maintain();
+      assertNothingLost(f, item, files, note);
+      const removed = await f.remove(item);
+      assert.equal(removed.status, 200, `${note} ${JSON.stringify(removed.body)}`);
+      assertFullWindow(f, f.bin(item), note);
+      w.maintain();
+      const restored = await f.restore(item);
+      assert.equal(restored.status, 200, `${note} ${JSON.stringify(restored.body)}`);
+      assertNothingLost(f, item, files, note);
+      assert.deepEqual(f.state(item), kind.endsWith('reprocessed') ? { ...f.IN_REVIEW, model: 'ready' } : f.IN_REVIEW, note);
+    }
+    assert.ok(at > 10, `${kind}: ${at} steps`);
+  }
+});
+
+test('a project delete that dies at any step loses nothing to the next maintenance, and can be finished', async (t) => {
+  const f = await fixture(t), w = worker(t, f);
+  for (const halfDeleted of [false, true]) {
+    let at = 0, died = true;
+    while (died) {
+      at += 1;
+      const note = `${halfDeleted} step ${at}`, project = f.processing.createProject({ displayName: `Project ${note}` });
+      const left = halfDeleted ? await leftByEarlierVersion(f, project, note) : null, item = left ? left.item : await f.publishedTask(project, note), before = left ? left.before : f.snapshot(item), files = filesOf(f, item, before);
+      if (left) age(f, left.trash, 45);
+      died = crashAt(f, at, (processing, storage) => lifecycle.trashProjectTree(processing, storage, project.id, 'ops:test'));
+      w.maintain();
+      w.maintain();
+      assertNothingLost(f, item, files, note);
+      const removed = await f.request('DELETE', `/api/v1/projects/${project.id}`);
+      assert.equal(removed.status, 200, `${note} ${JSON.stringify(removed.body)}`);
+      w.maintain();
+      assert.equal((await f.request('POST', `/api/v1/storage/trash/${removed.body.trash.id}/restore`)).status, 200, note);
+      assert.deepEqual(f.snapshot(item), before, note);
+      assert.deepEqual(f.state(item), f.IN_REVIEW, note);
+    }
+    assert.ok(at > 10, `${at} steps`);
+  }
+});
+
+test('a restore of an expired item that dies at any step loses nothing to the next maintenance, and can be finished', async (t) => {
+  const f = await fixture(t), w = worker(t, f);
+  for (const whole of [false, true]) {
+    let at = 0, died = true, started = 0;
+    while (died) {
+      at += 1;
+      const note = `${whole} step ${at}`, project = f.processing.createProject({ displayName: `Project ${note}` }), item = await publishNewer(f, await f.publishedTask(project, note)), before = f.snapshot(item), files = filesOf(f, item, before);
+      const trash = whole ? (await f.request('DELETE', `/api/v1/projects/${project.id}`)).body.trash : (await f.remove(item)).body.trash;
+      age(f, trash, 45);
+      died = crashAt(f, at, (processing, storage) => lifecycle.restoreContainerTrash(processing, storage, trash.id, 'ops:test'));
+      // Until the restore has begun, the item is simply past its date.
+      if (Date.parse(f.processing.getTrash(trash.id).purgeAfter) < Date.now()) { assert.equal(started, 0, note); continue; }
+      started += 1;
+      w.maintain();
+      // A month later nobody has looked at it: what was restored still stays.
+      const live = f.processing.getTrash(trash.id);
+      if (!live.permanentlyDeletedAt && f.processing.listContainerTrashMembers(trash.id).some((member) => member.permanentlyDeletedAt)) age(f, trash, 45);
+      w.maintain();
+      assertNothingLost(f, item, files, note);
+      if (!live.permanentlyDeletedAt) {
+        const restored = await f.request('POST', `/api/v1/storage/trash/${trash.id}/restore`);
+        assert.equal(restored.status, 200, `${note} ${JSON.stringify(restored.body)}`);
+      }
+      assert.deepEqual(f.snapshot(item), before, note);
+      assert.deepEqual(f.state(item), f.IN_REVIEW, note);
+    }
+    assert.ok(started > 10, `${started} steps`);
+  }
+});
+
+test('an expired purge that dies at any step is finished by later maintenance, and nothing is restorable in between', async (t) => {
+  const f = await fixture(t), w = worker(t, f);
+  for (const whole of [false, true]) {
+    let at = 0, died = true;
+    while (died) {
+      at += 1;
+      const note = `${whole} step ${at}`, project = f.processing.createProject({ displayName: `Project ${note}` }), item = await publishNewer(f, await f.publishedTask(project, note)), files = filesOf(f, item, f.snapshot(item));
+      const trash = whole ? (await f.request('DELETE', `/api/v1/projects/${project.id}`)).body.trash : (await f.remove(item)).body.trash;
+      age(f, trash, 45);
+      died = crashAt(f, at, (processing, storage) => lifecycle.purgeContainerTrash(processing, storage, trash.id, 'storage-maintenance', { expired: true }));
+      if (f.processing.getTrash(trash.id).purgeStartedAt && !f.processing.getTrash(trash.id).permanentlyDeletedAt) {
+        assert.equal((await f.request('POST', `/api/v1/storage/trash/${trash.id}/restore`)).body.code, 'purge_started', note);
+        assert.equal((await f.request('DELETE', whole ? `/api/v1/projects/${project.id}` : `/api/v1/tasks/${item.task.id}`)).status, 409, note);
+      }
+      w.maintain();
+      w.maintain();
+      assert.ok(f.processing.getTrash(trash.id).permanentlyDeletedAt, note);
+      const now = contents(f);
+      for (const file of files) assert.equal(now.has(file), false, `${note}: ${file}`);
+    }
+    assert.ok(at > 10, `${at} steps`);
+  }
+});
+
+test('a real second process that keeps purging never removes a task that is being deleted and restored', { timeout: 120_000 }, async (t) => {
+  const { spawn } = require('node:child_process');
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' });
+  const script = `const {openDatabase}=require('./server/database'),{ProcessingRepository}=require('./server/processingRepository'),{StorageManager}=require('./server/storageManager'),{purgeExpiredTrash,reconcileStorageMutations}=require('./server/storageLifecycle');
+    const [databasePath,config]=JSON.parse(process.argv[1]),processing=new ProcessingRepository(openDatabase(databasePath)),storage=new StorageManager(config);storage.initialize();
+    process.stdout.write('ready\\n');let passes=0;process.on('SIGTERM',()=>{process.stdout.write('passes '+passes+'\\n',()=>process.exit(0));});
+    (function pass(){try{reconcileStorageMutations(processing,storage);purgeExpiredTrash(processing,storage);passes+=1;}catch(error){if(!/locked|busy/i.test(error.message))process.stdout.write('error '+error.stack+'\\n');}setImmediate(pass);})();`;
+  const child = spawn(process.execPath, ['-e', script, JSON.stringify([path.join(f.root, 'viewer.sqlite'), f.config])], { cwd: path.join(__dirname, '..'), stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => child.kill('SIGKILL'));
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk; });
+  await new Promise((resolve) => { child.stdout.once('data', resolve); });
+  for (let round = 0; round < 25; round += 1) {
+    const note = `round ${round}`, { item, before, trash } = await republishedLeftByEarlierVersion(f, project, note), files = filesOf(f, item, before);
+    age(f, trash, 45);
+    const removed = await f.remove(item);
+    assert.equal(removed.status, 200, `${note} ${JSON.stringify(removed.body)}`);
+    await new Promise((resolve) => { setTimeout(resolve, round % 5); });
+    assertNothingLost(f, item, files, note);
+    assert.equal((await f.restore(item)).status, 200, note);
+    assert.deepEqual(f.snapshot(item), before, note);
+  }
+  child.kill('SIGTERM');
+  await new Promise((resolve) => { child.once('close', resolve); });
+  assert.doesNotMatch(output, /error/);
+  assert.ok(Number(/passes (\d+)/.exec(output)?.[1]) > 25, output);
+});
+
+test('an output whose move finished after its delete had stopped is kept with its task, not removed on its own date', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f), moveExact = f.storage.moveExact;
+  for (const inProject of [false, true]) {
+    const owner = inProject ? f.processing.createProject({ displayName: 'Deleted project' }) : project, item = await publishNewer(f, await f.publishedTask(owner, `Orphan ${inProject}`)), before = f.snapshot(item);
+    let failed = false;
+    f.storage.moveExact = function move(source, ...rest) {
+      if (!failed && source === 'models') { failed = true; throw Object.assign(new Error('synthetic I/O error'), { code: 'EIO' }); }
+      return moveExact.call(this, source, ...rest);
+    };
+    const remove = () => f.request('DELETE', inProject ? `/api/v1/projects/${owner.id}` : `/api/v1/tasks/${item.task.id}`);
+    assert.equal((await remove()).status, 409);
+    f.storage.moveExact = moveExact;
+    reconcileStorageMutations(f.processing, f.storage);
+    const orphan = f.processing.activeTrashForEntity('output', item.older.versionId), root = f.processing.activeTrashForEntity(inProject ? 'project' : 'task', inProject ? owner.id : item.task.id);
+    assert.ok(orphan);
+    // Its own date comes first; its task can still be restored.
+    f.database.prepare("UPDATE storage_trash SET purge_after='2020-01-01T00:00:00.000Z' WHERE id=?").run(orphan.id);
+    assert.deepEqual(purgeExpiredTrash(w.processing, w.storage), [{ trashId: orphan.id, status: 'transferred', containerTrashId: root.id }]);
+    assert.equal(f.processing.getTrash(orphan.id).purgeAfter, f.processing.getTrash(root.id).purgeAfter);
+    assert.deepEqual(purgeExpiredTrash(w.processing, w.storage), []);
+    if (inProject) assert.equal((await remove()).status, 200);
+    assert.equal((await f.request('POST', `/api/v1/storage/trash/${root.id}/restore`)).status, 200);
+    assert.deepEqual(f.snapshot(item), before);
+  }
+});
+
+test('maintenance that read an output as expired on its own does not remove it once its task was deleted', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f), item = await publishNewer(f, await f.publishedTask(project)), before = f.snapshot(item);
+  // Deleted on its own, past its date, when the project is deleted.
+  assert.equal((await f.request('DELETE', `/api/v1/processing/outputs/${item.older.versionId}`)).status, 200);
+  const own = f.processing.activeTrashForEntity('output', item.older.versionId);
+  assert.equal((await f.remove(item)).status, 200);
+  f.database.prepare("UPDATE storage_trash SET purge_after='2020-01-01T00:00:00.000Z' WHERE id=?").run(own.id);
+  for (const step of ['expiredTrash', 'beginPurgeMutation']) {
+    const original = w.processing[step].bind(w.processing);
+    let done = false;
+    w.processing[step] = (...args) => {
+      const listed = step === 'expiredTrash' ? original(...args) : null;
+      if (!done) { done = true; assert.ok(f.processing.addContainerTrashMember(f.bin(item).id, own.id)); }
+      return listed || original(...args);
+    };
+    w.maintain();
+    delete w.processing[step];
+    assert.ok(done, step);
+    assert.equal(f.processing.getTrash(own.id).permanentlyDeletedAt, null, step);
+    f.database.prepare('DELETE FROM container_trash_members WHERE member_trash_id=?').run(own.id);
+    f.database.prepare("UPDATE storage_trash SET purge_after='2020-01-01T00:00:00.000Z' WHERE id=?").run(own.id);
+  }
+  // An item already being removed does not join, and nothing joins a purging one.
+  const mutation = f.processing.beginPurgeMutation(own.id, 'ops:test');
+  assert.ok(mutation);
+  assert.equal(f.processing.addContainerTrashMember(f.bin(item).id, own.id), null);
+  f.database.prepare("UPDATE storage_mutations SET status='failed' WHERE id=?").run(mutation.id);
+  f.database.prepare("UPDATE storage_trash SET purge_started_at='2026-01-01T00:00:00.000Z' WHERE id=?").run(f.bin(item).id);
+  assert.equal(f.processing.addContainerTrashMember(f.bin(item).id, own.id), null);
+  f.database.prepare('UPDATE storage_trash SET purge_started_at=NULL WHERE id=?').run(f.bin(item).id);
+  assert.equal((await f.restore(item)).status, 200);
+  assert.deepEqual([f.snapshot(item).files[1], f.snapshot(item).files[0]], [before.files[1], before.files[0]]);
+});
+
+test('archiving, moving and other changes are not a way round the Recycle Bin', async (t) => {
+  const f = await fixture(t), w = worker(t, f), other = f.processing.createProject({ displayName: 'Other' });
+  const changes = {
+    'archive task': (item) => f.request('POST', `/api/v1/tasks/${item.task.id}/archive`),
+    'archive project': (item) => f.request('POST', `/api/v1/projects/${item.task.projectId}/archive`),
+    'move task': (item) => { const task = f.processing.getTask(item.task.id); return f.request('PATCH', `/api/v1/tasks/${item.task.id}/project`, { projectId: other.id, folderId: null, expectedProjectId: task.projectId, expectedFolderId: null, expectedFolderRevision: task.folderRevision || 0, confirmSharingChange: true }); },
+    'delete dataset': (item) => f.request('DELETE', `/api/v1/datasets/${item.dataset.id}`),
+    'archive dataset': (item) => f.request('POST', `/api/v1/datasets/${item.dataset.id}/archive`),
+    'move dataset': (item) => f.request('PATCH', `/api/v1/datasets/${item.dataset.id}`, { projectId: other.id }),
+    'archive new output': (item) => f.request('POST', `/api/v1/processing/outputs/${item.versionId}/archive`),
+    'delete new output': (item) => f.request('DELETE', `/api/v1/processing/outputs/${item.versionId}`),
+    'cancel new attempt': (item) => f.request('POST', `/api/v1/attempts/${item.attempt.id}/cancel`),
+    'empty bin item': (item) => f.request('DELETE', `/api/v1/storage/trash/${f.bin(item).id}`, { typedId: item.task.id }),
+    'delete project': (item) => f.request('DELETE', `/api/v1/projects/${item.task.projectId}`),
+    'delete task': (item) => f.remove(item),
+  };
+  const refused = ['archive task', 'move task', 'delete dataset', 'empty bin item'];
+  for (const [started, reprocessed] of [[false, true], [true, true], [false, false], [true, false]]) {
+    for (const [name, change] of Object.entries(changes)) {
+      const note = `${name} ${started ? 'purge started' : 'half deleted'} ${reprocessed ? 'reprocessed' : ''}`, project = f.processing.createProject({ displayName: note }), { item: left, before, trash } = await leftByEarlierVersion(f, project, note);
+      const item = reprocessed ? { ...left, ...f.output(f.processing.getTask(left.task.id), 'Reprocessed'), older: left } : left, files = [...filesOf(f, left, before), ...(reprocessed ? filesOf(f, item, f.snapshot(item)) : [])];
+      age(f, trash, 45);
+      if (started) f.database.prepare('UPDATE storage_trash SET purge_started_at=? WHERE id=?').run(new Date().toISOString(), trash.id);
+      const response = await change(item);
+      if (refused.includes(name) || (started && ['delete project', 'delete task'].includes(name))) assert.equal(response.status, 409, `${note} ${JSON.stringify(response.body)}`);
+      w.maintain();
+      w.maintain();
+      assertNothingLost(f, item, files, note);
+    }
+  }
+  const { item } = await leftByEarlierVersion(f, f.processing.createProject({ displayName: 'Message' }), 'Message');
+  const archived = await f.request('POST', `/api/v1/tasks/${item.task.id}/archive`);
+  assert.deepEqual([archived.body.code, archived.body.error], ['task_not_archivable', 'This task is in the Recycle Bin. Restore it, or delete it again.']);
+  // Ordinary tasks and projects can be archived as before.
+  const plain = f.processing.createProject({ displayName: 'Plain' }), task = await f.publishedTask(plain, 'Plain');
+  assert.equal((await f.request('POST', `/api/v1/tasks/${task.task.id}/archive`)).status, 200);
+  assert.equal((await f.request('POST', `/api/v1/projects/${plain.id}/archive`)).status, 200);
+});
+
+test('a project whose delete or restore stopped partway is never purged, whatever its tasks say', async (t) => {
+  const f = await fixture(t), w = worker(t, f), moveExact = f.storage.moveExact;
+  // Delete stopped before its second task.
+  const stopped = f.processing.createProject({ displayName: 'Delete stopped' }), first = await f.publishedTask(stopped, 'First');
+  await pause();
+  const second = await f.publishedTask(stopped, 'Second'), before = [f.snapshot(first), f.snapshot(second)];
+  let models = 0;
+  f.storage.moveExact = function move(source, ...rest) {
+    if (source === 'models' && (models += 1) === 2) throw Object.assign(new Error('synthetic conflict'), { code: 'lifecycle_conflict' });
+    return moveExact.call(this, source, ...rest);
+  };
+  const removed = await f.request('DELETE', `/api/v1/projects/${stopped.id}`);
+  f.storage.moveExact = moveExact;
+  assert.equal(removed.status, 409);
+  f.database.prepare("UPDATE processing_tasks SET status='draft' WHERE id=?").run(second.task.id);
+  f.database.prepare("UPDATE storage_trash SET permanently_deleted_at=created_at WHERE entity_type='task' AND entity_id=?").run(second.task.id);
+  const trash = f.processing.activeTrashForEntity('project', stopped.id);
+  f.database.prepare('DELETE FROM container_trash_members WHERE container_trash_id=? AND entity_id=?').run(trash.id, second.task.id);
+  age(f, trash, 45);
+  w.maintain();
+  assert.equal(f.processing.getTrash(trash.id).purgeStartedAt ?? null, null);
+  assertNothingLost(f, first, filesOf(f, first, before[0]), 'first');
+  assertNothingLost(f, second, filesOf(f, second, before[1]), 'second');
+
+  // Restore stopped after the project, before its task.
+  const half = f.processing.createProject({ displayName: 'Restore stopped' }), item = await f.publishedTask(half, 'Task'), itemBefore = f.snapshot(item);
+  const root = (await f.request('DELETE', `/api/v1/projects/${half.id}`)).body.trash;
+  assert.ok(f.processing.restoreMetadataEntity(root.id, 'ops:test', { finalizeTrash: false }));
+  assert.equal(f.processing.getProject(half.id).status, 'active');
+  age(f, root, 45);
+  assert.equal((await f.request('POST', `/api/v1/projects/${half.id}/archive`)).status, 409, 'archiving would let it be purged');
+  w.maintain();
+  assertNothingLost(f, item, filesOf(f, item, itemBefore), 'half restored');
+  assert.equal((await f.request('POST', `/api/v1/storage/trash/${root.id}/restore`)).status, 200);
+  assert.deepEqual(f.snapshot(item), itemBefore);
+});
+
+test('a permanent deletion left unfinished or failed by an earlier version removes nothing from a task that is not archived', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f);
+  for (const status of ['intent', 'failed']) {
+    const { item, before, trash } = await leftByEarlierVersion(f, project, status), files = filesOf(f, item, before), output = f.processing.activeTrashForEntity('output', item.versionId), at = new Date().toISOString(), id = crypto.randomUUID();
+    f.database.prepare('UPDATE storage_trash SET purge_started_at=? WHERE id=?').run(at, trash.id);
+    f.database.prepare("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,status,actor,created_at,updated_at) VALUES (?,'purge','output',?,?,'trash',?,?,'storage-maintenance',?,?)").run(id, item.versionId, output.id, output.relativePath, status, at, at);
+    w.maintain();
+    if (status === 'failed') assert.equal((await f.request('POST', `/api/v1/storage/mutations/${id}/retry`)).status, 409);
+    assertNothingLost(f, item, files, status);
+    assert.equal(f.processing.getStorageMutation(id).status, 'failed');
+  }
+  // A failed purge of something that was restored since cannot be retried onto it.
+  const item = await f.publishedTask(project, 'Restored since'), before = f.snapshot(item);
+  assert.equal((await f.remove(item)).status, 200);
+  const output = f.processing.activeTrashForEntity('output', item.versionId), id = crypto.randomUUID(), at = new Date().toISOString();
+  f.database.prepare("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,status,actor,created_at,updated_at) VALUES (?,'purge','output',?,?,'trash',?,'failed','ops:test',?,?)").run(id, item.versionId, output.id, output.relativePath, at, at);
+  assert.equal((await f.restore(item)).status, 200);
+  assert.equal((await f.request('POST', `/api/v1/storage/mutations/${id}/retry`)).status, 409);
+  assert.deepEqual(f.snapshot(item), before);
+});
+
+test('the worker finishing a move the request is making changes nothing for either', async (t) => {
+  const f = await fixture(t), project = f.processing.createProject({ displayName: 'Project' }), w = worker(t, f), exists = f.storage.pathExistsStrict;
+  for (const step of ['delete', 'restore']) {
+    for (let at = 1; at <= 9; at += 1) {
+      const note = `${step} ${at}`, item = await f.publishedTask(project, note), before = f.snapshot(item);
+      if (step === 'restore') assert.equal((await f.remove(item)).status, 200, note);
+      let calls = 0;
+      f.storage.pathExistsStrict = function check(...args) {
+        const result = exists.apply(this, args);
+        if ((calls += 1) === at) reconcileStorageMutations(w.processing, w.storage);
+        return result;
+      };
+      const response = step === 'delete' ? await f.remove(item) : await f.restore(item);
+      f.storage.pathExistsStrict = exists;
+      assert.equal(response.status, 200, `${note} ${JSON.stringify(response.body)}`);
+      if (step === 'delete') { assert.deepEqual(f.state(item), f.DELETED, note); assert.equal((await f.restore(item)).status, 200, note); }
+      assert.deepEqual(f.state(item), f.IN_REVIEW, note);
+      assert.deepEqual(f.snapshot(item), before, note);
+      assert.equal(f.database.prepare("SELECT COUNT(*) n FROM storage_mutations WHERE status<>'complete'").get().n, 0, note);
+    }
+  }
+  // The same between the check and the move itself.
+  const item = await f.publishedTask(project, 'move'), before = f.snapshot(item), moveExact = f.storage.moveExact;
+  f.storage.moveExact = function move(...args) { reconcileStorageMutations(w.processing, w.storage); return moveExact.apply(this, args); };
+  assert.equal((await f.remove(item)).status, 200);
+  assert.equal((await f.restore(item)).status, 200);
+  f.storage.moveExact = moveExact;
+  assert.deepEqual(f.snapshot(item), before);
+  // A real failure is still one.
+  f.storage.moveExact = () => { throw Object.assign(new Error('synthetic I/O error'), { code: 'EIO' }); };
+  assert.equal((await f.remove(item)).status, 409);
+  f.storage.moveExact = moveExact;
 });

@@ -21,10 +21,14 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   if(faultAt==='after_intent')throw Object.assign(new Error('injected failure after lifecycle intent'),{code:'fault_injected'});
   try{
     if(mutation.status==='intent'){
+      if(mutation.type==='purge'&&!processing.purgeStillAdmissible(mutation))throw conflict('permanent deletion is no longer allowed');
       if(mutation.type==='trash'||mutation.type==='restore'){
-        const sourceExists=exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath),destinationExists=exists(storage,mutation.destinationRootKey,mutation.destinationRelativePath);
+        // The other process (API or worker) may be applying the same journal; its rename can land between these checks.
+        const place=()=>({sourceExists:exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath),destinationExists:exists(storage,mutation.destinationRootKey,mutation.destinationRelativePath)});
+        let {sourceExists,destinationExists}=place();
+        if(sourceExists&&destinationExists)({sourceExists,destinationExists}=place());
         if(sourceExists&&destinationExists)throw conflict('lifecycle source and destination both exist');
-        if(sourceExists&&!destinationExists){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);storage.moveExact(mutation.sourceRootKey,mutation.sourceRelativePath,mutation.destinationRootKey,mutation.destinationRelativePath);}
+        if(sourceExists&&!destinationExists){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);try{storage.moveExact(mutation.sourceRootKey,mutation.sourceRelativePath,mutation.destinationRootKey,mutation.destinationRelativePath);}catch(error){const now=place();if(now.sourceExists||!now.destinationExists)throw error;}}
         else if(!sourceExists&&!destinationExists&&!mutation.allowAbsentSource)throw conflict('lifecycle source and destination are both absent');
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation,{destinationRelativePath:!sourceExists&&!destinationExists?'':mutation.destinationRelativePath});
@@ -62,7 +66,7 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
       if(item.entityType==='output'&&require('./outputSupersession').automaticSupersessionTrash(processing,item.id)){results.push({trashId:item.id,status:'deferred',errorCode:'supersession_reverification_required'});continue;}
       if(item.entityType==='project'||item.entityType==='task'){
         const {purgeContainerTrash}=require('./containerLifecycle');
-        const purged=purgeContainerTrash(processing,storage,item.id,actor);
+        const purged=purgeContainerTrash(processing,storage,item.id,actor,{expired:true});
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         results.push({trashId:item.id,status:'complete',container:true});
         if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
@@ -80,16 +84,22 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
           results.push({trashId:item.id,status:'transferred',containerTrashId:heir.id});continue;
         }
       }
+      // An output that belongs to a deleted, restorable task goes with that task's item as well.
+      const container=output&&processing.deletedTaskContainer(item);
+      if(container){
+        if(!processing.moveContainerTrashMember(null,container.id,item.id,null)){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
+        results.push({trashId:item.id,status:'transferred',containerTrashId:container.id});continue;
+      }
       if(dataset?.storageMode==='external_reference'){
-        const purged=processing.markTrashPurged(item.id);
+        const purged=processing.markTrashPurged(item.id,null,{expired:true});
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         results.push({trashId:item.id,status:'complete',externalReference:true});
       }else if(output&&output.storageMode!=='managed'){
-        const purged=processing.purgeMetadataOutput(item.id);
+        const purged=processing.purgeMetadataOutput(item.id,null,{expired:true});
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         results.push({trashId:item.id,status:'complete',externalReference:true});
       }else{
-        const mutation=processing.beginPurgeMutation(item.id,actor);
+        const mutation=processing.beginPurgeMutation(item.id,actor,{expired:true});
         if(!mutation){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         const completed=applyStorageMutation(processing,storage,mutation);
         results.push({trashId:item.id,status:completed.status,mutationId:completed.id,externalReference:false});
