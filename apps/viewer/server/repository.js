@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const path = require('node:path');
 const { validCameraFilename } = require('./cameraPhotos');
-const { modelDeleted } = require('./modelDeletion');
+const { modelDeleted, grantVersionId } = require('./modelDeletion');
 
 function now() {
   return new Date().toISOString();
@@ -710,7 +710,8 @@ class ViewerRepository {
 
   publicShareLive(share, at = Date.now()) {
     if (!share || share.revokedAt) return false;
-    if (share.expiresAt && Date.parse(share.expiresAt) <= at) return false;
+    // Only an expiry that is known to be in the future keeps it alive; one that cannot be read does not.
+    if (share.expiresAt && !(Date.parse(share.expiresAt) > at)) return false;
     // A stored link is refused while its model is in the Recycle Bin.
     return !(share.modelId && this.modelDeleted(share.modelId, share.modelVersionId));
   }
@@ -838,8 +839,8 @@ class ViewerRepository {
   redeemSessionGrant(id, at = Date.now()) {
     return this.transaction(() => {
       const row = this.database.prepare('SELECT * FROM session_grants WHERE id=?').get(id);
-      if (!row || row.redeemed_at || Date.parse(row.expires_at) <= at) return null;
-      if (this.modelDeleted(row.model_id, row.model_version_id)) return null;
+      if (!row || row.redeemed_at || !(Date.parse(row.expires_at) > at)) return null;
+      if (this.modelDeleted(row.model_id, grantVersionId(row))) return null;
       if (row.source_authorization_id && this.database.prepare(`SELECT 1
         FROM revoked_published_session_authorizations
         WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`
@@ -915,7 +916,7 @@ class ViewerRepository {
   }
 
   viewerSessionLive(session, at = Date.now()) {
-    if (!session || session.revokedAt || Date.parse(session.expiresAt) <= at) return false;
+    if (!session || session.revokedAt || !(Date.parse(session.expiresAt) > at)) return false;
     // So is a stored session, whoever it was issued to.
     if (this.modelDeleted(session.modelId, session.modelVersionId)) return false;
     if (session.sourceAuthorization && this.database.prepare(`SELECT 1 FROM revoked_published_session_authorizations
