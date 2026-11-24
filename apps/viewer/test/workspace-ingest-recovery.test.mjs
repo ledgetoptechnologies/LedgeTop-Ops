@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { canRecoverExistingResult, recoverExistingResult } from '../workspace-ingest-recovery.mjs';
 
 const session = {id:'session-a',subject:'staff-a',expiresAt:'2099-01-01T00:00:00Z',permissions:['viewer.processing.write']};
@@ -83,13 +84,31 @@ test('lost permission, unavailable storage and stale diagnostics do not send a r
   assert.equal(calls,0);
 });
 
-test('workspace uses server diagnostics and the ordinary authenticated API helper', () => {
+test('workspace uses server diagnostics and the ordinary authenticated API helper', async () => {
   const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
   assert.match(source,/canRecoverExistingResult\(diagnostic,can\('viewer\.processing\.write'\)\)/);
   assert.match(source,/recoverExistingResult\(diagnostic,can\('viewer\.processing\.write'\),id,mutate,/);
   assert.match(source,/delete detail\.attemptDiagnostics\[id\]/);assert.match(source,/loadTaskAttemptDiagnostics\(taskId,id\)/);
   assert.match(source,/delete state\.diagnosticDetails\[id\]/);assert.match(source,/loadGlobalAttemptDiagnostics\(id\)/);
   assert.match(source,/detail\.attemptDiagnostics\?\.\[attemptId\]!==pending/);assert.match(source,/state\.diagnosticDetails\[attemptId\]!==pending/);
-  const api=source.split(/\r?\n/).find(line=>line.startsWith('async function api('));
-  assert.match(api,/Authorization:`Bearer \$\{state\.token\}`/);assert.match(api,/!init\.headers\['Idempotency-Key'\]/);assert.match(api,/if\(recoveryGuard\).*response=await fetch\(path,init\).*else response=await workspaceFetch\(path,init\)/);
+  const apiSource=source.match(/^async function api\([\s\S]*?^}/m)?.[0];
+  assert.ok(apiSource,'locates the workspace API helper');
+  const calls=[];
+  const transport=name=>(path,init)=>{
+    calls.push({name,path,authorization:init.headers.Authorization,idempotencyKey:init.headers['Idempotency-Key']});
+    return {ok:true,status:200,json:async()=>({})};
+  };
+  const api=runInNewContext(`${apiSource}\napi`,{
+    state:{token:'synthetic-token'},
+    crypto:{randomUUID:()=> 'generated-key'},
+    workspaceFetch:transport('workspace'),
+    fetch:transport('guarded'),
+  });
+  const path='/fixture-recovery';
+  await api(path,{method:'POST'});
+  await api(path,{method:'POST',headers:{'Idempotency-Key':'original-key'},recoveryGuard:()=>true});
+  assert.deepEqual(calls,[
+    {name:'workspace',path,authorization:'Bearer synthetic-token',idempotencyKey:'generated-key'},
+    {name:'guarded',path,authorization:'Bearer synthetic-token',idempotencyKey:'original-key'},
+  ]);
 });
