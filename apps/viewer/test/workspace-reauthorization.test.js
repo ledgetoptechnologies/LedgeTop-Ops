@@ -29,12 +29,21 @@ test('known expiry pauses without disposing uploads; unknown authorization loss 
   for(const reason of ['expired','revoked','unauthorized']){
     let uploadDisposals=0;
     const calls=[],state={token:'existing',adminSession:{expiresAt:new Date(Date.now()+(reason==='unauthorized'?60000:-1000)).toISOString()}};
-    const context=vm.createContext({workspaceAuthorizationClearing:false,state,invalidateFolderAuthorization:()=>calls.push(['invalidate-folders']),reviewSessionController:{suspend:options=>calls.push(['suspend',options.preserve])},storageUsagePoll:{stop(){}},workspaceRenewal:{dispose(){}},releaseAllGcpImages(){},sessionStorage:{removeItem(){}},TOKEN_KEY:'token',clearInterval(){},clearTimeout(){},beginWorkspaceReauthorization:()=>{calls.push(['pause']);return true;},renderNav(){},access(){}});
+    const context=vm.createContext({
+      workspaceAuthorizationClearing:false,state,
+      invalidatePublicationAuthority:()=>calls.push(['invalidate-publication']),
+      invalidateFolderAuthorization:()=>calls.push(['invalidate-folders']),
+      reviewSessionController:{suspend:options=>calls.push(['suspend',options.preserve])},
+      storageUsagePoll:{stop(){}},workspaceRenewal:{dispose(){}},releaseAllGcpImages(){},
+      sessionStorage:{removeItem(){}},TOKEN_KEY:'token',clearInterval(){},clearTimeout(){},
+      beginWorkspaceReauthorization:()=>{calls.push(['pause']);return true;},renderNav(){},access(){}
+    });
     context.activeNewTask={dispose(){uploadDisposals++;}};
     vm.runInContext(`${clear};clearWorkspaceAuthorization(${JSON.stringify(reason)});`,context);
-    assert.equal(calls[0]?.[0],'invalidate-folders',reason);
+    assert.deepEqual(calls.slice(0,2),[['invalidate-publication'],['invalidate-folders']],reason);
     vm.runInContext("clearWorkspaceAuthorization('unauthorized');",context);
     assert.equal(calls.filter(call=>call[0]==='invalidate-folders').length,1,reason);
+    assert.equal(calls.filter(call=>call[0]==='invalidate-publication').length,1,reason);
     assert.equal(uploadDisposals,reason==='expired'?0:1);
     assert.equal(calls.filter(call=>call[0]==='suspend').length,reason==='expired'?0:1);
     assert.equal(calls.filter(call=>call[0]==='pause').length,reason==='expired'?1:0);
