@@ -154,6 +154,13 @@ test('a missing token, a bad argument and an existing receipt stop before any re
   assert.deepEqual(replay.network, []);
   assert.ok(fs.readFileSync(receipt).equals(before), 'an existing receipt is never changed');
 
+  // A baseline that cannot be one is refused before the target is contacted.
+  const running = file('running.json'), refused = file('baseline.json');
+  fs.writeFileSync(running, JSON.stringify({ contract: 'production-ops-0227-0244-ordered-once-v1', status: 'running' }));
+  const baseline = run(['--reconcile', '--baseline-receipt', running, ...PRODUCTION, '--receipt', refused]);
+  assert.deepEqual([baseline.status, baseline.stderr, baseline.network], [1, '', []]);
+  assert.equal(readReceipt(refused).stop.code, 'ops_0227_0244:baseline_receipt_status_not_eligible');
+
   const usage = run(['--nope']);
   assert.equal(usage.status, 1);
   assert.match(usage.stderr, /^ops_0227_0244:usage\nusage: /u);

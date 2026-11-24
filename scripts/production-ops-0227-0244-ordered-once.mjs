@@ -563,20 +563,30 @@ export function openOps0227To0244Receipt(filename, { log = () => {} } = {}) {
           throw error;
         }
         fs.closeSync(fd);
-        for (const started = performance.now(); ;) {
+        // One monotonic deadline covers everything from the first try: the rechecks, the waits and the replacement.
+        const started = performance.now(), deadline = started + HELD_LIMIT_MS;
+        for (let held = null; ;) {
+          if (held && performance.now() >= deadline) throw held;
+          let expired = false;
           try {
             same(next, bytes);
             // Only this process's own last receipt is replaced.
             same(filename, current);
-            fs.renameSync(next, filename);
-            break;
+            expired = held !== null && performance.now() >= deadline;
+            if (!expired) {
+              fs.renameSync(next, filename);
+              break;
+            }
           } catch (error) {
             if (process.platform !== 'win32' || !HELD_BY_OTHERS.includes(error?.code)) throw error;
+            held = error;
             wait.refusals++;
-            if (wait.waitedMs >= HELD_LIMIT_MS || wait.refusals > HELD_LIMIT_MS / HELD_WAIT_MS) throw error;
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HELD_WAIT_MS);
-            wait.waitedMs = Math.round(performance.now() - started);
           }
+          const remaining = deadline - performance.now();
+          wait.waitedMs = Math.round(performance.now() - started);
+          if (expired || remaining <= 0) throw held;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(HELD_WAIT_MS, remaining));
+          wait.waitedMs = Math.round(performance.now() - started);
         }
         syncFolder(path.dirname(filename));
         same(filename, bytes);
@@ -667,7 +677,7 @@ async function runOrdered({ plan, provider, mode = 'dry-run', target, receipt = 
   const save = (write, what) => {
     let wait;
     try { wait = write(); } catch (cause) { throw new ReceiptWriteFailure(state, cause); }
-    // A local wait for a held file is part of the record; the next saved receipt carries it.
+    // A local wait for a held file is part of the record: the next saved receipt carries it, the last one is only logged.
     if (wait?.refusals > 0) state.receiptWaits.push({ receipt: what, step: state.steps.at(-1)?.name ?? null, ...wait });
   };
   const persist = () => { if (receipt) save(() => receipt.write(state), 'receipt'); };
@@ -801,10 +811,7 @@ async function runOrdered({ plan, provider, mode = 'dry-run', target, receipt = 
     stop(null, 'final', 'final_ledger_mismatch');
   }
   state.finishedAt = stamp();
-  const waits = state.receiptWaits.length;
   persist();
-  // The last receipt cannot hold its own wait, so it is saved once more; a wait of that write is only logged.
-  if (state.receiptWaits.length > waits) persist();
   return state;
 }
 
@@ -912,11 +919,7 @@ export async function mainOps0227To0244(args, dependencies = {}) {
     }
     const token = env.CLOUDFLARE_API_TOKEN;
     if (typeof token !== 'string' || token.length < 20 || token.length > 16_384) fail('cloudflare_token_missing');
-    const providerFactory = dependencies.providerFactory ?? (await import('./production-ops-0227-0244-cloudflare-provider.mjs')).createOps0227To0244CloudflareProvider;
-    const provider = providerFactory({ getBearerToken: () => token, accountId: options.accountId, databaseId: options.databaseId,
-      databaseName: options.databaseName, allowWrites: options.mode === 'execute' });
-    await provider.assertTarget();
-    const readOnly = { readSnapshot: query => provider.readSnapshot(query) };
+    // Checked before the target is contacted: a receipt that cannot be a baseline costs no request.
     let baseline = null;
     if (options.baselineReceipt) {
       try { baseline = loadOps0227To0244BaselineReceipt(options.baselineReceipt, { plan, target }); }
@@ -933,6 +936,11 @@ export async function mainOps0227To0244(args, dependencies = {}) {
           writesPerformed: 0, at: new Date().toISOString() });
       }
     }
+    const providerFactory = dependencies.providerFactory ?? (await import('./production-ops-0227-0244-cloudflare-provider.mjs')).createOps0227To0244CloudflareProvider;
+    const provider = providerFactory({ getBearerToken: () => token, accountId: options.accountId, databaseId: options.databaseId,
+      databaseName: options.databaseName, allowWrites: options.mode === 'execute' });
+    await provider.assertTarget();
+    const readOnly = { readSnapshot: query => provider.readSnapshot(query) };
     const common = { plan, target, log: out, approvalRef: options.approvalRef, baseline,
       approvedExistingSchema: dependencies.approvedExistingSchema ?? null };
     if (options.mode === 'reconcile') return await runOps0227To0244Ordered({ ...common, provider: readOnly, mode: 'reconcile', receipt });

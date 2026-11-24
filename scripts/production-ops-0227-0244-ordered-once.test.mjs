@@ -708,8 +708,8 @@ test('only an ended execute run, or its unsent starting point, can be a baseline
   for (const [file, next] of [[untouched, 0], [landed, 1]]) {
     const receiptFile = receiptPath();
     const resumed = await cli(file, [...execArgs(receiptFile), '--resume-from', OPS_0227_0244_ORDERED_NAMES[next], '--baseline-receipt', preApplyReceipt]);
-    assert.deepEqual([resumed.result.status, resumed.result.stop.code, resumed.provider.calls.writes, resumed.provider.calls.reads],
-      ['reconciliation-required', 'ops_0227_0244:baseline_receipt_pre_apply_not_resumable', 0, 0]);
+    assert.deepEqual([resumed.result.status, resumed.result.stop.code, resumed.provider], ['reconciliation-required', 'ops_0227_0244:baseline_receipt_pre_apply_not_resumable', undefined],
+      'no provider is built');
     assert.equal(readReceipt(receiptFile).stop.code, 'ops_0227_0244:baseline_receipt_pre_apply_not_resumable');
   }
   // A running receipt is refused by the command, before any read of the ledger.
@@ -717,7 +717,7 @@ test('only an ended execute run, or its unsent starting point, can be a baseline
   fs.writeFileSync(running, JSON.stringify({ ...completed, status: 'running' }));
   for (const args of [['--reconcile'], [...execArgs(receiptPath()).filter(arg => !rehearsalArgs.includes(arg)), '--resume-from', OPS_0227_0244_ORDERED_NAMES[1]]]) {
     const { result, provider } = await cli(landed, [...args, '--baseline-receipt', running, ...rehearsalArgs]);
-    assert.deepEqual([result.status, result.stop.code, provider.calls.reads, provider.calls.writes], ['reconciliation-required', 'ops_0227_0244:baseline_receipt_status_not_eligible', 0, 0]);
+    assert.deepEqual([result.status, result.stop.code, provider], ['reconciliation-required', 'ops_0227_0244:baseline_receipt_status_not_eligible', undefined], 'no provider is built');
   }
 });
 
@@ -1105,7 +1105,7 @@ test('reconcile and resume re-prove the approved schema, and a receipt cannot in
     const refused = await cli(file, args, { extra: SOURCE_OK });
     ({ provider } = refused);
     assert.equal(refused.result.stop.code, 'ops_0227_0244:baseline_receipt_existing_schema_not_approved');
-    assert.equal(provider.calls.writes, 0);
+    assert.equal(provider, undefined, 'no provider is built');
   }
   write({ ...OPS_PRODUCTION_EXISTING_SCHEMA });
   const loaded = loadOps0227To0244BaselineReceipt(productionReceipt, { plan, target: OPS_PRODUCTION_DATABASE });
@@ -1291,12 +1291,13 @@ test('a run that cannot save its receipt stops at once and is never reported as 
 
 const realFs = Object.fromEntries(['openSync', 'writeSync', 'fsyncSync', 'closeSync', 'readFileSync', 'renameSync'].map(name => [name, fs[name]]));
 const HELD = ['EPERM', 'EACCES', 'EBUSY'];
-/** Runs `body` as on Windows, without really waiting; returns the requested waits in milliseconds. */
+/** Runs `body` as on Windows with a fake monotonic clock that only waiting and `clock.now` move; returns the waits. */
 async function asOnWindows(body) {
-  const platform = Object.getOwnPropertyDescriptor(process, 'platform'), wait = Atomics.wait, waits = [];
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform'), wait = Atomics.wait, now = performance.now, waits = [], clock = { now: 1_000 };
   Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
-  Atomics.wait = (array, index, expected, ms) => { waits.push(ms); return 'timed-out'; };
-  try { await body(waits); } finally { Object.defineProperty(process, 'platform', platform); Atomics.wait = wait; restoreFs(); }
+  Atomics.wait = (array, index, expected, ms) => { waits.push(ms); clock.now += ms; return 'timed-out'; };
+  performance.now = () => clock.now;
+  try { await body(waits, clock); } finally { Object.defineProperty(process, 'platform', platform); Atomics.wait = wait; performance.now = now; restoreFs(); }
   return waits;
 }
 const diskError = code => Object.assign(new Error('synthetic'), { code });
@@ -1417,8 +1418,8 @@ test('Windows: a held receipt is waited for, at most 15 seconds, with the same p
     const name = receiptPath(), lines = [], receipt = openOps0227To0244Receipt(name, { log: line => lines.push(line) });
     receipt.write(first);
     let wait = null, error = null;
-    const waits = await asOnWindows(() => {
-      Object.assign(fs, patch(name));
+    const waits = await asOnWindows((unused, clock) => {
+      Object.assign(fs, patch(name, clock));
       try { wait = receipt.write(value); } catch (caught) { error = caught; }
     });
     const left = fs.existsSync(`${name}.next`) ? fs.readFileSync(`${name}.next`) : null;
@@ -1436,24 +1437,63 @@ test('Windows: a held receipt is waited for, at most 15 seconds, with the same p
 
     const refused = [], failed = await attempt(refuseRename(code, Infinity, refused));
     assert.equal(failed.error?.message, 'ops_0227_0244:receipt_write_failed');
-    assert.deepEqual([failed.error.cause.code, failed.error.receiptWait.refusals, refused.length, failed.waits.length], [code, 151, 151, 150]);
+    assert.deepEqual([failed.error.cause.code, failed.error.receiptWait, refused.length, failed.waits.length], [code, { refusals: 150, waitedMs: 15_000 }, 150, 150]);
     assert.ok(failed.stored.equals(encode(first)), 'the previous receipt is intact');
     assert.ok(failed.left.equals(encode(value)), 'the proven file is left beside it');
-    assert.match(failed.lines.join('\n'), /^receipt replacement refused 151 times over \d+ ms: not saved/u);
+    assert.match(failed.lines.join('\n'), /^receipt replacement refused 150 times over 15000 ms: not saved/u);
 
     // Reading the same two files can be refused in the same way, before the replacement.
     let reads = 0;
     const reading = await attempt(() => ({ readFileSync: (file, ...rest) => { if (isNext(file) && ++reads <= 2) throw diskError(code); return realFs.readFileSync(file, ...rest); } }));
     assert.deepEqual([reading.error, reading.wait.refusals], [null, 2]);
   }
-  // 15 seconds of real time end the wait too, however few tries that was.
-  const clock = performance.now.bind(performance);
-  let now = 0;
-  try {
-    performance.now = () => (now += 8_000);
-    const calls = [], slow = await attempt(refuseRename('EBUSY', Infinity, calls));
-    assert.ok(slow.error && calls.length === 3 && slow.error.receiptWait.waitedMs === 16_000);
-  } finally { performance.now = clock; }
+  // One deadline, 15 seconds from the first try, for everything: rechecks and refused replacements are charged to it.
+  const timed = async ({ readMs = 0, renameMs = 0, firstReadMs = 0, until = Infinity }) => {
+    const events = [];
+    let at = null;
+    const run = await attempt((name, clock) => ({
+      readFileSync: (file, ...rest) => {
+        at ??= clock.now;
+        if (isNext(file) || file === name) { events.push([clock.now - at, 'read']); clock.now += events.length === 1 ? firstReadMs || readMs : readMs; }
+        return realFs.readFileSync(file, ...rest);
+      },
+      renameSync: (from, to) => {
+        events.push([clock.now - at, 'rename']);
+        clock.now += renameMs;
+        if (clock.now - at < until) throw diskError('EPERM');
+        realFs.renameSync(from, to);
+      } }));
+    return { ...run, events, renames: events.filter(([, kind]) => kind === 'rename').map(([ms]) => ms) };
+  };
+  // Just before the deadline a replacement may still happen; the last sleep is cut to what is left.
+  const justBefore = await timed({ until: 14_900 });
+  assert.deepEqual([justBefore.error, justBefore.renames.at(-1), justBefore.wait.waitedMs], [null, 14_900, 14_900]);
+  const cutSleep = await timed({ renameMs: 30 });
+  assert.deepEqual([cutSleep.error?.receiptWait.waitedMs, cutSleep.renames.at(-1), cutSleep.waits.at(-1)], [15_000, 14_950, 20]);
+  assert.ok(cutSleep.waits.slice(0, -1).every(ms => ms === 100));
+  // Nothing at all happens at or after the deadline: no read, no replacement.
+  for (const run of [cutSleep, await timed({ until: 15_000 }), await timed({ renameMs: 4_000 }), await timed({ readMs: 30 }), await timed({ readMs: 800, renameMs: 900 })]) {
+    assert.equal(run.error?.message, 'ops_0227_0244:receipt_write_failed');
+    assert.ok(run.events.every(([ms]) => ms < 15_000));
+    assert.ok(run.error.receiptWait.waitedMs >= 15_000 && run.error.receiptWait.refusals === run.renames.length);
+    assert.ok(run.stored.equals(encode(first)) && run.left.equals(encode(value)));
+  }
+  // The rechecks of a retry can use up the budget: they run, and the replacement after them does not.
+  let recheck = null;
+  const late = await attempt((name, clock) => {
+    const from = clock.now, seen = [];
+    recheck = seen;
+    return { readFileSync: (file, ...rest) => { if (isNext(file) || file === name) { seen.push(clock.now - from); if (seen.length > 2) clock.now += 7_500; } return realFs.readFileSync(file, ...rest); },
+      renameSync: () => { seen.push('rename'); throw diskError('EBUSY'); } };
+  });
+  assert.equal(late.error?.cause?.code, 'EBUSY');
+  assert.deepEqual(recheck, [0, 0, 'rename', 100, 7_600]);
+  assert.deepEqual([late.error.receiptWait, late.waits], [{ refusals: 1, waitedMs: 15_100 }, [100]]);
+  // The first try is not a retry: however slow its reads were, it may replace.
+  const slowFirst = await timed({ firstReadMs: 20_000, until: 0 });
+  assert.deepEqual([slowFirst.error, slowFirst.renames.length, slowFirst.waits], [null, 1, []]);
+  const slowRefused = await timed({ firstReadMs: 20_000 });
+  assert.deepEqual([slowRefused.error?.cause?.code, slowRefused.renames.length, slowRefused.waits], ['EPERM', 1, []]);
   // Never again after a replacement that may have happened, and never with other bytes on either side.
   const renames = [];
   const committed = await attempt(() => ({ renameSync: (from, to) => { renames.push(to); realFs.renameSync(from, to); throw diskError('EPERM'); } }));
@@ -1496,15 +1536,17 @@ test('Windows: a held receipt during a run is waited for or stops it, at the fir
     });
     const after = remote(), sent = provider.calls.writes;
     provider.close();
-    return { result, receiptFile, lines, waits, sent, remoteAtRefusal, after, saved: fs.statSync(receiptFile).size ? readReceipt(receiptFile) : null };
+    return { result, receiptFile, lines, waits, renames, sent, remoteAtRefusal, after, saved: fs.statSync(receiptFile).size ? readReceipt(receiptFile) : null };
   };
   // Writes: 1 and 2 start, 3 pre-apply, 4 first 'sending', then two per file, 24 the last.
   for (const failAt of [1, 2, 3, 4, 5, 12, 13, 23, 24]) {
     const ok = await attempt(failAt, 2);
     assert.deepEqual([ok.result.status, ok.result.receiptFailure, ok.waits.length, ok.sent], ['complete', undefined, 2, 10], `write ${failAt}`);
     assert.equal(ok.saved.status, 'complete');
-    assert.equal(ok.saved.receiptWaits.length, 1);
-    assert.deepEqual([ok.saved.receiptWaits[0].receipt, ok.saved.receiptWaits[0].refusals], [failAt === 3 ? 'pre-apply' : 'receipt', 2], `write ${failAt}`);
+    // The last write is the one required final receipt: its own wait is only logged, and nothing is saved after it.
+    assert.equal(ok.renames, 24);
+    if (failAt === 24) assert.deepEqual(ok.saved.receiptWaits, []);
+    else assert.deepEqual(ok.saved.receiptWaits.map(wait => [wait.receipt, wait.refusals, wait.waitedMs]), [[failAt === 3 ? 'pre-apply' : 'receipt', 2, 200]], `write ${failAt}`);
     assert.equal(ok.lines.filter(line => line.startsWith('receipt replacement refused 2 times')).length, 1);
 
     const held = await attempt(failAt, Infinity);
@@ -1513,7 +1555,7 @@ test('Windows: a held receipt during a run is waited for or stops it, at the fir
     assert.deepEqual([held.result.status, held.result.stop.code, held.result.receiptFailure, held.result.writesPerformed], [
       ...(held.sent ? ['reconciliation-required', 'reconciliation_required:receipt_write_failed'] : ['stopped', 'receipt_write_failed']),
       'ops_0227_0244:receipt_write_failed', held.sent], `write ${failAt}`);
-    assert.match(held.result.stop.detail, /^receipt replacement refused 151 times over \d+ ms$/u);
+    assert.equal(held.result.stop.detail, 'receipt replacement refused 150 times over 15000 ms');
     assert.equal(held.sent, failAt < 5 ? 0 : failAt === 24 ? 10 : Math.floor((failAt - 3) / 2), `write ${failAt}`);
     if (failAt === 1) assert.equal(held.saved, null); else assert.equal(held.saved.status, 'running');
     if (failAt > 3) assert.equal(readReceipt(`${held.receiptFile}.pre-apply.json`).status, 'pre-apply');

@@ -274,7 +274,8 @@ receipt again. One local wait exists: on Windows, a replacement refused because
 another program holds a file open (EPERM, EACCES or EBUSY) is tried again with the
 same file for at most 15 seconds, and only while both files still hold exactly the
 expected bytes. Nothing is sent or read remotely meanwhile. The refusals and the
-time are logged and recorded in `receiptWaits`. No migration batch and no other
+time are logged, and recorded in `receiptWaits` of the next saved receipt (a wait of
+the last write is only logged). No migration batch and no other
 request is ever sent twice. Do not open the receipt files during a run. The
 previous complete receipt normally stays in place, and
 `.next` holds whatever was written. A receipt that was not saved is never
