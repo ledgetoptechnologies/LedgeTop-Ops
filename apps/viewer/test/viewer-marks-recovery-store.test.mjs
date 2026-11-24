@@ -137,3 +137,63 @@ test('a GeoJSON retry reuses the frozen payload even after category resolution h
     assert.equal(store.state.undo.at(-1).type, 'import');
   }
 });
+
+for (const conflict of ['mark_category_name_taken', 'mark_category_id_conflict']) {
+  test(`a definite ${conflict} only releases a frozen import after fresh readback`, async () => {
+    const file = { type: 'Feature', properties: { name: 'North', category: 'Gate' },
+      geometry: { type: 'Point', coordinates: [-87, 43] } };
+    const original = geoJsonToMarks(file, { newId: randomUUID });
+    const existing = { id: randomUUID(), name: 'Gate', color: '#43a047', icon: 'gate', mine: true };
+    const rows = [], submissions = [];
+    let categories = [], unavailable = '';
+    const store = createMarksStore({ request: async (path, init) => {
+      if (init.method === 'GET') {
+        if (unavailable === path) {
+          unavailable = '';
+          throw new TypeError('Offline');
+        }
+        if (path === base) return list(rows, categories);
+        assert.equal(path, base + '/deleted');
+        return Response.json({ marks: [] });
+      }
+      assert.equal(path, base + '/batch');
+      const payload = JSON.parse(init.body);
+      submissions.push(payload);
+      if (submissions.length === 1) {
+        unavailable = base;
+        throw new TypeError('No response');
+      }
+      // Like createMany, reject the conflicting category before inserting any
+      // marks. An ID can remain reserved even after its category is deleted.
+      for (const category of payload.categories) {
+        const reserved = conflict === 'mark_category_id_conflict' && category.id === original.categories[0].id;
+        if (reserved || categories.some(row => row.name === category.name)) {
+          if (submissions.length === 2) unavailable = base;
+          if (submissions.length === 3) unavailable = base + '/deleted';
+          return Response.json({ code: reserved ? 'mark_category_id_conflict' : 'mark_category_name_taken' }, { status: 409 });
+        }
+      }
+      assert.deepEqual(payload.categories, []);
+      assert.equal(payload.marks[0].categoryId, existing.id);
+      rows.push(...payload.marks.map(mark => record(mark)));
+      return Response.json({ marks: rows, categories: [] }, { status: 201 });
+    } });
+    await store.setScope(scope);
+    assert.equal(await store.importMarks(original), 0);
+    categories = [existing];
+
+    const retry = () => geoJsonToMarks(file, { newId: randomUUID, categories });
+    for (let count = 2; count <= 4; count++) {
+      assert.equal(await store.importMarks(retry()), 0);
+      assert.equal(store.state.failure, conflict);
+      assert.equal(submissions.length, count, 'no implicit repeat after any refusal');
+      assert.deepEqual(submissions.at(-1), submissions[0], 'retry keeps the original IDs and payload');
+      assert.deepEqual(rows, []);
+    }
+    const replacement = retry();
+    assert.equal(await store.importMarks(replacement), 1);
+    assert.deepEqual(rows.map(mark => mark.id), [replacement.marks[0].id]);
+    assert.equal(submissions.length, 5);
+    assert.equal(store.state.undo.at(-1).type, 'import');
+  });
+}

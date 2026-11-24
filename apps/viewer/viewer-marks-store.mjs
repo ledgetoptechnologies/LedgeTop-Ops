@@ -20,6 +20,7 @@ const MESSAGES = {
   mark_revision_conflict: 'Someone else changed this mark. The list was reloaded.',
   mark_category_revision_conflict: 'Someone else changed this category. The list was reloaded.',
   mark_category_name_taken: 'A category with that name already exists.',
+  mark_category_id_conflict: 'That category changed or is no longer available.',
   mark_limit_reached: 'The mark limit for this project was reached.',
   mark_category_limit_reached: 'The category limit for this project was reached.',
   mark_rate_limited: 'Too many requests at once. Wait a minute and try again.',
@@ -361,7 +362,10 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
               throw error;
             }
             scope.check();
-            if (!op.mine()) throw error;
+            if (!op.mine()) {
+              await op.refused?.(scope, error);
+              throw error;
+            }
             // By the same evidence: not being in the list says nothing by itself.
             value = await checkDoubt(scope, op, { read: false });
           } else throw error;
@@ -808,15 +812,27 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         // Sent again, the server answers with what is there now, which may have been changed since.
         return { rows: imported, exact: asMade(imported, false) };
       }, { key: 'import ' + signature, makes: true, landed, tried: () => { pendingImport = { signature, marks, categories }; },
-        mine: () => pendingImport?.signature === signature && Boolean(landed()), done: ({ rows: imported, exact }) => {
+        mine: () => pendingImport?.signature === signature && Boolean(landed()),
+        async refused(scope, error) {
+          if (pendingImport?.signature !== signature || !state.capabilities.write
+            || !['mark_category_name_taken', 'mark_category_id_conflict', 'mark_id_conflict'].includes(error.code)) return;
+          // The live list was refreshed and contains none of these IDs. Check
+          // Recently deleted too, before allowing another explicit import.
+          const deleted = await scope.api('/deleted').catch(readError => {
+            if (accessLost(readError)) throw readError;
+            return null;
+          });
+          scope.check();
+          const ids = new Set(marks.map(mark => mark.id));
+          if (Array.isArray(deleted?.marks) && !deleted.marks.some(mark => ids.has(mark.id))) pendingImport = null;
+        },
+        done: ({ rows: imported, exact }) => {
         pendingImport = null;
         importedRows = imported;
         if (!exact) { state.message = MESSAGES.import_unsure; return; }
         const count = imported.length;
         remember({ type: 'import', marks: Object.freeze(imported.map(({ id, revision }) => Object.freeze({ id, revision }))), label: `import ${count} marks`, done: `${count} mark${count === 1 ? '' : 's'} imported` });
       } });
-      // Those ids are used up without any of them being there: another go makes its own.
-      if (state.failure === 'mark_id_conflict') pendingImport = null;
       if (ok) onImported?.(importedRows);
       return ok ? importedRows.length : 0;
     },
