@@ -76,7 +76,7 @@ function fixture({ denied = 'getter', active = false, reject = false } = {}) {
   ]) vm.runInContext(source.slice(source.indexOf(start), source.indexOf(end)), context);
   const tokenProviders = source.split('\n').filter(line => /^\s*token:\s*\(\)\s*=>/.test(line) && line.includes('sessionStorageKey'))
     .map(line => vm.runInContext(`(${line.trim().slice('token:'.length).replace(/,$/, '')})`, context));
-  assert.equal(tokenProviders.length, 3, 'admin calculation, personal workspace and surface providers are exercised');
+  assert.equal(tokenProviders.length, 4, 'admin calculation, personal workspace, surface and Marks providers are exercised');
   return { context, session, values, calls, loading, posts, initialized, tokenProviders, sessionCapabilities, startupPhases,
     setNext(value) { next = value; } };
 }

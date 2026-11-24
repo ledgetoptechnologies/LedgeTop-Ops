@@ -237,6 +237,7 @@ jobs:
           VIEWER_SCHEMA_VERSION="$(docker run --rm --entrypoint node "$VERIFY_IMAGE" -e '
             const {openDatabase}=require("./server/database");
             const db=openDatabase("/tmp/release-attestation.sqlite");
+            if(db.prepare("SELECT name FROM schema_migrations WHERE version=84").get()?.name!=="viewer_coordinate_marks")throw new Error("Schema 84 is missing or recorded under another name");
             try{process.stdout.write(String(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version));}
             finally{db.close();}
           ')"

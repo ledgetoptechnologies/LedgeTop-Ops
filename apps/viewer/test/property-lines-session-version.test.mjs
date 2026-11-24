@@ -85,7 +85,7 @@ function page() {
     sessionRenewalBlocked: false, lodAvailabilityTimer: null, lodAvailabilityRefreshInFlight: false,
     dom: { lodStatus: {}, cloudStatus: {} },
     measurementDraftRecovery: { capture() {}, hasPending: () => false }, measurementWorkspace: null, viewerSlice: null,
-    viewerProductDownloads: null,
+    viewerProductDownloads: null, syncViewerMarks() {},
     setDisplayUnits() {}, renderStaffNavigation() {}, renderClientNavigation() {}, applyProjectConfig() {},
     scheduleLodAvailabilityRefresh() {}, stopLodAvailabilityRefresh() {}, scheduleSessionRenewal() {},
     propertyLinesGroundGrid: async () => null, recoverFailedLodTiles() {}, pcApi: () => null, installMeasurementWorkspace() {}, installContours() {}, cancelStaleOrthoPrintExports() {}, applyAvailability: () => [],
