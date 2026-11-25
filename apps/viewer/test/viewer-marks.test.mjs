@@ -589,7 +589,7 @@ test('revoked, public and unverifiable sessions cannot read or write Marks', asy
   const { session, request, sessions } = await openApi(t);
   const revoked = session('client', 'client-a');
   sessions.get(auth.hashToken(revoked)).revoked = true;
-  for (const token of [revoked, session('public', 'recipient'), session('client', 'no-measure', { permissions: { view: true } }),
+  for (const token of [revoked, session('public', 'recipient'), session('client', 'no-measure', { permissions: { view: true }, sourceAuthorization: null }),
     session('client', 'stale', { modelVersionId: 'synthetic-v2' }), 'not-a-real-token-value']) {
     assert.equal((await request(token)).status, 403);
     assert.equal((await request(token, 'POST', '', point())).status, 403);

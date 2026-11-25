@@ -161,6 +161,27 @@ test('staff manage each other\'s shared marks, never a private one', async t => 
   await refused(404, 'mark_not_found', two, 'GET', mark.id);
 });
 
+test('a client session without measure reads the shared lists and nothing else', async t => {
+  const { session, sessions, call, refused, make, shared } = await open(t);
+  const staff = session('ops', 'one'), client = session('client', 'c');
+  const mark = await make(staff), own = await make(client, { name: 'Own' });
+  sessions.get(auth.hashToken(client)).permissions = { view: true, measure: false, personalMeasurements: true };
+  assert.deepEqual(await shared(client), ['Pin']);
+  assert.deepEqual((await call(client, 'GET', 'shared')).body.marks.map(row => [row.mine, row.editable, row.deletable]), [[false, false, false]]);
+  assert.deepEqual((await call(client)).body, { marks: [], categories: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'], shared: true, access: [] } });
+  for (const target of [mark, own]) {
+    for (const [method, route, body] of [['GET', target.id], ['PUT', target.id, content(target)], ['DELETE', target.id, { revision: 1 }], ['POST', target.id + '/restore', { revision: 1 }],
+      ['POST', target.id + '/revert', { revision: 1 }], ['GET', target.id + '/history'], ['POST', 'batch/delete', { marks: [{ id: target.id, revision: 1 }] }]]) await refused(403, 'marks_unavailable', client, method, route, body);
+  }
+  for (const [method, route, body] of [['POST', '', point()], ['POST', 'batch', { marks: [point()] }], ['POST', 'batch/share', {}], ['POST', 'batch/status', { ids: [own.id] }],
+    ['POST', 'categories', {}], ['POST', 'categories/starter', {}], ['POST', 'shared', {}], ['GET', 'deleted'], ['GET', 'audiences']]) await refused(403, 'marks_unavailable', client, method, route, body);
+  assert.equal((await call(staff, 'GET', mark.id)).body.mark.revision, 1);
+  for (const token of [session('client', 'd', { permissions: { view: false } }), session('client', 'e', { permissions: { view: true }, sourceAuthorization: null }),
+    session('ops', 'two', { permissions: { view: true } })]) {
+    for (const route of ['', 'shared']) await refused(403, 'marks_unavailable', token, 'GET', route);
+  }
+});
+
 test('staff undo a client edit; history is bounded, keeps staff\'s version, and goes with the mark', async t => {
   const { db, session, call, refused, make } = await open(t);
   const staff = session('ops', 'one'), client = session('client', 'c');

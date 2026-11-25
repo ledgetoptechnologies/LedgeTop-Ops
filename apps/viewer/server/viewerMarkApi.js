@@ -45,8 +45,9 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
   });
   router.use((req, res, next) => {
     if (req.markPrincipal) return req.path === '/' ? res.json(readOnlyList(req.markPrincipal)) : next();
-    const principal = getMeasurementPrincipal(req, repository, { allowTransient: true });
-    if (!principal) return res.status(403).json({ code: 'marks_unavailable' });
+    const principal = getMeasurementPrincipal(req, repository, { allowTransient: true, allowViewOnly: true });
+    // Without measure a client only reads the lists of what staff share; all else is refused as without access.
+    if (!principal || (principal.viewOnly && !(req.method === 'GET' && READ_ONLY_PATHS.has(req.path) && marks.readableChoices(principal).length))) return res.status(403).json({ code: 'marks_unavailable' });
     if (!principal.personalPersistence) {
       if (req.method === 'GET' && req.path === '/') return res.json(readOnlyList(principal));
       if (req.method === 'GET' && req.path === '/shared' && marks.readableChoices(principal).length) {
