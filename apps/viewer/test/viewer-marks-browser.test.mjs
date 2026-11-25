@@ -464,6 +464,65 @@ test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
   });
 });
 
+for (const writable of [true, false]) {
+  test(`marks toolbar: visible desktop and phone labels with ${writable ? 'staff' : 'view-only'} admission`, { timeout: 90000 }, async t => {
+    const app = express(), asked = [];
+    app.use('/api/v1/marks', (req, res) => {
+      asked.push([req.method, req.path]);
+      if (req.method !== 'GET' || req.path !== '/') return res.sendStatus(405);
+      res.json({ marks: [], categories: [], capabilities: { write: writable, staff: writable, visibility: ['private'] } });
+    });
+    await withBrowser(t, { app }, async h => {
+      const { client, waitFor } = h;
+      await h.load('?mode=staff');
+      for (const width of [1280, 320, 375]) {
+        await h.size(width, 740, width < 640);
+        await client.evaluate('map.invalidateSize({ animate: false }), 0');
+        const controls = await client.evaluate(`['.viewer-mark-add', '.viewer-mark-layers'].map(selector => {
+          const button = document.querySelector(selector), r = button.getBoundingClientRect(), style = getComputedStyle(button);
+          const range = document.createRange(); range.selectNodeContents(button);
+          const text = range.getBoundingClientRect();
+          return { text: button.textContent, name: button.getAttribute('aria-label'), title: button.title,
+            hidden: button.hidden, disabled: button.disabled, expanded: button.getAttribute('aria-expanded'),
+            fits: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight
+              && r.width >= 44 && r.height >= 44 && text.left >= r.left && text.right <= r.right
+              && text.top >= r.top && text.bottom <= r.bottom && style.visibility === 'visible' && Number(style.opacity) > 0,
+            hit: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === button };
+        })`);
+        assert.deepEqual(controls.map(control => [control.text, control.name, control.title]), [
+          ['Add mark', 'Add mark', 'Add mark (M)'], ['Marks', 'Marks', 'Marks (L)'],
+        ], `visible labels match accessible names at ${width}px`);
+        assert.equal(controls[0].hidden, !writable);
+        assert.equal(controls[1].hidden, false);
+        assert.equal(controls[1].expanded, 'false');
+        for (const control of controls.filter(control => !control.hidden)) {
+          assert.equal(control.disabled, false);
+          assert.equal(control.fits, true, `${control.text} label and touch target fit ${width}px`);
+          assert.equal(control.hit, true, `${control.text} is not covered at ${width}px`);
+        }
+        if (writable) {
+          const [x, y] = await client.evaluate(`(() => { const r = document.querySelector('.viewer-mark-add').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+          await h.click(x, y);
+          await waitFor("!document.querySelector('.viewer-mark-strip').hidden", 'Add mark starts placement');
+          assert.equal(await client.evaluate("document.querySelector('.viewer-mark-add').hidden"), true);
+          await h.pressText('Cancel');
+          await waitFor("document.querySelector('.viewer-mark-strip').hidden", 'placement cancelled');
+        }
+        await client.evaluate("document.querySelector('.viewer-mark-layers').focus(), 0");
+        for (const type of ['keyDown', 'keyUp']) await client.command('Input.dispatchKeyEvent', {
+          type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' && { text: '\r' }),
+        });
+        await waitFor("!document.querySelector('.viewer-mark-box').hidden", 'Marks opens with keyboard');
+        assert.equal(await client.evaluate("document.querySelector('.viewer-mark-layers').getAttribute('aria-expanded')"), 'true');
+        assert.equal(await client.evaluate("document.querySelector('[data-tab=list]').getAttribute('aria-selected')"), 'true');
+        await h.press('.viewer-mark-box .viewer-mark-close');
+      }
+      assert.deepEqual(await h.state(), [], 'toolbar interactions create no marks');
+      assert.deepEqual(asked, [['GET', '/']], 'toolbar interactions make no writes or extra requests');
+    });
+  });
+}
+
 // The list comes from the authorized store, not the viewport or map layers.
 // These responses are a local UI fixture, not a change to server authorization.
 for (const writable of [true, false]) {

@@ -115,7 +115,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const drawBar = h(document, 'div', { class: 'viewer-mark-row viewer-mark-draw', hidden: true }, drawCount, drawUndo, drawFinish, drawCancel);
 
   // Placing, over the map
-  const addButton = h(document, 'button', { type: 'button', class: 'viewer-mark-add', 'aria-label': 'Add mark', title: 'Add mark (M)', text: '+' });
+  const addButton = h(document, 'button', { type: 'button', class: 'viewer-mark-add', 'aria-label': 'Add mark', title: 'Add mark (M)', text: 'Add mark' });
   const stripTitle = h(document, 'strong', { role: 'status', 'aria-live': 'polite' });
   const chips = h(document, 'div', { class: 'viewer-mark-chips', role: 'group', 'aria-label': 'Category' });
   const severalButton = h(document, 'button', { type: 'button', text: 'Place several', 'aria-pressed': 'false' });
@@ -241,7 +241,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   root.replaceChildren(status, tools, openBox);
 
   // One Marks pop-up, from the map or the sidebar.
-  const boxButton = h(document, 'button', { type: 'button', class: 'viewer-mark-layers', 'aria-label': 'Marks', title: 'Marks (L)', 'aria-expanded': 'false', text: '\u2630' });
+  const boxButton = h(document, 'button', { type: 'button', class: 'viewer-mark-layers', 'aria-label': 'Marks', title: 'Marks (L)', 'aria-expanded': 'false', text: 'Marks' });
   const boxClose = h(document, 'button', { type: 'button', class: 'viewer-mark-close', 'aria-label': 'Close marks', text: '\u00d7' });
   const boxMessage = h(document, 'p', { class: 'hint', role: 'status', 'aria-live': 'polite' });
   const box = h(document, 'section', { class: 'viewer-mark-box', role: 'dialog', 'aria-label': 'Marks', hidden: true },
