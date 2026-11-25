@@ -490,7 +490,7 @@ function createApiV1(repository) {
         publicIdHash: tokenHash,
         tokenCiphertext: shareClass==='staff'?shareTokenVault.seal(token,tokenHash):null,
         passwordHash,
-        permissions: newSharePermissions(body.permissions),
+        permissions: newSharePermissions(body.permissions,shareClass),
         label: body.label ? String(body.label).slice(0, 120) : null,
         createdBy: body.createdBy ? String(body.createdBy).slice(0, 200) : req.servicePrincipal.keyId,
         expiresAt,

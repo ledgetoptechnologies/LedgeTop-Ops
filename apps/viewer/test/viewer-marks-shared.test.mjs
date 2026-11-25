@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { DatabaseSync } from 'node:sqlite';
@@ -264,6 +265,20 @@ test('a public link reads shared marks only while it shows them, without notes o
   record.permissions.marks = true; record.revokedAt = 'now';
   await refused(403, 'marks_unavailable', token, 'GET', 'shared');
   assert.deepEqual([newSharePermissions({}).marks, newSharePermissions({ marks: false }).marks, effectiveSharePermissions({ view: true }).marks], [true, false, false]);
+});
+
+test('a link a client creates does not show marks unless that was chosen', async t => {
+  const { session, link, refused, make, shared } = await open(t);
+  await make(session('ops', 'one'));
+  for (const value of [undefined, {}, { view: true, measure: true }, { view: true, marks: 'true' }]) {
+    assert.equal(newSharePermissions(value, 'client').marks, false);
+    for (const route of ['', 'shared']) await refused(403, 'marks_unavailable', link(newSharePermissions(value, 'client')).token, 'GET', route);
+  }
+  assert.equal(newSharePermissions({ marks: true }, 'client').marks, true);
+  assert.equal(newSharePermissions({}, 'staff').marks, true);
+  assert.deepEqual(await shared(link(newSharePermissions({}, 'staff')).token), ['Pin']);
+  const route = fs.readFileSync(new URL('../server/apiV1.js', import.meta.url), 'utf8');
+  assert.match(route, /permissions: newSharePermissions(body.permissions,shareClass)/, 'the route that creates client links says whose link it is');
 });
 
 test('shared lists come in bounded pages', async t => {

@@ -9,10 +9,11 @@ function assetAllowed(share,kind){
   return view ? (!share.allowedViews||share.allowedViews.includes(view)) : !share.allowedViews;
 }
 // A new link stores every permission, so nothing is decided by what a request left out: camera positions and
-// downloads are on only when chosen. Marks staff shared on the model show unless turned off. Reading an older link keeps its meaning (assetAllowed above).
-function newSharePermissions(value){
+// downloads are on only when chosen. Marks staff shared on the model show on a
+// staff link unless turned off, and on a client's link only when chosen. Reading an older link keeps its meaning (assetAllowed above).
+function newSharePermissions(value,shareClass='staff'){
   const input=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
-  return {view:input.view!==false,measure:input.measure!==false,cameras:input.cameras===true,download:input.download===true,marks:input.marks!==false};
+  return {view:input.view!==false,measure:input.measure!==false,cameras:input.cameras===true,download:input.download===true,marks:shareClass==='staff'?input.marks!==false:input.marks===true};
 }
 // What a stored link allows, whatever its record leaves out. A link from before marks could be shown does not show them.
 function effectiveSharePermissions(value){
