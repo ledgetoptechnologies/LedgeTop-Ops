@@ -11,7 +11,7 @@ const express = require('express');
 const auth = require('../server/auth.js');
 const { createViewerMarkApi } = require('../server/viewerMarkApi.js');
 const schema = require('../server/viewerMarkSchema.js');
-const { ViewerMarkRepository, LIMITS } = require('../server/viewerMarkRepository.js');
+const { ViewerMarkRepository, LIMITS, validateMark } = require('../server/viewerMarkRepository.js');
 const { newSharePermissions, effectiveSharePermissions } = require('../server/publicSharePolicy.js');
 
 const MODEL = 'synthetic-model';
@@ -20,7 +20,7 @@ const point = (changes = {}) => ({ id: randomUUID(), geometry: { type: 'Point', 
 const content = (mark, changes = {}) => ({ id: mark.id, geometry: mark.geometry, name: mark.name, note: mark.note, color: mark.color, icon: mark.icon,
   categoryId: mark.categoryId, elevationNavd88M: mark.elevationNavd88M, revision: mark.revision, ...changes });
 
-async function open(t, { limited = false } = {}) {
+async function open(t) {
   const limits = { on: false };
   const db = new DatabaseSync(':memory:');
   db.exec(`PRAGMA foreign_keys=ON; CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('${MODEL}'), ('other-model');`);
@@ -63,8 +63,7 @@ async function open(t, { limited = false } = {}) {
   };
   const shared = async token => (await call(token, 'GET', 'shared')).body.marks?.map(mark => mark.name);
   const make = async (token, changes) => { const answer = await call(token, 'POST', '', point(changes)); assert.equal(answer.status, 201); return answer.body.mark; };
-  limits.on = limited;
-  return { db, session, sessions, link, call, refused, shared, make };
+  return { limits, db, session, sessions, link, call, refused, shared, make };
 }
 
 test('a new staff mark is shared for editing; stored marks stay private; client marks keep their rules', async t => {
@@ -329,11 +328,14 @@ test('a link a client creates does not show marks unless that was chosen', async
 });
 
 test('reads without a person of their own are rate limited like any other', async t => {
-  const { session, link, call, make } = await open(t, { limited: true });
+  const { session, link, call, make, limits } = await open(t);
   await make(session('ops', 'one'));
-  for (const token of [session('client', 'company', { permissions: { view: true, measure: true } }), session('client', 'v', { permissions: { view: true, personalMeasurements: true } })]) {
-    for (const route of ['', 'shared']) assert.equal((await call(token, 'GET', route)).status, 429, route);
-  }
+  limits.on = true;
+  const company = session('client', 'company', { permissions: { view: true, measure: true } });
+  assert.equal((await call(company, 'GET', '')).status, 429);
+  assert.equal((await call(company, 'GET', 'shared')).status, 403, 'refused before anything is read');
+  const viewer = session('client', 'v', { permissions: { view: true, personalMeasurements: true } });
+  for (const route of ['', 'shared']) assert.equal((await call(viewer, 'GET', route)).status, 429, route);
   assert.equal((await call(link({ view: true, marks: true }).token, 'GET', '')).status, 429);
 });
 
@@ -370,7 +372,7 @@ test('recently deleted: one\'s own all come first, and every shared one can be r
 
 test('a mark from before authorship was recorded keeps its content time through sharing, deleting and restoring', async t => {
   const { db, session, call } = await open(t);
-  const staff = session('ops', 'one'), client = session('client', 'c'), mark = { ...point({ name: 'Legacy' }), categoryId: null };
+  const staff = session('ops', 'one'), client = session('client', 'c'), mark = validateMark(point({ name: 'Legacy' })).document;
   db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, document_json, creation_hash, revision, created_at, updated_at, updated_by_audience, updated_by_subject)
     VALUES (?, ?, 'ops', 'one', 'private', ?, 'x', 3, '2026-10-01T00:00:00.000Z', '2026-10-05T00:00:00.000Z', 'ops', 'one')`).run(mark.id, MODEL, JSON.stringify(mark));
   let now = (await call(staff, 'POST', 'batch/share', { marks: [{ id: mark.id, revision: 3 }] })).body.marks[0];
