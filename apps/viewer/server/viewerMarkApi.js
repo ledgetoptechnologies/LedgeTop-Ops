@@ -92,7 +92,7 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
   router.get('/deleted', (req, res) => {
     const after = req.query.after === undefined ? null : typeof req.query.after === 'string' && CURSOR.exec(req.query.after);
     if (after === false || (req.query.after !== undefined && !after)) throw markError('invalid_mark_page');
-    res.json(marks.deleted(req.markPrincipal, after && { at: after[1], id: after[2] }));
+    res.json(marks.deleted(req.markPrincipal, Date.now(), after && { at: after[1], id: after[2] }));
   });
   router.get('/audiences', (req, res) => res.json({ audiences: marks.audiences(req.markPrincipal) }));
   router.post('/batch', (req, res) => {

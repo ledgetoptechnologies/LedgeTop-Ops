@@ -558,7 +558,7 @@ class ViewerMarkRepository {
   // The deleted marks that can still come back, newest first. One's own, all of them (storing
   // bounds them per owner), come first; for staff, shared ones of other staff follow in pages
   // of the shared list's size, sizes read before any document, with `next` for the page after.
-  deleted(principal, after = null, now = Date.now()) {
+  deleted(principal, now = Date.now(), after = null) {
     const cutoff = recoveryCutoff(now), describe = ({ id }) => {
       const row = this.row(principal, id), shared = this.isShared(row);
       return { ...JSON.parse(row.document_json), visibility: shared ? 'shared' : row.visibility, access: shared ? row.share_access : null,

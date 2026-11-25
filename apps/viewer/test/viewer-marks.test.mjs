@@ -458,9 +458,9 @@ test('a deleted mark can be restored by its owner for 30 days', async t => {
   const person = { modelId, modelVersionId: 'synthetic-v1', audience: 'client', subject: 'client-a', session: {}, personalPersistence: true };
   const deletedAt = Date.parse('2026-11-01T00:00:00.000Z'), limit = deletedAt + 30 * 86_400_000;
   db.prepare('UPDATE viewer_marks SET deleted_at=? WHERE id=?').run(new Date(deletedAt).toISOString(), mark.id);
-  assert.equal(repository.deleted(person, limit).length, 1);
+  assert.equal(repository.deleted(person, limit).marks.length, 1);
   assert.equal(repository.purgeDeleted(limit), 0);
-  assert.equal(repository.deleted(person, limit + 1).length, 0);
+  assert.equal(repository.deleted(person, limit + 1).marks.length, 0);
   assert.throws(() => repository.restore(person, mark.id, 2, limit + 1), { code: 'mark_not_found' });
   assert.equal(repository.restore(person, mark.id, 2, limit).name, 'Kept');
   db.prepare('UPDATE viewer_marks SET deleted_at=? WHERE id=?').run(new Date(deletedAt).toISOString(), mark.id);
