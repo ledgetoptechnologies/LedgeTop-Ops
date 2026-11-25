@@ -232,6 +232,34 @@ test('a process killed inside 84 leaves the populated database at 86; two proces
   healthy(current);
 });
 
+test('90 adds only the sharing tables, survives the previous build, and is refused if altered', t => {
+  const { db, open } = populated(t, 86);
+  withMigrations(item => item.version <= 86, () => applyMigrations(db));
+  const before = snapshot(db);
+  db.close();
+  const current = open();
+  const after = snapshot(current), added = ['viewer_mark_history', 'viewer_mark_shares'];
+  assert.deepEqual(after.objects.filter(row => !added.includes(row.name)), before.objects);
+  assert.deepEqual(after.objects.filter(row => added.includes(row.name)).map(row => row.name), added);
+  for (const [name, rows] of Object.entries(before.rows)) if (name !== 'schema_migrations') assert.deepEqual(after.rows[name], rows, name);
+  const staff = { ...principal, audience: 'ops', subject: 'staff-a' };
+  const { mark } = new marksRepository.ViewerMarkRepository(current).create(staff, pin());
+  // What a build without 90 reads: a row marked internal, which it serves to its owner only.
+  assert.equal(current.prepare('SELECT visibility FROM viewer_marks WHERE id=?').get(mark.id).visibility, 'internal');
+  current.close();
+  const previous = open(item => item.version <= 86);
+  healthy(previous);
+  previous.close();
+  const again = open();
+  assert.equal(new marksRepository.ViewerMarkRepository(again).get(staff, mark.id).visibility, 'shared');
+  again.exec("UPDATE models SET active_version_id=NULL; DELETE FROM viewer_sessions; DELETE FROM model_versions; DELETE FROM models WHERE id='synthetic-model'");
+  assert.equal(again.prepare('SELECT count(*) n FROM viewer_mark_shares').get().n, 0);
+  healthy(again);
+  again.exec('ALTER TABLE viewer_mark_shares ADD COLUMN extra TEXT');
+  again.close();
+  assert.throws(() => open(), { code: 'viewer_migration_history_conflict' });
+});
+
 test('a later reserved number (87) can land before or after 84', t => {
   for (const first of ['87', '84']) {
     const { db } = populated(t, 86);
@@ -240,7 +268,7 @@ test('a later reserved number (87) can land before or after 84', t => {
     try {
       withMigrations(item => item.version !== (first === '87' ? 84 : 87), () => applyMigrations(db));
       applyMigrations(db);
-      assert.deepEqual(ledger(db).slice(-4).map(([version]) => version), [84, 85, 86, 87]);
+      assert.deepEqual(ledger(db).slice(-5).map(([version]) => version), [84, 85, 86, 87, 90]);
       assert.equal(marks.verify(db), true);
       healthy(db);
     } finally { MIGRATIONS.splice(MIGRATIONS.indexOf(later), 1); }
