@@ -362,7 +362,7 @@ test('signed-in client: map-click and typed pins survive a reload at full precis
     assert.deepEqual((await h.state())[1].geometry.coordinates, [-86.99971234, 43.05031234]);
 
     // Opening and editing a mark asks the server nothing; a save is one request.
-    assert.deepEqual(h.asked(), ['GET /api/v1/marks']);
+    assert.deepEqual(h.asked(), ['GET /api/v1/marks', 'GET /api/v1/marks/shared']);
     // Invalid text, Save without a change event: nothing is written and the editor stays open.
     await openTreeStand();
     await h.setQuietly('.viewer-mark-form [name=pointCoordinates]', 'not a place');
@@ -382,7 +382,7 @@ test('signed-in client: map-click and typed pins survive a reload at full precis
     await h.client.evaluate("document.querySelector('.viewer-mark-form').requestSubmit(), 0");
     await waitFor("document.querySelector('.viewer-mark-form').hidden", 'editor closed after save');
     rows = stored();
-    assert.deepEqual(h.asked(), ['GET /api/v1/marks', 'PUT /api/v1/marks/:id']);
+    assert.deepEqual(h.asked(), ['GET /api/v1/marks', 'GET /api/v1/marks/shared', 'PUT /api/v1/marks/:id']);
     assert.equal(rows[1].id, treeStand.id);
     assert.equal(rows[1].revision, 3);
     assert.deepEqual(rows[1].geometry.coordinates, [-86.99961234, 43.05041234]);

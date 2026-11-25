@@ -148,7 +148,7 @@ for (const permissions of REDUCED) {
     assert.deepEqual(panel.store.state.marks.map(mark => mark.name).sort(), ['Private late', 'Private pin']);
     assert.deepEqual(panel.store.state.undo, [], 'undo does not come back');
     assert.equal(panel.store.canWrite(), true);
-    assert.deepEqual(requests, [['GET', '/api/v1/marks']]);
+    assert.deepEqual(requests, [['GET', '/api/v1/marks'], ['GET', '/api/v1/marks/shared']]);
   });
 }
 
