@@ -255,7 +255,7 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     await capture(page, 'viewer-direct-share-desktop.png');
     await form.getByRole('button', { name: 'Review share', exact: true }).click();
     const review = form.getByRole('region', { name: 'Review share' });
-    assert.match(await review.innerText(), /Drone Services[\s\S]*including models published later[\s\S]*View, measure, see camera positions and download[\s\S]*No end date/);
+    assert.match(await review.innerText(), /Drone Services[\s\S]*and later ones[\s\S]*View, measure, see camera positions and download[\s\S]*No end date/);
     assert.equal(await later.isDisabled(), true, 'Choices are frozen while reviewing');
     assert.equal(state.requests.filter(req => req.method === 'POST').length, 0, 'Review alone sends nothing');
     await form.getByRole('button', { name: 'Share with client', exact: true }).click();

@@ -49,8 +49,8 @@ function shareForm(answers,{tasks=['task']}={}){
   const choices={summary:'Pat Example will see Task one.',permissions:{},expiresAt:null};
   const form={isConnected:true,elements:{},querySelector:part,querySelectorAll:()=>[]};
   const context=vm.createContext({crypto:{randomUUID:()=>`key-${posts.length}`},state:{shareContext:{}},modal:{open:true},toast:(text,bad)=>toasts.push([text,Boolean(bad)]),dateTime,
-    directShareContext:()=>({projectId:'project'}),readDirectShareForm:()=>({scope:'tasks',summary:choices.summary,bodies:({confirmed}={})=>{choices.confirmed=confirmed;if(choices.invalid)throw new Error(choices.invalid);return tasks.map(taskId=>({taskId,permissions:{}}))}}),
-    SHARE_TARGET_MISSING:'missing',directShareReviewMarkup:()=>'review',directShareErrorText:error=>`Refused: ${error.message}`,DIRECT_CLIENT_GRANTS_PATH:'/grants',
+    directShareContext:()=>({projectId:'project'}),readDirectShareForm:()=>({scope:'tasks',what:choices.what,summary:choices.summary,bodies:({confirmed}={})=>{choices.confirmed=confirmed;if(choices.invalid)throw new Error(choices.invalid);return tasks.map(taskId=>({taskId,permissions:{}}))}}),
+    SHARE_TARGET_MISSING:'missing',directShareReviewMarkup:()=>'review',directClientKey:()=>'k',directClientTwin:async()=>false,directShareErrorText:error=>`Refused: ${error.message}`,DIRECT_CLIENT_GRANTS_PATH:'/grants',
     api:async(path,options)=>{posts.push(options.body);const answer=answers.shift();if(answer instanceof Error)throw answer;return answer},loadDirectClientAccess:async()=>null,rerenderClientSharePanel(){},directClientAccess:value=>value,bindClientPicker(){}});
   vm.runInContext(declaration('bindDirectShare'),context);context.bindDirectShare(form,'project','output');
   return {form,summary,review,toasts,posts,choices,submit:()=>form.onsubmit({preventDefault(){}}),change:()=>form.onchange(),back:()=>elements.back.onclick()};
@@ -78,6 +78,13 @@ test('a share refused halfway says how far it went, and keeps saying it',async()
 test('choices that became invalid during the review say so beside the form',async()=>{
   const f=shareForm([]);await f.submit();f.choices.invalid='Tick the confirmation.';await f.submit();
   assert.equal(f.summary.textContent,'Tick the confirmation.');assert.equal(f.form.reviewing,false);assert.equal(f.posts.length,0);
+});
+test('what changed after the review is not sent: the form opens again',async()=>{
+  const f=shareForm([{}]);f.choices.what='one';await f.submit();assert.equal(f.form.reviewing,true);
+  f.choices.what='two';await f.submit();
+  assert.equal(f.posts.length,0);assert.equal(f.form.reviewing,false);assert.match(f.summary.textContent,/changed since the review/);
+  await f.submit();f.change();assert.equal(f.form.reviewing,false,'a change of any control leaves the review');
+  await f.submit();await f.submit();assert.equal(f.posts.length,1);
 });
 test('nothing is written into a dialog that was replaced meanwhile',async()=>{
   const f=shareForm([new Error('late')]);await f.submit();const sending=f.submit();f.form.isConnected=false;f.summary.textContent='another dialog';await sending;

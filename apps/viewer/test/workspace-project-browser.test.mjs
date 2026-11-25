@@ -910,8 +910,8 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="share-output"]').click()`);
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.share-form')?.dataset.outputId === 'output-johnson'", `${viewport.name}: task Share shortcut did not target the published output`);
     await client.evaluate(`document.querySelector('[data-share-mode="internal"]').focus()`);
-    await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'Home',code:'Home',windowsVirtualKeyCode:36});
-    await client.command('Input.dispatchKeyEvent',{type:'keyUp',key:'Home',code:'Home',windowsVirtualKeyCode:36});
+    await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'End',code:'End',windowsVirtualKeyCode:35});
+    await client.command('Input.dispatchKeyEvent',{type:'keyUp',key:'End',code:'End',windowsVirtualKeyCode:35});
     assert.deepEqual(await client.evaluate(`({focused:document.activeElement?.id,selected:document.querySelector('#share-tab-public')?.getAttribute('aria-selected'),publicVisible:!document.querySelector('#share-panel-public')?.hidden,internalHidden:document.querySelector('#share-panel-internal')?.hidden})`),{focused:'share-tab-public',selected:'true',publicVisible:true,internalHidden:true},`${viewport.name}: Public link tab must activate and receive keyboard focus`);
     await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
     await client.command('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});

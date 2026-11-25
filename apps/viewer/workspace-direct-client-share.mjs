@@ -59,10 +59,29 @@ async function sameNameClients(api,projectId,grants){
 }
 export const directClientKey=client=>JSON.stringify([client.sourceId,client.workspaceId]);
 export const directClientLabel=client=>client?.pickerLabel||clientPickerLabel(client);
-// The review always adds the business: it names the exact client even when a same-named one was not in the search results.
+// The review names the exact client whatever page of results was loaded: always its business and organisation,
+// and the end of its id when another client has all of those too, or when that could not be ruled out.
 export function directClientReviewName(client){
-  const word=clientBusinessWord(client?.businessName),label=directClientLabel(client);
-  return word&&!label.includes(`(${word}`)?`${label} (${word})`:label;
+  const name=client?.displayName||'Client',organization=client?.organizationName;
+  const details=[clientBusinessWord(client?.businessName),organization&&organization!==name?organization:null,
+    client?.twin===false||!client?.workspaceId?null:`ref ${String(client.workspaceId).slice(-6)}`].filter(Boolean);
+  return `${name}${details.length?` (${details.join(', ')})`:''}`;
+}
+// Whether another client looks the same in the review. null when the search could not be read to its end.
+export async function directClientTwin(api,projectId,client){
+  const same=text=>String(text??'').trim().toLocaleLowerCase();
+  const look=item=>JSON.stringify([same(item.displayName),same(clientBusinessWord(item.businessName)),same(item.organizationName)]);
+  if(same(client.displayName).length<2)return null;
+  try{
+    for(let cursor=null,pages=0;pages<5;pages++){
+      const page=directClientAccess(await api(directClientsPath(projectId,{query:client.displayName,cursor,include:'clients'})));
+      if(!page)return null;
+      if(page.clients.some(item=>directClientKey(item)!==directClientKey(client)&&look(item)===look(client)))return true;
+      cursor=page.clientsNextCursor||null;
+      if(!cursor)return false;
+    }
+  }catch{}
+  return null;
 }
 // Only tasks with a live published model can be shared one by one.
 export function shareableTasks(projectId,tasks,outputs){
@@ -93,7 +112,8 @@ const permissionList=permissions=>{
 // The review step repeats exactly what will be sent: who, what, permissions and end.
 export function directShareReviewMarkup({client,what,permissions,expiresAt,dateTime=value=>value}){
   const can=permissionList(permissions);
-  return [['Client',directClientReviewName(client)],['Shared',what],['Can',can[0].toUpperCase()+can.slice(1)],
+  const name=directClientReviewName(client);
+  return [['Client',name],['Who',`Everyone in ${name}’s portal account`],['Shared',what],['Can',can[0].toUpperCase()+can.slice(1)],
     ['Ends',expiresAt?dateTime(expiresAt):'No end date']]
     .map(([label,value])=>`<dt>${label}</dt><dd>${esc(value)}</dd>`).join('');
 }
@@ -130,9 +150,10 @@ export function readDirectShareForm(form,{projectId,projectName,tasks,clients}){
   const scope=form.querySelector('input[name="scope"]:checked')?.value==='project'?'project':'tasks';
   const chosen=scope==='tasks'?[...form.querySelectorAll('input[name="taskId"]')].filter(input=>input.checked).map(input=>input.value):[];
   const taskNames=chosen.map(id=>tasks.find(task=>task.id===id)?.name||'Task');
-  const what=scope==='project'?`Whole project ${projectName}, including models published later`
+  const now=!tasks.length?'nothing published yet':tasks.length>5?`${tasks.length} published tasks now`:tasks.map(task=>`“${task.name}”`).join(', ');
+  const what=scope==='project'?`Whole project ${projectName}: ${now} and later ones`
     :`${taskNames.length===1?'Task':`${taskNames.length} tasks`} ${taskNames.map(name=>`“${name}”`).join(', ')}`;
-  return {client,scope,chosen,what,summary:directScopeSummary({clientName:client?directClientLabel(client):'',projectName,scope,taskNames}),
+  return {client,scope,chosen,what,published:scope==='project'?tasks.map(task=>task.id).sort():chosen,summary:directScopeSummary({clientName:client?directClientLabel(client):'',projectName,scope,taskNames}),
     // confirmed is true only for the Share click on the review.
     bodies:({confirmed=false}={})=>{
       if(!client)throw new Error('Choose a client.');

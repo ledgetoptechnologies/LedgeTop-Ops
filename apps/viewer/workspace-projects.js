@@ -20,7 +20,7 @@ import { createWorkspaceNavigationWork, workspaceNavigationState } from './works
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, directClientTwin, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, directClientKey, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -1856,19 +1856,19 @@ function rerenderClientSharePanel(projectId,onlyOutputId){
 }
 function bindDirectShare(form,projectId,onlyOutputId){
   const context=directShareContext(onlyOutputId),shareContext=state.shareContext,live=()=>state.shareContext===shareContext&&form.isConnected&&modal.open;
-  let picked=null;const read=()=>readDirectShareForm(form,{...context,clients:picked?[picked]:[]});
+  let picked=null;const read=()=>readDirectShareForm(form,{...context,tasks:directShareContext(onlyOutputId).tasks||context.tasks,clients:picked?[picked]:[]});
   const summary=form.querySelector('[data-direct-summary]'),taskInputs=[...form.querySelectorAll('input[name="taskId"]')];
   const review=form.querySelector('[data-direct-review]'),reviewButton=form.querySelector('[data-direct-review-button]');
   // Review step: the choices are frozen and repeated in plain words before anything is sent.
   // It is the confirmation: only its Share button sends, and any change of the choices goes back through it.
   const setReviewing=on=>{
-    form.reviewing=on;review.hidden=!on;reviewButton.hidden=on;
+    form.reviewing=on;if(!on)form.reviewed=null;review.hidden=!on;reviewButton.hidden=on;
     for(const element of form.querySelectorAll('fieldset,input[name="expiresAt"],input[name="measure"],input[name="cameras"],input[name="download"]'))element.disabled=on;
     if(!on)sync();
   };
   const sync=()=>{const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';
     const later=form.elements.includeLater,off=current.scope!=='project';if(later&&later.disabled!==off){later.disabled=off;later.checked=!off}summary.textContent=current.summary};
-  form.onchange=sync;
+  form.onchange=()=>form.reviewing?setReviewing(false):sync();
   form.querySelector('[data-direct-back]').onclick=()=>setReviewing(false);
   // The second click of a double-click on Review share must not land on Share.
   const send=form.querySelector('[data-direct-send]');if(send)send.onclick=event=>{if(event.detail>1)event.preventDefault()};
@@ -1889,15 +1889,27 @@ function bindDirectShare(form,projectId,onlyOutputId){
   form.onsubmit=async event=>{
     event.preventDefault();if(form.shareBusy)return;
     if(directShareContext(onlyOutputId).targetMissing){if(form.reviewing)setReviewing(false);summary.textContent=SHARE_TARGET_MISSING;return}
-    let bodies,target;try{target=read();bodies=target.bodies({confirmed:form.reviewing===true})}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
+    let bodies,target;const choices=confirmed=>{target=read();const key=JSON.stringify([target.bodies(),target.what,target.published,target.client&&directClientKey(target.client)]);bodies=target.bodies({confirmed});return key};
+    let chosen;try{chosen=choices(form.reviewing===true)}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
     if(!form.reviewing){
+      if(target.client&&target.client.twin===undefined){
+        // Is there another client that would read the same? Asked before the review names this one.
+        const client=picked;form.shareBusy=true;summary.textContent='Preparing the review…';
+        let twin=null;try{twin=await directClientTwin(api,projectId,client)}finally{form.shareBusy=false}
+        if(!live())return;
+        let still;try{still=choices(false)}catch{}
+        if(picked!==client||still!==chosen){sync();return}
+        target.client=picked={...client,twin};
+      }
       // The review says it all; the line above it is for progress and refusals.
       summary.textContent='';
-      const body=bodies[0];
+      const body=bodies[0];form.reviewed=chosen;
       form.querySelector('[data-direct-review-text]').innerHTML=directShareReviewMarkup({client:target.client,what:target.what,permissions:body.permissions,expiresAt:body.expiresAt,dateTime});
       // Focus the review, not Share: a held Enter key must not send.
       setReviewing(true);review.focus?.();return;
     }
+    // What was reviewed is what is sent; anything that changed since goes back to the form.
+    if(form.reviewed!==chosen){setReviewing(false);summary.textContent='Something changed since the review. Check it and review again.';return}
     // Inputs stay frozen while sending so the summary always matches what is being shared.
     const controls=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);
     for(const [element] of controls)element.disabled=true;
@@ -1933,8 +1945,8 @@ function clientShareCard(output,onlyOutputId){
   }else{
     const target=onlyOutputId
       ?`<label><span>Client Portal project for this exact model</span><select name="associationId" required><option value="">Select client project</option>${associations.map(item=>{const project=projects.find(project=>project.id===associationProjectId(item)&&portalAccountId(project)===portalAccountId(item));return`<option data-portal="${project.nativeTarget?'native':'legacy'}" value="${esc(item.selectionKey)}">${esc(clientProjectLabel(project))}</option>`}).join('')}</select></label><p class="form-note">Only this model. Future published tasks are not included.</p>`
-      :`<label><span>Operations client project</span><select name="projectId" required><option value="">Select client project</option>${projects.filter(portalAccountId).map(project=>`<option data-portal="${project.nativeTarget?'native':'legacy'}" value="${esc(clientProjectKey(project))}">${esc(clientProjectLabel(project))}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="wholeProject" required> Grant the entire selected Operations project, not just one Viewer model</label><label class="check"><input type="checkbox" name="includeFuturePublished" required checked> Include current and future published tasks</label>`;
-    form=`<form id="client-grant-form" class="manage-form share-dialog-form"><label><span>Portal connection</span><select name="portalConnection"><option value="legacy">Operations client accounts</option>${projects.some(project=>project.nativeTarget)?`<option value="native" ${projects.some(project=>!project.nativeTarget)?'':'selected'}>Connected Client Workspaces</option>`:''}</select></label>${target}${field('Expiry (optional)','expiresAt','type="datetime-local"')}<label class="check"><input type="checkbox" name="measure" checked> Measurements</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download" checked> Downloads</label><button class="primary-button">Grant client access</button></form>`;
+      :`<label><span>Operations client project</span><select name="projectId" required><option value="">Select client project</option>${projects.filter(portalAccountId).map(project=>`<option data-portal="${project.nativeTarget?'native':'legacy'}" value="${esc(clientProjectKey(project))}">${esc(clientProjectLabel(project))}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="wholeProject" required> Grant the entire selected Operations project, not just one Viewer model</label><label class="check"><input type="checkbox" name="includeFuturePublished" required> Include current and future published tasks</label>`;
+    form=`<form id="client-grant-form" class="manage-form share-dialog-form"><label><span>Portal connection</span><select name="portalConnection"><option value="legacy">Operations client accounts</option>${projects.some(project=>project.nativeTarget)?`<option value="native" ${projects.some(project=>!project.nativeTarget)?'':'selected'}>Connected Client Workspaces</option>`:''}</select></label>${target}${field('Expiry (optional)','expiresAt','type="datetime-local"')}<label class="check"><input type="checkbox" name="measure" checked> Measurements</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads</label><button class="primary-button">Grant client access</button></form>`;
   }
   const localModels=new Set(state.outputs.filter(item=>(item.projectId||state.tasks.find(task=>task.id===item.taskId)?.projectId)===state.shareContext?.projectId).map(item=>item.modelId).filter(Boolean));
   const related=(access.associations||[]).filter(item=>localModels.has(associationModelId(item))),projectIds=new Set(related.map(associationProjectId));
