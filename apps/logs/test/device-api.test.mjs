@@ -38,9 +38,9 @@ function staffDirectory() {
 
 async function freshEnv() {
   const db = await runtime.getD1Database('LOGS_DB'), bucket = await runtime.getR2Bucket('LOGS_BUCKET');
-  for (const table of ['raw_logs', 'device_sign_ins', 'devices', 'audit_events', 'keychains', 'flight_messages', 'flight_tags', 'import_items', 'flights', 'imports', 'controllers', 'batteries', 'aircraft'])
+  for (const table of ['raw_logs', 'device_sign_ins', 'device_pairing_failures', 'device_pairings', 'devices', 'audit_events', 'keychains', 'flight_messages', 'flight_tags', 'import_items', 'flights', 'imports', 'controllers', 'batteries', 'aircraft'])
     await db.prepare(`DROP TABLE IF EXISTS ${table}`).run();
-  for (const file of ['0001_flight_logs.sql', '0002_devices_raw_logs.sql', '0003_device_eligibility_revision.sql']) {
+  for (const file of ['0001_flight_logs.sql', '0002_devices_raw_logs.sql', '0003_device_eligibility_revision.sql', '0004_device_pairings.sql']) {
     const sql = fs.readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8').replace(/--.*$/gm, '');
     for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(statement).run();
   }
@@ -277,6 +277,87 @@ test('the hourly limit counts only admitted requests and is enforced in the inse
     assert.deepEqual([over.status, over.body.code], [429, 'too_many_sign_ins']);
     assert.equal(await env.LOGS_DB.prepare("SELECT COUNT(*) AS n FROM device_sign_ins WHERE username = 'bkoltz'").first().then(r => r.n), 3, 'refused requests are not stored');
   } finally { Object.assign(device.DEVICE_LIMITS, saved); }
+});
+
+test('a pairing code made in Ops signs in past a flooded username, once, for the right pilot only', async () => {
+  env = await freshEnv();
+  const saved = { ...device.DEVICE_LIMITS };
+  try {
+    device.DEVICE_LIMITS.signInsPerHour = device.DEVICE_LIMITS.pendingPerUsername;
+    // Someone exhausts bkoltz's anonymous budget.
+    for (let i = 0; i < device.DEVICE_LIMITS.pendingPerUsername; i++) await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } });
+    assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } })).status, 429);
+    await device.clearPendingSignIns(env, beau);
+    assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } })).status, 429, 'clearing does not reset the hourly budget');
+    // Beau makes a pairing code in Ops; only a hash is stored.
+    const pairing = await device.createPairing(env, beau);
+    assert.match(pairing.code, /^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$/);
+    const stored = await env.LOGS_DB.prepare('SELECT secret_hash, eligibility_revision FROM device_pairings').first();
+    assert.notEqual(stored.secret_hash, pairing.code.replace('-', ''));
+    assert.equal(stored.eligibility_revision, 1);
+    // Kollin's username with Beau's code is refused and doesn't use it up.
+    assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstirn', pairingCode: pairing.code } })).status, 404);
+    // Typed loosely (lower case, no dash, O for 0) it still works, past the exhausted budget, and needs approval.
+    const typed = pairing.code.toLowerCase().replace('-', ' ').replace(/0/g, 'o');
+    const paired = await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz', pairingCode: typed } });
+    assert.equal(paired.status, 201);
+    assert.equal(paired.body.paired, true);
+    assert.equal((await device.pendingSignIns(env, beau)).items.length, 1);
+    await assert.rejects(device.decideSignIn(env, kollin, { signInId: paired.body.signInId, approve: true }), e => e.code === 'sign_in_not_found');
+    await device.decideSignIn(env, beau, { signInId: paired.body.signInId, approve: true });
+    const collected = await call('GET', `/api/v1/device/sign-in/${paired.body.signInId}`, { poll: paired.body.pollToken });
+    assert.deepEqual([collected.body.status, collected.body.pilot.id], ['approved', 'staff-beau']);
+    // Single use.
+    assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz', pairingCode: pairing.code } })).status, 404);
+  } finally { Object.assign(device.DEVICE_LIMITS, saved); }
+});
+
+test('pairing codes need current eligibility, expire, can be cancelled, are capped per pilot, and wrong guesses are bounded', async () => {
+  env = await freshEnv();
+  const dir = env.OPS_DIRECTORY;
+  // Not eligible: no code.
+  dir.setEligible('staff-kollin', false);
+  await assert.rejects(device.createPairing(env, kollin), e => e.code === 'not_eligible');
+  await assert.rejects(device.createPairing(env, null), e => e.code === 'unauthenticated');
+  // A code made before a revision change no longer works.
+  const stale = await device.createPairing(env, beau);
+  dir.setEligible('staff-beau', true);
+  assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz', pairingCode: stale.code } })).status, 404);
+  // Expired.
+  const old = await device.createPairing(env, beau);
+  await env.LOGS_DB.prepare("UPDATE device_pairings SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").bind(old.pairingId).run();
+  assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz', pairingCode: old.code } })).status, 404);
+  // Cancelled, and only by its own pilot.
+  const mine = await device.createPairing(env, beau);
+  dir.setEligible('staff-kollin', true);
+  assert.deepEqual(await device.cancelPairing(env, kollin, mine.pairingId), { closed: false });
+  assert.deepEqual(await device.cancelPairing(env, beau, mine.pairingId), { closed: true });
+  assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz', pairingCode: mine.code } })).status, 404);
+  // At most three open per pilot; Kollin's are untouched by Beau's.
+  const kollins = await device.createPairing(env, kollin);
+  for (let i = 0; i < 4; i++) await device.createPairing(env, beau);
+  const open = await env.LOGS_DB.prepare("SELECT pilot_id, COUNT(*) AS n FROM device_pairings WHERE status = 'open' GROUP BY pilot_id ORDER BY pilot_id").all();
+  assert.deepEqual(open.results.map(r => [r.pilot_id, r.n]), [['staff-beau', 3], ['staff-kollin', 1]]);
+  // Wrong guesses are recorded (time only) and, past the global limit, pairing pauses for everyone.
+  const saved = { ...device.DEVICE_LIMITS };
+  try {
+    device.DEVICE_LIMITS.pairingFailuresPerHour = 3;
+    const before = (await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM device_pairing_failures').first()).n;
+    for (const guess of ['AAAAA-AAAAA', 'not a code', 'BBBBB-BBBBB'].slice(0, Math.max(0, 3 - before)))
+      assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstirn', pairingCode: guess } })).status, 404);
+    const paused = await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstirn', pairingCode: kollins.code } });
+    assert.deepEqual([paused.status, paused.body.code], [429, 'pairing_unavailable']);
+    // The ordinary username path is unaffected.
+    assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstirn' } })).status, 201);
+  } finally { Object.assign(device.DEVICE_LIMITS, saved); }
+});
+
+test('two controllers racing one pairing code: exactly one sign-in', async () => {
+  env = await freshEnv();
+  const pairing = await device.createPairing(env, beau);
+  const results = await Promise.all([0, 1, 2].map(() => call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz', pairingCode: pairing.code } })));
+  assert.equal(results.filter(r => r.status === 201).length, 1);
+  assert.equal(await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM device_sign_ins WHERE pairing_id IS NOT NULL').first().then(r => r.n), 1);
 });
 
 test('requests and tokens from before revisions existed, or a directory without eligibility, fail closed', async () => {
