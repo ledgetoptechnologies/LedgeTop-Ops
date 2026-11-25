@@ -90,7 +90,8 @@ test('in the panel: suggestions add one or all, and go away with the person\'s o
   const panel = mount();
   await panel.marks.setScope(scope('client', 'client-a'));
   assert.equal(suggested(panel).length, 12);
-  assert.deepEqual(requests.map(([method]) => method), ['GET'], 'nothing is written to show them');
+  assert.deepEqual(requests, [['GET', '/api/v1/marks'], ['GET', '/api/v1/marks/shared']]);
+  assert.ok(requests.every(([method]) => method === 'GET'), 'nothing is written to show them');
   await panel.q('[aria-label="Add Water"]').click();
   assert.deepEqual([own(panel), suggested(panel).length, rows()], [['Water'], 11, 1]);
   await panel.q('[aria-label="Edit Water"]').click();
