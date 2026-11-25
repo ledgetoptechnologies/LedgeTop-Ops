@@ -56,7 +56,7 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
       assert.deepEqual(Object.keys(body).sort(), grantKeys, 'UI must use direct client authority, without a PA/business project');
       assert.equal(body.sourceId, CLIENT.sourceId); assert.equal(body.workspaceId, CLIENT.workspaceId); assert.equal(body.viewerProjectId, PROJECT);
       assert.equal(body.confirmedScope, true); assert.match(key || '', /^[A-Za-z0-9._:-]{16,128}$/);
-      assert.deepEqual(body.permissions, { measure: true, cameras: false, download: false });
+      assert.deepEqual(body.permissions, { measure: true, cameras: true, download: true });
       assert.equal(body.expiresAt, null);
       if (body.scopeType === 'project') { assert.equal(body.taskId, null); assert.equal(body.includeFuturePublished, true); }
       else { assert.equal(body.scopeType, 'task'); assert.ok(TASKS.includes(body.taskId)); assert.equal(body.includeFuturePublished, false); }
@@ -143,8 +143,7 @@ async function openWorkspace(t, browser, state, viewport = { width: 1366, height
 async function openShare(page, outputId = null) {
   await page.locator(outputId ? `[data-action="share-output"][data-id="${outputId}"]` : `[data-action="project-share"][data-id="${PROJECT}"]`).click();
   const form = page.locator('#direct-client-grant-form'); await form.waitFor({ state: 'visible' });
-  assert.equal(await form.getByRole('checkbox', { name: /^Camera positions/ }).isChecked(), false,
-    'New direct shares must keep photo locations off until explicitly selected');
+  assert.equal(await form.getByRole('checkbox', { name: /^Camera positions/ }).isChecked(), true);
   // Search-first combobox: focus lists nobody; two typed characters search; choosing one only fills the form.
   const combobox = form.getByRole('combobox', { name: 'Client' });
   await combobox.click();
@@ -181,7 +180,6 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     const original = await form.elementHandle();
     await form.locator('[name="scope"][value="tasks"]').check();
     await form.locator(`[name="taskId"][value="${TASKS[0]}"]`).check();
-    await form.locator('[name="confirmedScope"]').check();
     const legacy = page.locator('.share-legacy');
     assert.equal(await legacy.getAttribute('open'), null, 'Legacy details remain optional');
     if (deferLegacy) {
@@ -190,7 +188,6 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     }
     await legacy.getByText('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
     assert.equal(await original.evaluate(element => element.isConnected), true, 'Late legacy completion must preserve the current direct form');
-    assert.equal(await form.locator('[name="confirmedScope"]').isChecked(), true);
     assert.equal(await form.locator('input[name="client"]').inputValue(), JSON.stringify([CLIENT.sourceId, CLIENT.workspaceId]));
     await reviewAndShare(form);
     await page.locator('[data-action="revoke-direct-client-grant"]').waitFor();
@@ -225,7 +222,6 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     const original = await form.elementHandle();
     await form.locator('[name="scope"][value="tasks"]').check();
     await form.locator(`[name="taskId"][value="${TASKS[0]}"]`).check();
-    await form.locator('[name="confirmedScope"]').check();
     await reviewAndShare(form);
     await page.waitForFunction(() => document.querySelector('[data-direct-summary]')?.textContent.startsWith('Sharing…'));
     const progress = await form.locator('[data-direct-summary]').innerText();
@@ -243,27 +239,23 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     assertNoUnrelatedWrites(state, pageErrors);
   });
 
-  await t.test('Share project starts on the whole project, needs the later-models box and consent, then a review; pending revoke stays honest', async child => {
+  await t.test('Share project starts on the whole project, needs the later-models box and a review; pending revoke stays honest', async child => {
     const state = await fixture(child), { page, pageErrors } = await openWorkspace(child, browser, state), form = await openShare(page);
     assert.equal(await page.locator(`[data-action="project-share"][data-id="${PROJECT}"]`).innerText(), 'Share project');
     assert.equal(state.requests.some(request => request.path === DIRECT && request.query.include === 'all'), false, 'Opening Share must not list clients');
-    const consent = form.locator('[name="confirmedScope"]'); assert.equal(await consent.isChecked(), false);
-    assert.equal(await consent.getAttribute('required'), '');
+    assert.equal(await form.locator('[name="confirmedScope"]').count(), 0);
     assert.equal(await form.locator('[name="scope"][value="project"]').isChecked(), true);
     const later = form.getByRole('checkbox', { name: 'Also share models published later' });
-    assert.equal(await later.isChecked(), false, 'Later models are never pre-selected');
-    await consent.check(); await reviewAndShare(form);
+    assert.equal(await later.isChecked(), true);
+    await later.uncheck(); await reviewAndShare(form);
     assert.match(await form.locator('[data-direct-summary]').innerText(), /always includes models published later/);
-    assert.equal(state.requests.filter(req => req.method === 'POST').length, 0, 'Consent alone must not send whole-project access');
-    await later.check(); await consent.uncheck();
+    assert.equal(state.requests.filter(req => req.method === 'POST').length, 0, 'A whole project without later models is refused');
+    await later.check();
     assert.match(await form.locator('[data-direct-summary]').innerText(), /every published task.*including tasks published later/);
     await capture(page, 'viewer-direct-share-desktop.png');
-    await reviewAndShare(form);
-    assert.equal(state.requests.filter(req => req.method === 'POST').length, 0, 'Missing explicit consent must not send a grant');
-    await consent.check();
     await form.getByRole('button', { name: 'Review share', exact: true }).click();
     const review = form.getByRole('region', { name: 'Review share' });
-    assert.match(await review.innerText(), /including tasks published later[\s\S]*They can view and measure[\s\S]*does not expire/);
+    assert.match(await review.innerText(), /Drone Services[\s\S]*including models published later[\s\S]*View, measure, see camera positions and download[\s\S]*No end date/);
     assert.equal(await later.isDisabled(), true, 'Choices are frozen while reviewing');
     assert.equal(state.requests.filter(req => req.method === 'POST').length, 0, 'Review alone sends nothing');
     await form.getByRole('button', { name: 'Share with client', exact: true }).click();
@@ -288,7 +280,7 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     assert.equal(await form.locator(`[name="taskId"][value="${TASKS[1]}"]`).isChecked(), false);
     assert.match(await form.locator('[data-direct-summary]').innerText(), /only “North field”.*Other tasks.*stay hidden/);
     await capture(page, 'viewer-direct-share-mobile.png');
-    await form.locator('[name="confirmedScope"]').check(); await reviewAndShare(form);
+    await reviewAndShare(form);
     await page.locator('[data-action="revoke-direct-client-grant"]').waitFor();
     const posts = state.requests.filter(req => req.method === 'POST'); assert.equal(posts.length, 1);
     assert.equal(posts[0].body.taskId, TASKS[0]); assert.equal(posts[0].body.scopeType, 'task'); assert.equal(posts[0].body.includeFuturePublished, false);
@@ -305,7 +297,7 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     const state = await fixture(child, { failSecondTaskOnce: true, deferLegacy: true, legacyUnavailable: true }), { page, pageErrors } = await openWorkspace(child, browser, state), form = await openShare(page);
     await form.locator('[name="scope"][value="tasks"]').check();
     for (const taskId of TASKS) await form.locator(`[name="taskId"][value="${taskId}"]`).check();
-    await form.locator('[name="confirmedScope"]').check(); await reviewAndShare(form);
+    await reviewAndShare(form);
     await page.waitForFunction(() => document.querySelector('[data-direct-summary]')?.textContent.includes('Shared 1 of 2'));
     assert.equal(state.grants.length, 1);
     const partial = await form.locator('[data-direct-summary]').innerText(), original = await form.elementHandle();

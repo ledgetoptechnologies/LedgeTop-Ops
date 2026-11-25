@@ -49,26 +49,26 @@ function shareForm(answers,{tasks=['task']}={}){
   const choices={summary:'Pat Example will see Task one.',permissions:{},expiresAt:null};
   const form={isConnected:true,elements:{},querySelector:part,querySelectorAll:()=>[]};
   const context=vm.createContext({crypto:{randomUUID:()=>`key-${posts.length}`},state:{shareContext:{}},modal:{open:true},toast:(text,bad)=>toasts.push([text,Boolean(bad)]),dateTime,
-    directShareContext:()=>({projectId:'project'}),readDirectShareForm:()=>({scope:'tasks',summary:choices.summary,bodies:()=>{if(choices.invalid)throw new Error(choices.invalid);return tasks.map(taskId=>({taskId,permissions:{}}))}}),
-    SHARE_TARGET_MISSING:'missing',directShareReviewText:()=>'review',directShareErrorText:error=>`Refused: ${error.message}`,DIRECT_CLIENT_GRANTS_PATH:'/grants',
+    directShareContext:()=>({projectId:'project'}),readDirectShareForm:()=>({scope:'tasks',summary:choices.summary,bodies:({confirmed}={})=>{choices.confirmed=confirmed;if(choices.invalid)throw new Error(choices.invalid);return tasks.map(taskId=>({taskId,permissions:{}}))}}),
+    SHARE_TARGET_MISSING:'missing',directShareReviewMarkup:()=>'review',directShareErrorText:error=>`Refused: ${error.message}`,DIRECT_CLIENT_GRANTS_PATH:'/grants',
     api:async(path,options)=>{posts.push(options.body);const answer=answers.shift();if(answer instanceof Error)throw answer;return answer},loadDirectClientAccess:async()=>null,rerenderClientSharePanel(){},directClientAccess:value=>value,bindClientPicker(){}});
   vm.runInContext(declaration('bindDirectShare'),context);context.bindDirectShare(form,'project','output');
   return {form,summary,review,toasts,posts,choices,submit:()=>form.onsubmit({preventDefault(){}}),change:()=>form.onchange(),back:()=>elements.back.onclick()};
 }
 test('after a refused client share the reason stays beside the form until something is changed',async()=>{
   const f=shareForm([new Error('not this client'),{}]);
-  await f.submit();assert.equal(f.form.reviewing,true);
+  await f.submit();assert.equal(f.form.reviewing,true);assert.equal(f.choices.confirmed,false);
   await f.submit();
   assert.deepEqual(f.toasts,[['Refused: not this client',true]]);assert.equal(f.form.reviewing,false,'the form can be changed again');assert.equal(f.review.hidden,true);
   assert.equal(f.summary.textContent,'Refused: not this client');
   f.choices.summary='Pat Example will see Task two.';f.change();assert.equal(f.summary.textContent,'Pat Example will see Task two.');
   // Asked again, the review starts from the choices and not from the old reason.
-  await f.submit();assert.equal(f.form.reviewing,true);assert.equal(f.summary.textContent,'Pat Example will see Task two.');
-  await f.submit();assert.deepEqual(f.toasts.at(-1),['Shared with the client',false]);
+  await f.submit();assert.equal(f.form.reviewing,true);assert.equal(f.summary.textContent,'');
+  await f.submit();assert.equal(f.choices.confirmed,true);assert.deepEqual(f.toasts.at(-1),['Shared with the client',false]);
 });
 test('reviewing again without a change drops the old reason too, and Back shows the choices',async()=>{
   const f=shareForm([new Error('no')]);await f.submit();await f.submit();assert.equal(f.summary.textContent,'Refused: no');
-  await f.submit();assert.equal(f.summary.textContent,f.choices.summary);
+  await f.submit();assert.equal(f.summary.textContent,'');
   f.back();assert.equal(f.summary.textContent,f.choices.summary);assert.equal(f.form.reviewing,false);
 });
 test('a share refused halfway says how far it went, and keeps saying it',async()=>{
