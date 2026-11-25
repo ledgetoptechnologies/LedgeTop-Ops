@@ -67,12 +67,23 @@ const VIEWER_MARKS_SQL = `
 // mark row keeps visibility 'internal' and a row here says who may change it. Both
 // are needed, so a build without this table reads such a mark as its owner's alone.
 // viewer_mark_history keeps earlier versions of a shared mark, with who made them,
-// so that staff can undo a client's change.
+// so that staff can undo a client's change. viewer_mark_authors: who made a mark's present
+// content, as sharing, deleting and restoring change the row but not the content (none
+// recorded: its owner).
 const VIEWER_MARK_SHARING_SQL = `
   CREATE TABLE viewer_mark_shares (
     model_id TEXT NOT NULL,
     mark_id TEXT NOT NULL,
     access TEXT NOT NULL CHECK(access IN ('view','edit')),
+    PRIMARY KEY(model_id, mark_id),
+    FOREIGN KEY(model_id, mark_id) REFERENCES viewer_marks(model_id, id) ON DELETE CASCADE
+  );
+  CREATE TABLE viewer_mark_authors (
+    model_id TEXT NOT NULL,
+    mark_id TEXT NOT NULL,
+    audience TEXT NOT NULL CHECK(audience IN ('ops','client')),
+    subject TEXT NOT NULL,
+    changed_at TEXT NOT NULL,
     PRIMARY KEY(model_id, mark_id),
     FOREIGN KEY(model_id, mark_id) REFERENCES viewer_marks(model_id, id) ON DELETE CASCADE
   );
@@ -99,6 +110,6 @@ function verifyObjects(database, sql, names) {
   return objects.length === definitions.length && definitions.every(definition => objects.some(object => canonical(object.sql) === canonical(definition)));
 }
 const verifyViewerMarksSchema = database => verifyObjects(database, VIEWER_MARKS_SQL, OBJECTS);
-const verifyViewerMarkSharingSchema = database => verifyObjects(database, VIEWER_MARK_SHARING_SQL, ['viewer_mark_shares', 'viewer_mark_history']);
+const verifyViewerMarkSharingSchema = database => verifyObjects(database, VIEWER_MARK_SHARING_SQL, ['viewer_mark_shares', 'viewer_mark_authors', 'viewer_mark_history']);
 
 module.exports = { VIEWER_MARKS_SQL, VIEWER_MARK_SHARING_SQL, verifyViewerMarksSchema, verifyViewerMarkSharingSchema };

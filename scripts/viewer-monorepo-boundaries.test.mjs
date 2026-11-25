@@ -44,7 +44,7 @@ const reviewedProviderRemovalSqlSha256 = 'a916f9316bc0c2d332e599113b8bf8eee06572
 const reviewedTrashPurgeMigration = { version: 86, name: 'trash_container_purge_started' };
 const reviewedTrashPurgeSqlSha256 = '52576879d42af94bde93b510d936442a8d6e407e559068bbb1874442b2d61f8b';
 const reviewedMarkSharingMigration = { version: 90, name: 'viewer_mark_sharing' };
-const reviewedMarkSharingSqlSha256 = '1ef4f584e83a7afa14745a028af1d25b63d553b6cf159d8a984978563a2af405';
+const reviewedMarkSharingSqlSha256 = 'cb17340d0a549ba04ece26cfb31aec4253d02a6cf3ad771eb1be114f656c15dc';
 const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "90"';
 const reviewedConverter = {
   patchSha256: 'fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c',

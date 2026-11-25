@@ -39,7 +39,9 @@ const ACCESS = Object.freeze(['edit', 'view']);
 const HELD_SHARING = Object.freeze({ client: Object.freeze(['private', 'staff']), ops: Object.freeze(['internal', 'client', 'private']) });
 const VISIBILITIES = Object.freeze(['private', 'staff', 'internal', 'client', 'shared']);
 // Every read of a mark goes through this, so nothing decides without its share row.
-const MARKS = 'viewer_marks m LEFT JOIN viewer_mark_shares s ON s.model_id=m.model_id AND s.mark_id=m.id';
+const MARKS = 'viewer_marks m LEFT JOIN viewer_mark_shares s ON s.model_id=m.model_id AND s.mark_id=m.id LEFT JOIN viewer_mark_authors a ON a.model_id=m.model_id AND a.mark_id=m.id';
+const COLUMNS = `m.*, s.access AS share_access, coalesce(a.audience, m.owner_audience) AS author_audience,
+  coalesce(a.subject, m.owner_subject) AS author_subject, coalesce(a.changed_at, m.updated_at) AS content_at`;
 const SHARED_ROW = "m.owner_audience='ops' AND m.visibility='internal' AND s.access IS NOT NULL";
 const ACCOUNT_TOUCH_MS = 60 * 60 * 1000;
 
@@ -194,7 +196,7 @@ class ViewerMarkRepository {
   }
 
   row(principal, id) {
-    return this.database.prepare(`SELECT m.*, s.access AS share_access FROM ${MARKS} WHERE m.model_id=? AND m.id=?`).get(principal.modelId, id);
+    return this.database.prepare(`SELECT ${COLUMNS} FROM ${MARKS} WHERE m.model_id=? AND m.id=?`).get(principal.modelId, id);
   }
 
   liveCategoryIds(modelId) {
@@ -218,7 +220,7 @@ class ViewerMarkRepository {
       visibility: shared ? 'shared' : row.visibility, access: shared ? row.share_access : null,
       revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at,
       author, mine: isOwner(principal, row), editable: this.editable(principal, row), deletable: this.manageable(principal, row),
-      ...(shared && staff(principal) ? { changedBy: row.updated_by_audience === 'ops' ? 'staff' : 'client' } : {}),
+      ...(shared && staff(principal) ? { changedBy: row.author_audience === 'ops' ? 'staff' : 'client' } : {}),
       // Nobody else's identity is sent; a share target only goes back to the staff member who set it.
       ...(staff(principal) && isOwner(principal, row) ? { shareAccount: row.share_account } : {}),
     };
@@ -227,7 +229,7 @@ class ViewerMarkRepository {
   // The person's own marks, all of them.
   list(principal) {
     const categories = this.liveCategoryIds(principal.modelId);
-    return this.database.prepare(`SELECT m.*, s.access AS share_access FROM ${MARKS} WHERE ${OWN_LIVE.replace('model_id', 'm.model_id')}
+    return this.database.prepare(`SELECT ${COLUMNS} FROM ${MARKS} WHERE ${OWN_LIVE.replace('model_id', 'm.model_id')}
       ORDER BY created_at, id`).all(...this.owner(principal))
       .map(row => this.view(principal, row, categories));
   }
@@ -327,7 +329,7 @@ class ViewerMarkRepository {
   keepVersion(row) {
     const key = [row.model_id, row.id];
     this.database.prepare(`INSERT OR REPLACE INTO viewer_mark_history(model_id, mark_id, revision, document_json, changed_by_audience, changed_by_subject, changed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(...key, row.revision, row.document_json, row.updated_by_audience, row.updated_by_subject, row.updated_at);
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(...key, row.revision, row.document_json, row.author_audience, row.author_subject, row.content_at);
     this.database.prepare(`DELETE FROM viewer_mark_history WHERE model_id=? AND mark_id=?
       AND revision NOT IN (SELECT revision FROM viewer_mark_history WHERE model_id=? AND mark_id=? ORDER BY revision DESC LIMIT ?)
       AND revision<>coalesce((SELECT max(revision) FROM viewer_mark_history WHERE model_id=? AND mark_id=? AND changed_by_audience='ops'), 0)`)
@@ -355,10 +357,14 @@ class ViewerMarkRepository {
     const { stored, account: shareAccount, access } = this.sharing(principal, principal.audience,
       { visibility, shareAccount: requestedAccount, access: requestedAccess });
     const document = JSON.stringify(mark);
-    const hash = createHash('sha256').update(JSON.stringify([document, visibility, shareAccount, ...(access ? [access] : [])])).digest('hex');
+    const hashOf = (...choice) => createHash('sha256').update(JSON.stringify([document, ...choice])).digest('hex');
+    const hash = hashOf(visibility, shareAccount, ...(access ? [access] : []));
     const existing = this.row(principal, mark.id);
     if (existing) {
-      if (existing.deleted_at || !isOwner(principal, existing) || existing.creation_hash !== hash) throw markError('mark_id_conflict', 409);
+      if (existing.deleted_at || !isOwner(principal, existing) 
+        // A request that left sharing out may be a retry from before shared became the default: it made a private mark, and that stays.
+        || !(existing.creation_hash === hash || (requested === undefined && requestedAccess === undefined && staff(principal)
+          && existing.creation_hash === hashOf('private', null)))) throw markError('mark_id_conflict', 409);
       return { mark: this.view(principal, existing), replayed: true };
     }
     this.checkCategory(principal, mark.categoryId);
@@ -421,13 +427,17 @@ class ViewerMarkRepository {
   }
 
   // The new version of a mark. Earlier content of a shared mark is kept.
-  write(principal, row, document, { stored = row.visibility, account = row.share_account, access = row.share_access } = {}) {
+  write(principal, row, document, { stored = row.visibility, account = row.share_account, access = row.share_access } = {}, { keep = this.isShared(row) } = {}) {
     const growth = Buffer.byteLength(document) - Buffer.byteLength(row.document_json);
     if (growth > 0 && growth > this.liveRoom(this.ownerOf(row)).bytes) throw markError('mark_storage_limit', 429);
-    if (this.isShared(row) && document !== row.document_json) this.keepVersion(row);
+    const now = new Date().toISOString(), changed = document !== row.document_json;
+    if (changed && keep) this.keepVersion(row);
     this.database.prepare(`UPDATE viewer_marks SET document_json=?, visibility=?, share_account=?, revision=revision+1, updated_at=?,
       updated_by_audience=?, updated_by_subject=? WHERE model_id=? AND id=?`).run(document, stored, account,
-      new Date().toISOString(), principal.audience, principal.subject, principal.modelId, row.id);
+      now, principal.audience, principal.subject, principal.modelId, row.id);
+    if (changed && row.owner_audience === 'ops') this.database.prepare(`INSERT INTO viewer_mark_authors(model_id, mark_id, audience, subject, changed_at)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(model_id, mark_id) DO UPDATE SET audience=excluded.audience, subject=excluded.subject, changed_at=excluded.changed_at`)
+      .run(principal.modelId, row.id, principal.audience, principal.subject, now);
     if (access !== row.share_access) this.saveAccess(principal.modelId, row.id, access);
     // Also answers the colleague who just made it its owner's alone, with what they sent.
     return this.describe(principal, this.row(principal, row.id));
@@ -476,7 +486,8 @@ class ViewerMarkRepository {
       const version = this.database.prepare(`SELECT document_json FROM viewer_mark_history WHERE model_id=? AND mark_id=? ${to ? 'AND revision=?' : ''}
         ORDER BY revision DESC LIMIT 1`).get(principal.modelId, id, ...(to ? [to] : []));
       if (!version) throw markError('mark_version_not_found', 404);
-      return this.write(principal, row, version.document_json);
+      // Kept also when the mark is no longer shared.
+      return this.write(principal, row, version.document_json, {}, { keep: true });
     });
   }
 

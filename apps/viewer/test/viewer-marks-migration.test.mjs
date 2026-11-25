@@ -238,7 +238,7 @@ test('90 adds only the sharing tables, survives the previous build, and is refus
   const before = snapshot(db);
   db.close();
   const current = open();
-  const after = snapshot(current), added = ['viewer_mark_history', 'viewer_mark_shares'];
+  const after = snapshot(current), added = ['viewer_mark_authors', 'viewer_mark_history', 'viewer_mark_shares'];
   assert.deepEqual(after.objects.filter(row => !added.includes(row.name)), before.objects);
   assert.deepEqual(after.objects.filter(row => added.includes(row.name)).map(row => row.name), added);
   for (const [name, rows] of Object.entries(before.rows)) if (name !== 'schema_migrations') assert.deepEqual(after.rows[name], rows, name);

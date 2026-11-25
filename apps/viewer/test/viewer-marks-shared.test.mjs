@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
@@ -209,6 +209,49 @@ test('staff undo a client edit; history is bounded, keeps staff\'s version, and 
   await call(client, 'PUT', gone.id, content(gone, { name: 'x' }));
   assert.equal((await call(staff, 'DELETE', gone.id, { revision: 2, permanent: true })).status, 204);
   assert.equal(count(), 0);
+});
+
+test('client content stays a client\'s after staff change its sharing, delete or restore it', async t => {
+  const { session, call, make } = await open(t);
+  const staff = session('ops', 'one'), client = session('client', 'c');
+  let mark = await make(staff, { name: 'Original' });
+  const edit = async name => { mark = (await call(client, 'PUT', mark.id, content(mark, { name }))).body.mark; };
+  await edit('Client 1');
+  mark = (await call(staff, 'PUT', mark.id, content(mark, { access: 'view' }))).body.mark;
+  assert.equal(mark.changedBy, 'client');
+  mark = (await call(staff, 'PUT', mark.id, content(mark, { access: 'edit' }))).body.mark;
+  await call(staff, 'DELETE', mark.id, { revision: mark.revision });
+  mark = (await call(staff, 'POST', mark.id + '/restore', { revision: mark.revision })).body.mark;
+  assert.equal(mark.changedBy, 'client');
+  for (let i = 2; i <= 16; i += 1) await edit('Client ' + i);
+  const { versions } = (await call(staff, 'GET', mark.id + '/history')).body;
+  assert.deepEqual([versions.filter(row => row.changedBy === 'staff').map(row => row.mark.name), versions.length], [['Original'], LIMITS.history + 1]);
+  assert.equal((await call(staff, 'POST', mark.id + '/revert', { revision: mark.revision, to: 1 })).body.mark.changedBy, 'staff');
+});
+
+test('going back after a mark was unshared keeps what it replaces', async t => {
+  const { session, call, make } = await open(t);
+  const staff = session('ops', 'one'), client = session('client', 'c');
+  let mark = await make(staff, { name: 'Original' });
+  mark = (await call(client, 'PUT', mark.id, content(mark, { name: 'Client' }))).body.mark;
+  mark = (await call(staff, 'PUT', mark.id, content(mark, { visibility: 'private' }))).body.mark;
+  const back = (await call(staff, 'POST', mark.id + '/revert', { revision: mark.revision })).body.mark;
+  assert.deepEqual([back.name, back.visibility], ['Original', 'private']);
+  assert.equal((await call(staff, 'POST', mark.id + '/revert', { revision: back.revision })).body.mark.name, 'Client');
+});
+
+test('a retry of a create from before shared was the default replays its private mark', async t => {
+  const { db, session, call, refused, shared } = await open(t);
+  const staff = session('ops', 'one'), client = session('client', 'c'), input = point();
+  const document = JSON.stringify({ id: input.id, geometry: input.geometry, name: input.name, note: input.note, categoryId: null, color: input.color, icon: input.icon, elevationNavd88M: null });
+  db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, document_json, creation_hash, revision, created_at, updated_at, updated_by_audience, updated_by_subject)
+    VALUES (?, ?, 'ops', 'one', 'private', ?, ?, 1, '2026-11-01', '2026-11-01', 'ops', 'one')`)
+    .run(input.id, MODEL, document, createHash('sha256').update(JSON.stringify([document, 'private', null])).digest('hex'));
+  const again = await call(staff, 'POST', '', input);
+  assert.deepEqual([again.status, again.body.mark?.visibility, again.body.mark?.revision], [200, 'private', 1]);
+  assert.deepEqual(await shared(client), []);
+  for (const changes of [{ name: 'Other' }, { visibility: 'shared' }, { access: 'edit' }]) await refused(409, 'mark_id_conflict', staff, 'POST', '', { ...input, ...changes });
+  await refused(409, 'mark_id_conflict', session('ops', 'two'), 'POST', '', input);
 });
 
 test('share all: own marks, exact revisions, bounded, all or none', async t => {
