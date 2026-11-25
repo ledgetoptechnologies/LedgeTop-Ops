@@ -1393,7 +1393,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         search = ''; tab = 'list'; armedDelete = null; categoryDraft = null; moving = false; deleteForGood = null;
         showCategoryIcon(DEFAULT_STYLE.icon);
         categoryColor.value = DEFAULT_STYLE.color;
-        visibility.setScope(sessionScope ? next.key : null);
+        visibility.setScope(sessionScope && !publicReadOnly ? next.key : null);
         for (const input of [searchInput, coordInput, nameInput, noteInput, elevationInput, pointCoords, categoryName]) input.value = '';
         for (const choice of [categorySelect, accountSelect]) choice.replaceChildren();
         for (const shown of [coordDetected, coordReadout, editorTitle]) shown.textContent = '';
