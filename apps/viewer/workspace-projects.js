@@ -21,7 +21,7 @@ import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setW
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
 import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, directClientKey, shareableTasks } from './workspace-direct-client-share.mjs';
-import { directProjectShareEditForm, editableDirectProjectGrant, publicationFolderPath, readDirectProjectShareEdit } from './workspace-direct-client-share.mjs';
+import { directProjectShareEditForm, editableDirectProjectGrant, publicationFolderPath, readDirectProjectShareEdit, syncDirectProjectSelection } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -1876,7 +1876,7 @@ function projectShareSelectionCatalog(projectId,folders,tasks){
   ]);
   return {
     folders:folders.map(folder=>({...folder,displayName:folderNames.get(folder.id)})),
-    tasks:tasks.map(task=>({id:task.id,name:[folderNames.get(task.folderId),task.displayName||'Untitled task'].filter(Boolean).join(' / ')})),
+    tasks:tasks.map(task=>({id:task.id,folderId:task.folderId,name:[folderNames.get(task.folderId),task.displayName||'Untitled task'].filter(Boolean).join(' / ')})),
     topology,
   };
 }
@@ -2001,9 +2001,10 @@ function bindDirectShare(form,projectId,onlyOutputId){
   const sync=()=>{
     if(mode&&mode.value!==previousMode){
       // Except excludes unticked targets; Only includes ticked targets. A new mode needs fresh choices.
-      for(const input of form.querySelectorAll('input[name="folder"],input[name="task"]'))input.checked=mode.value==='except';
+      syncDirectProjectSelection(form,mode.value,context.selectionCatalog,{reset:true});
       previousMode=mode.value;
     }
+    syncDirectProjectSelection(form,mode?.value,context.selectionCatalog);
     const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';
     const later=form.elements.includeLater,off=current.scope!=='project';if(later&&later.disabled!==off){later.disabled=off;later.checked=!off}
     if(mode)mode.disabled=current.scope!=='project';

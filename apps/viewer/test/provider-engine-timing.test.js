@@ -153,7 +153,7 @@ test('migration 83 preserves populated schema 42 and refuses incompatible ledger
   db=openDatabase(databasePath);
   const upgraded=new ProcessingRepository(db);
   assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=48').get().name,folderMigration.name);
-  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=88').get().name,generationMigration.name);
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=91').get().name,generationMigration.name);
   assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=83').get().name,migration.name);
   assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=84').get().name,marksMigration.name);
   assert.equal(upgraded.getTask(task.id).folderId,null);

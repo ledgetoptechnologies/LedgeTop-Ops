@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { directClientReviewName, SHARE_TARGET_MISSING, directClientAccess, directClientLabel, directClientsPath, directGrantRows, directScopeSummary, directShareDefaultScope, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, readDirectShareForm, shareableTasks } from '../workspace-direct-client-share.mjs';
-import { directProjectShareEditForm, editableDirectProjectGrant, publicationFolderPath, publishAudience, readDirectProjectShareEdit } from '../workspace-direct-client-share.mjs';
+import { directProjectShareEditForm, editableDirectProjectGrant, publicationFolderPath, publishAudience, readDirectProjectShareEdit, syncDirectProjectSelection } from '../workspace-direct-client-share.mjs';
 
 const clients=[{sourceId:'source-a',workspaceId:'ws-1',displayName:'Acme Construction',businessName:'Ledge Top'},{sourceId:'source-a',workspaceId:'ws-2',displayName:'Harbor Works',businessName:null}];
 const tasks=[{id:'task-1',name:'North wall'},{id:'task-2',name:'South wall'}];
@@ -34,6 +34,35 @@ test('first Except share sends only unticked targets as exclusions; Only sends t
     const body=readDirectShareForm(input,{projectId:'project',projectName:'Site',tasks,clients,entry:'project',selectionCatalog:catalog}).bodies()[0];
     assert.deepEqual(body.selection,{version:1,mode,folderIds:['folder'],taskIds:[]});
   }
+});
+
+for(const mode of ['only','except'])test(`first-share ${mode} derives deep inheritance and preserves intentional task choices`,()=>{
+  const catalog={folders:[{id:'root',parentId:null,displayName:'Root'},{id:'child',parentId:'root',displayName:'Child'},
+    {id:'leaf',parentId:'child',displayName:'Leaf'}],tasks:[{id:'nested',folderId:'leaf',name:'Nested'},{id:'loose',folderId:null,name:'Loose'}]};
+  const selected=mode==='only',input=form({client:key});input.elements.mode={value:mode};
+  const controls={folder:catalog.folders,task:catalog.tasks};
+  for(const name of Object.keys(controls))controls[name]=controls[name].map(item=>({value:item.id,checked:!selected,disabled:true,hasAttribute:()=>false}));
+  input.querySelectorAll=selector=>{
+    const match=/^input\[name="(folder|task)"\](.*)$/.exec(selector);
+    return match?controls[match[1]].filter(item=>match[2]===':checked'?item.checked:match[2]===':not(:checked)'?!item.checked:true):[];
+  };
+  const sync=()=>syncDirectProjectSelection(input,mode,catalog);
+  sync();controls.task[0].checked=selected;sync();
+  controls.folder[0].checked=selected;sync();
+  for(const control of [...controls.folder.slice(1),controls.task[0]]){
+    assert.equal(control.checked,selected);assert.equal(control.disabled,true);assert.match(control.title,/Inherited from Root/);
+  }
+  const context={projectId:'project',projectName:'Site',tasks,clients,entry:'project',selectionCatalog:catalog};
+  const read=()=>readDirectShareForm(input,context);
+  assert.deepEqual(read().bodies()[0].selection,{version:1,mode,folderIds:['root'],taskIds:[]});
+  // Even if a caller changes disabled and checked without a change event, descendants do not become explicit.
+  controls.folder[1].checked=!selected;controls.folder[1].disabled=false;
+  controls.task[0].checked=!selected;controls.task[0].disabled=false;
+  assert.deepEqual(read().bodies()[0].selection,{version:1,mode,folderIds:['root'],taskIds:[]});
+  controls.folder[0].checked=!selected;sync();
+  assert.equal(controls.task[0].checked,selected);assert.equal(controls.task[0].disabled,false);
+  assert.equal(controls.folder[1].checked,!selected);assert.equal(controls.folder[1].disabled,false);
+  assert.deepEqual(read().bodies()[0].selection,{version:1,mode,folderIds:[],taskIds:['nested']});
 });
 
 test('only tasks with a live published model can be chosen one by one',()=>{

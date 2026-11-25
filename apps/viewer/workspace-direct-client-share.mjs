@@ -146,7 +146,7 @@ export function readDirectShareForm(form,{projectId,projectName,tasks,clients,kn
   const mode=scope==='project'?(form.elements.mode?.value??(entry==='project'?'':'whole')):null;
   let selection=null,selectionError=null;
   if(mode!==null){
-    try{selection=readProjectSelection(form,mode,selectionCatalog,{unticked:mode==='except'})}
+    try{selection=readProjectSelection(form,mode,selectionCatalog,{unticked:mode==='except',firstShare:true})}
     catch(error){selectionError=error;}
   }
   const selectionSummary=projectSelectionSummary({selection,clientName,projectName,catalog:selectionCatalog});
@@ -231,7 +231,48 @@ ${projectSelectionFields({tasks,folders},grant.selection,{editing:true})}
 <button type="button" class="secondary-button" data-edit-share-back>Back to access list</button></div></form>`;
 }
 
-function readProjectSelection(form,mode,catalog,{unticked=false}={}){
+// Keep intentional direct choices apart from the inherited ticks painted onto controls.
+// Readers use the same derivation as rendering, never disabled as a source of authority.
+const firstShareChoices=new WeakMap();
+export function syncDirectProjectSelection(form,mode,catalog,{reset=false,render=true}={}){
+  if(!catalog)return null;
+  const active=mode==='only'||mode==='except',checked=mode==='only';
+  let previous=firstShareChoices.get(form);
+  if(reset||previous?.mode!==mode)previous=null;
+  const choices=new Map(),groups={};
+  for(const name of ['folder','task']){
+    const selected=new Set(form.querySelectorAll(`input[name="${name}"]${mode==='except'?':not(:checked)':':checked'}`));
+    const inputs=[...new Set([...form.querySelectorAll(`input[name="${name}"]`),...selected])];
+    groups[name]=inputs;
+    for(const input of inputs){
+      const old=previous?.choices.get(input);
+      const direct=reset?mode==='except':old?.inherited?old.direct:selected.has(input)===checked;
+      choices.set(input,{direct,inherited:false});
+    }
+  }
+  const explicitFolders=new Set(groups.folder.filter(input=>choices.get(input).direct===checked).map(input=>input.value));
+  const folders=new Map(catalog.folders.map(folder=>[folder.id,folder]));
+  const tasks=new Map(catalog.tasks.map(task=>[task.id,task]));
+  const inheritedFrom=id=>{
+    while(id){if(explicitFolders.has(id))return id;id=folders.get(id)?.parentId;}
+    return null;
+  };
+  const result={folderIds:[],taskIds:[]};
+  for(const name of ['folder','task'])for(const input of groups[name]){
+    const choice=choices.get(input),ancestor=active?inheritedFrom(name==='folder'?folders.get(input.value)?.parentId:tasks.get(input.value)?.folderId):null;
+    choice.inherited=Boolean(ancestor);
+    if(active&&!ancestor&&choice.direct===checked)result[`${name}Ids`].push(input.value);
+    if(render){
+      input.checked=ancestor?checked:choice.direct;
+      input.disabled=Boolean(ancestor);
+      input.title=ancestor?`Inherited from ${folders.get(ancestor)?.displayName||'ancestor folder'}. Change that folder to choose this item separately.`:'';
+    }
+  }
+  if(render)firstShareChoices.set(form,{mode,choices});
+  return {...result,folderIds:[...new Set(result.folderIds)].sort(),taskIds:[...new Set(result.taskIds)].sort()};
+}
+
+function readProjectSelection(form,mode,catalog,{unticked=false,firstShare=false}={}){
   if(mode==='whole')return null;
   if(mode!=='only'&&mode!=='except')throw new Error('Choose what the client can see.');
   if(!catalog)throw new Error(PROJECT_CHOICES_UNAVAILABLE);
@@ -242,7 +283,8 @@ function readProjectSelection(form,mode,catalog,{unticked=false}={}){
       throw new Error('Clear unavailable selections and review the updated access.');
     return [...new Set(inputs.map(input=>input.value))].sort();
   };
-  const folderIds=selected('folder',catalog.folders),taskIds=selected('task',catalog.tasks);
+  let folderIds=selected('folder',catalog.folders),taskIds=selected('task',catalog.tasks);
+  if(firstShare)({folderIds,taskIds}=syncDirectProjectSelection(form,mode,catalog,{render:false}));
   const count=folderIds.length+taskIds.length;
   if(count<1||count>128)throw new Error(unticked?'Untick between 1 and 128 folders and tasks to exclude, or choose Everything.':'Choose between 1 and 128 folders and tasks.');
   return {version:1,mode,folderIds,taskIds};

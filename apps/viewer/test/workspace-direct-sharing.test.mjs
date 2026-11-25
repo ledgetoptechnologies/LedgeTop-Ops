@@ -364,6 +364,56 @@ const readyTasks=path=>path.includes('cursor=next-page')
   ?{tasks:[{id:'task-a',projectId:'project',folderId:null,displayName:'Roof'}],nextCursor:null}
   :{tasks:[{id:'task-z',projectId:'project',folderId:'folder-z',displayName:'Wall'}],nextCursor:'next-page'};
 
+async function nestedFirstShare(mode){
+  let moved=false;
+  const f=await firstProjectShare('whole',readyFolders,path=>{
+    const page=readyTasks(path);
+    return moved?{...page,tasks:page.tasks.map(task=>({...task,folderId:null}))}:page;
+  });
+  const inputs={folder:['folder-a','folder-z'],task:['task-a','task-z']};
+  for(const name of Object.keys(inputs))inputs[name]=inputs[name].map(value=>({name,value,checked:false,disabled:false,dataset:{},hasAttribute:()=>false}));
+  const original=f.form.querySelectorAll;
+  f.form.querySelectorAll=selector=>{
+    if(selector==='input[name="folder"],input[name="task"]')return [...inputs.folder,...inputs.task];
+    const match=/^input\[name="(folder|task)"\](.*)$/.exec(selector);
+    if(match)return inputs[match[1]].filter(input=>match[2]===':checked'?input.checked:match[2]===':not(:checked)'?!input.checked:true);
+    return original(selector);
+  };
+  f.form.elements.mode.value=mode;f.form.onchange();
+  return {...f,inputs,move(){moved=true}};
+}
+for(const mode of ['only','except'])test(`first-share ${mode} locks nested ticks to ancestor precedence and restores direct choices`,async()=>{
+  const f=await nestedFirstShare(mode),selected=mode==='only';
+  const [root,child]=f.inputs.folder,task=f.inputs.task[1];
+  child.checked=selected;f.form.onchange();
+  root.checked=selected;f.form.onchange();
+  assert.equal(task.checked,selected,'nested task ticks must agree with their ancestor');
+  assert.equal(child.checked,selected);assert.equal(child.disabled,true);
+  assert.equal(task.disabled,true);
+  // Disabled is cosmetic: a contradictory tick must not become an explicit request ID.
+  task.checked=!selected;
+  await f.submit();assert.equal(f.form.reviewing,true);
+  assert.match(f.controls['[data-direct-review-text]'].textContent,/“Site”/);
+  f.controls['[data-direct-back]'].onclick();
+  assert.equal(task.checked,selected);
+  root.checked=!selected;f.form.onchange();
+  assert.equal(child.disabled,false);assert.equal(child.checked,selected,'intentional child choice is restored');
+  assert.equal(task.disabled,true,'the direct child folder still controls its task');
+  child.checked=!selected;f.form.onchange();
+  assert.equal(task.disabled,false);assert.equal(task.checked,!selected);
+  root.checked=selected;f.form.onchange();
+  await f.submit();await f.submit();
+  assert.deepEqual(f.posts().map(call=>call.options.body.selection),[{version:1,mode,folderIds:['folder-a'],taskIds:[]}]);
+});
+for(const mode of ['only','except'])test(`first-share ${mode} blocks a task moved after nested selection review`,async()=>{
+  const f=await nestedFirstShare(mode);
+  f.inputs.folder[0].checked=mode==='only';f.form.onchange();
+  await f.submit();assert.equal(f.form.reviewing,true);
+  f.move();await f.submit();
+  assert.equal(f.posts().length,0);
+  assert.match(f.controls['[data-direct-summary]'].textContent,/changed.*Close and reopen Share.*review/);
+});
+
 const {createClientGrantProxy}=createRequire(import.meta.url)('../server/clientGrantProxy.js');
 const syntheticRecipient={sourceId:'project-alpha:synthetic',workspaceId:'synthetic-client',displayName:'Synthetic client'};
 const syntheticFolder='00000000-0000-4000-8000-000000000001';
@@ -432,7 +482,7 @@ for(const mode of ['except','only'])test(`old Operations refuses first-share ${m
   assert.equal(f.wire.length,1);assert.equal(f.envelopes.length,1);
   assert.equal(f.wire[0].path,directClientShare.DIRECT_CLIENT_GRANTS_PATH);
   const body=JSON.parse(f.wire[0].body);
-  assert.deepEqual(body.selection,{version:1,mode,folderIds:[syntheticFolder],taskIds:[syntheticTask]});
+  assert.deepEqual(body.selection,{version:1,mode,folderIds:[syntheticFolder],taskIds:[]});
   assert.equal(Object.hasOwn(body,'replaces'),false);
   assert.equal(JSON.parse(f.envelopes[0]).action,'create');
   assert.deepEqual(JSON.parse(f.envelopes[0]).grant,body);
@@ -460,10 +510,8 @@ for(const [mode,status,payload,expected] of [
   assert.ok(f.notices.some(([text,error])=>error&&text===expected));
 });
 test('first-share mode changes start Except ticked and Only unticked, without resetting choices on other changes',async()=>{
-  const f=await firstProjectShare('whole',readyFolders);
-  const inputs=[{checked:false},{checked:false}];
-  f.choices['input[name="folder"],input[name="task"]']=inputs;
-  f.form.elements.mode.value='except';f.form.onchange();
+  const f=await nestedFirstShare('except');
+  const inputs=[f.inputs.folder[1],f.inputs.task[0]];
   assert.deepEqual(inputs.map(input=>input.checked),[true,true]);
   inputs[0].checked=false;f.form.onchange();
   assert.deepEqual(inputs.map(input=>input.checked),[false,true]);
@@ -479,15 +527,15 @@ for(const mode of ['only','except'])test(`first-issued ${mode} project access se
   await f.submit();
   assert.equal(f.form.reviewing,true);
   const review=f.controls['[data-direct-review-text]'].textContent;
-  assert.match(review,mode==='only'?/Only “Site”, “Site \/ South”, “Roof”, “Site \/ South \/ Wall”/
-    :/Whole project except “Site”, “Site \/ South”, “Roof”, “Site \/ South \/ Wall”/);
+  assert.match(review,mode==='only'?/Only “Site”, “Roof”/
+    :/Whole project except “Site”, “Roof”/);
   assert.match(review,/matching tasks published later.+see camera positions.+Access ends/);
   assert.equal(f.posts().length,0);
   await f.submit();
   assert.deepEqual(f.posts().map(call=>call.options.body),[{
     sourceId:'s',workspaceId:'w',viewerProjectId:'project',taskId:null,scopeType:'project',includeFuturePublished:true,
     permissions:{measure:false,cameras:true,download:false},expiresAt:new Date('2098-01-02T03:04').toISOString(),confirmedScope:true,
-    selection:{version:1,mode,folderIds:['folder-a','folder-z'],taskIds:['task-a','task-z']},
+    selection:{version:1,mode,folderIds:['folder-a'],taskIds:['task-a']},
   }]);
   assert.equal(f.calls.filter(call=>call.path==='/api/v1/projects/project/folders').length,2);
   assert.equal(f.calls.filter(call=>call.path.includes('projectId=project&limit=100&cursor=next-page')).length,2);
