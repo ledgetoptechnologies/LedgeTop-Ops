@@ -4272,6 +4272,7 @@ let printSizes = null;
 // Property lines exactly as drawn on the map (only when shown there). The
 // controller draws each outline twice in its own pane, a wide halo and the
 // line itself; take the narrower one and its colour, whatever that colour is.
+// `attribution` is the parcel source printed with them.
 function propertyLinesForPrint() {
   if (!map || !propertyLines?.state?.drawn?.map) return { lines: [], color: null };
   let line = null;
@@ -4286,7 +4287,7 @@ function propertyLinesForPrint() {
     const flat = L.LineUtil.isFlat(ring) ? ring : ring.flat(Infinity);
     if (flat.length > 1) lines.push(flat.map((ll) => latLonToUtm(ll.lat, ll.lng)));
   }
-  return { lines, color: typeof line.options.color === 'string' ? line.options.color : null };
+  return { lines, color: typeof line.options.color === 'string' ? line.options.color : null, attribution: propertyLines.attribution() };
 }
 
 async function exportOrthoPrintFromViewer({ area, size, format, contours, property }, dialogSignal) {
@@ -4343,7 +4344,7 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
       ortho, extent, longEdge, format, epsg: printEpsg(),
       traceContours: contours && DTM_URL ? (printExtent, targetCell) => contourLines.computeForExtent(printExtent, targetCell, { signal }) : null,
       colors: contourLines?.colors(), propertyLines: drawnLines.lines.length ? drawnLines.lines : null,
-      propertyStyle: drawnLines.color ? { color: drawnLines.color } : null, units: DISPLAY_UNITS,
+      propertyStyle: drawnLines.color ? { color: drawnLines.color } : null, propertyAttribution: drawnLines.attribution || '', units: DISPLAY_UNITS,
       createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal, checkpoint: current,
     });
     // Rendering takes a while: the session may have expired or changed

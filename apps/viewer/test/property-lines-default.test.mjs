@@ -112,6 +112,14 @@ test('default on: an authorized offer shows the lines on every supported view wi
   }
 });
 
+test('prints: the source and credit of the drawn lines, and nothing once access is lost', async () => {
+  const ctx = await open(page());
+  assert.equal(ctx.controller.attribution(), 'Source: Wisconsin Statewide Parcel Map V12. C');
+  assert.equal(ctx.dom.notice.textContent, 'Property lines are approximate, not a survey. Source: Wisconsin Statewide Parcel Map V12.');
+  ctx.controller.suspend();
+  assert.equal(ctx.controller.attribution(), '');
+});
+
 test('default on: one page moving through every view keeps the lines without refetching the offer', async () => {
   const ctx = await open(page());
   for (const [mode, cloudMode, surface] of [...VIEWS, ...VIEWS.slice().reverse()]) {

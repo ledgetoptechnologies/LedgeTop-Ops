@@ -18,7 +18,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const executable = () => [process.env.CHROME_PATH, process.env.EDGE_PATH, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/chromium', '/usr/bin/google-chrome'].filter(Boolean).find(existsSync);
 const SERVED = new Map([
   ['/contours.mjs', 'contours.mjs'], ['/contour-layer.mjs', 'contour-layer.mjs'], ['/contour-worker.mjs', 'contour-worker.mjs'],
-  ['/utm-conversion.mjs', 'utm-conversion.mjs'], ['/raster-vertical-units.mjs', 'raster-vertical-units.mjs'], ['/ortho-print-export.mjs', 'ortho-print-export.mjs'], ['/orthophoto-mask.mjs', 'orthophoto-mask.mjs'],
+  ['/utm-conversion.mjs', 'utm-conversion.mjs'], ['/raster-vertical-units.mjs', 'raster-vertical-units.mjs'], ['/ortho-print-export.mjs', 'ortho-print-export.mjs'], ['/orthophoto-mask.mjs', 'orthophoto-mask.mjs'], ['/brand-colors.mjs', 'brand-colors.mjs'],
   ['/leaflet.js', 'node_modules/leaflet/dist/leaflet-src.esm.js'], ['/leaflet.css', 'node_modules/leaflet/dist/leaflet.css'],
 ]);
 
@@ -81,7 +81,7 @@ window.renderPrint = async (kind, longEdge, interval) => {
   const features = buildContours({ ...d, levels });
   const square = [[E0 + 40, N0 + 40], [E0 + 360, N0 + 40], [E0 + 360, N0 + 260], [E0 + 40, N0 + 260], [E0 + 40, N0 + 40]];
   const result = await renderOrthoPrint({ ortho: ortho(kind), extent: { minE: E0, maxE: E0 + W, minN: N0, maxN: N0 + H }, longEdge,
-    contours: { features, interval, units: 'imperial' }, colors: CONTOUR_COLORS.brown, propertyLines: [square], createCanvas: () => document.createElement('canvas') });
+    contours: { features, interval, units: 'imperial' }, colors: CONTOUR_COLORS.brown, propertyLines: [square], propertyAttribution: 'Source: Synthetic parcels R1. Credit line.', createCanvas: () => document.createElement('canvas') });
   window.print = result;
   window.printData = result.ctx.getImageData(0, 0, result.width, result.height).data;
   window.printPng = result.canvas.toDataURL('image/png').split(',')[1];
@@ -157,9 +157,13 @@ test('print export burns contours, ft labels, property lines and legend into rea
     assert.ok(indexHits >= 13, `800 ft index ring found in ${indexHits}/16 directions`);
     assert.ok(widthIndex > widthMinor * 1.4 && widthMinor > 0, `index lines thicker than minor (${widthIndex} vs ${widthMinor})`);
     assert.deepEqual(await client.evaluate('pixel(600, 300)'), [150, 160, 150, 255], 'imagery untouched between lines');
-    const yellow = await client.evaluate(`pixel(${Math.round(200 / gsd)}, ${Math.round((300 - 260) / gsd)})`);
-    assert.ok(yellow[0] > 200 && yellow[1] > 170 && yellow[2] < 90, `property line pixel ${yellow}`);
-    const legend = await client.evaluate('pixel(30, 1500)');
+    const line = await client.evaluate(`pixel(${Math.round(200 / gsd)}, ${Math.round((300 - 260) / gsd)})`);
+    assert.ok(line[0] > 200 && line[1] < 130 && line[2] < 70, `property line pixel (brand orange) ${line}`);
+    // The note band across the bottom: opaque white, with real text in it.
+    const band = await client.evaluate("(() => { const edge = pixel(2044, 1533); let ink = 0; for (let y = 1501; y < 1536; y++) for (let x = 0; x < 1000; x++) { const p = pixel(x, y); if (p[0] < 110 && p[1] < 110 && p[2] < 110) ink++; } return { edge, ink }; })()");
+    assert.deepEqual(band.edge, [255, 255, 255, 255]);
+    assert.ok(band.ink > 300, `note text pixels ${band.ink}`);
+    const legend = await client.evaluate('pixel(24, 1474)');
     assert.ok(legend.slice(0, 3).every(v => v > 225), `legend box pixel ${legend}`);
     // Labels: light halo pixels appear on the imagery away from the legend.
     const halo = await client.evaluate("(() => { let n = 0; for (let y = 0; y < 1300; y++) for (let x = 300; x < 2048; x++) { const p = pixel(x, y); if (p[0] > 235 && p[1] > 230 && p[2] > 215) n++; } return n; })()");
