@@ -43,6 +43,8 @@ function page() {
 import * as L from '/node_modules/leaflet/dist/leaflet-src.esm.js';
 import { mountViewerMarks } from '/viewer-marks.mjs';
 const mode = new URLSearchParams(location.search).get('mode');
+// Map-only fixture, matching the prior centered-pin captures without the shell sidebar.
+if (new URLSearchParams(location.search).has('mapOnly')) document.getElementById('sidebar').style.display = 'none';
 const signedIn = mode === 'session' || mode === 'staff';
 const map = L.map('leaflet-map').setView([43.05, -87.0], 18);
 let lostMethod;
@@ -219,6 +221,66 @@ async function withBrowser(t, { app = null } = {}, run) {
     await unlock();
   }
 }
+
+for (const device of [
+  { name: 'desktop', width: 1440, height: 900, mobile: false },
+  { name: 'short desktop', width: 1440, height: 520, mobile: false },
+  { name: 'pocket', width: 640, height: 740, mobile: true },
+  { name: 'phone', width: 390, height: 844, mobile: true },
+]) test(`Marks editor reachability: ${device.name} Edit > More needs no map pan`, { timeout: 60000 }, async t => {
+  const { app, database } = marksApi();
+  t.after(() => database.close());
+  await withBrowser(t, { app }, async h => {
+    const { client, waitFor } = h;
+    await h.size(device.width, device.height, device.mobile);
+    await client.command('Emulation.setTouchEmulationEnabled', { enabled: device.mobile });
+    const pointFor = selector => client.evaluate(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)}), r = el.getBoundingClientRect();
+        const x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2, hit = document.elementFromPoint(x, y);
+        return { x, y, reachable: r.width > 0 && r.height > 0 && r.left >= 0 && r.right <= innerWidth &&
+          r.top >= 0 && r.bottom <= innerHeight && (hit === el || el.contains(hit)) };
+      })()`);
+    const press = async selector => {
+      const point = await pointFor(selector);
+      assert.equal(point.reachable, true, `${device.name}: ${selector} is in viewport and hit-testable`);
+      if (device.mobile) {
+        await client.command('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: point.x, y: point.y }] });
+        await client.command('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      } else await h.click(point.x, point.y);
+    };
+    await h.load('?mode=staff&mapOnly');
+    await client.evaluate(`marks.store.create({ name: 'Reachable pin', note: '', geometry: { type: 'Point', coordinates: [-87, 43.05] },
+      color: '#1e88e5', icon: 'pin', visibility: 'shared', access: 'edit', categoryId: null, elevationNavd88M: null }).then(() => true)`);
+    for (const action of ['Cancel', 'Save']) {
+      await h.load('?mode=staff&mapOnly');
+      await client.evaluate('window.editorMapMoves = 0; map.on("movestart", () => window.editorMapMoves++); 0');
+      const before = await client.evaluate('[map.getCenter().lat, map.getCenter().lng, map.getZoom()]');
+      await press('.viewer-map-mark');
+      await waitFor("!document.querySelector('.viewer-mark-view').hidden", 'normal pin card open');
+      await press('.viewer-mark-view .viewer-mark-primary');
+      await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'editor open');
+      await press('.viewer-mark-more summary');
+      await waitFor("document.querySelector('.viewer-mark-more').open", 'More expanded');
+      // Give the native details toggle and layout callbacks a frame to settle.
+      await client.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
+      const actions = '.viewer-mark-form > .viewer-mark-row';
+      for (const type of ['submit', 'button']) assert.equal((await pointFor(`${actions} [type=${type}]`)).reachable, true, 'both Save and Cancel reachable without scrolling');
+      const layout = await client.evaluate(`(() => {
+        const el = document.querySelector('.viewer-mark-card:not(.viewer-mark-pick)'), r = el.getBoundingClientRect();
+        return { bounds: [r.left, r.top, r.right, r.bottom], sheet: el.classList.contains('sheet'), scrollTop: el.scrollTop };
+      })()`);
+      assert.equal(layout.sheet, device.mobile, 'pocket and phone retain the sheet');
+      assert.equal(layout.scrollTop, 0, 'no editor scrolling needed for actions');
+      assert.ok(layout.bounds[0] >= 0 && layout.bounds[1] >= 0 && layout.bounds[2] <= device.width && layout.bounds[3] <= device.height, 'expanded editor fits viewport');
+      t.diagnostic(`${device.name} ${action}: ${JSON.stringify(layout)}`);
+      await press(`${actions} ${action === 'Save' ? '[type=submit]' : '[type=button]'}`);
+      await waitFor("document.querySelector('.viewer-mark-form').hidden && !marks.store.state.busy", `${action} completed`);
+      assert.deepEqual(await client.evaluate('[map.getCenter().lat, map.getCenter().lng, map.getZoom()]'), before, 'map view unchanged');
+      assert.equal(await client.evaluate('window.editorMapMoves'), 0, 'no automatic or manual map pan');
+    }
+    assert.equal(database.prepare('SELECT revision FROM viewer_marks').get().revision, 2, 'Cancel does not write; Save persists');
+  });
+});
 
 test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeout: 90000 }, t => withBrowser(t, {}, async h => {
   const { client, waitFor, mouse } = h;

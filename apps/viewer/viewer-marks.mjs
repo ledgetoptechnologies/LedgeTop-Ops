@@ -164,7 +164,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const more = h(document, 'details', { class: 'viewer-mark-more' }, h(document, 'summary', { text: 'More' }), pointCoordsField, coordReadout, elevationField, visibilityField, accountField);
   const editor = h(document, 'form', { class: 'viewer-mark-form', hidden: true }, editorTitle,
     field('Label', nameInput), field('Category', categorySelect), picker.element, field('Notes', noteInput), more,
-    h(document, 'div', { class: 'viewer-mark-row' }, saveButton, cancelButton));
+    h(document, 'div', { class: 'viewer-mark-row viewer-mark-editor-actions' }, saveButton, cancelButton));
 
   // The card: what a mark is, then Edit, Move or Delete.
   const cardBadge = h(document, 'span', { class: 'viewer-mark-list-icon' });
@@ -1020,6 +1020,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(moveSave, 'click', () => saveDraft());
   on(moveCancel, 'click', () => { if (canMoveDraft()) cancelDraft(); });
   on(cancelButton, 'click', () => cancelDraft());
+  // Native details expansion changes the card height without a map movement.
+  on(more, 'toggle', () => placeCard());
   on(closeButton, 'click', () => closeCard({ focusPin: true }));
   on(drawUndo, 'click', () => { drawing?.positions.pop(); render(); });
   on(drawCancel, 'click', () => { setMode('idle'); render(); });
