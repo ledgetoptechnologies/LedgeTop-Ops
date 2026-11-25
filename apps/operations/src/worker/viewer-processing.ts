@@ -454,13 +454,13 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
         if(parsed.data.action==='create'){
           const result=await createDirectViewerClientGrant({env:c.env,principal,grant:parsed.data.grant,
             idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw});
-          return c.json(result,result.replayed?200:201);
+          return c.json(result,result.sessionRevocation?.pending?202:result.replayed?200:201);
         }
         const result=await revokeDirectViewerClientGrant({env:c.env,principal,grantId:parsed.data.grantId!,
           reason:parsed.data.reason!,idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw});
         return c.json(result,result.sessionRevocation.pending?202:200);
       }catch(error){if(error instanceof DirectViewerGrantError)return c.json({error:error.message,code:error.code,
-        ...(error.grantId?{grantId:error.grantId}:{})},error.status);throw error;}
+        ...(error.grantId?{grantId:error.grantId}:{}),...(error.grants?{grants:error.grants}:{})},error.status);throw error;}
     }
     if (parsed.data.connection === "native") {
       if (parsed.data.action === "list") return c.json(await listNativeViewerClientGrantWorkspace(c.env, principal));

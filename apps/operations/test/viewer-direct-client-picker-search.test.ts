@@ -2,13 +2,15 @@ import {readFileSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
+import {ViewerServiceError} from '@ltds/shared';
+import {sha256} from '../src/worker/crypto';
 import type {Env,StaffPrincipal} from '../src/worker/types';
 const mocks=vi.hoisted(()=>({catalog:vi.fn(),scope:vi.fn(),proof:vi.fn(),guard:vi.fn()}));
 vi.mock('../src/worker/viewer-integration',()=>({viewerServiceClient:()=>({clientDeliveryCatalog:mocks.catalog,revokePublishedSessionSourceAuthorization:vi.fn()})}));
 vi.mock('../src/worker/acl',()=>({sqlScope:mocks.scope}));
 vi.mock('../../client/src/worker/project-alpha-portal-authority',()=>({readPortalProjectionSourceProof:mocks.proof,
  portalProjectionSourceGuard:mocks.guard}));
-import {createDirectViewerClientGrant,decodeDirectViewerClientCursor,encodeDirectViewerClientCursor,
+import {createDirectViewerClientGrant,decodeDirectViewerClientCursor,encodeDirectViewerClientCursor,readDirectViewerClientGrants,
  listDirectViewerClientGrantWorkspace} from '../src/worker/viewer-direct-client-grants';
 
 // Synthetic data only.
@@ -184,6 +186,14 @@ describe('direct Viewer grant listing',()=>{
   const other=await listDirectViewerClientGrantWorkspace(env,principal,{include:'grants',viewerProjectId:'other-project'});
   expect(other).toMatchObject({grants:[],grantsNextCursor:null});
  });
+ it('reads the receipts of a whole page at once, not one read per share',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'},{id:'ws-two',name:'Two'}]);await seedGrants(database,200);
+  let receiptReads=0;const session={batch:(statements:D1PreparedStatement[])=>database.batch(statements),
+   prepare:(sql:string)=>{if(/^SELECT grant_id,response_json FROM viewer_direct_client_grant_mutation_receipts|^SELECT response_json FROM viewer_direct_client_grant_mutation_receipts/.test(sql))receiptReads++;return database.prepare(sql);}};
+  const counted={...env,DELIVERY_DB:{withSession:()=>session}} as unknown as Env;
+  expect((await listDirectViewerClientGrantWorkspace(counted,principal,{include:'grants'})).grants).toHaveLength(100);expect(receiptReads).toBe(1);
+  expect(await readDirectViewerClientGrants(counted,{sourceId:'project-alpha:primary',workspaceId:'ws-one'})).toHaveLength(100);expect(receiptReads).toBe(2);
+ },120_000);
  it('holds the per-client limit when another share lands between the count and the insert',async()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'},{id:'ws-two',name:'Two'}]);await seedGrants(database,198);// 99 per client
   const now=new Date().toISOString();let raced=false;
@@ -273,6 +283,312 @@ describe('direct Viewer grant listing',()=>{
   // Same-scope uniqueness is unchanged: an active row for the same scope still answers duplicate_active_grant.
   await expect(createFor(env,'picker-replay-cap-000003')).rejects.toMatchObject({status:409,code:'duplicate_active_grant'});
  });
+});
+
+// Grants with a selection keep the fail-closed 1970 sentinel on the row; their real lifetime is
+// in the single v2 or v3 creation receipt. The cap counts them only while that receipt matches and is unexpired.
+describe('direct Viewer per-client cap with restricted grants',()=>{
+ const PAST='2020-01-01T00:00:00.000Z',FUTURE='2099-01-01T00:00:00.000Z',SENTINEL='1970-01-01T00:00:00.000Z';
+ type Receipt='v3'|'v3-except'|'v3-unsorted'|'v3-extra'|'v3-mixed'|'v2-selection'|'v3-exclusions'|'v3-no-selection'|'v3-bad-mode'|'live'|'live-no-expiry'|'expired'|'missing'|'duplicate'|'wrong-version'|'wrong-workspace'|'wrong-permissions'|'v1';
+ let receiptSequence=0;
+ function envelope(id:string,viewerProjectId:string,expiresAt:string|null,kind:Receipt){
+  const now=new Date().toISOString();
+  const grant={grantId:id,sourceId:'project-alpha:primary',workspaceId:kind==='wrong-workspace'?'ws-other':'ws-one',viewerProjectId,taskId:null,
+   scopeType:'project',includeFuturePublished:true,permissions:{measure:true,cameras:false,download:kind==='wrong-permissions'},expiresAt,
+   grantVersion:kind==='wrong-version'?2:1,revokedAt:null,createdAt:now,clientDisplayName:'One'};
+  const pin={version:1,mode:'native_source',sourceId:'project-alpha:primary',workspaceId:'ws-one',sourceWorkspaceId:'source-ws-one',
+   rootType:'standalone_client',rootPublicId:'root-ws-one'};
+  const one='00000000-0000-4000-8000-000000000001',two='00000000-0000-4000-8000-000000000002';
+  const exclusions={version:1,folderIds:[],taskIds:[one]},only={version:1,mode:'only',folderIds:[one],taskIds:[two]};
+  const shapes:Record<string,unknown>={'v3':{selection:only},'v3-except':{selection:{...only,mode:'except'}},'v3-unsorted':{selection:{...only,folderIds:[two,one]}},
+   'v3-extra':{selection:only,note:'x'},'v3-mixed':{selection:only,exclusions},'v3-exclusions':{exclusions},'v3-no-selection':{},'v3-bad-mode':{selection:{...only,mode:'all'}}};
+  if(kind in shapes)return {version:3,grant,recipientAuthorityPin:pin,...shapes[kind] as object};
+  if(kind==='v2-selection')return {version:2,grant,recipientAuthorityPin:pin,selection:only};
+  return kind==='v1'?{version:1,grant,recipientAuthorityPin:pin}
+   :{version:2,grant,recipientAuthorityPin:pin,exclusions:{version:1,folderIds:[],taskIds:['00000000-0000-4000-8000-000000000001']}};
+ }
+ async function seedRestricted(database:D1Database,prefix:string,count:number,kind:Receipt,expiry?:string){
+  const now=new Date().toISOString();let statements:D1PreparedStatement[]=[];
+  for(let index=0;index<count;index++){
+   const id=`${prefix}-${String(index).padStart(4,'0')}`,project=`${prefix}-project-${index}`;
+   const expiresAt=expiry??(kind==='expired'?PAST:kind==='live-no-expiry'?null:FUTURE);
+   statements.push(database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+    can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+    VALUES(?,'project-alpha:primary','ws-one',?,NULL,'project',1,1,0,0,?,1,'active','staff-one',?,?)`).bind(id,project,SENTINEL,now,now));
+   const receipts=kind==='missing'?0:kind==='duplicate'?2:1;
+   for(let copy=0;copy<receipts;copy++)statements.push(database.prepare(`INSERT INTO viewer_direct_client_grant_mutation_receipts
+    (actor_staff_id,idempotency_key,action,request_fingerprint,grant_id,response_json,created_at) VALUES('staff-one',?,'grant.create','fingerprint',?,?,?)`)
+    .bind(`restricted-receipt-${++receiptSequence}`,id,JSON.stringify(envelope(id,project,expiresAt,kind)),now));
+   // Seed in batches: one D1 round trip per row is too slow for 100-row fixtures.
+   if(statements.length>=100||index===count-1){await database.batch(statements);statements=[];}
+  }
+ }
+ async function seedOrdinary(database:D1Database,prefix:string,count:number,expiresAt:string|null){
+  const now=new Date().toISOString();
+  if(count>0)await database.batch(Array.from({length:count},(_,index)=>database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+   can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+   VALUES(?,'project-alpha:primary','ws-one',?,NULL,'project',1,1,0,0,?,1,'active','staff-one',?,?)`)
+   .bind(`${prefix}-${String(index).padStart(4,'0')}`,`${prefix}-project-${index}`,expiresAt,now,now)));
+ }
+ const createFor=(env:Env,idempotencyKey:string,viewerProjectId='viewer-project')=>createDirectViewerClientGrant({env,principal,idempotencyKey,
+  request:new Request('https://ops.example.test/'),grant:{sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId,taskId:null,scopeType:'project',
+   includeFuturePublished:true,confirmedScope:true,expiresAt:null,permissions:{measure:true,cameras:false,download:false}}});
+ const issuable=async(env:Env)=>(await readDirectViewerClientGrants(env,{sourceId:'project-alpha:primary',workspaceId:'ws-one'})).map(row=>row.id).sort();
+ const counts=async(database:D1Database)=>({
+  grants:await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants`).first<number>('n'),
+  receipts:await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grant_mutation_receipts`).first<number>('n'),
+  audit:await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grant_audit`).first<number>('n')});
+ const countSql=/SELECT count\(\*\) n FROM viewer_direct_client_grants WHERE source_id=\? AND workspace_id=\? AND status='active'/;
+ // A restricted grant (with its receipt) commits after this request has run the precheck count.
+ function racingEnv(env:Env,database:D1Database,land:()=>Promise<void>){
+  const state={raced:false};
+  const racing={prepare(sql:string){const statement=database.prepare(sql);
+   if(!countSql.test(sql)||state.raced)return statement;
+   return {bind:(...values:unknown[])=>{const bound=statement.bind(...values);return {first:async(column:string)=>{const value=await bound.first(column);
+    state.raced=true;await land();return value;}};}};},
+   batch:(statements:D1PreparedStatement[])=>database.batch(statements)};
+  return {state,env:{...env,DELIVERY_DB:{withSession:()=>racing}} as unknown as Env};
+ }
+
+ it('does not count 100 restricted grants whose receipt lifetime has expired, and does not issue them',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'restricted-expired',100,'expired');
+  expect(await issuable(env)).toEqual([]);
+  const created=await createFor(env,'restricted-expired-cap-01');
+  expect(created.replayed).toBe(false);expect(await issuable(env)).toEqual([created.grant.grantId]);
+ },120_000);
+ it('refuses at 100 live restricted grants with no writes, and still issues them',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  await seedRestricted(database,'restricted-live',99,'live');await seedRestricted(database,'restricted-open',1,'live-no-expiry');
+  expect(await issuable(env)).toHaveLength(100);
+  const before=await counts(database);
+  await expect(createFor(env,'restricted-live-cap-00001')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(await counts(database)).toEqual(before);
+ },120_000);
+ it('neither counts nor issues restricted grants with a missing, duplicated or mismatched receipt',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  for(const kind of ['missing','duplicate','wrong-version','wrong-workspace','wrong-permissions','v1'] as const)
+   await seedRestricted(database,`restricted-${kind}`,20,kind);
+  expect(await issuable(env)).toEqual([]);
+  const created=await createFor(env,'restricted-invalid-cap-01');
+  expect(created.replayed).toBe(false);expect(await issuable(env)).toEqual([created.grant.grantId]);
+ },120_000);
+ it('holds the boundary across ordinary and restricted grants together',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  await seedOrdinary(database,'ordinary-live',50,FUTURE);await seedOrdinary(database,'ordinary-open',9,null);
+  await seedOrdinary(database,'ordinary-expired',15,PAST);
+  await seedRestricted(database,'restricted-live',40,'live');await seedRestricted(database,'restricted-expired',15,'expired');
+  await seedRestricted(database,'restricted-bad',10,'wrong-version');
+  expect(await issuable(env)).toHaveLength(99);
+  const created=await createFor(env,'mixed-boundary-cap-00001');expect(created.replayed).toBe(false);
+  expect(await issuable(env)).toHaveLength(100);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'another-project'},tasks:[]});
+  const before=await counts(database);
+  await expect(createFor(env,'mixed-boundary-cap-00002','another-project')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(await counts(database)).toEqual(before);
+ },120_000);
+ it('counts a live restricted grant inside the INSERT when it lands after the precheck',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'restricted-live',99,'live');
+  const before=await counts(database);
+  const race=racingEnv(env,database,()=>seedRestricted(database,'restricted-race',1,'live'));
+  await expect(createFor(race.env,'restricted-race-cap-00001')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(race.state.raced).toBe(true);
+  // Only the racing grant and its receipt were written; this request wrote nothing.
+  expect(await counts(database)).toEqual({grants:before.grants!+1,receipts:before.receipts!+1,audit:before.audit});
+ },120_000);
+ // Expiries with an offset. The create schema accepts ±HH:MM up to ±23:59; SQLite's parser rejects offsets above
+ // 14 hours, so storage is canonical UTC and older stored offsets are applied by hand on read.
+ const OFFSET_FUTURE='2099-01-01T00:00:00+15:00',OFFSET_FUTURE_UTC='2098-12-31T09:00:00.000Z';
+ const OFFSET_FAR='2099-01-01T00:00:00-23:59',OFFSET_FAR_UTC='2099-01-01T23:59:00.000Z';
+ const selection={version:1 as const,mode:'except' as const,folderIds:[],taskIds:['00000000-0000-4000-8000-000000000002']};
+ const createWith=(env:Env,idempotencyKey:string,viewerProjectId:string,expiresAt:string|null,restricted:boolean)=>createDirectViewerClientGrant({env,principal,
+  idempotencyKey,request:new Request('https://ops.example.test/'),grant:{sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId,taskId:null,
+   scopeType:'project',includeFuturePublished:true,confirmedScope:true,expiresAt,permissions:{measure:true,cameras:false,download:false},
+   ...(restricted?{selection}:{})}});
+ const issuableExpiry=async(env:Env)=>Object.fromEntries((await readDirectViewerClientGrants(env,{sourceId:'project-alpha:primary',workspaceId:'ws-one'}))
+  .map(row=>[row.id,row.authorization_expires_at]));
+ it('stores a non-UTC offset expiry as canonical UTC, and list, mint selection, replay and the cap agree on it',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'restricted-live',98,'live');
+  mocks.catalog.mockResolvedValueOnce({project:{id:'offset-restricted'},tasks:[]});
+  const restricted=await createWith(env,'offset-restricted-key-01','offset-restricted',OFFSET_FUTURE,true);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'offset-ordinary'},tasks:[]});
+  const ordinary=await createWith(env,'offset-ordinary-key-0001','offset-ordinary',OFFSET_FAR,false);
+  expect(restricted.grant.expiresAt).toBe(OFFSET_FUTURE_UTC);expect(ordinary.grant.expiresAt).toBe(OFFSET_FAR_UTC);
+  const stored=await database.prepare(`SELECT id,authorization_expires_at expiry FROM viewer_direct_client_grants WHERE id IN (?,?)`)
+   .bind(restricted.grant.grantId,ordinary.grant.grantId).all<{id:string;expiry:string}>();
+  expect(Object.fromEntries(stored.results.map(row=>[row.id,row.expiry]))).toEqual({[restricted.grant.grantId]:SENTINEL,[ordinary.grant.grantId]:OFFSET_FAR_UTC});
+  const receipt=await database.prepare(`SELECT json_extract(response_json,'$.grant.expiresAt') expiry FROM viewer_direct_client_grant_mutation_receipts WHERE grant_id=?`)
+   .bind(restricted.grant.grantId).first<string>('expiry');
+  expect(receipt).toBe(OFFSET_FUTURE_UTC);
+  // Mint selection (the issuer's read) and the staff listing both see the canonical instant.
+  const selected=await issuableExpiry(env);
+  expect(Object.keys(selected)).toHaveLength(100);
+  expect(selected[restricted.grant.grantId]).toBe(OFFSET_FUTURE_UTC);expect(selected[ordinary.grant.grantId]).toBe(OFFSET_FAR_UTC);
+  const listed=(await listDirectViewerClientGrantWorkspace(env,principal,{include:'grants'})).grants;
+  expect(listed.find(grant=>grant.grantId===restricted.grant.grantId)?.expiresAt).toBe(OFFSET_FUTURE_UTC);
+  expect(listed.find(grant=>grant.grantId===ordinary.grant.grantId)?.expiresAt).toBe(OFFSET_FAR_UTC);
+  // The same request replays to the same stored grant.
+  expect(await createWith(env,'offset-restricted-key-01','offset-restricted',OFFSET_FUTURE,true)).toEqual({grant:restricted.grant,replayed:true});
+  expect(await createWith(env,'offset-ordinary-key-0001','offset-ordinary',OFFSET_FAR,false)).toEqual({grant:ordinary.grant,replayed:true});
+  // Both count: the client is now at 100.
+  const before=await counts(database);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'another-project'},tasks:[]});
+  await expect(createFor(env,'offset-cap-key-00000001','another-project')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(await counts(database)).toEqual(before);
+ },120_000);
+ it('counts and issues legacy receipts and rows stored with a large offset, and drops past or unparseable ones',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  await seedRestricted(database,'legacy-offset',97,'live',OFFSET_FUTURE);
+  await seedRestricted(database,'legacy-offset-past',5,'live','2020-01-01T00:00:00-23:59');
+  await seedRestricted(database,'legacy-no-suffix',5,'live','2099-01-01T00:00:00');
+  await seedRestricted(database,'legacy-garbage',5,'live','not-a-date');
+  await seedOrdinary(database,'ordinary-offset',2,OFFSET_FAR);
+  await seedOrdinary(database,'ordinary-offset-past',5,'2020-01-01T00:00:00+15:00');
+  const selected=await issuableExpiry(env);
+  expect(Object.keys(selected)).toHaveLength(99);
+  expect(new Set(Object.entries(selected).map(([id,expiry])=>id.startsWith('legacy-offset-')?expiry:null))).toEqual(new Set([OFFSET_FUTURE_UTC,null]));
+  const created=await createFor(env,'legacy-offset-cap-000001');expect(created.replayed).toBe(false);
+  expect(Object.keys(await issuableExpiry(env))).toHaveLength(100);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'another-project'},tasks:[]});
+  const before=await counts(database);
+  await expect(createFor(env,'legacy-offset-cap-000002','another-project')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(await counts(database)).toEqual(before);
+ },120_000);
+ it('counts a legacy large-offset restricted grant inside the INSERT and the diagnosis when it lands after the precheck',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'legacy-offset',99,'live',OFFSET_FUTURE);
+  const before=await counts(database);
+  const race=racingEnv(env,database,()=>seedRestricted(database,'legacy-offset-race',1,'live',OFFSET_FUTURE));
+  await expect(createFor(race.env,'legacy-offset-race-00001')).rejects.toMatchObject({status:409,code:'grant_limit'});
+  expect(race.state.raced).toBe(true);
+  expect(await counts(database)).toEqual({grants:before.grants!+1,receipts:before.receipts!+1,audit:before.audit});
+ },120_000);
+ // Year-9999 boundary: 9999-12-31T23:59:59-01:00 passes the create schema, but its UTC instant is in year
+ // 10000, which has no YYYY form for the issuer schema or SQLite. It is refused before any write.
+ const BEYOND='9999-12-31T23:59:59-01:00',LARGEST='9999-12-31T23:59:59.999Z';
+ const ledger=async(database:D1Database)=>({...await counts(database),
+  revocations:await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grant_revocations`).first<number>('n')});
+ it('refuses an expiry whose UTC instant is beyond year 9999 with no writes, restricted or not',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  const before=await ledger(database);
+  for(const restricted of [false,true])
+   await expect(createWith(env,`beyond-9999-key-${restricted?'r':'o'}0001`,'viewer-project',BEYOND,restricted))
+    .rejects.toMatchObject({status:400,code:'expired_at_invalid'});
+  expect(mocks.catalog).not.toHaveBeenCalled();
+  expect(await ledger(database)).toEqual(before);
+ },120_000);
+ it('accepts the largest representable expiry and stores it in a form the issuer schema and SQLite both read',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  const ordinary=await createWith(env,'largest-expiry-key-o0001','viewer-project',LARGEST,false);
+  mocks.catalog.mockResolvedValueOnce({project:{id:'largest-restricted'},tasks:[]});
+  const restricted=await createWith(env,'largest-expiry-key-r0001','largest-restricted','9999-12-31T23:59:59Z',true);
+  expect(ordinary.grant.expiresAt).toBe(LARGEST);expect(restricted.grant.expiresAt).toBe('9999-12-31T23:59:59.000Z');
+  for(const value of [ordinary.grant.expiresAt,restricted.grant.expiresAt]){
+   expect(value).toMatch(/^\d{4}-\d\d-\d\dT/);
+   expect(await database.prepare(`SELECT julianday(?) IS NOT NULL ok`).bind(value).first<number>('ok')).toBe(1);
+  }
+  expect(await issuableExpiry(env)).toEqual({[ordinary.grant.grantId]:LARGEST,[restricted.grant.grantId]:'9999-12-31T23:59:59.000Z'});
+  expect(await createWith(env,'largest-expiry-key-o0001','viewer-project',LARGEST,false)).toEqual({grant:ordinary.grant,replayed:true});
+ },120_000);
+ it('still replays a grant committed with that expiry before the range check, with no new writes',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  // A pre-pin receipt, as an earlier build stored it: the raw public result with the request's original expiry.
+  const request={sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId:'viewer-project',taskId:null,scopeType:'project' as const,
+   includeFuturePublished:true,confirmedScope:true as const,expiresAt:BEYOND,permissions:{measure:true,cameras:false,download:false}};
+  const id='committed-beyond-9999',now=new Date().toISOString();
+  const committed={grantId:id,sourceId:request.sourceId,workspaceId:'ws-one',viewerProjectId:'viewer-project',taskId:null,scopeType:'project',
+   includeFuturePublished:true,permissions:request.permissions,expiresAt:BEYOND,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:'One'};
+  await database.batch([
+   database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+    can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+    VALUES(?,'project-alpha:primary','ws-one','viewer-project',NULL,'project',1,1,0,0,?,1,'active','staff-one',?,?)`).bind(id,BEYOND,now,now),
+   database.prepare(`INSERT INTO viewer_direct_client_grant_mutation_receipts(actor_staff_id,idempotency_key,action,request_fingerprint,grant_id,response_json,created_at)
+    VALUES('staff-one','committed-beyond-key-001','grant.create',?,?,?,?)`)
+    .bind(await sha256(JSON.stringify(['direct.create',request])),id,JSON.stringify(committed),now)]);
+  const before=await ledger(database);
+  expect(await createDirectViewerClientGrant({env,principal,idempotencyKey:'committed-beyond-key-001',request:new Request('https://ops.example.test/'),grant:request}))
+   .toEqual({grant:committed,replayed:true});
+  expect(await ledger(database)).toEqual(before);
+  // A new key with the same body is a new create, and is refused.
+  await expect(createDirectViewerClientGrant({env,principal,idempotencyKey:'committed-beyond-key-002',request:new Request('https://ops.example.test/'),grant:request}))
+   .rejects.toMatchObject({status:400,code:'expired_at_invalid'});
+  expect(await ledger(database)).toEqual(before);
+ },120_000);
+ it('ignores an expired restricted grant inside the INSERT when it lands after the precheck',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);await seedRestricted(database,'restricted-live',99,'live');
+  const race=racingEnv(env,database,()=>seedRestricted(database,'restricted-race-expired',1,'expired'));
+  const created=await createFor(race.env,'restricted-race-cap-00002');
+  expect(race.state.raced).toBe(true);expect(created.replayed).toBe(false);expect(await issuable(env)).toHaveLength(100);
+ },120_000);
+});
+describe('direct Viewer selections in receipts',()=>{
+ const SENTINEL='1970-01-01T00:00:00.000Z',one='00000000-0000-4000-8000-000000000001',two='00000000-0000-4000-8000-000000000002';
+ const pin={version:1,mode:'native_source',sourceId:'project-alpha:primary',workspaceId:'ws-one',sourceWorkspaceId:'source-ws-one',rootType:'standalone_client',rootPublicId:'root-ws-one'};
+ const only={version:1,mode:'only',folderIds:[one],taskIds:[two]},exclusions={version:1,folderIds:[one],taskIds:[]};
+ const read=(env:Env)=>readDirectViewerClientGrants(env,{sourceId:'project-alpha:primary',workspaceId:'ws-one'});
+ async function seed(database:D1Database,id:string,expiry:string|null,receipt:((grant:object)=>unknown)|null,scope:'project'|'task'='project'){
+  const now=new Date().toISOString(),task=scope==='task'?'viewer-task':null;
+  const grant={grantId:id,sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId:`project-${id}`,taskId:task,scopeType:scope,includeFuturePublished:scope==='project',
+   permissions:{measure:true,cameras:false,download:false},expiresAt:null,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:'One'};
+  await database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
+   can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+   VALUES(?,'project-alpha:primary','ws-one',?,?,?,?,1,0,0,?,1,'active','staff-one',?,?)`).bind(id,grant.viewerProjectId,task,scope,scope==='project'?1:0,expiry,now,now).run();
+  if(receipt)await database.prepare(`INSERT INTO viewer_direct_client_grant_mutation_receipts VALUES('staff-one',?,'grant.create','fingerprint',?,?,?)`)
+   .bind(`selection-${id}`,id,JSON.stringify(receipt(grant)),now).run();
+ }
+ it('reads v2 as except, reads and writes v3, and refuses every mixed or malformed shape, on both sides of the sentinel',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  const envelope=(version:number,extra:object)=>(grant:object)=>({version,grant,recipientAuthorityPin:pin,...extra});
+  await seed(database,'a-v2',SENTINEL,envelope(2,{exclusions}));
+  await seed(database,'b-v3-only',SENTINEL,envelope(3,{selection:only}));
+  await seed(database,'c-v3-except',SENTINEL,envelope(3,{selection:{...only,mode:'except'}}));
+  await seed(database,'d-plain-raw',null,grant=>grant);
+  await seed(database,'e-plain-v1',null,envelope(1,{}));
+  await seed(database,'f-task',null,envelope(1,{}),'task');
+  await seed(database,'g-plain-none',null,null);
+  const refused:Array<[string,string|null,((grant:object)=>unknown)|null]>=[
+   ['r-v2-selection',SENTINEL,envelope(2,{selection:only})],['r-v3-exclusions',SENTINEL,envelope(3,{exclusions})],
+   ['r-v3-both',SENTINEL,envelope(3,{selection:only,exclusions})],['r-v2-both',SENTINEL,envelope(2,{selection:only,exclusions})],
+   ['r-v3-neither',SENTINEL,envelope(3,{})],['r-v2-neither',SENTINEL,envelope(2,{})],['r-v3-extra',SENTINEL,envelope(3,{selection:only,note:'x'})],
+   ['r-v3-unsorted',SENTINEL,envelope(3,{selection:{...only,folderIds:[two,one]}})],['r-v3-mode',SENTINEL,envelope(3,{selection:{...only,mode:'all'}})],
+   ['r-v3-empty',SENTINEL,envelope(3,{selection:{...only,folderIds:[],taskIds:[]}})],['r-v4',SENTINEL,envelope(4,{selection:only})],
+   ['r-sentinel-v1',SENTINEL,envelope(1,{})],['r-sentinel-raw',SENTINEL,grant=>grant],['r-sentinel-none',SENTINEL,null],
+   ['r-open-v2',null,envelope(2,{exclusions})],['r-open-v3',null,envelope(3,{selection:only})],['r-open-keys',null,grant=>({...grant,selection:only})],
+   ['r-dated-v3','2099-01-01T00:00:00.000Z',envelope(3,{selection:only})]];
+  for(const [id,expiry,receipt] of refused)await seed(database,id,expiry,receipt);
+  const rows=await read(env);
+  expect(Object.fromEntries(rows.map(row=>[row.id,row.selection??null]))).toEqual({'a-v2':{...exclusions,mode:'except'},'b-v3-only':only,
+   'c-v3-except':{...only,mode:'except'},'d-plain-raw':null,'e-plain-v1':null,'f-task':null,'g-plain-none':null});
+  // Staff see the selection of the shares that have one; refused rows are listed as ended, never as a whole project.
+  const listed=(await listDirectViewerClientGrantWorkspace(env,principal,{include:'grants'})).grants;
+  const by=Object.fromEntries(listed.map(grant=>[grant.grantId,grant]));
+  expect(by['b-v3-only']).toMatchObject({selection:only,expiresAt:null});expect(by['a-v2']).toMatchObject({selection:{...exclusions,mode:'except'}});
+  expect(by['d-plain-raw']).not.toHaveProperty('selection');
+  for(const [id] of refused){expect(by[id]).not.toHaveProperty('selection');}
+  for(const id of ['r-v3-both','r-sentinel-v1'])expect(by[id]!.expiresAt).toBe(SENTINEL);
+  for(const id of ['r-open-v2','r-open-v3','r-open-keys','r-dated-v3'])expect(Date.parse(by[id]!.expiresAt!)).toBeLessThan(Date.now());
+ },120_000);
+ it('writes v3 with the sentinel, replays only the same selection, and reports what the Viewer refused',async()=>{
+  const {env,database}=await fixture([{id:'ws-one',name:'One'}]);
+  const create=(key:string,selection:unknown,project='viewer-project')=>createDirectViewerClientGrant({env,principal,idempotencyKey:key,request:new Request('https://ops.example.test/'),
+   grant:{sourceId:'project-alpha:primary',workspaceId:'ws-one',viewerProjectId:project,taskId:null,scopeType:'project',includeFuturePublished:true,confirmedScope:true,
+    expiresAt:null,permissions:{measure:true,cameras:false,download:false},...(selection===undefined?{}:{selection})}});
+  mocks.catalog.mockResolvedValueOnce({project:{id:'viewer-project'},tasks:[]});
+  const created=await create('selection-create-00001',only);
+  expect(mocks.catalog).toHaveBeenLastCalledWith({projectId:'viewer-project',selection:only,validateSelection:true});
+  const row=await database.prepare('SELECT authorization_expires_at expiry,scope_type scope,include_future_published future FROM viewer_direct_client_grants WHERE id=?').bind(created.grant.grantId).first();
+  expect(row).toEqual({expiry:SENTINEL,scope:'project',future:1});
+  const stored=JSON.parse((await database.prepare('SELECT response_json FROM viewer_direct_client_grant_mutation_receipts WHERE grant_id=?').bind(created.grant.grantId).first<string>('response_json'))!);
+  expect(Object.keys(stored).sort()).toEqual(['grant','recipientAuthorityPin','selection','version']);expect(stored.version).toBe(3);expect(stored.selection).toEqual(only);
+  expect((await read(env)).map(item=>item.selection)).toEqual([only]);
+  expect(await create('selection-create-00001',only)).toEqual({grant:created.grant,replayed:true});
+  await expect(create('selection-create-00001',{...only,mode:'except'})).rejects.toMatchObject({code:'idempotency_conflict'});
+  for(const broken of [{...only,mode:'all'},{...only,folderIds:[two,one]},{...only,folderIds:[one,one]},{...only,folderIds:[],taskIds:[]},{...only,extra:1},{...exclusions}])
+   await expect(create('selection-broken-00001',broken,'another-project')).rejects.toMatchObject({status:400});
+  mocks.catalog.mockRejectedValueOnce(new ViewerServiceError('old','unsupported'));
+  await expect(create('selection-unsupported-1',only,'another-project')).rejects.toMatchObject({status:409,code:'selection_unsupported'});
+  mocks.catalog.mockRejectedValueOnce(new ViewerServiceError('gone','not_found',404));
+  await expect(create('selection-elsewhere-01',only,'another-project')).rejects.toMatchObject({status:409,code:'selection_not_in_project'});
+  expect(await database.prepare('SELECT count(*) n FROM viewer_direct_client_grants').first<number>('n')).toBe(1);
+ },120_000);
 });
 
 describe('direct Viewer picker authorization is unchanged',()=>{

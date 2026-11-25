@@ -130,7 +130,7 @@ jobs:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "90"
+          EXPECTED_SCHEMA_VERSION: "92"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_OBJ2TILES_SOURCE_SHA256: "79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5"
           EXPECTED_OBJ2TILES_PATCH_SHA256: "fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c"
@@ -237,8 +237,13 @@ jobs:
           VIEWER_SCHEMA_VERSION="$(docker run --rm --entrypoint node "$VERIFY_IMAGE" -e '
             const {openDatabase}=require("./server/database");
             const db=openDatabase("/tmp/release-attestation.sqlite");
-            if(db.prepare("SELECT name FROM schema_migrations WHERE version=84").get()?.name!=="viewer_coordinate_marks")throw new Error("Schema 84 is missing or recorded under another name");
-            try{process.stdout.write(String(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version));}
+            try {
+              const readMigration=db.prepare("SELECT name FROM schema_migrations WHERE version=?");
+              for(const [version,name] of [[84,"viewer_coordinate_marks"],[90,"viewer_mark_sharing"],[91,"task_authorization_generations"],[92,"restricted_viewer_session_lifecycle"]]){
+                if(readMigration.get(version)?.name!==name)throw new Error(`Schema ${version} is missing or recorded under another name`);
+              }
+              process.stdout.write(String(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version));
+            }
             finally{db.close();}
           ')"
           test "$VIEWER_SCHEMA_VERSION" = "$EXPECTED_SCHEMA_VERSION"
@@ -300,7 +305,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "90"
+          EXPECTED_SCHEMA_VERSION: "92"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_OBJ2TILES_LOCKSET_SHA256: "b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98"
           EXPECTED_OBJ2TILES_LICENSE_NOTICE_SHA256: "86768eb4bb03feacad31ba6ec90c003abafdebeb5257a1c3eeb1b4f348530a4e"

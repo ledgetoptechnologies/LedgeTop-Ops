@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const express = require('express');
+const { restrictedSessionScope } = require('./restrictedSessionScope');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const auth = require('./auth');
 const shareTokenVault = require('./shareTokenVault');
@@ -259,20 +260,26 @@ function createApiV1(repository) {
       return res.status(400).json({ error: 'invalid session grant' });
     const existing = presentedViewer(req);
     const grant = repository.redeemSessionGrant(grantId);
-    if (!grant) return res.status(410).json({ error: 'session grant expired or already redeemed' });
+    if (!grant || grant.permissions?.view !== true)
+      return res.status(410).json({ error: 'session grant expired or already redeemed' });
     const authorizedUntilMs = Date.parse(grant.permissions.__authorizedUntil || '');
-    const ttlMs = Math.min(
-      config.viewerSessionTtlSeconds * 1000,
-      Number.isFinite(authorizedUntilMs) ? authorizedUntilMs - Date.now() : config.viewerSessionTtlSeconds * 1000,
+    const redeemedAt = Date.now();
+    if (grant.restrictedScope !== undefined && !Number.isFinite(authorizedUntilMs))
+      return res.status(410).json({ error: 'LTDS authorization has expired' });
+    const expiresAtMs = Math.min(
+      redeemedAt + config.viewerSessionTtlSeconds * 1000,
+      Number.isFinite(authorizedUntilMs) ? authorizedUntilMs : Infinity,
     );
+    const ttlMs = expiresAtMs - redeemedAt;
     if (ttlMs <= 0) return res.status(410).json({ error: 'LTDS authorization has expired' });
+    const expiresAt = new Date(expiresAtMs).toISOString();
     const modelVersionId = grant.modelVersionId || grant.permissions.__versionId;
     const target = {
       sessionMode: grant.sessionMode || 'published',
       reviewAttemptId: grant.reviewAttemptId || null,
       modelId: grant.modelId,
       modelVersionId,
-      expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+      expiresAt,
       revokedAt: null,
     };
     const model = target.sessionMode === 'review'
@@ -286,10 +293,10 @@ function createApiV1(repository) {
     const grantedPermissions = { ...grant.permissions };
     delete grantedPermissions.__authorizedUntil;
     delete grantedPermissions.__versionId;
-    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
     let accessToken;
     let session;
     const canRenew = existing
+      && existing.session.restrictedScope === undefined && grant.restrictedScope === undefined
       && existing.session.modelId === grant.modelId
       && existing.session.modelVersionId === modelVersionId
       && existing.session.subject === grant.subject
@@ -309,9 +316,12 @@ function createApiV1(repository) {
         reviewAttemptId: target.reviewAttemptId,
         sessionMode: target.sessionMode,
         sourceAuthorization: grant.sourceAuthorization,
+        restrictedScope: grant.restrictedScope,
         subject: grant.subject,
         audience: grant.audience,
-        permissions: grantedPermissions,
+        permissions: grant.restrictedScope === undefined ? grantedPermissions : {
+          ...grantedPermissions, __authorizedUntil: grant.permissions.__authorizedUntil,
+        },
         displayUnits: grant.displayUnits || config.defaultUnits,
         expiresAt,
       });
@@ -347,16 +357,21 @@ function createApiV1(repository) {
     res.json({ model: serviceCatalogModel(model) });
   });
 
-  router.post('/api/v1/models/:id/sessions', serviceOnly, idempotentService, (req, res) => {
+  const mintPublishedSession = restrictedRoute => (req, res) => {
     const model = repository.getModel(req.params.id);
     if (!model || model.status !== 'ready' || !model.activeVersion)
       return res.status(404).json({ error: 'ready model not found' });
     const body = req.body || {};
+    const restrictedScope = restrictedRoute ? restrictedSessionScope(body.restrictedScope) : undefined;
+    if ((restrictedRoute && !restrictedScope) || (!restrictedRoute && body.restrictedScope !== undefined))
+      return res.status(400).json({ error: 'restrictedScope is invalid for this route' });
     const sourceAuthorization = body.sourceAuthorization === undefined
       ? null
       : publishedSessionSourceAuthorization(body.sourceAuthorization);
     if (body.sourceAuthorization !== undefined && !sourceAuthorization)
       return res.status(400).json({ error: 'sourceAuthorization is invalid' });
+    if (restrictedRoute && (body.audience !== 'client' || sourceAuthorization?.type !== 'direct_client_grant'))
+      return res.status(400).json({ error: 'restricted sessions require a direct client grant' });
     if (config.publishedSessionSourceRevocationEnabled && !sourceAuthorization)
       return res.status(400).json({ error: 'sourceAuthorization is required while published-session revocation is enabled' });
     if (!body.modelVersionId) return res.status(400).json({ error: 'modelVersionId is required' });
@@ -388,6 +403,7 @@ function createApiV1(repository) {
         modelVersionId: model.activeVersionId,
         sessionMode: 'published',
         sourceAuthorization,
+        restrictedScope,
         subject: body.subject,
         audience: body.audience,
         permissions: {
@@ -406,6 +422,8 @@ function createApiV1(repository) {
         details: { audience: body.audience, subject: body.subject },
       });
     } catch (error) {
+      if (error?.code === 'restricted_session_scope_denied')
+        return res.status(404).json({ error: 'ready model not found' });
       if (error?.code === 'source_authorization_revoked')
         return res.status(409).json({ error: 'sourceAuthorization is revoked' });
       throw error;
@@ -421,7 +439,9 @@ function createApiV1(repository) {
       redeemUrl: `${base}/api/v1/sessions/redeem`,
       embedUrl: `${base}/session/${encodeURIComponent(grant.id)}`,
     });
-  });
+  };
+  router.post('/api/v1/models/:id/sessions', serviceOnly, idempotentService, mintPublishedSession(false));
+  router.post('/api/v1/models/:id/restricted-sessions', serviceOnly, idempotentService, mintPublishedSession(true));
 
   function publishedSessionSourceRevocationEnabled(req, res, next) {
     if (!config.publishedSessionSourceRevocationEnabled && req.body?.sourceAuthorization?.type !== 'direct_client_grant') {

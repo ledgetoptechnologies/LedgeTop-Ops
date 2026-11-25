@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { directClientReviewName, SHARE_TARGET_MISSING, directClientAccess, directClientLabel, directClientsPath, directGrantRows, directScopeSummary, directShareDefaultScope, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, readDirectShareForm, shareableTasks } from '../workspace-direct-client-share.mjs';
+import { directProjectShareEditForm, editableDirectProjectGrant, publicationFolderPath, publishAudience, readDirectProjectShareEdit } from '../workspace-direct-client-share.mjs';
 
 const clients=[{sourceId:'source-a',workspaceId:'ws-1',displayName:'Acme Construction',businessName:'Ledge Top'},{sourceId:'source-a',workspaceId:'ws-2',displayName:'Harbor Works',businessName:null}];
 const tasks=[{id:'task-1',name:'North wall'},{id:'task-2',name:'South wall'}];
@@ -12,6 +13,28 @@ function form({client='',scope='project',checked=[],later=true,expiresAt='',perm
     querySelectorAll:selector=>selector==='input[name="taskId"]'?taskInputs:[]};
 }
 const key=JSON.stringify(['source-a','ws-1']);
+
+test('first project Share uses the approved tick-box labels without changing saved-share editing',()=>{
+  const catalog={folders:[{id:'folder',displayName:'North'}],tasks};
+  const html=directShareForm({projectName:'Site',tasks,selectionCatalog:catalog});
+  const options=[...html.matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map(match=>match.slice(1));
+  assert.deepEqual(options,[['whole','Everything'],['except','Everything except unticked folders and tasks'],['only','Only ticked folders and tasks']]);
+  const saved=directProjectShareEditForm({grant:{clientDisplayName:'Acme'},...catalog});
+  assert.match(saved,/Whole project except selected folders and tasks/);
+  assert.doesNotMatch(saved,/unticked/);
+});
+
+test('first Except share sends only unticked targets as exclusions; Only sends ticked targets',()=>{
+  const catalog={folders:[{id:'folder',displayName:'North'}],tasks};
+  for(const mode of ['only','except']){
+    const input=form({client:key});input.elements.mode={value:mode};
+    const original=input.querySelectorAll;
+    input.querySelectorAll=selector=>selector===`input[name="folder"]${mode==='except'?':not(:checked)':':checked'}`
+      ?[{value:'folder',hasAttribute:()=>false}]:original(selector);
+    const body=readDirectShareForm(input,{projectId:'project',projectName:'Site',tasks,clients,entry:'project',selectionCatalog:catalog}).bodies()[0];
+    assert.deepEqual(body.selection,{version:1,mode,folderIds:['folder'],taskIds:[]});
+  }
+});
 
 test('only tasks with a live published model can be chosen one by one',()=>{
   const all=[{id:'a',projectId:'p',displayName:'Published'},{id:'b',projectId:'p',displayName:'Ready only'},{id:'c',projectId:'other',displayName:'Other project'}];
@@ -133,6 +156,50 @@ test('server codes become plain explanations',()=>{
   assert.equal(directShareErrorText({message:'Request failed (503)'}),'Request failed (503)');
 });
 
+test('saved project selections display what they include or exclude',()=>{
+  const folders=[{id:'folder',displayName:'Model drafts'}];
+  const grant={grantId:'selected',sourceId:'source-a',workspaceId:'ws-1',viewerProjectId:'project',scopeType:'project'};
+  const markup=(mode)=>directGrantRows({grants:[{...grant,selection:{version:1,mode,folderIds:['folder'],taskIds:['task-1']}}]},
+    {projectId:'project',tasks,folders});
+  assert.match(markup('only'),/Only “Model drafts”, “North wall”/);
+  assert.match(markup('except'),/Whole project except “Model drafts”, “North wall”/);
+});
+
+test('publication warnings follow the current complete folder path and report unavailable ancestry',()=>{
+  const scope={projectId:'project',taskId:'task-1'};
+  const folders=[{id:'root',projectId:'project',parentId:null},{id:'child',projectId:'project',parentId:'root'}];
+  const task={id:'task-1',projectId:'project',folderId:'child'};
+  const grant={grantId:'selected',sourceId:'source-a',workspaceId:'ws-1',viewerProjectId:'project',scopeType:'project'};
+  const client={key, name:'a client', id:'ws-1'};
+  const audience=(mode,folderPath)=>publishAudience({grants:[{...grant,selection:{version:1,mode,folderIds:['root'],taskIds:[]}}]},
+    {...scope,folderPath});
+  const path=publicationFolderPath(task,folders,scope);
+  assert.deepEqual(path,['child','root']);
+  assert.deepEqual(audience('only',path),{clients:[client],complete:true});
+  assert.deepEqual(audience('except',path),{clients:[],complete:true});
+  const moved=publicationFolderPath({...task,folderId:null},folders,scope);
+  assert.deepEqual(audience('only',moved),{clients:[],complete:true});
+  assert.deepEqual(audience('except',moved),{clients:[client],complete:true});
+  const incomplete=publicationFolderPath(task,folders.slice(1),scope);
+  assert.equal(incomplete,null);
+  assert.deepEqual(audience('except',incomplete),{clients:[],complete:false});
+});
+
+test('replacement overflow directs staff to the individual revoke controls, including for expired shares',async()=>{
+  const grants=Array.from({length:101},(_,index)=>({
+    grantId:`legacy-${index}`,viewerProjectId:'project',scopeType:'task',taskId:`legacy-task-${index}`,expiresAt:'2020-01-01T00:00:00Z',revokedAt:null,
+  }));
+  const message=directShareErrorText({code:'share_replacement_limit'});
+  assert.match(message,/more than 100 shares/);
+  assert.match(message,/Clients with access, revoke shares .* one at a time, then try again/);
+  const access=await loadDirectClientAccess(async path=>new URLSearchParams(path.split('?')[1]).has('grantsCursor')
+    ? {clients:[],grants:grants.slice(100),grantsNextCursor:null}
+    : {clients:[],grants:grants.slice(0,100),grantsNextCursor:'legacy-99'},'project');
+  const rows=directGrantRows(access,{projectId:'project',tasks:[]});
+  assert.equal([...rows.matchAll(/data-action="revoke-direct-client-grant"/g)].length,101);
+  assert.match(rows,/data-id="legacy-100">Revoke/);
+});
+
 test('new client shares start with everything on and no end date',()=>{
   const html=directShareForm({projectName:'Site',tasks,access:{clients,grants:[]}});
   for(const name of ['measure','cameras','download'])assert.match(html,new RegExp(`name="${name}" checked`));
@@ -210,4 +277,48 @@ test('a chosen task that can no longer be shared refuses the whole share and is 
   assert.throws(()=>readDirectShareForm(picked,context).bodies({confirmed:true}),/“South wall” can no longer be shared. Nothing was sent/);
   assert.throws(()=>readDirectShareForm(picked,{...context,known:[]}).bodies(),/A chosen task can no longer be shared/);
   assert.match(readDirectShareForm(form({client:key}),{...context,fresh:true}).what,/Published now: “North wall”, and later ones/);
+});
+
+const editableGrant={grantId:'grant-1',grantVersion:4,sourceId:'project-alpha:native',workspaceId:'workspace-1',
+  viewerProjectId:'project',scopeType:'project',taskId:null,revokedAt:null,clientDisplayName:'Acme',includeFuturePublished:true,
+  permissions:{measure:false,cameras:true,download:false},expiresAt:'2031-01-02T03:04:05.678Z'};
+const editFolders=[{id:'folder-1',displayName:'East / Level 1'},{id:'folder-2',displayName:'West'}];
+const editForm=(mode,folderIds=[],taskIds=[],missing=[])=>({
+  elements:{mode:{value:mode}},
+  querySelectorAll:selector=>(selector.includes('folder')?folderIds:taskIds)
+    .map(value=>({value,hasAttribute:attribute=>attribute==='data-missing'&&missing.includes(value)})),
+});
+
+test('project edit is available only for a single editable share of that exact recipient and project',()=>{
+  const options={projectId:'project',tasks,now:Date.parse('2030-01-01T00:00:00Z')};
+  const other={...editableGrant,grantId:'other',workspaceId:'workspace-2'};
+  const access={grants:[editableGrant,other]};
+  assert.equal(editableDirectProjectGrant(access,'project','grant-1',options.now),editableGrant);
+  assert.match(directGrantRows(access,options),/data-action="edit-direct-project-share" data-id="grant-1"/);
+  assert.doesNotMatch(directGrantRows(access,{...options,taskId:'task-1'}),/Edit selection/);
+  assert.doesNotMatch(directGrantRows({...access,grantsIncomplete:true},options),/Edit selection/);
+  assert.doesNotMatch(directGrantRows({grants:[editableGrant,{...editableGrant,grantId:'expired-sibling',scopeType:'task',
+    taskId:'task-1',expiresAt:'2020-01-01T00:00:00Z'}]},options),/Edit selection/);
+});
+
+test('project share review preserves the recipient, permissions, exact expiry and grant version',()=>{
+  const context={grant:editableGrant,tasks,folders:editFolders,projectName:'Site'};
+  const change=readDirectProjectShareEdit(editForm('only',['folder-2','folder-1'],['task-2']),context);
+  assert.deepEqual(change.body,{
+    sourceId:'project-alpha:native',workspaceId:'workspace-1',viewerProjectId:'project',taskId:null,
+    scopeType:'project',includeFuturePublished:true,permissions:{measure:false,cameras:true,download:false},
+    expiresAt:'2031-01-02T03:04:05.678Z',confirmedScope:true,selection:{version:1,mode:'only',folderIds:['folder-1','folder-2'],taskIds:['task-2']},
+    replaces:[{grantId:'grant-1',grantVersion:4}],
+  });
+  assert.match(change.summary,/Acme.+Site.+Only “East \/ Level 1”, “West”, “South wall”/);
+  assert.match(readDirectProjectShareEdit(editForm('except',[],['task-1']),context).summary,/Whole project except “North wall”/);
+  assert.throws(()=>readDirectProjectShareEdit(editForm('only'),context),/Choose between/);
+  assert.throws(()=>readDirectProjectShareEdit(editForm('whole'),context),/different selection/);
+  const prior={...context,grant:{...editableGrant,selection:{version:1,mode:'except',folderIds:['removed-folder'],taskIds:[]}}};
+  assert.match(directProjectShareEditForm(prior),/removed-folder" checked data-missing/);
+  assert.throws(()=>readDirectProjectShareEdit(editForm('except',['removed-folder'],[],['removed-folder']),prior),/unavailable selections/);
+  const whole=readDirectProjectShareEdit(editForm('whole',['removed-folder']),prior);
+  assert.equal(Object.hasOwn(whole.body,'selection'),false);
+  assert.match(whole.summary,/every published task in Site, including tasks published later/);
+
 });

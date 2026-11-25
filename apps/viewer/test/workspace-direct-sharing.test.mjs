@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import * as directClientShare from '../workspace-direct-client-share.mjs';
 
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
@@ -21,8 +22,9 @@ function declaration(name){
   const rest=source.slice(match.index),next=/\n(?:async )?function \w+\(|\nconst \w+\s*=/.exec(rest);
   return next?rest.slice(0,next.index):rest;
 }
-const names=['invalidatePublicationAuthority','publicationAuthorityLive','clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
-  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','publicLinkState','publicTabLabel','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink','shareFence','publicationAudience','confirmPublication','reopenMovedShare'];
+const names=['folderPath','pagedApi','loadProjectShareSelectionCatalog','projectShareSelectionCatalog','sameShareSelectionCatalog','editDirectProjectShare','invalidatePublicationAuthority','publicationAuthorityLive','clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
+  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','publicLinkState','publicTabLabel','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink','shareFence','publicationAudience','confirmPublication','reopenMovedShare','newLinkExpiry'];
+
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
   const state={token:'signed-in',adminSession:{id:'session',subject:'ops:me',expiresAt:'2099-01-01T00:00:00Z'},projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
@@ -38,7 +40,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     contains:()=>false,querySelectorAll:selector=>selector==='[data-action="copy-share"]'?copyButtons:[],
   };
   const esc=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
-  const context=vm.createContext({...directClientShare,document,state,modal,modalContent,AbortController,publicationReads:new Set(),publicationAuthorityGeneration:0,workspaceAuthorizationClearing:false,workspaceRecovery:{isPaused:()=>false},workspaceRenewal:null,crypto:{randomUUID:()=>`request-${++sequence}`},
+  const context=vm.createContext({...directClientShare,document,state,modal,modalContent,AbortController,folderCache:new Map(),publicationReads:new Set(),publicationAuthorityGeneration:0,workspaceAuthorizationClearing:false,workspaceRecovery:{isPaused:()=>false},workspaceRenewal:null,crypto:{randomUUID:()=>`request-${++sequence}`},
     can:permission=>permissions.includes(permission),esc,dateTime:value=>value,card:(title,body)=>`<section><h3>${esc(title)}</h3>${body}</section>`,
     empty:text=>`<p>${esc(text)}</p>`,field:(label,name,attrs='')=>`<label>${esc(label)}<input name="${name}" ${attrs}></label>`,
     badge:value=>`<span>${esc(value)}</span>`,button:(action,id,label)=>`<button data-action="${action}" data-id="${id}">${label}</button>`,
@@ -58,6 +60,150 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   return {context,document,state,output,posts,receipts,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
     respondReceipt(fn){receipt=fn},respond(fn){respond=fn},respondPost(fn){const base=respond;respond=(path,options)=>options.method==='POST'?fn(path,options):base(path,options)},respondNative(fn){nativeRespond=fn},respondDirect(fn){directRespond=fn},html:()=>rendered.at(-1)?.html||''};
 }
+
+function projectShareEditFixture(){
+  const f=fixture();
+  f.state.projects[0].status='active';
+  f.state.tasks[0].displayName='North wall';
+  f.state.tasks[0].folderId='root';
+  f.state.shareContext.projectId='project';
+  const grant={grantId:'grant',grantVersion:7,sourceId:'project-alpha:native',workspaceId:'client',viewerProjectId:'project',
+    scopeType:'project',taskId:null,includeFuturePublished:true,clientDisplayName:'Acme',revokedAt:null,
+    permissions:{measure:false,cameras:true,download:false},expiresAt:'2098-01-02T00:00:00.123Z'};
+  f.state.clientDirectAccess={clients:[],grants:[grant],clientsNextCursor:null};
+  const stateControls={status:{},fields:{},mode:{value:'only'},submit:{disabled:false},back:{}};
+  const editForm={isConnected:true,elements:{mode:stateControls.mode},
+    querySelector:selector=>({
+      '[role="status"]':stateControls.status,'[data-edit-share-targets]':stateControls.fields,
+      '[data-edit-share-back]':stateControls.back,'button[type="submit"]':stateControls.submit,
+    })[selector],
+    querySelectorAll:selector=>selector.includes('folder')?[{value:'root',hasAttribute:()=>false}]:[],
+  };
+  const previousQuery=f.modalContent.querySelector;
+  f.modalContent.querySelector=selector=>selector==='#direct-project-share-edit'?editForm:previousQuery(selector);
+  f.respond(async path=>path.endsWith('/folders')?{folders:[{id:'root',projectId:'project',parentId:null,displayName:'Main'}]}
+    :path.startsWith('/api/v1/tasks?')?{tasks:[f.state.tasks[0]],nextCursor:null}:{});
+  const original={dataset:{id:grant.grantId},isConnected:true,disabled:false};
+  const submit=()=>editForm.onsubmit({preventDefault(){}});
+  return {...f,grant,original,submit,stateControls};
+}
+
+test('staff project share editing requires review and reuses the exact request after an uncertain result',async()=>{
+  const f=projectShareEditFixture();
+  let writes=0;
+  f.respondDirect(async (_path,options)=>{
+    if(options.method!=='POST')return f.state.clientDirectAccess;
+    if(++writes===1)throw new Error('Temporary network failure');
+    return {grant:{grantId:'replacement'},sessionRevocation:{pending:true}};
+  });
+  await f.context.editDirectProjectShare('project',f.original);
+  assert.match(f.html(),/Edit client share|Editing access for/);
+  assert.match(f.html(),/Main \/ North wall/);
+  assert.equal(f.posts().length,0);
+  f.context.dialogs.confirm=async text=>{assert.match(text,/replaces.+Acme.+Only “Main”/);return false};
+  await f.submit();
+  assert.equal(f.posts().length,0);
+  f.context.dialogs.confirm=async()=>true;
+  await f.submit();
+  assert.equal(f.posts().length,1);
+  await f.submit();
+  assert.equal(f.posts().length,2);
+  const [first,second]=f.posts().map(call=>call.options);
+  assert.equal(second.headers['Idempotency-Key'],first.headers['Idempotency-Key']);
+  assert.deepEqual(second.body,first.body);
+  assert.deepEqual(first.body.replaces,[{grantId:'grant',grantVersion:7}]);
+  assert.deepEqual(first.body.permissions,f.grant.permissions);
+  assert.equal(first.body.expiresAt,f.grant.expiresAt);
+  assert.ok(f.notices.some(([notice])=>notice.includes('Revocation of prior sessions is pending')));
+});
+
+test('a changed project-share version requires a fresh access list before another edit',async()=>{
+  const f=projectShareEditFixture();
+  f.respondDirect(async (_path,options)=>{
+    if(options.method!=='POST')return f.state.clientDirectAccess;
+    throw Object.assign(new Error('Share changed'),{code:'share_changed'});
+  });
+  await f.context.editDirectProjectShare('project',f.original);
+  await f.submit();
+  assert.equal(f.posts().length,1);
+  assert.equal(f.stateControls.submit.disabled,true);
+  assert.equal(f.stateControls.back.disabled,false);
+  assert.match(f.stateControls.status.textContent,/Return to the access list/);
+  await f.submit();
+  assert.equal(f.posts().length,1);
+});
+
+test('the workspace API accepts committed replacement replays and pending revocations with the dispatch guard',async()=>{
+  const cases=[
+    {status:200,payload:{grant:{grantId:'replacement'},sessionRevocation:{pending:false}}},
+    {status:202,payload:{grant:{grantId:'replacement'},sessionRevocation:{pending:true}}},
+  ];
+  const events=[];
+  const scope=vm.createContext({
+    state:{token:'synthetic',adminSession:{id:'same'}},workspaceRecovery:{wait:async()=>{}},workspaceRenewal:null,
+    fetch:async(path,request)=>{
+      events.push(['dispatch',path,request.headers['Idempotency-Key']]);
+      const {status,payload}=cases.shift();
+      return Response.json(payload,{status});
+    },
+  });
+  vm.runInContext(declaration('workspaceFetch')+'\n'+declaration('api'),scope);
+  const path='/api/v1/workspace/direct-client-grants';
+  const options={method:'POST',headers:{'Idempotency-Key':'replacement-key'},
+    beforeDispatch:()=>()=>events.push(['authority verified'])};
+  assert.deepEqual(await scope.api(path,options),{grant:{grantId:'replacement'},sessionRevocation:{pending:false}});
+  assert.deepEqual(await scope.api(path,options),{grant:{grantId:'replacement'},sessionRevocation:{pending:true}});
+  assert.deepEqual(events,[
+    ['authority verified'],['dispatch',path,'replacement-key'],
+    ['authority verified'],['dispatch',path,'replacement-key'],
+  ]);
+});
+
+test('public link creation still requires its exact committed response',async()=>{
+  const scope=vm.createContext({
+    state:{token:'synthetic'},workspaceFetch:async()=>Response.json({share:{id:'link'}},{status:200}),
+  });
+  vm.runInContext(declaration('api'),scope);
+  await assert.rejects(scope.api('/api/v1/processing/outputs/model/shares',{
+    method:'POST',headers:{'Idempotency-Key':'link-key'},publicShareCreate:true,
+  }),/link request outcome could not be read/);
+});
+
+test('a confirmed edit is discarded if sharing authority is paused while the review is open',async()=>{
+  const f=projectShareEditFixture();
+  f.respondDirect(async()=>f.state.clientDirectAccess);
+  await f.context.editDirectProjectShare('project',f.original);
+  f.context.dialogs.confirm=async()=>{f.context.invalidatePublicationAuthority();return true};
+  await f.submit();
+  assert.equal(f.posts().length,0);
+  assert.match(f.stateControls.status.textContent,/Access changed while reviewing/);
+});
+
+test('publication preview reads current folder placement for saved selections',async()=>{
+  const f=fixture();
+  f.respondDirect(async()=>({clients:[],grants:[
+    {sourceId:'source',workspaceId:'allow',viewerProjectId:'project',scopeType:'project',clientDisplayName:'Allowed client',
+      selection:{version:1,mode:'only',folderIds:['root'],taskIds:[]}},
+    {sourceId:'source',workspaceId:'leave-out',viewerProjectId:'project',scopeType:'project',clientDisplayName:'Other client',
+      selection:{version:1,mode:'except',folderIds:['root'],taskIds:[]}},
+  ]}));
+  let folderId='nested';
+  f.respond(async path=>{
+    if(path==='/api/v1/tasks/task')return {task:{id:'task',projectId:'project',folderId}};
+    if(path==='/api/v1/projects/project/folders')return {folders:[
+      {id:'root',projectId:'project',parentId:null},{id:'nested',projectId:'project',parentId:'root'},
+    ]};
+    return f.state.clientAccess;
+  });
+  const inside=await f.context.publicationAudience(f.output,'project');
+  assert.equal(inside.text,'Publishing this task shows it to Allowed client.');
+  assert.equal(inside.complete,true);
+  folderId=null;
+  const outside=await f.context.publicationAudience(f.output,'project');
+  assert.equal(outside.text,'Publishing this task shows it to Other client.');
+  assert.equal(f.calls.filter(call=>call.path==='/api/v1/tasks/task').length,2);
+  assert.equal(f.posts().length,0);
+});
 
 test('ready share preflight and cancel execute only reads and never reopen a closed modal',async()=>{
   const f=fixture();let resolve;
@@ -177,6 +323,245 @@ test('a project Share is unaffected by task rows coming and going',async()=>{
   await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
   const html=f.html()+f.clientPanel.innerHTML;
   assert.match(html,/name="scope" value="project" checked/);assert.doesNotMatch(html,/no longer in this project/);
+});
+
+async function firstProjectShare(mode,loadFolders,loadTasks=readyTasks,recipient={sourceId:'s',workspaceId:'w',displayName:'Acme'}){
+  const f=fixture();
+  f.state.tasks=[
+    {id:'task-z',projectId:'project',folderId:'folder-z',displayName:'Stale task name'},
+    {id:'task-stale',projectId:'project',folderId:null,displayName:'Removed task'},
+  ];
+  f.context.folderCache.set('project',{folders:[{id:'cached',displayName:'Stale folder'}]});
+  f.respond(path=>path.endsWith('/folders')?loadFolders():path.startsWith('/api/v1/tasks?')?loadTasks(path):{shares:[]});
+  f.respondDirect(async()=>({clients:[],grants:[],grantsNextCursor:null}));
+  await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+
+  f.context.bindClientPicker=(_root,options)=>{options.onSelect(recipient);return {dispose(){}}};
+  const controls={
+    '[data-direct-summary]':{},'[data-direct-share-targets]':{},'[data-direct-review]':{},
+    '[data-direct-review-button]':{},'[data-direct-review-text]':{},'[data-direct-back]':{},
+    '[data-direct-send]':{focus(){}},'[data-client-picker]':{},'input[name="scope"]:checked':{value:'project'},
+  };
+  const selected=ids=>ids.map(value=>({value,hasAttribute:()=>false}));
+  const choices={
+    [`input[name="folder"]${mode==='except'?':not(:checked)':':checked'}`]:selected(['folder-z','folder-a']),
+    [`input[name="task"]${mode==='except'?':not(:checked)':':checked'}`]:selected(['task-z','task-a']),
+  };
+  const form={isConnected:true,elements:{mode:{value:mode},client:{value:directClientShare.directClientKey(recipient)},
+    includeLater:{checked:true},confirmedScope:{checked:false},expiresAt:{value:'2098-01-02T03:04'},
+    measure:{checked:false},cameras:{checked:true},download:{checked:false}},
+    querySelector:selector=>controls[selector]||null,querySelectorAll:selector=>choices[selector]||[]};
+  f.context.bindDirectShare(form,'project',null);
+  form.elements.confirmedScope.checked=true;
+  return {...f,form,controls,choices,submit:()=>form.onsubmit({preventDefault(){}})};
+}
+
+const readyFolders=()=>({folders:[
+  {id:'folder-z',projectId:'project',parentId:'folder-a',displayName:'South'},
+  {id:'folder-a',projectId:'project',parentId:null,displayName:'Site'},
+]});
+const readyTasks=path=>path.includes('cursor=next-page')
+  ?{tasks:[{id:'task-a',projectId:'project',folderId:null,displayName:'Roof'}],nextCursor:null}
+  :{tasks:[{id:'task-z',projectId:'project',folderId:'folder-z',displayName:'Wall'}],nextCursor:'next-page'};
+
+const {createClientGrantProxy}=createRequire(import.meta.url)('../server/clientGrantProxy.js');
+const syntheticRecipient={sourceId:'project-alpha:synthetic',workspaceId:'synthetic-client',displayName:'Synthetic client'};
+const syntheticFolder='00000000-0000-4000-8000-000000000001';
+const syntheticTask='00000000-0000-4000-8000-000000000002';
+// Captured at Viewer 913d4a31 and accepted by the strict grant schema at
+// Operations 4a1c05e6. Convert only the datetime-local field for the host TZ.
+const legacyWholeBody=`{"sourceId":"project-alpha:synthetic","workspaceId":"synthetic-client","viewerProjectId":"project","permissions":{"measure":false,"cameras":true,"download":false},"expiresAt":"${new Date('2098-01-02T03:04').toISOString()}","confirmedScope":true,"taskId":null,"scopeType":"project","includeFuturePublished":true}`;
+const legacyWholeEnvelope=`{"subject":"ops:synthetic","action":"create","connection":"direct","idempotencyKey":"synthetic-first-share-key-0001","grant":${legacyWholeBody}}`;
+async function legacyContractShare(mode,{rejection=null}={}){
+  const f=await firstProjectShare(mode,
+    ()=>({folders:[{id:syntheticFolder,projectId:'project',parentId:null,displayName:'Synthetic folder'}]}),
+    ()=>({tasks:[{id:syntheticTask,projectId:'project',folderId:syntheticFolder,displayName:'Synthetic task'}],nextCursor:null}),
+    syntheticRecipient);
+  for(const key of Object.keys(f.choices))delete f.choices[key];
+  const suffix=mode==='except'?':not(:checked)':':checked';
+  f.choices[`input[name="folder"]${suffix}`]=[{value:syntheticFolder,hasAttribute:()=>false}];
+  f.choices[`input[name="task"]${suffix}`]=[{value:syntheticTask,hasAttribute:()=>false}];
+
+  const wire=[],envelopes=[],responses=[],routes=new Map();
+  createClientGrantProxy({
+    config:{opsAutomationBaseUrl:'https://synthetic.example.test',viewerEventSecret:'s'.repeat(32),viewerEventKeyId:'synthetic'},
+    authorize:()=>()=>{},diagnostic(){},
+    fetchImpl:async(_url,init)=>{
+      envelopes.push(init.body);
+      const envelope=JSON.parse(init.body);
+      // Simulate the older Worker boundary with the captured accepted envelope.
+      if(rejection)return Response.json(rejection.payload,{status:rejection.status});
+      if(init.body!==legacyWholeEnvelope)return Response.json({error:'Viewer client-grant request is invalid'},{status:400});
+      const {confirmedScope,...scope}=envelope.grant;
+      return Response.json({grant:{...scope,grantId:'synthetic-grant',grantVersion:1,revokedAt:null,
+        createdAt:'2026-01-01T00:00:00Z',clientDisplayName:syntheticRecipient.displayName},replayed:false},{status:201});
+    },
+  }).mount(Object.fromEntries(['get','post','delete'].map(method=>[method,(path,...handlers)=>routes.set(`${method.toUpperCase()} ${path}`,handlers.at(-1))])));
+  const originalApi=f.context.api;
+  f.context.fetch=async(path,init)=>{
+    wire.push({path,method:init.method,body:init.body});
+    const handler=routes.get(`${init.method} ${path}`);assert.ok(handler,'no alternate grant endpoint');
+    let status=200,response;
+    const res={set(){return this},status(value){status=value;return this},json(payload){response=Response.json(payload,{status});return this}};
+    await handler({adminPrincipal:{subject:'ops:synthetic'},body:JSON.parse(init.body),get:name=>init.headers[name]},res);
+    responses.push({status:response.status,payload:await response.clone().json()});return response;
+  };
+  f.context.clearWorkspaceAuthorization=()=>{};
+  f.context.workspaceRecovery.wait=async()=>{};
+  vm.runInContext(['responseError','workspaceFetch','api'].map(declaration).join('\n'),f.context);
+  const shippedApi=f.context.api;
+  f.context.api=(path,options={})=>options.method==='POST'?shippedApi(path,options):originalApi(path,options);
+  f.context.crypto.randomUUID=()=> 'synthetic-first-share-key-0001';
+  await f.submit();assert.equal(f.form.reviewing,true);assert.equal(wire.length,0);
+  await f.submit();
+  return {...f,wire,envelopes,responses};
+}
+
+test('Everything first-share outgoing JSON bytes equal the pinned legacy request and succeed on the old schema',async()=>{
+  const current=await legacyContractShare('whole');
+  assert.equal(current.wire.length,1);assert.equal(current.envelopes.length,1);
+  assert.equal(current.wire[0].body,legacyWholeBody);
+  assert.equal(current.envelopes[0],legacyWholeEnvelope);
+  assert.equal(Object.hasOwn(JSON.parse(current.wire[0].body),'selection'),false);
+
+  assert.equal(current.responses[0].status,201);
+  assert.ok(current.notices.some(([text,error])=>text==='Shared with the client'&&!error));
+});
+for(const mode of ['except','only'])test(`old Operations refuses first-share ${mode} once with selection, without broadening or another grant endpoint`,async()=>{
+  const f=await legacyContractShare(mode);
+  assert.equal(f.wire.length,1);assert.equal(f.envelopes.length,1);
+  assert.equal(f.wire[0].path,directClientShare.DIRECT_CLIENT_GRANTS_PATH);
+  const body=JSON.parse(f.wire[0].body);
+  assert.deepEqual(body.selection,{version:1,mode,folderIds:[syntheticFolder],taskIds:[syntheticTask]});
+  assert.equal(Object.hasOwn(body,'replaces'),false);
+  assert.equal(JSON.parse(f.envelopes[0]).action,'create');
+  assert.deepEqual(JSON.parse(f.envelopes[0]).grant,body);
+  assert.equal(f.responses[0].status,400);
+  assert.equal(f.responses[0].payload.code,'operations_selection_unsupported');
+  assert.match(f.controls['[data-direct-summary]'].textContent,/Operations must be updated.*Nothing was shared/);
+  assert.ok(f.notices.some(([text,error])=>error&&/Operations must be updated/.test(text)));
+  assert.equal(f.form.reviewing,false);assert.equal(f.form.elements.mode.value,mode);
+  assert.equal(f.wire.length,1);
+});
+for(const [mode,status,payload,expected] of [
+  ['whole',400,{error:'Viewer client-grant request is invalid'},'Operations rejected the client access request'],
+  ['only',400,{error:'Different legacy error'},'Operations rejected the client access request'],
+  ['only',400,{error:'Invalid details',code:'invalid_request'},'Some of the details were not accepted. Check them and try again.'],
+  ['only',401,{error:'Unauthorized'},'authorization_required'],
+  ['except',403,{error:'Forbidden'},'Your current Viewer grant does not permit this action'],
+  ['only',409,{error:'Unavailable',code:'relationship_missing'},'This client is not connected to Ledge Top yet, so nothing was shared.'],
+  ['except',429,{error:'Too many requests'},'Operations rejected the client access request'],
+  ['only',503,{error:'Unavailable'},'Operations rejected the client access request'],
+])test(`first-share ${mode} preserves existing error behavior for HTTP ${status}`,async()=>{
+  const f=await legacyContractShare(mode,{rejection:{status,payload}});
+  assert.equal(f.wire.length,1);assert.equal(f.envelopes.length,1);
+  assert.equal(f.responses[0].status,status>=500?502:status);
+  assert.equal(f.controls['[data-direct-summary]'].textContent,expected);
+  assert.ok(f.notices.some(([text,error])=>error&&text===expected));
+});
+test('first-share mode changes start Except ticked and Only unticked, without resetting choices on other changes',async()=>{
+  const f=await firstProjectShare('whole',readyFolders);
+  const inputs=[{checked:false},{checked:false}];
+  f.choices['input[name="folder"],input[name="task"]']=inputs;
+  f.form.elements.mode.value='except';f.form.onchange();
+  assert.deepEqual(inputs.map(input=>input.checked),[true,true]);
+  inputs[0].checked=false;f.form.onchange();
+  assert.deepEqual(inputs.map(input=>input.checked),[false,true]);
+  f.form.elements.mode.value='only';f.form.onchange();
+  assert.deepEqual(inputs.map(input=>input.checked),[false,false]);
+});
+for(const mode of ['only','except'])test(`first-issued ${mode} project access sends the exact reviewed selection without replacements`,async()=>{
+  const f=await firstProjectShare(mode,readyFolders);
+  assert.equal(f.calls.filter(call=>call.path==='/api/v1/projects/project/folders').length,1);
+  assert.match(f.html()+f.clientPanel.innerHTML,/Site \/ South \/ Wall/);
+  assert.doesNotMatch(f.html()+f.clientPanel.innerHTML,/Stale folder|Stale task name|Removed task/);
+  assert.equal(f.controls['[data-direct-share-targets]'].hidden,false);
+  await f.submit();
+  assert.equal(f.form.reviewing,true);
+  const review=f.controls['[data-direct-review-text]'].textContent;
+  assert.match(review,mode==='only'?/Only “Site”, “Site \/ South”, “Roof”, “Site \/ South \/ Wall”/
+    :/Whole project except “Site”, “Site \/ South”, “Roof”, “Site \/ South \/ Wall”/);
+  assert.match(review,/matching tasks published later.+see camera positions.+Access ends/);
+  assert.equal(f.posts().length,0);
+  await f.submit();
+  assert.deepEqual(f.posts().map(call=>call.options.body),[{
+    sourceId:'s',workspaceId:'w',viewerProjectId:'project',taskId:null,scopeType:'project',includeFuturePublished:true,
+    permissions:{measure:false,cameras:true,download:false},expiresAt:new Date('2098-01-02T03:04').toISOString(),confirmedScope:true,
+    selection:{version:1,mode,folderIds:['folder-a','folder-z'],taskIds:['task-a','task-z']},
+  }]);
+  assert.equal(f.calls.filter(call=>call.path==='/api/v1/projects/project/folders').length,2);
+  assert.equal(f.calls.filter(call=>call.path.includes('projectId=project&limit=100&cursor=next-page')).length,2);
+});
+
+for(const [label,loadFolders] of [
+  ['failed',()=>{throw new Error('Folder service unavailable')}],
+  ['incomplete',()=>({folders:readyFolders().folders.slice(0,1)})],
+])test(`a ${label} fresh folder read cannot fall back to cached choices or a whole share`,async()=>{
+  const f=await firstProjectShare('except',loadFolders);
+  const html=f.html()+f.clientPanel.innerHTML;
+  assert.match(html,/value="except"\s+disabled/);
+  assert.match(html,/Folders and tasks could not be verified/);
+  assert.doesNotMatch(html,/Stale folder/);
+  await f.submit();
+  assert.equal(Boolean(f.form.reviewing),false);
+  assert.equal(f.posts().length,0);
+  assert.match(f.controls['[data-direct-summary]'].textContent,/could not be verified/);
+});
+
+test('changing selected access to whole during review sends nothing',async()=>{
+  const f=await firstProjectShare('only',readyFolders);
+  await f.submit();
+  assert.equal(f.form.reviewing,true);
+  f.form.elements.mode.value='whole';
+  await f.submit();
+  assert.equal(f.form.reviewing,false);
+  assert.equal(f.posts().length,0);
+  assert.match(f.controls['[data-direct-summary]'].textContent,/choices changed/);
+});
+
+for(const [label,updateTasks] of [
+  ['missing task folder',page=>({...page,tasks:page.tasks.map(task=>({...task,folderId:'unlisted-folder'}))})],
+  ['duplicate task',page=>({...page,tasks:[...page.tasks,...page.tasks]})],
+  ['missing task page',page=>({nextCursor:page.nextCursor})],
+])test(`a project catalog with a ${label} cannot offer or send a selection`,async()=>{
+  const f=await firstProjectShare('only',readyFolders,path=>updateTasks(readyTasks(path)));
+  assert.match(f.html()+f.clientPanel.innerHTML,/value="only"\s+disabled/);
+  await f.submit();
+  assert.equal(f.posts().length,0);
+  assert.match(f.controls['[data-direct-summary]'].textContent,/could not be verified/);
+});
+
+for(const [label,updateTasks] of [
+  ['task moves out of a selected folder',page=>({...page,tasks:page.tasks.map(task=>({...task,folderId:null}))})],
+  ['selected task is renamed',page=>({...page,tasks:page.tasks.map(task=>({...task,displayName:'Changed task'}))})],
+])test(`a reviewed Except share sends nothing when a ${label}`,async()=>{
+  let changed=false;
+  const f=await firstProjectShare('except',readyFolders,path=>{
+    const page=readyTasks(path);
+    return changed?updateTasks(page):page;
+  });
+  await f.submit();
+  assert.equal(f.form.reviewing,true);
+  changed=true;
+  await f.submit();
+  assert.equal(f.form.reviewing,false);
+  assert.equal(f.posts().length,0);
+  assert.match(f.controls['[data-direct-summary]'].textContent,/changed.*Close and reopen Share/);
+});
+
+test('a scoped first issuance ignores a matching catalog returned after the signed-in subject changed',async()=>{
+  let resumeFolders,refreshStarted=false;
+  const f=await firstProjectShare('only',()=>refreshStarted
+    ?new Promise(resolve=>{resumeFolders=resolve}):readyFolders());
+  await f.submit();
+  refreshStarted=true;
+  const sending=f.submit();
+  assert.equal(typeof resumeFolders,'function');
+  f.state.adminSession={...f.state.adminSession,subject:'ops:other'};
+  resumeFolders(readyFolders());
+  await sending;
+  assert.equal(f.posts().length,0);
+  assert.match(f.controls['[data-direct-summary]'].textContent,/Access changed while reviewing/);
 });
 
 const grantFor=(clientDisplayName,extra={})=>({grantId:clientDisplayName,sourceId:'s',workspaceId:clientDisplayName,viewerProjectId:'project',scopeType:'project',taskId:null,revokedAt:null,expiresAt:null,clientDisplayName,...extra});
@@ -741,8 +1126,10 @@ test('whole-project client scope requires current and future publications',()=>{
   f.form.elements.wholeProject.checked=true;f.form.elements.includeFuturePublished.checked=false;
   assert.throws(()=>f.context.clientGrantBody(f.form,null),/must include/);
   f.form.elements.includeFuturePublished.checked=true;assert.equal(f.context.clientGrantBody(f.form,null).grant.includeFuturePublished,true);
-  f.context.shareModal('project');assert.match(f.html(),/name="wholeProject" required/);
-  assert.doesNotMatch(f.html(),/name="(?:includeFuturePublished|wholeProject)" checked/);
+  // New legacy project grants are refused by the server; the legacy panel no longer offers the form.
+  f.context.shareModal('project');assert.doesNotMatch(f.html(),/name="wholeProject"|name="includeFuturePublished"/);
+  assert.match(f.context.clientShareCard(f.output,null),/New whole-project shares are direct client shares\./);
+  assert.doesNotMatch(f.context.clientShareCard(f.output,null),/id="client-grant-form"/);
 });
 
 test('project sharing has no public creation form or public task forms',async()=>{
@@ -1053,7 +1440,8 @@ test('direct client sharing leads the Share dialog and keeps Operations project 
   await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
   const html=f.html()+f.clientPanel.innerHTML;
   assert.match(html,/Share with a client/);assert.match(html,/Share through an Operations project instead/);
-  assert.match(html,/The whole project<\/label>/);assert.match(html,/Also share models published later/);
+  assert.match(html,/Project access<\/label>/);assert.match(html,/value="whole" selected>Everything/);
+  assert.match(html,/Also share models published later/);
   assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
 });
 test('changing or clearing the chosen client leaves the review',()=>{
