@@ -182,7 +182,7 @@ test('the review step repeats who, what, permissions and expiry',()=>{
   const client={...clients[0],displayName:'<b>Acme</b>',businessName:'Ledge Top Drone Services Project Alpha'};
   const read=readDirectShareForm(form({client:key}),{projectId:'project',projectName:'Site',tasks,clients:[{...client,organizationName:'Acme Group',twin:false}]});
   const text=directShareReviewMarkup({client:read.client,what:read.what,permissions:{measure:true,cameras:false,download:true},expiresAt:'2030-01-02T00:00:00.000Z',dateTime:()=>'Jan 2, 2030'});
-  assert.equal(text,'<dt>Client</dt><dd>&lt;b&gt;Acme&lt;/b&gt; (Drone Services, Acme Group)</dd><dt>Who</dt><dd>Everyone in &lt;b&gt;Acme&lt;/b&gt; (Drone Services, Acme Group)’s portal account</dd><dt>Shared</dt><dd>Whole project Site: “North wall”, “South wall” and later ones</dd><dt>Can</dt><dd>View, measure and download</dd><dt>Ends</dt><dd>Jan 2, 2030</dd>');
+  assert.equal(text,'<dt>Client</dt><dd>&lt;b&gt;Acme&lt;/b&gt; (Drone Services, Acme Group)</dd><dt>Who</dt><dd>Authorized members of &lt;b&gt;Acme&lt;/b&gt; (Drone Services, Acme Group)’s portal account</dd><dt>Shared</dt><dd>Whole project Site. Published when this opened: “North wall”, “South wall”, and later ones</dd><dt>Can</dt><dd>View, measure and download</dd><dt>Ends</dt><dd>Jan 2, 2030</dd>');
   const task=readDirectShareForm(form({client:key,scope:'tasks',checked:['task-1']}),{projectId:'project',projectName:'Site',tasks,clients});
   assert.match(directShareReviewMarkup({client:task.client,what:task.what,permissions:{},expiresAt:null}),/Task “North wall”.*No end date/);
 });
@@ -213,5 +213,13 @@ test('the review names one client whatever page was loaded',async()=>{
   assert.equal(await directClientTwin(async()=>{throw new Error('down')},'p',me),null);
   assert.equal(await directClientTwin(async()=>page([me],'again'),'p',me),null,'a list without end is not an answer');
   assert.equal(directClientReviewName({...me,twin:false}),'Pat Example (Drone Services)');
-  for(const twin of [true,null])assert.equal(directClientReviewName({...me,twin}),'Pat Example (Drone Services, ref aaa111)');
+  for(const twin of [true,null])assert.equal(directClientReviewName({...me,twin}),'Pat Example (Drone Services, workspace workspace-aaa111)');
+});
+
+test('a chosen task that can no longer be shared refuses the whole share and is named',()=>{
+  const context={projectId:'project',projectName:'Site',tasks:[tasks[0]],clients,known:tasks};
+  const picked=form({client:key,scope:'tasks',checked:['task-1','task-2']});
+  assert.throws(()=>readDirectShareForm(picked,context).bodies({confirmed:true}),/“South wall” can no longer be shared. Nothing was sent/);
+  assert.throws(()=>readDirectShareForm(picked,{...context,known:[]}).bodies(),/A chosen task can no longer be shared/);
+  assert.match(readDirectShareForm(form({client:key}),{...context,fresh:true}).what,/Published now: “North wall”, and later ones/);
 });

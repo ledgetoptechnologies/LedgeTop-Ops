@@ -50,7 +50,7 @@ function shareForm(answers,{tasks=['task']}={}){
   const form={isConnected:true,elements:{},querySelector:part,querySelectorAll:()=>[]};
   const context=vm.createContext({crypto:{randomUUID:()=>`key-${posts.length}`},state:{shareContext:{}},modal:{open:true},toast:(text,bad)=>toasts.push([text,Boolean(bad)]),dateTime,
     directShareContext:()=>({projectId:'project'}),readDirectShareForm:()=>({scope:'tasks',what:choices.what,summary:choices.summary,bodies:({confirmed}={})=>{choices.confirmed=confirmed;if(choices.invalid)throw new Error(choices.invalid);return tasks.map(taskId=>({taskId,permissions:{}}))}}),
-    SHARE_TARGET_MISSING:'missing',directShareReviewMarkup:()=>'review',directClientKey:()=>'k',directClientTwin:async()=>false,directShareErrorText:error=>`Refused: ${error.message}`,DIRECT_CLIENT_GRANTS_PATH:'/grants',
+    SHARE_TARGET_MISSING:'missing',directShareReviewMarkup:()=>'review',directClientKey:()=>'k',directClientTwin:async()=>false,refreshProjectOutputs:async()=>true,directShareErrorText:error=>`Refused: ${error.message}`,DIRECT_CLIENT_GRANTS_PATH:'/grants',
     api:async(path,options)=>{posts.push(options.body);const answer=answers.shift();if(answer instanceof Error)throw answer;return answer},loadDirectClientAccess:async()=>null,rerenderClientSharePanel(){},directClientAccess:value=>value,bindClientPicker(){}});
   vm.runInContext(declaration('bindDirectShare'),context);context.bindDirectShare(form,'project','output');
   return {form,summary,review,toasts,posts,choices,submit:()=>form.onsubmit({preventDefault(){}}),change:()=>form.onchange(),back:()=>elements.back.onclick()};

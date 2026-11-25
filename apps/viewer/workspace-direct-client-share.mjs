@@ -60,11 +60,11 @@ async function sameNameClients(api,projectId,grants){
 export const directClientKey=client=>JSON.stringify([client.sourceId,client.workspaceId]);
 export const directClientLabel=client=>client?.pickerLabel||clientPickerLabel(client);
 // The review names the exact client whatever page of results was loaded: always its business and organisation,
-// and the end of its id when another client has all of those too, or when that could not be ruled out.
+// and its full workspace id when another client has all of those too, or when that could not be ruled out.
 export function directClientReviewName(client){
   const name=client?.displayName||'Client',organization=client?.organizationName;
   const details=[clientBusinessWord(client?.businessName),organization&&organization!==name?organization:null,
-    client?.twin===false||!client?.workspaceId?null:`ref ${String(client.workspaceId).slice(-6)}`].filter(Boolean);
+    client?.twin===false||!client?.workspaceId?null:`workspace ${client.workspaceId}`].filter(Boolean);
   return `${name}${details.length?` (${details.join(', ')})`:''}`;
 }
 // Whether another client looks the same in the review. null when the search could not be read to its end.
@@ -113,7 +113,7 @@ const permissionList=permissions=>{
 export function directShareReviewMarkup({client,what,permissions,expiresAt,dateTime=value=>value}){
   const can=permissionList(permissions);
   const name=directClientReviewName(client);
-  return [['Client',name],['Who',`Everyone in ${name}’s portal account`],['Shared',what],['Can',can[0].toUpperCase()+can.slice(1)],
+  return [['Client',name],['Who',`Authorized members of ${directClientReviewName({...client,twin:false})}’s portal account`],['Shared',what],['Can',can[0].toUpperCase()+can.slice(1)],
     ['Ends',expiresAt?dateTime(expiresAt):'No end date']]
     .map(([label,value])=>`<dt>${label}</dt><dd>${esc(value)}</dd>`).join('');
 }
@@ -145,19 +145,22 @@ ${PERMISSIONS.map(([name,label,checked])=>`<label class="check"><input type="che
 </form>`;
 }
 
-export function readDirectShareForm(form,{projectId,projectName,tasks,clients}){
+export function readDirectShareForm(form,{projectId,projectName,tasks,clients,known=tasks,fresh=false}){
   const client=clients.find(item=>directClientKey(item)===form.elements.client.value)||null;
   const scope=form.querySelector('input[name="scope"]:checked')?.value==='project'?'project':'tasks';
   const chosen=scope==='tasks'?[...form.querySelectorAll('input[name="taskId"]')].filter(input=>input.checked).map(input=>input.value):[];
-  const taskNames=chosen.map(id=>tasks.find(task=>task.id===id)?.name||'Task');
-  const now=!tasks.length?'nothing published yet':tasks.length>5?`${tasks.length} published tasks now`:tasks.map(task=>`“${task.name}”`).join(', ');
-  const what=scope==='project'?`Whole project ${projectName}: ${now} and later ones`
+  const taskNames=chosen.map(id=>(tasks.find(task=>task.id===id)||known.find(task=>task.id===id))?.name||'A chosen task');
+  const gone=chosen.map((id,index)=>tasks.some(task=>task.id===id)?null:taskNames[index]).filter(Boolean);
+  const list=!tasks.length?'nothing':tasks.length>5?`${tasks.length} tasks`:tasks.map(task=>`“${task.name}”`).join(', ');
+  const what=scope==='project'?`Whole project ${projectName}. ${fresh?'Published now':'Published when this opened'}: ${list}, and later ones`
     :`${taskNames.length===1?'Task':`${taskNames.length} tasks`} ${taskNames.map(name=>`“${name}”`).join(', ')}`;
   return {client,scope,chosen,what,published:scope==='project'?tasks.map(task=>task.id).sort():chosen,summary:directScopeSummary({clientName:client?directClientLabel(client):'',projectName,scope,taskNames}),
     // confirmed is true only for the Share click on the review.
     bodies:({confirmed=false}={})=>{
       if(!client)throw new Error('Choose a client.');
       if(scope==='tasks'&&!chosen.length)throw new Error('Choose at least one task, or share the whole project.');
+      // One task that can no longer be shared refuses the whole share, before anything is sent.
+      if(gone.length)throw new Error(`${gone.map(name=>name==='A chosen task'?name:`“${name}”`).join(', ')} can no longer be shared. Nothing was sent. Choose again.`);
       // The contract has no project share without later models: the box must be ticked on purpose.
       if(scope==='project'&&!form.elements.includeLater?.checked)throw new Error(ERRORS.later_required);
       const expires=form.elements.expiresAt.value?new Date(form.elements.expiresAt.value):null;

@@ -154,6 +154,24 @@ test('a task Share opened without its model row offers no form, and a form alrea
   g.state.tasks=[];await form.onsubmit({preventDefault(){}});
   assert.equal(g.calls.some(call=>call.options?.method==='POST'),false);
 });
+test('a task unpublished before or during the review sends nothing and is named',async()=>{
+  for(const when of ['reading','reviewed']){
+    const g=fixture();Object.assign(g.output,{status:'published',activePublished:true});g.state.clientDirectAccess={clients:[],grants:[]};
+    g.state.tasks[0].displayName='North wall';g.state.shareContext={id:'context',projectId:'project',taskId:'task',taskName:'North wall'};
+    g.context.bindClientPicker=(_root,options)=>{options.onSelect({sourceId:'s',workspaceId:'w',displayName:'Acme'});return{dispose(){}}};
+    const unpublish=()=>{g.state.outputs=[{...g.output,status:'ready',activePublished:false}]};
+    g.context.refreshProjectOutputs=async()=>{if(when==='reading')unpublish();return true};
+    const summary={textContent:''},box={dataset:{},focus(){}};
+    const form={isConnected:true,elements:{client:{value:JSON.stringify(['s','w'])},includeLater:{checked:false,disabled:true},expiresAt:{value:''},measure:{checked:true},cameras:{checked:true},download:{checked:true}},
+      querySelector:selector=>({'[data-direct-summary]':summary,'input[name="scope"]:checked':{value:'tasks'}})[selector]||box,
+      querySelectorAll:selector=>selector==='input[name="taskId"]'?[{value:'task',checked:true}]:[]};
+    g.context.bindDirectShare(form,'project','output');
+    await form.onsubmit({preventDefault(){}});
+    if(when==='reviewed'){assert.equal(form.reviewing,true);unpublish();await form.onsubmit({preventDefault(){}})}
+    assert.ok(!form.reviewing);assert.match(summary.textContent,/“North wall” can no longer be shared/);
+    assert.equal(g.calls.filter(call=>call.options?.method==='POST').length,0);
+  }
+});
 test('a project Share is unaffected by task rows coming and going',async()=>{
   const f=fixture();f.respondDirect(async()=>({clients:[],grants:[],clientsNextCursor:null}));f.state.outputs=[];f.state.tasks=[];
   await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));

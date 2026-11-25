@@ -707,10 +707,12 @@ function currentShares(published,results,before){
 async function refreshProjectOutputs(projectId){
   const token=state.token,session=state.adminSession,fence=outputFences.get(projectId);
   const current=()=>Boolean(token)&&token===state.token&&session===state.adminSession&&fence===outputFences.get(projectId);
+  let read=false;
   try{
     const result=await pagedApi(`/api/v1/processing/outputs?projectId=${encodeURIComponent(projectId)}`,'outputs',{recoveryGuard:current});
     if(!current())return;
     state.outputs=[...state.outputs.filter(item=>item.projectId!==projectId),...result.outputs];
+    read=true;
     const detail=state.taskDetails[state.expandedTaskId]?.task;
     if(detail&&detail.projectId===projectId)detail.outputs=result.outputs.filter(item=>item.taskId===detail.id);
     if(state.section==='dashboard')projectPaintPending=patchProjectTree(projectId)||projectPaintPending;
@@ -720,6 +722,7 @@ async function refreshProjectOutputs(projectId){
     projectArtifactsRefreshId=new Set([...(projectArtifactsRefreshId||[]),projectId]);
     if(error.status!==401)console.warn('Project output refresh failed',error.message);
   }
+  return read;
 }
 
 // Refreshes every open project's tasks and folders, one project at a time.
@@ -1856,7 +1859,7 @@ function rerenderClientSharePanel(projectId,onlyOutputId){
 }
 function bindDirectShare(form,projectId,onlyOutputId){
   const context=directShareContext(onlyOutputId),shareContext=state.shareContext,live=()=>state.shareContext===shareContext&&form.isConnected&&modal.open;
-  let picked=null;const read=()=>readDirectShareForm(form,{...context,tasks:directShareContext(onlyOutputId).tasks||context.tasks,clients:picked?[picked]:[]});
+  let picked=null,fresh=false;const read=()=>readDirectShareForm(form,{...context,tasks:directShareContext(onlyOutputId).tasks||context.tasks,known:context.tasks,fresh,clients:picked?[picked]:[]});
   const summary=form.querySelector('[data-direct-summary]'),taskInputs=[...form.querySelectorAll('input[name="taskId"]')];
   const review=form.querySelector('[data-direct-review]'),reviewButton=form.querySelector('[data-direct-review-button]');
   // Review step: the choices are frozen and repeated in plain words before anything is sent.
@@ -1892,15 +1895,16 @@ function bindDirectShare(form,projectId,onlyOutputId){
     let bodies,target;const choices=confirmed=>{target=read();const key=JSON.stringify([target.bodies(),target.what,target.published,target.client&&directClientKey(target.client)]);bodies=target.bodies({confirmed});return key};
     let chosen;try{chosen=choices(form.reviewing===true)}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
     if(!form.reviewing){
-      if(target.client&&target.client.twin===undefined){
-        // Is there another client that would read the same? Asked before the review names this one.
-        const client=picked;form.shareBusy=true;summary.textContent='Preparing the review…';
-        let twin=null;try{twin=await directClientTwin(api,projectId,client)}finally{form.shareBusy=false}
-        if(!live())return;
-        let still;try{still=choices(false)}catch{}
-        if(picked!==client||still!==chosen){sync();return}
-        target.client=picked={...client,twin};
-      }
+      // What is published now, and is there another client that would read the same? Both are read before the review.
+      const client=picked,asked=JSON.stringify(bodies);form.shareBusy=true;summary.textContent='Preparing the review…';
+      let twin=null;
+      try{[fresh,twin]=await Promise.all([refreshProjectOutputs(projectId).then(read=>read===true,()=>false),client?directClientTwin(api,projectId,client):null])}finally{form.shareBusy=false}
+      if(!live())return;
+      if(directShareContext(onlyOutputId).targetMissing){summary.textContent=SHARE_TARGET_MISSING;return}
+      if(picked!==client){sync();return}
+      if(client)picked={...client,twin};
+      try{chosen=choices(false)}catch(error){summary.textContent=error.message;return}
+      if(JSON.stringify(bodies)!==asked){sync();return}
       // The review says it all; the line above it is for progress and refusals.
       summary.textContent='';
       const body=bodies[0];form.reviewed=chosen;
