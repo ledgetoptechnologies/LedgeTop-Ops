@@ -11,16 +11,43 @@ const session = { schemaVersion: 1, readOnly: true, user: { id: 'staff', display
 const op = { id: 'one', title: 'Example', status: 'scheduled', scheduledStart: null, scheduledEnd: null,
   location: null, projectName: null, divisionName: null };
 const binding = () => ({ read: vi.fn(async (_input: string) => envelope(session)) });
-const env = (read = binding()) => ({ ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'true',
+const env = (read = binding(), businessRead = binding()) => ({ ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'true',
   IOS_MANAGED_PILOT_ORIGIN: origin, IOS_MANAGED_PILOT_AUDIENCE: 'pilot-audience',
   IOS_OAUTH_PROBE_ENABLED: 'true', IOS_OAUTH_PROBE_AUDIENCE: 'pilot-audience',
-  TEAM_DOMAIN: 'https://synthetic.cloudflareaccess.com', OPERATIONS_AUD: 'web-audience', IOS_PILOT_READ: read });
+  TEAM_DOMAIN: 'https://synthetic.cloudflareaccess.com', OPERATIONS_AUD: 'web-audience', IOS_PILOT_READ: read,
+  IOS_PILOT_BUSINESS_READ: businessRead });
 const req = (path: string, init: RequestInit = { headers: auth }) => new Request(origin + path, init);
 const access = { aud: 'pilot-audience', getIdentity: async () => ({ user_uuid: 'staff-subject', email: 'staff@example.test' }) };
 const handlePilotEdge = (request: Request, environment: Parameters<typeof actualHandlePilotEdge>[1], reviewed: readonly string[]) =>
   actualHandlePilotEdge(request, environment, reviewed, access);
 
 describe('isolated pilot edge bridge', () => {
+  it('keeps business reads independently gated and accepts only bounded allowlisted responses', async () => {
+    const service = binding(), businessService = binding(), e = env(service, businessService);
+    const rootsPath = '/mobile-pilot/v1/business-roots';
+    const projectsPath = '/mobile-pilot/v1/business-roots/organization/root-1/projects';
+    expect((await handlePilotEdge(req(rootsPath), e, [origin])).status).toBe(404);
+    expect(service.read).not.toHaveBeenCalled();
+    const enabled = { ...e, IOS_PILOT_BUSINESS_ENABLED: 'true' };
+    expect((await handlePilotEdge(req(rootsPath, { method: 'POST', headers: auth }), enabled, [origin])).status).toBe(405);
+    expect((await handlePilotEdge(req(rootsPath + '?cursor=a&cursor=b'), enabled, [origin])).status).toBe(400);
+    const root = { sourceId: 'project-alpha:staging', rootNamespace: 'business', kind: 'organization', clientHubRootId: 'root-1', name: 'Example' };
+    businessService.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, roots: [root], nextCursor: null }));
+    expect((await handlePilotEdge(req(rootsPath), enabled, [origin])).status).toBe(200);
+    expect(businessService.read).toHaveBeenCalledOnce();
+    expect(service.read).not.toHaveBeenCalled();
+    businessService.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, roots: [{ ...root, email: 'private' }], nextCursor: null }));
+    const extra = await handlePilotEdge(req(rootsPath), enabled, [origin]);
+    expect(extra.status).toBe(503);
+    expect(await extra.text()).not.toContain('private');
+    businessService.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, roots: [{ ...root, sourceId: 'project-alpha:primary' }], nextCursor: null }));
+    expect((await handlePilotEdge(req(rootsPath), enabled, [origin])).status).toBe(503);
+    const project = { id: 'one', origin: 'pa', name: 'Example project', status: null, startDate: null, endDate: null };
+    businessService.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, projects: [project], nextCursor: null }));
+    expect((await handlePilotEdge(req(projectsPath), enabled, [origin])).status).toBe(200);
+    businessService.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, projects: [{ ...project, manager: 'private' }], nextCursor: null }));
+    expect((await handlePilotEdge(req(projectsPath), enabled, [origin])).status).toBe(503);
+  });
   it('is closed by default and for unknown origins, settings, and paths', async () => {
     const e = env();
     expect((await edge.fetch(req('/mobile-pilot/v1/session'), e)).status).toBe(404);
@@ -28,6 +55,27 @@ describe('isolated pilot edge bridge', () => {
     expect((await handlePilotEdge(req('/mobile-pilot/v1/session'), { ...e, ENVIRONMENT: 'production' }, [origin])).status).toBe(404);
     expect((await handlePilotEdge(req('/api/operations'), e, [origin])).status).toBe(404);
     expect(e.IOS_PILOT_READ.read).not.toHaveBeenCalled();
+  });
+  it('routes business calls only to the named binding and keeps missing bindings closed', async () => {
+    const read = binding(), businessRead = binding();
+    const e = env(read, businessRead), enabled = { ...e, IOS_PILOT_BUSINESS_ENABLED: 'true' };
+    const root = { sourceId: 'project-alpha:staging', rootNamespace: 'business', kind: 'organization', clientHubRootId: 'root-1', name: 'Example' };
+    businessRead.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, roots: [root], nextCursor: null }));
+    expect((await handlePilotEdge(req('/mobile-pilot/v1/business-roots'), enabled, [origin])).status).toBe(200);
+    expect(businessRead.read).toHaveBeenCalledOnce();
+    expect(read.read).not.toHaveBeenCalled();
+
+    read.read.mockResolvedValueOnce(envelope(session));
+    expect((await handlePilotEdge(req('/mobile-pilot/v1/session'), enabled, [origin])).status).toBe(200);
+    expect(read.read).toHaveBeenCalledOnce();
+    expect(businessRead.read).toHaveBeenCalledOnce();
+
+    expect((await handlePilotEdge(req('/mobile-pilot/v1/business-roots'),
+      { ...enabled, IOS_PILOT_BUSINESS_READ: undefined }, [origin])).status).toBe(503);
+    expect((await handlePilotEdge(req('/mobile-pilot/v1/session'),
+      { ...enabled, IOS_PILOT_READ: undefined }, [origin])).status).toBe(503);
+    expect(read.read).toHaveBeenCalledOnce();
+    expect(businessRead.read).toHaveBeenCalledOnce();
   });
   it('rejects writes, unwanted queries, browser headers and malformed assertion', async () => {
     const e = env();

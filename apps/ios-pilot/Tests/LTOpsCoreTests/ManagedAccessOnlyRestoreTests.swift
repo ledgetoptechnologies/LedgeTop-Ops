@@ -28,6 +28,13 @@ private actor AccessIdentityGate {
     func resume(with session: MobilePilotSession) { continuation?.resume(returning: session); continuation = nil }
 }
 
+private struct RestoreUnusedTransport: ManagedOAuthExchanging {
+    func verifyMetadata() async throws { throw MobilePilotError.unavailable }
+    func register() async throws -> String { throw MobilePilotError.unavailable }
+    func exchange(code: String, verifier: String, clientID: String) async throws -> ManagedOAuthCredential { throw MobilePilotError.unavailable }
+    func revoke(token: String, clientID: String, hint: ManagedOAuthTokenKind) async throws { throw MobilePilotError.unavailable }
+}
+
 final class ManagedAccessOnlyRestoreTests: XCTestCase, @unchecked Sendable {
     private let issuer = "https://ledgetoptechnologies.cloudflareaccess.com"
     private func pins(resource: String = "https://ios-pilot-read-staging.ledgetop.app") throws -> ManagedOAuthPins {
@@ -44,6 +51,59 @@ final class ManagedAccessOnlyRestoreTests: XCTestCase, @unchecked Sendable {
     }
     private func credential(expiry: Date = Date().addingTimeInterval(300), refresh: String? = nil) -> ManagedOAuthCredential {
         ManagedOAuthCredential(accessToken: "oauth:access-token", refreshToken: refresh, expiresAt: expiry)
+    }
+
+    private func coordinator(_ pins: ManagedOAuthPins) -> ManagedOAuthCoordinator {
+        ManagedOAuthCoordinator(pins: pins, transport: RestoreUnusedTransport(), browser: { _ in throw MobilePilotError.unavailable },
+                                proofFactory: { throw MobilePilotError.unavailable })
+    }
+
+    func testRestoreValidationNetworkFailureCanRetryWithoutSavingAnActiveSession() async throws {
+        let store = AccessOnlyMemoryStore(), pins = try pins(), expected = session()
+        try store.save(ManagedAccessOnlyRecord(pins: pins, credential: credential(), clientID: "client-1", session: expected))
+        let restore = ManagedAccessOnlyRestore(pins: pins, store: store) { _ in expected }
+        let pilot = coordinator(pins)
+        do {
+            _ = try await pilot.restoreReadOnlySession(from: restore) { _ -> Bool in throw URLError(.notConnectedToInternet) }
+            XCTFail("Offline data validation must fail")
+        } catch is URLError {}
+        let afterFailure = await pilot.currentDataCredential()
+        XCTAssertNil(afterFailure)
+        XCTAssertTrue(store.hasItem)
+        let retry = try await pilot.restoreReadOnlySession(from: restore) { _ in true }
+        XCTAssertEqual(retry?.1, true)
+        let afterRetry = await pilot.currentDataCredential()
+        XCTAssertNotNil(afterRetry)
+    }
+
+    func testRestoreValidationRevocationClearsSavedCredential() async throws {
+        let store = AccessOnlyMemoryStore(), pins = try pins(), expected = session()
+        try store.save(ManagedAccessOnlyRecord(pins: pins, credential: credential(), clientID: "client-1", session: expected))
+        let restore = ManagedAccessOnlyRestore(pins: pins, store: store) { _ in expected }
+        let pilot = coordinator(pins)
+        do {
+            _ = try await pilot.restoreReadOnlySession(from: restore) { _ -> Bool in throw MobilePilotError.signedOut }
+            XCTFail("Revoked access must fail")
+        } catch let error as MobilePilotError { XCTAssertEqual(error, .signedOut) }
+        XCTAssertFalse(store.hasItem)
+        let credential = await pilot.currentDataCredential()
+        XCTAssertNil(credential)
+    }
+
+    func testSignOutDuringRestoreValidationCannotCommitSession() async throws {
+        let store = AccessOnlyMemoryStore(), pins = try pins(), expected = session()
+        try store.save(ManagedAccessOnlyRecord(pins: pins, credential: credential(), clientID: "client-1", session: expected))
+        let restore = ManagedAccessOnlyRestore(pins: pins, store: store) { _ in expected }
+        let pilot = coordinator(pins), gate = AccessIdentityGate()
+        let pending = Task { try await pilot.restoreReadOnlySession(from: restore) { _ in try await gate.verify() } }
+        await gate.waitUntilStarted()
+        _ = await pilot.signOut()
+        _ = await restore.signOut()
+        await gate.resume(with: expected)
+        do { _ = try await pending.value; XCTFail("Sign-out must prevent restore") } catch {}
+        let credential = await pilot.currentDataCredential()
+        XCTAssertNil(credential)
+        XCTAssertFalse(store.hasItem)
     }
 
     func testRecordContainsOnlyBoundedAccessCredentialNotProfileOrBusinessData() throws {
