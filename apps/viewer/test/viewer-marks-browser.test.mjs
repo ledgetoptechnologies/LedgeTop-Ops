@@ -529,12 +529,12 @@ for (const writable of [true, false]) {
   test(`marks list: all supplied model marks, phone navigation and ${writable ? 'staff' : 'view-only'} actions`, { timeout: 90000 }, async t => {
     const category = { id: 'synthetic-category', name: 'Synthetic survey', color: '#1565c0', icon: 'target', mine: true, editable: writable };
     const base = { color: '#1565c0', icon: 'target', categoryId: category.id, note: '', revision: 1,
-      visibility: 'private', mine: true, editable: writable, author: 'staff', elevationNavd88M: null };
+      visibility: 'private', mine: true, editable: writable, deletable: writable, author: 'staff', elevationNavd88M: null };
     const supplied = [
       { ...base, id: 'near', name: 'Near pin', geometry: { type: 'Point', coordinates: [-87, 43.05] } },
       { ...base, id: 'far', name: 'Offscreen_' + 'long_name_'.repeat(8), geometry: { type: 'Point', coordinates: [-88, 44] } },
       { ...base, id: 'line', name: 'Survey line', geometry: { type: 'LineString', coordinates: [[-89, 44], [-89.001, 44.001]] } },
-      { ...base, id: 'area', name: 'Survey area', mine: false, editable: false,
+      { ...base, id: 'area', name: 'Survey area', mine: false, editable: false, deletable: false,
         geometry: { type: 'Polygon', coordinates: [[[-90, 44], [-90.001, 44], [-90.001, 44.001], [-90, 44]]] } },
     ];
     const app = express(), asked = [];
