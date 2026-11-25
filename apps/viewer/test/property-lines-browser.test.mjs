@@ -36,7 +36,7 @@ function page() {
   const html = readFileSync(path.join(root, 'index.html'), 'utf8');
   const style = html.match(/<style>[\s\S]*?<\/style>/)[0];
   const panel = block(html, '<div class="panel" id="panel-property-lines"');
-  const notice = html.match(/<div id="property-lines-notice"[^>]*><\/div>/)[0];
+  const notice = block(html, '<div id="view-notes">');
   const floating = block(html, '<div id="floating-controls">');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/node_modules/leaflet/dist/leaflet.css">${style}</head><body>
@@ -175,10 +175,17 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     const overlaps = async () => client.evaluate(`(() => { const r = s => document.querySelector(s).getBoundingClientRect();
       const o = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
       const n = r('#property-lines-notice'), z = r('.leaflet-control-zoom'), f = r('#floating-controls'), a = r('.leaflet-control-attribution'), w = r('#viewer-wrap');
-      return { zoom: o(n, z), floating: o(n, f), attribution: o(n, a), inside: n.left >= w.left && n.right <= w.right && n.top >= w.top, bottomGap: w.bottom - n.bottom, width: n.width }; })()`);
+      return { zoom: o(n, z), floating: o(n, f), attribution: o(n, a), inside: n.left >= w.left && n.right <= w.right && n.top >= w.top && n.bottom <= w.bottom,
+        bottomLeft: w.bottom - n.bottom <= 20 && n.left - w.left <= 20, rightGap: w.right - n.right, width: n.width }; })()`);
+    // The elevation readout shares the corner: it sits above the notice, never on it.
+    const readout = () => client.evaluate(`(() => { const h = document.getElementById('dem-hover'); h.style.display = 'block';
+      const a = h.getBoundingClientRect(), b = document.getElementById('property-lines-notice').getBoundingClientRect(); h.style.display = '';
+      return a.height > 0 && a.bottom <= b.top; })()`);
     let layout = await overlaps();
     assert.deepEqual([layout.zoom, layout.floating, layout.attribution, layout.inside], [false, false, false, true], JSON.stringify(layout));
-    assert.ok(layout.bottomGap > 120, 'leaves the bottom-right compass area clear');
+    assert.equal(layout.bottomLeft, true, JSON.stringify(layout));
+    assert.ok(layout.rightGap >= 200, 'leaves the bottom-right legend and compass area clear');
+    assert.equal(await readout(), true);
 
     // Pan and zoom: debounced, only the newest request matters, cache reused.
     const before = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length;
@@ -251,7 +258,8 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     await client.evaluate("document.getElementById('layer-property-lines').click()");
     await waitFor("document.getElementById('property-lines-status').dataset.state === 'ready'", 'phone ready');
     layout = await overlaps();
-    assert.deepEqual([layout.zoom, layout.floating, layout.attribution, layout.inside], [false, false, false, true], JSON.stringify(layout));
+    assert.deepEqual([layout.zoom, layout.floating, layout.attribution, layout.inside, layout.bottomLeft], [false, false, false, true, true], JSON.stringify(layout));
+    assert.equal(await readout(), true);
 
     // Without an offer the card is absent and nothing is fetched or drawn.
     offered = false;

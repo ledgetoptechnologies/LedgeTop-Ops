@@ -20,12 +20,15 @@ export const CONTOUR_INTERVALS = Object.freeze({
   metric: Object.freeze([0.5, 1, 2, 5, 10, 20]),
 });
 
-// onX-style: dark brown lines on imagery, light halo behind labels.
 export const CONTOUR_COLORS = Object.freeze({
   brown: Object.freeze({ minor: 'rgba(92,58,28,0.82)', index: '#4a2c10', label: '#3d240c', halo: 'rgba(255,248,232,0.92)', casing: 'rgba(255,248,232,0.28)' }),
   tan: Object.freeze({ minor: 'rgba(214,180,126,0.85)', index: '#e2c48f', label: '#f3dfb5', halo: 'rgba(40,26,12,0.85)', casing: 'rgba(40,26,12,0.30)' }),
   white: Object.freeze({ minor: 'rgba(255,255,255,0.72)', index: '#ffffff', label: '#ffffff', halo: 'rgba(0,0,0,0.75)', casing: 'rgba(0,0,0,0.30)' }),
 });
+
+// Used until the viewer picks a color, on the map and in prints.
+export const CONTOUR_DEFAULT_COLOR = 'white';
+export const CONTOUR_DEFAULT_COLORS = CONTOUR_COLORS[CONTOUR_DEFAULT_COLOR];
 
 export const CONTOUR_STYLE = Object.freeze({
   minorWidth: 1,
@@ -406,7 +409,7 @@ export function placeLabels(points, { spacing = CONTOUR_STYLE.labelSpacingPx, mi
  * @param options { colors, scale, width, height, labels }
  * @returns { minor, index, labels } counts drawn
  */
-export function drawContours(ctx, features, project, { colors = CONTOUR_COLORS.brown, scale = 1, width = Infinity, height = Infinity,
+export function drawContours(ctx, features, project, { colors = CONTOUR_DEFAULT_COLORS, scale = 1, width = Infinity, height = Infinity,
   labels = true, pad = 32 } = {}) {
   const style = CONTOUR_STYLE;
   const projected = [];
