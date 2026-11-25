@@ -20,14 +20,15 @@ const point = (changes = {}) => ({ id: randomUUID(), geometry: { type: 'Point', 
 const content = (mark, changes = {}) => ({ id: mark.id, geometry: mark.geometry, name: mark.name, note: mark.note, color: mark.color, icon: mark.icon,
   categoryId: mark.categoryId, elevationNavd88M: mark.elevationNavd88M, revision: mark.revision, ...changes });
 
-async function open(t) {
+async function open(t, { limited = false } = {}) {
+  const limits = { on: false };
   const db = new DatabaseSync(':memory:');
   db.exec(`PRAGMA foreign_keys=ON; CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('${MODEL}'), ('other-model');`);
   db.exec(schema.VIEWER_MARKS_SQL + (schema.VIEWER_MARK_SHARING_SQL || ''));
   const sessions = new Map(), links = new Map();
   const version = id => ({ id: id + '-v1', status: 'ready' });
   const repository = {
-    database: db, rateLimited: () => false,
+    database: db, rateLimited: () => limits.on,
     getViewerSessionByHash: hash => sessions.get(hash), viewerSessionLive: session => !session.revoked,
     getModel: id => ({ id, status: 'ready', activeVersion: version(id) }),
     getPublicShare: id => links.get(id), publicShareLive: link => Boolean(link) && !link.revokedAt,
@@ -62,6 +63,7 @@ async function open(t) {
   };
   const shared = async token => (await call(token, 'GET', 'shared')).body.marks?.map(mark => mark.name);
   const make = async (token, changes) => { const answer = await call(token, 'POST', '', point(changes)); assert.equal(answer.status, 201); return answer.body.mark; };
+  limits.on = limited;
   return { db, session, sessions, link, call, refused, shared, make };
 }
 
@@ -324,6 +326,15 @@ test('a link a client creates does not show marks unless that was chosen', async
   assert.deepEqual(await shared(link(newSharePermissions({}, 'staff')).token), ['Pin']);
   const route = fs.readFileSync(new URL('../server/apiV1.js', import.meta.url), 'utf8');
   assert.ok(route.includes('newSharePermissions(body.permissions,shareClass)'), 'the route that creates client links says whose link it is');
+});
+
+test('reads without a person of their own are rate limited like any other', async t => {
+  const { session, link, call, make } = await open(t, { limited: true });
+  await make(session('ops', 'one'));
+  for (const token of [session('client', 'company', { permissions: { view: true, measure: true } }), session('client', 'v', { permissions: { view: true, personalMeasurements: true } })]) {
+    for (const route of ['', 'shared']) assert.equal((await call(token, 'GET', route)).status, 429, route);
+  }
+  assert.equal((await call(link({ view: true, marks: true }).token, 'GET', '')).status, 429);
 });
 
 test('shared lists come in bounded pages', async t => {
