@@ -464,6 +464,90 @@ test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
   });
 });
 
+// The list comes from the authorized store, not the viewport or map layers.
+// These responses are a local UI fixture, not a change to server authorization.
+for (const writable of [true, false]) {
+  test(`marks list: all supplied model marks, phone navigation and ${writable ? 'staff' : 'view-only'} actions`, { timeout: 90000 }, async t => {
+    const category = { id: 'synthetic-category', name: 'Synthetic survey', color: '#1565c0', icon: 'target', mine: true, editable: writable };
+    const base = { color: '#1565c0', icon: 'target', categoryId: category.id, note: '', revision: 1,
+      visibility: 'private', mine: true, editable: writable, author: 'staff', elevationNavd88M: null };
+    const supplied = [
+      { ...base, id: 'near', name: 'Near pin', geometry: { type: 'Point', coordinates: [-87, 43.05] } },
+      { ...base, id: 'far', name: 'Offscreen_' + 'long_name_'.repeat(8), geometry: { type: 'Point', coordinates: [-88, 44] } },
+      { ...base, id: 'line', name: 'Survey line', geometry: { type: 'LineString', coordinates: [[-89, 44], [-89.001, 44.001]] } },
+      { ...base, id: 'area', name: 'Survey area', mine: false, editable: false,
+        geometry: { type: 'Polygon', coordinates: [[[-90, 44], [-90.001, 44], [-90.001, 44.001], [-90, 44]]] } },
+    ];
+    const app = express(), asked = [];
+    app.use('/api/v1/marks', (req, res) => {
+      asked.push([req.method, req.path]);
+      if (req.method !== 'GET' || req.path !== '/') return res.sendStatus(405);
+      res.json({ marks: supplied, categories: [category], capabilities: { write: writable, staff: writable, visibility: ['private'] } });
+    });
+    await withBrowser(t, { app }, async h => {
+      const { client, waitFor } = h;
+      await h.load('?mode=staff');
+      assert.equal(await client.evaluate('map.getBounds().contains([44, -88])'), false, 'far pin starts outside the map');
+      await h.press('.viewer-mark-layers');
+      assert.equal(await client.evaluate("document.querySelector('[data-tab=list]').getAttribute('aria-selected')"), 'true', 'List is the default');
+      const rows = () => client.evaluate(`Array.from(document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item'), row => ({
+        name: row.querySelector('.viewer-mark-list-name > span').textContent,
+        category: row.querySelector('small').textContent,
+        icon: Boolean(row.querySelector('.viewer-mark-list-icon svg'))
+      }))`);
+      const listed = await rows();
+      assert.deepEqual(listed.map(row => row.name), supplied.map(mark => mark.name), 'pins, line and area are listed even off screen');
+      assert.ok(listed.every(row => row.category.includes(category.name) && row.icon), 'every row has its category and icon');
+
+      // Search and category visibility are convenience filters over the same store.
+      await h.type('[name=markSearch]', 'Offscreen_');
+      assert.deepEqual((await rows()).map(row => row.name), [supplied[1].name]);
+      await h.type('[name=markSearch]', '');
+      await h.press('[data-tab=categories]');
+      await h.press('[data-eye="synthetic-category"]');
+      await h.press('[data-tab=list]');
+      assert.deepEqual(await rows(), []);
+      assert.deepEqual(await h.state(), supplied, 'hiding a category does not remove authorized store marks');
+      await h.press('[data-tab=categories]');
+      await h.pressText('Show all');
+      await h.press('[data-tab=list]');
+      assert.equal((await rows()).length, supplied.length);
+
+      for (const width of [320, 375]) {
+        await h.size(width, 740, true);
+        await client.evaluate('map.invalidateSize({ animate: false }), 0');
+        await waitFor("document.querySelector('.viewer-mark-box').classList.contains('sheet')", 'phone sheet');
+        const fits = await client.evaluate(`(() => {
+          const box = document.querySelector('.viewer-mark-box'), list = document.querySelector('#viewer-marks-list .viewer-mark-list');
+          const r = box.getBoundingClientRect();
+          return r.left >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1
+            && box.scrollWidth <= box.clientWidth + 1 && list.scrollWidth <= list.clientWidth + 1;
+        })()`);
+        assert.equal(fits, true, `list and long name fit ${width}px without horizontal scrolling`);
+      }
+      const [x, y] = await client.evaluate(`(() => {
+        const row = Array.from(document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item')).find(row => row.textContent.includes('Offscreen_'));
+        row.scrollIntoView({ block: 'nearest' });
+        const r = row.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2];
+      })()`);
+      await h.click(x, y);
+      await waitFor("!document.querySelector('.viewer-mark-card').hidden && map.getBounds().contains([44, -88])", 'list navigates to the off-screen pin');
+      assert.equal(await client.evaluate("document.querySelector('.viewer-mark-card h4').textContent"), supplied[1].name);
+      const actions = () => client.evaluate(`Array.from(document.querySelectorAll('.viewer-mark-view button')).filter(button => !button.closest('[hidden]')).map(button => button.textContent)`);
+      assert.deepEqual((await actions()).filter(text => ['Edit', 'Move', 'Delete'].includes(text)), writable ? ['Edit', 'Move', 'Delete'] : []);
+      assert.equal(await client.evaluate("document.querySelector('.viewer-mark-add').hidden"), !writable);
+      assert.equal(await client.evaluate("document.querySelector('[data-tab=deleted]').hidden"), !writable);
+      // Staff still get no edit actions on a supplied, non-editable mark.
+      await h.press('.viewer-mark-card .viewer-mark-close');
+      await h.press('.viewer-mark-layers');
+      await client.evaluate(`Array.from(document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item')).find(row => row.textContent.includes('Survey area')).click(), 0`);
+      assert.deepEqual((await actions()).filter(text => ['Edit', 'Move', 'Delete'].includes(text)), []);
+      assert.deepEqual(await h.state(), supplied, 'listing and navigation never change mark geometry or content');
+      assert.deepEqual(asked, [['GET', '/']], 'list interactions make no writes or additional data requests');
+    });
+  });
+}
+
 // Grouping, the list for one spot, and the Marks pop-up on real Leaflet.
 test('marks: several on one spot and the Marks pop-up', { timeout: 90000 }, async t => {
   await withBrowser(t, {}, async h => {
