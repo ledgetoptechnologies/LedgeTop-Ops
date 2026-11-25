@@ -45,14 +45,17 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
     if (req.markPrincipal) return req.path === '/' ? res.json(readOnlyList(req.markPrincipal, true)) : next();
     const principal = getMeasurementPrincipal(req, repository, { allowTransient: true, allowViewOnly: true });
     // Without measure a verified client only reads the lists of what staff share; all else is refused as without access.
-    if (!principal || (principal.viewOnly && !(req.method === 'GET' && READ_ONLY_PATHS.has(req.path) && marks.readableChoices(principal).length))) return res.status(403).json({ code: 'marks_unavailable' });
+    if (!principal) return res.status(403).json({ code: 'marks_unavailable' });
     if (!principal.personalPersistence) {
-      // The same read limit as any other read, before anything is looked up.
       const listing = req.method === 'GET' && req.path === '/';
+      if (principal.viewOnly && !(req.method === 'GET' && READ_ONLY_PATHS.has(req.path))) return res.status(403).json({ code: 'marks_unavailable' });
+      // The same read limit as any other read, before anything is looked up.
       if ((listing || principal.viewOnly) && repository.rateLimited(`viewer-mark-read:${principal.audience}:${principal.subject}`, 240, 60_000)) {
         return res.status(429).json({ code: 'mark_rate_limited' });
       }
-      if (listing) return res.json(readOnlyList(principal));
+      const shared = marks.readableChoices(principal).length > 0;
+      if (principal.viewOnly && !shared) return res.status(403).json({ code: 'marks_unavailable' });
+      if (listing) return res.json(readOnlyList(principal, shared));
       if (principal.viewOnly) {
         req.markPrincipal = principal;
         return next();

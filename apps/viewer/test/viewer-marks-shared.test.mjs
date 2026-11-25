@@ -336,7 +336,13 @@ test('reads without a person of their own are rate limited like any other', asyn
   assert.equal((await call(company, 'GET', 'shared')).status, 403, 'refused before anything is read');
   const viewer = session('client', 'v', { permissions: { view: true, personalMeasurements: true } });
   for (const route of ['', 'shared']) assert.equal((await call(viewer, 'GET', route)).status, 429, route);
+  // Counted before anything is looked up; what is refused anyway stays refused without counting.
+  const unbound = session('client', 'u', { permissions: { view: true, personalMeasurements: true }, sourceAuthorization: null });
+  for (const route of ['', 'shared']) assert.equal((await call(unbound, 'GET', route)).status, 429, route);
+  for (const [method, route] of [['POST', ''], ['GET', 'deleted']]) assert.equal((await call(viewer, method, route, method === 'POST' ? point() : undefined)).status, 403, route);
   assert.equal((await call(link({ view: true, marks: true }).token, 'GET', '')).status, 429);
+  limits.on = false;
+  for (const route of ['', 'shared']) assert.equal((await call(unbound, 'GET', route)).status, 403, route);
 });
 
 test('recently deleted: one\'s own all come first, and every shared one can be reached page by page', async t => {
