@@ -67,11 +67,13 @@ test('migration40 preserves legacy authority/data/indexes/triggers and isolates 
   repository.createViewerSession({ ...sessionInput(model, authority), tokenHash: 'legacy-token-hash' });
   repository.revokePublishedSessionsBySourceAuthorization({ sourceAuthorization: { ...authority, id: 'old-tombstone' }, audit: { actorType: 'service', action: 'test', entityType: 'source_authorization' } });
   const names = ['session_grants', 'viewer_sessions', 'revoked_published_session_authorizations'];
+  const columns = names.map(name => database.prepare(`PRAGMA table_info(${name})`).all().map(column => column.name).join(','));
   const before = names.map(name => database.prepare(`SELECT * FROM ${name}`).all());
   const objects = database.prepare("SELECT name,type FROM sqlite_master WHERE tbl_name IN ('session_grants','viewer_sessions','revoked_published_session_authorizations') AND type IN ('index','trigger') ORDER BY name").all();
   applyMigrations(database);
-  assert.deepEqual(names.map(name => database.prepare(`SELECT * FROM ${name}`).all()), before);
-  assert.deepEqual(database.prepare("SELECT name,type FROM sqlite_master WHERE tbl_name IN ('session_grants','viewer_sessions','revoked_published_session_authorizations') AND type IN ('index','trigger') ORDER BY name").all(), objects);
+  assert.deepEqual(names.map((name, index) => database.prepare(`SELECT ${columns[index]} FROM ${name}`).all()), before);
+  const readObject = database.prepare('SELECT name,type FROM sqlite_master WHERE name=?');
+  assert.deepEqual(objects.map(({ name }) => readObject.get(name)), objects);
   assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
   assert.throws(() => database.prepare("UPDATE session_grants SET source_authorization_id='changed' WHERE id=?").run(grant.id), /immutable/);
   assert.throws(() => database.prepare("UPDATE viewer_sessions SET source_authorization_type='direct_client_grant' WHERE token_hash='legacy-token-hash'").run(), /immutable/);
@@ -121,6 +123,50 @@ test('signed client catalog has bounded pagination, exact-task isolation and fre
   assert.equal((await signed(url + `&taskId=${second.task.id}`)).status, 404);
   database.prepare("UPDATE projects SET status='archived' WHERE id=?").run(project.id);
   assert.equal((await signed(url)).status, 404);
+});
+
+test('a selection is applied to every catalog read, named back, validated, and starts at the shared folder', async t => {
+  const state = fixture(t, 88), { processing, database } = state, project = processing.createProject({ displayName: 'Selected delivery' });
+  const outer = processing.createProjectFolder(project.id, { displayName: 'Synthetic outer' }, 'ops:test');
+  const inner = processing.createProjectFolder(project.id, { displayName: 'Synthetic inner', parentId: outer.id }, 'ops:test');
+  const [root, high, low] = ['Root flight', 'Outer flight', 'Inner flight'].map(name => publish(state, project, name));
+  processing.moveTaskToFolder(high.task.id, outer.id, 'ops:test'); processing.moveTaskToFolder(low.task.id, inner.id, 'ops:test');
+  const foreign = processing.createProject({ displayName: 'Another client' }), foreignTask = publish(state, foreign, 'Private flight');
+  const app = express(); app.use(createClientDeliveryCatalog(state.repository));
+  const { signed } = await listener(t, app), url = `/api/v1/client-delivery-catalog?projectId=${project.id}`;
+  const scope = value => '&selectionScope=' + Buffer.from(JSON.stringify(value)).toString('base64url');
+  const pick = (mode, folderIds, taskIds) => ({ version: 1, mode, folderIds: [...folderIds].sort(), taskIds: [...taskIds].sort() });
+  const read = async (selection, tail = '') => { const response = await signed(url + scope(selection) + tail); return { status: response.status, body: await response.json() }; };
+  const names = result => result.body.tasks.map(task => task.displayName).sort();
+  assert.equal((await (await signed(url)).json()).capabilities, undefined, 'a caller without a selection sees what it always saw');
+  const only = await read(pick('only', [inner.id], []));
+  assert.deepEqual(only.body.capabilities, ['task_generation_v1', 'selection_v1']);
+  assert.deepEqual(names(only), ['Inner flight']);
+  assert.deepEqual(only.body.tasks[0].folderPath.map(folder => folder.name), ['Synthetic inner']);
+  assert.equal(JSON.stringify(only.body).includes('Synthetic outer'), false, 'a folder above the shared one is not named');
+  assert.ok(only.body.tasks[0].authorizationGeneration >= 1);
+  assert.deepEqual((await read(pick('only', [outer.id], []))).body.tasks.map(task => task.folderPath.map(folder => folder.name)).sort(), [['Synthetic outer'], ['Synthetic outer', 'Synthetic inner']]);
+  assert.deepEqual(names(await read(pick('only', [], [root.task.id]))), ['Root flight']);
+  assert.deepEqual(names(await read(pick('except', [inner.id], [root.task.id]))), ['Outer flight']);
+  // Pages and exact reads agree; an unselected task is as absent as another project's.
+  const first = await read(pick('only', [outer.id], []), '&limit=1'), second = await read(pick('only', [outer.id], []), `&limit=1&cursor=${first.body.nextCursor}`);
+  assert.deepEqual([...names(first), ...names(second)].sort(), ['Inner flight', 'Outer flight']); assert.equal(second.body.nextCursor, null);
+  for (const hidden of [root.task.id, foreignTask.task.id]) assert.equal((await read(pick('only', [outer.id], []), `&taskId=${hidden}`)).status, 404);
+  assert.equal((await read(pick('only', [outer.id], []), `&taskId=${low.task.id}`)).status, 200);
+  // Validation: every id in this project, now.
+  assert.equal((await read(pick('only', [outer.id], [root.task.id]), '&validateSelection=1')).status, 200);
+  const foreignFolder = processing.createProjectFolder(foreign.id, { displayName: 'Other' }, 'ops:test');
+  for (const selection of [pick('only', [foreignFolder.id], []), pick('only', [], [foreignTask.task.id]), pick('except', [crypto.randomUUID()], []), pick('only', [outer.id], [crypto.randomUUID()])])
+    assert.equal((await read(selection, '&validateSelection=1')).status, 404);
+  for (const tail of [scope({ ...pick('only', [outer.id], []), mode: 'all' }), scope({ version: 1, folderIds: [outer.id], taskIds: [] }), scope(pick('only', [], [])), '&selectionScope=%21', '&selectionScope=',
+    '&validateSelection=1', scope(pick('only', [outer.id], [])) + '&validateSelection=0', '&exclusionScope=e30', scope(pick('only', [outer.id], [])) + `&validateSelection=1&taskId=${low.task.id}`])
+    assert.equal((await signed(url + tail)).status, 400, tail.slice(0, 60));
+  // Moving the task out ends it at the next read; the generation a credential was bound to is gone.
+  const before = only.body.tasks[0].authorizationGeneration;
+  processing.moveTaskToFolder(low.task.id, null, 'ops:test'); assert.deepEqual(names(await read(pick('only', [inner.id], []))), []);
+  processing.moveTaskToFolder(low.task.id, inner.id, 'ops:test');
+  assert.ok((await read(pick('only', [inner.id], []))).body.tasks[0].authorizationGeneration > before);
+  assert.equal(database.prepare('PRAGMA foreign_key_check').all().length, 0);
 });
 
 test('signed client catalog preserves project and task scope across folder moves', async t => {

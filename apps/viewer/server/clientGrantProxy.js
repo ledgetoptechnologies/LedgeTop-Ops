@@ -2,7 +2,7 @@
 
 const { signViewerEvent } = require('./viewerEvents');
 const { randomUUID } = require('node:crypto');
-const { validDirectGrantInput, validDirectSnapshot, directListQuery } = require('./directClientGrantContract');
+const { validReplaces, validDirectGrantInput, validDirectSnapshot, directListQuery } = require('./directClientGrantContract');
 
 const REMOTE_PATH = '/api/viewer/workspace/client-grants';
 const LOCAL_PATH = '/api/v1/workspace/client-grants';
@@ -134,18 +134,24 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
         stage = 'upstream_rejection';
         const status = response.status >= 400 && response.status < 500 ? response.status : 502;
         report(status, 'operations_request_failed');
+        // Older Workers reject the selection field. Explain the refusal without
+        // retrying the mutation or applying this message to unrelated errors.
+        if (connection === 'direct' && action === 'create' && envelope.grant.selection && !envelope.grant.replaces
+          && response.status === 400 && payload?.code === undefined && payload?.error === 'Viewer client-grant request is invalid')
+          return res.status(400).json({ error: 'Operations must be updated before it can accept this project selection. Nothing was shared.', code: 'operations_selection_unsupported' });
         if (connection === 'direct' && response.status >= 400 && response.status < 500
           && payload && typeof payload === 'object' && !Array.isArray(payload)
           && typeof payload.code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(payload.code)
           && typeof payload.error === 'string' && payload.error.length > 0 && payload.error.length <= 500
           && !/[\u0000-\u001f\u007f]/.test(payload.error))
           return res.status(status).json({ error: payload.error, code: payload.code,
-            ...(typeof payload.grantId === 'string' && ID.test(payload.grantId) ? { grantId: payload.grantId } : {}) });
+            ...(typeof payload.grantId === 'string' && ID.test(payload.grantId) ? { grantId: payload.grantId } : {}),
+            ...(payload.code === 'share_changed' && validReplaces(payload.grants) ? { grants: payload.grants } : {}) });
         return res.status(status).json({ error: 'Operations rejected the client access request', code: 'operations_request_failed' });
       }
       stage = 'response_schema';
       if (!(connection === 'direct' ? validDirectSnapshot(payload, action) : connection === 'native' ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
-      const status = connection === 'direct' && action === 'revoke' && payload.sessionRevocation.pending
+      const status = connection === 'direct' && ['create', 'revoke'].includes(action) && payload.sessionRevocation?.pending
         ? 202 : action === 'create' && !payload.replayed ? 201 : 200;
       return res.status(status).json(payload);
     } catch {

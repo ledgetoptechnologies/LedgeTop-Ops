@@ -16,9 +16,13 @@ const ERRORS={
   expired_at_invalid:'Choose an expiry date in the future, or leave it empty.',
   duplicate_active_grant:'This client already has this access. Revoke it first to change its settings.',
   grant_limit:'This client has reached the maximum number of shares. Revoke one they no longer need first.',
+  share_replacement_limit:'This client has more than 100 shares in this project. In Clients with access, revoke shares they no longer need one at a time, then try again.',
+  share_changed:'This client’s shares changed. Return to the access list and review the current share before editing again.',
   idempotency_conflict:'This share changed while it was being sent. Check the list below before trying again.',
   forbidden:'You do not have permission to share with clients.',
   later_required:'A whole-project share always includes models published later. To share only what is published now, choose the tasks instead.',
+  selection_not_in_project:'The selected folders or tasks changed. Close and reopen Share to choose again.',
+  selection_unsupported:'The Viewer must be updated before it can share part of a project.',
   invalid_request:'Some of the details were not accepted. Check them and try again.',
 };
 
@@ -79,9 +83,10 @@ export function directShareReviewText({summary,permissions,expiresAt,dateTime=va
 
 // The task this Share was opened on is gone from the project: nothing can be shared from here.
 export const SHARE_TARGET_MISSING='This task or its model is no longer in this project, so it can’t be shared from here. Close Share and open it again.';
-export function directShareForm({projectName,tasks,entry=null,taskId=null,taskName='',targetMissing=false}){
+export function directShareForm({projectName,tasks,entry=null,taskId=null,taskName='',targetMissing=false,selectionCatalog=null}){
   if(targetMissing)return `<p class="form-note" role="alert">${esc(SHARE_TARGET_MISSING)}</p>`;
   const scope=directShareDefaultScope({entry,taskId}),unpublished=taskId&&!tasks.some(task=>task.id===taskId);
+  const projectEntry=scope==='project';
   const taskList=tasks.length?tasks.map(task=>`<label class="check"><input type="checkbox" name="taskId" value="${esc(task.id)}" ${task.id===taskId?'checked':''}> ${esc(task.name)}</label>`).join('')
     :'<p class="form-note">No tasks in this project have a published model yet.</p>';
   const notice=unpublished?`<p class="form-note" role="status">${taskName?`“${esc(taskName)}”`:'This task'} is not published yet, so a client cannot be given it on its own. Publish it first.</p>`:'';
@@ -91,7 +96,8 @@ ${clientPickerMarkup()}
 <p class="form-note">Authorized members of this client’s portal account can open what you share.</p>
 </fieldset>
 <fieldset><legend>What to share</legend>
-<label class="check"><input type="radio" name="scope" value="project" ${scope==='project'?'checked':''}> The whole project</label>
+<label class="check"><input type="radio" name="scope" value="project" ${projectEntry?'checked':''}> ${projectEntry?'Project access':'The whole project'}</label>
+${projectEntry?projectSelectionFields(selectionCatalog):''}
 <label class="check direct-share-later"><input type="checkbox" name="includeLater" ${scope==='project'?'':'disabled'}> Also share models published later</label>
 <label class="check"><input type="radio" name="scope" value="tasks" ${scope==='tasks'?'checked':''} ${tasks.length||unpublished?'':'disabled'}> Only the tasks I choose</label>
 ${notice}<div class="direct-share-tasks" data-direct-task-list>${taskList}</div>
@@ -106,53 +112,182 @@ ${PERMISSIONS.map(([name,label,checked])=>`<label class="check"><input type="che
 </form>`;
 }
 
-export function readDirectShareForm(form,{projectId,projectName,tasks,clients}){
+export function readDirectShareForm(form,{projectId,projectName,tasks,clients,entry=null,selectionCatalog=null}){
   const client=clients.find(item=>directClientKey(item)===form.elements.client.value)||null;
   const scope=form.querySelector('input[name="scope"]:checked')?.value==='project'?'project':'tasks';
   const chosen=scope==='tasks'?[...form.querySelectorAll('input[name="taskId"]')].filter(input=>input.checked).map(input=>input.value):[];
   const taskNames=chosen.map(id=>tasks.find(task=>task.id===id)?.name||'Task');
-  return {client,scope,chosen,summary:directScopeSummary({clientName:client?directClientLabel(client):'',projectName,scope,taskNames}),
+  const clientName=client?directClientLabel(client):'';
+  const mode=scope==='project'?(form.elements.mode?.value??(entry==='project'?'':'whole')):null;
+  let selection=null,selectionError=null;
+  if(mode!==null){
+    try{selection=readProjectSelection(form,mode,selectionCatalog,{unticked:mode==='except'})}
+    catch(error){selectionError=error;}
+  }
+  return {client,scope,mode,chosen,summary:(clientName&&selectionError?.message)
+    ||projectSelectionSummary({selection,clientName,projectName,catalog:selectionCatalog})
+    ||directScopeSummary({clientName,projectName,scope,taskNames}),
     bodies:()=>{
       if(!client)throw new Error('Choose a client.');
+      if(selectionError)throw selectionError;
       if(scope==='tasks'&&!chosen.length)throw new Error('Choose at least one task, or share the whole project.');
       // The contract has no project share without later models: the box must be ticked on purpose.
-      if(scope==='project'&&!form.elements.includeLater?.checked)throw new Error(ERRORS.later_required);
+      if(scope==='project'&&!form.elements.includeLater?.checked)throw new Error(selection
+        ?'Confirm that the selection also includes matching models published later.':ERRORS.later_required);
       if(!form.elements.confirmedScope.checked)throw new Error(ERRORS.consent_required);
       const expires=form.elements.expiresAt.value?new Date(form.elements.expiresAt.value):null;
       if(expires&&!(expires.getTime()>Date.now()))throw new Error(ERRORS.expired_at_invalid);
       const common={sourceId:client.sourceId,workspaceId:client.workspaceId,viewerProjectId:projectId,
         permissions:Object.fromEntries(PERMISSIONS.map(([name])=>[name,form.elements[name].checked])),
         expiresAt:expires?expires.toISOString():null,confirmedScope:true};
-      return scope==='project'?[{...common,taskId:null,scopeType:'project',includeFuturePublished:true}]
+      return scope==='project'?[{...common,taskId:null,scopeType:'project',includeFuturePublished:true,...(selection?{selection}:{})}]
         :chosen.map(taskId=>({...common,taskId,scopeType:'task',includeFuturePublished:false}));
     }};
 }
 
-export function directGrantRows(access,{projectId,tasks,taskId=null,dateTime=value=>value,now=Date.now()}){
+function savedSelectionSummary(selection,tasks,folders){
+  const names=[
+    ...selection.folderIds.map(id=>folders.find(folder=>folder.id===id)?.displayName||'Unavailable folder'),
+    ...selection.taskIds.map(id=>tasks.find(task=>task.id===id)?.name||'Unavailable task'),
+  ].map(name=>`“${name}”`).join(', ');
+  return selection.mode==='only'?`Only ${names}`:`Whole project except ${names}`;
+}
+
+export function editableDirectProjectGrant(access,projectId,grantId,now=Date.now()){
+  if(!access||access.grantsIncomplete||access.grantsNextCursor)return null;
+  const grant=access.grants.find(item=>item.grantId===grantId&&item.viewerProjectId===projectId&&!item.revokedAt);
+  if(grant?.scopeType!=='project'||grant.taskId!==null||grant.includeFuturePublished!==true
+    ||!grant.sourceId||!grant.workspaceId||!Number.isSafeInteger(grant.grantVersion)
+    ||grant.grantVersion<1||!(grant.expiresAt===null||Date.parse(grant.expiresAt)>now)
+    ||PERMISSIONS.some(([key])=>typeof grant.permissions?.[key]!=='boolean'))return null;
+  const other=access.grants.some(item=>!item.revokedAt&&item.grantId!==grantId&&item.viewerProjectId===projectId
+    &&item.sourceId===grant.sourceId&&item.workspaceId===grant.workspaceId);
+  return other?null:grant;
+}
+
+const PROJECT_CHOICES_UNAVAILABLE='Folders and tasks could not be verified. Close and reopen Share to choose a project selection.';
+function projectSelectionFields(catalog,selection=null,{editing=false}={}){
+  const active=selection?.mode||'whole';
+  const choices=editing
+    ?[['whole','Whole project'],['only','Only selected folders and tasks'],['except','Whole project except selected folders and tasks']]
+    :[['whole','Everything'],['except','Everything except unticked folders and tasks'],['only','Only ticked folders and tasks']];
+  const options=(name,items,selected=[],labelFor)=>{
+    const available=new Set(items.map(item=>item.id));
+    return [...items.map(item=>({id:item.id,label:labelFor(item),missing:false})),
+      ...selected.filter(id=>!available.has(id)).map(id=>({id,label:`Previously selected ${name} is unavailable`,missing:true}))]
+      .map(({id,label,missing})=>`<label class="check"><input name="${name}" type="checkbox" value="${esc(id)}" ${selected.includes(id)?'checked':''} ${missing?'data-missing':''}> ${esc(label)}</label>`).join('');
+  };
+  const folderOptions=options('folder',catalog?.folders||[],selection?.folderIds,folder=>folder.displayName);
+  const taskOptions=options('task',catalog?.tasks||[],selection?.taskIds,task=>task.name);
+  return `<label><span>What this client can see</span><select name="mode">
+${choices
+  .map(([mode,label])=>`<option value="${mode}" ${mode===active?'selected':''}${!catalog&&mode!=='whole'?' disabled':''}>${label}</option>`).join('')}
+</select></label>
+${catalog?'':`<p class="form-note">${esc(PROJECT_CHOICES_UNAVAILABLE)}</p>`}
+<fieldset ${editing?'data-edit-share-targets':'data-direct-share-targets'} ${active==='whole'?'hidden disabled':''}><legend>Folders and tasks</legend>
+<p class="form-note">A folder includes its subfolders. Tasks become visible only after publication.</p>
+<div class="direct-share-tasks"><strong>Folders</strong>${folderOptions||'<p class="form-note">No folders.</p>'}
+<strong>Tasks</strong>${taskOptions||'<p class="form-note">No tasks.</p>'}</div></fieldset>`;
+}
+
+function projectSelectionSummary({selection,clientName,projectName,catalog}){
+  if(!selection||!clientName)return null;
+  return `Authorized members of ${clientName}’s portal account can use this share in ${projectName}. ${savedSelectionSummary(selection,catalog.tasks,catalog.folders)}. This share follows the current folder structure and includes matching tasks published later.`;
+}
+
+export function directProjectShareEditForm({grant,tasks,folders}){
+  return `<form id="direct-project-share-edit" class="manage-form direct-share-form">
+<p>Editing access for <strong>${esc(grant.clientDisplayName||'this client')}</strong></p>
+${projectSelectionFields({tasks,folders},grant.selection,{editing:true})}
+<p role="status"></p>
+<div class="action-row"><button type="submit" class="primary-button">Review change</button>
+<button type="button" class="secondary-button" data-edit-share-back>Back to access list</button></div></form>`;
+}
+
+function readProjectSelection(form,mode,catalog,{unticked=false}={}){
+  if(mode==='whole')return null;
+  if(mode!=='only'&&mode!=='except')throw new Error('Choose what the client can see.');
+  if(!catalog)throw new Error(PROJECT_CHOICES_UNAVAILABLE);
+  const selected=(name,items)=>{
+    const available=new Set(items.map(item=>item.id));
+    const inputs=[...form.querySelectorAll(`input[name="${name}"]${unticked?':not(:checked)':':checked'}`)];
+    if(inputs.some(input=>!available.has(input.value)||input.hasAttribute('data-missing')))
+      throw new Error('Clear unavailable selections and review the updated access.');
+    return [...new Set(inputs.map(input=>input.value))].sort();
+  };
+  const folderIds=selected('folder',catalog.folders),taskIds=selected('task',catalog.tasks);
+  const count=folderIds.length+taskIds.length;
+  if(count<1||count>128)throw new Error(unticked?'Untick between 1 and 128 folders and tasks to exclude, or choose Everything.':'Choose between 1 and 128 folders and tasks.');
+  return {version:1,mode,folderIds,taskIds};
+}
+
+export function readDirectProjectShareEdit(form,{grant,projectName,tasks,folders}){
+  const mode=form.elements.mode.value,catalog={tasks,folders};
+  const selection=readProjectSelection(form,mode,catalog);
+  const original=grant.selection;
+  const unchanged=selection?original?.mode===mode
+    &&JSON.stringify(selection.folderIds)===JSON.stringify(original.folderIds)
+    &&JSON.stringify(selection.taskIds)===JSON.stringify(original.taskIds):!original;
+  if(unchanged)throw new Error('Choose a different selection to save a change.');
+  const clientName=grant.clientDisplayName||'the selected client';
+  const summary=projectSelectionSummary({selection,clientName,projectName,catalog})||directScopeSummary({clientName,projectName,scope:'project'});
+  return {summary,body:{sourceId:grant.sourceId,workspaceId:grant.workspaceId,viewerProjectId:grant.viewerProjectId,
+    taskId:null,scopeType:'project',includeFuturePublished:true,permissions:{...grant.permissions},
+    expiresAt:grant.expiresAt,confirmedScope:true,...(selection?{selection}:{}),
+    replaces:[{grantId:grant.grantId,grantVersion:grant.grantVersion}]}};
+}
+
+export function directGrantRows(access,{projectId,tasks,folders=[],taskId=null,dateTime=value=>value,now=Date.now()}){
   const grants=access.grants.filter(grant=>!grant.revokedAt&&grant.viewerProjectId===projectId&&(!taskId||grant.scopeType==='project'||grant.taskId===taskId));
   const incomplete=access.grantsIncomplete?'<p class="form-note" role="status">Some shares could not be listed. Close and reopen Share to load the rest.</p>':'';
   if(!grants.length)return incomplete||'<div class="empty-state">No clients have access yet.</div>';
   return `${incomplete}<div class="data-list top-gap">${grants.map(grant=>{
-    const what=grant.scopeType==='project'?'Whole project, including tasks published later':`Task: ${tasks.find(task=>task.id===grant.taskId)?.name||'Unavailable task'}`;
+    const what=grant.selection?savedSelectionSummary(grant.selection,tasks,folders)
+      :grant.scopeType==='project'?'Whole project, including tasks published later':`Task: ${tasks.find(task=>task.id===grant.taskId)?.name||'Unavailable task'}`;
     // An expired share gives no access, but it still holds its place until it is revoked.
     const expired=Boolean(grant.expiresAt)&&!(Date.parse(grant.expiresAt)>now);
     const details=[what,grant.permissions?`Can ${permissionList(grant.permissions)}`:null,
       expired?`Expired${Number.isNaN(Date.parse(grant.expiresAt))?', end date unknown':` ${dateTime(grant.expiresAt)}`}; revoke it to share this again`:grant.expiresAt?`Expires ${dateTime(grant.expiresAt)}`:'No expiry',
       grant.createdAt?`Shared ${dateTime(grant.createdAt)}`:null].filter(Boolean).join(' · ');
-    return `<div class="manage-row"><div><strong>${esc(grant.clientDisplayName||'Client')}</strong><small>${esc(details)}</small></div><span class="status ${expired?'expired':'active'}">${expired?'expired':'active'}</span><div><button class="secondary-button" data-action="revoke-direct-client-grant" data-id="${esc(grant.grantId)}">Revoke</button></div></div>`;
+    const edit=!taskId&&grant.scopeType==='project'&&editableDirectProjectGrant(access,projectId,grant.grantId,now);
+    return `<div class="manage-row"><div><strong>${esc(grant.clientDisplayName||'Client')}</strong><small>${esc(details)}</small></div><span class="status ${expired?'expired':'active'}">${expired?'expired':'active'}</span><div class="row-actions">${edit?`<button class="secondary-button" data-action="edit-direct-project-share" data-id="${esc(grant.grantId)}">Edit selection</button>`:''}<button class="secondary-button" data-action="revoke-direct-client-grant" data-id="${esc(grant.grantId)}">Revoke</button></div></div>`;
   }).join('')}</div>`;
 }
 
-// Who a publication adds: clients whose live share covers this task once it is published.
+export function publicationFolderPath(task,folders,{projectId,taskId}){
+  if(task?.id!==taskId||task.projectId!==projectId||!Object.hasOwn(task,'folderId'))return null;
+  if(task.folderId===null)return [];
+  if(typeof task.folderId!=='string'||!Array.isArray(folders))return null;
+  const parents=new Map(folders.filter(folder=>folder?.projectId===projectId).map(folder=>[folder.id,folder.parentId]));
+  const path=[];
+  for(let id=task.folderId;id!==null;id=parents.get(id)){
+    if(path.length===16||path.includes(id)||!parents.has(id))return null;
+    path.push(id);
+  }
+  return path;
+}
+
+function selectionCoversTask(selection,taskId,folderPath){
+  if(selection.taskIds.includes(taskId))return selection.mode==='only';
+  if(selection.mode==='only'&&!selection.folderIds.length)return false;
+  if(folderPath===null)return null;
+  const matched=selection.folderIds.some(id=>folderPath.includes(id));
+  return selection.mode==='only'?matched:!matched;
+}
+
 // A task share can outlive its model, so a task being published again counts too.
-export function publishAudience(access,{projectId,taskId,now=Date.now()}){
+export function publishAudience(access,{projectId,taskId,folderPath=null,now=Date.now()}){
   const clients=new Map();
+  let complete=true;
   for(const grant of access.grants){
     if(grant.revokedAt||grant.viewerProjectId!==projectId||grant.expiresAt&&!(Date.parse(grant.expiresAt)>now))continue;
-    if(grant.scopeType==='project'||grant.scopeType==='task'&&grant.taskId===taskId)
+    const covered=grant.selection?selectionCoversTask(grant.selection,taskId,folderPath)
+      :grant.scopeType==='project'||grant.scopeType==='task'&&grant.taskId===taskId;
+    if(covered===null)complete=false;
+    if(covered)
       clients.set(directClientKey(grant),{key:directClientKey(grant),name:grant.clientDisplayName||'a client',id:grant.workspaceId});
   }
-  return [...clients.values()];
+  return {clients:[...clients.values()],complete};
 }
 const NAMED_CLIENTS=5;
 // One line per client, in name order. Clients that share a name carry the end of their id, as in the client search.

@@ -33,7 +33,10 @@ function snapshot(db) {
   const objects = db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => ({ ...row }));
   const rows = {};
   for (const { type, name } of objects) {
-    if (type === 'table') rows[name] = db.prepare(`SELECT * FROM ${quote(name)} ORDER BY rowid`).all().map(row => ({ ...row }));
+    if (type !== 'table') continue;
+    const primaryKey = db.prepare('SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk').all(name);
+    const order = primaryKey.map(column => quote(column.name)).join(', ') || 'rowid';
+    rows[name] = db.prepare(`SELECT * FROM ${quote(name)} ORDER BY ${order}`).all().map(row => ({ ...row }));
   }
   return { objects, rows };
 }
@@ -240,7 +243,13 @@ test('a later reserved number (87) can land before or after 84', t => {
     try {
       withMigrations(item => item.version !== (first === '87' ? 84 : 87), () => applyMigrations(db));
       applyMigrations(db);
-      assert.deepEqual(ledger(db).slice(-4).map(([version]) => version), [84, 85, 86, 87]);
+      const applied = new Map(ledger(db));
+      assert.equal(applied.get(84), NAME);
+      assert.equal(applied.get(85), 'processing_provider_removal');
+      assert.equal(applied.get(86), 'trash_container_purge_started');
+      assert.equal(applied.get(87), 'synthetic_87');
+      assert.equal(applied.get(88), 'task_authorization_generations');
+      assert.equal(applied.get(89), 'restricted_viewer_session_lifecycle');
       assert.equal(marks.verify(db), true);
       healthy(db);
     } finally { MIGRATIONS.splice(MIGRATIONS.indexOf(later), 1); }

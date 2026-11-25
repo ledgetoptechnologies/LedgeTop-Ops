@@ -43,7 +43,9 @@ export interface ViewerClientDeliveryCatalog {
   tasks: Array<{ id: string; displayName: string; modelId: string; modelVersionId: string;
     modelTitle: string; publishedAt: string;
     /** Root-first folders holding the task; [] at the project root; absent from older Viewer images. */
-    folderPath?: ViewerClientFolderPathEntry[] }>;
+    folderPath?: ViewerClientFolderPathEntry[];
+    /** Viewer-owned task authorization generation; required by grants with a selection, absent from older images. */
+    authorizationGeneration?: number }>;
   nextCursor: string | null;
 }
 
@@ -542,6 +544,9 @@ export interface ViewerServiceConfiguration {
   secret: string;
 }
 
+/** What a client share covers inside its project: everything except, or only, these folders and tasks (canonical: sorted, unique). */
+export type ViewerProjectSelection = { version: 1; mode: "except" | "only"; folderIds: string[]; taskIds: string[] };
+
 export class ViewerServiceError extends Error {
   constructor(
     message: string,
@@ -552,6 +557,7 @@ export class ViewerServiceError extends Error {
       | "unavailable"
       | "invalid_response"
       | "invalid_request"
+      | "unsupported"
       | "not_found"
       | "conflict",
     readonly status = 503,
@@ -784,9 +790,11 @@ export class ViewerServiceClient {
     this.origin = origin;
   }
 
-  private async request(pathWithQuery: string, init: { method?: string; body?: string; idempotencyKey?: string } = {}): Promise<unknown> {
+  private async request(pathWithQuery: string, init: { method?: string; body?: string; idempotencyKey?: string; unsupportedOnBadRequest?: boolean; deadlineAt?: number } = {}): Promise<unknown> {
     const method = (init.method || "GET").toUpperCase(), body = init.body || "";
-    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 10_000);
+    const timeoutMs = init.deadlineAt === undefined
+      ? 10_000 : Math.max(1, Math.min(10_000, init.deadlineAt - Date.now()));
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), timeoutMs);
     let stage: "sign" | "fetch" | "response" = "sign";
     try {
       const signed = await signViewerServiceRequest({
@@ -822,6 +830,9 @@ export class ViewerServiceClient {
       if (response.status === 404) throw new ViewerServiceError("3D model not found", "not_found", 404);
       if (response.status === 409)
         throw new ViewerServiceError("3D Viewer request conflicts with an earlier request", "conflict", 409);
+      // An older Viewer refuses a query it does not know.
+      if (response.status === 400 && init.unsupportedOnBadRequest)
+        throw new ViewerServiceError("This Viewer does not support shares with a selection", "unsupported");
       if (!response.ok) {
         console.error(JSON.stringify({ event: "viewer.service.upstream_rejected", status: response.status }));
         throw new ViewerServiceError("3D Viewer is temporarily unavailable", "unavailable", 503);
@@ -881,6 +892,8 @@ export class ViewerServiceClient {
 
   async clientDeliveryCatalog(input: {
     projectId: string; taskId?: string; cursor?: string; limit?: number;
+    selection?: ViewerProjectSelection;
+    validateSelection?: true;
   }): Promise<ViewerClientDeliveryCatalog> {
     const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
     const title = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value);
@@ -890,8 +903,19 @@ export class ViewerServiceClient {
       throw new ViewerServiceError("Viewer delivery catalog request is invalid", "invalid_configuration");
     const query = new URLSearchParams({ projectId: input.projectId, limit: String(input.limit ?? 25) });
     if (input.taskId) query.set("taskId", input.taskId);
+    if (input.selection) {
+      const bytes = new TextEncoder().encode(JSON.stringify(input.selection));
+      if (bytes.length > 5400) throw new ViewerServiceError("Viewer selection scope is too large", "invalid_configuration");
+      query.set("selectionScope", btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""));
+    }
+    if (input.validateSelection) query.set("validateSelection", "1");
     if (input.cursor) query.set("cursor", input.cursor);
-    const payload = record(await this.request(`/api/v1/client-delivery-catalog?${query}`));
+    const payload = record(await this.request(`/api/v1/client-delivery-catalog?${query}`,
+      input.selection ? { unsupportedOnBadRequest: true } : {}));
+    // A Viewer that does not say it applies selections may have ignored this one.
+    if (input.selection && !(Array.isArray(payload?.capabilities)
+      && ["task_generation_v1", "selection_v1"].every(name => (payload.capabilities as unknown[]).includes(name))))
+      throw new ViewerServiceError("This Viewer does not support shares with a selection", "unsupported");
     const project = record(payload?.project);
     if (!payload || payload.schemaVersion !== 1 || !project || project.id !== input.projectId || !title(project.displayName) ||
       !Array.isArray(payload.tasks) || payload.tasks.length > (input.limit ?? 25) ||
@@ -903,6 +927,7 @@ export class ViewerServiceClient {
       if (!task || !id(task.id) || seen.has(task.id) || !title(task.displayName) || !id(task.modelId) || !id(task.modelVersionId) ||
         !title(task.modelTitle) || typeof task.publishedAt !== "string" || !Number.isFinite(Date.parse(task.publishedAt)) ||
         (task.folderPath !== undefined && parseViewerClientFolderPath(task.folderPath) === null) ||
+        (task.authorizationGeneration !== undefined && (!Number.isSafeInteger(task.authorizationGeneration) || (task.authorizationGeneration as number) < 1)) ||
         (input.taskId !== undefined && task.id !== input.taskId))
         throw new ViewerServiceError("Viewer returned an invalid delivery task", "invalid_response");
       seen.add(task.id);
@@ -915,6 +940,7 @@ export class ViewerServiceClient {
         id: task.id as string, displayName: task.displayName as string, modelId: task.modelId as string,
         modelVersionId: task.modelVersionId as string, modelTitle: task.modelTitle as string, publishedAt: task.publishedAt as string,
         ...(task.folderPath !== undefined ? { folderPath: parseViewerClientFolderPath(task.folderPath)! } : {}),
+        ...(task.authorizationGeneration !== undefined ? { authorizationGeneration: task.authorizationGeneration as number } : {}),
       }; }), nextCursor: payload.nextCursor as string | null };
   }
 
@@ -992,8 +1018,13 @@ export class ViewerServiceClient {
       personalMeasurements?: boolean;
     };
     sourceAuthorization?: ViewerPublishedSessionSourceAuthorization;
+    restrictedScope?: {
+      version: 1; projectId: string; taskId: string; generation: number;
+      selection: ViewerProjectSelection;
+    };
   }): Promise<ViewerSessionGrant> {
-    const path = `/api/v1/models/${encodeURIComponent(input.modelId)}/sessions`;
+    const endpoint = input.restrictedScope ? "restricted-sessions" : "sessions";
+    const path = `/api/v1/models/${encodeURIComponent(input.modelId)}/${endpoint}`;
     const body = JSON.stringify({
       subject: input.subject,
       audience: input.audience,
@@ -1002,6 +1033,7 @@ export class ViewerServiceClient {
       displayUnits: input.displayUnits || "imperial",
       permissions: input.permissions || { view: true, measure: true, cameras: true, download: false },
       ...(input.sourceAuthorization ? { sourceAuthorization: input.sourceAuthorization } : {}),
+      ...(input.restrictedScope ? { restrictedScope: input.restrictedScope } : {}),
     });
     const payload = record(await this.request(path, { method: "POST", body, idempotencyKey: input.idempotencyKey }));
     const grant = typeof payload?.grant === "string" ? payload.grant : "";
@@ -1026,11 +1058,12 @@ export class ViewerServiceClient {
   async revokePublishedSessionSourceAuthorization(input: {
     sourceAuthorization: ViewerPublishedSessionSourceAuthorization;
     idempotencyKey: string;
+    deadlineAt?: number;
   }): Promise<ViewerPublishedSessionRevocation> {
     const path = "/api/v1/published-sessions/source-authorization";
     const body = JSON.stringify({ sourceAuthorization: input.sourceAuthorization });
     const payload = record(await this.request(path, {
-      method: "DELETE", body, idempotencyKey: input.idempotencyKey,
+      method: "DELETE", body, idempotencyKey: input.idempotencyKey, deadlineAt: input.deadlineAt,
     }));
     const source = record(payload?.sourceAuthorization);
     if (!payload || !source || source.type !== input.sourceAuthorization.type || source.id !== input.sourceAuthorization.id ||

@@ -1,6 +1,8 @@
 'use strict';
 
 const express = require('express');
+const { CAPABILITIES, canonicalProjectSelection } = require('./projectSelection');
+const { currentTaskAuthorizationGeneration } = require('./restrictedSessionScope');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const { requireService } = require('./serviceAuth');
 const { ProcessingRepository } = require('./processingRepository');
@@ -11,12 +13,21 @@ function createClientDeliveryCatalog(repository) {
   const processing = new ProcessingRepository(repository.database);
   router.get('/api/v1/client-delivery-catalog', requireService(repository), (req, res) => {
     res.set('Cache-Control', 'no-store');
-    const { projectId, taskId, cursor, limit = '50' } = req.query;
-    if (Object.keys(req.query).some(key => !['projectId', 'taskId', 'cursor', 'limit'].includes(key))
+    const { projectId, taskId, cursor, selectionScope, validateSelection, limit = '50' } = req.query;
+    let selection;
+    if (selectionScope !== undefined) {
+      if (typeof selectionScope !== 'string' || !/^[A-Za-z0-9_-]{1,7200}$/.test(selectionScope))
+        return res.status(400).json({ error: 'Invalid selection scope', code: 'invalid_catalog_query' });
+      try { selection = canonicalProjectSelection(JSON.parse(Buffer.from(selectionScope, 'base64url').toString('utf8'))); }
+      catch { /* Invalid below. */ }
+      if (!selection) return res.status(400).json({ error: 'Invalid selection scope', code: 'invalid_catalog_query' });
+    }
+    if (Object.keys(req.query).some(key => !['projectId', 'taskId', 'cursor', 'limit', 'selectionScope', 'validateSelection'].includes(key))
       || typeof projectId !== 'string' || !UUID.test(projectId)
       || (taskId !== undefined && (typeof taskId !== 'string' || !UUID.test(taskId)))
       || typeof limit !== 'string' || !/^\d{1,2}$/.test(limit) || Number(limit) < 1 || Number(limit) > 50
       || (cursor !== undefined && (typeof cursor !== 'string' || !/^[A-Za-z0-9_-]{8,2048}$/.test(cursor)))
+      || (validateSelection !== undefined && (validateSelection !== '1' || !selection || taskId !== undefined || cursor !== undefined))
       || (taskId !== undefined && cursor !== undefined))
       return res.status(400).json({ error: 'Invalid client delivery catalog query', code: 'invalid_catalog_query' });
     if (cursor !== undefined) {
@@ -26,15 +37,28 @@ function createClientDeliveryCatalog(repository) {
         || typeof decoded.createdAt !== 'string' || decoded.createdAt.length > 40 || !Number.isFinite(Date.parse(decoded.createdAt)))
         return res.status(400).json({ error: 'Invalid catalog cursor', code: 'invalid_catalog_query' });
     }
+    // A share of only some folders starts at the shared folder: the names above it were not shared. A task chosen on
+    // its own keeps the path a task share has always shown.
+    const sharedPath = path => {
+      const from = selection?.mode === 'only' ? path.findIndex(folder => selection.folderIds.includes(folder.id)) : -1;
+      return from > 0 ? path.slice(from) : path;
+    };
+    // Read in the same snapshot as eligibility; a task without a generation row is
+    // returned without one, and a restricted issuer then refuses to mint for it.
+    const generationField = taskId => {
+      const generation = currentTaskAuthorizationGeneration(repository.database, taskId);
+      return generation === null ? {} : { authorizationGeneration: generation };
+    };
     try {
       // Synchronous reads share one SQLite snapshot with no intervening await.
       // Exact-task queries never invoke the project catalog or expose siblings.
       const result = processing.transaction(() => {
         const project = processing.getProject(projectId);
         if (!project || project.status !== 'active') return null;
+        if (validateSelection && !processing.validateProjectSelection(project.id, selection)) return null;
         const page = taskId === undefined
-          ? processing.listActivePublishedProjectTasksPage(projectId, { limit: Number(limit), cursor: cursor || null, strictPublished: true })
-          : { items: [processing.getActivePublishedProjectTask(projectId, taskId, { strictPublished: true })].filter(Boolean), nextCursor: null };
+          ? processing.listActivePublishedProjectTasksPage(projectId, { limit: Number(limit), cursor: cursor || null, strictPublished: true, selection })
+          : { items: [processing.getActivePublishedProjectTask(projectId, taskId, { strictPublished: true, selection })].filter(Boolean), nextCursor: null };
         if (taskId !== undefined && page.items.length !== 1) return null;
         // Paths are read only for the already-visible tasks on this page, in the same snapshot.
         const folderPaths = processing.clientTaskFolderPaths(project.id, page.items.map(task => task.taskId));
@@ -42,7 +66,10 @@ function createClientDeliveryCatalog(repository) {
           tasks: page.items.map(task => ({ id: task.taskId, displayName: task.taskDisplayName,
             modelId: task.modelId, modelVersionId: task.modelVersionId,
             modelTitle: task.modelDisplayName, publishedAt: task.publishedAt,
-            folderPath: folderPaths.get(task.taskId) || [] })), nextCursor: page.nextCursor };
+            folderPath: sharedPath(folderPaths.get(task.taskId) || []),
+            ...generationField(task.taskId) })), nextCursor: page.nextCursor,
+          // Said only to a caller that asked with a selection, so older callers see what they always saw.
+          ...(selection ? { capabilities: [...CAPABILITIES] } : {}) };
       });
       return result ? res.json(result) : res.status(404).json({ error: 'Published delivery unavailable', code: 'delivery_unavailable' });
     } catch (error) {

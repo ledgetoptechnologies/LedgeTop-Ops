@@ -372,6 +372,16 @@ export async function listViewerClientGrants(env: Env, principal: StaffPrincipal
   return rows.results;
 }
 
+// Whole-project client access is a direct Viewer grant (with a selection) made from
+// the Viewer's Share project dialog. Legacy project-scope grants through an
+// Operations or connected-workspace project cannot carry a selection, so new ones
+// are refused here for every caller; existing ones stay listed and revocable,
+// exact task grants are unchanged, and idempotent replays of earlier creates still answer.
+function legacyProjectScope(scopeType: string): boolean { return scopeType === "project"; }
+function legacyProjectGrantRetired(): HTTPException {
+  return new HTTPException(410, { message: "Share whole projects from the Viewer Share project dialog" });
+}
+
 export async function createViewerClientGrant(input: {
   env: Env; principal: StaffPrincipal; grant: z.infer<typeof clientGrantInput>;
   idempotencyKey: string; request: Request;
@@ -389,6 +399,7 @@ export async function createViewerClientGrant(input: {
     if (prior.request_fingerprint !== fingerprint) throw new HTTPException(409, { message: "Idempotency-Key was already used" });
     return { grant: (await listViewerClientGrants(input.env, input.principal)).find(row => row.id === prior.grant_id), replayed: true };
   }
+  if (legacyProjectScope(parsed.data.scopeType)) throw legacyProjectGrantRetired();
   const target = await database.prepare(`SELECT project.id FROM projects project
     JOIN client_project_grants project_grant ON project_grant.project_id=project.id AND project_grant.account_id=?
       AND project_grant.revoked_at IS NULL
@@ -574,6 +585,7 @@ export async function createNativeViewerClientGrant(input:{env:Env;principal:Sta
     .first<{request_fingerprint:string;grant_id:string;response_json:string}>();
   if(prior){if(prior.request_fingerprint!==fingerprint)throw new HTTPException(409,{message:"Idempotency-Key was already used"});
     return {grant:parseNativeClientGrantSnapshot(prior.response_json),replayed:true};}
+  if(legacyProjectScope(parsed.data.scopeType))throw legacyProjectGrantRetired();
   const target=await requireNativeViewerGrantTarget(input.env,parsed.data);
   const count=await database.prepare("SELECT COUNT(*) count FROM viewer_native_client_grants WHERE status='active' AND revoked_at IS NULL").first<number>('count')??0;
   if(count>=500)throw new HTTPException(503,{message:"The native Viewer grant list is at capacity"});

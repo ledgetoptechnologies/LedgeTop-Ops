@@ -57,7 +57,7 @@ async function fixture(t){
   const staff={id:'admin',subject:'ops:admin',permissions:['viewer.processing.read'],expiresAt:session.expiresAt};
   const output={id:'version',modelId:'model',status:'ready'};
   const repository={resolveModelId:id=>id==='model'?id:null,getModel:id=>id==='model'?model:null,getModelVersion:(id,versionId)=>id==='model'&&versionId==='version'?model:null,
-    getViewerSessionByHash:hash=>hash===auth.hashToken(viewerToken)?session:null,viewerSessionLive:value=>!!value&&!value.revokedAt&&Date.parse(value.expiresAt)>Date.now(),rateLimited:()=>false,getModelAssetChunks:()=>[],getPublicShare:()=>null,publicShareLive:()=>false};
+    getViewerSessionByHash:hash=>hash===auth.hashToken(viewerToken)?session:null,readSnapshot:read=>read(),viewerSessionLive:value=>!!value&&!value.revokedAt&&Date.parse(value.expiresAt)>Date.now(),rateLimited:()=>false,getModelAssetChunks:()=>[],getPublicShare:()=>null,publicShareLive:()=>false};
   const processing={database:{},getModelOutput:id=>id==='version'?output:null,getAdminSessionByHash:hash=>hash===auth.hashToken(adminToken)?staff:null,adminSessionLive:value=>!!value&&!value.revokedAt&&Date.parse(value.expiresAt)>Date.now()};
   assetsRouter.setRepository(repository);assetsRouter.setProcessingRepository(processing);
   const app=express();app.use(express.json());app.use(assetsRouter);app.use(createProcessingApi({repository,processing,storage:{resolve:(_root,relative)=>path.join(root,relative)}}));

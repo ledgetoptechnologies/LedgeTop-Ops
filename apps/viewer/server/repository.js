@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { restrictedSessionScope, restrictedSessionAllows } = require('./restrictedSessionScope');
 const path = require('node:path');
 const { validCameraFilename } = require('./cameraPhotos');
 const { effectiveSharePermissions } = require('./publicSharePolicy');
@@ -12,6 +13,35 @@ function now() {
 function parseJson(value, fallback) {
   if (typeof value !== 'string') return fallback;
   try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function encodeSessionPermissions(permissions, scope, binding) {
+  if (scope === undefined) return JSON.stringify(permissions || {});
+  const restrictedScope = restrictedSessionScope(scope);
+  if (permissions?.view !== true || !restrictedScope || !restrictedSessionAllows(binding.database, { ...binding, restrictedScope }))
+    throw Object.assign(new Error('invalid or no longer eligible restricted session scope'), { code: 'restricted_session_scope_denied' });
+  // Older readers only see view=false. Keep usable permissions inside the versioned record.
+  return JSON.stringify({ view: false, restrictedSession: { scope: restrictedScope, permissions } });
+}
+
+function sessionWithinAuthorization(expiresAt, authorizedUntil, at) {
+  const expiry = Date.parse(expiresAt);
+  const cap = Date.parse(authorizedUntil);
+  return Number.isFinite(expiry) && Number.isFinite(cap) && expiry > at && expiry <= cap;
+}
+
+function decodeSessionPermissions(value) {
+  const stored = parseJson(value, { view: false });
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return { permissions: { view: false } };
+  if (!Object.hasOwn(stored, 'restrictedSession')) return { permissions: stored };
+  const restricted = stored.restrictedSession;
+  if (stored.view !== false || Object.keys(stored).sort().join(',') !== 'restrictedSession,view'
+    || !restricted || Object.keys(restricted).sort().join(',') !== 'permissions,scope'
+    || !restricted.permissions || restricted.permissions.view !== true)
+    return { permissions: { view: false }, restrictedScope: null };
+  // A scope that cannot be read, such as one written before selections, is denied; it is never the whole project.
+  const scope = restrictedSessionScope(restricted.scope);
+  return { permissions: scope ? restricted.permissions : { view: false }, restrictedScope: scope };
 }
 
 function finiteVector(value, keys) {
@@ -791,13 +821,16 @@ class ViewerRepository {
     ).run(timestamp, timestamp, id);
   }
 
-  createSessionGrant({ modelId, modelVersionId = null, reviewAttemptId = null, sessionMode = 'published', sourceAuthorization: authorization = null, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
+  createSessionGrant({ modelId, modelVersionId = null, reviewAttemptId = null, sessionMode = 'published', sourceAuthorization: authorization = null, restrictedScope, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
     this.pruneAuthState();
     const id = crypto.randomUUID();
     const timestamp = now();
     const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
     if (sessionMode !== 'published' && sourceId !== null)
       throw new TypeError('source authorization is only valid for published sessions');
+    // Restricted mints check eligibility and the exact captured task generation,
+    // the source-version tombstone and the insert inside one write transaction.
+    return this.restrictedAtomically(restrictedScope, () => {
     const inserted = this.database.prepare(`INSERT INTO session_grants(
       id,model_id,model_version_id,review_attempt_id,session_mode,
       source_authorization_type,source_authorization_id,source_authorization_version,
@@ -808,12 +841,18 @@ class ViewerRepository {
         WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?
       )`).run(
       id, modelId, modelVersionId, reviewAttemptId, sessionMode, sourceType, sourceId, sourceVersion,
-      subject, audience, JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp,
+      subject, audience, encodeSessionPermissions(permissions, restrictedScope, { database: this.database, modelId, modelVersionId, sessionMode, audience, sourceAuthorization: authorization }), displayUnits, expiresAt, timestamp,
       sourceId, sourceType, sourceId, sourceVersion,
     );
     if (inserted.changes !== 1)
       throw Object.assign(new Error('source authorization is revoked'), { code: 'source_authorization_revoked' });
     return { id, modelId, modelVersionId, reviewAttemptId, sessionMode, sourceAuthorization: authorization, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
+    });
+  }
+
+  restrictedAtomically(restrictedScope, callback) {
+    if (restrictedScope === undefined || this.database.isTransaction) return callback();
+    return this.transaction(callback);
   }
 
   createSessionGrantAudited(input, audit) {
@@ -832,10 +871,18 @@ class ViewerRepository {
         FROM revoked_published_session_authorizations
         WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`
       ).get(row.source_authorization_type, row.source_authorization_id, row.source_authorization_version)) return null;
+      const stored = decodeSessionPermissions(row.permissions_json);
+      const restricted = stored.restrictedScope !== undefined;
+      if (restricted && !sessionWithinAuthorization(row.expires_at, stored.permissions.__authorizedUntil, at))
+        return null;
+      if (!restrictedSessionAllows(this.database, {
+        ...stored, modelId: row.model_id, modelVersionId: row.model_version_id, audience: row.audience,
+        sessionMode: row.session_mode || 'published', sourceAuthorization: sourceAuthorization(row),
+      })) return null;
       const timestamp = new Date(at).toISOString();
-      const updated = this.database.prepare(
-        'UPDATE session_grants SET redeemed_at=? WHERE id=? AND redeemed_at IS NULL',
-      ).run(timestamp, id);
+      const updated = this.database.prepare(restricted
+        ? 'UPDATE session_grants SET redeemed_at=?,restricted_redemption=1 WHERE id=? AND redeemed_at IS NULL'
+        : 'UPDATE session_grants SET redeemed_at=? WHERE id=? AND redeemed_at IS NULL').run(timestamp, id);
       if (updated.changes !== 1) return null;
       return {
         id: row.id,
@@ -846,7 +893,7 @@ class ViewerRepository {
         sourceAuthorization: sourceAuthorization(row),
         subject: row.subject,
         audience: row.audience,
-        permissions: parseJson(row.permissions_json, {}),
+        ...stored,
         displayUnits: row.display_units,
         expiresAt: row.expires_at,
       };
@@ -855,6 +902,12 @@ class ViewerRepository {
 
   viewerSession(row) {
     if (!row) return null;
+    const stored = decodeSessionPermissions(row.permissions_json);
+    if (stored.restrictedScope !== undefined) {
+      const { __authorizedUntil, ...permissions } = stored.permissions;
+      stored.permissions = permissions;
+      stored.restrictedAuthorizedUntil = __authorizedUntil;
+    }
     return {
       id: row.id,
       tokenHash: row.token_hash,
@@ -865,7 +918,7 @@ class ViewerRepository {
       sessionMode: row.session_mode || 'published',
       reviewAttemptId: row.review_attempt_id,
       sourceAuthorization: sourceAuthorization(row),
-      permissions: parseJson(row.permissions_json, {}),
+      ...stored,
       displayUnits: row.display_units,
       expiresAt: row.expires_at,
       revokedAt: row.revoked_at,
@@ -874,12 +927,15 @@ class ViewerRepository {
     };
   }
 
-  createViewerSession({ tokenHash, modelId, modelVersionId, reviewAttemptId = null, sessionMode = 'published', sourceAuthorization: authorization = null, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
+  createViewerSession({ tokenHash, modelId, modelVersionId, reviewAttemptId = null, sessionMode = 'published', sourceAuthorization: authorization = null, restrictedScope, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
+    if (restrictedScope !== undefined && !sessionWithinAuthorization(expiresAt, permissions?.__authorizedUntil, Date.now()))
+      return null;
     const id = crypto.randomUUID();
     const timestamp = now();
     const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
     if (sessionMode !== 'published' && sourceId !== null)
       throw new TypeError('source authorization is only valid for published sessions');
+    return this.restrictedAtomically(restrictedScope, () => {
     const inserted = this.database.prepare(`INSERT INTO viewer_sessions(
       id,token_hash,model_id,model_version_id,review_attempt_id,session_mode,
       source_authorization_type,source_authorization_id,source_authorization_version,
@@ -890,22 +946,56 @@ class ViewerRepository {
         WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?
       )`).run(
       id, tokenHash, modelId, modelVersionId, reviewAttemptId, sessionMode, sourceType, sourceId, sourceVersion, subject, audience,
-      JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp, timestamp,
+      encodeSessionPermissions(permissions, restrictedScope, { database: this.database, modelId, modelVersionId, sessionMode, audience, sourceAuthorization: authorization }), displayUnits, expiresAt, timestamp, timestamp,
       sourceId, sourceType, sourceId, sourceVersion,
     );
     if (inserted.changes !== 1) return null;
     return this.getViewerSessionByHash(tokenHash);
+    });
   }
 
   getViewerSessionByHash(tokenHash) {
     return this.viewerSession(this.database.prepare('SELECT * FROM viewer_sessions WHERE token_hash=?').get(tokenHash));
   }
 
+  // One deferred read transaction gives every read below (tombstone, task
+  // generation, eligibility, review state) the same WAL snapshot, so a commit
+  // from another connection between them cannot combine old and new state.
+  readSnapshot(callback) {
+    if (this.database.isTransaction) return callback();
+    this.database.exec('BEGIN');
+    try {
+      const result = callback();
+      this.database.exec('COMMIT');
+      return result;
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   viewerSessionLive(session, at = Date.now()) {
-    if (!session || session.revokedAt || Date.parse(session.expiresAt) <= at) return false;
+    return this.readSnapshot(() => this.viewerSessionLiveInSnapshot(session, at));
+  }
+
+  /** Re-read a session by token hash and decide liveness in one snapshot; null when not live. */
+  liveViewerSessionByHash(tokenHash, at = Date.now()) {
+    return this.readSnapshot(() => {
+      const session = this.getViewerSessionByHash(tokenHash);
+      return session && this.viewerSessionLiveInSnapshot(session, at) ? session : null;
+    });
+  }
+
+  viewerSessionLiveInSnapshot(session, at = Date.now()) {
+    if (!session || session.revokedAt) return false;
+    const expiry = Date.parse(session.expiresAt);
+    if (!Number.isFinite(expiry) || expiry <= at) return false;
+    if (session.restrictedScope !== undefined
+      && !sessionWithinAuthorization(session.expiresAt, session.restrictedAuthorizedUntil, at)) return false;
     if (session.sourceAuthorization && this.database.prepare(`SELECT 1 FROM revoked_published_session_authorizations
       WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`)
       .get(session.sourceAuthorization.type, session.sourceAuthorization.id, session.sourceAuthorization.version)) return false;
+    if (!restrictedSessionAllows(this.database, session)) return false;
     if (session.sessionMode !== 'review') return true;
     const attempt = this.database.prepare(`SELECT a.status,a.result_model_id,a.result_model_version_id,o.status AS output_status,v.status AS version_status
       FROM processing_attempts a
