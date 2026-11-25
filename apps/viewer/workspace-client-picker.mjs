@@ -1,8 +1,8 @@
 // Type-to-filter client picker (ARIA 1.2 combobox with a listbox popup).
 // The controller holds all behaviour and is DOM-free so it can be tested
 // directly; bindClientPicker connects it to the markup from clientPickerMarkup.
-// Choosing a client only fills the form: sharing still needs the explicit
-// confirmation checkbox and the Share button.
+// Choosing a client only fills the form: sharing still needs the review step
+// and its Share button.
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
 
@@ -11,10 +11,20 @@ export const CLIENT_PICKER_DEBOUNCE_MS=250;
 export const CLIENT_PICKER_MIN_QUERY=2;
 
 const clientKind=client=>client?.rootType==='organization'?'Organisation':client?.rootType==='standalone_client'?'Individual client':null;
-// A short, stable fragment of the workspace id, so same-named clients in one division still differ.
-export const clientReference=client=>client?.workspaceId?`ref ${String(client.workspaceId).slice(-6)}`:null;
-export function clientPickerDetails(client){
-  return [client?.organizationName||null,client?.businessName?`Division: ${client.businessName}`:null,clientKind(client),clientReference(client)].filter(Boolean);
+// "Ledge Top Drone Services Project Alpha" -> "Drone Services".
+export const clientBusinessWord=name=>name?String(name).replace(/^Ledge ?Top\s+/i,'').replace(/\s+Project Alpha$/i,'')||String(name):null;
+const nameOf=client=>client?.displayName||'Client',fold=text=>String(text).trim().toLocaleLowerCase();
+const keyOf=client=>JSON.stringify([client?.sourceId,client?.workspaceId]);
+// Different clients that share a name each get one word that tells them apart: the business, else the organisation,
+// else the kind. Only when none of those differ, the end of the id. Rows are never merged by name.
+export function clientPickerWord(client,all=[]){
+  const others=all.filter(item=>fold(nameOf(item))===fold(nameOf(client))&&keyOf(item)!==keyOf(client));
+  if(!others.length)return null;
+  for(const word of [item=>clientBusinessWord(item?.businessName),item=>item?.organizationName||null,clientKind]){
+    const own=word(client);
+    if(own&&others.every(item=>word(item)&&fold(word(item))!==fold(own)))return own;
+  }
+  return [clientBusinessWord(client?.businessName),client?.workspaceId?`ref ${String(client.workspaceId).slice(-6)}`:null].filter(Boolean).join(', ')||null;
 }
 // Pages whose rows were all withheld by the server's authority checks are skipped, up to this many in a row.
 export const CLIENT_PICKER_EMPTY_PAGE_LIMIT=5;
@@ -88,7 +98,7 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
       // Only results for the current text can be chosen.
       if(state.loading)return false;
       const client=state.items[index];if(!client)return false;
-      state.selected=client;state.active=index;state.open=false;state.query=clientPickerLabel(client);changed();onSelect(client);return true;
+      state.selected=client;state.active=index;state.open=false;state.query=clientPickerLabel(client,state.items);changed();onSelect(client,state.query);return true;
     },
     key(name){
       if(name==='ArrowDown'){this.move(1);return true}
@@ -104,16 +114,14 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
   return api;
 }
 
-// "Name — Organisation (Division)": enough to tell same-named clients apart in text.
-export function clientPickerLabel(client){
-  const name=client?.displayName||'Client',organization=client?.organizationName,division=client?.businessName;
-  const details=[division&&division!==name?division:null,clientKind(client),clientReference(client)].filter(Boolean);
-  return `${name}${organization&&organization!==name?` — ${organization}`:''}${details.length?` (${details.join(', ')})`:''}`;
+export function clientPickerLabel(client,all=[]){
+  const word=clientPickerWord(client,all);
+  return `${nameOf(client)}${word?` (${word})`:''}`;
 }
 
 export function clientPickerMarkup({id='direct-client-picker',query=''}={}){
   return `<div class="client-picker" data-client-picker>
-<label for="${esc(id)}-input"><span>Client</span></label>
+<label class="sr-only" for="${esc(id)}-input">Client</label>
 <input id="${esc(id)}-input" name="clientQuery" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${esc(id)}-list" aria-describedby="${esc(id)}-status" autocomplete="off" spellcheck="false" placeholder="Type a name, business or email" value="${esc(query)}">
 <input type="hidden" name="client" value="">
 <ul id="${esc(id)}-list" class="client-picker-list" role="listbox" aria-label="Matching clients" hidden data-client-picker-list></ul>
@@ -123,15 +131,15 @@ export function clientPickerMarkup({id='direct-client-picker',query=''}={}){
 
 export function clientPickerOptions(state,{id='direct-client-picker'}={}){
   return state.items.map((client,index)=>{
-    const details=clientPickerDetails(client);
+    const word=clientPickerWord(client,state.items);
     return `<li id="${esc(id)}-option-${index}" class="client-picker-option" role="option" data-index="${index}" aria-selected="${index===state.active}">`
       +`<span class="client-picker-name">${esc(client.displayName||'Client')}</span>`
-      +(details.length?`<small class="client-picker-meta">${esc(details.join(' · '))}</small>`:'')+'</li>';
+      +(word?`<small class="client-picker-meta">${esc(word)}</small>`:'')+'</li>';
   }).join('')+(state.loadingMore?'<li class="client-picker-more" role="presentation">Loading more clients…</li>':'');
 }
 
 export function clientPickerStatus(state){
-  if(state.selected)return `Selected: ${clientPickerLabel(state.selected)}`;
+  if(state.selected)return `Selected: ${state.query}`;
   if(state.loading)return 'Searching clients…';
   if(state.error)return 'Clients could not be loaded. Keep typing, or press the Down arrow to try again.';
   if(!state.open)return '';
@@ -139,6 +147,10 @@ export function clientPickerStatus(state){
   if(!state.items.length)return state.query.trim()?`No clients match “${state.query.trim()}”.`:'No connected clients yet.';
   return `${state.items.length}${state.cursor?'+':''} client${state.items.length===1&&!state.cursor?'':'s'} found. Use the arrow keys to choose.`;
 }
+
+// Shown only while something is wrong, empty or on its way; the rest of the status is for screen readers.
+export const clientPickerStatusShown=state=>!state.selected&&(state.loading||Boolean(state.error)
+  ||state.open&&!state.items.length&&state.query.trim().length>=Math.max(1,state.minQuery||0));
 
 export function bindClientPicker(root,{fetchPage,onSelect,initial,id='direct-client-picker',setTimer,clearTimer,minQuery=CLIENT_PICKER_MIN_QUERY}){
   const input=root.querySelector('[role="combobox"]'),list=root.querySelector('[data-client-picker-list]'),
@@ -150,13 +162,13 @@ export function bindClientPicker(root,{fetchPage,onSelect,initial,id='direct-cli
     if(open&&state.active>=0){input.setAttribute('aria-activedescendant',`${id}-option-${state.active}`);
       list.querySelector(`[data-index="${state.active}"]`)?.scrollIntoView?.({block:'nearest'});}
     else input.removeAttribute('aria-activedescendant');
-    status.textContent=clientPickerStatus(state);
+    status.textContent=clientPickerStatus(state);status.classList?.toggle('sr-only',!clientPickerStatusShown(state));
     // A short list has no scrollbar to scroll: keep loading until it fills its box or runs out.
     if(open&&state.cursor&&!state.loading&&!state.loadingMore&&Number.isFinite(list.scrollHeight)&&list.scrollHeight<=list.clientHeight+1)
       setTimeout(()=>void picker.more(),0);
   };
   const picker=createClientPicker({fetchPage,initial,minQuery,onChange:render,...(setTimer?{setTimer}:{}),...(clearTimer?{clearTimer}:{}),
-    onSelect:client=>{hidden.value=client?JSON.stringify([client.sourceId,client.workspaceId]):'';if(client)input.value=clientPickerLabel(client);onSelect?.(client)}});
+    onSelect:(client,label)=>{hidden.value=client?JSON.stringify([client.sourceId,client.workspaceId]):'';if(client)input.value=label;onSelect?.(client,label)}});
   input.oninput=()=>picker.input(input.value);
   input.onfocus=()=>void picker.focus();
   input.onkeydown=event=>{

@@ -79,7 +79,7 @@ test('keyboard: arrows move, Enter chooses without submitting, Escape closes, ty
   assert.equal(picker.key('Escape'), true); assert.equal(picker.state.open, false);
   picker.key('ArrowDown'); assert.equal(picker.key('Enter'), true);
   assert.equal(chosen.at(-1).workspaceId, 'ws-2'); assert.equal(picker.state.open, false);
-  assert.equal(picker.state.query, 'Same Name (Division B, ref ws-2)');
+  assert.equal(picker.state.query, 'Same Name (Division B)');
   assert.equal(picker.key('Tab'), false);
   picker.input('Same Nam');
   assert.equal(chosen.at(-1), null, 'editing the text clears the chosen client');
@@ -99,7 +99,7 @@ test('empty and error states are explicit', async () => {
 
 test('names, organisations and divisions containing markup are escaped', () => {
   const hostile = client('ws-1', '<img src=x onerror=alert(1)>', { organizationName: '"><script>x</script>', businessName: "O'Brien & <b>Co</b>", rootType: 'organization' });
-  const html = clientPickerOptions({ items: [hostile], active: 0, loadingMore: false });
+  const html = clientPickerOptions({ items: [hostile, client('ws-9', hostile.displayName, { businessName: 'Other' })], active: 0, loadingMore: false });
   assert.doesNotMatch(html, /<img|<script|<b>/);
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/); assert.match(html, /O&#39;Brien &amp; &lt;b&gt;Co&lt;\/b&gt;/);
   assert.match(html, /role="option"[^>]*aria-selected="true"/);
@@ -108,18 +108,23 @@ test('names, organisations and divisions containing markup are escaped', () => {
   assert.match(markup, /role="combobox"/); assert.match(markup, /aria-controls="direct-client-picker-list"/); assert.match(markup, /role="listbox"/);
   assert.doesNotMatch(markup, /<button|<select/);
   // Labels are plain text (set with textContent / escaped by callers).
-  assert.equal(clientPickerLabel(hostile), `${hostile.displayName} — ${hostile.organizationName} (${hostile.businessName}, Organisation, ref ws-1)`);
+  assert.equal(clientPickerLabel(hostile), hostile.displayName);
 });
 
-test('options show what tells same-named clients apart', () => {
+test('a row is the name; different clients with one name each get one word and are never merged', () => {
+  const plain = clientPickerOptions({ items: [client('ws-1', 'Pat Example'), client('ws-2', 'Sam Example')], active: -1, loadingMore: false });
+  assert.doesNotMatch(plain, /Division|ref |client-picker-meta/);
+  const pair = [client('ws-1', 'Pat Example', { businessName: 'Ledge Top Drone Services Project Alpha' }), client('ws-2', 'pat example', { businessName: 'Ledge Top Technologies Project Alpha' })];
+  const rows = clientPickerOptions({ items: pair, active: -1, loadingMore: false });
+  assert.match(rows, /meta">Drone Services<.*meta">Technologies</s); assert.equal(rows.match(/role="option"/g).length, 2); assert.doesNotMatch(rows, /ref |Project Alpha/);
+  assert.equal(clientPickerLabel(pair[1], pair), 'pat example (Technologies)');
   const html = clientPickerOptions({ items: [client('ws-1', 'Pat Example', { organizationName: 'Lakeside Builders', rootType: 'organization' }),
     client('ws-2', 'Pat Example', { businessName: 'Division B', rootType: 'standalone_client' })], active: -1, loadingMore: false });
-  assert.match(html, /Lakeside Builders · Division: Division A · Organisation · ref ws-1/);
-  assert.match(html, /Division: Division B · Individual client · ref ws-2/);
-  // Same name, division and type still differ by the reference, in the row and in the label used for confirmation.
+  assert.match(html, /meta">Division A<.*meta">Division B</s);
+  // Nothing else differs: only then the reference, in the row and in the label used for the review.
   const twins = [client('workspace-aaa111', 'Pat Example'), client('workspace-bbb222', 'Pat Example')];
-  assert.notEqual(clientPickerLabel(twins[0]), clientPickerLabel(twins[1]));
-  assert.match(clientPickerLabel(twins[0]), /ref aaa111/);
+  assert.notEqual(clientPickerLabel(twins[0], twins), clientPickerLabel(twins[1], twins));
+  assert.match(clientPickerLabel(twins[0], twins), /ref aaa111/);
   assert.match(clientPickerOptions({ items: twins, active: -1, loadingMore: false }), /ref bbb222/);
 });
 
@@ -195,7 +200,7 @@ test('the bound combobox keeps aria-expanded, aria-activedescendant and the chos
   key('Escape'); assert.equal(stopped, 1, 'Escape closes only the list, not the dialog'); assert.equal(list.hidden, true);
   key('ArrowDown'); key('Enter');
   assert.equal(hidden.value, JSON.stringify(['project-alpha:primary', 'ws-1'])); assert.equal(chosen.at(-1).workspaceId, 'ws-1');
-  assert.equal(input.value, 'Acme <Survey> (Division A, ref ws-1)'); assert.match(status.textContent, /^Selected: Acme <Survey>/);
+  assert.equal(input.value, 'Acme <Survey>'); assert.match(status.textContent, /^Selected: Acme <Survey>/);
   assert.equal(prevented, 4);
   input.value = 'Acme'; input.oninput(); assert.equal(hidden.value, ''); assert.equal(chosen.at(-1), null);
   picker.dispose(); assert.equal(time.pending(), 0);

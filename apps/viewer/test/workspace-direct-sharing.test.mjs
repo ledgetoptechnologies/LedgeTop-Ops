@@ -7,8 +7,8 @@ import * as directClientShare from '../workspace-direct-client-share.mjs';
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 test('public and authenticated client sharing forms constrain intrinsic input widths',()=>{
   const css=readFileSync(new URL('../workspace-management.css',import.meta.url),'utf8');
-  assert.match(css,/\.share-form,#client-grant-form\{min-width:0;grid-template-columns:minmax\(0,1fr\)\}/);
-  assert.match(css,/#client-grant-form label,#client-grant-form input,#client-grant-form select\{min-width:0\}/);
+  assert.match(css,/\.share-dialog-form\{min-width:0;grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(css,/\.share-dialog-form label,\.share-dialog-form input,\.share-dialog-form select\{min-width:0\}/);
 });
 test('conditional sharing fields stay hidden despite managed-form layout rules',()=>{
   const css=readFileSync(new URL('../workspace-management.css',import.meta.url),'utf8');
@@ -22,7 +22,7 @@ function declaration(name){
   return next?rest.slice(0,next.index):rest;
 }
 const names=['invalidatePublicationAuthority','publicationAuthorityLive','clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
-  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','publicLinkState','publicTabLabel','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink','shareFence','publicationAudience','confirmPublication','reopenMovedShare','newLinkExpiry'];
+  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','publicLinkState','publicTabLabel','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink','shareFence','publicationAudience','confirmPublication','reopenMovedShare'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
   const state={token:'signed-in',adminSession:{id:'session',subject:'ops:me',expiresAt:'2099-01-01T00:00:00Z'},projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
@@ -49,7 +49,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     mutate:async(...args)=>calls.push({mutation:args}),toast:(...args)=>notices.push(args),navigator:{clipboard:{writeText:async()=>{throw new Error('clipboard denied')}}},
     dialogs:{confirm:async()=>{decisions.push('confirm');return true},form:async()=>null},
   });
-  vm.runInContext(/^const PUBLIC_LINK_DAYS=.*$/m.exec(source)[0]+'\n'+names.map(declaration).join('\n'),context);
+  vm.runInContext(names.map(declaration).join('\n'),context);
   const form={dataset:{outputId:'output'},isConnected:true,elements:{label:{value:''},password:{value:''},expiresAt:{value:''},
     measure:{checked:true},cameras:{checked:true},download:{checked:false}},button:{disabled:false},querySelector(){return this.button},
     querySelectorAll(selector){return selector==='input[name="allowedViews"]'?[{checked:true,value:'model'}]:[]}};
@@ -84,10 +84,11 @@ test('dedicated ready sharing offers explicit link creation without publish UX o
   const f=fixture();await f.context.openShareModal('project','output');
   assert.match(f.html(),/Create public link/);assert.match(f.html(),/This model is private/);
   assert.doesNotMatch(f.html(),/Review & publish|publish-attempt|project-share-form|name="wholeProject"/);
-  assert.doesNotMatch(f.html(),/name="download" checked/);assert.match(f.html(),/Optional password/);
+  assert.match(f.html(),/Optional password/);
   assert.match(f.html(),/Downloads, including model report/);
   assert.match(f.html(),/Direct Operations client sharing is not available/);
-  assert.match(f.html(),/No Operations account or client workspace is required/);
+  assert.doesNotMatch(f.html(),/No Operations account|Links follow/);
+  assert.match(f.html(),/class="segmented-tabs" role="tablist"[^>]*><button[^>]*data-share-mode="internal".*data-share-mode="public"/);
   assert.match(f.html(),/data-share-mode="internal" role="tab"[^>]*aria-selected="true"/);
   assert.match(f.html(),/data-share-mode-panel="public"[^>]* hidden/);
   assert.equal(f.calls.every(call=>!call.options.method||call.options.method==='GET'),true);
@@ -104,7 +105,7 @@ test('creating a link for a private model says clients with the whole project ge
   let asked='';f.context.dialogs.confirm=async text=>{asked=text;return false};await f.context.confirmPublication(f.output,'project',true,f.context.shareFence(f.form,f.output,'project'));
   assert.match(asked,/clients who have the whole project also get newly activated tasks/);
   Object.assign(f.output,{status:'published',activePublished:true});f.state.sharePreflight={};f.context.shareModal('project','output');
-  assert.match(f.html(),/Links follow this model’s latest published version\./);assert.doesNotMatch(f.html(),/not published yet/);
+  assert.doesNotMatch(f.html(),/Links follow/);assert.doesNotMatch(f.html(),/not published yet/);
 });
 
 for(const gone of ['output row','task','task moved to another project','every row'])for(const when of ['before the client panel is built','before a later panel rebuild'])
@@ -142,16 +143,34 @@ test('a task Share opened without its model row offers no form, and a form alrea
   g.state.shareContext={id:'context',projectId:'project',taskId:'task',taskName:'North wall'};
   g.context.bindClientPicker=(_root,options)=>{options.onSelect({sourceId:'s',workspaceId:'w',displayName:'Acme'});return{dispose(){}}};
   const summary={textContent:''},review={hidden:true},reviewButton={hidden:false},box={dataset:{},onclick:null,textContent:'',focus(){}};
-  const form={isConnected:true,elements:{client:{value:JSON.stringify(['s','w'])},confirmedScope:{checked:true},includeLater:{checked:true,disabled:true},expiresAt:{value:''},measure:{checked:true},cameras:{checked:false},download:{checked:false}},
+  const form={isConnected:true,elements:{client:{value:JSON.stringify(['s','w'])},includeLater:{checked:true,disabled:true},expiresAt:{value:''},measure:{checked:true},cameras:{checked:false},download:{checked:false}},
     querySelector:selector=>({'[data-direct-summary]':summary,'[data-direct-review]':review,'[data-direct-review-button]':reviewButton,'input[name="scope"]:checked':{value:'tasks'}})[selector]||box,
     querySelectorAll:selector=>selector==='input[name="taskId"]'?[{value:'task',checked:true}]:[]};
-  g.context.bindDirectShare(form,'project','output');form.elements.confirmedScope.checked=true;
+  g.context.bindDirectShare(form,'project','output');
   await form.onsubmit({preventDefault(){}});assert.equal(form.reviewing,true,'the form works while its task is there');
   g.state.outputs=[];await form.onsubmit({preventDefault(){}});
   assert.equal(summary.textContent,directClientShare.SHARE_TARGET_MISSING);assert.equal(g.calls.some(call=>call.options?.method==='POST'),false);
   g.state.outputs=[g.output];await form.onsubmit({preventDefault(){}});
   g.state.tasks=[];await form.onsubmit({preventDefault(){}});
   assert.equal(g.calls.some(call=>call.options?.method==='POST'),false);
+});
+test('a task unpublished before or during the review sends nothing and is named',async()=>{
+  for(const when of ['reading','reviewed']){
+    const g=fixture();Object.assign(g.output,{status:'published',activePublished:true});g.state.clientDirectAccess={clients:[],grants:[]};
+    g.state.tasks[0].displayName='North wall';g.state.shareContext={id:'context',projectId:'project',taskId:'task',taskName:'North wall'};
+    g.context.bindClientPicker=(_root,options)=>{options.onSelect({sourceId:'s',workspaceId:'w',displayName:'Acme'});return{dispose(){}}};
+    const unpublish=()=>{g.state.outputs=[{...g.output,status:'ready',activePublished:false}]};
+    g.context.refreshProjectOutputs=async()=>{if(when==='reading')unpublish();return true};
+    const summary={textContent:''},box={dataset:{},focus(){}};
+    const form={isConnected:true,elements:{client:{value:JSON.stringify(['s','w'])},includeLater:{checked:false,disabled:true},expiresAt:{value:''},measure:{checked:true},cameras:{checked:true},download:{checked:true}},
+      querySelector:selector=>({'[data-direct-summary]':summary,'input[name="scope"]:checked':{value:'tasks'}})[selector]||box,
+      querySelectorAll:selector=>selector==='input[name="taskId"]'?[{value:'task',checked:true}]:[]};
+    g.context.bindDirectShare(form,'project','output');
+    await form.onsubmit({preventDefault(){}});
+    if(when==='reviewed'){assert.equal(form.reviewing,true);unpublish();await form.onsubmit({preventDefault(){}})}
+    assert.ok(!form.reviewing);assert.match(summary.textContent,/“North wall” can no longer be shared/);
+    assert.equal(g.calls.filter(call=>call.options?.method==='POST').length,0);
+  }
 });
 test('a project Share is unaffected by task rows coming and going',async()=>{
   const f=fixture();f.respondDirect(async()=>({clients:[],grants:[],clientsNextCursor:null}));f.state.outputs=[];f.state.tasks=[];
@@ -491,10 +510,10 @@ test('legacy active published output needs no processing attempt or publication 
 
 test('ready create form requires share-create and publish; published share needs only share-create',()=>{
   for(const permissions of [[],['viewer.processing.publish'],['viewer.shares.create'],['viewer.shares.read']]){
-    const f=fixture(permissions);f.context.shareModal('project','output');assert.doesNotMatch(f.html(),/class="manage-form share-form"/);
+    const f=fixture(permissions);f.context.shareModal('project','output');assert.doesNotMatch(f.html(),/class="manage-form share-dialog-form share-form"/);
   }
   const f=fixture(['viewer.shares.create']);f.output.activePublished=true;f.output.status='published';
-  f.context.shareModal('project','output');assert.match(f.html(),/class="manage-form share-form"/);
+  f.context.shareModal('project','output');assert.match(f.html(),/class="manage-form share-dialog-form share-form"/);
   assert.doesNotMatch(f.html(),/data-action="revoke-share"/);
 });
 
@@ -728,7 +747,7 @@ test('whole-project client scope requires current and future publications',()=>{
 
 test('project sharing has no public creation form or public task forms',async()=>{
   const f=fixture();f.context.shareModal('project');f.context.bindProjectShareCard('project');
-  assert.doesNotMatch(f.html(),/project-share-form|class="manage-form share-form"|Create public link|Create whole-project link/);
+  assert.doesNotMatch(f.html(),/project-share-form|class="manage-form share-dialog-form share-form"|Create public link|Create whole-project link/);
   assert.match(f.html(),/A public link opens one task\. Use Share on that task to create one\./);
   assert.match(f.html(),/data-legacy-project-shares/);assert.equal(f.calls.length,0);
   await f.context.createOutputShare(f.form,'project',null);assert.equal(f.calls.length,0);
@@ -743,7 +762,7 @@ test('a project and a task open the same Share dialog: same tabs, same order, st
   f.context.shareModal('project','output');const task=frame(f);
   assert.equal(project.title,'Share project: Site');assert.equal(task.title,'Share task: North wall');
   assert.deepEqual(task.tabs,project.tabs);assert.deepEqual(task.panels,project.panels);
-  assert.deepEqual(project.tabs.map(item=>[item[5],item[4]]),[['Public link','false'],['Client Workspace','true']]);
+  assert.deepEqual(project.tabs.map(item=>[item[5],item[4]]),[['Client Workspace','true'],['Public link','false']]);
   assert.deepEqual(project.panels.map(item=>[item[0],item[3]]),[['internal',undefined],['public','hidden']]);
   // Both dialogs switch tabs, and a refresh of the dialog keeps the chosen tab.
   const tabs=['public','internal'].map(mode=>({dataset:{shareMode:mode},tabIndex:0,setAttribute(){},focus(){},click(){this.onclick()}}));
@@ -843,16 +862,14 @@ test('failed or cancelled revoke does not erase an otherwise valid created link'
   await element.onclick();assert.equal(f.state.lastShareUrl,'https://viewer.test/link');
 });
 
-test('a new public link starts without camera positions and ends in 30 days; saved links keep their own settings',()=>{
-  const f=fixture(),now=Date.parse('2026-10-20T15:04:00Z');
+test('a new public link starts with everything on and no end; saved links keep their own settings',()=>{
+  const f=fixture();
   for(const [published,status] of [[false,'ready'],[true,'published']]){
     Object.assign(f.output,{activePublished:published,status});f.context.shareModal('project','output');
-    const form=/<form class="manage-form share-form"[\s\S]*?<\/form>/.exec(f.html())[0];
-    assert.match(form,/name="measure" checked/);assert.doesNotMatch(form,/name="cameras" checked|name="download" checked/);assert.match(form,/name="cameras"/);
-    const value=/name="expiresAt" type="datetime-local" value="([^"]+)"/.exec(form)[1],ahead=new Date(value).getTime()-Date.now();
-    assert.ok(Math.abs(ahead-30*86400000)<90_000,`ends ${ahead} ms ahead`);assert.doesNotMatch(form,/name="expiresAt"[^>]*required/);
+    const form=/<form class="manage-form share-dialog-form share-form"[\s\S]*?<\/form>/.exec(f.html())[0];
+    for(const name of ['measure','cameras','download'])assert.match(form,new RegExp(`name="${name}" checked`));
+    assert.match(form,/name="expiresAt" type="datetime-local">/);
   }
-  assert.equal(new Date(f.context.newLinkExpiry(now)).getTime(),now+30*86400000);
   f.state.shares.output=[{id:'old',permissions:{view:true,measure:false,cameras:true,download:true},expiresAt:null,hasPassword:false}];
   f.modalContent.querySelector=()=>({elements:{passwordAction:{}},querySelector:()=>null,querySelectorAll:()=>[]});
   f.context.editShareModal('project','output','old');
@@ -1039,20 +1056,17 @@ test('direct client sharing leads the Share dialog and keeps Operations project 
   assert.match(html,/The whole project<\/label>/);assert.match(html,/Also share models published later/);
   assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
 });
-test('changing or clearing the chosen client unticks the confirmation',()=>{
+test('changing or clearing the chosen client leaves the review',()=>{
   const f=fixture();f.state.clientDirectAccess={clients:[],grants:[]};let bound;
   f.context.bindClientPicker=(_root,options)=>{bound=options;return {dispose(){}}};
-  const confirmed={checked:false},summary={textContent:''};
-  const form={isConnected:true,elements:{client:{value:''},confirmedScope:confirmed,includeLater:{checked:false},expiresAt:{value:''},measure:{checked:true},cameras:{checked:false},download:{checked:false}},
-    querySelector:selector=>selector==='[data-direct-summary]'?summary:selector==='[data-client-picker]'?{}:selector==='input[name="scope"]:checked'?{value:'project'}:selector==='[data-direct-review]'?{hidden:true}:selector==='[data-direct-review-button]'?{hidden:false}:selector==='[data-direct-back]'?{}:null,
+  const summary={textContent:''},review={hidden:true};
+  const form={isConnected:true,elements:{client:{value:''},includeLater:{checked:false},expiresAt:{value:''},measure:{checked:true},cameras:{checked:false},download:{checked:false}},
+    querySelector:selector=>selector==='[data-direct-summary]'?summary:selector==='[data-client-picker]'?{}:selector==='input[name="scope"]:checked'?{value:'project'}:selector==='[data-direct-review]'?review:selector==='[data-direct-review-button]'?{hidden:false}:selector==='[data-direct-back]'?{}:null,
     querySelectorAll:()=>[]};
   f.context.bindDirectShare(form,'project',null);
   const first={sourceId:'project-alpha:primary',workspaceId:'ws-1',displayName:'Pat Example',businessName:'Division A'};
-  bound.onSelect(first);confirmed.checked=true;
-  bound.onSelect({...first});assert.equal(confirmed.checked,true,'the same client again keeps the confirmation');
-  bound.onSelect({...first,workspaceId:'ws-2'});assert.equal(confirmed.checked,false,'a different client needs a fresh confirmation');
-  confirmed.checked=true;bound.onSelect(null);assert.equal(confirmed.checked,false,'clearing the client needs a fresh confirmation');
-  assert.match(summary.textContent,/Choose a client/);
+  for(const next of [first,{...first,workspaceId:'ws-2'},null]){form.reviewing=true;review.hidden=false;bound.onSelect(next);assert.equal(form.reviewing,false);assert.equal(review.hidden,true)}
+  assert.equal(summary.textContent,'');
 });
 test('without direct client sharing the Share dialog is unchanged',async()=>{
   const f=fixture();await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
