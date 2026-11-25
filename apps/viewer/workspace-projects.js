@@ -20,7 +20,7 @@ import { createWorkspaceNavigationWork, workspaceNavigationState } from './works
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, directClientTwin, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, directClientKey, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, directClientKey, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -1895,14 +1895,12 @@ function bindDirectShare(form,projectId,onlyOutputId){
     let bodies,target;const choices=confirmed=>{target=read();const key=JSON.stringify([target.bodies(),target.what,target.published,target.client&&directClientKey(target.client)]);bodies=target.bodies({confirmed});return key};
     let chosen;try{chosen=choices(form.reviewing===true)}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
     if(!form.reviewing){
-      // What is published now, and is there another client that would read the same? Both are read before the review.
+      // What is published now is read again before the review.
       const client=picked,asked=JSON.stringify(bodies);form.shareBusy=true;summary.textContent='Preparing the review…';
-      let twin=null;
-      try{[fresh,twin]=await Promise.all([refreshProjectOutputs(projectId).then(read=>read===true,()=>false),client?directClientTwin(api,projectId,client):null])}finally{form.shareBusy=false}
+      try{fresh=await refreshProjectOutputs(projectId).then(read=>read===true,()=>false)}finally{form.shareBusy=false}
       if(!live())return;
       if(directShareContext(onlyOutputId).targetMissing){summary.textContent=SHARE_TARGET_MISSING;return}
       if(picked!==client){sync();return}
-      if(client)picked={...client,twin};
       try{chosen=choices(false)}catch(error){summary.textContent=error.message;return}
       if(JSON.stringify(bodies)!==asked){sync();return}
       // The review says it all; the line above it is for progress and refusals.

@@ -59,29 +59,11 @@ async function sameNameClients(api,projectId,grants){
 }
 export const directClientKey=client=>JSON.stringify([client.sourceId,client.workspaceId]);
 export const directClientLabel=client=>client?.pickerLabel||clientPickerLabel(client);
-// The review names the exact client whatever page of results was loaded: always its business and organisation,
-// and its full workspace id when another client has all of those too, or when that could not be ruled out.
+// The review names the exact client: always its business and organisation, and its full workspace reference.
 export function directClientReviewName(client){
   const name=client?.displayName||'Client',organization=client?.organizationName;
-  const details=[clientBusinessWord(client?.businessName),organization&&organization!==name?organization:null,
-    client?.twin===false||!client?.workspaceId?null:`workspace ${client.workspaceId}`].filter(Boolean);
+  const details=[clientBusinessWord(client?.businessName),organization&&organization!==name?organization:null].filter(Boolean);
   return `${name}${details.length?` (${details.join(', ')})`:''}`;
-}
-// Whether another client looks the same in the review. null when the search could not be read to its end.
-export async function directClientTwin(api,projectId,client){
-  const same=text=>String(text??'').trim().toLocaleLowerCase();
-  const look=item=>JSON.stringify([same(item.displayName),same(clientBusinessWord(item.businessName)),same(item.organizationName)]);
-  if(same(client.displayName).length<2)return null;
-  try{
-    for(let cursor=null,pages=0;pages<5;pages++){
-      const page=directClientAccess(await api(directClientsPath(projectId,{query:client.displayName,cursor,include:'clients'})));
-      if(!page)return null;
-      if(page.clients.some(item=>directClientKey(item)!==directClientKey(client)&&look(item)===look(client)))return true;
-      cursor=page.clientsNextCursor||null;
-      if(!cursor)return false;
-    }
-  }catch{}
-  return null;
 }
 // Only tasks with a live published model can be shared one by one.
 export function shareableTasks(projectId,tasks,outputs){
@@ -113,9 +95,9 @@ const permissionList=permissions=>{
 export function directShareReviewMarkup({client,what,permissions,expiresAt,dateTime=value=>value}){
   const can=permissionList(permissions);
   const name=directClientReviewName(client);
-  return [['Client',name],['Who',`Authorized members of ${directClientReviewName({...client,twin:false})}’s portal account`],['Shared',what],['Can',can[0].toUpperCase()+can.slice(1)],
+  return [['Client',name],['Who',`Authorized members of ${name}’s portal account`],['Shared',what],['Can',can[0].toUpperCase()+can.slice(1)],
     ['Ends',expiresAt?dateTime(expiresAt):'No end date']]
-    .map(([label,value])=>`<dt>${label}</dt><dd>${esc(value)}</dd>`).join('');
+    .map(([label,value])=>`<dt>${label}</dt><dd>${esc(value)}${label==='Client'&&client?.workspaceId?`<small class="direct-share-reference">Workspace ${esc(client.workspaceId)}</small>`:''}</dd>`).join('');
 }
 
 // The task this Share was opened on is gone from the project: nothing can be shared from here.

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { directClientReviewName, SHARE_TARGET_MISSING, directClientAccess, directClientLabel, directClientsPath, directGrantRows, directScopeSummary, directShareDefaultScope, directShareErrorText, directShareForm, directClientTwin, directShareReviewMarkup, loadDirectClientAccess, readDirectShareForm, shareableTasks } from '../workspace-direct-client-share.mjs';
+import { directClientReviewName, SHARE_TARGET_MISSING, directClientAccess, directClientLabel, directClientsPath, directGrantRows, directScopeSummary, directShareDefaultScope, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, readDirectShareForm, shareableTasks } from '../workspace-direct-client-share.mjs';
 
 const clients=[{sourceId:'source-a',workspaceId:'ws-1',displayName:'Acme Construction',businessName:'Ledge Top'},{sourceId:'source-a',workspaceId:'ws-2',displayName:'Harbor Works',businessName:null}];
 const tasks=[{id:'task-1',name:'North wall'},{id:'task-2',name:'South wall'}];
@@ -180,9 +180,9 @@ test('the shared-with list says what a client can do and shows an expired share 
 
 test('the review step repeats who, what, permissions and expiry',()=>{
   const client={...clients[0],displayName:'<b>Acme</b>',businessName:'Ledge Top Drone Services Project Alpha'};
-  const read=readDirectShareForm(form({client:key}),{projectId:'project',projectName:'Site',tasks,clients:[{...client,organizationName:'Acme Group',twin:false}]});
+  const read=readDirectShareForm(form({client:key}),{projectId:'project',projectName:'Site',tasks,clients:[{...client,organizationName:'Acme Group',workspaceId:'ws-1'}]});
   const text=directShareReviewMarkup({client:read.client,what:read.what,permissions:{measure:true,cameras:false,download:true},expiresAt:'2030-01-02T00:00:00.000Z',dateTime:()=>'Jan 2, 2030'});
-  assert.equal(text,'<dt>Client</dt><dd>&lt;b&gt;Acme&lt;/b&gt; (Drone Services, Acme Group)</dd><dt>Who</dt><dd>Authorized members of &lt;b&gt;Acme&lt;/b&gt; (Drone Services, Acme Group)’s portal account</dd><dt>Shared</dt><dd>Whole project Site. Published when this opened: “North wall”, “South wall”, and later ones</dd><dt>Can</dt><dd>View, measure and download</dd><dt>Ends</dt><dd>Jan 2, 2030</dd>');
+  assert.equal(text,'<dt>Client</dt><dd>&lt;b&gt;Acme&lt;/b&gt; (Drone Services, Acme Group)<small class="direct-share-reference">Workspace ws-1</small></dd><dt>Who</dt><dd>Authorized members of &lt;b&gt;Acme&lt;/b&gt; (Drone Services, Acme Group)’s portal account</dd><dt>Shared</dt><dd>Whole project Site. Published when this opened: “North wall”, “South wall”, and later ones</dd><dt>Can</dt><dd>View, measure and download</dd><dt>Ends</dt><dd>Jan 2, 2030</dd>');
   const task=readDirectShareForm(form({client:key,scope:'tasks',checked:['task-1']}),{projectId:'project',projectName:'Site',tasks,clients});
   assert.match(directShareReviewMarkup({client:task.client,what:task.what,permissions:{},expiresAt:null}),/Task “North wall”.*No end date/);
 });
@@ -202,18 +202,6 @@ test('same-named clients with access are told apart by business, and never by na
   assert.match(rows,/Pat Example <span[^>]*>Drone Services<.*g-1.*Pat Example <span[^>]*>Technologies<.*g-2/s);assert.doesNotMatch(rows,/ref |Project Alpha/);
   const single=directGrantRows({grants:[grant('g-1','a','w-1'),{...grant('g-3','a','w-1'),scopeType:'task',taskId:'task-1'}]},{projectId:'project',tasks});
   assert.doesNotMatch(single,/client-picker-meta/,'one client with two shares needs no word');
-});
-
-test('the review names one client whatever page was loaded',async()=>{
-  const me={sourceId:'a',workspaceId:'workspace-aaa111',displayName:'Pat Example',businessName:'Ledge Top Drone Services Project Alpha'};
-  const other={...me,workspaceId:'workspace-bbb222'},pages=list=>async path=>list[Number(new URL(path,'https://x').searchParams.get('cursor')||0)];
-  const page=(clients,next=null)=>({clients,grants:[],clientsNextCursor:next});
-  assert.equal(await directClientTwin(pages([page([me],'1'),page([other])]),'p',me),true,'a twin on a later page counts');
-  assert.equal(await directClientTwin(pages([page([me,{...other,businessName:'Ledge Top Technologies Project Alpha'}])]),'p',me),false);
-  assert.equal(await directClientTwin(async()=>{throw new Error('down')},'p',me),null);
-  assert.equal(await directClientTwin(async()=>page([me],'again'),'p',me),null,'a list without end is not an answer');
-  assert.equal(directClientReviewName({...me,twin:false}),'Pat Example (Drone Services)');
-  for(const twin of [true,null])assert.equal(directClientReviewName({...me,twin}),'Pat Example (Drone Services, workspace workspace-aaa111)');
 });
 
 test('a chosen task that can no longer be shared refuses the whole share and is named',()=>{
