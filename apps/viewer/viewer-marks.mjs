@@ -858,7 +858,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       const text = h(document, 'span', { class: 'viewer-mark-list-name' }, h(document, 'span', { text: mark.name }),
         h(document, 'small', { text: [category?.name, !mark.mine ? (mark.author === 'staff' ? 'From project staff' : 'From a client')
           : mark.visibility === 'client' && mark.shareAccount ? accountLabel(mark.shareAccount)
-            : mark.visibility !== defaultVisibility() && VISIBILITY_LABEL[mark.visibility]].filter(Boolean).join(' · ') }));
+            : sharingValue(mark) !== defaultVisibility() && VISIBILITY_LABEL[sharingValue(mark)]].filter(Boolean).join(' · ') }));
       if (!view.map) return h(document, 'li', {}, icon, text);
       const button = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'aria-current': mark.id === selectedId ? 'true' : false }, icon, text);
       on(button, 'click', () => select(mark.id));
