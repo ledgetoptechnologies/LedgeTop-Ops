@@ -282,7 +282,8 @@ public actor ManagedOAuthCoordinator {
         return ManagedOAuthCredential(accessToken: credential.accessToken, refreshToken: nil, expiresAt: credential.expiresAt)
     }
     /// Persist a bounded, access-token-only read session after the caller has
-    /// fetched the first permitted Operations page.
+    /// verified the read-only server session. Individual data areas are loaded
+    /// separately so authentication does not require unrelated read permissions.
     public func saveReadOnlySession(to store: ManagedAccessOnlyRestore, serverSession: MobilePilotSession) async throws {
         guard let credential, let client = credentialClientID, credential.expiresAt > Date(),
               revocationsInFlight == 0 else { throw MobilePilotError.unavailable }
