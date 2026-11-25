@@ -355,9 +355,7 @@ test('Viewer publication preserves the ACK and folder migrations and pins the ex
   const trashPurge = migrations.find(({ version }) => version === reviewedTrashPurgeMigration.version);
   assert.equal(createHash('sha256').update(trashPurge.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedTrashPurgeSqlSha256, 'migration 86 SQL must match the reviewed trash-purge schema');
   const sharing = migrations.at(-1);
-  assert.equal(createHash('sha256').update(sharing.sql.replace(/
-/g, '
-')).digest('hex'), reviewedMarkSharingSqlSha256, 'migration 90 SQL must match the reviewed mark-sharing schema');
+  assert.equal(createHash('sha256').update(sharing.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedMarkSharingSqlSha256, 'migration 90 SQL must match the reviewed mark-sharing schema');
 });
 
 test('The candidate image check fails without schema 84 even though the maximum version is unchanged', () => {

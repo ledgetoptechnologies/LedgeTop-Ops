@@ -128,14 +128,14 @@ test('marks nobody shared stay with their owner, whatever else is asked for or a
   };
   const made = {}, categories = {};
   for (const [who, token] of Object.entries(people)) {
-    const omitted = await request(token, 'POST', '', point({ name: who }));
+    const client = !['staff', 'otherStaff', 'sameName'].includes(who);
+    const omitted = await request(token, 'POST', '', point({ name: who, ...(!client && { visibility: 'private' }) }));
     assert.equal(omitted.status, 201, who);
     assert.equal(omitted.body.mark.visibility, 'private', who);
     made[who] = omitted.body.mark;
     categories[who] = { id: randomUUID(), name: 'Category', color: '#3366ff', icon: 'flag' };
     assert.equal((await request(token, 'POST', 'categories', categories[who])).status, 201, who);
-    const client = !['staff', 'otherStaff', 'sameName'].includes(who);
-    assert.deepEqual((await request(token)).body.capabilities.visibility, client ? ['private', 'staff'] : ['private'], who);
+    assert.deepEqual((await request(token)).body.capabilities.visibility, client ? ['private', 'staff'] : ['shared', 'private'], who);
     for (const visibility of client ? ['internal', 'client'] : ['staff', 'internal', 'client']) {
       assert.equal((await request(token, 'POST', '', point({ visibility }))).status, 403, `${who} ${visibility}`);
       assert.equal((await request(token, 'PUT', made[who].id, { ...point(), id: made[who].id, revision: 1, visibility })).status, 403, `${who} ${visibility}`);
@@ -191,7 +191,7 @@ test('without a verified individual identity a client reads nothing, even under 
         const transient = session('client', subject, { permissions });
         const list = await request(transient);
         assert.equal(list.status, 200);
-        assert.deepEqual(list.body, { marks: [], categories: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] } });
+        assert.deepEqual(list.body, { marks: [], categories: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'], ...(!options && { shared: true, access: [] }) } });
         assert.equal((await request(transient, 'GET', mark.id)).status, 403);
         assert.equal((await request(transient, 'HEAD')).status, 403);
         assert.equal((await request(transient, 'GET', 'audiences')).status, 403);
