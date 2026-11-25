@@ -26,7 +26,6 @@ function selectedTaskForm() {
   return {
     elements: {
       client: { value: JSON.stringify([sourceId, workspaceId]) },
-      confirmedScope: { checked: true },
       expiresAt: { value: futureLocalDateTime() },
       measure: { checked: false }, cameras: { checked: false }, download: { checked: false },
     },
@@ -36,10 +35,13 @@ function selectedTaskForm() {
 }
 
 test('Viewer task-share form body passes the direct HTTP proxy contract without a grant wrapper', async t => {
-  const [body] = readDirectShareForm(selectedTaskForm(), {
-    projectId: viewerProjectId, projectName: 'Synthetic project', tasks, clients,
-  }).bodies();
-  assert.ok(body);
+  // Review builds the body without consent; only the Share click on the review confirms it.
+  const read = readDirectShareForm(selectedTaskForm(), { projectId: viewerProjectId, projectName: 'Synthetic project', tasks, clients });
+  const [reviewed] = read.bodies();
+  assert.equal(reviewed.confirmedScope, false);
+  const [body] = read.bodies({ confirmed: true });
+  assert.equal(body.confirmedScope, true);
+  assert.deepEqual({ ...body, confirmedScope: false }, reviewed, 'Share sends exactly what was reviewed');
   assert.ok(Number.isFinite(Date.parse(body.expiresAt)) && Date.parse(body.expiresAt) >= Date.now() + 7 * 24 * 60 * 60 * 1000);
   assert.deepEqual(body.permissions, { measure: false, cameras: false, download: false });
   assert.equal(body.scopeType, 'task');
@@ -71,7 +73,18 @@ test('Viewer task-share form body passes the direct HTTP proxy contract without 
   const server = await new Promise(resolve => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
   t.after(() => new Promise(resolve => server.close(resolve)));
 
-  // This is the body/key pair emitted by the Viewer form's POST call.
+  const post = (payload, key = idempotencyKey) => fetch(`http://127.0.0.1:${server.address().port}${PATH}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key, Authorization: 'Bearer synthetic-browser-session' },
+    body: JSON.stringify(payload),
+  });
+  // Nothing is forwarded before Share, and a body that skipped the review's Share is refused.
+  assert.deepEqual(forwarded, []);
+  const unconfirmed = await post(reviewed, 'direct-browser-transport-idempotency-0000');
+  assert.equal(unconfirmed.status, 400);
+  assert.deepEqual(forwarded, [], 'a body without consent never reaches Operations');
+
+  // This is the body/key pair emitted by the Viewer form's POST call after Share on the review.
   const response = await fetch(`http://127.0.0.1:${server.address().port}${PATH}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey, Authorization: 'Bearer synthetic-browser-session' },
