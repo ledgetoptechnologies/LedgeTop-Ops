@@ -397,7 +397,8 @@ test('the store stops at its limit and on a page that does not move on', async (
   const answer = body => ({ ok: true, status: 200, json: async () => body });
   for (const [name, page] of [
     ['repeated', path => ({ marks: [row(1, 'a')], categories: [], next: 'same' })],
-    ['empty', path => ({ marks: [], categories: [], next: path.includes('after') ? 'again' : 'first' })],
+    ['cycle', path => ({ marks: [], categories: [], next: path.includes('after=one') ? 'two' : 'one' })],
+    ['moving empty', path => { const n = Number(new URLSearchParams(path.split('?')[1] || '').get('after') || 0); return { marks: [], categories: [], next: String(n + 1) }; }],
     ['endless', path => { const n = Number(new URLSearchParams(path.split('?')[1] || '').get('after') || 0); return { marks: Array.from({ length: 400 }, (_, i) => row(n * 400 + i, 'b')), categories: [], next: String(n + 1) }; }],
   ]) {
     const asked = [];
@@ -411,12 +412,30 @@ test('the store stops at its limit and on a page that does not move on', async (
     await store.setScope({ mode: 'session', key: name, token: () => 'synthetic-token-value' });
     const shared = asked.filter(path => path.startsWith('/api/v1/marks/shared')).length;
     if (name === 'endless') assert.ok(store.state.marks.length <= 5000 && shared <= 13, name);
-    else assert.ok(shared <= 2, `${name} ${shared}`);
+    else if (name === 'moving empty') assert.ok(shared <= 101, `${name} ${shared}`);
+    else assert.ok(shared <= 3, `${name} ${shared}`);
     asked.length = 0;
     await store.loadDeleted();
     const deleted = asked.filter(path => path.startsWith('/api/v1/marks/deleted')).length;
-    assert.ok(store.state.deleted.length <= 5000 && (name === 'endless' ? deleted <= 13 : deleted <= 2), `${name} deleted ${deleted}`);
+    assert.ok(store.state.deleted.length <= 5000 && (name === 'endless' ? deleted <= 13 : deleted <= 101), `${name} deleted ${deleted}`);
   }
+});
+
+test('an empty page that moves on is followed to the next real one', async () => {
+  const { createMarksStore } = await import('../viewer-marks-store.mjs');
+  const mark = id => ({ ...point({ id }), revision: 1, mine: false, editable: false });
+  const pages = { '': { marks: [], categories: [], next: 'c1' }, c1: { marks: [mark('00000000-0000-4000-8000-000000000001')], categories: [], next: null } };
+  const answer = body => ({ ok: true, status: 200, json: async () => body });
+  const request = async path => {
+    if (path === '/api/v1/marks') return answer({ marks: [], categories: [], starters: [], capabilities: { write: true, staff: true, visibility: ['shared', 'private'], shared: true } });
+    const after = new URLSearchParams(path.split('?')[1] || '').get('after') || '';
+    return answer(pages[after]);
+  };
+  const store = createMarksStore({ request });
+  await store.setScope({ mode: 'session', key: 'k', token: () => 'synthetic-token-value' });
+  assert.deepEqual(store.state.marks.map(row => row.id), ['00000000-0000-4000-8000-000000000001']);
+  await store.loadDeleted();
+  assert.deepEqual(store.state.deleted.map(row => row.id), ['00000000-0000-4000-8000-000000000001']);
 });
 
 test('shared lists come in bounded pages', async t => {

@@ -12,6 +12,8 @@ const MARK_FIELDS = ['id', 'geometry', 'name', 'note', 'categoryId', 'color', 'i
 const UNDO_LIMIT = 20;
 // What others share arrives in pages; this many are shown at most.
 const SHARED_LIMIT = 5000;
+// And this many pages at most, as a page may be empty.
+const PAGE_LIMIT = 100;
 // How long an answer is waited for before a change counts as not answered (a large one
 // longer, by its size), and for the check whether it was made.
 export const WRITE_MS = 30_000;
@@ -162,18 +164,25 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       updatedAt: now, author: 'client', mine: true, editable: true };
   }
 
+  // The cursor for the next page, unless it is one already read from (a page may be empty and
+  // still move on, as rows are left out after being counted), or there were pages enough.
+  function following(seen, next) {
+    if (!next || seen.has(next) || seen.size >= PAGE_LIMIT) return null;
+    seen.add(next);
+    return next;
+  }
+
   async function readSharedPages(scope, receive) {
     let count = 0, next = null;
+    const seen = new Set();
     do {
-      const after = next;
       const page = await scope.api('/shared' + (next ? '?after=' + encodeURIComponent(next) : ''));
       scope.check();
       if (!Array.isArray(page?.marks) || !Array.isArray(page.categories)) throw new Error('Incomplete shared marks page');
       const marks = page.marks.slice(0, SHARED_LIMIT - count);
       receive({ ...page, marks });
       count += marks.length;
-      // A page that does not move on ends the reading.
-      next = page.marks.length && page.next !== after ? page.next : null;
+      next = following(seen, page.next);
     } while (next && count < SHARED_LIMIT);
     return { count, next };
   }
@@ -482,12 +491,12 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   async function readDeletedRows(scope) {
     const marks = [];
     let next = null;
+    const seen = new Set();
     do {
-      const after = next;
       const page = await scope.api('/deleted' + (next ? '?after=' + encodeURIComponent(next) : ''));
       scope.check();
       marks.push(...page.marks.slice(0, SHARED_LIMIT - marks.length));
-      next = page.marks.length && page.next !== after ? page.next : null;
+      next = following(seen, page.next);
     } while (next && marks.length < SHARED_LIMIT);
     scope.check();
     state.deleted = marks;
