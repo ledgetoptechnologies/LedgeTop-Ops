@@ -1,4 +1,5 @@
 'use strict';
+const {runtimeObj2TilesParallelism}=require('./obj2TilesBudget');
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -114,15 +115,20 @@ function remainingCommandMs(deadlineAt) {
   return remaining;
 }
 
-async function runObj2TilesWithResourceRetry({ bin, source, output, deadlineAt, signal, clearIncomplete, runCommand = run, verifyConverterBinary = verifyCurrentConverterBinary }) {
+function obj2TilesAuditFlags(serialRetry,parallelism){
+ if(serialRetry){if(parallelism!==1)throw new Error('invalid serial retry evidence');return ['--converter-serial-retry'];}
+ if(!Number.isInteger(parallelism)||parallelism<2||parallelism>14)throw new Error('invalid converter evidence');return parallelism===2?[]:['--converter-parallelism',String(parallelism)];
+}
+
+async function runObj2TilesWithResourceRetry({ bin, source, output, deadlineAt, signal, clearIncomplete, parallelism = 2, runCommand = run, verifyConverterBinary = verifyCurrentConverterBinary }) {
   await verifyConverterBinary(bin);
   let serialRetry = false;
   try {
-    const result = await runCommand(bin, obj2TilesArguments(source, output), {
+    const result = await runCommand(bin, obj2TilesArguments(source, output, { parallelism }), {
       timeoutMs: remainingCommandMs(deadlineAt),
       signal,
     });
-    return { result, serialRetry };
+    return { result, serialRetry, parallelism: serialRetry ? 1 : parallelism };
   } catch (error) {
     if (!isExplicitResourcePressure(error) || signal?.aborted) throw error;
     const resourcePressureEvidence = {
@@ -140,7 +146,7 @@ async function runObj2TilesWithResourceRetry({ bin, source, output, deadlineAt, 
         timeoutMs: remainingCommandMs(deadlineAt),
         signal,
       });
-      return { result, serialRetry };
+      return { result, serialRetry, parallelism: serialRetry ? 1 : parallelism };
     } catch (retryError) {
       if (retryError && typeof retryError === 'object') {
         retryError.resourcePressureEvidence = resourcePressureEvidence;
@@ -370,7 +376,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
       fs.renameSync(output, quarantine);
       throw Object.assign(new Error('an unreferenced derivative final failed re-verification'), { code: 'lod_provenance_invalid', cause: error });
     }
-    if (![CONTROLLED_CONVERTER_COMMAND_SHA256, SERIAL_RETRY_CONVERTER_COMMAND_SHA256]
+    if (![CONTROLLED_CONVERTER_COMMAND_SHA256, SERIAL_RETRY_CONVERTER_COMMAND_SHA256, ...require('../lod-converter-policy.cjs').PARALLEL_CONVERTER_CONTRACTS.map(item=>item.commandSha256)]
       .includes(existing.provenance?.converter?.commandSha256)) {
       throw Object.assign(new Error('existing derivative does not use the current KTX2 policy'), { code: 'lod_provenance_invalid' });
     }
@@ -413,9 +419,11 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
     onPhase('generating');
     let conversion;
     let converterSerialRetry = false;
+    let converterParallelism = 2;
     try {
-      ({ result: conversion, serialRetry: converterSerialRetry } = await runObj2TilesWithResourceRetry({
+      ({ result: conversion, serialRetry: converterSerialRetry, parallelism: converterParallelism } = await runObj2TilesWithResourceRetry({
         bin: config.obj2TilesBin,
+        parallelism: runtimeObj2TilesParallelism(config.obj2TilesMaxParallelism || 2,(config.obj2TilesMemoryRequiredGiB||0)*1024**3,config.obj2TilesPidsRequired||0),
         source,
         output: incomplete,
         deadlineAt: Date.parse(job.deadline_at || ''),
@@ -437,7 +445,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
       '--controlled-obj2tiles',
       source,
       config.obj2TilesBin,
-      ...(converterSerialRetry ? ['--converter-serial-retry'] : []),
+      ...obj2TilesAuditFlags(converterSerialRetry,converterParallelism),
     ], { timeoutMs: Math.max(1, Date.parse(job.deadline_at) - Date.now()), signal: combinedSignal });
     if (pressure.signal.aborted) throw pressure.signal.reason;
     onPhase('verifying');
@@ -704,6 +712,7 @@ module.exports = {
   generateMeshTiles,
   isExplicitResourcePressure,
   obj2TilesDiagnostics,
+  obj2TilesAuditFlags,
   structuredCommandFailure,
   successfulLodAuditEvidence,
   processOneDerivative,

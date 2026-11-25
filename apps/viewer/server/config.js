@@ -190,6 +190,9 @@ const config = {
   publishedSessionSourceRevocationEnabled: bool(process.env.PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED, false),
   entwineBin: process.env.ENTWINE_BIN || 'entwine',
   obj2TilesBin: process.env.OBJ2TILES_BIN || 'obj2tiles',
+  obj2TilesPidsRequired: /^(?:[1-9][0-9]{0,4}|100000)$/.test(process.env.OBJ2TILES_PIDS_REQUIRED||'') ? Number(process.env.OBJ2TILES_PIDS_REQUIRED) : 0,
+  obj2TilesMemoryRequiredGiB: /^(?:[1-9]|[1-9][0-9]|[1-9][0-9]{2})$/.test(process.env.OBJ2TILES_MEMORY_REQUIRED_GIB||'') ? Number(process.env.OBJ2TILES_MEMORY_REQUIRED_GIB) : 0,
+  obj2TilesMaxParallelism: /^(?:[2-9]|1[0-4])$/.test(process.env.OBJ2TILES_MAX_PARALLELISM||'') ? Number(process.env.OBJ2TILES_MAX_PARALLELISM) : 2,
   localDerivativesEnabled: bool(process.env.LOCAL_DERIVATIVES_ENABLED, false),
   // The production image contains the pinned converter and every generated
   // tileset remains verification-gated. Explicit false is still authoritative.
