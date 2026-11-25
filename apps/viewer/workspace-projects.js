@@ -21,7 +21,7 @@ import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setW
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
 import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, directClientKey, shareableTasks } from './workspace-direct-client-share.mjs';
-import { directProjectShareEditForm, editableDirectProjectGrant, publicationFolderPath, readDirectProjectShareEdit, syncDirectProjectSelection } from './workspace-direct-client-share.mjs';
+import { directProjectShareEditForm, directProjectShareReviewText, editableDirectProjectGrant, publicationFolderPath, readDirectProjectShareEdit, syncDirectProjectSelection } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -1958,7 +1958,7 @@ async function editDirectProjectShare(projectId,button){
     try{
       const authorityAtReview=publicationAuthorityGeneration;
       const reviewedAuthorityLive=()=>live()&&publicationAuthorityGeneration===authorityAtReview;
-      const summary=change.summary;
+      const summary=directProjectShareReviewText({summary:change.summary,permissions:grant.permissions,expiresAt:grant.expiresAt,dateTime});
       if(!await dialogs.confirm(`This replaces the current project share. ${summary}`,{title:'Review share change',submitLabel:'Save selection'}))return;
       if(!reviewedAuthorityLive())throw new Error('Access changed while reviewing. Review the change again.');
       const serialized=JSON.stringify(change.body);

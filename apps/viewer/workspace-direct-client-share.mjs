@@ -95,6 +95,10 @@ const permissionList=permissions=>{
   const can=['view',permissions?.measure&&'measure',permissions?.cameras&&'see camera positions',permissions?.download&&'download'].filter(Boolean);
   return can.length>1?`${can.slice(0,-1).join(', ')} and ${can.at(-1)}`:can[0];
 };
+// Saved replacements use a plain-text confirmation, with the saved permissions and end unchanged.
+export function directProjectShareReviewText({summary,permissions,expiresAt,dateTime=value=>value}){
+  return `${summary} They can ${permissionList(permissions)}. ${expiresAt?`Access ends ${dateTime(expiresAt)}.`:'No end date.'}`;
+}
 // The review step repeats exactly what will be sent: who, what, permissions and end.
 export function directShareReviewMarkup({client,what,permissions,expiresAt,dateTime=value=>value}){
   const can=permissionList(permissions);

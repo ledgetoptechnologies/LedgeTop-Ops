@@ -20,7 +20,7 @@ for(const mode of ['only','except'])test(`first-share ${mode} inheritance uses r
   t.after(release);
   const script=`
 import * as share from '/workspace-direct-client-share.mjs';
-const {directShareForm,readDirectShareForm,syncDirectProjectSelection,directShareReviewText,directShareErrorText,DIRECT_CLIENT_GRANTS_PATH}=share;
+const {directShareForm,readDirectShareForm,syncDirectProjectSelection,directShareReviewMarkup,directClientKey,directShareErrorText,DIRECT_CLIENT_GRANTS_PATH}=share;
 const assert=(condition,message)=>{if(!condition)throw new Error(message)};
 try{
 ${['folderPath','projectShareSelectionCatalog','sameShareSelectionCatalog','bindDirectShare'].map(declaration).join('\n')}
@@ -36,6 +36,7 @@ ${['folderPath','projectShareSelectionCatalog','sameShareSelectionCatalog','bind
   const loadProjectShareSelectionCatalog=async()=>projectShareSelectionCatalog('project',folders,moved?tasks.map(task=>({...task,folderId:null})):tasks);
   const notices=[],toast=text=>notices.push(text),rerenderClientSharePanel=()=>{};
   const loadDirectClientAccess=async()=>({clients:[],grants:[]});
+  const refreshProjectOutputs=async()=>true;
   const api=async(_path,options)=>{if(options.beforeDispatch)(await options.beforeDispatch())();creates++;return{grant:{grantId:'synthetic'}}};
   document.body.innerHTML=directShareForm(context);
   const form=document.querySelector('form');form.elements.client.value=JSON.stringify([client.sourceId,client.workspaceId]);
@@ -54,15 +55,18 @@ ${['folderPath','projectShareSelectionCatalog','sameShareSelectionCatalog','bind
   tick(root,!selected);assert(!child.disabled&&child.checked===selected,'Direct child selection must survive ancestor unlock');
   tick(child,!selected);assert(!leaf.disabled&&!task.disabled,'Descendants must unlock after ancestor deselection');
   tick(root,selected);
-  form.elements.includeLater.checked=true;form.elements.confirmedScope.checked=true;
-  const submit=()=>form.onsubmit({preventDefault(){}});
-  await submit();assert(form.reviewing,'Review must open');
+  form.elements.includeLater.checked=true;
+  const submit=async selector=>{form.querySelector(selector).click();while(form.shareBusy)await new Promise(resolve=>setTimeout(resolve,0))};
+  assert(creates===0,'Choosing scope must not POST');
+  await submit('[data-direct-review-button]');assert(form.reviewing,'Review must open');
+  assert(creates===0,'Review must not POST before final consent');
   const review=form.querySelector('[data-direct-review-text]').textContent;
   assert(review.includes('“Root”')&&!review.includes('“Root / Child”'),'Review must contain only explicit ancestor');
   task.checked=!selected; // A cosmetic lock is not authority.
-  moved=true;await submit();assert(creates===0,'Moved task must block create');
+  moved=true;await submit('[data-direct-send]');assert(creates===0,'Moved task must block create');
   assert(form.querySelector('[data-direct-summary]').textContent.includes('Close and reopen Share to review'),'Movement refusal must require reopen/review');
-  moved=false;await submit();await submit();assert(creates===1,'Unchanged review must create exactly once');
+  moved=false;await submit('[data-direct-review-button]');assert(creates===0,'Second review must not POST');
+  await submit('[data-direct-send]');assert(creates===1,'Final Share after unchanged review must create exactly once');
   const body=readDirectShareForm(form,{...context,clients:[client]}).bodies()[0];
   assert(JSON.stringify(body.selection)===JSON.stringify({version:1,mode,folderIds:['root'],taskIds:[]}),'Inherited IDs must not be serialized');
   document.body.innerHTML='<pre id="result">'+encodeURIComponent(JSON.stringify({mode,creates,movedCreates:0,passed:true}))+'</pre>';
@@ -82,7 +86,7 @@ ${['folderPath','projectShareSelectionCatalog','sameShareSelectionCatalog','bind
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
-  const {child,cleanup}=launchBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--no-sandbox','--dump-dom','--timeout=15000',`http://127.0.0.1:${server.address().port}/`],{prefix:'ltds-first-share-',spawnOptions:{stdio:['ignore','pipe','pipe']}});
+  const {child,cleanup}=launchBrowser(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--no-sandbox','--dump-dom','--virtual-time-budget=10000','--timeout=15000',`http://127.0.0.1:${server.address().port}/`],{prefix:'ltds-first-share-',spawnOptions:{stdio:['ignore','pipe','pipe']}});
   t.after(cleanup);
   let output='',stderr='';child.stdout.on('data',chunk=>output+=chunk);child.stderr.on('data',chunk=>stderr+=chunk);
   const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve)});

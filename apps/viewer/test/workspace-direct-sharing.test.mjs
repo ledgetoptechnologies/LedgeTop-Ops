@@ -23,7 +23,7 @@ function declaration(name){
   return next?rest.slice(0,next.index):rest;
 }
 const names=['folderPath','pagedApi','loadProjectShareSelectionCatalog','projectShareSelectionCatalog','sameShareSelectionCatalog','editDirectProjectShare','invalidatePublicationAuthority','publicationAuthorityLive','clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
-  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','publicLinkState','publicTabLabel','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink','shareFence','publicationAudience','confirmPublication','reopenMovedShare','newLinkExpiry'];
+  'clientProjectKey','clientProjectLabel','clientAccessSnapshot','exactClientAssociations','clientGrantBody','clientSharePanel','legacyClientSharePanel','clientShareCard','directShareContext','directClientShareCard','rerenderClientSharePanel','bindDirectShare','rememberShareResult','clearShareResult','visibleShareResult','shareModal','createOutputShare','clientGrantRevocationMessage','bindShareModal','bindProjectShareCard','publicLinkState','publicTabLabel','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink','shareFence','publicationAudience','confirmPublication','reopenMovedShare'];
 
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
@@ -393,7 +393,7 @@ for(const mode of ['only','except'])test(`first-share ${mode} locks nested ticks
   // Disabled is cosmetic: a contradictory tick must not become an explicit request ID.
   task.checked=!selected;
   await f.submit();assert.equal(f.form.reviewing,true);
-  assert.match(f.controls['[data-direct-review-text]'].textContent,/“Site”/);
+  assert.match(f.controls['[data-direct-review-text]'].innerHTML,/“Site”/);
   f.controls['[data-direct-back]'].onclick();
   assert.equal(task.checked,selected);
   root.checked=!selected;f.form.onchange();
@@ -526,10 +526,11 @@ for(const mode of ['only','except'])test(`first-issued ${mode} project access se
   assert.equal(f.controls['[data-direct-share-targets]'].hidden,false);
   await f.submit();
   assert.equal(f.form.reviewing,true);
-  const review=f.controls['[data-direct-review-text]'].textContent;
+  const review=f.controls['[data-direct-review-text]'].innerHTML;
   assert.match(review,mode==='only'?/Only “Site”, “Roof”/
     :/Whole project except “Site”, “Roof”/);
-  assert.match(review,/matching tasks published later.+see camera positions.+Access ends/);
+  assert.match(review,/matching tasks published later.+see camera positions.+<dt>Ends<\/dt>/);
+  assert.match(review,/Workspace w/);
   assert.equal(f.posts().length,0);
   await f.submit();
   assert.deepEqual(f.posts().map(call=>call.options.body),[{
@@ -564,7 +565,7 @@ test('changing selected access to whole during review sends nothing',async()=>{
   await f.submit();
   assert.equal(f.form.reviewing,false);
   assert.equal(f.posts().length,0);
-  assert.match(f.controls['[data-direct-summary]'].textContent,/choices changed/);
+  assert.match(f.controls['[data-direct-summary]'].textContent,/Something changed since the review/);
 });
 
 for(const [label,updateTasks] of [
