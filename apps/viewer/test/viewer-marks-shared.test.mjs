@@ -115,10 +115,11 @@ test('a client changes content of an editable shared mark and nothing else', asy
   await refused(403, 'mark_visibility_forbidden', client, 'POST', 'batch/share', { marks: [{ id: mark.id, revision: now.revision }] });
   assert.deepEqual({ ...db.prepare('SELECT updated_by_audience a, updated_by_subject s, owner_subject o FROM viewer_marks WHERE id=?').get(mark.id) }, { a: 'client', s: 'c', o: 'one' });
   assert.equal((await call(staff, 'GET', mark.id)).body.mark.changedBy, 'client');
-  // No verified person: reading only.
+  // No verified person: refused, as before.
   const login = session('client', 'company', { permissions: { view: true, measure: true } });
-  assert.equal((await call(login, 'GET', 'shared')).body.marks.length, 3);
-  assert.equal((await call(login)).body.capabilities.write, false);
+  await refused(403, 'mark_identity_required', login, 'GET', 'shared');
+  await refused(403, 'mark_identity_required', login, 'GET', mark.id);
+  assert.deepEqual((await call(login)).body, { marks: [], categories: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] } });
   await refused(403, 'mark_identity_required', login, 'PUT', mark.id, content(now));
 });
 
@@ -177,7 +178,8 @@ test('a client session without measure reads the shared lists and nothing else',
   for (const [method, route, body] of [['POST', '', point()], ['POST', 'batch', { marks: [point()] }], ['POST', 'batch/share', {}], ['POST', 'batch/status', { ids: [own.id] }],
     ['POST', 'categories', {}], ['POST', 'categories/starter', {}], ['POST', 'shared', {}], ['GET', 'deleted'], ['GET', 'audiences']]) await refused(403, 'marks_unavailable', client, method, route, body);
   assert.equal((await call(staff, 'GET', mark.id)).body.mark.revision, 1);
-  for (const token of [session('client', 'd', { permissions: { view: false } }), session('client', 'e', { permissions: { view: true }, sourceAuthorization: null }),
+  for (const token of [session('client', 'd', { permissions: { view: false } }), session('client', 'e', { permissions: { view: true, personalMeasurements: true }, sourceAuthorization: null }),
+    session('client', 'f', { permissions: { view: true } }),
     session('ops', 'two', { permissions: { view: true } })]) {
     for (const route of ['', 'shared']) await refused(403, 'marks_unavailable', token, 'GET', route);
   }

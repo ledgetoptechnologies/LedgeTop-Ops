@@ -9,8 +9,7 @@ const { ViewerMarkRepository, RECOVERY_DAYS, markError } = require('./viewerMark
 // Same explicit bearer and live model access as personal measurements. Each person
 // reads and changes their own marks and what others share with them, as
 // SERVED_SHARING says. A client session without a verified individual identity (a
-// shared company login) has no person to own or change marks: it reads what staff
-// shared on the model and everything else is refused. A public link that shows
+// shared company login) has no person to read or change marks: it gets an empty list and everything else is refused. A public link that shows
 // marks reads the same without notes, by its signed page token, and writes nothing.
 // The app's JSON parser limit, so the page can say what is too large before sending it.
 const requestLimit = () => (config.processingPlatformEnabled ? config.uploadMaxManifestBytes : 100 * 1024);
@@ -46,11 +45,11 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
   router.use((req, res, next) => {
     if (req.markPrincipal) return req.path === '/' ? res.json(readOnlyList(req.markPrincipal)) : next();
     const principal = getMeasurementPrincipal(req, repository, { allowTransient: true, allowViewOnly: true });
-    // Without measure a client only reads the lists of what staff share; all else is refused as without access.
+    // Without measure a verified client only reads the lists of what staff share; all else is refused as without access.
     if (!principal || (principal.viewOnly && !(req.method === 'GET' && READ_ONLY_PATHS.has(req.path) && marks.readableChoices(principal).length))) return res.status(403).json({ code: 'marks_unavailable' });
     if (!principal.personalPersistence) {
       if (req.method === 'GET' && req.path === '/') return res.json(readOnlyList(principal));
-      if (req.method === 'GET' && req.path === '/shared' && marks.readableChoices(principal).length) {
+      if (principal.viewOnly) {
         if (repository.rateLimited(`viewer-mark-read:${principal.audience}:${principal.subject}`, 240, 60_000)) return res.status(429).json({ code: 'mark_rate_limited' });
         req.markPrincipal = principal;
         return next();

@@ -191,7 +191,7 @@ test('without a verified individual identity a client reads nothing, even under 
         const transient = session('client', subject, { permissions });
         const list = await request(transient);
         assert.equal(list.status, 200);
-        assert.deepEqual(list.body, { marks: [], categories: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'], ...(!options && { shared: true, access: [] }) } });
+        assert.deepEqual(list.body, { marks: [], categories: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] } });
         assert.equal((await request(transient, 'GET', mark.id)).status, 403);
         assert.equal((await request(transient, 'HEAD')).status, 403);
         assert.equal((await request(transient, 'GET', 'audiences')).status, 403);

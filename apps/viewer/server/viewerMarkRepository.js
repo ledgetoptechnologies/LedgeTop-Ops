@@ -29,7 +29,7 @@ const OWN_DELETED = 'model_id=? AND owner_audience=? AND owner_subject=? AND del
 // owner picks "Me and project staff"; staff then read it, and only its owner
 // changes, deletes or restores it.
 // A staff mark is shared unless its owner picks Only me. Shared: all staff read
-// and manage it; every client session issued for that model reads it, and changes
+// and manage it; every verified client session issued for that model reads it, and changes
 // its content (nothing else) if its access is 'edit'; a public link reads it,
 // without its note, if that link shows marks.
 const SERVED_SHARING = Object.freeze({ client: Object.freeze(['private', 'staff']), ops: Object.freeze(['shared', 'private']) });
@@ -63,6 +63,8 @@ function principalAccount(principal) {
 // A client session Ops issued for this model, by either kind of authorization.
 const boundClient = principal => principal.audience === 'client'
   && ['direct_client_grant', 'model_association'].includes(principal.session?.sourceAuthorization?.type);
+// Whose permissions attest one individual (personalPersistence is off without measure, though).
+const verifiedClient = principal => boundClient(principal) && principal.session.permissions?.personalMeasurements === true;
 
 const plainObject = value => value && typeof value === 'object' && !Array.isArray(value);
 const cleanText = (value, max) => typeof value === 'string' && value.trim() && value.length <= max && !CONTROL.test(value);
@@ -134,7 +136,7 @@ class ViewerMarkRepository {
   }
 
   // Who reads marks shared on their model. Public principals exist only for a live link that shows marks.
-  readsShared(principal) { return staff(principal) || boundClient(principal) || principal.audience === 'public'; }
+  readsShared(principal) { return staff(principal) || verifiedClient(principal) || principal.audience === 'public'; }
 
   // The owner always reads. Anyone else needs a sharing choice that is being
   // served: staff then read every mark except someone else's private one, and
@@ -155,7 +157,7 @@ class ViewerMarkRepository {
 
   editable(principal, row) {
     return this.readable(principal, row) && (this.manageable(principal, row)
-      || (boundClient(principal) && principal.personalPersistence !== false && this.isShared(row) && row.share_access === 'edit'));
+      || (verifiedClient(principal) && principal.personalPersistence !== false && this.isShared(row) && row.share_access === 'edit'));
   }
 
   // Held staff-wide marks come with one list of categories for all staff.
