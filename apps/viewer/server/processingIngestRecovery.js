@@ -24,6 +24,9 @@ function inspectIngestRecovery(processing,id){
   if(attempt.status!=='failed'||!task||task.status!=='failed'||task.activeAttemptId!==id||
     !project||project.status!=='active'||!dataset||dataset.status!=='finalized'||dataset.projectId!==task.projectId||
     !provider?.enabled||!attempt.providerTaskId||attempt.resultModelId||attempt.resultModelVersionId)reject();
+  // Old workers could commit exact model/version rows before linking the attempt.
+  // Retain them for review; never reimport over an unlinked partial result.
+  if(db.prepare("SELECT 1 FROM models m JOIN model_versions v ON v.model_id=m.id WHERE m.provider='ltds-processing' AND m.provider_model_id=? AND v.provider_version_id=? LIMIT 1").get(attempt.taskId,id))reject('ingest_recovery_unlinked_partial_result');
   const jobs=db.prepare('SELECT * FROM processing_jobs WHERE attempt_id=? ORDER BY updated_at DESC,created_at DESC,id DESC').all(id);
   const failed=jobs.find(job=>job.status==='failed'&&job.job_type==='ingest');
   if(!failed||jobs.some(job=>job.updated_at>failed.updated_at||!['complete','failed','cancelled'].includes(job.status))||

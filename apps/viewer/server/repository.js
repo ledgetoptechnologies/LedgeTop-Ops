@@ -368,7 +368,8 @@ class ViewerRepository {
     });
   }
 
-  upsertModelVersion(input) {
+  upsertModelVersion(input, {beforeCommit=null}={}) {
+    if(beforeCommit!==null&&typeof beforeCommit!=='function')throw new TypeError('invalid model commit guard');
     const timestamp = now();
     return this.transaction(() => {
       // Upgrade reconciliation tests and interrupted rolling starts can open a
@@ -492,6 +493,8 @@ class ViewerRepository {
         this.database.prepare('UPDATE models SET active_version_id=?,status=?,updated_at=? WHERE id=?')
           .run(versionId, 'ready', timestamp, modelId);
       }
+      const guarded=beforeCommit?.({modelId,versionId});
+      if(guarded&&typeof guarded.then==='function'){Promise.resolve(guarded).catch(()=>{});throw new TypeError('model commit guard must be synchronous');}
       return this.getModel(modelId);
     });
   }

@@ -27,7 +27,7 @@ async function ingest(t,mode='fresh'){
     {path:'images.json',data:JSON.stringify([{filename:'a.jpg',latitude:43,longitude:-88,altitude:200}])},
     {path:'odm_georeferencing/coords.txt',data:'WGS84 UTM 16N\n100 200\n1 2 200\n'},
   ];
-  if(mode==='cameras')entries.push({path:'odm_report/shots.geojson',data:JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{filename:'a.jpg',translation:[1,2,200],rotation:[0,0,0]},geometry:{type:'Point',coordinates:[-88,43,200]}}]})});
+  if(mode==='cameras'||mode.startsWith('boundary-'))entries.push({path:'odm_report/shots.geojson',data:JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{filename:'a.jpg',translation:[1,2,200],rotation:[0,0,0]},geometry:{type:'Point',coordinates:[-88,43,200]}}]})});
   const zip=makeZip(entries),requests=[];
   const server=http.createServer((req,res)=>{requests.push(req.url);res.writeHead(200,{'content-type':'application/zip','content-length':zip.length});res.end(zip);});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -65,6 +65,39 @@ async function ingest(t,mode='fresh'){
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM model_outputs').get().count,0);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM measurement_source_unit_evidence').get().count,0);
     return {legacyRequiresReview:true};
+  }
+  if(mode.startsWith('boundary-')){
+    const original=repository.upsertModelVersion.bind(repository);
+    repository.upsertModelVersion=(input,options)=>{
+      if(mode==='boundary-expired')db.prepare("UPDATE processing_jobs SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(job.id);
+      if(mode==='boundary-generation')db.prepare('UPDATE processing_jobs SET attempt_count=attempt_count+1 WHERE id=?').run(job.id);
+      const model=original(input,{beforeCommit:ids=>{
+        assert.equal(db.isTransaction,true);
+        assert.equal(db.prepare('SELECT COUNT(*) n FROM model_camera_photos').get().n,1);
+        if(mode==='boundary-before-link')throw Object.assign(Error('synthetic stop before link'),{code:'synthetic_stop'});
+        options.beforeCommit(ids);
+        assert.equal(processing.getAttempt(attempt.id).resultModelVersionId,ids.versionId);
+        if(mode==='boundary-after-link')throw Object.assign(Error('synthetic stop after link'),{code:'synthetic_stop'});
+      }});
+      if(mode==='boundary-after-commit'){
+        // This is a committed crash boundary: a subsequent claimant must see
+        // the result IDs and hold the retained partial rows, never reimport.
+        db.prepare("UPDATE processing_jobs SET attempt_count=5,error_code='processing_lease_expired',lease_expires_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(job.id);
+        assert.equal(processing.claimJob('next-worker'),null);
+        throw Object.assign(Error('synthetic stop after commit'),{code:'synthetic_stop'});
+      }
+      return model;
+    };
+    const code=['boundary-expired','boundary-generation'].includes(mode)?'lease_lost':'synthetic_stop';
+    await assert.rejects(processIngest(job,{processing,repository,storage,config,providerCredentials:{resolve:()=>''},signal:new AbortController().signal}),{code});
+    assert.deepEqual(requests,[`/task/${attempt.providerTaskId}/download/all.zip`]);
+    const retained=mode==='boundary-after-commit',current=processing.getAttempt(attempt.id);
+    for(const table of ['models','model_versions','model_camera_photos'])assert.equal(db.prepare(`SELECT COUNT(*) n FROM ${table}`).get().n,retained?1:0,table);
+    assert.equal(Boolean(current.resultModelId),retained);assert.equal(Boolean(current.resultModelVersionId),retained);
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,0);
+    if(retained){assert.equal(current.errorCode,'ingest_lease_retry_exhausted_partial_result');assert.ok(db.prepare('SELECT COUNT(*) n FROM model_assets').get().n>0);}
+    else assert.equal(db.prepare('SELECT COUNT(*) n FROM model_assets').get().n,0);
+    return;
   }
   await processIngest(job,{processing,repository,storage,config,providerCredentials:{resolve:()=>''},signal:new AbortController().signal});
   assert.deepEqual(requests,[`/task/${attempt.providerTaskId}/download/all.zip`]);
@@ -114,3 +147,5 @@ test('processIngest registers ODM camera positions and links their dataset photo
   assert.deepEqual(f.repository.listCameraPhotos(f.completed.resultModelVersionId),[{filename:'a.jpg',rootKey:'datasets',relativePath:'source/Flight 1/a.jpg',contentType:'image/jpeg',byteSize:4,sha256:sha('jpeg')}]);
   const plain=await ingest(t);assert.equal(plain.assets.some(asset=>asset.kind==='shots'),false);
 });
+
+for(const mode of ['expired','generation','before-link','after-link','after-commit'])test(`processIngest co-commits model/cameras and result link at ${mode} boundary`,{skip:process.platform!=='linux'},async t=>{await ingest(t,`boundary-${mode}`);});
