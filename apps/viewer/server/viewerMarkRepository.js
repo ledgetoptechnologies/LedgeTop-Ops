@@ -361,7 +361,7 @@ class ViewerMarkRepository {
     const hash = hashOf(visibility, shareAccount, ...(access ? [access] : []));
     const existing = this.row(principal, mark.id);
     if (existing) {
-      if (existing.deleted_at || !isOwner(principal, existing) 
+      if (existing.deleted_at || !isOwner(principal, existing)
         // A request that left sharing out may be a retry from before shared became the default: it made a private mark, and that stays.
         || !(existing.creation_hash === hash || (requested === undefined && requestedAccess === undefined && staff(principal)
           && existing.creation_hash === hashOf('private', null)))) throw markError('mark_id_conflict', 409);
