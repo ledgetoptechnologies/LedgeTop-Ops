@@ -477,7 +477,14 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   }
 
   async function readDeletedRows(scope) {
-    const { marks } = await scope.api('/deleted');
+    const marks = [];
+    let next = null;
+    do {
+      const page = await scope.api('/deleted' + (next ? '?after=' + encodeURIComponent(next) : ''));
+      scope.check();
+      marks.push(...page.marks);
+      next = page.next;
+    } while (next && marks.length < SHARED_LIMIT);
     scope.check();
     state.deleted = marks;
     return marks;

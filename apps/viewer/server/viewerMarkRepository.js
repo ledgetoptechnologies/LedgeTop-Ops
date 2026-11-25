@@ -546,21 +546,27 @@ class ViewerMarkRepository {
   owner(principal) { return [principal.modelId, principal.audience, principal.subject]; }
   ownerOf(row) { return { modelId: row.model_id, audience: row.owner_audience, subject: row.owner_subject }; }
 
-  // The deleted marks that can still come back, newest first: one's own, all of them, and for
-  // staff also shared ones of other staff, as many as fit. Sizes are read before any document.
-  deleted(principal, now = Date.now()) {
-    const others = staff(principal) && this.visibility.ops.includes('shared');
-    const rows = this.database.prepare(`SELECT m.id, m.owner_audience, m.owner_subject, length(CAST(m.document_json AS BLOB)) AS bytes FROM ${MARKS}
-      WHERE m.model_id=? AND ((m.owner_audience=? AND m.owner_subject=?) ${others ? `OR (${SHARED_ROW})` : ''})
-      AND m.deleted_at IS NOT NULL AND m.document_json<>'{}' AND m.deleted_at>=?
-      ORDER BY (m.owner_audience=? AND m.owner_subject=?) DESC, m.deleted_at DESC, m.rowid DESC LIMIT ?`)
-      .all(...this.owner(principal), recoveryCutoff(now), principal.audience, principal.subject, LIMITS.deleted);
-    let bytes = LIMITS.deletedBytes;
-    return rows.filter(row => isOwner(principal, row) || (bytes -= row.bytes) >= 0).map(({ id }) => {
+  // The deleted marks that can still come back, newest first. One's own, all of them (storing
+  // bounds them per owner), come first; for staff, shared ones of other staff follow in pages
+  // of the shared list's size, sizes read before any document, with `next` for the page after.
+  deleted(principal, after = null, now = Date.now()) {
+    const cutoff = recoveryCutoff(now), describe = ({ id }) => {
       const row = this.row(principal, id), shared = this.isShared(row);
       return { ...JSON.parse(row.document_json), visibility: shared ? 'shared' : row.visibility, access: shared ? row.share_access : null,
         revision: row.revision, deletedAt: row.deleted_at, mine: isOwner(principal, row) };
-    }).sort((a, b) => (a.deletedAt < b.deletedAt ? 1 : a.deletedAt > b.deletedAt ? -1 : 0));
+    };
+    const own = after ? [] : this.database.prepare(`SELECT id FROM viewer_marks WHERE ${OWN_DELETED} AND document_json<>'{}' AND deleted_at>=?
+      ORDER BY deleted_at DESC, rowid DESC LIMIT ?`).all(...this.owner(principal), cutoff, LIMITS.deleted).map(describe);
+    if (!staff(principal) || !this.visibility.ops.includes('shared')) return { marks: own, next: null };
+    const sizes = this.database.prepare(`SELECT m.id, m.deleted_at, length(CAST(m.document_json AS BLOB)) AS bytes FROM ${MARKS}
+      WHERE m.model_id=? AND ${SHARED_ROW} AND NOT (m.owner_audience=? AND m.owner_subject=?)
+      AND m.deleted_at IS NOT NULL AND m.document_json<>'{}' AND m.deleted_at>=?
+      AND (? IS NULL OR m.deleted_at<? OR (m.deleted_at=? AND m.id<?)) ORDER BY m.deleted_at DESC, m.id DESC LIMIT ?`)
+      .all(principal.modelId, principal.audience, principal.subject, cutoff, after?.at ?? null, after?.at ?? '', after?.at ?? '', after?.id ?? '', LIMITS.pageRows + 1);
+    let bytes = 0, take = 0;
+    while (take < Math.min(sizes.length, LIMITS.pageRows) && (take === 0 || bytes + sizes[take].bytes <= LIMITS.pageBytes)) bytes += sizes[take++].bytes;
+    const last = sizes[take - 1];
+    return { marks: [...own, ...sizes.slice(0, take).map(describe)], next: take < sizes.length ? `${last.deleted_at}~${last.id}` : null };
   }
 
   restore(principal, id, revision, now = Date.now()) {

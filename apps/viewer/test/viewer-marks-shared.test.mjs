@@ -337,6 +337,37 @@ test('reads without a person of their own are rate limited like any other', asyn
   assert.equal((await call(link({ view: true, marks: true }).token, 'GET', '')).status, 429);
 });
 
+test('recently deleted: one\'s own all come first, and every shared one can be reached page by page', async t => {
+  const { db, session, call } = await open(t);
+  const staff = session('ops', 'one'), add = db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, document_json, creation_hash, revision,
+    created_at, updated_at, updated_by_audience, updated_by_subject, deleted_at) VALUES (?, ?, 'ops', ?, ?, ?, 'x', 1, ?, ?, 'ops', ?, ?)`);
+  const share = db.prepare("INSERT INTO viewer_mark_shares VALUES (?, ?, 'edit')");
+  const at = i => new Date(Date.now() - 1000 * (i + 1)).toISOString();
+  const big = { type: 'LineString', coordinates: Array.from({ length: 500 }, (_, i) => [-87 - i / 1e5, 43]) };
+  const seed = (owner, i, visibility, shared) => {
+    const mark = { ...point({ note: 'n'.repeat(2000) }), geometry: big, categoryId: null };
+    add.run(mark.id, MODEL, owner, visibility, JSON.stringify(mark), at(i), at(i), owner, at(i));
+    if (shared) share.run(MODEL, mark.id);
+    return mark.id;
+  };
+  const own = Array.from({ length: LIMITS.deleted }, (_, i) => seed('one', i, 'private', false));
+  const theirs = Array.from({ length: 700 }, (_, i) => seed('two', i, 'internal', true));
+  seed('two', 1, 'private', false);
+  const first = (await call(staff, 'GET', 'deleted')).body;
+  assert.deepEqual(first.marks.filter(row => row.mine).map(row => row.id), own);
+  const seen = first.marks.filter(row => !row.mine).map(row => row.id);
+  assert.ok(seen.length > 0 && first.next);
+  for (let next = first.next; next;) {
+    const page = (await call(staff, 'GET', 'deleted?after=' + encodeURIComponent(next))).body;
+    assert.ok(page.marks.every(row => !row.mine) && page.marks.length > 0 && JSON.stringify(page).length < 1_600_000);
+    seen.push(...page.marks.map(row => row.id));
+    next = page.next;
+  }
+  assert.deepEqual(seen, theirs, 'every shared one once, newest first, nothing private of anyone else');
+  assert.equal((await call(staff, 'GET', 'deleted?after=nonsense')).status, 400);
+  assert.deepEqual((await call(session('client', 'c'), 'GET', 'deleted')).body, { marks: [], next: null });
+});
+
 test('shared lists come in bounded pages', async t => {
   const { db, session, link, call } = await open(t);
   const insert = db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, document_json, creation_hash, revision, created_at, updated_at, updated_by_audience, updated_by_subject)

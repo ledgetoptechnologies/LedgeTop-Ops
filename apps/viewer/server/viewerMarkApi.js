@@ -88,7 +88,12 @@ function createViewerMarkApi(repository, { visibility, maxRequestBytes = request
     if (after === false || (req.query.after !== undefined && !after)) throw markError('invalid_mark_page');
     res.json(marks.sharedPage(req.markPrincipal, after && { at: after[1], id: after[2] }));
   });
-  router.get('/deleted', (req, res) => res.json({ marks: marks.deleted(req.markPrincipal) }));
+  // One's own first, then for staff a page at a time of what other staff shared.
+  router.get('/deleted', (req, res) => {
+    const after = req.query.after === undefined ? null : typeof req.query.after === 'string' && CURSOR.exec(req.query.after);
+    if (after === false || (req.query.after !== undefined && !after)) throw markError('invalid_mark_page');
+    res.json(marks.deleted(req.markPrincipal, after && { at: after[1], id: after[2] }));
+  });
   router.get('/audiences', (req, res) => res.json({ audiences: marks.audiences(req.markPrincipal) }));
   router.post('/batch', (req, res) => {
     if (!req.body || typeof req.body !== 'object' || Object.keys(req.body).some(key => !['marks', 'categories'].includes(key))) throw markError('invalid_mark_batch');
