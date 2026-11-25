@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
+import { safeAccessReturnPath } from "./access-return-path";
 
 export const ACCESS_LOGOUT = CLOUDFLARE_ACCESS_LOGOUT_PATH;
 
@@ -11,7 +12,7 @@ export const ACCESS_LOGOUT = CLOUDFLARE_ACCESS_LOGOUT_PATH;
  */
 export function useAccessSignOut(returnTo = "/", beforeSignOut?: () => boolean | void) {
   // Only a path on this same site; anything else (another origin, "//host", a scheme) returns home instead.
-  const destination = /^\/(?![/\\])/.test(returnTo) ? returnTo : "/";
+  const destination = safeAccessReturnPath(returnTo);
   const [pending, setPending] = useState(false);
   const started = useRef(false);
   const signOut = (event: MouseEvent<HTMLAnchorElement>) => {
