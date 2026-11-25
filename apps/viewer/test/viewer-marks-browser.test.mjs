@@ -73,7 +73,7 @@ document.body.dataset.ready = 'true';
 function marksApi() {
   const database = new DatabaseSync(':memory:');
   database.exec("CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('synthetic-model');");
-  database.exec(schema.VIEWER_MARKS_SQL);
+  database.exec(schema.VIEWER_MARKS_SQL + schema.VIEWER_MARK_SHARING_SQL);
   const session = { audience: 'client', subject: 'client:synthetic-person', modelId: 'synthetic-model', modelVersionId: 'synthetic-v1',
     permissions: { view: true, measure: true, personalMeasurements: true },
     sourceAuthorization: { type: 'direct_client_grant', id: 'synthetic-grant', version: 1 } };

@@ -6,8 +6,9 @@ import { STARTER_CATEGORIES } from './viewer-mark-style.mjs';
 //
 // Scopes:
 //   session   - a live Viewer session bearer; the server decides who may write
-//   temporary - public links: marks live in this tab only and are never sent
-const MARK_FIELDS = ['id', 'geometry', 'name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility', 'shareAccount'];
+//   temporary - public links: marks live in this tab only and are never sent. With a
+//               token, what staff share is read too, if the link shows it
+const MARK_FIELDS = ['id', 'geometry', 'name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility', 'shareAccount', 'access'];
 const UNDO_LIMIT = 20;
 // What others share arrives in pages; this many are shown at most.
 const SHARED_LIMIT = 5000;
@@ -41,6 +42,7 @@ const MESSAGES = {
   import_too_large: 'That file is too large to import at once. Split it and import the parts.',
   'entity.too.large': 'That is too large to save at once.',
   mark_edit_forbidden: 'You can only change your own marks.',
+  mark_version_not_found: 'There is no earlier version to go back to.',
   mark_category_edit_forbidden: 'You can only change categories you made.',
   mark_identity_required: 'This login cannot keep marks.',
   mark_share_account_unknown: 'Choose a client account to share with.',
@@ -149,7 +151,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     const result = {};
     for (const field of MARK_FIELDS) if (mark[field] !== undefined) result[field] = mark[field];
     if (result.visibility !== 'client') delete result.shareAccount;
-    if (temporary()) { delete result.visibility; delete result.shareAccount; }
+    if (result.visibility !== 'shared') delete result.access;
+    if (temporary()) { delete result.visibility; delete result.shareAccount; delete result.access; }
     return { ...result, ...extra };
   }
 
@@ -518,7 +521,14 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
         ready: next?.mode === 'temporary', loading: next?.mode === 'session',
         capabilities: { write: next?.mode === 'temporary', staff: false, visibility: ['private'] } });
       emit();
-      if (next?.mode !== 'session') return true;
+      if (next?.mode !== 'session') {
+        if (next?.token) await readSharedPages(scope, page => {
+          state.marks = addUnseen(state.marks, page.marks.map(mark => ({ ...mark, mine: false, editable: false })));
+          state.categories = byName(addUnseen(state.categories, page.categories));
+          emit();
+        }).catch(() => {});
+        return true;
+      }
       try {
         await load(scope);
       } catch (error) {
@@ -643,6 +653,39 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           follow(mark.id, deleted.revision, mark.revision);
           remember({ type: 'create', id: saved.id, revision: saved.revision, label: 'restore ' + saved.name, done: saved.name + ' restored' });
         } });
+      return ok ? saved : null;
+    },
+
+    // Staff: share all of one's own marks that are not, as many requests as it takes.
+    async shareAll(access = 'edit') {
+      const unshared = () => state.marks.filter(mark => mark.mine && mark.visibility !== 'shared');
+      let done = true;
+      while (done && state.capabilities.shareAll && unshared().length) {
+        const some = unshared().slice(0, 500).map(({ id, revision }) => ({ id, revision }));
+        done = await run(async scope => {
+          const { marks } = await scope.api('/batch/share', 'POST', { marks: some, access });
+          scope.check();
+          const saved = new Map(marks.map(mark => [mark.id, mark]));
+          state.marks = state.marks.map(mark => saved.get(mark.id) || mark);
+        }, { landed: () => (some.every(item => find(item.id)?.visibility === 'shared') ? true : undefined) });
+      }
+      return done;
+    },
+
+    // Staff: earlier versions of a shared mark, newest first, and going back to one.
+    async history(current) {
+      let versions = null;
+      const ok = await run(async scope => { ({ versions } = await scope.api('/' + encodeURIComponent(current.id) + '/history')); scope.check(); });
+      return ok ? versions : null;
+    },
+    async revert(current, to) {
+      let saved = null;
+      const ok = await run(async scope => {
+        const { mark } = await scope.api('/' + encodeURIComponent(current.id) + '/revert', 'POST', { revision: current.revision, ...(to && { to }) });
+        scope.check();
+        saved = mark;
+        state.marks = state.marks.map(row => (row.id === mark.id ? mark : row));
+      });
       return ok ? saved : null;
     },
 

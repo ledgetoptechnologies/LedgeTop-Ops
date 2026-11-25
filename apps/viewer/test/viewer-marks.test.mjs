@@ -31,7 +31,7 @@ async function openApi(t, options) {
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE models(id TEXT PRIMARY KEY);
     INSERT INTO models VALUES ('synthetic-model'), ('other-model');`);
-  db.exec(schema.VIEWER_MARKS_SQL);
+  db.exec(schema.VIEWER_MARKS_SQL + schema.VIEWER_MARK_SHARING_SQL);
   assert.equal(schema.verifyViewerMarksSchema(db), true);
   const sessions = new Map();
   // Client sessions carry the portal account they were issued under.

@@ -2232,6 +2232,13 @@ const MIGRATIONS = [
   `,verify(database){
     return database.prepare('PRAGMA table_info(storage_trash)').all().some(column=>column.name==='purge_started_at'&&column.type==='TEXT'&&column.notnull===0);
   }},
+  // Staff marks shared on a model, and the versions staff can go back to. 87 to 89 are reserved elsewhere.
+  {version:90,name:'viewer_mark_sharing',sql:require('./viewerMarkSchema').VIEWER_MARK_SHARING_SQL,
+    verify(database){return require('./viewerMarkSchema').verifyViewerMarkSharingSchema(database);},
+    after(database){
+      if(!this.verify(database))
+        throw Object.assign(new Error('Viewer schema version 90 did not create the Marks sharing tables.'),{code:'viewer_migration_history_conflict'});
+    }},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;

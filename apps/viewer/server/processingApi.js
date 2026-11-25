@@ -448,7 +448,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       if(expiresAt===undefined)return error(res,400,'invalid_expiry');
       if(b.displayUnits!==undefined&&!validUnits(b.displayUnits))return error(res,400,'invalid_units');
       const requested=b.permissions===undefined||b.permissions===null?{view:true}:b.permissions;
-      if(!onlyKeys(requested,['view','measure','cameras','download'])||requested.view!==true
+      if(!onlyKeys(requested,['view','measure','cameras','download','marks'])||requested.view!==true
         ||Object.values(requested).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');
       const permissions=newSharePermissions(requested);
       const initial=outputShareState(processing.getModelOutput(req.params.id));
@@ -543,7 +543,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       if(b.label!==undefined){if(b.label!==null&&(typeof b.label!=='string'||b.label.length>120))return error(res,400,'invalid_label');patch.label=b.label||null;}
       if(b.password!==undefined){if(b.password!==null&&(typeof b.password!=='string'||(b.password!==''&&b.password.length<8)||b.password.length>1024))return error(res,400,'invalid_password');patch.passwordHash=b.password?await auth.hashPassword(b.password):null;}
       if(b.expiresAt!==undefined){const expiry=b.expiresAt===null?null:Date.parse(b.expiresAt);if(b.expiresAt!==null&&(!Number.isFinite(expiry)||expiry<=Date.now()))return error(res,400,'invalid_expiry');patch.expiresAt=expiry?new Date(expiry).toISOString():null;}
-      if(b.permissions!==undefined){if(!onlyKeys(b.permissions,['view','measure','cameras','download'])||b.permissions.view!==true||Object.values(b.permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');patch.permissions=b.permissions;}
+      if(b.permissions!==undefined){if(!onlyKeys(b.permissions,['view','measure','cameras','download','marks'])||b.permissions.view!==true||Object.values(b.permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');patch.permissions=b.permissions;}
       if(b.allowedViews!==undefined){const model=repository.getModel(share.modelId),available=Object.keys(VIEW_KINDS).filter(view=>VIEW_KINDS[view].some(kind=>model?.activeVersion?.assets.some(asset=>asset.kind===kind&&asset.published)));if(!Array.isArray(b.allowedViews)||!b.allowedViews.length||b.allowedViews.some(view=>!available.includes(view)))return error(res,400,'invalid_allowed_views');patch.allowedViews=[...new Set(b.allowedViews)];}
       if(b.displayUnits!==undefined){if(!validUnits(b.displayUnits))return error(res,400,'invalid_units');patch.displayUnits=b.displayUnits;}
       // Password hashing yields; recheck the administrative session before committing.

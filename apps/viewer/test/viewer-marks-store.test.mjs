@@ -16,7 +16,7 @@ const SHARING = { visibility: marksRepository.HELD_SHARING };
 async function openServer(t, options) {
   const database = new DatabaseSync(':memory:');
   database.exec(`CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('synthetic-model');`);
-  database.exec(schema.VIEWER_MARKS_SQL);
+  database.exec(schema.VIEWER_MARKS_SQL + schema.VIEWER_MARK_SHARING_SQL);
   const sessions = new Map();
   const repository = {
     database,
