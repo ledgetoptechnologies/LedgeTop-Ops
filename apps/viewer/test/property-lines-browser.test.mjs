@@ -41,7 +41,7 @@ function page() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/node_modules/leaflet/dist/leaflet.css">${style}</head><body>
 <div id="main" style="height:100vh"><aside id="sidebar"><div id="sidebar-custom">${panel}</div></aside>
-<div id="viewer-wrap"><div id="leaflet-map" style="display:block"></div>${notice}${floating}</div></div>
+<div id="viewer-wrap"><div id="leaflet-map" style="display:block"></div><div id="viewer-marks-ui"><section class="viewer-mark-strip" hidden>Tap the map</section><section class="viewer-mark-card" hidden></section><section class="viewer-mark-box" hidden></section></div>${notice}${floating}</div></div>
 <script type="module">
 import * as L from '/node_modules/leaflet/dist/leaflet-src.esm.js';
 import { createPropertyLinesController } from '/property-lines-layer.mjs';
@@ -260,6 +260,19 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     layout = await overlaps();
     assert.deepEqual([layout.zoom, layout.floating, layout.attribution, layout.inside, layout.bottomLeft], [false, false, false, true, true], JSON.stringify(layout));
     assert.equal(await readout(), true);
+
+    // A marks strip or sheet on the same phone view never covers the notice while the lines are drawn.
+    for (const [name, height] of [['viewer-mark-strip', 120], ['viewer-mark-card sheet', 340], ['viewer-mark-card sheet full', 900], ['viewer-mark-box sheet', 900]]) {
+      const selector = '.' + name.split(' ')[0];
+      const open = await client.evaluate(`(() => { const e = document.querySelector('${selector}'); e.className = '${name}'; e.style.height = '${height}px'; e.hidden = false;
+        const a = e.getBoundingClientRect(), n = document.getElementById('property-lines-notice').getBoundingClientRect();
+        return { shown: a.height > 50 && n.height > 0, covered: a.left < n.right && a.right > n.left && a.top < n.bottom && a.bottom > n.top }; })()`);
+      assert.deepEqual(open, { shown: true, covered: false }, name);
+      layout = await overlaps();
+      assert.deepEqual([layout.zoom, layout.floating, layout.inside], [false, false, true], `${name} ${JSON.stringify(layout)}`);
+      await client.evaluate(`document.querySelector('${selector}').hidden = true; 0`);
+    }
+    assert.equal((await overlaps()).bottomLeft, true, 'back to the bottom left when it closes');
 
     // Without an offer the card is absent and nothing is fetched or drawn.
     offered = false;
