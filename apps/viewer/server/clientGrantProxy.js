@@ -6,6 +6,8 @@ const { validDirectGrantInput, validDirectSnapshot, directListQuery } = require(
 
 const REMOTE_PATH = '/api/viewer/workspace/client-grants';
 const LOCAL_PATH = '/api/v1/workspace/client-grants';
+// What Operations answers when it does not accept the shape of a request.
+const LIST_SHAPE_REFUSAL = 'Viewer client-grant request is invalid';
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 
@@ -118,13 +120,14 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       // An Operations release from before the name-ordered picker refuses `include` outright.
       // Ask it once more the way it understands, and keep only the half that was asked for.
       const include = envelope.listQuery?.include;
-      if (response.status === 400 && include && include !== 'all' && envelope.listQuery.grantsCursor === undefined) {
+      if (response.status === 400 && payload?.error === LIST_SHAPE_REFUSAL && include && include !== 'all' && envelope.listQuery.grantsCursor === undefined) {
         const { include: _include, ...older } = envelope.listQuery;
         ({ response, payload } = await send({ ...envelope, listQuery: include === 'grants' ? { ...older, limit: 1 } : older }));
-        if (response.ok && payload && Array.isArray(payload.clients) && Array.isArray(payload.grants)) {
+        if (response.ok) {
           stage = 'response_schema';
           if (!validDirectSnapshot(payload, action)) throw new Error('invalid_response');
-          payload = include === 'grants' ? { ...payload, clients: [], clientsNextCursor: null } : { ...payload, grants: [] };
+          payload = include === 'grants' ? { ...payload, clients: [], clientsNextCursor: null }
+            : { clients: payload.clients, grants: [], clientsNextCursor: payload.clientsNextCursor };
         }
       }
       if (!response.ok) {

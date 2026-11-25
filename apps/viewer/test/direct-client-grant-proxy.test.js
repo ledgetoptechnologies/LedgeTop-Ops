@@ -89,7 +89,7 @@ test('direct known bounded rejection is preserved while unstructured upstream er
 
 test('an Operations release without the include field still lists clients and shares, once each, with nothing extra', async t => {
   const refused = () => json({ error: 'Viewer client-grant request is invalid' }, { status: 400 });
-  const older = envelope => envelope.listQuery.include !== undefined ? refused() : json({ ...list, clientsNextCursor: 'workspace-one' });
+  const older = envelope => envelope.listQuery.include !== undefined ? refused() : json({ ...list, clientsNextCursor: 'workspace-one', grantsNextCursor: 'grant-one' });
   const picker = await fixture(t, older);
   const clients = await picker.request(PATH + '?q=Synthetic&include=clients&limit=25&viewerProjectId=viewer-project&cursor=workspace-zero');
   assert.equal(clients.status, 200);
@@ -100,22 +100,26 @@ test('an Operations release without the include field still lists clients and sh
   // Opening the dialog must not bring a client list with it.
   const opened = await fixture(t, older);
   const grants = await opened.request(PATH + '?include=grants&limit=25&viewerProjectId=viewer-project');
-  assert.equal(grants.status, 200); assert.deepEqual(await grants.json(), { clients: [], grants: [grant], clientsNextCursor: null });
+  assert.equal(grants.status, 200); assert.deepEqual(await grants.json(), { clients: [], grants: [grant], clientsNextCursor: null, grantsNextCursor: 'grant-one' });
   assert.deepEqual(opened.envelopes[1].listQuery, { limit: 1, viewerProjectId: 'viewer-project' });
 });
 
 test('the older-Operations retry never widens, repeats or hides another refusal', async t => {
+  const shape = 'Viewer client-grant request is invalid';
   const status = (code, body) => async (path, options) => { const item = await fixture(t, () => json(body || { error: 'refused' }, { status: code }));
     return { response: await item.request(path, options), calls: item.envelopes.length }; };
   for (const code of [401, 403, 404, 409, 429, 500]) assert.equal((await status(code)(PATH + '?include=grants')).calls, 1, String(code));
-  const twice = await status(400)(PATH + '?include=grants'); assert.equal(twice.calls, 2); assert.equal(twice.response.status, 400);
-  assert.equal((await status(400)(PATH)).calls, 1); assert.equal((await status(400)(PATH + '?include=all')).calls, 1);
-  assert.equal((await status(400)(PATH + '?include=grants&grantsCursor=grant-one')).calls, 1);
-  assert.equal((await status(400)(PATH, { method: 'POST', body: input })).calls, 1);
-  assert.equal((await status(400)(PATH + '/grant-one', { method: 'DELETE', body: {} })).calls, 1);
-  const denied = await fixture(t, envelope => json({ error: 'refused' }, { status: envelope.listQuery.include ? 400 : 403 }));
+  for (const body of [undefined, { error: 'Invalid client picker query', code: 'invalid_request' }])
+    assert.equal((await status(400, body)(PATH + '?include=grants')).calls, 1);
+  const refusedShape = status(400, { error: shape });
+  const twice = await refusedShape(PATH + '?include=grants'); assert.equal(twice.calls, 2); assert.equal(twice.response.status, 400);
+  assert.equal((await refusedShape(PATH)).calls, 1); assert.equal((await refusedShape(PATH + '?include=all')).calls, 1);
+  assert.equal((await refusedShape(PATH + '?include=grants&grantsCursor=grant-one')).calls, 1);
+  assert.equal((await refusedShape(PATH, { method: 'POST', body: input })).calls, 1);
+  assert.equal((await refusedShape(PATH + '/grant-one', { method: 'DELETE', body: {} })).calls, 1);
+  const denied = await fixture(t, envelope => json({ error: envelope.listQuery.include ? shape : 'refused' }, { status: envelope.listQuery.include ? 400 : 403 }));
   assert.equal((await denied.request(PATH + '?include=clients')).status, 403);
-  const malformed = await fixture(t, envelope => envelope.listQuery.include ? json({ error: 'refused' }, { status: 400 })
+  const malformed = await fixture(t, envelope => envelope.listQuery.include ? json({ error: shape }, { status: 400 })
     : json({ ...list, clients: [{ ...list.clients[0], email: 'x@example.test' }] }));
   assert.equal((await malformed.request(PATH + '?include=grants')).status, 502);
 });
