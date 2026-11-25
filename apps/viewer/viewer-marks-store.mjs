@@ -165,12 +165,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   async function readSharedPages(scope, receive) {
     let count = 0, next = null;
     do {
+      const after = next;
       const page = await scope.api('/shared' + (next ? '?after=' + encodeURIComponent(next) : ''));
       scope.check();
       if (!Array.isArray(page?.marks) || !Array.isArray(page.categories)) throw new Error('Incomplete shared marks page');
-      receive(page);
-      count += page.marks.length;
-      next = page.next;
+      const marks = page.marks.slice(0, SHARED_LIMIT - count);
+      receive({ ...page, marks });
+      count += marks.length;
+      // A page that does not move on ends the reading.
+      next = page.marks.length && page.next !== after ? page.next : null;
     } while (next && count < SHARED_LIMIT);
     return { count, next };
   }
@@ -480,10 +483,11 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     const marks = [];
     let next = null;
     do {
+      const after = next;
       const page = await scope.api('/deleted' + (next ? '?after=' + encodeURIComponent(next) : ''));
       scope.check();
-      marks.push(...page.marks);
-      next = page.next;
+      marks.push(...page.marks.slice(0, SHARED_LIMIT - marks.length));
+      next = page.marks.length && page.next !== after ? page.next : null;
     } while (next && marks.length < SHARED_LIMIT);
     scope.check();
     state.deleted = marks;

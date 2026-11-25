@@ -391,6 +391,34 @@ test('a mark from before authorship was recorded keeps its content time through 
   assert.deepEqual([kept.mark.name, kept.changedBy, kept.changedAt], ['Legacy', 'staff', '2026-10-05T00:00:00.000Z']);
 });
 
+test('the store stops at its limit and on a page that does not move on', async () => {
+  const { createMarksStore } = await import('../viewer-marks-store.mjs');
+  const row = (i, prefix) => ({ ...point({ id: `${prefix}${String(i).padStart(4, '0')}-0000-4000-8000-000000000000`.slice(0, 36) }), revision: 1, mine: false, editable: false });
+  const answer = body => ({ ok: true, status: 200, json: async () => body });
+  for (const [name, page] of [
+    ['repeated', path => ({ marks: [row(1, 'a')], categories: [], next: 'same' })],
+    ['empty', path => ({ marks: [], categories: [], next: path.includes('after') ? 'again' : 'first' })],
+    ['endless', path => { const n = Number(new URLSearchParams(path.split('?')[1] || '').get('after') || 0); return { marks: Array.from({ length: 400 }, (_, i) => row(n * 400 + i, 'b')), categories: [], next: String(n + 1) }; }],
+  ]) {
+    const asked = [];
+    const request = async path => {
+      asked.push(path);
+      if (asked.length > 40) throw new Error('did not stop');
+      if (path === '/api/v1/marks') return answer({ marks: [], categories: [], starters: [], capabilities: { write: true, staff: true, visibility: ['shared', 'private'], shared: true } });
+      return answer(page(path));
+    };
+    const store = createMarksStore({ request });
+    await store.setScope({ mode: 'session', key: name, token: () => 'synthetic-token-value' });
+    const shared = asked.filter(path => path.startsWith('/api/v1/marks/shared')).length;
+    if (name === 'endless') assert.ok(store.state.marks.length <= 5000 && shared <= 13, name);
+    else assert.ok(shared <= 2, `${name} ${shared}`);
+    asked.length = 0;
+    await store.loadDeleted();
+    const deleted = asked.filter(path => path.startsWith('/api/v1/marks/deleted')).length;
+    assert.ok(store.state.deleted.length <= 5000 && (name === 'endless' ? deleted <= 13 : deleted <= 2), `${name} deleted ${deleted}`);
+  }
+});
+
 test('shared lists come in bounded pages', async t => {
   const { db, session, link, call } = await open(t);
   const insert = db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, document_json, creation_hash, revision, created_at, updated_at, updated_by_audience, updated_by_subject)
