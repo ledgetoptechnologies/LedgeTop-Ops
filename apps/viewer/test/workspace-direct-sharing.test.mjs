@@ -7,8 +7,8 @@ import * as directClientShare from '../workspace-direct-client-share.mjs';
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 test('public and authenticated client sharing forms constrain intrinsic input widths',()=>{
   const css=readFileSync(new URL('../workspace-management.css',import.meta.url),'utf8');
-  assert.match(css,/.share-dialog-form{min-width:0;grid-template-columns:minmax(0,1fr)}/);
-  assert.match(css,/.share-dialog-form label,.share-dialog-form input,.share-dialog-form select\{min-width:0\}/);
+  assert.match(css,/\.share-dialog-form\{min-width:0;grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(css,/\.share-dialog-form label,\.share-dialog-form input,\.share-dialog-form select\{min-width:0\}/);
 });
 test('conditional sharing fields stay hidden despite managed-form layout rules',()=>{
   const css=readFileSync(new URL('../workspace-management.css',import.meta.url),'utf8');
