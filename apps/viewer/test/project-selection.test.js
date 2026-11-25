@@ -103,6 +103,39 @@ const paged = (repo, selection) => {
   return seen.sort();
 };
 const pick = (mode, folders, tasks) => ({ version: 1, mode, folderIds: folders.map(id), taskIds: tasks.map(id) });
+
+test('Only keeps an explicit published task across folder moves within its project', t => {
+  const { db, repo } = fixture(t);
+  const task = id(12), selection = pick('only', [], [12]);
+  const scope = { strictPublished: true, selection };
+  const expectVisible = expected => {
+    assert.equal(repo.getActivePublishedProjectTask('project', task, scope)?.taskId, expected ? task : undefined);
+    assert.deepEqual(paged(repo, selection), expected ? [12] : []);
+  };
+  expectVisible(true);
+  db.prepare('UPDATE processing_tasks SET folder_id=? WHERE id=?').run(id(2), task);
+  expectVisible(true);
+
+  db.prepare("INSERT INTO projects VALUES ('other','Other project','metric','active')").run();
+  const moveProject = db.prepare('UPDATE processing_tasks SET project_id=?, folder_id=? WHERE id=?');
+  const moveOutput = db.prepare('UPDATE model_outputs SET project_id=? WHERE task_id=?');
+  moveProject.run('other', id(6), task);
+  moveOutput.run('other', task);
+  assert.equal(repo.getActivePublishedProjectTask('other', task, { strictPublished: true })?.taskId, task);
+  expectVisible(false);
+
+  moveProject.run('project', id(2), task);
+  moveOutput.run('project', task);
+  expectVisible(true);
+  db.prepare("UPDATE model_outputs SET status='superseded' WHERE task_id=?").run(task);
+  expectVisible(false);
+  db.prepare("UPDATE model_outputs SET status='published' WHERE task_id=?").run(task);
+  expectVisible(true);
+  db.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(task);
+  expectVisible(false);
+  db.prepare('DELETE FROM processing_tasks WHERE id=?').run(task);
+  expectVisible(false);
+});
 for (const [label, selection, expected] of [
   ['only a top folder takes its subfolders', pick('only', [1], []), [13, 14]],
   ['only a subfolder leaves its parent out', pick('only', [2], []), [13]],
