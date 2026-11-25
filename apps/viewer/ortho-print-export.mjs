@@ -266,7 +266,7 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
   const scale = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
   const project = (e, n) => [(e - extent.minE) / gsdE, (extent.maxN - n) / gsdN];
   let drawn = null;
-  if (contours?.features?.length) drawn = drawContours(ctx, contours.features, project, { colors, scale, width, height });
+  if (contours?.features?.length) drawn = drawContours(ctx, contours.features, project, { colors, scale, width, height, print });
   let propertyCount = 0;
   if (propertyLines?.length) {
     ctx.save(); ctx.lineJoin = 'round'; ctx.lineCap = 'round';

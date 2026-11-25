@@ -172,6 +172,7 @@ test('drawing strokes minor lines thin, index lines thick, and labels index line
   const widths = calls.filter(c => c[0] === 'set' && c[1] === 'lineWidth').map(c => c[2]);
   assert.deepEqual(widths.slice(0, 3).map(w => +w.toFixed(6)), [1, 3.8, 2.2]);
   assert.deepEqual(calls.filter(c => c[0] === 'fillText').map(c => c[1]), ['750ft', '750ft']);
+  assert.ok(!calls.some(c => c[2] === CONTOUR_COLORS.white.printCasing), 'the map has no print edge');
   assert.ok(calls.some(c => c[0] === 'set' && c[1] === 'strokeStyle' && c[2] === CONTOUR_COLORS.white.halo), 'label halo of the default color');
 });
 

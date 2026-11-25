@@ -199,6 +199,9 @@ test('export traces contours for the print extent and burns lines, ft labels and
   const legend = strokes.slice(strokes.lastIndexOf('rgba(0,0,0,0.35)') + 1);
   const { white } = CONTOUR_COLORS;
   assert.deepEqual(legend, [white.halo, white.index, white.halo, white.minor]);
+  // On white no-data areas the lines keep their color and get a thin dark edge, drawn first; brown prints as before.
+  assert.deepEqual(strokes.slice(0, 4), [white.printCasing, white.minor, white.printCasing, white.index]);
+  assert.ok(!ops.some(o => o[2] === white.printCasing), 'brown has no dark edge');
   const tif = await exportOrthoPrint({
     ortho: ds, extent: { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200 }, longEdge: 400, format: 'tif', epsg: 32616,
     traceContours, units: 'imperial', createCanvas: fakeCanvasFactory([]), propertyLines: [[[500050, 4700050], [500350, 4700050]]], propertyStyle: { color: '#F97316' },
