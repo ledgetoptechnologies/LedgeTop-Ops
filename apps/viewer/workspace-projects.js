@@ -501,7 +501,7 @@ function taskTimestamp(value){if(!value)return'Unavailable';const date=new Date(
 function projectActions(project){
   const tasks=state.tasks.filter(task=>task.projectId===project.id),hasActiveTask=tasks.some(task=>LIVE_ATTEMPT_STATUSES.has(task.latestAttempt?.status)||['queued','processing'].includes(task.status)),canShare=['viewer.shares.create','viewer.shares.read','viewer.shares.revoke','viewer.client_grants.manage'].some(can);
   if(project.status!=='active')return'';
-  const items=`${can('viewer.projects.write')?menuItem('folder-create',project.id,'New folder'):''}${can('viewer.projects.write')?menuItem('edit-project',project.id,'Rename project',{shortcut:'F2'}):''}${can('viewer.datasets.import')?menuItem('project-import',project.id,'Import existing results'):''}${can('viewer.projects.read')?menuItem('project-property-lines',project.id,'Property lines source'):''}${can('viewer.projects.write')&&!hasActiveTask?`${MENU_SEPARATOR}${menuItem('trash-project',project.id,'Delete project',{danger:true})}`:''}`;
+  const items=`${can('viewer.projects.write')?menuItem('folder-create',project.id,'New folder'):''}${can('viewer.projects.write')?menuItem('edit-project',project.id,'Rename project',{shortcut:'F2'}):''}${can('viewer.datasets.import')?menuItem('project-import',project.id,'Import existing map…'):''}${can('viewer.projects.read')?menuItem('project-property-lines',project.id,'Property lines source'):''}${can('viewer.projects.write')&&!hasActiveTask?`${MENU_SEPARATOR}${menuItem('trash-project',project.id,'Delete project',{danger:true})}`:''}`;
   return`${can('viewer.processing.write')?`<button class="primary-button" data-action="project-process" data-id="${esc(project.id)}" tabindex="-1">New task</button>`:''}${canShare?button('project-share',project.id,'Share project',false,'tabindex="-1"'):''}${items?treeMenu('More project actions',items):''}`;
 }
 // The project row is level 1 of the tree; its actions show while it is open.
@@ -793,6 +793,7 @@ function treeDragAvailable(){return typeof matchMedia!=='function'||!matchMedia(
 function menuItem(action,id,label,{danger=false,disabled='',shortcut='',extra=''}={}){return`<button type="button" class="secondary-button${danger?' danger-button':''}" role="menuitem" tabindex="-1" data-action="${esc(action)}" data-id="${esc(id)}" ${disabled?`aria-disabled="true" title="${esc(disabled)}"`:''} ${extra}>${esc(label)}${shortcut?`<span class="menu-shortcut" aria-hidden="true">${esc(shortcut)}</span>`:''}</button>`}
 const MENU_SEPARATOR='<div class="menu-separator" role="separator"></div>';
 function treeMenu(label,items,className=''){return`<details class="project-more-actions tree-menu ${className}"><summary tabindex="-1" aria-label="${esc(label)}" title="${esc(label)}" aria-haspopup="menu">⋯</summary><div class="project-more-menu" role="menu" aria-label="${esc(label)}">${items}</div></details>`}
+function canImportInto(project){return project?.status==='active'&&can('viewer.datasets.import')}
 function canWriteFolders(project){return project?.status==='active'&&can('viewer.projects.write')}
 function uniqueFolderName(folders,parentId){
   const taken=new Set(folders.filter(folder=>(folder.parentId||null)===parentId).map(folder=>folder.displayName.toLocaleLowerCase('en-US')));
@@ -807,7 +808,9 @@ function folderTreeRow(row,project,folders,tasks,counts){
   const name=renaming
     ?`<span class="tree-toggle folder-toggle is-editing"><span class="tree-chevron" aria-hidden="true">›</span>${treeIcon(row.expanded?'folderOpen':'folder')}<input class="tree-inline-name" data-tree-rename="${esc(folder.id)}" data-project-id="${esc(project.id)}" value="${esc(folder.displayName)}" aria-label="Folder name" maxlength="160" autocomplete="off"></span>`
     :`<button type="button" class="tree-toggle folder-toggle" data-action="folder-toggle" data-id="${esc(folder.id)}" data-project-id="${esc(project.id)}" data-tree-focus tabindex="-1" aria-expanded="${row.expanded}"><span class="tree-chevron" aria-hidden="true">›</span>${treeIcon(row.expanded?'folderOpen':'folder')}<span class="tree-name"><strong>${esc(folder.displayName)}</strong><span class="tree-count">${esc(count)}</span></span></button>`;
-  const menu=writable&&!renaming?treeMenu(`More actions for ${folder.displayName}`,`${menuItem('folder-new',folder.id,'New subfolder',{extra:`data-project-id="${esc(project.id)}"`})}${menuItem('folder-rename',folder.id,'Rename',{shortcut:'F2',extra:`data-project-id="${esc(project.id)}"`})}${MENU_SEPARATOR}${menuItem('folder-delete',folder.id,'Delete',{danger:true,disabled:emptyFolder?'':'Only empty folders can be deleted.',extra:`data-project-id="${esc(project.id)}"`})}`):'';
+  const extra=`data-project-id="${esc(project.id)}"`,importItem=canImportInto(project)?menuItem('folder-import',folder.id,'Import existing map…',{extra}):'';
+  const items=writable?`${menuItem('folder-new',folder.id,'New subfolder',{extra})}${importItem}${menuItem('folder-rename',folder.id,'Rename',{shortcut:'F2',extra})}${MENU_SEPARATOR}${menuItem('folder-delete',folder.id,'Delete',{danger:true,disabled:emptyFolder?'':'Only empty folders can be deleted.',extra})}`:importItem;
+  const menu=items&&!renaming?treeMenu(`More actions for ${folder.displayName}`,items):'';
   return`<div class="tree-row folder-tree-row" ${treeRowAttributes(row,project.id)} aria-expanded="${row.expanded}"${drop}><div class="tree-cell tree-name-cell" role="gridcell">${name}</div><div class="tree-cell row-actions" role="gridcell">${menu}</div></div>`;
 }
 function newFolderTreeRow(row,project){
@@ -1007,6 +1010,7 @@ async function action(element){
   if(action==='folder-create')return startNewFolder(id,null);
   if(action==='folder-new')return startNewFolder(element.dataset.projectId,id);
   if(action==='tree-new-folder'){const target=treeNewFolderTarget();return target?startNewFolder(target.projectId,target.parentId):toast('Open a project to add a folder.',true);}
+  if(action==='folder-import')return importModal(element.dataset.projectId,null,id);
   if(action==='folder-rename')return startFolderRename(element.dataset.projectId,id);
   if(action==='folder-delete')return deleteFolder(element.dataset.projectId,id);
   if(action==='folder-move-task')return moveTaskFolderModal(id);
@@ -1648,11 +1652,39 @@ function treeRowControls(row){
   if(row.matches('.task-panel'))return[...row.querySelectorAll(':scope > .task-summary .task-quick-actions > button, :scope > .task-summary .task-quick-actions > details > summary')];
   return[...row.querySelectorAll(':scope .row-actions > button, :scope .row-actions > details > summary')];
 }
-function openTreeRowMenu(row){
-  const menu=[...row.querySelectorAll('details.tree-menu')].find(item=>!item.closest('.task-detail-shell'));
-  if(!menu)return;
+function treeRowMenu(row){return[...(row?.querySelectorAll('details.tree-menu')||[])].find(item=>!item.closest('.task-detail-shell'))||null}
+// point: where the mouse asked for the menu; without it the menu opens at its "⋯" button.
+function openTreeRowMenu(row,point=null){
+  const menu=treeRowMenu(row);
+  if(!menu)return false;
   closeTreeMenus(menu);menu.open=true;
-  menu.querySelector('.project-more-menu button:not(:disabled)')?.focus();
+  if(point&&!phoneLayout())placeTreeMenu(menu.querySelector(':scope > .project-more-menu'),point);
+  menu.querySelector('.project-more-menu button:not(:disabled)')?.focus({preventScroll:Boolean(point)});
+  return true;
+}
+// Shown in the top layer, like the phone sheet, because the project list would hold a fixed menu inside it.
+function placeTreeMenu(panel,{x,y}){
+  if(typeof panel?.showPopover!=='function')return;
+  if(!panel.hasAttribute('popover')){panel.popover='manual';try{panel.showPopover();}catch{panel.removeAttribute('popover');return;}}
+  Object.assign(panel.style,{position:'fixed',margin:'0',right:'auto',bottom:'auto',left:'0px',top:'0px',color:'var(--text)'});
+  const {width,height}=panel.getBoundingClientRect(),gap=8;
+  panel.style.left=`${Math.max(gap,Math.min(x,innerWidth-width-gap))}px`;
+  panel.style.top=`${Math.max(gap,Math.min(y,innerHeight-height-gap))}px`;
+}
+// Right-click opens the row's own "⋯" menu. A closed project opens first, because its actions show while it is open.
+function treeContextMenu(event){
+  if(event.defaultPrevented||event.shiftKey)return;
+  // The Menu key fires this again on the menu it just opened; the browser's menu must not cover it.
+  if(event.target.closest?.('details.tree-menu')){event.preventDefault();return;}
+  const row=event.target.closest?.('#project-list [data-tree-key]');
+  if(!row||event.target.closest('.task-detail-shell,input,textarea,select,a')){closeTreeMenus();return;}
+  const key=row.dataset.treeKey,point={x:event.clientX,y:event.clientY};
+  if(!treeRowMenu(row)&&key.startsWith('p:')&&!isProjectOpen(key.slice(2))&&state.projects.find(project=>project.id===key.slice(2))?.status==='active'){
+    event.preventDefault();toggleTreeProject(key.slice(2),true);
+    openTreeRowMenu(treeRowElement(key),point);
+    return;
+  }
+  if(openTreeRowMenu(row,point))event.preventDefault();else closeTreeMenus();
 }
 function treeMenuKeys(event,menu){
   const items=[...menu.querySelectorAll('.project-more-menu > button')].filter(item=>item.getClientRects().length);
@@ -1707,6 +1739,7 @@ function treeKeydown(event){
   else if(event.key==='Delete'&&kind==='t'){event.preventDefault();void deleteTaskWithUndo(id);}
 }
 content.addEventListener('keydown',treeKeydown);
+content.addEventListener('contextmenu',treeContextMenu);
 content.addEventListener('focusin',event=>{
   const target=event.target.closest?.('#project-list [data-tree-focus]');
   if(!target)return;
@@ -1727,7 +1760,7 @@ content.addEventListener('toggle',event=>{
   if(menu.open){
     closeTreeMenus(menu);
     if(panel&&phoneLayout()&&typeof panel.showPopover==='function'){panel.popover='manual';try{panel.showPopover();}catch{panel.removeAttribute('popover');}}
-  }else if(panel?.hasAttribute('popover')){try{panel.hidePopover();}catch{}panel.removeAttribute('popover');}
+  }else if(panel?.hasAttribute('popover')){try{panel.hidePopover();}catch{}panel.removeAttribute('popover');panel.removeAttribute('style');}
 },true);
 document.addEventListener('click',event=>{if(!event.target.closest?.('details.tree-menu'))closeTreeMenus();});
 document.addEventListener('keydown',event=>{
@@ -1738,13 +1771,71 @@ document.addEventListener('keydown',event=>{
     if(control){event.preventDefault();control.click();}
   }
 });
-function legacyImportModal(projectId,datasetId){const project=state.projects.find(item=>item.id===(projectId||state.datasets.find(dataset=>dataset.id===datasetId)?.projectId)),drafts=state.datasets.filter(dataset=>dataset.projectId===project?.id&&dataset.status==='draft');openModal(`Import into ${project?.displayName||'project'}`,`<div class="import-choice" role="tablist" aria-label="Import source"><button class="import-tab active" data-import-tab="device">This device</button><button class="import-tab" data-import-tab="server">Server import folder</button></div><section data-import-panel="device"><form id="upload-form" class="manage-form">${select('Draft dataset','datasetId',opts(drafts,'Select a draft'))}<label><span>Artifact role</span><select name="processingRole"><option value="auto">Detect automatically</option><option value="image">Source imagery</option><option value="provider_input">Model / orthophoto / point cloud</option><option value="gcp_source">GCP source</option></select></label>${field('Files','files','required type="file" multiple')}<button class="primary-button">Upload or resume</button><progress id="upload-progress" value="0" max="100"></progress></form><p class="form-note">Browser uploads are limited to 128 files, 64 MB each, and 256 MB total.</p></section><section data-import-panel="server" hidden><form id="server-import-form" class="manage-form"><input type="hidden" name="projectId" value="${esc(project?.id||'')}">${field('Task name','taskDisplayName','required maxlength="240"')}${field('Folder or backup ZIP','sourceRelativePath','required placeholder="incoming/task-folder or task.zip"')}<button class="primary-button">Queue structured task import</button></form><p class="form-note">This immediately queues a durable import from the managed server folder. The worker validates the folder or ZIP, detects supported task artifacts, and creates the task only after validation; there is no preview step.</p></section>`);modalContent.querySelectorAll('[data-import-tab]').forEach(tab=>tab.onclick=()=>{modalContent.querySelectorAll('[data-import-tab]').forEach(item=>item.classList.toggle('active',item===tab));modalContent.querySelectorAll('[data-import-panel]').forEach(panel=>panel.hidden=panel.dataset.importPanel!==tab.dataset.importTab)});const upload=modalContent.querySelector('#upload-form');if(datasetId)upload.elements.datasetId.value=datasetId;upload.onsubmit=event=>{event.preventDefault();uploadFiles(upload)};modalContent.querySelector('#server-import-form').onsubmit=event=>{event.preventDefault();modal.close();mutate('/api/v1/processing/server-task-imports',{method:'POST',body:values(event.currentTarget),headers:{'Idempotency-Key':crypto.randomUUID()}},'Server-folder import queued')}}
 async function renderServerImportBrowser(path=''){
   const browser=modalContent.querySelector('#server-import-browser'),selection=modalContent.querySelector('input[name="sourceRelativePath"]'),submit=modalContent.querySelector('#server-import-form button[type="submit"]');
   if(!browser)return;browser.setAttribute('aria-busy','true');browser.innerHTML='<p class="form-note">Loading import folder…</p>';
-  try{const page=await api(`/api/v1/processing/server-task-imports/browse?path=${encodeURIComponent(path)}&limit=100`),crumbs=page.path?page.path.split('/'):[];browser.innerHTML=`<div class="import-browser-heading"><nav class="import-breadcrumb" aria-label="Import folder"><button type="button" data-browse-path="">Imports</button>${crumbs.map((part,index)=>`<span>/</span><button type="button" data-browse-path="${esc(crumbs.slice(0,index+1).join('/'))}">${esc(part)}</button>`).join('')}</nav><button type="button" class="secondary-button" data-select-folder="${esc(page.path)}" data-select-kind="folder" ${page.path?'':'disabled'}>Select this folder</button></div><div class="import-browser-list">${page.entries.map(entry=>`<div class="import-browser-row"><span aria-hidden="true">${entry.kind==='folder'?'📁':'🗜️'}</span><strong>${esc(entry.name)}</strong><small>${entry.kind==='zip'?bytes(entry.byteSize):'Folder'}</small>${entry.kind==='folder'?`<button type="button" class="secondary-button" data-browse-path="${esc(entry.relativePath)}">Open</button><button type="button" class="secondary-button" data-select-path="${esc(entry.relativePath)}" data-select-kind="${entry.kind}">Select</button>`:`<button type="button" class="secondary-button" data-select-path="${esc(entry.relativePath)}" data-select-kind="${entry.kind}">Select ZIP</button>`}</div>`).join('')||empty('This folder has no importable folders or ZIP files.')}</div>${page.nextCursor?'<p class="form-note">This folder has more than 100 entries. Narrow it into subfolders before importing.</p>':''}`;browser.querySelectorAll('[data-browse-path]').forEach(button=>button.onclick=()=>renderServerImportBrowser(button.dataset.browsePath));browser.querySelectorAll('[data-select-path],[data-select-folder]').forEach(button=>button.onclick=()=>{const selected=button.dataset.selectPath??button.dataset.selectFolder;selection.value=selected;selection.dataset.sourceKind=button.dataset.selectKind;modalContent.querySelector('#server-import-selection').textContent=selected;submit.disabled=false;const name=selected.split('/').at(-1).replace(/\.zip$/i,'');const taskName=modalContent.querySelector('input[name="taskDisplayName"]');if(!taskName.value)taskName.value=name});}catch(error){browser.innerHTML=`<div class="empty-state">${esc(error.message)}</div><button type="button" class="secondary-button" id="retry-import-browser">Retry</button>`;browser.querySelector('#retry-import-browser').onclick=()=>renderServerImportBrowser(path)}finally{browser.removeAttribute('aria-busy')}
+  try{const page=await api(`/api/v1/processing/server-task-imports/browse?path=${encodeURIComponent(path)}&limit=100`),crumbs=page.path?page.path.split('/'):[];browser.innerHTML=`<div class="import-browser-heading"><nav class="import-breadcrumb" aria-label="Import folder"><button type="button" data-browse-path="">Imports</button>${crumbs.map((part,index)=>`<span>/</span><button type="button" data-browse-path="${esc(crumbs.slice(0,index+1).join('/'))}">${esc(part)}</button>`).join('')}</nav><button type="button" class="secondary-button" data-select-folder="${esc(page.path)}" data-select-kind="folder" ${page.path?'':'disabled'}>Select this folder</button></div><div class="import-browser-list">${page.entries.map(entry=>`<div class="import-browser-row"><span aria-hidden="true">${entry.kind==='folder'?'📁':'🗜️'}</span><strong>${esc(entry.name)}</strong><small>${entry.kind==='zip'?bytes(entry.byteSize):'Folder'}</small>${entry.kind==='folder'?`<button type="button" class="secondary-button" data-browse-path="${esc(entry.relativePath)}">Open</button><button type="button" class="secondary-button" data-select-path="${esc(entry.relativePath)}" data-select-kind="${entry.kind}">Select</button>`:`<button type="button" class="secondary-button" data-select-path="${esc(entry.relativePath)}" data-select-kind="${entry.kind}">Select ZIP</button>`}</div>`).join('')||empty('This folder has no importable folders or ZIP files.')}</div>${page.nextCursor?'<p class="form-note">This folder has more than 100 entries. Narrow it into subfolders before importing.</p>':''}`;browser.querySelectorAll('[data-browse-path]').forEach(button=>button.onclick=()=>renderServerImportBrowser(button.dataset.browsePath));browser.querySelectorAll('[data-select-path],[data-select-folder]').forEach(button=>button.onclick=()=>{const selected=button.dataset.selectPath??button.dataset.selectFolder;selection.value=selected;selection.dataset.sourceKind=button.dataset.selectKind;modalContent.querySelector('#server-import-selection').textContent=selected;syncImportSubmit(submit.form);const name=selected.split('/').at(-1).replace(/\.zip$/i,'');const taskName=modalContent.querySelector('input[name="taskDisplayName"]');if(!taskName.value)taskName.value=name});}catch(error){browser.innerHTML=`<div class="empty-state">${esc(error.message)}</div><button type="button" class="secondary-button" id="retry-import-browser">Retry</button>`;browser.querySelector('#retry-import-browser').onclick=()=>renderServerImportBrowser(path)}finally{browser.removeAttribute('aria-busy')}
 }
-function importModal(projectId,datasetId){const project=state.projects.find(item=>item.id===(projectId||state.datasets.find(dataset=>dataset.id===datasetId)?.projectId)),drafts=state.datasets.filter(dataset=>dataset.projectId===project?.id&&dataset.status==='draft');openModal(`Import into ${project?.displayName||'project'}`,`<div class="import-choice" role="tablist" aria-label="Import source"><button class="import-tab active" data-import-tab="device">This device</button><button class="import-tab" data-import-tab="server">Server import folder</button></div><section data-import-panel="device"><form id="upload-form" class="manage-form">${select('Draft dataset','datasetId',opts(drafts,'Select a draft'))}<label><span>Artifact role</span><select name="processingRole"><option value="auto">Detect automatically</option><option value="image">Source imagery</option><option value="provider_input">Model / orthophoto / point cloud</option><option value="gcp_source">GCP source</option></select></label>${field('Files','files','required type="file" multiple')}<button class="primary-button">Upload or resume</button><progress id="upload-progress" value="0" max="100"></progress></form><p class="form-note">Browser uploads are limited to 128 files, 64 MB each, and 256 MB total.</p></section><section data-import-panel="server" hidden><form id="server-import-form" class="manage-form"><input type="hidden" name="projectId" value="${esc(project?.id||'')}"><input type="hidden" name="sourceRelativePath">${field('Task name','taskDisplayName','required maxlength="240"')}<div id="server-import-browser" class="import-browser" aria-live="polite"></div><p>Selected: <strong id="server-import-selection">Nothing selected</strong></p><button type="submit" class="primary-button" disabled>Queue selected source</button></form><p class="form-note">Browse the persistent server import folder and select a folder or ZIP. Import copies and validates the source; it never removes the original automatically.</p></section>`);modalContent.querySelectorAll('[data-import-tab]').forEach(tab=>tab.onclick=()=>{modalContent.querySelectorAll('[data-import-tab]').forEach(item=>item.classList.toggle('active',item===tab));modalContent.querySelectorAll('[data-import-panel]').forEach(panel=>panel.hidden=panel.dataset.importPanel!==tab.dataset.importTab);if(tab.dataset.importTab==='server')renderServerImportBrowser('')});const upload=modalContent.querySelector('#upload-form');if(datasetId)upload.elements.datasetId.value=datasetId;upload.onsubmit=event=>{event.preventDefault();uploadFiles(upload)};modalContent.querySelector('#server-import-form').onsubmit=event=>{event.preventDefault();modal.close();mutate('/api/v1/processing/server-task-imports',{method:'POST',body:values(event.currentTarget),headers:{'Idempotency-Key':crypto.randomUUID()}},'Server-folder import queued')}}
+// The import dialog. From a project or folder menu it opens on the server import with that target filled in; the target
+// can be changed to another active project or one of its folders. Folder imports name a folder; root imports do not.
+function importModal(projectId,datasetId,folderId=null){
+  const dataset=datasetId?state.datasets.find(item=>item.id===datasetId):null;
+  const project=state.projects.find(item=>item.id===(projectId||dataset?.projectId));
+  if(!project||project.status!=='active'||(!dataset&&!canImportInto(project)))return;
+  const title=item=>`Import into ${item.displayName}`;
+  const drafts=id=>opts(state.datasets.filter(item=>item.projectId===id&&item.status==='draft'),'Select a draft');
+  const projects=state.projects.filter(item=>item.status==='active');
+  openModal(title(project),`<div class="import-choice" role="tablist" aria-label="Import source"><button type="button" class="import-tab" role="tab" data-import-tab="device">This device</button><button type="button" class="import-tab" role="tab" data-import-tab="server">Server import folder</button></div>
+    <section data-import-panel="device"><form id="upload-form" class="manage-form">${select('Draft dataset','datasetId',drafts(project.id))}<label><span>Artifact role</span><select name="processingRole"><option value="auto">Detect automatically</option><option value="image">Source imagery</option><option value="provider_input">Model / orthophoto / point cloud</option><option value="gcp_source">GCP source</option></select></label>${field('Files','files','required type="file" multiple')}<button class="primary-button">Upload or resume</button><progress id="upload-progress" value="0" max="100"></progress></form><p class="form-note">Browser uploads are limited to 128 files, 64 MB each, and 256 MB total.</p></section>
+    <section data-import-panel="server" hidden><form id="server-import-form" class="manage-form"><label><span>Project</span><select name="projectId">${projects.map(item=>`<option value="${esc(item.id)}" ${item.id===project.id?'selected':''}>${esc(item.displayName)}</option>`).join('')}</select></label><label><span>Folder</span><select name="folderId"><option value="">Project root</option></select></label><p class="form-note" data-import-folder-status role="status" hidden></p><input type="hidden" name="sourceRelativePath">${field('Task name','taskDisplayName','required maxlength="240"')}<div id="server-import-browser" class="import-browser" aria-live="polite"></div><p>Selected: <strong id="server-import-selection">Nothing selected</strong></p><button type="submit" class="primary-button" disabled>Queue selected source</button></form><p class="form-note">Browse the persistent server import folder and select a folder or ZIP. Import copies and validates the source; it never removes the original automatically.</p></section>`);
+  let browsed=false;
+  const showTab=name=>{
+    modalContent.querySelectorAll('[data-import-tab]').forEach(tab=>{const active=tab.dataset.importTab===name;tab.classList.toggle('active',active);tab.setAttribute('aria-selected',String(active));});
+    modalContent.querySelectorAll('[data-import-panel]').forEach(panel=>{panel.hidden=panel.dataset.importPanel!==name;});
+    if(name==='server'&&!browsed){browsed=true;void loadImportFolders(form,folderId);void renderServerImportBrowser('');}
+  };
+  modalContent.querySelectorAll('[data-import-tab]').forEach(tab=>{tab.onclick=()=>showTab(tab.dataset.importTab);});
+  const upload=modalContent.querySelector('#upload-form'),form=modalContent.querySelector('#server-import-form');
+  if(dataset)upload.elements.datasetId.value=dataset.id;
+  upload.onsubmit=event=>{event.preventDefault();uploadFiles(upload)};
+  form.elements.projectId.onchange=event=>{
+    const next=state.projects.find(item=>item.id===event.currentTarget.value);if(!next)return;
+    const heading=modalContent.querySelector('#workspace-modal-title');if(heading)heading.textContent=title(next);
+    upload.elements.datasetId.innerHTML=drafts(next.id);
+    void loadImportFolders(form,null);
+  };
+  form.elements.folderId.onchange=()=>syncImportSubmit(form);
+  showTab(dataset?'device':'server');
+}
+// Queuing needs a chosen source and a known target.
+function importTargetReady(form){const picker=form.elements.folderId;return!picker.disabled&&picker.selectedIndex>=0}
+function syncImportSubmit(form){form.querySelector('button[type="submit"]').disabled=!form.elements.sourceRelativePath.value||!importTargetReady(form)}
+// Fills the folder list for the chosen project. A folder that is gone leaves nothing chosen, so the import never falls back
+// to the project root unless the user picks it.
+async function loadImportFolders(form,folderId,{refresh=false}={}){
+  const projectId=form.elements.projectId.value,picker=form.elements.folderId,status=form.querySelector('[data-import-folder-status]');
+  const request=form.importFolderRequest=(form.importFolderRequest||0)+1,token=state.token;
+  const current=()=>form.isConnected&&form.importFolderRequest===request&&token===state.token;
+  const ready=(folders,problem='')=>{
+    const gone=Boolean(folderId)&&!folders.some(folder=>folder.id===folderId),message=problem||(gone?'That folder is no longer in this project. Choose another folder.':'');
+    picker.innerHTML=folderPickerOptions(folders,folderId);picker.disabled=false;
+    if(gone)picker.selectedIndex=-1;
+    status.hidden=!message;status.textContent=message;
+    syncImportSubmit(form);
+  };
+  const cached=refresh?null:folderCache.get(projectId)?.folders;
+  if(cached)return ready(cached);
+  picker.disabled=true;picker.innerHTML='<option value="">Loading folders…</option>';status.hidden=true;syncImportSubmit(form);
+  try{
+    const response=await api(`/api/v1/projects/${encodeURIComponent(projectId)}/folders`,{recoveryGuard:current});
+    if(!current())return;
+    if(!Array.isArray(response.folders))throw Error('Invalid folder response.');
+    ready(response.folders.filter(folder=>folder.projectId===projectId));
+  }catch(error){
+    if(!current())return;
+    ready([],`Folders could not be loaded (${error.message}). You can still import to the project root.`);
+  }
+}
 let activeNewTask=null;
 // duplicate pre-fills the dialog from another task (see mountNewTask); the copy is created only when the user starts it.
 function processModal(projectId,duplicate=null){
@@ -2396,7 +2487,30 @@ async function load(){const generation=++projectDataGeneration, token=state.toke
 }
 function access(){content.innerHTML='<div class="auth-state"><div><p class="eyebrow">Secure workspace</p><h2>Open Viewer from Ledge Top Operations</h2><p>This workspace reuses your Operations identity and has no separate login.</p></div></div>'}
 
-async function submitServerImport(form){if(state.busy)return;const submit=form.querySelector('button[type="submit"]'),browser=modalContent.querySelector('#server-import-browser');const endpoint=form.elements.sourceRelativePath.dataset.sourceKind==='zip'?'/api/v1/processing/webodm-task-imports':'/api/v1/processing/server-task-imports';state.busy=true;submit.disabled=true;submit.textContent='Starting import…';try{const result=await api(endpoint,{method:'POST',body:values(form),headers:{'Idempotency-Key':crypto.randomUUID()}});rememberOperation(result.operation);modal.close();toast('Import queued; progress will continue in Background work');scheduleOperationRefresh(500)}catch(error){browser.innerHTML=`<div class="empty-state">${esc(error.message)}</div>`;submit.disabled=false;submit.textContent='Try again';toast(error.message,true)}finally{state.busy=false}}
+// The target is held while the request runs. The answer may arrive after the dialog was closed or replaced, so it only
+// touches the form that sent it, and only recovers the folder list for the target that was sent.
+async function submitServerImport(form){
+  if(state.busy||!importTargetReady(form))return;
+  const {projectId,folderId:picker}=form.elements,submit=form.querySelector('button[type="submit"]'),endpoint=form.elements.sourceRelativePath.dataset.sourceKind==='zip'?'/api/v1/processing/webodm-task-imports':'/api/v1/processing/server-task-imports';
+  const {folderId,...body}=values(form),folder=folderId?picker.selectedOptions[0]?.textContent:'',request=form.importFolderRequest;
+  if(folderId)body.folderId=folderId;
+  const sameTarget=()=>form.importFolderRequest===request&&projectId.value===body.projectId&&picker.value===(folderId||'');
+  state.busy=true;projectId.disabled=picker.disabled=true;submit.disabled=true;submit.textContent='Starting import…';
+  try{
+    const result=await api(endpoint,{method:'POST',body,headers:{'Idempotency-Key':crypto.randomUUID()}});
+    rememberOperation(result.operation);if(form.isConnected)modal.close();toast(`Import queued${folder?` for ${folder}`:''}; progress will continue in Background work`);scheduleOperationRefresh(500);
+  }catch(error){
+    if(form.isConnected){
+      // A folder list that started loading meanwhile owns the folder field.
+      projectId.disabled=false;if(form.importFolderRequest===request)picker.disabled=false;
+      submit.textContent='Try again';
+      if(error.code!=='invalid_folder')form.querySelector('#server-import-browser').innerHTML=`<div class="empty-state">${esc(error.message)}</div>`;
+      else if(sameTarget())void loadImportFolders(form,folderId,{refresh:true});
+      syncImportSubmit(form);
+    }
+    toast(error.message,true);
+  }finally{state.busy=false}
+}
 modalContent.addEventListener('submit',event=>{const form=event.target;if(form?.id!=='server-import-form')return;event.preventDefault();event.stopImmediatePropagation();submitServerImport(form)},true);
 
 document.addEventListener('visibilitychange',()=>scheduleProjectRefresh(0));

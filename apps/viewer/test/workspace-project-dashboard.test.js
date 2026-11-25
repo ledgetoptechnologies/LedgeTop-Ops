@@ -197,7 +197,7 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/job\.result\?\.summary/);
   assert.match(processingApi,/requestOptionalLodDerivative/);
   assert.match(source,/The original (?:model|input) remains available/);
-  assert.match(source,/rememberOperation\(result\.operation\);modal\.close\(\)/);
+  assert.match(source,/rememberOperation\(result\.operation\);if\(form\.isConnected\)modal\.close\(\)/);
   assert.match(source,/scheduleOperationRefresh\(500\)/);
   assert.doesNotMatch(source,/while\(modal\.open\)/);
   assert.match(css,/\.import-activity/);

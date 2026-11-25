@@ -133,6 +133,9 @@ async function importWebodmTask(operation, { processing, repository, storage, co
     const requiredDerivatives=lodDerivativeSpecs(assets,{meshDerivativesEnabled:config.meshDerivativesEnabled,required:true});
     return{project,task,attempt,model,import:replay,requiredDerivatives,retainedLeaseToken:retainedImport.leaseToken,...summary};
   }
+  const queued = JSON.parse(operation.payload_json || '{}');
+  // Fail before copying anything when the chosen folder is gone; the folder is checked again when the task is created.
+  if (queued.request?.folderId && !processing.getTask(queued.ids?.taskId)) processing.requireImportFolder(queued.request.projectId, queued.request.folderId);
   const { payload, request, staging, stagingRelative, stagingCleanupRelative } = await stageSource(operation, { processing, storage, config }, signal, progress);
   const ids = payload.ids || {}, sourceDiscovered = await discoverAssets(staging), sourceSummary = capabilitySummary(sourceDiscovered.assets);
   if (!sourceSummary.assetKinds.length) {
@@ -155,7 +158,11 @@ async function importWebodmTask(operation, { processing, repository, storage, co
     const adoptedFiles=adopted.scan.files.map((file)=>({relativePath:file.relativePath,byteSize:file.byteSize,sha256:file.sha256,metadata:file.metadata||{}})).sort((left,right)=>compareUtf8(left.relativePath,right.relativePath));if(JSON.stringify(adoptedFiles.map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256})))!==JSON.stringify(retainedManifest.files.map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256}))))throw Object.assign(new Error('materialized retained manifest changed during adoption'),{code:'retained_manifest_conflict'});dataset = processing.finalizeDataset(dataset.id,adoptedFiles,manifestHash(adoptedFiles));
   }
   let task = processing.getTask(ids.taskId);
-  if (!task) task = processing.createTask({ id: ids.taskId, projectId: request.projectId, datasetId: dataset.id, displayName: request.taskDisplayName, createdBy: operation.subject, metadata: { catalogImportOperationId: operation.id, webodmTaskImportOperationId: operation.id, assetKinds: summary.assetKinds } });
+  // A task that already exists keeps its current folder: staff may have moved it since an earlier run of this import.
+  if (!task) {
+    const input = { id: ids.taskId, projectId: request.projectId, datasetId: dataset.id, displayName: request.taskDisplayName, createdBy: operation.subject, metadata: { catalogImportOperationId: operation.id, webodmTaskImportOperationId: operation.id, assetKinds: summary.assetKinds } };
+    task = request.folderId ? processing.createImportedTaskInFolder(input, request.folderId, operation.id) : processing.createTask(input);
+  }
   const attempt = processing.createImportedAttempt({ id: ids.attemptId, taskId: task.id, datasetId: dataset.id, providerTaskId: request.externalTaskId ? `webodm:${request.externalTaskId}` : `webodm-import:${retainedDiscovered.sourceFingerprint}`, createdBy: operation.subject, displayName: request.taskDisplayName, metadata: { webodmTaskImport: true }, staged: true });
   const datasetRoot = storage.resolve('datasets', dataset.relativePath, { mustExist: true }), assets = [];
   for (const asset of retainedDiscovered.assets) {

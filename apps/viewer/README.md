@@ -529,7 +529,9 @@ Credential-bearing replay bodies are encrypted at rest and pruned after 24h.
 - Server import: durable `/api/v1/dataset-imports/preview` and
   `/api/v1/dataset-imports/adopt` operations
 - WebODM task migration: durable `POST /api/v1/processing/webodm-task-imports`
-  accepts a task folder or exported ZIP and reports detected asset capabilities
+  accepts a task folder or exported ZIP and reports detected asset capabilities.
+  An optional `folderId` creates the task in that folder of the same project
+  (also on `server-task-imports`)
 - Processing: `/api/v1/processing/providers`, `/presets`, task/attempt detail,
   cancel, retry, and publish routes
 - Storage accounting/recovery: `/api/v1/storage`, `/storage/trash/...`, and

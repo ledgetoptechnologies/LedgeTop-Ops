@@ -187,7 +187,7 @@ test('project actions prioritize enabled new task for empty projects and keep se
   assert.ok(html.indexOf('>Share project<')<html.indexOf('<details'));
   const menu=html.slice(html.indexOf('<details'),html.indexOf('</details>'));
   assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['folder-create','edit-project','project-import','trash-project']);
-  assert.match(menu,/New folder/);assert.match(menu,/Rename project/);assert.match(menu,/Import existing results/);assert.match(menu,/Delete project/);
+  assert.match(menu,/New folder/);assert.match(menu,/Rename project/);assert.match(menu,/Import existing map…/);assert.match(menu,/Delete project/);
   f.state.projects[0].status='archived';assert.equal(f.context.projectActions(f.state.projects[0]),'');
 });
 

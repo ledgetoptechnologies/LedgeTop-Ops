@@ -56,16 +56,16 @@ test('an open project shows its folders and tasks inline, with nested folders ex
   assert.deepEqual([...html.matchAll(/data-tree-key="([^"]+)"/g)].map(match => match[1]), ['f:empty', 'f:f', 'f:child', 't:nested-task', 't:folder-task', 't:root-task']);
   assert.match(html, /data-tree-key="f:child"[^>]*data-tree-parent="f:f"/);
   assert.match(html, /<article data-tree-key="t:nested-task" aria-level="4"/);
-  // Folder "⋯": New subfolder, Rename (F2), separator, Delete (only when empty).
+  // Folder "⋯": New subfolder, Import existing map…, Rename (F2), separator, Delete (only when empty).
   const menu = html.slice(html.indexOf('data-tree-key="f:f"'), html.indexOf('data-tree-key="f:child"'));
-  assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match => match[1]), ['folder-toggle', 'folder-new', 'folder-rename', 'folder-delete']);
+  assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match => match[1]), ['folder-toggle', 'folder-new', 'folder-import', 'folder-rename', 'folder-delete']);
   assert.match(menu, /data-action="folder-delete"[^>]*aria-disabled="true" title="Only empty folders can be deleted\."/);
   assert.match(html.slice(html.indexOf('data-tree-key="f:empty"')), /data-action="folder-delete" data-id="empty"  data-project-id/);
   // An empty open folder shows a drop row.
   context.treeState.folders.add('empty');
   assert.match(context.projectTree(context.state.projects[0]), /data-tree-key="e:empty"[^>]*data-task-drop-project="p" data-task-drop-folder="empty"><div class="tree-cell" role="gridcell">Empty\. Drop tasks here\./);
   context.can = () => false;
-  assert.doesNotMatch(context.projectTree(context.state.projects[0]), /folder-rename|folder-delete|folder-new/);
+  assert.doesNotMatch(context.projectTree(context.state.projects[0]), /folder-rename|folder-delete|folder-new|folder-import/);
 });
 
 test('an inline row names a new folder or renames one, with a free default name', async () => {
