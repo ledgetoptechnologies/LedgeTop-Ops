@@ -368,6 +368,21 @@ test('recently deleted: one\'s own all come first, and every shared one can be r
   assert.deepEqual((await call(session('client', 'c'), 'GET', 'deleted')).body, { marks: [], next: null });
 });
 
+test('a mark from before authorship was recorded keeps its content time through sharing, deleting and restoring', async t => {
+  const { db, session, call } = await open(t);
+  const staff = session('ops', 'one'), client = session('client', 'c'), mark = { ...point({ name: 'Legacy' }), categoryId: null };
+  db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, document_json, creation_hash, revision, created_at, updated_at, updated_by_audience, updated_by_subject)
+    VALUES (?, ?, 'ops', 'one', 'private', ?, 'x', 3, '2026-10-01T00:00:00.000Z', '2026-10-05T00:00:00.000Z', 'ops', 'one')`).run(mark.id, MODEL, JSON.stringify(mark));
+  let now = (await call(staff, 'POST', 'batch/share', { marks: [{ id: mark.id, revision: 3 }] })).body.marks[0];
+  now = (await call(staff, 'PUT', mark.id, content(now, { access: 'view' }))).body.mark;
+  now = (await call(staff, 'PUT', mark.id, content(now, { access: 'edit' }))).body.mark;
+  await call(staff, 'DELETE', mark.id, { revision: now.revision });
+  now = (await call(staff, 'POST', mark.id + '/restore', { revision: now.revision + 0 })).body.mark;
+  await call(client, 'PUT', mark.id, content(now, { name: 'Client' }));
+  const [kept] = (await call(staff, 'GET', mark.id + '/history')).body.versions;
+  assert.deepEqual([kept.mark.name, kept.changedBy, kept.changedAt], ['Legacy', 'staff', '2026-10-05T00:00:00.000Z']);
+});
+
 test('shared lists come in bounded pages', async t => {
   const { db, session, link, call } = await open(t);
   const insert = db.prepare(`INSERT INTO viewer_marks(id, model_id, owner_audience, owner_subject, visibility, document_json, creation_hash, revision, created_at, updated_at, updated_by_audience, updated_by_subject)

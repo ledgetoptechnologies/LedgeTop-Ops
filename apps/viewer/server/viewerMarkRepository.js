@@ -325,6 +325,13 @@ class ViewerMarkRepository {
     else this.database.prepare('DELETE FROM viewer_mark_shares WHERE model_id=? AND mark_id=?').run(modelId, id);
   }
 
+  // A mark from before authorship was recorded was last given its content by its owner, when
+  // it was last written. That is written down before anything else changes the row.
+  pinAuthor(row) {
+    if (row.owner_audience === 'ops') this.database.prepare(`INSERT OR IGNORE INTO viewer_mark_authors(model_id, mark_id, audience, subject, changed_at)
+      VALUES (?, ?, ?, ?, ?)`).run(row.model_id, row.id, row.author_audience, row.author_subject, row.content_at);
+  }
+
   // Keeps the version about to be replaced: the last few, and always the newest one staff made.
   keepVersion(row) {
     const key = [row.model_id, row.id];
@@ -431,6 +438,7 @@ class ViewerMarkRepository {
     const growth = Buffer.byteLength(document) - Buffer.byteLength(row.document_json);
     if (growth > 0 && growth > this.liveRoom(this.ownerOf(row)).bytes) throw markError('mark_storage_limit', 429);
     const now = new Date().toISOString(), changed = document !== row.document_json;
+    this.pinAuthor(row);
     if (changed && keep) this.keepVersion(row);
     this.database.prepare(`UPDATE viewer_marks SET document_json=?, visibility=?, share_account=?, revision=revision+1, updated_at=?,
       updated_by_audience=?, updated_by_subject=? WHERE model_id=? AND id=?`).run(document, stored, account,
@@ -509,6 +517,7 @@ class ViewerMarkRepository {
       this.database.prepare('DELETE FROM viewer_mark_history WHERE model_id=? AND mark_id=?').run(principal.modelId, id);
     }
     const now = new Date().toISOString();
+    this.pinAuthor(row);
     this.database.prepare(`UPDATE viewer_marks SET deleted_at=?, updated_at=?, document_json=?,
       updated_by_audience=?, updated_by_subject=? WHERE model_id=? AND id=?`)
       .run(now, now, room ? row.document_json : '{}', principal.audience, principal.subject, principal.modelId, id);
@@ -579,6 +588,7 @@ class ViewerMarkRepository {
       // It comes back with the sharing it had, if that is still served.
       if (!this.isShared(row) && !this.visibility[row.owner_audience].includes(row.visibility)) throw markError('mark_visibility_forbidden', 403);
       this.takeRoom(this.liveRoom(this.ownerOf(row)), row.document_json);
+      this.pinAuthor(row);
       this.database.prepare(`UPDATE viewer_marks SET deleted_at=NULL, revision=revision+1, updated_at=?,
         updated_by_audience=?, updated_by_subject=? WHERE model_id=? AND id=?`)
         .run(new Date(now).toISOString(), principal.audience, principal.subject, principal.modelId, id);
