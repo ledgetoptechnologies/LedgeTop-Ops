@@ -90,7 +90,6 @@ body{font-size:14px;line-height:1.45}
 .workspace-modal{padding:16px;border-radius:12px}
 .modal-heading{margin-bottom:12px}
 .modal-heading .icon-button{font-size:18px}
-.share-view-controls{padding:10px 12px}
 .share-columns,.diagnostic-grid{gap:12px}
 .share-columns>div>.content-card,.share-columns>.content-card{margin-bottom:10px}
 :root .authenticated-share-options{padding:10px 12px}
@@ -166,5 +165,8 @@ body{font-size:14px;line-height:1.45}
   .share-legacy>summary,.quick-action,.task-disclosure>summary,.import-tab,.gcp-import-disclosure summary,
   .project-open,.task-summary-toggle,.provider-list-item,.project-search input,
   .manage-form input:not([type=checkbox]):not([type=radio]),.manage-form select{min-height:44px}
+  .segmented-tab,.share-dialog-form .check,.share-dialog-form summary{min-height:44px}
+  .share-dialog-form summary{align-content:center}
+  .share-dialog-form>.primary-button{justify-self:stretch}
   .project-more-actions>summary,.icon-button{min-width:44px}
 }

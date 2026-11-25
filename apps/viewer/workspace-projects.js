@@ -20,7 +20,7 @@ import { createWorkspaceNavigationWork, workspaceNavigationState } from './works
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -1848,7 +1848,7 @@ function directShareContext(onlyOutputId){
 }
 function directClientShareCard(onlyOutputId){
   const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
-  return card('Share with a client',`<p class="form-note">Choose a client and what they can see. No business project or model setup is needed.</p>${directShareForm(context)}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,{...context,dateTime})}`);
+  return card('Share with a client',`${directShareForm(context)}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,{...context,dateTime})}`);
 }
 function rerenderClientSharePanel(projectId,onlyOutputId){
   const panel=modalContent.querySelector('[data-client-share-panel]');
@@ -1860,17 +1860,20 @@ function bindDirectShare(form,projectId,onlyOutputId){
   const summary=form.querySelector('[data-direct-summary]'),taskInputs=[...form.querySelectorAll('input[name="taskId"]')];
   const review=form.querySelector('[data-direct-review]'),reviewButton=form.querySelector('[data-direct-review-button]');
   // Review step: the choices are frozen and repeated in plain words before anything is sent.
+  // It is the confirmation: only its Share button sends, and any change of the choices goes back through it.
   const setReviewing=on=>{
     form.reviewing=on;review.hidden=!on;reviewButton.hidden=on;
-    for(const element of form.querySelectorAll('fieldset,input[name="expiresAt"],input[name="measure"],input[name="cameras"],input[name="download"],input[name="confirmedScope"]'))element.disabled=on;
+    for(const element of form.querySelectorAll('fieldset,input[name="expiresAt"],input[name="measure"],input[name="cameras"],input[name="download"]'))element.disabled=on;
     if(!on)sync();
   };
   const sync=()=>{const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';
-    if(form.elements.includeLater)form.elements.includeLater.disabled=current.scope!=='project';summary.textContent=current.summary};
+    const later=form.elements.includeLater,off=current.scope!=='project';if(later&&later.disabled!==off){later.disabled=off;later.checked=!off}summary.textContent=current.summary};
   form.onchange=sync;
   form.querySelector('[data-direct-back]').onclick=()=>setReviewing(false);
+  // The second click of a double-click on Review share must not land on Share.
+  const send=form.querySelector('[data-direct-send]');if(send)send.onclick=event=>{if(event.detail>1)event.preventDefault()};
   // Type-to-filter picker: each keystroke (debounced) asks the server, and an older answer never replaces a newer one.
-  // Choosing a client only fills the form; the confirmation checkbox and Share button are still required.
+  // Choosing a client only fills the form; the review and its Share button are still required.
   const pickerRoot=form.querySelector('[data-client-picker]');
   // Search-first: no client is listed until staff type at least two characters.
   if(pickerRoot)form.clientPicker=bindClientPicker(pickerRoot,{initial:null,
@@ -1878,21 +1881,22 @@ function bindDirectShare(form,projectId,onlyOutputId){
       const result=directClientAccess(await api(directClientsPath(projectId,{query,cursor,include:'clients'}),{signal}));
       if(!result)throw new Error('Clients could not be loaded.');if(!live())throw new Error('Share dialog closed');return result;
     },
-    onSelect:client=>{
-      // Any change of client, including clearing it, needs a fresh confirmation for the new recipient.
-      const changed=(picked?JSON.stringify([picked.sourceId,picked.workspaceId]):'')!==(client?JSON.stringify([client.sourceId,client.workspaceId]):'');
-      picked=client;if(changed&&form.elements.confirmedScope)form.elements.confirmedScope.checked=false;if(form.isConnected)sync()}});
+    onSelect:(client,pickerLabel)=>{
+      // Any change of client, including clearing it, needs a fresh review for the new recipient.
+      picked=client?{...client,...(pickerLabel?{pickerLabel}:{})}:null;if(form.reviewing)setReviewing(false);else if(form.isConnected)sync()}});
   sync();
   // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
   form.onsubmit=async event=>{
     event.preventDefault();if(form.shareBusy)return;
     if(directShareContext(onlyOutputId).targetMissing){if(form.reviewing)setReviewing(false);summary.textContent=SHARE_TARGET_MISSING;return}
-    let bodies,target;try{target=read();bodies=target.bodies()}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
+    let bodies,target;try{target=read();bodies=target.bodies({confirmed:form.reviewing===true})}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
     if(!form.reviewing){
-      summary.textContent=target.summary;
+      // The review says it all; the line above it is for progress and refusals.
+      summary.textContent='';
       const body=bodies[0];
-      form.querySelector('[data-direct-review-text]').textContent=directShareReviewText({summary:target.summary,permissions:body.permissions,expiresAt:body.expiresAt,dateTime});
-      setReviewing(true);form.querySelector('[data-direct-send]').focus();return;
+      form.querySelector('[data-direct-review-text]').innerHTML=directShareReviewMarkup({client:target.client,what:target.what,permissions:body.permissions,expiresAt:body.expiresAt,dateTime});
+      // Focus the review, not Share: a held Enter key must not send.
+      setReviewing(true);review.focus?.();return;
     }
     // Inputs stay frozen while sending so the summary always matches what is being shared.
     const controls=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);
@@ -1929,8 +1933,8 @@ function clientShareCard(output,onlyOutputId){
   }else{
     const target=onlyOutputId
       ?`<label><span>Client Portal project for this exact model</span><select name="associationId" required><option value="">Select client project</option>${associations.map(item=>{const project=projects.find(project=>project.id===associationProjectId(item)&&portalAccountId(project)===portalAccountId(item));return`<option data-portal="${project.nativeTarget?'native':'legacy'}" value="${esc(item.selectionKey)}">${esc(clientProjectLabel(project))}</option>`}).join('')}</select></label><p class="form-note">Only this model. Future published tasks are not included.</p>`
-      :`<label><span>Operations client project</span><select name="projectId" required><option value="">Select client project</option>${projects.filter(portalAccountId).map(project=>`<option data-portal="${project.nativeTarget?'native':'legacy'}" value="${esc(clientProjectKey(project))}">${esc(clientProjectLabel(project))}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="wholeProject" required> Grant the entire selected Operations project, not just one Viewer model</label><label class="check"><input type="checkbox" name="includeFuturePublished" required> Include current and future published tasks</label>`;
-    form=`<form id="client-grant-form" class="manage-form"><label><span>Portal connection</span><select name="portalConnection"><option value="legacy">Operations client accounts</option>${projects.some(project=>project.nativeTarget)?`<option value="native" ${projects.some(project=>!project.nativeTarget)?'':'selected'}>Connected Client Workspaces</option>`:''}</select></label><p class="form-note">Choose an exact account or verified workspace project. Existing workspace membership controls who can sign in. Viewer access applies to the selected client account or workspace and its eligible members.</p>${target}${field('Expiry (optional)','expiresAt','type="datetime-local"')}<label class="check"><input type="checkbox" name="measure" checked> Measurements</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads</label><button class="primary-button">Grant client access</button></form>`;
+      :`<label><span>Operations client project</span><select name="projectId" required><option value="">Select client project</option>${projects.filter(portalAccountId).map(project=>`<option data-portal="${project.nativeTarget?'native':'legacy'}" value="${esc(clientProjectKey(project))}">${esc(clientProjectLabel(project))}</option>`).join('')}</select></label><label class="check"><input type="checkbox" name="wholeProject" required> Grant the entire selected Operations project, not just one Viewer model</label><label class="check"><input type="checkbox" name="includeFuturePublished" required checked> Include current and future published tasks</label>`;
+    form=`<form id="client-grant-form" class="manage-form share-dialog-form"><label><span>Portal connection</span><select name="portalConnection"><option value="legacy">Operations client accounts</option>${projects.some(project=>project.nativeTarget)?`<option value="native" ${projects.some(project=>!project.nativeTarget)?'':'selected'}>Connected Client Workspaces</option>`:''}</select></label>${target}${field('Expiry (optional)','expiresAt','type="datetime-local"')}<label class="check"><input type="checkbox" name="measure" checked> Measurements</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download" checked> Downloads</label><button class="primary-button">Grant client access</button></form>`;
   }
   const localModels=new Set(state.outputs.filter(item=>(item.projectId||state.tasks.find(task=>task.id===item.taskId)?.projectId)===state.shareContext?.projectId).map(item=>item.modelId).filter(Boolean));
   const related=(access.associations||[]).filter(item=>localModels.has(associationModelId(item))),projectIds=new Set(related.map(associationProjectId));
@@ -1998,31 +2002,28 @@ function shareModal(projectId,onlyOutputId=null){
   const project=state.projects.find(item=>item.id===projectId),selected=state.outputs.find(output=>output.id===onlyOutputId),checking=state.shareContext?.loading===true;
   const mode=state.shareContext?.mode==='public'?'public':'internal',task=state.tasks.find(item=>item.id===selected?.taskId);
   if(!onlyOutputId)visibleShareResult(projectId,onlyOutputId);
-  const result=onlyOutputId&&visibleShareResult(projectId,onlyOutputId)?card('Public link',`<div class="share-result"><input readonly aria-label="New public link" value="${esc(state.lastShareUrl)}"><button class="primary-button" data-action="copy-share" data-url="${esc(state.lastShareUrl)}">Copy</button></div><p class="form-note">Link created successfully. You can copy this link again from its saved entry.</p>`):'';
+  const result=onlyOutputId&&visibleShareResult(projectId,onlyOutputId)?card('Public link',`<div class="share-result"><input readonly aria-label="New public link" value="${esc(state.lastShareUrl)}"><button class="primary-button" data-action="copy-share" data-url="${esc(state.lastShareUrl)}">Copy</button></div>`):'';
   let publicCards='';
   if(selected){
     const output=selected,preflight=state.sharePreflight[output.id],ready=!output.activePublished,mayCreate=can('viewer.shares.create')&&(!ready||can('viewer.processing.publish'));
-    const blocked=Boolean(preflight?.error),views=availableShareViews(output),warning=preflight?.existingAccessUpdateRequired?'Activating this version can update existing model/client access and project links, and shows this task to every client who has the whole project. Confirmation is required before creating the link.':ready?'This model is private. Create public link publishes it, which also shows this task to every client who has the whole project.':'Links follow this model’s latest published version.';
+    const blocked=Boolean(preflight?.error),views=availableShareViews(output),warning=preflight?.existingAccessUpdateRequired?'Activating this version can update existing model/client access and project links, and shows this task to every client who has the whole project. Confirmation is required before creating the link.':ready?'This model is private. Create public link publishes it, which also shows this task to every client who has the whole project.':'';
     const form=checking?empty('Checking share eligibility…'):mayCreate&&!blocked&&views.length?
-      `<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt',`type="datetime-local" value="${esc(newLinkExpiry())}"`)}${shareViewControls(output)}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras"> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`:
+      `<form class="manage-form share-dialog-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt','type="datetime-local"')}${shareViewControls(output)}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download" checked> Downloads, including model report</label>${warning?`<p class="form-note share-warning">${esc(warning)}</p>`:''}<button class="primary-button">Create public link</button></form>`:
       blocked?empty('Sharing eligibility could not be verified. Close and reopen Share to retry.'):empty(mayCreate?'No verified views are available for this link.':'Creating a link requires share permission and, for private ready models, activation permission.');
     const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(publicLinkState(share))}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
     publicCards=card(output.displayName||'Model',form+list);
   }
-  // A project and a task open the same dialog: the same two tabs, in the Data page's order, starting on Client Workspace.
-  const tab=(name,label)=>`<button class="secondary-button" data-share-mode="${name}" role="tab" id="share-tab-${name}" aria-controls="share-panel-${name}" tabindex="${mode===name?0:-1}" aria-selected="${mode===name}">${label}</button>`;
+  // A project and a task open the same dialog: the same two tabs, Client Workspace first and selected.
+  const tab=(name,label)=>`<button type="button" class="segmented-tab" data-share-mode="${name}" role="tab" id="share-tab-${name}" aria-controls="share-panel-${name}" tabindex="${mode===name?0:-1}" aria-selected="${mode===name}">${label}</button>`;
   const publicPanel=onlyOutputId
-    ?`<p class="form-note">No Operations account or client workspace is required. Anyone with the link can access its allowed content.</p>${result}${publicCards}`
+    ?`${result}${publicCards}`
     :'<p class="form-note">A public link opens one task. Use Share on that task to create one.</p><div data-legacy-project-shares></div>';
   // A refresh of an open dialog replaces its content: keyboard focus on a tab or Close goes back to the same control.
   const active=document.activeElement,focusKey=!active||!modal.open||!modalContent.contains(active)?null:/^share-tab-/.test(active.id)?`#${active.id}`:active.classList.contains('modal-close')?'.modal-close':null;
-  openModal(onlyOutputId?`Share task: ${task?.displayName||selected?.displayName||'Model'}`:`Share project: ${project?.displayName||'Project'}`,`<div class="row-actions" role="tablist" aria-label="Sharing audience">${tab('public',publicTabLabel(selected?state.shares[selected.id]:null))}${tab('internal','Client Workspace')}</div><div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" role="tabpanel" id="share-panel-internal" aria-labelledby="share-tab-internal" ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div><div data-share-mode-panel="public" role="tabpanel" id="share-panel-public" aria-labelledby="share-tab-public" ${mode==='public'?'':'hidden'}>${publicPanel}</div></div>`,'wide-modal');
+  openModal(onlyOutputId?`Share task: ${task?.displayName||selected?.displayName||'Model'}`:`Share project: ${project?.displayName||'Project'}`,`<div class="segmented-tabs" role="tablist" aria-label="Sharing audience">${tab('internal','Client Workspace')}${tab('public',publicTabLabel(selected?state.shares[selected.id]:null))}</div><div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" role="tabpanel" id="share-panel-internal" aria-labelledby="share-tab-internal" ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div><div data-share-mode-panel="public" role="tabpanel" id="share-panel-public" aria-labelledby="share-tab-public" ${mode==='public'?'':'hidden'}>${publicPanel}</div></div>`,'wide-modal');
   if(focusKey)modalContent.querySelector(focusKey)?.focus();
   bindShareModal(projectId,onlyOutputId);
 }
-// A new public link starts with a 30-day end and without camera positions; staff can change both. Existing links keep theirs.
-const PUBLIC_LINK_DAYS=30;
-function newLinkExpiry(now=Date.now()){return shareExpiryInput(new Date(now+PUBLIC_LINK_DAYS*24*60*60*1000).toISOString())}
 function shareExpiryInput(value){
   if(!value)return '';const date=new Date(value);if(!Number.isFinite(date.getTime()))return '';
   return new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);
@@ -2030,7 +2031,7 @@ function shareExpiryInput(value){
 function editShareModal(projectId,outputId,shareId){
   const output=state.outputs.find(item=>item.id===outputId),share=(state.shares[outputId]||[]).find(item=>item.id===shareId);
   if(!output||!share||share.revokedAt||!can('viewer.shares.read')||!can('viewer.shares.create'))return;
-  openModal('Edit public link',`<form id="share-edit-form" class="manage-form">${field('Link label','label',`maxlength="120" value="${esc(share.label||'')}"`)}<label><span>Password</span><select name="passwordAction"><option value="keep">Keep current password setting</option><option value="set">Set or replace password</option><option value="remove">Remove password</option></select></label><label data-password-input hidden><span>New password</span><input name="password" type="password" minlength="8" autocomplete="new-password" disabled></label>${field('Expiry (optional)','expiresAt',`type="datetime-local" value="${esc(shareExpiryInput(share.expiresAt))}"`)}${shareViewControls(output,share.allowedViews??null)}<label class="check"><input name="measure" type="checkbox" ${share.permissions?.measure?'checked':''}> Temporary measurements (not saved to the project)</label><label class="check"><input name="cameras" type="checkbox" ${share.permissions?.cameras?'checked':''}> Camera positions</label><label class="check"><input name="download" type="checkbox" ${share.permissions?.download?'checked':''}> Downloads, including model report</label><p class="form-note">The URL stays the same. Password and permission changes apply to existing sessions. Link version behavior stays unchanged.</p><button class="primary-button" type="submit">Save link settings</button><p role="status"></p></form>`,'wide-modal');
+  openModal('Edit public link',`<form id="share-edit-form" class="manage-form share-dialog-form">${field('Link label','label',`maxlength="120" value="${esc(share.label||'')}"`)}<label><span>Password</span><select name="passwordAction"><option value="keep">Keep current password setting</option><option value="set">Set or replace password</option><option value="remove">Remove password</option></select></label><label data-password-input hidden><span>New password</span><input name="password" type="password" minlength="8" autocomplete="new-password" disabled></label>${field('Expiry (optional)','expiresAt',`type="datetime-local" value="${esc(shareExpiryInput(share.expiresAt))}"`)}${shareViewControls(output,share.allowedViews??null)}<label class="check"><input name="measure" type="checkbox" ${share.permissions?.measure?'checked':''}> Temporary measurements (not saved to the project)</label><label class="check"><input name="cameras" type="checkbox" ${share.permissions?.cameras?'checked':''}> Camera positions</label><label class="check"><input name="download" type="checkbox" ${share.permissions?.download?'checked':''}> Downloads, including model report</label><p class="form-note">The URL stays the same. Password and permission changes apply to existing sessions. Link version behavior stays unchanged.</p><button class="primary-button" type="submit">Save link settings</button><p role="status"></p></form>`,'wide-modal');
   const form=modalContent.querySelector('#share-edit-form');bindShareViewControls(form);
   const permissionsAtOpen={...share.permissions};
   form.elements.passwordAction.onchange=()=>{const setting=form.elements.passwordAction.value==='set';form.querySelector('[data-password-input]').hidden=!setting;form.elements.password.disabled=!setting;form.elements.password.required=setting;};
