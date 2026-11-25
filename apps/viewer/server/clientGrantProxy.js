@@ -6,6 +6,8 @@ const { validDirectGrantInput, validDirectSnapshot, directListQuery } = require(
 
 const REMOTE_PATH = '/api/viewer/workspace/client-grants';
 const LOCAL_PATH = '/api/v1/workspace/client-grants';
+// What Operations answers when it does not accept the shape of a request.
+const LIST_SHAPE_REFUSAL = 'Viewer client-grant request is invalid';
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 
@@ -89,30 +91,45 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
         requestId, action, stage, upstreamStatus, status, code }); } catch { /* Diagnostics must not change authorization or responses. */ }
     };
     try {
-      const body = JSON.stringify(envelope);
       const url = new URL(REMOTE_PATH, config.opsAutomationBaseUrl);
       if (url.origin !== config.opsAutomationBaseUrl || url.pathname !== REMOTE_PATH || url.search || url.hash || url.username || url.password)
         throw new Error('invalid_destination');
-      stage = 'signing';
-      const signed = signViewerEvent({ secret: config.viewerEventSecret, keyId: config.viewerEventKeyId, method: 'POST', path: REMOTE_PATH, body });
-      stage = 'request';
-      const response = await fetchImpl(url, {
-        method: 'POST',
-        redirect: 'error',
-        signal: AbortSignal.timeout(15_000),
-        headers: { ...signed, Accept: 'application/json', 'Content-Type': 'application/json' },
-        body,
-      });
-      upstreamStatus = response.status;
-      stage = 'response_headers';
-      const declared = Number(response.headers.get('content-length') || 0);
-      if (declared > 1024 * 1024) throw new Error('response_too_large');
-      stage = 'response_body';
-      const text = await response.text();
-      if (Buffer.byteLength(text) > 1024 * 1024) throw new Error('response_too_large');
-      stage = 'response_json';
-      let payload;
-      try { payload = JSON.parse(text); } catch { throw new Error('invalid_response'); }
+      const send = async message => {
+        const body = JSON.stringify(message);
+        stage = 'signing';
+        const signed = signViewerEvent({ secret: config.viewerEventSecret, keyId: config.viewerEventKeyId, method: 'POST', path: REMOTE_PATH, body });
+        stage = 'request';
+        const response = await fetchImpl(url, {
+          method: 'POST',
+          redirect: 'error',
+          signal: AbortSignal.timeout(15_000),
+          headers: { ...signed, Accept: 'application/json', 'Content-Type': 'application/json' },
+          body,
+        });
+        upstreamStatus = response.status;
+        stage = 'response_headers';
+        const declared = Number(response.headers.get('content-length') || 0);
+        if (declared > 1024 * 1024) throw new Error('response_too_large');
+        stage = 'response_body';
+        const text = await response.text();
+        if (Buffer.byteLength(text) > 1024 * 1024) throw new Error('response_too_large');
+        stage = 'response_json';
+        try { return { response, payload: JSON.parse(text) }; } catch { throw new Error('invalid_response'); }
+      };
+      let { response, payload } = await send(envelope);
+      // An Operations release from before the name-ordered picker refuses `include` outright.
+      // Ask it once more the way it understands, and keep only the half that was asked for.
+      const include = envelope.listQuery?.include;
+      if (response.status === 400 && payload?.error === LIST_SHAPE_REFUSAL && include && include !== 'all' && envelope.listQuery.grantsCursor === undefined) {
+        const { include: _include, ...older } = envelope.listQuery;
+        ({ response, payload } = await send({ ...envelope, listQuery: include === 'grants' ? { ...older, limit: 1 } : older }));
+        if (response.ok) {
+          stage = 'response_schema';
+          if (!validDirectSnapshot(payload, action)) throw new Error('invalid_response');
+          payload = include === 'grants' ? { ...payload, clients: [], clientsNextCursor: null }
+            : { clients: payload.clients, grants: [], clientsNextCursor: payload.clientsNextCursor };
+        }
+      }
       if (!response.ok) {
         stage = 'upstream_rejection';
         const status = response.status >= 400 && response.status < 500 ? response.status : 502;
