@@ -2612,22 +2612,30 @@ function syncViewerMarks() {
   if (!viewerMarks) return;
   const model = PROJECT;
   let context = null;
-  if (model?.id && model?.activeVersion?.id && SHARE_PERMISSIONS.measure !== false) {
+  if (model?.id && model?.activeVersion?.id && SHARE_PERMISSIONS.view !== false) {
     const session = activeViewerSession;
     if (VIEW_MODE === 'session' && sessionAccessState !== 'unavailable'
-      && Date.parse(session?.expiresAt) > Date.now() && session?.subject && ['ops', 'client'].includes(session.audience)) {
+      && Date.parse(session?.expiresAt) > Date.now() && session?.subject && session.permissions?.view === true
+      && ['ops', 'client'].includes(session.audience)
+      && (session.permissions.measure === true || session.audience === 'client')) {
       // Whose marks, and whether the login is still that individual: losing that
       // clears the panel like a different person, before anything is loaded.
       context = { mode: 'session', key: JSON.stringify([session.audience, session.subject, model.id,
-        session.audience === 'ops' || session.permissions?.personalMeasurements === true]),
+        session.permissions.measure === true && (session.audience === 'ops' || session.permissions.personalMeasurements === true)]),
         token: () => sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null,
       };
-    } else if (['view', 'embed', 'project'].includes(VIEW_MODE)) {
-      context = { mode: 'temporary', key: JSON.stringify(['public', model.id]) };
+    } else if (['view', 'embed', 'project'].includes(VIEW_MODE)
+      && SHARE_PERMISSIONS.view === true && SHARE_PERMISSIONS.marks === true) {
+      // The URL's share-link token is not a Marks bearer. The page already holds
+      // the signed bearer in its same-origin asset URLs, including without measure.
+      const token = Object.values(model.assets || {}).map(value => measurementAssetBearer(value)).find(Boolean);
+      if (token) context = { mode: 'session', key: JSON.stringify(['public', model.id, model.activeVersion.id, token]), readOnly: true,
+        token: () => token };
     }
   }
   // Unsaved work survives an expired session, not refused access.
-  void viewerMarks.setScope(context, { keepDraft: SHARE_PERMISSIONS.measure !== false
+  void viewerMarks.setScope(context, { keepDraft: VIEW_MODE === 'session' && SHARE_PERMISSIONS.view !== false
+    && activeViewerSession?.permissions?.view === true && activeViewerSession.permissions.measure === true
     && (sessionAccessState !== 'unavailable' || sessionAccessReason === 'session-expired') });
 }
 

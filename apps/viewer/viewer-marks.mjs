@@ -10,7 +10,7 @@ import { createMarkDraftRecovery, reconcileMarkDraft, sameMark, SENT_LIMIT } fro
 
 const TYPE_LABEL = { Point: 'Pin', LineString: 'Line', Polygon: 'Area' };
 // The server says which of these a person may choose; with one choice the field is hidden.
-const VISIBILITY_LABEL = { staff: 'Me and project staff', private: 'Only me', internal: 'Staff only', client: 'A client account' };
+const VISIBILITY_LABEL = { shared: 'Shared, client can edit', 'shared-view': 'Shared, view only', staff: 'Me and project staff', private: 'Only me', internal: 'Staff only', client: 'A client account' };
 const ACCOUNT_TYPE = { model_association: 'Client association', direct_client_grant: 'Client grant' };
 const accountLabel = key => { const [type, id = ''] = String(key).split(/:(.*)/s); return `${ACCOUNT_TYPE[type] || 'Client'} …${id.slice(-6)}`; };
 const LABELS_KEY = 'ltds.viewer.marks.labels', GROUP_KEY = 'ltds.viewer.marks.group';
@@ -37,6 +37,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   let boxOpen = false, picked = null;
   let tab = 'list', search = '', armedDelete = null, categoryDraft = null;
   let sessionScope = false, scopeKey, writtenCoords = null;
+  let publicReadOnly = false, history = null;
   let hadMarksAccess = false, hadWriteAccess = false;
   let pendingRestoreFocus = null;
   let sharedRefreshTimer = null, pageSuspended = false;
@@ -171,10 +172,12 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const cardFacts = h(document, 'dl', { class: 'viewer-mark-facts' });
   const editButton = h(document, 'button', { type: 'button', class: 'viewer-mark-primary', text: 'Edit' });
   const moveButton = h(document, 'button', { type: 'button', text: 'Move' });
+  const historyButton = h(document, 'button', { type: 'button', text: 'History' });
+  const historyList = h(document, 'ul', { class: 'viewer-mark-list viewer-mark-history', 'aria-label': 'Mark history', hidden: true });
   const closeButton = h(document, 'button', { type: 'button', class: 'viewer-mark-close', 'aria-label': 'Close', text: '\u00d7' });
-  const cardActions = h(document, 'div', { class: 'viewer-mark-row' }, editButton, moveButton, deleteButton);
+  const cardActions = h(document, 'div', { class: 'viewer-mark-row' }, editButton, moveButton, deleteButton, historyButton);
   const cardView = h(document, 'div', { class: 'viewer-mark-view' }, h(document, 'div', { class: 'viewer-mark-card-head' }, cardBadge,
-    h(document, 'div', { class: 'viewer-mark-list-name' }, cardName, cardKind), closeButton), cardActions, cardNote, cardFacts);
+    h(document, 'div', { class: 'viewer-mark-list-name' }, cardName, cardKind), closeButton), cardActions, historyList, cardNote, cardFacts);
   const cardMessage = h(document, 'p', { class: 'hint viewer-mark-card-message', role: 'status', 'aria-live': 'polite' });
   const card = h(document, 'section', { class: 'viewer-mark-card', role: 'dialog', 'aria-label': 'Mark', hidden: true }, cardMessage, cardView, editor);
 
@@ -185,7 +188,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const undoButton = h(document, 'button', { type: 'button', text: 'Undo' });
   // What is hidden is always said, and leads to where it can be shown again.
   const hiddenButton = h(document, 'button', { type: 'button', class: 'viewer-mark-hidden-count' });
-  const listHead = h(document, 'div', { class: 'viewer-mark-row viewer-mark-list-head' }, undoButton);
+  const shareAllButton = h(document, 'button', { type: 'button', text: 'Share all' });
+  const listHead = h(document, 'div', { class: 'viewer-mark-row viewer-mark-list-head' }, undoButton, shareAllButton);
   const list = h(document, 'ul', { class: 'viewer-mark-list', 'aria-label': 'Marks' });
 
   // Categories
@@ -257,7 +261,13 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   overlay.append(addButton, boxButton, hiddenButton, cross, strip, card, pick, box, undoBar);
 
   // ---- helpers --------------------------------------------------------------
-  const canWrite = () => store.canWrite() && Boolean(view.map);
+  const canWrite = () => !publicReadOnly && store.canWrite() && Boolean(view.map);
+  const canDelete = mark => !publicReadOnly && store.canWrite() && Boolean(mark?.deletable ?? (!sessionScope && mark?.mine && mark?.editable));
+  const canShare = mark => !publicReadOnly && store.canWrite() && (!mark?.id || mark.mine || (store.state.capabilities.staff && mark.visibility === 'shared'));
+  const canHistory = mark => !publicReadOnly && store.canWrite() && store.state.capabilities.staff && store.state.capabilities.history && mark?.visibility === 'shared' && canDelete(mark);
+  const shareAllAvailable = () => !publicReadOnly && store.canWrite() && store.state.capabilities.staff && store.state.capabilities.shareAll
+    && store.state.marks.some(mark => mark.mine && mark.visibility !== 'shared');
+  const sharingValue = mark => mark?.visibility === 'shared' && mark.access === 'view' ? 'shared-view' : mark?.visibility;
   const canMoveDraft = () => Boolean(moving && view.map && draft?.id && store.editable(store.find(draft.id)));
   const categoryById = id => store.state.categories.find(category => category.id === id) || null;
   const visibleMarks = () => store.state.marks.filter(visibility.shows);
@@ -391,6 +401,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (!view.map || !mark || mode !== 'idle' || unsaved()) return;
     draft = null;
     selectedId = id;
+    history = null;
     picked = null;
     if (narrow()) boxOpen = false;
     armedDelete = null;
@@ -460,6 +471,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     draft = null;
     picked = null;
     selectedId = null;
+    history = null;
     armedDelete = null;
     deleteForGood = null;
     moving = false;
@@ -508,7 +520,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (!draft || (draft.id && !store.find(draft.id)?.editable)) return null;
     return { kind: 'editor', id: draft.id, newId: draft.newId || null, revision: draft.id ? draft.revision : null, geometry: structuredClone(draft.geometry),
       name: nameInput.value, note: noteInput.value, categoryId: chosenStarter() ? null : categorySelect.value || null, starter: chosenStarter()?.key || null, color: safeColor(colorInput.value), icon: keepIcon(draft.icon),
-      elevation: elevationInput.value, units: units() === 'metric' ? 'metric' : 'imperial', visibility: visibilitySelect.value,
+      elevation: elevationInput.value, units: units() === 'metric' ? 'metric' : 'imperial', ...readSharing(),
       coordinates: draft.geometry.type === 'Point' && pointCoords.value !== writtenCoords ? pointCoords.value : null,
       ...(draft.sent && { sent: draft.sent }) };
   }
@@ -574,9 +586,12 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     colorInput.value = safeColor(draft.color);
     noteInput.value = draft.note || '';
     elevationInput.value = elevationForDisplay(draft.elevationNavd88M, units());
-    const options = store.state.capabilities.visibility;
+    const options = store.state.capabilities.visibility.flatMap(value => value === 'shared'
+      ? (store.state.capabilities.access || []).map(access => access === 'view' ? 'shared-view' : 'shared') : [value]);
+    const selected = sharingValue(draft);
+    if (selected && !options.includes(selected)) options.push(selected);
     visibilitySelect.replaceChildren(...options.map(value => h(document, 'option', { value, text: VISIBILITY_LABEL[value] })));
-    visibilitySelect.value = options.includes(draft.visibility) ? draft.visibility : options[0];
+    visibilitySelect.value = selected || options[0];
     const accounts = store.state.audiences.map(row => row.account);
     if (draft.shareAccount && !accounts.includes(draft.shareAccount)) accounts.unshift(draft.shareAccount);
     accountSelect.replaceChildren(h(document, 'option', { value: '', text: accounts.length ? 'Choose…' : 'No client with a direct grant has opened Marks here' }),
@@ -596,11 +611,18 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     pointCoords.value = writtenCoords = editableCoords(lat, lon);
   }
 
+  function readSharing() {
+    if (!canShare(draft)) return { visibility: draft.visibility, ...(draft.access && { access: draft.access }) };
+    const value = visibilitySelect.value;
+    return { visibility: value === 'shared-view' ? 'shared' : value,
+      ...(['shared', 'shared-view'].includes(value) ? { access: value === 'shared-view' ? 'view' : 'edit' } : {}),
+      ...(value === 'client' ? { shareAccount: accountSelect.value || null } : {}) };
+  }
+
   function readEditor() {
     const elevation = elevationToMetres(elevationInput.value, units());
     return { name: nameInput.value.trim(), categoryId: chosenStarter() ? null : categorySelect.value || null, color: safeColor(colorInput.value),
-      note: noteInput.value.trim(), elevationNavd88M: elevation, visibility: visibilitySelect.value,
-      ...(visibilitySelect.value === 'client' ? { shareAccount: accountSelect.value || null } : {}) };
+      note: noteInput.value.trim(), elevationNavd88M: elevation, ...readSharing() };
   }
 
   function readout(geometry) {
@@ -619,21 +641,40 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       cardFacts.replaceChildren();
       return;
     }
-    const { state } = store, editable = store.editable(mark);
+    const { state } = store, editable = !publicReadOnly && store.editable(mark), deletable = canDelete(mark), hasHistory = canHistory(mark);
     card.setAttribute('aria-label', mark.name);
     cardBadge.innerHTML = markBadge(mark);
     cardName.textContent = mark.name;
-    cardKind.textContent = [categoryById(mark.categoryId)?.name, mark.mine ? null : mark.author === 'staff' ? 'From project staff' : 'From a client'].filter(Boolean).join(' · ');
-    cardNote.textContent = mark.note || '';
-    cardNote.hidden = !mark.note;
+    cardKind.textContent = [categoryById(mark.categoryId)?.name, mark.mine ? null : mark.author === 'staff' ? 'From project staff' : 'From a client',
+      state.capabilities.staff && mark.changedBy === 'client' ? 'Changed by a client' : null].filter(Boolean).join(' · ');
+    cardNote.textContent = publicReadOnly ? '' : mark.note || '';
+    cardNote.hidden = publicReadOnly || !mark.note;
     const facts = [
-      sessionScope && mark.mine && state.capabilities.visibility.length > 1 ? ['Visible to', VISIBILITY_LABEL[mark.visibility]] : null,
+      sessionScope && mark.mine && state.capabilities.visibility.length > 1 ? ['Visible to', VISIBILITY_LABEL[sharingValue(mark)]] : null,
       [mark.geometry.type === 'Point' ? 'Coordinates' : 'Points', mark.geometry.type === 'Point' ? readout(mark.geometry) : String(markPositions(mark.geometry).length)],
       Number.isFinite(mark.elevationNavd88M) ? ['NAVD88 Elevation', `${elevationForDisplay(mark.elevationNavd88M, units())} ${elevationUnit(units())}`] : null,
     ].filter(Boolean);
     cardFacts.replaceChildren(...facts.flatMap(([term, value]) => [h(document, 'dt', { text: term }), h(document, 'dd', { text: value })]));
-    cardActions.hidden = !editable;
-    for (const button of [editButton, moveButton, deleteButton]) { button.hidden = !editable; button.disabled = state.busy; }
+    cardActions.hidden = !editable && !deletable && !hasHistory;
+    for (const button of [editButton, moveButton]) { button.hidden = !editable; button.disabled = state.busy; }
+    deleteButton.hidden = !deletable;
+    deleteButton.disabled = historyButton.disabled = state.busy;
+    historyButton.hidden = !hasHistory;
+    historyList.hidden = !hasHistory || history?.id !== mark.id;
+    historyList.replaceChildren(...(!historyList.hidden ? history.versions.map(version => {
+      const restore = h(document, 'button', { type: 'button', text: 'Restore', 'data-revert-revision': String(version.revision), disabled: state.busy });
+      on(restore, 'click', async () => {
+        const current = store.find(mark.id), held = store.hold();
+        if (!canHistory(current) || store.state.busy || unsaved()) return;
+        if (await store.revert(current, version.revision)) {
+          if (!held.live() || selectedId !== mark.id) return;
+          history = null;
+          render();
+          historyButton.focus?.();
+        }
+      });
+      return h(document, 'li', {}, h(document, 'span', { class: 'viewer-mark-list-name', text: `${version.mark.name} · ${version.changedBy === 'client' ? 'Client' : 'Staff'} · ${new Date(version.changedAt).toLocaleString()}` }), restore);
+    }) : []));
     deleteButton.textContent = deleteForGood === mark.id ? 'Delete for good' : 'Delete';
   }
 
@@ -794,7 +835,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       pointCoordsField.hidden = draft.geometry.type !== 'Point';
       coordReadout.textContent = readout(draft.geometry);
       elevationLabel.textContent = `NAVD88 Elevation (${elevationUnit(units())})`;
-      visibilityField.hidden = !sessionScope || !state.capabilities.write || state.capabilities.visibility.length < 2 || Boolean(draft.id && !draft.mine);
+      visibilityField.hidden = !sessionScope || !canShare(draft) || state.capabilities.visibility.length < 2;
       accountField.hidden = visibilityField.hidden || visibilitySelect.value !== 'client';
     }
 
@@ -824,7 +865,9 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       return h(document, 'li', {}, button);
     });
     list.replaceChildren(...rows);
-    listHead.hidden = !state.ready || !state.undo.length;
+    shareAllButton.hidden = !shareAllAvailable();
+    shareAllButton.disabled = state.busy;
+    listHead.hidden = !state.ready || (!state.undo.length && shareAllButton.hidden);
     searchInput.hidden = !state.marks.length;
 
     // Categories
@@ -962,6 +1005,18 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(placeCancel, 'click', () => { setMode('idle'); render(); addButton.focus?.(); });
   on(editButton, 'click', () => beginEdit());
   on(moveButton, 'click', () => beginEdit({ move: true }));
+  on(shareAllButton, 'click', async () => {
+    if (!shareAllAvailable() || store.state.busy || unsaved()) return;
+    await store.shareAll('edit');
+  });
+  on(historyButton, 'click', async () => {
+    const current = store.find(selectedId), held = store.hold();
+    if (!canHistory(current) || store.state.busy || unsaved()) return;
+    const versions = await store.history(current);
+    if (!versions || !held.live() || selectedId !== current.id || store.find(current.id)?.revision !== current.revision) return;
+    history = { id: current.id, versions: [...versions].sort((a, b) => b.revision - a.revision) };
+    render();
+  });
   on(moveSave, 'click', () => saveDraft());
   on(moveCancel, 'click', () => { if (canMoveDraft()) cancelDraft(); });
   on(cancelButton, 'click', () => cancelDraft());
@@ -1135,7 +1190,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // when that is not possible any more does it ask, and then says so.
   async function removeMark(id, { permanent = false } = {}) {
     const current = store.find(id);
-    if (!current || !store.editable(current) || store.state.busy) return;
+    if (!current || !canDelete(current) || store.state.busy) return;
     deleteForGood = null;
     const held = store.hold(), open = selectedId, stays = focusKeeper();
     const removed = await store.remove(current, { permanent });
@@ -1316,6 +1371,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     store,
     // keepDraft is false when access was refused rather than expired: unsaved work goes too.
     async setScope(next, { keepDraft: mayReturn = true } = {}) {
+      publicReadOnly = next?.readOnly === true;
       sessionScope = next?.mode === 'session';
       if (!mayReturn) recovery.clear();
       // Anyone else's unsaved work goes as soon as they are gone, map open or not.
@@ -1324,7 +1380,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         draftChecked = false;
         endMarkInput();
         // Nothing one person typed or picked stays in the panel for the next one.
-        draft = null; selectedId = null; mode = 'idle'; drawing = null;
+        draft = null; selectedId = null; mode = 'idle'; drawing = null; history = null;
         more.open = false;
         preview = null; placeChoice = null; several = false; crosshair = false;
         picker.close({ focus: false });
