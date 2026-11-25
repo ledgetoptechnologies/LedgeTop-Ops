@@ -3,6 +3,7 @@ package app.ledgetop.logs;
 import android.content.Context;
 import android.net.Uri;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -20,19 +21,36 @@ final class LogFile {
     final String name;
     final long size;
     final long lastModified;
+    /** Synthetic-input builds only: the SHA-256 of the captured bytes below, else null. */
+    final String snapshotSha256;
     private final File file;
     private final Uri uri;
+    private final byte[] snapshot;
 
-    private LogFile(String key, String name, long size, long lastModified, File file, Uri uri) {
+    private LogFile(String key, String name, long size, long lastModified, File file, Uri uri, byte[] snapshot) {
         this.key = key; this.name = name; this.size = size; this.lastModified = lastModified; this.file = file; this.uri = uri;
+        this.snapshot = snapshot;
+        this.snapshotSha256 = snapshot == null ? null : InputPolicy.sha256(snapshot);
+    }
+
+    /**
+     * A synthetic test file captured once into memory: its fingerprint and its upload both come from these exact
+     * bytes, never from the file on disk again. Null when the file is too large to capture (nothing is offered).
+     */
+    static LogFile snapshot(File file) throws IOException {
+        long modified = file.lastModified();
+        byte[] bytes;
+        try (InputStream in = new FileInputStream(file)) { bytes = InputPolicy.capture(in, InputPolicy.SYNTHETIC_MAX_BYTES); }
+        if (bytes == null) return null;
+        return new LogFile(file.getAbsolutePath(), file.getName(), bytes.length, modified, null, null, bytes);
     }
 
     static LogFile of(File file) {
-        return new LogFile(file.getAbsolutePath(), file.getName(), file.length(), file.lastModified(), file, null);
+        return new LogFile(file.getAbsolutePath(), file.getName(), file.length(), file.lastModified(), file, null, null);
     }
 
     static LogFile of(Uri document, String name, long size, long lastModified) {
-        return new LogFile(document.toString(), name, size, lastModified, null, document);
+        return new LogFile(document.toString(), name, size, lastModified, null, document, null);
     }
 
     static boolean isFlightRecord(String name) {
@@ -40,6 +58,7 @@ final class LogFile {
     }
 
     InputStream open(Context context) throws IOException {
+        if (snapshot != null) return new ByteArrayInputStream(snapshot);
         if (file != null) return new FileInputStream(file);
         InputStream in = context.getContentResolver().openInputStream(uri);
         if (in == null) throw new FileNotFoundException("flight record unavailable");

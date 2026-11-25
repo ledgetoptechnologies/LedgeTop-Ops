@@ -8,11 +8,14 @@ import java.util.Locale;
 final class BuildInfo {
     static final String VERSION = "0.3.4";
     static final String PRODUCTION_HOST = "logs.ledgetop.app";
-    static final String DEFAULT_SERVER = "https://" + PRODUCTION_HOST;
+    static final String PRODUCTION_SERVER = "https://" + PRODUCTION_HOST;
+    /** A synthetic-input build talks only to its one baked-in staging host; every other build defaults to production. */
+    static final String DEFAULT_SERVER = BuildFlags.SYNTHETIC_INPUT_ONLY && BuildFlags.EXTRA_HOSTS.length == 1
+        ? "https://" + BuildFlags.EXTRA_HOSTS[0] : PRODUCTION_SERVER;
 
     /**
      * The only servers this build will ever talk to:
-     * - https://logs.ledgetop.app;
+     * - https://logs.ledgetop.app, except in a synthetic-input staging build (never production);
      * - the exact staging host baked into a staging build (BuildFlags.EXTRA_HOSTS);
      * - http loopback with a port (adb reverse), in test builds only (BuildFlags.ALLOW_LOOPBACK).
      * Anything else is refused, so a device token can never be sent to another server.
@@ -27,7 +30,7 @@ final class BuildInfo {
             host = host.toLowerCase(Locale.ROOT);
             if ("https".equals(scheme)) {
                 if (uri.getPort() != -1) return false;
-                if (host.equals(PRODUCTION_HOST)) return true;
+                if (host.equals(PRODUCTION_HOST)) return !BuildFlags.SYNTHETIC_INPUT_ONLY;
                 for (String extra : BuildFlags.EXTRA_HOSTS) if (host.equals(extra)) return true;
                 return false;
             }

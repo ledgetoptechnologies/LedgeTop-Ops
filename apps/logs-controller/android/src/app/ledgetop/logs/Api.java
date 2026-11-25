@@ -67,8 +67,8 @@ final class Api {
     }
 
     private HttpURLConnection open(String method, String path) throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) new URL(base + path).openConnection();
-        connection.setRequestMethod(method);
+        // Never follows a redirect: the tokens below go only to the checked server (see HttpPolicy).
+        HttpURLConnection connection = HttpPolicy.open(new URL(base + path), method);
         connection.setConnectTimeout(15_000);
         connection.setReadTimeout(120_000);
         connection.setRequestProperty("Accept", "application/json");
@@ -80,6 +80,8 @@ final class Api {
     private static JSONObject read(HttpURLConnection connection) throws IOException {
         try {
             int status = connection.getResponseCode();
+            if (HttpPolicy.isRedirect(status))
+                throw new Failure(status, "redirect_refused", "Ledge Top answered with a redirect, which this app never follows — will retry");
             InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
             String text = "";
             if (stream != null) {

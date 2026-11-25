@@ -138,14 +138,37 @@ final class SyncEngine {
 
     /** Every DJI flight record this app can read, oldest first: shared-storage folders plus the granted folder. */
     List<LogFile> findLogs() {
-        File root = Environment.getExternalStorageDirectory();
         List<LogFile> found = new ArrayList<>();
+        if (InputPolicy.syntheticOnly()) {
+            // Staging device test: never look at the DJI apps' folders or a granted folder, only this app's own one.
+            // Each file is captured once into memory (bounded); its fingerprint and upload use those exact bytes.
+            File folder = syntheticFolder();
+            File[] files = folder == null ? null : folder.listFiles();
+            if (files != null) {
+                Arrays.sort(files, (a, b) -> a.getName().compareTo(b.getName()));
+                for (File file : files) {
+                    if (found.size() >= InputPolicy.SYNTHETIC_MAX_FILES) break;
+                    if (!file.isFile() || !LogFile.isFlightRecord(file.getName())) continue;
+                    try { LogFile captured = LogFile.snapshot(file); if (captured != null) found.add(captured); }
+                    catch (IOException e) { /* unreadable: nothing offered */ }
+                }
+            }
+            return sortedOldestFirst(found);
+        }
+        File root = Environment.getExternalStorageDirectory();
         for (String relative : LOG_FOLDERS) {
             File[] files = new File(root, relative).listFiles();
             if (files == null) continue;
             for (File file : files) if (file.isFile() && LogFile.isFlightRecord(file.getName())) found.add(LogFile.of(file));
         }
         found.addAll(treeLogs());
+        return sortedOldestFirst(found);
+    }
+
+    /** Android/data/app.ledgetop.logs/files/synthetic-input: written only by adb or this app, never by DJI apps. */
+    File syntheticFolder() { return context.getExternalFilesDir(InputPolicy.SYNTHETIC_FOLDER); }
+
+    private static List<LogFile> sortedOldestFirst(List<LogFile> found) {
         LogFile[] sorted = found.toArray(new LogFile[0]);
         Arrays.sort(sorted, (a, b) -> Long.compare(a.lastModified, b.lastModified));
         return Arrays.asList(sorted);
@@ -166,6 +189,7 @@ final class SyncEngine {
 
     /** Keeps a folder the pilot picked: read-only, and it survives reboots. */
     void rememberLogTree(Uri tree) {
+        if (InputPolicy.syntheticOnly()) return;                               // a synthetic-input build never reads a granted folder
         context.getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         prefs.edit().putString("logTreeUri", tree.toString()).apply();
     }
@@ -192,9 +216,10 @@ final class SyncEngine {
     }
 
     /** Android 11+, no folder granted yet: DJI Fly's logs need the one-time folder picker. */
-    boolean canChooseLogFolder() { return Build.VERSION.SDK_INT >= 30 && logTree() == null; }
+    boolean canChooseLogFolder() { return !InputPolicy.syntheticOnly() && Build.VERSION.SDK_INT >= 30 && logTree() == null; }
 
     String folderSummary() {
+        if (InputPolicy.syntheticOnly()) return "the staging test folder (approved test files only)";
         if (logTree() != null) return "the DJI Fly folder you chose";
         File root = Environment.getExternalStorageDirectory();
         for (String relative : LOG_FOLDERS) if (new File(root, relative).isDirectory()) return relative;
@@ -231,6 +256,7 @@ final class SyncEngine {
                 if (owner == null) continue;                                           // nobody signed in to credit it to
                 String hash = hash(file);
                 if (hash == null) continue;
+                if (!InputPolicy.allowed(hash)) continue;                             // never offered or uploaded
                 Map<String, LogFile> group = bySession.get(owner);
                 if (group == null) { group = new HashMap<>(); bySession.put(owner, group); }
                 group.put(hash, file);
@@ -316,6 +342,7 @@ final class SyncEngine {
 
     /** SHA-256 of the whole file (the same fingerprint OpenDroneLog uses), cached while the file is unchanged. */
     private String hash(LogFile file) {
+        if (InputPolicy.syntheticOnly()) return file.snapshotSha256;          // captured bytes only; never the path cache
         String key = file.key, stamp = file.size + ":" + file.lastModified;
         String cached = hashes.getString(key, null);
         if (cached != null && cached.startsWith(stamp + "=")) return cached.substring(stamp.length() + 1);
