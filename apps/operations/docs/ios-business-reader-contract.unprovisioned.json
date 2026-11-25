@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "status": "unprovisioned-proposal",
+  "environment": "staging",
+  "cloudflareAccountId": "df3f376bae6ee621f50cf972ebcc9484",
+  "operationsDatabaseId": "a58ea102-f04d-417a-bfd1-b0654cfeb503",
+  "deliveryDatabaseId": null,
+  "edgeWorker": null,
+  "readerWorker": null,
+  "privateEntrypoint": "IosPilotBusinessReadService",
+  "bindingName": "IOS_PILOT_BUSINESS_READ",
+  "reviewedPilotOrigin": null,
+  "accessIssuer": null,
+  "pilotAudience": null,
+  "ordinaryOperationsAudience": null,
+  "source": {
+    "sourceId": "project-alpha:primary",
+    "rootNamespace": "business",
+    "snapshotProtocol": "legacy-instance-scoped",
+    "configuredApplicationKey": null,
+    "apiV2IdentityRequiredForLegacySnapshot": false,
+    "currentDirectoryIdentityAndProjectionRequiredForReads": true,
+    "sourceInstanceId": null,
+    "applicationId": null,
+    "historyEpoch": null,
+    "reviewedRecordTuples": []
+  },
+  "humanAdmission": {
+    "canonicalStaffId": null,
+    "privateSubjectBindingEvidenceReference": null,
+    "admissionVersion": null,
+    "profileVersion": null,
+    "reviewedPermissionEvidenceReference": null
+  },
+  "executionApprovalReference": null
+}

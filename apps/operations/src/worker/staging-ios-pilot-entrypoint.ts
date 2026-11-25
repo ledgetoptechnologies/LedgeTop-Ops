@@ -14,3 +14,4 @@ export {
   SharedProfilePortalIngress, StaffDirectory, ThumbnailRendererContainer, ViewerSessionIssuer,
 } from './staging-native-authority-entrypoint';
 export { IosPilotReadService } from './ios-pilot-read-entrypoint';
+export { IosPilotBusinessReadService } from './ios-pilot-business-entrypoint';

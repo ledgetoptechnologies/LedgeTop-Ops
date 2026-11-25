@@ -4,7 +4,7 @@ import type { Env } from './types';
 
 // The service binding is limited to the exact staging host. This class is
 // exported only by the staging pilot wrapper and has no public HTTP route.
-const REVIEWED_RPC_ORIGINS: readonly string[] = ['https://ios-pilot-staging.ledgetop.app'];
+const REVIEWED_RPC_ORIGINS: readonly string[] = [];
 
 /** Private service-binding RPC; it is not an HTTP route. */
 export class IosPilotReadService extends WorkerEntrypoint<Env> {
