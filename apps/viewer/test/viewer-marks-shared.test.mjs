@@ -278,7 +278,7 @@ test('a link a client creates does not show marks unless that was chosen', async
   assert.equal(newSharePermissions({}, 'staff').marks, true);
   assert.deepEqual(await shared(link(newSharePermissions({}, 'staff')).token), ['Pin']);
   const route = fs.readFileSync(new URL('../server/apiV1.js', import.meta.url), 'utf8');
-  assert.match(route, /permissions: newSharePermissions(body.permissions,shareClass)/, 'the route that creates client links says whose link it is');
+  assert.ok(route.includes('newSharePermissions(body.permissions,shareClass)'), 'the route that creates client links says whose link it is');
 });
 
 test('shared lists come in bounded pages', async t => {
