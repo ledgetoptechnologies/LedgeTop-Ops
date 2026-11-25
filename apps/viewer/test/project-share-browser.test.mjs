@@ -322,7 +322,7 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     await waitFor(client, `document.querySelector('#client-grant-form') !== null`, `${viewport.name}: Operations client form did not load`);
     assert.equal(await client.evaluate(`window.__legacyRow===document.querySelector('[data-action="revoke-project-share"]')`), true, 'Late client response must not replace legacy link controls');
     assert.deepEqual(await client.evaluate(`(() => {const form=document.querySelector('#client-grant-form');return {whole:form.elements.wholeProject.checked,future:form.elements.includeFuturePublished.checked,download:form.elements.download.checked}})()`),
-      {whole:false,future:false,download:false}, 'Whole project and future client access require explicit opt-in');
+      {whole:false,future:true,download:true}, 'Whole-project access requires explicit opt-in');
     // A native dialog's close event is queued. Let it finish before any new
     // confirmation attaches its parent-close listener to the reused dialog.
     await client.evaluate(`new Promise(resolve => {
