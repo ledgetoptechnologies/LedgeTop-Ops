@@ -4,6 +4,8 @@
 // on a canvas above the ortho/DEM tiles and below property lines.
 import {
   CONTOUR_COLORS,
+  CONTOUR_DEFAULT_COLOR,
+  CONTOUR_DEFAULT_COLORS,
   autoContourInterval,
   chooseDemWindow,
   contourLevels,
@@ -79,7 +81,7 @@ export function createContourWorkerClient({ WorkerClass = null, inline = false }
 export function createContourCanvasLayer(L) {
   return L.Layer.extend({
     options: { pane: CONTOUR_PANE, padding: 0.25 },
-    initialize(options) { L.setOptions(this, options); this._features = []; this._colors = CONTOUR_COLORS.brown; this._proj = null; },
+    initialize(options) { L.setOptions(this, options); this._features = []; this._colors = CONTOUR_DEFAULT_COLORS; this._proj = null; },
     onAdd(map) {
       if (!map.getPane(this.options.pane)) {
         const pane = map.createPane(this.options.pane);
@@ -181,11 +183,14 @@ export function createContourController(deps) {
   let exportWorker = deps.exportWorker || null;
   const Layer = deps.Layer || createContourCanvasLayer(L);
   let on = false, layer = null, timer = null, abort = null, generation = 0, cache = null, status = '', lastUnits = null;
-  let intervalChoice = 'auto', colorKey = 'brown';
+  let intervalChoice = 'auto';
+  // A choice the browser kept in the select (back/forward, reload) stays the choice.
+  const chosenColor = () => Object.hasOwn(CONTOUR_COLORS, dom.color?.value) ? dom.color.value : CONTOUR_DEFAULT_COLOR;
+  let colorKey = chosenColor();
 
   const verticalScale = deps.verticalScale || dtmVerticalScale;
   const elevations = new WeakMap(); // ds -> Promise<{ scale, min, max }> in metres
-  const colors = () => CONTOUR_COLORS[colorKey] || CONTOUR_COLORS.brown;
+  const colors = () => CONTOUR_COLORS[colorKey];
 
   function elevationInfo(ds) {
     if (!elevations.has(ds)) {
@@ -327,7 +332,7 @@ export function createContourController(deps) {
 
   dom.button?.addEventListener('click', toggle);
   dom.interval?.addEventListener('change', () => { intervalChoice = dom.interval.value === 'auto' ? 'auto' : Number(dom.interval.value); cache = null; refresh(); });
-  dom.color?.addEventListener('change', () => { colorKey = CONTOUR_COLORS[dom.color.value] ? dom.color.value : 'brown'; layer?.setColors(colors()); });
+  dom.color?.addEventListener('change', () => { colorKey = chosenColor(); layer?.setColors(colors()); });
 
   return {
     refresh,

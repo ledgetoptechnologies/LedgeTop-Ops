@@ -191,6 +191,17 @@ test('export traces contours for the print extent and burns lines, ft labels and
   assert.ok(texts.some(t => /Contours 10 ft · index every 50 ft/.test(t)), 'legend states interval and index');
   assert.ok(ops.some(o => o[0] === 'set' && o[1] === 'strokeStyle' && o[2] === CONTOUR_COLORS.brown.index), 'index colour used');
   assert.ok(ops.some(o => o[0] === 'set' && o[1] === 'strokeStyle' && o[2] === '#FFD60A'), 'property lines drawn');
+  // No color chosen prints white, with a dark line under the legend samples so they show on the white box.
+  const plainLog = [];
+  await exportOrthoPrint({ ortho: ds, extent: { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200 }, longEdge: 1024, format: 'png',
+    traceContours, units: 'imperial', createCanvas: fakeCanvasFactory(plainLog) });
+  const strokes = plainLog[0].ops.filter(o => o[0] === 'set' && o[1] === 'strokeStyle').map(o => o[2]);
+  const legend = strokes.slice(strokes.lastIndexOf('rgba(0,0,0,0.35)') + 1);
+  const { white } = CONTOUR_COLORS;
+  assert.deepEqual(legend, [white.halo, white.index, white.halo, white.minor]);
+  // On white no-data areas the lines keep their color and get a thin dark edge, drawn first; brown prints as before.
+  assert.deepEqual(strokes.slice(0, 4), [white.printCasing, white.minor, white.printCasing, white.index]);
+  assert.ok(!ops.some(o => o[2] === white.printCasing), 'brown has no dark edge');
   const tif = await exportOrthoPrint({
     ortho: ds, extent: { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200 }, longEdge: 400, format: 'tif', epsg: 32616,
     traceContours, units: 'imperial', createCanvas: fakeCanvasFactory([]), propertyLines: [[[500050, 4700050], [500350, 4700050]]], propertyStyle: { color: '#F97316' },

@@ -20,12 +20,15 @@ export const CONTOUR_INTERVALS = Object.freeze({
   metric: Object.freeze([0.5, 1, 2, 5, 10, 20]),
 });
 
-// onX-style: dark brown lines on imagery, light halo behind labels.
 export const CONTOUR_COLORS = Object.freeze({
   brown: Object.freeze({ minor: 'rgba(92,58,28,0.82)', index: '#4a2c10', label: '#3d240c', halo: 'rgba(255,248,232,0.92)', casing: 'rgba(255,248,232,0.28)' }),
-  tan: Object.freeze({ minor: 'rgba(214,180,126,0.85)', index: '#e2c48f', label: '#f3dfb5', halo: 'rgba(40,26,12,0.85)', casing: 'rgba(40,26,12,0.30)' }),
-  white: Object.freeze({ minor: 'rgba(255,255,255,0.72)', index: '#ffffff', label: '#ffffff', halo: 'rgba(0,0,0,0.75)', casing: 'rgba(0,0,0,0.30)' }),
+  tan: Object.freeze({ minor: 'rgba(214,180,126,0.85)', index: '#e2c48f', label: '#f3dfb5', halo: 'rgba(40,26,12,0.85)', casing: 'rgba(40,26,12,0.30)', printCasing: 'rgba(40,26,12,0.70)' }),
+  white: Object.freeze({ minor: 'rgba(255,255,255,0.72)', index: '#ffffff', label: '#ffffff', halo: 'rgba(0,0,0,0.75)', casing: 'rgba(0,0,0,0.30)', printCasing: 'rgba(0,0,0,0.70)' }),
 });
+
+// Used until the viewer picks a color, on the map and in prints.
+export const CONTOUR_DEFAULT_COLOR = 'white';
+export const CONTOUR_DEFAULT_COLORS = CONTOUR_COLORS[CONTOUR_DEFAULT_COLOR];
 
 export const CONTOUR_STYLE = Object.freeze({
   minorWidth: 1,
@@ -403,11 +406,12 @@ export function placeLabels(points, { spacing = CONTOUR_STYLE.labelSpacingPx, mi
 /**
  * Draw contour features on a 2D canvas context.
  * @param project (a, b) -> [x, y] pixel position for a feature coordinate pair
- * @param options { colors, scale, width, height, labels }
+ * @param options { colors, scale, width, height, labels, print }; print adds a thin dark edge to light lines,
+ *   which would otherwise vanish on the white areas outside the orthophoto
  * @returns { minor, index, labels } counts drawn
  */
-export function drawContours(ctx, features, project, { colors = CONTOUR_COLORS.brown, scale = 1, width = Infinity, height = Infinity,
-  labels = true, pad = 32 } = {}) {
+export function drawContours(ctx, features, project, { colors = CONTOUR_DEFAULT_COLORS, scale = 1, width = Infinity, height = Infinity,
+  labels = true, pad = 32, print = false } = {}) {
   const style = CONTOUR_STYLE;
   const projected = [];
   for (const f of features) {
@@ -434,8 +438,10 @@ export function drawContours(ctx, features, project, { colors = CONTOUR_COLORS.b
   ctx.save();
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   const minor = projected.filter(p => !p.f.isIndex), index = projected.filter(p => p.f.isIndex);
+  const printCasing = print ? colors.printCasing : null;
+  if (printCasing) strokeAll(minor, printCasing, (style.minorWidth + 1) * scale);
   strokeAll(minor, colors.minor, style.minorWidth * scale);
-  strokeAll(index, colors.casing, (style.indexWidth + style.casingExtra) * scale);
+  strokeAll(index, printCasing || colors.casing, (style.indexWidth + style.casingExtra) * scale);
   strokeAll(index, colors.index, style.indexWidth * scale);
   let labelCount = 0;
   if (labels && index.length) {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { CONTOUR_WORKER_UNAVAILABLE, VIEW_MAX_POINTS, createContourController, createContourWorkerClient, dtmVerticalScale } from '../contour-layer.mjs';
-import { METERS_PER_FOOT } from '../contours.mjs';
+import { CONTOUR_COLORS, METERS_PER_FOOT } from '../contours.mjs';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 5));
 
@@ -18,9 +18,10 @@ function element(tag = 'div') {
   };
 }
 
-function fixture({ units = 'imperial', mode = 'ortho', dtm = true, verticalScale, compute } = {}) {
+function fixture({ units = 'imperial', mode = 'ortho', dtm = true, verticalScale, compute, color = '' } = {}) {
   const documentRef = { createElement: element };
   const dom = { panel: element(), button: element('button'), interval: element('select'), color: element('select'), status: element('p') };
+  dom.color.value = color;
   const reads = [], computes = [], layers = [];
   // 100 m x 100 m DTM at 0.5 m, a plane rising 0.2 m per metre east from 230 m.
   const image = (w) => ({
@@ -80,6 +81,18 @@ test('panel shows only in map modes with a DTM; Show traces the visible area, Hi
   assert.equal(f.map.hasLayer(f.layers[0]), false);
   f.env.dtm = false; f.controller.refresh();
   assert.equal(f.dom.panel.hidden, true);
+});
+
+test('contours start white; a chosen color is used, also one the browser kept in the select', async () => {
+  const f = fixture();
+  f.controller.refresh(); f.dom.button.dispatch('click'); await tick();
+  assert.equal(f.controller.colors(), CONTOUR_COLORS.white);
+  assert.equal(f.layers[0].colors, CONTOUR_COLORS.white);
+  f.dom.color.value = 'brown'; f.dom.color.dispatch('change');
+  assert.equal(f.layers[0].colors, CONTOUR_COLORS.brown);
+  assert.equal(fixture({ color: 'tan' }).controller.colors(), CONTOUR_COLORS.tan);
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html.match(/<select id="contour-color">.*?<\/select>/s)[0], /<option value="white" selected>/);
 });
 
 test('interval chooser lists ft steps, switching interval re-traces with the new levels; panning inside the traced area does not', async () => {

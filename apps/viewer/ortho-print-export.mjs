@@ -2,7 +2,7 @@
 // orthophoto with contour lines (and optionally property lines) burned in.
 // PNG for printing (white background, small legend and scale bar) or a
 // georeferenced RGBA GeoTIFF in the orthophoto's own projected CRS.
-import { CONTOUR_COLORS, CONTOUR_INDEX_EVERY, drawContours, unitMeters, unitSuffix } from './contours.mjs';
+import { CONTOUR_DEFAULT_COLORS, CONTOUR_INDEX_EVERY, drawContours, unitMeters, unitSuffix } from './contours.mjs';
 import { isRgbNoData } from './orthophoto-mask.mjs';
 
 export const PRINT_SIZES = Object.freeze([2048, 4096, 6144]);
@@ -123,10 +123,11 @@ function drawLegend(ctx, { width, height, gsdE, units, contours, scale, colors }
   ctx.fillStyle = '#1b1b1b'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
   let cy = y + pad + line / 2;
   if (contours) {
-    ctx.strokeStyle = colors.index; ctx.lineWidth = 2.2 * scale;
-    ctx.beginPath(); ctx.moveTo(x + pad, cy - 3 * scale); ctx.lineTo(x + pad + 26 * scale, cy - 3 * scale); ctx.stroke();
-    ctx.strokeStyle = colors.minor; ctx.lineWidth = 1 * scale;
-    ctx.beginPath(); ctx.moveTo(x + pad, cy + 3 * scale); ctx.lineTo(x + pad + 26 * scale, cy + 3 * scale); ctx.stroke();
+    // The color's own halo goes under each sample, so white lines show on the white legend box.
+    for (const [color, lineWidth, dy] of [[colors.halo, 4.6, -3], [colors.index, 2.2, -3], [colors.halo, 3, 3], [colors.minor, 1, 3]]) {
+      ctx.strokeStyle = color; ctx.lineWidth = lineWidth * scale;
+      ctx.beginPath(); ctx.moveTo(x + pad, cy + dy * scale); ctx.lineTo(x + pad + 26 * scale, cy + dy * scale); ctx.stroke();
+    }
   }
   const tx = x + pad + (contours ? 34 * scale : 0);
   for (const row of rows) { ctx.fillText(row, tx, cy); cy += line; }
@@ -243,7 +244,7 @@ function putPixels(ctx, rgba, width, height) {
  * }
  */
 export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 4096, format = 'png', contours = null,
-  colors = CONTOUR_COLORS.brown, propertyLines = null, propertyStyle = null, units = 'imperial', createCanvas, pool, signal,
+  colors = CONTOUR_DEFAULT_COLORS, propertyLines = null, propertyStyle = null, units = 'imperial', createCanvas, pool, signal,
   maxStripPixels } = {}) {
   abortIf(signal);
   const extent = clampExtent(requested, ortho);
@@ -265,7 +266,7 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
   const scale = Math.max(1, Math.min(4, Math.max(width, height) / 1600));
   const project = (e, n) => [(e - extent.minE) / gsdE, (extent.maxN - n) / gsdN];
   let drawn = null;
-  if (contours?.features?.length) drawn = drawContours(ctx, contours.features, project, { colors, scale, width, height });
+  if (contours?.features?.length) drawn = drawContours(ctx, contours.features, project, { colors, scale, width, height, print });
   let propertyCount = 0;
   if (propertyLines?.length) {
     ctx.save(); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
