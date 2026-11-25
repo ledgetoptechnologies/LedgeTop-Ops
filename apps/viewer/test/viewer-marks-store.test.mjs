@@ -53,11 +53,11 @@ test('as served: a client shares with staff view-only, nobody asks for audiences
   await client.setScope(scope('client', 'client-a'));
   await staff.setScope(scope('ops', 'staff-person'));
   const { maxRequestBytes } = client.state.capabilities;
-  assert.deepEqual(client.state.capabilities, { write: true, staff: false, visibility: ['private', 'staff'], recoveryDays: 30, shared: false, maxRequestBytes });
-  assert.deepEqual(staff.state.capabilities, { write: true, staff: true, visibility: ['private'], recoveryDays: 30, shared: true, maxRequestBytes });
+  assert.deepEqual(client.state.capabilities, { write: true, staff: false, visibility: ['private', 'staff'], access: [], shareAll: false, history: false, recoveryDays: 30, shared: true, maxRequestBytes });
+  assert.deepEqual(staff.state.capabilities, { write: true, staff: true, visibility: ['shared', 'private'], access: ['edit', 'view'], shareAll: true, history: true, recoveryDays: 30, shared: true, maxRequestBytes });
   assert.equal((await client.create(pin('Mine'))).visibility, 'private');
   const shared = await client.create(pin('Shared', { visibility: 'staff' }));
-  assert.equal((await staff.create(pin('Staff pin'))).visibility, 'private');
+  assert.equal((await staff.create(pin('Staff pin'))).visibility, 'shared');
   assert.equal(await staff.create(pin('For a client', { visibility: 'client', shareAccount: 'direct_client_grant:grant-a' })), null);
   assert.match(staff.state.message, /not available/);
   await staff.refresh();
@@ -273,7 +273,8 @@ test('reading shared marks stops between pages when the scope changes, and never
   const staff = scope('ops', 'staff-person'), other = scope('client', 'client-b');
   for (const replacement of [other, { mode: 'temporary', key: 'public' }, null]) {
     const sent = [];
-    const held = heldRequests(request, path => path.includes('/shared'));
+    let first = true; // only the replaced scope's read is held; a client reads shared marks too
+    const held = heldRequests(request, path => path.includes('/shared') && first && !(first = false));
     const store = createMarksStore({ request: (path, init) => { sent.push([path, init.headers.authorization]); return held.request(path, init); } });
     const loading = store.setScope(staff);
     await settled();
