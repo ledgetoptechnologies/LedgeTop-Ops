@@ -676,7 +676,8 @@ WGS84 UTM 16N
   model in a WGS84 or ITRF-based frame expect roughly 1 to 1.5 m of offset in
   Wisconsin, within the parcel map's own accuracy.
   Each request names the model; the server checks live access to that model
-  (session, admin, or a live share at its current revision) and accepts only
+  (session, admin, a live share at its current revision, or a live whole-project
+  link whose project has the model as an active published task) and accepts only
   two request types. A 3D `bbox` must lie inside the model's site window (a
   verified centre plus a half-size from the surveyed area, default 1.5 km,
   plus margin). A map `tile` must be on the fixed grid (zoom 14 to 16), touch

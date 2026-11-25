@@ -930,6 +930,9 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
         AND o.project_id=p.id AND o.status='published'
       WHERE p.id=? AND p.status='active' AND t.id=?${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}`).get(projectId,taskId));}
+  // The same rule starting from a model id: an output belongs to exactly one task, so the model's active output names
+  // the only task that can qualify. Always the strict form (no archived or purged task, version ready).
+  getActivePublishedProjectTaskForModel(projectId,modelId){const output=this.database.prepare('SELECT o.task_id FROM models m JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id WHERE m.id=? AND o.project_id=?').get(modelId,projectId);const selected=output?this.getActivePublishedProjectTask(projectId,output.task_id,{strictPublished:true}):null;return selected?.modelId===modelId?selected:null;}
   /**
    * Folder path (root first) for tasks the caller has ALREADY filtered to client-visible published tasks. Only the
    * ancestry of those exact tasks is read, so a folder holding no visible task is never named. A chain that is too
