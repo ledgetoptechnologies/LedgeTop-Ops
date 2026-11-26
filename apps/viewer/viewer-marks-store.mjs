@@ -67,6 +67,8 @@ const accessLost = error => error.code === 'mark_identity_required' || viewerAcc
 export function createMarksStore({ request = globalThis.fetch, newId = () => crypto.randomUUID(), onChange = () => {}, onViewerAccessLost = () => {},
   later = (work, ms) => { const id = globalThis.setTimeout(work, ms); return () => globalThis.clearTimeout(id); } } = {}) {
   let context = null, controller = null, sharedRefresh = null;
+  // The notice that the shared list was cut short, while it is the one shown.
+  let cutShort = null;
   // Changes not answered, by mark: what was sent and what it was based on. And the one
   // that could not be checked either, if any: nothing else is sent before it is.
   let attempts = new Map(), doubt = null;
@@ -232,7 +234,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           categories = addUnseen(categories, page.categories);
         }
       });
-      if (truncated) state.message ||= `Only the first ${count} marks shared with you are shown.`;
+      if (truncated && !state.message) state.message = cutShort = `Only the first ${count} marks shared with you are shown.`;
     } catch (error) {
       scope.check();
       if (accessLost(error)) throw error;
@@ -288,9 +290,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     }
     const nextMarks = addUnseen(state.marks.filter(mark => mark.mine), marks);
     const nextCategories = byName(addUnseen(state.categories.filter(category => category.mine), [...categories.values()]));
-    const notice = (partial || truncated) && !state.message;
-    if (notice) state.message = partial ? 'Some shared marks could not be loaded. Reload the page to try again.'
-      : `Only the first ${marks.length} marks shared with you are shown.`;
+    // A whole refresh takes back the notice that the list was cut short, and nothing else.
+    const cleared = !partial && !truncated && cutShort !== null && state.message === cutShort;
+    if (cleared) state.message = '';
+    if (state.message !== cutShort) cutShort = null;
+    const notice = cleared || ((partial || truncated) && !state.message);
+    if (notice && !cleared) {
+      if (partial) state.message = 'Some shared marks could not be loaded. Reload the page to try again.';
+      else state.message = cutShort = `Only the first ${marks.length} marks shared with you are shown.`;
+    }
     if (!notice && JSON.stringify(nextMarks) === JSON.stringify(state.marks)
       && JSON.stringify(nextCategories) === JSON.stringify(state.categories)) return;
     Object.assign(state, { marks: nextMarks, categories: nextCategories });

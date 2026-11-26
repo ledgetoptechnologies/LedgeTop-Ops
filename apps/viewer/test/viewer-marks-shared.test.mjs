@@ -392,7 +392,7 @@ test('a mark from before authorship was recorded keeps its content time through 
 });
 
 // A list served a page at a time by a fake server: page(n) answers request n (from 1), and every request is counted.
-async function pagedStore(page) {
+async function pagedStore(page, { onChange } = {}) {
   const { createMarksStore } = await import('../viewer-marks-store.mjs');
   const answer = body => ({ ok: true, status: 200, json: async () => body });
   const asked = { shared: 0, deleted: 0 };
@@ -403,7 +403,7 @@ async function pagedStore(page) {
     if (asked[kind] > 500) throw new Error('did not stop');
     return answer({ categories: [], ...page(asked[kind], kind) });
   };
-  const store = createMarksStore({ request });
+  const store = createMarksStore({ request, onChange });
   await store.setScope({ mode: 'session', key: 'paged', token: () => 'synthetic-token-value' });
   // The warning the panel shows after loading (a later action replaces messages).
   const sharedCut = /Only the first/.test(store.state.message);
@@ -456,6 +456,15 @@ test('a periodic refresh that is cut short keeps what it read and says so', asyn
   asked.shared = 0;
   await store.refreshShared();
   assert.equal(store.state.marks.length, 1, 'a whole refresh replaces it again');
+  assert.equal(store.state.message, '', 'and takes back the notice');
+  // A notice of something else stays; a warning-only change is emitted.
+  mode = 'cycle'; asked.shared = 0;
+  await store.refreshShared();
+  assert.match(store.state.message, /Only the first/);
+  store.state.message = 'Something else.';
+  mode = 'whole'; asked.shared = 0;
+  await store.refreshShared();
+  assert.equal(store.state.message, 'Something else.');
 });
 
 test('whether Recently deleted was cut short is only ever about the latest read', async () => {
@@ -473,6 +482,18 @@ test('whether Recently deleted was cut short is only ever about the latest read'
   await store.loadDeleted();
   await store.setScope(null);
   assert.deepEqual([store.state.deleted, store.state.deletedTruncated], [[], false]);
+});
+
+test('taking back only the cut-short notice is a change of its own', async () => {
+  let mode = 'whole', changes = 0;
+  const { store, asked } = await pagedStore(n => (mode === 'whole' || n === 1 ? { marks: n === 1 ? rows(1) : [], next: mode === 'whole' ? null : 'x' } : { marks: [], next: 'x' }),
+    { onChange: () => { changes += 1; } });
+  mode = 'cut'; asked.shared = 0;
+  await store.refreshShared();
+  assert.deepEqual([store.state.marks.length, /Only the first 1 /.test(store.state.message)], [1, true]);
+  mode = 'whole'; asked.shared = 0; changes = 0;
+  await store.refreshShared();
+  assert.deepEqual([store.state.marks.length, store.state.message, changes], [1, '', 1]);
 });
 
 test('a cursor already read from ends paging, cut short', async () => {
