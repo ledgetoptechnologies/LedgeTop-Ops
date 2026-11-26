@@ -163,7 +163,15 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     await waitFor('controller.state.outlines === 2', 'unmerged');
     own = await owners();
     assert.equal(own.merge, false);
-    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n3.9 ac'], 'the narrower parcel cannot hold its name inside it at this zoom, even at the smallest size');
+    // At zoom 17 the narrow parcel holds its name only if the font's text fits inside it at the
+    // smallest size: that depends on the machine's fonts, so it may or may not be labelled here.
+    // Whatever is shown is whole and inside its own parcel; both are labelled at zoom 18 below.
+    assert.equal(own.labels[0], 'SAMPLE FARMS LLC\n3.9 ac');
+    assert.ok(own.labels.length <= 2 && own.labels.slice(1).every(label => label === 'Sample Farms LLC\n2.7 ac'), JSON.stringify(own.labels));
+    assert.equal(await client.evaluate(`[...document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label')].every(l => {
+      const r = l.getBoundingClientRect(), x = map.containerPointToLatLng([r.left + 1 - map.getContainer().getBoundingClientRect().left, 0]).lng,
+        right = map.containerPointToLatLng([r.right - 1 - map.getContainer().getBoundingClientRect().left, 0]).lng, split = -89.4005;
+      return l.textContent.startsWith('SAMPLE') ? right <= split : x >= split; })`), true, 'each label inside its own parcel');
     await client.evaluate('map.setZoom(18, {animate:false}); 0');
     await waitFor("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length === 2", 'one label per parcel when zoomed in');
     assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC\n3.9 ac', 'Sample Farms LLC\n2.7 ac']);
