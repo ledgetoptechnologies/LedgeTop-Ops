@@ -31,7 +31,7 @@ async function openApi(t, options) {
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE models(id TEXT PRIMARY KEY);
     INSERT INTO models VALUES ('synthetic-model'), ('other-model');`);
-  db.exec(schema.VIEWER_MARKS_SQL);
+  db.exec(schema.VIEWER_MARKS_SQL + schema.VIEWER_MARK_SHARING_SQL);
   assert.equal(schema.verifyViewerMarksSchema(db), true);
   const sessions = new Map();
   // Client sessions carry the portal account they were issued under.
@@ -128,14 +128,14 @@ test('marks nobody shared stay with their owner, whatever else is asked for or a
   };
   const made = {}, categories = {};
   for (const [who, token] of Object.entries(people)) {
-    const omitted = await request(token, 'POST', '', point({ name: who }));
+    const client = !['staff', 'otherStaff', 'sameName'].includes(who);
+    const omitted = await request(token, 'POST', '', point({ name: who, ...(!client && { visibility: 'private' }) }));
     assert.equal(omitted.status, 201, who);
     assert.equal(omitted.body.mark.visibility, 'private', who);
     made[who] = omitted.body.mark;
     categories[who] = { id: randomUUID(), name: 'Category', color: '#3366ff', icon: 'flag' };
     assert.equal((await request(token, 'POST', 'categories', categories[who])).status, 201, who);
-    const client = !['staff', 'otherStaff', 'sameName'].includes(who);
-    assert.deepEqual((await request(token)).body.capabilities.visibility, client ? ['private', 'staff'] : ['private'], who);
+    assert.deepEqual((await request(token)).body.capabilities.visibility, client ? ['private', 'staff'] : ['shared', 'private'], who);
     for (const visibility of client ? ['internal', 'client'] : ['staff', 'internal', 'client']) {
       assert.equal((await request(token, 'POST', '', point({ visibility }))).status, 403, `${who} ${visibility}`);
       assert.equal((await request(token, 'PUT', made[who].id, { ...point(), id: made[who].id, revision: 1, visibility })).status, 403, `${who} ${visibility}`);
@@ -458,9 +458,9 @@ test('a deleted mark can be restored by its owner for 30 days', async t => {
   const person = { modelId, modelVersionId: 'synthetic-v1', audience: 'client', subject: 'client-a', session: {}, personalPersistence: true };
   const deletedAt = Date.parse('2026-11-01T00:00:00.000Z'), limit = deletedAt + 30 * 86_400_000;
   db.prepare('UPDATE viewer_marks SET deleted_at=? WHERE id=?').run(new Date(deletedAt).toISOString(), mark.id);
-  assert.equal(repository.deleted(person, limit).length, 1);
+  assert.equal(repository.deleted(person, limit).marks.length, 1);
   assert.equal(repository.purgeDeleted(limit), 0);
-  assert.equal(repository.deleted(person, limit + 1).length, 0);
+  assert.equal(repository.deleted(person, limit + 1).marks.length, 0);
   assert.throws(() => repository.restore(person, mark.id, 2, limit + 1), { code: 'mark_not_found' });
   assert.equal(repository.restore(person, mark.id, 2, limit).name, 'Kept');
   db.prepare('UPDATE viewer_marks SET deleted_at=? WHERE id=?').run(new Date(deletedAt).toISOString(), mark.id);
@@ -589,7 +589,7 @@ test('revoked, public and unverifiable sessions cannot read or write Marks', asy
   const { session, request, sessions } = await openApi(t);
   const revoked = session('client', 'client-a');
   sessions.get(auth.hashToken(revoked)).revoked = true;
-  for (const token of [revoked, session('public', 'recipient'), session('client', 'no-measure', { permissions: { view: true } }),
+  for (const token of [revoked, session('public', 'recipient'), session('client', 'no-measure', { permissions: { view: true }, sourceAuthorization: null }),
     session('client', 'stale', { modelVersionId: 'synthetic-v2' }), 'not-a-real-token-value']) {
     assert.equal((await request(token)).status, 403);
     assert.equal((await request(token, 'POST', '', point())).status, 403);

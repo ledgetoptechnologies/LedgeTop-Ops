@@ -6,11 +6,14 @@ import { STARTER_CATEGORIES } from './viewer-mark-style.mjs';
 //
 // Scopes:
 //   session   - a live Viewer session bearer; the server decides who may write
-//   temporary - public links: marks live in this tab only and are never sent
-const MARK_FIELDS = ['id', 'geometry', 'name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility', 'shareAccount'];
+//   temporary - public links: marks live in this tab only and are never sent. With a
+//               token, what staff share is read too, if the link shows it
+const MARK_FIELDS = ['id', 'geometry', 'name', 'note', 'categoryId', 'color', 'icon', 'elevationNavd88M', 'visibility', 'shareAccount', 'access'];
 const UNDO_LIMIT = 20;
 // What others share arrives in pages; this many are shown at most.
 const SHARED_LIMIT = 5000;
+// And this many pages at most, as a page may be empty.
+const PAGE_LIMIT = 100;
 // How long an answer is waited for before a change counts as not answered (a large one
 // longer, by its size), and for the check whether it was made.
 export const WRITE_MS = 30_000;
@@ -41,6 +44,7 @@ const MESSAGES = {
   import_too_large: 'That file is too large to import at once. Split it and import the parts.',
   'entity.too.large': 'That is too large to save at once.',
   mark_edit_forbidden: 'You can only change your own marks.',
+  mark_version_not_found: 'There is no earlier version to go back to.',
   mark_category_edit_forbidden: 'You can only change categories you made.',
   mark_identity_required: 'This login cannot keep marks.',
   mark_share_account_unknown: 'Choose a client account to share with.',
@@ -63,6 +67,8 @@ const accessLost = error => error.code === 'mark_identity_required' || viewerAcc
 export function createMarksStore({ request = globalThis.fetch, newId = () => crypto.randomUUID(), onChange = () => {}, onViewerAccessLost = () => {},
   later = (work, ms) => { const id = globalThis.setTimeout(work, ms); return () => globalThis.clearTimeout(id); } } = {}) {
   let context = null, controller = null, sharedRefresh = null;
+  // The notice that the shared list was cut short, while it is the one shown.
+  let cutShort = null;
   // Changes not answered, by mark: what was sent and what it was based on. And the one
   // that could not be checked either, if any: nothing else is sent before it is.
   let attempts = new Map(), doubt = null;
@@ -72,7 +78,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   const refusalBearers = new WeakMap();
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
-    marks: [], categories: [], audiences: [], deleted: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
+    marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, starters: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
     // Why the last change failed, for the panel to offer what is possible instead.
     failure: '', recoveredChange: null,
   };
@@ -85,7 +91,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
 
   function hideInaccessibleMarks(error, message = 'Marks are hidden until access is restored.') {
     Object.assign(state, {
-      ready: false, marks: [], categories: [], audiences: [], deleted: [], starters: [], undo: [],
+      ready: false, marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, starters: [], undo: [],
       capabilities: readOnlyCapabilities(), recoveredChange: null, failure: error.code,
       message,
     });
@@ -149,7 +155,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     const result = {};
     for (const field of MARK_FIELDS) if (mark[field] !== undefined) result[field] = mark[field];
     if (result.visibility !== 'client') delete result.shareAccount;
-    if (temporary()) { delete result.visibility; delete result.shareAccount; }
+    if (result.visibility !== 'shared') delete result.access;
+    if (temporary()) { delete result.visibility; delete result.shareAccount; delete result.access; }
     return { ...result, ...extra };
   }
 
@@ -159,18 +166,35 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       updatedAt: now, author: 'client', mine: true, editable: true };
   }
 
-  async function readSharedPages(scope, receive) {
-    let count = 0, next = null;
-    do {
-      const page = await scope.api('/shared' + (next ? '?after=' + encodeURIComponent(next) : ''));
+  // Reads a list a page at a time: at most PAGE_LIMIT requests and SHARED_LIMIT rows. A page
+  // may be empty and still move on (rows are left out after being counted), so only the end
+  // (no cursor) is the whole list; a cursor already read from, or a limit reached while there
+  // is more, makes it truncated.
+  async function readPages(scope, path, receive) {
+    let count = 0, requests = 0, next = null, truncated = false;
+    const seen = new Set();
+    for (;;) {
+      const page = await scope.api(path + (next ? '?after=' + encodeURIComponent(next) : ''));
+      requests += 1;
       scope.check();
-      if (!Array.isArray(page?.marks) || !Array.isArray(page.categories)) throw new Error('Incomplete shared marks page');
-      receive(page);
-      count += page.marks.length;
+      if (!Array.isArray(page?.marks)) throw new Error('Incomplete marks page');
+      const marks = page.marks.slice(0, SHARED_LIMIT - count);
+      receive({ ...page, marks });
+      count += marks.length;
+      // Rows left out for the row limit: cut short, whatever the cursor says.
+      if (marks.length < page.marks.length) { truncated = true; break; }
+      if (!page.next) break;
+      if (seen.has(page.next) || count >= SHARED_LIMIT || requests >= PAGE_LIMIT) { truncated = true; break; }
+      seen.add(page.next);
       next = page.next;
-    } while (next && count < SHARED_LIMIT);
-    return { count, next };
+    }
+    return { count, truncated };
   }
+
+  const readSharedPages = (scope, receive) => readPages(scope, '/shared', page => {
+    if (!Array.isArray(page.categories)) throw new Error('Incomplete shared marks page');
+    receive(page);
+  });
 
   function addUnseen(list, records) {
     const ids = new Set(list.map(item => item.id));
@@ -192,7 +216,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     // Staff pick a client account when sharing a mark, if the server serves that choice.
     const audiences = data.capabilities.staff && data.capabilities.visibility.includes('client') ? (await scope.api('/audiences')).audiences : [];
     scope.check();
-    if (!data.capabilities.write) Object.assign(state, { undo: [], deleted: [] });
+    if (!data.capabilities.write) Object.assign(state, { undo: [], deleted: [], deletedTruncated: false });
     const first = !state.ready;
     if (first || !data.capabilities.shared) Object.assign(state, { marks: data.marks, categories: data.categories, starters: data.starters || [], capabilities: data.capabilities, audiences, ready: true });
     if (!data.capabilities.shared) return;
@@ -200,7 +224,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     // until everything new is here.
     let marks = first ? null : [...data.marks], categories = first ? null : [...data.categories];
     try {
-      const { count, next } = await readSharedPages(scope, page => {
+      const { count, truncated } = await readSharedPages(scope, page => {
         if (first) {
           state.marks = addUnseen(state.marks, page.marks);
           state.categories = byName(addUnseen(state.categories, page.categories));
@@ -210,7 +234,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           categories = addUnseen(categories, page.categories);
         }
       });
-      if (next) state.message ||= `Only the first ${count} marks shared with you are shown.`;
+      if (truncated && !state.message) state.message = cutShort = `Only the first ${count} marks shared with you are shown.`;
     } catch (error) {
       scope.check();
       if (accessLost(error)) throw error;
@@ -241,13 +265,13 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     let timedOut = false, current = false;
     const stopTimeout = later(() => { timedOut = true; refresh.abort(); }, READ_MS);
     const marks = [], categories = new Map();
-    let received = false, partial = false, refusal = null;
+    let received = false, partial = false, refusal = null, truncated = false;
     try {
-      await readSharedPages(scope, page => {
+      ({ truncated } = await readSharedPages(scope, page => {
         received = true;
         marks.push(...page.marks);
         for (const category of page.categories) categories.set(category.id, category);
-      });
+      }));
     } catch (error) {
       if (!scope.live() && !timedOut) return;
       if (accessLost(error)) refusal = error;
@@ -266,8 +290,15 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     }
     const nextMarks = addUnseen(state.marks.filter(mark => mark.mine), marks);
     const nextCategories = byName(addUnseen(state.categories.filter(category => category.mine), [...categories.values()]));
-    const notice = partial && !state.message;
-    if (notice) state.message = 'Some shared marks could not be loaded. Reload the page to try again.';
+    // A whole refresh takes back the notice that the list was cut short, and nothing else.
+    const cleared = !partial && !truncated && cutShort !== null && state.message === cutShort;
+    if (cleared) state.message = '';
+    if (state.message !== cutShort) cutShort = null;
+    const notice = cleared || ((partial || truncated) && !state.message);
+    if (notice && !cleared) {
+      if (partial) state.message = 'Some shared marks could not be loaded. Reload the page to try again.';
+      else state.message = cutShort = `Only the first ${marks.length} marks shared with you are shown.`;
+    }
     if (!notice && JSON.stringify(nextMarks) === JSON.stringify(state.marks)
       && JSON.stringify(nextCategories) === JSON.stringify(state.categories)) return;
     Object.assign(state, { marks: nextMarks, categories: nextCategories });
@@ -474,9 +505,12 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   }
 
   async function readDeletedRows(scope) {
-    const { marks } = await scope.api('/deleted');
+    const marks = [];
+    const { truncated } = await readPages(scope, '/deleted', page => marks.push(...page.marks));
     scope.check();
+    // Whether Recently deleted has more than is listed.
     state.deleted = marks;
+    state.deletedTruncated = truncated;
     return marks;
   }
 
@@ -513,12 +547,19 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       pendingImports.clear();
       context = next;
       const scope = currentScope();
-      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], undo: [], recoveredChange: null,
+      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, undo: [], recoveredChange: null,
         starters: next?.mode === 'temporary' ? STARTER_CATEGORIES.map(starter => starter.key) : [],
         ready: next?.mode === 'temporary', loading: next?.mode === 'session',
         capabilities: { write: next?.mode === 'temporary', staff: false, visibility: ['private'] } });
       emit();
-      if (next?.mode !== 'session') return true;
+      if (next?.mode !== 'session') {
+        if (next?.token) await readSharedPages(scope, page => {
+          state.marks = addUnseen(state.marks, page.marks.map(mark => ({ ...mark, mine: false, editable: false })));
+          state.categories = byName(addUnseen(state.categories, page.categories));
+          emit();
+        }).catch(() => {});
+        return true;
+      }
       try {
         await load(scope);
       } catch (error) {
@@ -646,6 +687,39 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       return ok ? saved : null;
     },
 
+    // Staff: share all of one's own marks that are not, as many requests as it takes.
+    async shareAll(access = 'edit') {
+      const unshared = () => state.marks.filter(mark => mark.mine && mark.visibility !== 'shared');
+      let done = true;
+      while (done && state.capabilities.shareAll && unshared().length) {
+        const some = unshared().slice(0, 500).map(({ id, revision }) => ({ id, revision }));
+        done = await run(async scope => {
+          const { marks } = await scope.api('/batch/share', 'POST', { marks: some, access });
+          scope.check();
+          const saved = new Map(marks.map(mark => [mark.id, mark]));
+          state.marks = state.marks.map(mark => saved.get(mark.id) || mark);
+        }, { landed: () => (some.every(item => find(item.id)?.visibility === 'shared') ? true : undefined) });
+      }
+      return done;
+    },
+
+    // Staff: earlier versions of a shared mark, newest first, and going back to one.
+    async history(current) {
+      let versions = null;
+      const ok = await run(async scope => { ({ versions } = await scope.api('/' + encodeURIComponent(current.id) + '/history')); scope.check(); });
+      return ok ? versions : null;
+    },
+    async revert(current, to) {
+      let saved = null;
+      const ok = await run(async scope => {
+        const { mark } = await scope.api('/' + encodeURIComponent(current.id) + '/revert', 'POST', { revision: current.revision, ...(to && { to }) });
+        scope.check();
+        saved = mark;
+        state.marks = state.marks.map(row => (row.id === mark.id ? mark : row));
+      });
+      return ok ? saved : null;
+    },
+
     // Undo the last change made in this tab.
     async undo() {
       const entry = state.undo.at(-1);
@@ -680,7 +754,12 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
             const ids = new Set(entry.marks.map(mark => mark.id));
             state.marks = state.marks.filter(mark => !ids.has(mark.id));
           },
-          look: async scope => { gone = (await scope.api('/deleted')).marks; scope.check(); state.deleted = gone; },
+          look: async scope => {
+            const page = await scope.api('/deleted');
+            scope.check();
+            gone = page.marks;
+            Object.assign(state, { deleted: gone, deletedTruncated: Boolean(page.next) });
+          },
           landed: () => {
             if (entry.marks.every(mark => find(mark.id))) return undefined;
             if (!gone || !state.capabilities.write) return UNKNOWN;

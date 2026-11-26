@@ -13,7 +13,7 @@ import { createMiniLeaflet } from './mini-leaflet.mjs';
 export async function openMarksPanel(t, { rateLimited = () => false, maxRequestBytes, ...options } = {}) {
   const database = new DatabaseSync(':memory:');
   database.exec("PRAGMA foreign_keys=ON; CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('synthetic-model'),('other-model');");
-  database.exec(schema.VIEWER_MARKS_SQL);
+  database.exec(schema.VIEWER_MARKS_SQL + schema.VIEWER_MARK_SHARING_SQL);
   const sessions = new Map();
   const repository = {
     database,

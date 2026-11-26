@@ -1,10 +1,139 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mountViewerMarks } from '../viewer-marks.mjs';
-import { createMiniDocument } from './helpers/mini-dom.mjs';
+import { createMarkVisibility } from '../viewer-mark-visibility.mjs';
+import { createMiniDocument, memoryStorage } from './helpers/mini-dom.mjs';
 import { createMiniLeaflet } from './helpers/mini-leaflet.mjs';
 
 const owned = { name: 'Owned pin', color: '#1565c0', geometry: { type: 'Point', coordinates: [-87, 43] } };
+
+test('category filters stay tab-local for public read-only sessions and persist for signed-in sessions', async t => {
+  for (const kind of ['public fresh', 'public saved', 'staff', 'client']) await t.test(kind, async () => {
+    const publicReadOnly = kind.startsWith('public');
+    const key = 'synthetic-category-' + kind;
+    const storageKey = 'ltds.viewer.marks.hidden';
+    const storage = memoryStorage(), reads = [], writes = [], requests = [];
+    if (kind === 'public saved') {
+      // A choice left by an older viewer must not be restored or removed by a public session.
+      const saved = createMarkVisibility({ storage: () => storage });
+      saved.setScope(key);
+      saved.toggle('gates');
+    }
+    const before = [...storage.items];
+    const localStorage = {
+      getItem: name => { if (name === storageKey) reads.push(name); return storage.getItem(name); },
+      setItem: (name, value) => { writes.push(name); storage.setItem(name, value); },
+      removeItem: name => { writes.push(name); storage.removeItem(name); },
+    };
+    const categories = [{ id: 'gates', name: 'Gates' }, { id: 'paths', name: 'Paths' }];
+    const rows = categories.map(category => ({ ...owned, id: category.id + '-pin', name: category.name + ' pin',
+      categoryId: category.id, mine: !publicReadOnly, editable: !publicReadOnly, visibility: 'shared', revision: 1 }));
+    const scope = { mode: 'session', key, readOnly: publicReadOnly, token: () => 'synthetic-category-token' };
+    const mount = async () => {
+      const { document } = createMiniDocument({ localStorage });
+      const panel = document.createElement('div'), leaflet = createMiniLeaflet(document);
+      const marks = mountViewerMarks({ panel, L: leaflet.L, getMap: () => leaflet.map, request: async (path, init) => {
+        requests.push([init.method, path, init.headers.authorization]);
+        assert.equal(init.method, 'GET', 'filtering must not write Marks');
+        assert.equal(path, '/api/v1/marks', 'the session store remains bound to the actual session');
+        assert.equal(init.headers.authorization, 'Bearer synthetic-category-token');
+        return Response.json({ marks: rows, categories, capabilities: {
+          write: !publicReadOnly, staff: kind === 'staff', visibility: ['private', 'shared'],
+        } });
+      } });
+      await marks.setScope(scope);
+      await panel.querySelector('.viewer-mark-layers').click();
+      return { marks, panel };
+    };
+    let ui = await mount();
+    const shown = () => ui.panel.querySelectorAll('[id=viewer-marks-list] .viewer-mark-list-name span').map(node => node.textContent);
+    const eye = id => ui.panel.querySelector(`[data-eye="${id}"]`);
+    try {
+      assert.deepEqual(shown(), ['Gates pin', 'Paths pin'], 'a new tab starts with all categories shown');
+      await ui.panel.querySelector('[data-tab=categories]').click();
+      await eye('gates').click();
+      assert.equal(eye('gates').getAttribute('aria-label'), 'Show Gates');
+      assert.deepEqual(shown(), ['Paths pin'], 'the category filter works inside the tab');
+      await ui.marks.setScope(scope);
+      ui.marks.setView({ map: true });
+      await ui.marks.store.refresh();
+      await ui.panel.querySelector('[data-tab=list]').click();
+      assert.equal(eye('gates').getAttribute('aria-label'), 'Show Gates');
+      assert.deepEqual(shown(), ['Paths pin'], 'same-session refresh, view and UI tab changes retain the filter');
+      assert.deepEqual(ui.marks.store.state.marks, rows, 'filtering never changes store data');
+      assert.equal(ui.marks.store.canWrite(), !publicReadOnly);
+      if (publicReadOnly) {
+        assert.deepEqual(reads, [], 'public category filters never read remembered choices');
+        assert.deepEqual(writes, [], 'public category filters never write storage');
+        assert.deepEqual([...storage.items], before, 'existing remembered choices remain untouched');
+      } else {
+        assert.ok(reads.length > 0, 'signed-in choices read storage');
+        assert.ok(writes.includes(storageKey), 'signed-in choices still persist');
+      }
+      ui.marks.dispose();
+      ui = await mount();
+      assert.deepEqual(shown(), publicReadOnly ? ['Gates pin', 'Paths pin'] : ['Paths pin'],
+        'a new tab restores signed-in choices only');
+      assert.equal(eye('gates').getAttribute('aria-label'), publicReadOnly ? 'Hide Gates' : 'Show Gates');
+      if (publicReadOnly) {
+        assert.deepEqual(reads, []);
+        assert.deepEqual(writes, []);
+        assert.deepEqual([...storage.items], before);
+      }
+      assert.equal(requests.length, 3, 'initial load, refresh and new-tab load all use the session store');
+    } finally {
+      ui.marks.dispose();
+    }
+  });
+});
+
+test('staff list distinguishes owned view-only sharing from the editable default without changing access', async () => {
+  const { document } = createMiniDocument();
+  const panel = document.createElement('div');
+  const leaflet = createMiniLeaflet(document);
+  const rows = [
+    { id: 'view', name: 'View pin', mine: true, visibility: 'shared', access: 'view' },
+    { id: 'edit', name: 'Edit pin', mine: true, visibility: 'shared', access: 'edit' },
+    { id: 'private', name: 'Private pin', mine: true, visibility: 'private' },
+    { id: 'staff', name: 'Staff pin', mine: false, author: 'staff', visibility: 'shared', access: 'view' },
+    { id: 'client', name: 'Client pin', mine: false, author: 'client', visibility: 'shared', access: 'edit' },
+  ].map(row => ({ ...owned, note: '', icon: 'pin', editable: true, revision: 1, ...row }));
+  const requests = [];
+  const marks = mountViewerMarks({ panel, L: leaflet.L, getMap: () => leaflet.map, request: async (path, init) => {
+    requests.push([init.method, path]);
+    assert.equal(init.method, 'GET', 'displaying sharing must not write access');
+    return Response.json({ marks: rows, categories: [], capabilities: {
+      write: true, staff: true, visibility: ['shared', 'private'], access: ['edit', 'view'],
+    } });
+  } });
+  try {
+    await marks.setScope({ mode: 'session', key: 'synthetic-staff', token: () => 'synthetic-staff' });
+    const before = structuredClone(marks.store.state.marks);
+    for (const map of [false, true]) {
+      marks.setView({ map });
+      if (panel.querySelector('.viewer-mark-box').hidden) await panel.querySelector('.viewer-mark-open').click();
+      assert.equal(panel.querySelector('.viewer-mark-box').hidden, false);
+      const list = panel.querySelector('[id=viewer-marks-list]');
+      assert.deepEqual(list.querySelectorAll('small').map(node => node.textContent),
+        ['Shared, view only', '', 'Only me', 'From project staff', 'From a client']);
+      if (!map) continue;
+      for (const [id, value] of [['view', 'shared-view'], ['edit', 'shared']]) {
+        const row = list.querySelectorAll('.viewer-mark-list-item').find(node => node.textContent.startsWith(rows.find(mark => mark.id === id).name));
+        await row.click();
+        const card = panel.querySelector('.viewer-mark-card');
+        const edit = card.querySelectorAll('button').find(node => node.textContent === 'Edit');
+        assert.equal(edit.hidden, false, 'owners can still edit either shared access mode');
+        await edit.click();
+        assert.equal(panel.querySelector('[name=visibility]').value, value);
+        await card.querySelectorAll('button').find(node => node.textContent === 'Cancel').click();
+      }
+    }
+    assert.deepEqual(marks.store.state.marks, before, 'list and editor inspection preserve access');
+    assert.deepEqual(requests, [['GET', '/api/v1/marks']]);
+  } finally {
+    marks.dispose();
+  }
+});
 
 test('the Marks list remains readable without advertising actions that need a map', async () => {
   const { document } = createMiniDocument();

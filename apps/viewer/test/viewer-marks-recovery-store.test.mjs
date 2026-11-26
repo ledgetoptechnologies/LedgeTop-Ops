@@ -276,7 +276,7 @@ test('one owned mark snapshot includes live rows and retained deletion IDs', t =
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
   db.exec("CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('one'), ('two');");
-  db.exec(schema.VIEWER_MARKS_SQL);
+  db.exec(schema.VIEWER_MARKS_SQL + schema.VIEWER_MARK_SHARING_SQL);
   const marks = new repository.ViewerMarkRepository(db);
   const owner = { modelId: 'one', audience: 'ops', subject: 'owner' };
   const person = { ...owner, subject: 'other' };

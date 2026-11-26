@@ -43,6 +43,8 @@ function page() {
 import * as L from '/node_modules/leaflet/dist/leaflet-src.esm.js';
 import { mountViewerMarks } from '/viewer-marks.mjs';
 const mode = new URLSearchParams(location.search).get('mode');
+// Map-only fixture, matching the prior centered-pin captures without the shell sidebar.
+if (new URLSearchParams(location.search).has('mapOnly')) document.getElementById('sidebar').style.display = 'none';
 const signedIn = mode === 'session' || mode === 'staff';
 const map = L.map('leaflet-map').setView([43.05, -87.0], 18);
 let lostMethod;
@@ -73,7 +75,7 @@ document.body.dataset.ready = 'true';
 function marksApi() {
   const database = new DatabaseSync(':memory:');
   database.exec("CREATE TABLE models(id TEXT PRIMARY KEY); INSERT INTO models VALUES ('synthetic-model');");
-  database.exec(schema.VIEWER_MARKS_SQL);
+  database.exec(schema.VIEWER_MARKS_SQL + schema.VIEWER_MARK_SHARING_SQL);
   const session = { audience: 'client', subject: 'client:synthetic-person', modelId: 'synthetic-model', modelVersionId: 'synthetic-v1',
     permissions: { view: true, measure: true, personalMeasurements: true },
     sourceAuthorization: { type: 'direct_client_grant', id: 'synthetic-grant', version: 1 } };
@@ -220,6 +222,66 @@ async function withBrowser(t, { app = null } = {}, run) {
   }
 }
 
+for (const device of [
+  { name: 'desktop', width: 1440, height: 900, mobile: false },
+  { name: 'short desktop', width: 1440, height: 520, mobile: false },
+  { name: 'pocket', width: 640, height: 740, mobile: true },
+  { name: 'phone', width: 390, height: 844, mobile: true },
+]) test(`Marks editor reachability: ${device.name} Edit > More needs no map pan`, { timeout: 60000 }, async t => {
+  const { app, database } = marksApi();
+  t.after(() => database.close());
+  await withBrowser(t, { app }, async h => {
+    const { client, waitFor } = h;
+    await h.size(device.width, device.height, device.mobile);
+    await client.command('Emulation.setTouchEmulationEnabled', { enabled: device.mobile });
+    const pointFor = selector => client.evaluate(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)}), r = el.getBoundingClientRect();
+        const x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2, hit = document.elementFromPoint(x, y);
+        return { x, y, reachable: r.width > 0 && r.height > 0 && r.left >= 0 && r.right <= innerWidth &&
+          r.top >= 0 && r.bottom <= innerHeight && (hit === el || el.contains(hit)) };
+      })()`);
+    const press = async selector => {
+      const point = await pointFor(selector);
+      assert.equal(point.reachable, true, `${device.name}: ${selector} is in viewport and hit-testable`);
+      if (device.mobile) {
+        await client.command('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: point.x, y: point.y }] });
+        await client.command('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      } else await h.click(point.x, point.y);
+    };
+    await h.load('?mode=staff&mapOnly');
+    await client.evaluate(`marks.store.create({ name: 'Reachable pin', note: '', geometry: { type: 'Point', coordinates: [-87, 43.05] },
+      color: '#1e88e5', icon: 'pin', visibility: 'shared', access: 'edit', categoryId: null, elevationNavd88M: null }).then(() => true)`);
+    for (const action of ['Cancel', 'Save']) {
+      await h.load('?mode=staff&mapOnly');
+      await client.evaluate('window.editorMapMoves = 0; map.on("movestart", () => window.editorMapMoves++); 0');
+      const before = await client.evaluate('[map.getCenter().lat, map.getCenter().lng, map.getZoom()]');
+      await press('.viewer-map-mark');
+      await waitFor("!document.querySelector('.viewer-mark-view').hidden", 'normal pin card open');
+      await press('.viewer-mark-view .viewer-mark-primary');
+      await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'editor open');
+      await press('.viewer-mark-more summary');
+      await waitFor("document.querySelector('.viewer-mark-more').open", 'More expanded');
+      // Give the native details toggle and layout callbacks a frame to settle.
+      await client.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
+      const actions = '.viewer-mark-form > .viewer-mark-row';
+      for (const type of ['submit', 'button']) assert.equal((await pointFor(`${actions} [type=${type}]`)).reachable, true, 'both Save and Cancel reachable without scrolling');
+      const layout = await client.evaluate(`(() => {
+        const el = document.querySelector('.viewer-mark-card:not(.viewer-mark-pick)'), r = el.getBoundingClientRect();
+        return { bounds: [r.left, r.top, r.right, r.bottom], sheet: el.classList.contains('sheet'), scrollTop: el.scrollTop };
+      })()`);
+      assert.equal(layout.sheet, device.mobile, 'pocket and phone retain the sheet');
+      assert.equal(layout.scrollTop, 0, 'no editor scrolling needed for actions');
+      assert.ok(layout.bounds[0] >= 0 && layout.bounds[1] >= 0 && layout.bounds[2] <= device.width && layout.bounds[3] <= device.height, 'expanded editor fits viewport');
+      t.diagnostic(`${device.name} ${action}: ${JSON.stringify(layout)}`);
+      await press(`${actions} ${action === 'Save' ? '[type=submit]' : '[type=button]'}`);
+      await waitFor("document.querySelector('.viewer-mark-form').hidden && !marks.store.state.busy", `${action} completed`);
+      assert.deepEqual(await client.evaluate('[map.getCenter().lat, map.getCenter().lng, map.getZoom()]'), before, 'map view unchanged');
+      assert.equal(await client.evaluate('window.editorMapMoves'), 0, 'no automatic or manual map pan');
+    }
+    assert.equal(database.prepare('SELECT revision FROM viewer_marks').get().revision, 2, 'Cancel does not write; Save persists');
+  });
+});
+
 test('marks: place, type, drag, draw, label and undo on a Leaflet map', { timeout: 90000 }, t => withBrowser(t, {}, async h => {
   const { client, waitFor, mouse } = h;
   await h.load();
@@ -362,7 +424,7 @@ test('signed-in client: map-click and typed pins survive a reload at full precis
     assert.deepEqual((await h.state())[1].geometry.coordinates, [-86.99971234, 43.05031234]);
 
     // Opening and editing a mark asks the server nothing; a save is one request.
-    assert.deepEqual(h.asked(), ['GET /api/v1/marks']);
+    assert.deepEqual(h.asked(), ['GET /api/v1/marks', 'GET /api/v1/marks/shared']);
     // Invalid text, Save without a change event: nothing is written and the editor stays open.
     await openTreeStand();
     await h.setQuietly('.viewer-mark-form [name=pointCoordinates]', 'not a place');
@@ -382,7 +444,7 @@ test('signed-in client: map-click and typed pins survive a reload at full precis
     await h.client.evaluate("document.querySelector('.viewer-mark-form').requestSubmit(), 0");
     await waitFor("document.querySelector('.viewer-mark-form').hidden", 'editor closed after save');
     rows = stored();
-    assert.deepEqual(h.asked(), ['GET /api/v1/marks', 'PUT /api/v1/marks/:id']);
+    assert.deepEqual(h.asked(), ['GET /api/v1/marks', 'GET /api/v1/marks/shared', 'PUT /api/v1/marks/:id']);
     assert.equal(rows[1].id, treeStand.id);
     assert.equal(rows[1].revision, 3);
     assert.deepEqual(rows[1].geometry.coordinates, [-86.99961234, 43.05041234]);
@@ -463,6 +525,149 @@ test('marks: pins by keyboard and by touch', { timeout: 90000 }, async t => {
     assert.equal((await h.state()).length, 2);
   });
 });
+
+for (const writable of [true, false]) {
+  test(`marks toolbar: visible desktop and phone labels with ${writable ? 'staff' : 'view-only'} admission`, { timeout: 90000 }, async t => {
+    const app = express(), asked = [];
+    app.use('/api/v1/marks', (req, res) => {
+      asked.push([req.method, req.path]);
+      if (req.method !== 'GET' || req.path !== '/') return res.sendStatus(405);
+      res.json({ marks: [], categories: [], capabilities: { write: writable, staff: writable, visibility: ['private'] } });
+    });
+    await withBrowser(t, { app }, async h => {
+      const { client, waitFor } = h;
+      await h.load('?mode=staff');
+      for (const width of [1280, 320, 375]) {
+        await h.size(width, 740, width < 640);
+        await client.evaluate('map.invalidateSize({ animate: false }), 0');
+        const controls = await client.evaluate(`['.viewer-mark-add', '.viewer-mark-layers'].map(selector => {
+          const button = document.querySelector(selector), r = button.getBoundingClientRect(), style = getComputedStyle(button);
+          const range = document.createRange(); range.selectNodeContents(button);
+          const text = range.getBoundingClientRect();
+          return { text: button.textContent, name: button.getAttribute('aria-label'), title: button.title,
+            hidden: button.hidden, disabled: button.disabled, expanded: button.getAttribute('aria-expanded'),
+            fits: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight
+              && r.width >= 44 && r.height >= 44 && text.left >= r.left && text.right <= r.right
+              && text.top >= r.top && text.bottom <= r.bottom && style.visibility === 'visible' && Number(style.opacity) > 0,
+            hit: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === button };
+        })`);
+        assert.deepEqual(controls.map(control => [control.text, control.name, control.title]), [
+          ['Add mark', 'Add mark', 'Add mark (M)'], ['Marks', 'Marks', 'Marks (L)'],
+        ], `visible labels match accessible names at ${width}px`);
+        assert.equal(controls[0].hidden, !writable);
+        assert.equal(controls[1].hidden, false);
+        assert.equal(controls[1].expanded, 'false');
+        for (const control of controls.filter(control => !control.hidden)) {
+          assert.equal(control.disabled, false);
+          assert.equal(control.fits, true, `${control.text} label and touch target fit ${width}px`);
+          assert.equal(control.hit, true, `${control.text} is not covered at ${width}px`);
+        }
+        if (writable) {
+          const [x, y] = await client.evaluate(`(() => { const r = document.querySelector('.viewer-mark-add').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+          await h.click(x, y);
+          await waitFor("!document.querySelector('.viewer-mark-strip').hidden", 'Add mark starts placement');
+          assert.equal(await client.evaluate("document.querySelector('.viewer-mark-add').hidden"), true);
+          await h.pressText('Cancel');
+          await waitFor("document.querySelector('.viewer-mark-strip').hidden", 'placement cancelled');
+        }
+        await client.evaluate("document.querySelector('.viewer-mark-layers').focus(), 0");
+        for (const type of ['keyDown', 'keyUp']) await client.command('Input.dispatchKeyEvent', {
+          type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' && { text: '\r' }),
+        });
+        await waitFor("!document.querySelector('.viewer-mark-box').hidden", 'Marks opens with keyboard');
+        assert.equal(await client.evaluate("document.querySelector('.viewer-mark-layers').getAttribute('aria-expanded')"), 'true');
+        assert.equal(await client.evaluate("document.querySelector('[data-tab=list]').getAttribute('aria-selected')"), 'true');
+        await h.press('.viewer-mark-box .viewer-mark-close');
+      }
+      assert.deepEqual(await h.state(), [], 'toolbar interactions create no marks');
+      assert.deepEqual(asked, [['GET', '/']], 'toolbar interactions make no writes or extra requests');
+    });
+  });
+}
+
+// The list comes from the authorized store, not the viewport or map layers.
+// These responses are a local UI fixture, not a change to server authorization.
+for (const writable of [true, false]) {
+  test(`marks list: all supplied model marks, phone navigation and ${writable ? 'staff' : 'view-only'} actions`, { timeout: 90000 }, async t => {
+    const category = { id: 'synthetic-category', name: 'Synthetic survey', color: '#1565c0', icon: 'target', mine: true, editable: writable };
+    const base = { color: '#1565c0', icon: 'target', categoryId: category.id, note: '', revision: 1,
+      visibility: 'private', mine: true, editable: writable, deletable: writable, author: 'staff', elevationNavd88M: null };
+    const supplied = [
+      { ...base, id: 'near', name: 'Near pin', geometry: { type: 'Point', coordinates: [-87, 43.05] } },
+      { ...base, id: 'far', name: 'Offscreen_' + 'long_name_'.repeat(8), geometry: { type: 'Point', coordinates: [-88, 44] } },
+      { ...base, id: 'line', name: 'Survey line', geometry: { type: 'LineString', coordinates: [[-89, 44], [-89.001, 44.001]] } },
+      { ...base, id: 'area', name: 'Survey area', mine: false, editable: false, deletable: false,
+        geometry: { type: 'Polygon', coordinates: [[[-90, 44], [-90.001, 44], [-90.001, 44.001], [-90, 44]]] } },
+    ];
+    const app = express(), asked = [];
+    app.use('/api/v1/marks', (req, res) => {
+      asked.push([req.method, req.path]);
+      if (req.method !== 'GET' || req.path !== '/') return res.sendStatus(405);
+      res.json({ marks: supplied, categories: [category], capabilities: { write: writable, staff: writable, visibility: ['private'] } });
+    });
+    await withBrowser(t, { app }, async h => {
+      const { client, waitFor } = h;
+      await h.load('?mode=staff');
+      assert.equal(await client.evaluate('map.getBounds().contains([44, -88])'), false, 'far pin starts outside the map');
+      await h.press('.viewer-mark-layers');
+      assert.equal(await client.evaluate("document.querySelector('[data-tab=list]').getAttribute('aria-selected')"), 'true', 'List is the default');
+      const rows = () => client.evaluate(`Array.from(document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item'), row => ({
+        name: row.querySelector('.viewer-mark-list-name > span').textContent,
+        category: row.querySelector('small').textContent,
+        icon: Boolean(row.querySelector('.viewer-mark-list-icon svg'))
+      }))`);
+      const listed = await rows();
+      assert.deepEqual(listed.map(row => row.name), supplied.map(mark => mark.name), 'pins, line and area are listed even off screen');
+      assert.ok(listed.every(row => row.category.includes(category.name) && row.icon), 'every row has its category and icon');
+
+      // Search and category visibility are convenience filters over the same store.
+      await h.type('[name=markSearch]', 'Offscreen_');
+      assert.deepEqual((await rows()).map(row => row.name), [supplied[1].name]);
+      await h.type('[name=markSearch]', '');
+      await h.press('[data-tab=categories]');
+      await h.press('[data-eye="synthetic-category"]');
+      await h.press('[data-tab=list]');
+      assert.deepEqual(await rows(), []);
+      assert.deepEqual(await h.state(), supplied, 'hiding a category does not remove authorized store marks');
+      await h.press('[data-tab=categories]');
+      await h.pressText('Show all');
+      await h.press('[data-tab=list]');
+      assert.equal((await rows()).length, supplied.length);
+
+      for (const width of [320, 375]) {
+        await h.size(width, 740, true);
+        await client.evaluate('map.invalidateSize({ animate: false }), 0');
+        await waitFor("document.querySelector('.viewer-mark-box').classList.contains('sheet')", 'phone sheet');
+        const fits = await client.evaluate(`(() => {
+          const box = document.querySelector('.viewer-mark-box'), list = document.querySelector('#viewer-marks-list .viewer-mark-list');
+          const r = box.getBoundingClientRect();
+          return r.left >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1
+            && box.scrollWidth <= box.clientWidth + 1 && list.scrollWidth <= list.clientWidth + 1;
+        })()`);
+        assert.equal(fits, true, `list and long name fit ${width}px without horizontal scrolling`);
+      }
+      const [x, y] = await client.evaluate(`(() => {
+        const row = Array.from(document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item')).find(row => row.textContent.includes('Offscreen_'));
+        row.scrollIntoView({ block: 'nearest' });
+        const r = row.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2];
+      })()`);
+      await h.click(x, y);
+      await waitFor("!document.querySelector('.viewer-mark-card').hidden && map.getBounds().contains([44, -88])", 'list navigates to the off-screen pin');
+      assert.equal(await client.evaluate("document.querySelector('.viewer-mark-card h4').textContent"), supplied[1].name);
+      const actions = () => client.evaluate(`Array.from(document.querySelectorAll('.viewer-mark-view button')).filter(button => !button.closest('[hidden]')).map(button => button.textContent)`);
+      assert.deepEqual((await actions()).filter(text => ['Edit', 'Move', 'Delete'].includes(text)), writable ? ['Edit', 'Move', 'Delete'] : []);
+      assert.equal(await client.evaluate("document.querySelector('.viewer-mark-add').hidden"), !writable);
+      assert.equal(await client.evaluate("document.querySelector('[data-tab=deleted]').hidden"), !writable);
+      // Staff still get no edit actions on a supplied, non-editable mark.
+      await h.press('.viewer-mark-card .viewer-mark-close');
+      await h.press('.viewer-mark-layers');
+      await client.evaluate(`Array.from(document.querySelectorAll('#viewer-marks-list .viewer-mark-list-item')).find(row => row.textContent.includes('Survey area')).click(), 0`);
+      assert.deepEqual((await actions()).filter(text => ['Edit', 'Move', 'Delete'].includes(text)), []);
+      assert.deepEqual(await h.state(), supplied, 'listing and navigation never change mark geometry or content');
+      assert.deepEqual(asked, [['GET', '/']], 'list interactions make no writes or additional data requests');
+    });
+  });
+}
 
 // Grouping, the list for one spot, and the Marks pop-up on real Leaflet.
 test('marks: several on one spot and the Marks pop-up', { timeout: 90000 }, async t => {

@@ -491,13 +491,13 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   const sharesFor = async (key, body) => (await (await signedFetch(baseUrl, `/api/v1/models/${model.id}/shares`, {
     method: 'POST', body: JSON.stringify(body), headers: { 'Idempotency-Key': key },
   })).json()).share;
-  assert.deepEqual(createdShare.share.permissions, { view: true, measure: true, cameras: false, download: false });
+  assert.deepEqual(createdShare.share.permissions, { view: true, measure: true, cameras: false, download: false, marks: true });
   const defaults = await sharesFor('share-defaults-0000001', {});
-  assert.deepEqual(defaults.permissions, { view: true, measure: true, cameras: false, download: false });
+  assert.deepEqual(defaults.permissions, { view: true, measure: true, cameras: false, download: false, marks: true });
   assert.ok(Math.abs(Date.parse(defaults.expiresAt) - (Date.now() + 30 * 24 * 60 * 60 * 1000)) < 60_000, defaults.expiresAt);
   const chosen = await sharesFor('share-chosen-00000001', { expiresAt: null, permissions: { view: true, cameras: true, download: true } });
   assert.equal(chosen.expiresAt, null);
-  assert.deepEqual(chosen.permissions, { view: true, measure: true, cameras: true, download: true });
+  assert.deepEqual(chosen.permissions, { view: true, measure: true, cameras: true, download: true, marks: true });
   for (const expiresAt of ['', 0, false]) assert.equal((await signedFetch(baseUrl, `/api/v1/models/${model.id}/shares`, {
     method: 'POST', body: JSON.stringify({ expiresAt }), headers: { 'Idempotency-Key': `share-bad-end-${String(expiresAt) || 'empty'}-0001` },
   })).status, 400);

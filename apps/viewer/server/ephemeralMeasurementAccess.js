@@ -4,7 +4,7 @@ const {revisionMatches}=require('./publicSharePolicy');
 const {ProcessingRepository}=require('./processingRepository');
 const {sourceAuthorizationValidator}=require('./sourceAuthorization');
 const fail=()=>{throw Object.assign(new Error('temporary_measurement_access_unavailable'),{code:'temporary_measurement_access_unavailable',status:403});};
-function localAccess(authority,repository,at=Date.now()){
+function localAccess(authority,repository,at=Date.now(),permission='measure'){
   if(!authority||!Number.isFinite(authority.expiresAt)||authority.expiresAt<=at)return null;
   let model,permissions,share=null,review=false;
   if(authority.kind==='viewer'){
@@ -25,7 +25,7 @@ function localAccess(authority,repository,at=Date.now()){
     if(selected?.modelId!==authority.modelId||selected?.modelVersionId!==authority.modelVersionId)return null;
     model=repository.getModel(authority.modelId);permissions=share.permissions;
   }else return null;
-  if(!model?.activeVersion||model.activeVersion.id!==authority.modelVersionId||model.activeVersion.status!=='ready'||(!review&&model.status!=='ready')||permissions?.view!==true||permissions?.measure!==true)return null;
+  if(!model?.activeVersion||model.activeVersion.id!==authority.modelVersionId||model.activeVersion.status!=='ready'||(!review&&model.status!=='ready')||permissions?.view!==true||permissions?.[permission]!==true)return null;
   return{model,share,authority};
 }
 async function resolveEphemeralAccess(token,repository,{validator=sourceAuthorizationValidator}={}){
@@ -46,4 +46,18 @@ async function resolveEphemeralAccess(token,repository,{validator=sourceAuthoriz
   const {expiresAt,...identity}=authority;
   return{...access,scopeKey:auth.hashToken(JSON.stringify(identity)),expiresAt:Math.min(expiresAt,Date.now()+15*60_000)};
 }
-module.exports={resolveEphemeralAccess,localAccess};
+// A public link opened by its signed page token, for reading marks. The link's own record is read
+// on every request, so revoking it or turning its marks off ends this at once. Null: no access.
+async function resolvePublicMarksAccess(token,repository,{validator=sourceAuthorizationValidator}={}){
+  if(typeof token!=='string'||token.length>4096||token.split('.').length!==2)return null;
+  const payload=auth.verify(token);
+  if(!payload||!['share-asset','project-share-asset'].includes(payload.kind)||typeof payload.modelId!=='string'||typeof payload.shareId!=='string')return null;
+  const version=repository.getModel(payload.modelId)?.activeVersion;if(!version)return null;
+  const authority={kind:payload.kind,shareId:payload.shareId,shareRevision:payload.shareRevision||0,modelId:payload.modelId,
+    modelVersionId:payload.kind==='project-share-asset'?payload.modelVersionId:version.id,expiresAt:payload.exp,
+    ...(payload.kind==='project-share-asset'?{projectId:payload.projectId,taskId:payload.taskId}:{})};
+  const access=localAccess(authority,repository,Date.now(),'marks');
+  if(!access?.share||!await validator.allows(access.share)||!localAccess(authority,repository,Date.now(),'marks'))return null;
+  return{modelId:authority.modelId,modelVersionId:authority.modelVersionId,shareId:authority.shareId};
+}
+module.exports={resolvePublicMarksAccess,resolveEphemeralAccess,localAccess};

@@ -14,6 +14,97 @@ function slowFile(text) {
 }
 const importInput = panel => panel.panel.querySelectorAll('input').find(node => node.getAttribute('type') === 'file');
 
+test('Recently deleted shows one partial warning only while deletedTruncated is true, including reopening', async t => {
+  const { mount, scope } = await openMarksPanel(t);
+  const panel = mount();
+  t.after(() => panel.marks.dispose());
+  await panel.marks.setScope(scope('client', 'client-a'));
+  // Exercise the real panel with synthetic state, independently of store reload/reset behavior.
+  panel.store.loadDeleted = async () => {};
+  const deleted = panel.q('[id=viewer-marks-deleted]');
+  const warning = 'Only some recently deleted marks are shown.';
+  const notices = () => deleted.querySelectorAll('[role=status]').filter(node => !node.hidden && node.textContent);
+  const render = () => panel.marks.setView({ map: true });
+  const assertWarning = () => {
+    assert.equal(notices().length, 1, 'one visible warning in Recently deleted');
+    assert.equal(notices()[0].textContent, warning);
+    assert.equal(notices()[0].getAttribute('aria-live'), 'polite');
+    assert.equal(notices()[0].classList.contains('hint'), true);
+    assert.equal(panel.text().split(warning).length - 1, 1, 'not duplicated elsewhere');
+  };
+  await panel.q('.viewer-mark-open').click();
+  await panel.q('[data-tab=deleted]').click();
+  assert.equal(panel.store.state.deletedTruncated, false, 'the store starts untruncated');
+  assert.equal(notices().length, 0, 'default false has no warning');
+
+  panel.store.state.deletedTruncated = true;
+  render();
+  assert.equal(deleted.hidden, false);
+  assertWarning();
+  render();
+  assertWarning();
+  await panel.q('[aria-label="Close marks"]').click();
+  await panel.q('.viewer-mark-open').click();
+  assert.equal(panel.q('.viewer-mark-box').hidden, false);
+  assertWarning();
+  await panel.q('[data-tab=list]').click();
+  assert.equal(deleted.hidden, true, 'warning stays in the Deleted tab');
+  await panel.q('[data-tab=deleted]').click();
+  assertWarning();
+
+  panel.store.state.deletedTruncated = false;
+  render();
+  assert.equal(notices().length, 0, 'cleared flag removes warning');
+  assert.doesNotMatch(panel.text(), /Only some recently deleted marks are shown\./);
+  await panel.q('[aria-label="Close marks"]').click();
+  await panel.q('.viewer-mark-open').click();
+  assert.equal(notices().length, 0, 'reopening does not revive a cleared warning');
+  panel.store.state.deletedTruncated = true;
+  render();
+  assertWarning();
+  delete panel.store.state.deletedTruncated;
+  render();
+  assert.equal(notices().length, 0, 'absent flag removes an existing warning');
+  assert.doesNotMatch(panel.text(), /Only some recently deleted marks are shown\./);
+});
+
+test('Recently deleted only claims an empty read when complete, preserving rows and loading/disabled states', async t => {
+  const { mount, scope } = await openMarksPanel(t);
+  const panel = mount();
+  t.after(() => panel.marks.dispose());
+  await panel.marks.setScope(scope('client', 'client-a'));
+  panel.store.loadDeleted = async () => {};
+  await panel.q('.viewer-mark-open').click();
+  await panel.q('[data-tab=deleted]').click();
+  const deleted = panel.q('[id=viewer-marks-deleted]');
+  const list = panel.q('.viewer-mark-deleted');
+  const empty = `None in the last ${panel.store.state.capabilities.recoveryDays} days.`;
+  const mark = { id: 'deleted-pin', name: 'Deleted pin', color: '#1e88e5', icon: 'pin', deletedAt: '2026-01-01T00:00:00Z',
+    geometry: { type: 'Point', coordinates: [-87, 43] } };
+  for (const loading of [false, true]) {
+    for (const busy of [false, true]) {
+      for (const rows of [[], [mark]]) {
+        for (const truncated of [false, true, undefined]) {
+          Object.assign(panel.store.state, { deleted: rows, deletedTruncated: truncated, loading, busy });
+          panel.marks.setView({ map: true });
+          const notices = deleted.querySelectorAll('[role=status]').filter(node => !node.hidden && node.textContent);
+          assert.deepEqual(notices.map(node => node.textContent), truncated === true ? ['Only some recently deleted marks are shown.'] : []);
+          if (rows.length) {
+            assert.match(list.textContent, /Deleted pin/);
+            assert.equal(list.querySelector('[data-restore-mark]').disabled, busy);
+            assert.doesNotMatch(list.textContent, /None in the last/);
+          } else {
+            assert.equal(list.textContent, truncated === true ? '' : empty,
+              `empty read: truncated=${truncated}, loading=${loading}, busy=${busy}`);
+            assert.equal(list.querySelectorAll('li').length, truncated === true ? 0 : 1);
+          }
+          if (loading) assert.match(panel.text(), /Loading marks…/);
+        }
+      }
+    }
+  }
+});
+
 test('a file chosen in the panel imports into the scope it was chosen in', async t => {
   const { mount, scope } = await openMarksPanel(t);
   const panel = mount();
@@ -148,7 +239,7 @@ for (const permissions of REDUCED) {
     assert.deepEqual(panel.store.state.marks.map(mark => mark.name).sort(), ['Private late', 'Private pin']);
     assert.deepEqual(panel.store.state.undo, [], 'undo does not come back');
     assert.equal(panel.store.canWrite(), true);
-    assert.deepEqual(requests, [['GET', '/api/v1/marks']]);
+    assert.deepEqual(requests, [['GET', '/api/v1/marks'], ['GET', '/api/v1/marks/shared']]);
   });
 }
 

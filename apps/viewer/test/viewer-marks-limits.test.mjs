@@ -120,7 +120,7 @@ test('many shared marks: small answers, all of them in pages, and nobody else\'s
   assert.equal(staff.state.marks.length, total);
   assert.equal(new Set(staff.state.marks.map(mark => mark.id)).size, total, 'none twice, none missed');
   for (const [path, size] of answers) assert.ok(size < 1_600_000, `${path} ${size}`);
-  assert.ok(await staff.create(pin('Mine')), staff.state.message);
+  assert.ok(await staff.create(pin('Mine', { visibility: 'private' })), staff.state.message);
   assert.equal(staff.state.marks.length, total + 1);
   // Reloading keeps what is there until everything new has arrived.
   requests.length = 0;
@@ -129,6 +129,12 @@ test('many shared marks: small answers, all of them in pages, and nobody else\'s
   // Someone else's page is never more than theirs to read.
   const client = await store(scope('client', 'client-a'));
   assert.equal(client.state.marks.length, LIMITS.perOwner);
+  // Reading a shared mark neither counts toward one's own limit nor lifts it.
+  assert.ok(await staff.create(pin('Shared')), staff.state.message);
+  await client.refresh();
+  assert.deepEqual([client.state.marks.filter(mark => mark.mine).length, client.state.marks.length], [LIMITS.perOwner, LIMITS.perOwner + 1]);
+  assert.equal(await client.create(pin('One too many')), null);
+  assert.equal(client.state.failure, 'mark_limit_reached');
   assert.ok(!requests.some(([, path]) => path.includes('/shared') && path.includes('client')));
 });
 

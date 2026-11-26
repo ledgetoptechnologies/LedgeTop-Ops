@@ -4,7 +4,7 @@
 // the map stays when a new flight is published.
 //
 // Who reads a mark (visibility). The API serves the first two
-// (viewerMarkRepository SERVED_SHARING):
+// (viewerMarkRepository SERVED_SHARING), and "shared" staff marks (schema 90 below):
 //   private  - only the person who made it
 //   staff    - a client's mark shared with project staff (never other clients)
 //   internal - a staff mark for staff only
@@ -63,14 +63,53 @@ const VIEWER_MARKS_SQL = `
   );
 `;
 
+// Viewer schema 90. Staff marks shared with everyone on the model ("shared"): the
+// mark row keeps visibility 'internal' and a row here says who may change it. Both
+// are needed, so a build without this table reads such a mark as its owner's alone.
+// viewer_mark_history keeps earlier versions of a shared mark, with who made them,
+// so that staff can undo a client's change. viewer_mark_authors: who made a mark's present
+// content, as sharing, deleting and restoring change the row but not the content (none
+// recorded: its owner).
+const VIEWER_MARK_SHARING_SQL = `
+  CREATE TABLE viewer_mark_shares (
+    model_id TEXT NOT NULL,
+    mark_id TEXT NOT NULL,
+    access TEXT NOT NULL CHECK(access IN ('view','edit')),
+    PRIMARY KEY(model_id, mark_id),
+    FOREIGN KEY(model_id, mark_id) REFERENCES viewer_marks(model_id, id) ON DELETE CASCADE
+  );
+  CREATE TABLE viewer_mark_authors (
+    model_id TEXT NOT NULL,
+    mark_id TEXT NOT NULL,
+    audience TEXT NOT NULL CHECK(audience IN ('ops','client')),
+    subject TEXT NOT NULL,
+    changed_at TEXT NOT NULL,
+    PRIMARY KEY(model_id, mark_id),
+    FOREIGN KEY(model_id, mark_id) REFERENCES viewer_marks(model_id, id) ON DELETE CASCADE
+  );
+  CREATE TABLE viewer_mark_history (
+    model_id TEXT NOT NULL,
+    mark_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    document_json TEXT NOT NULL,
+    changed_by_audience TEXT NOT NULL CHECK(changed_by_audience IN ('ops','client')),
+    changed_by_subject TEXT NOT NULL,
+    changed_at TEXT NOT NULL,
+    PRIMARY KEY(model_id, mark_id, revision),
+    FOREIGN KEY(model_id, mark_id) REFERENCES viewer_marks(model_id, id) ON DELETE CASCADE
+  );
+`;
+
 const OBJECTS = ['viewer_marks', 'viewer_marks_shared_idx', 'viewer_marks_owner_idx',
   'viewer_mark_categories', 'viewer_mark_categories_name_idx', 'viewer_mark_accounts'];
 
-function verifyViewerMarksSchema(database) {
-  const definitions = VIEWER_MARKS_SQL.split(';').map(sql => sql.trim()).filter(Boolean);
-  const objects = database.prepare(`SELECT sql FROM sqlite_schema WHERE name IN (${OBJECTS.map(() => '?').join(',')})`).all(...OBJECTS);
-  const canonical = sql => String(sql).trim().replace(/\s+/g, ' ');
-  return objects.length === definitions.length && definitions.every(sql => objects.some(object => canonical(object.sql) === canonical(sql)));
+function verifyObjects(database, sql, names) {
+  const definitions = sql.split(';').map(statement => statement.trim()).filter(Boolean);
+  const objects = database.prepare(`SELECT sql FROM sqlite_schema WHERE name IN (${names.map(() => '?').join(',')})`).all(...names);
+  const canonical = statement => String(statement).trim().replace(/\s+/g, ' ');
+  return objects.length === definitions.length && definitions.every(definition => objects.some(object => canonical(object.sql) === canonical(definition)));
 }
+const verifyViewerMarksSchema = database => verifyObjects(database, VIEWER_MARKS_SQL, OBJECTS);
+const verifyViewerMarkSharingSchema = database => verifyObjects(database, VIEWER_MARK_SHARING_SQL, ['viewer_mark_shares', 'viewer_mark_authors', 'viewer_mark_history']);
 
-module.exports = { VIEWER_MARKS_SQL, verifyViewerMarksSchema };
+module.exports = { VIEWER_MARKS_SQL, VIEWER_MARK_SHARING_SQL, verifyViewerMarksSchema, verifyViewerMarkSharingSchema };

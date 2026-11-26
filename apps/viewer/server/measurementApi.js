@@ -11,19 +11,21 @@ const { config } = require('./config');
 const {createEphemeralMeasurementApi}=require('./ephemeralMeasurementApi');
 const {MeasurementSourceUnitEvidence}=require('./measurementSourceUnitEvidence');
 
-function getMeasurementPrincipal(req, repository, { allowTransient = false } = {}) {
+function getMeasurementPrincipal(req, repository, { allowTransient = false, allowViewOnly = false } = {}) {
   // Deliberately no ambient-cookie fallback: personal mutations need an explicit
   // bearer held by this Viewer tab, and cannot be initiated by cross-site forms.
   const token = String(req.get('authorization') || '').match(/^Bearer\s+([A-Za-z0-9_-]{16,256})$/i)?.[1];
   if (!token) return null;
   const session = repository.getViewerSessionByHash(auth.hashToken(token));
-  if (!session || !repository.viewerSessionLive(session) || session.permissions?.view !== true || session.permissions?.measure !== true
+  if (!session || !repository.viewerSessionLive(session) || session.permissions?.view !== true
+      || (session.permissions.measure !== true && !(allowViewOnly && session.audience === 'client'))
       || !['ops','client'].includes(session.audience) || typeof session.subject !== 'string' || !session.subject.trim() || session.subject.length > 200) return null;
   const model = session.sessionMode === 'review' ? repository.getModelVersion(session.modelId, session.modelVersionId) : repository.getModel(session.modelId);
   if (!model?.activeVersion || model.activeVersion.id !== session.modelVersionId || model.activeVersion.status !== 'ready' || (session.sessionMode !== 'review' && model.status !== 'ready')) return null;
-  const personalPersistence = session.audience === 'ops' || session.permissions.personalMeasurements === true;
+  const viewOnly = session.permissions.measure !== true;
+  const personalPersistence = !viewOnly && (session.audience === 'ops' || session.permissions.personalMeasurements === true);
   if (!personalPersistence && !allowTransient) return null;
-  return { modelId: session.modelId, modelVersionId: session.modelVersionId, audience: session.audience, subject: session.subject, session, personalPersistence };
+  return { modelId: session.modelId, modelVersionId: session.modelVersionId, audience: session.audience, subject: session.subject, session, personalPersistence, ...(viewOnly && { viewOnly }) };
 }
 
 function measurementAdmin(req, principal, database) {
