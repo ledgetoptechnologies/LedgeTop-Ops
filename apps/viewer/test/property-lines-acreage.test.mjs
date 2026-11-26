@@ -493,10 +493,10 @@ test('next to a neighbour, the whole label box stays inside its own parcel, or i
   let strips = 0;
   for (const merge of [true, false]) {
     const candidates = ownerLabelCandidates(dissolveParcelsByOwner([strip, wide], { merge }), { acreage: { merged: merge, covered: all } });
-    for (const zoom of [16, 17, 18, 19]) {
+    for (const zoom of [16, 17, 18, 19]) for (const perChar of [4.5, 5, 5.5, 6, 6.5, 7]) {
       const mpp = 156543.03392 * Math.cos(candidates[0].lat * Math.PI / 180) / 2 ** zoom;
       const project = (lon, lat) => [(lon - west) * 111320 * Math.cos(lat * Math.PI / 180) / mpp + 50, (44.6 - lat) * 110540 / mpp + 50];
-      const placed = placeOwnerLabels(candidates, { zoom, project, measure: text => text.length * 7 });
+      const placed = placeOwnerLabels(candidates, { zoom, project, measure: text => text.length * perChar });
       for (const label of placed.filter(l => l.text === strip.owner)) {
         const [left] = project(west, 0), [right] = project(east, 0);
         strips++;
