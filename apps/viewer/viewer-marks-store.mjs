@@ -179,6 +179,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       const marks = page.marks.slice(0, SHARED_LIMIT - count);
       receive({ ...page, marks });
       count += marks.length;
+      // Rows left out for the row limit: cut short, whatever the cursor says.
+      if (marks.length < page.marks.length) { truncated = true; break; }
       if (!page.next) break;
       if (seen.has(page.next) || count >= SHARED_LIMIT || requests >= PAGE_LIMIT) { truncated = true; break; }
       seen.add(page.next);
@@ -261,13 +263,13 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     let timedOut = false, current = false;
     const stopTimeout = later(() => { timedOut = true; refresh.abort(); }, READ_MS);
     const marks = [], categories = new Map();
-    let received = false, partial = false, refusal = null;
+    let received = false, partial = false, refusal = null, truncated = false;
     try {
-      await readSharedPages(scope, page => {
+      ({ truncated } = await readSharedPages(scope, page => {
         received = true;
         marks.push(...page.marks);
         for (const category of page.categories) categories.set(category.id, category);
-      });
+      }));
     } catch (error) {
       if (!scope.live() && !timedOut) return;
       if (accessLost(error)) refusal = error;
@@ -286,8 +288,9 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     }
     const nextMarks = addUnseen(state.marks.filter(mark => mark.mine), marks);
     const nextCategories = byName(addUnseen(state.categories.filter(category => category.mine), [...categories.values()]));
-    const notice = partial && !state.message;
-    if (notice) state.message = 'Some shared marks could not be loaded. Reload the page to try again.';
+    const notice = (partial || truncated) && !state.message;
+    if (notice) state.message = partial ? 'Some shared marks could not be loaded. Reload the page to try again.'
+      : `Only the first ${marks.length} marks shared with you are shown.`;
     if (!notice && JSON.stringify(nextMarks) === JSON.stringify(state.marks)
       && JSON.stringify(nextCategories) === JSON.stringify(state.categories)) return;
     Object.assign(state, { marks: nextMarks, categories: nextCategories });

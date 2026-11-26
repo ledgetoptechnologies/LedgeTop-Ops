@@ -433,6 +433,31 @@ test('paging stops at 5000 rows, cut short if there is more and whole if not', a
   assert.deepEqual([sharedCut, store.state.deletedTruncated], [false, false]);
 });
 
+test('rows left out for the row limit cut a list short even on its last page; an exact fit is whole', async () => {
+  const { store, asked, sharedCut } = await pagedStore(n => ({ marks: rows(n, 600), next: n < 9 ? 'c' + n : null }));
+  assert.deepEqual([asked.shared, asked.deleted, store.state.marks.length, store.state.deleted.length], [9, 9, 5000, 5000]);
+  assert.deepEqual([sharedCut, store.state.deletedTruncated], [true, true]);
+  const fit = await pagedStore(n => ({ marks: rows(n, 625), next: n < 8 ? 'c' + n : null }));
+  assert.deepEqual([fit.asked.shared, fit.store.state.marks.length, fit.sharedCut, fit.store.state.deletedTruncated], [8, 5000, false, false]);
+});
+
+test('a periodic refresh that is cut short keeps what it read and says so', async () => {
+  let mode = 'whole';
+  const { store, asked } = await pagedStore(n => (mode === 'whole' ? { marks: rows(n), next: null }
+    : { marks: rows(n + 10), next: n % 2 ? 'one' : 'two' }));
+  assert.deepEqual([store.state.marks.length, store.state.message], [1, '']);
+  mode = 'cycle';
+  asked.shared = 0;
+  await store.refreshShared();
+  assert.equal(asked.shared, 3);
+  assert.deepEqual(store.state.marks.map(row => row.id).length, 3);
+  assert.match(store.state.message, /Only the first 3 marks/);
+  mode = 'whole';
+  asked.shared = 0;
+  await store.refreshShared();
+  assert.equal(store.state.marks.length, 1, 'a whole refresh replaces it again');
+});
+
 test('a cursor already read from ends paging, cut short', async () => {
   const { store, asked, sharedCut } = await pagedStore(n => ({ marks: rows(n), next: n % 2 ? 'one' : 'two' }));
   assert.deepEqual([asked.shared, asked.deleted], [3, 3]);
