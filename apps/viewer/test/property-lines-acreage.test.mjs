@@ -511,15 +511,15 @@ test('next to a neighbour, the whole label box stays inside its own parcel, or i
   assert.ok(strips > 0, 'the strip is labelled once zoomed in far enough');
 });
 
-test('records over the same land of one owner, merged with a neighbour, give one total in any order', () => {
+test('records over the same land of one owner, alone or beside more of its land, give one total in any order', () => {
   const land = forty(1, 'SAMPLE FARMS LLC', 0, 0), next = { ...forty(4, 'SAMPLE FARMS LLC', 1, 0), acres: 3.0 };
   for (const records of [[{ ...land, id: 1, acres: 3.9 }, { ...land, id: 2, acres: 7.1 }], [{ ...land, id: 1, acres: 3.9 }, { ...land, id: 2 }]]) {
     const seen = new Set();
-    for (const order of [[0, 1, 2], [1, 0, 2], [2, 1, 0], [2, 0, 1]]) {
+    for (const [order, expected] of [[[0, 1], '3.9 ac'], [[1, 0], '3.9 ac'], [[0, 1, 2], '6.9 ac'], [[1, 0, 2], '6.9 ac'], [[2, 1, 0], '6.9 ac'], [[2, 0, 1], '6.9 ac']]) {
       const parcels = order.map(i => [...records, next][i]);
       const [c] = ownerLabelCandidates(dissolveParcelsByOwner(parcels), { acreage: { merged: true, covered: all } });
-      seen.add(formatParcelArea(c.acreageM2, 'imperial', { approx: c.acreageApprox }));
+      seen.add(`${order.length}:${formatParcelArea(c?.acreageM2, 'imperial', { approx: c?.acreageApprox })}=${expected}`);
     }
-    assert.deepEqual([...seen], ['6.9 ac'], 'the record with the lowest id and a stated value, plus the neighbour, once');
+    assert.deepEqual([...seen], ['2:3.9 ac=3.9 ac', '3:6.9 ac=6.9 ac'], 'the record with the lowest id and a stated value, plus the rest of the land, once');
   }
 });
