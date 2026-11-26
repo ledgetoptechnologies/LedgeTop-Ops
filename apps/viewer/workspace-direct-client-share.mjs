@@ -201,7 +201,7 @@ function projectSelectionFields(catalog,selection=null,{editing=false}={}){
   const active=selection?.mode||'whole';
   const choices=editing
     ?[['whole','Whole project'],['only','Only selected folders and tasks'],['except','Whole project except selected folders and tasks']]
-    :[['whole','Everything'],['except','Everything except unticked folders and tasks'],['only','Only ticked folders and tasks']];
+    :[['whole','Everything'],['except','All except…'],['only','Only…']];
   const options=(name,items,selected=[],labelFor)=>{
     const available=new Set(items.map(item=>item.id));
     return [...items.map(item=>({id:item.id,label:labelFor(item),missing:false})),
@@ -240,6 +240,8 @@ ${projectSelectionFields({tasks,folders},grant.selection,{editing:true})}
 const firstShareChoices=new WeakMap();
 export function syncDirectProjectSelection(form,mode,catalog,{reset=false,render=true}={}){
   if(!catalog)return null;
+  const legend=render?form.querySelector('[data-direct-share-targets] legend'):null;
+  if(legend)legend.textContent=mode==='except'?'Untick folders and tasks to exclude':mode==='only'?'Tick folders and tasks to include':'Folders and tasks';
   const active=mode==='only'||mode==='except',checked=mode==='only';
   let previous=firstShareChoices.get(form);
   if(reset||previous?.mode!==mode)previous=null;

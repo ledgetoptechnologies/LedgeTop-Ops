@@ -14,14 +14,26 @@ function form({client='',scope='project',checked=[],later=true,expiresAt='',perm
 }
 const key=JSON.stringify(['source-a','ws-1']);
 
-test('first project Share uses the approved tick-box labels without changing saved-share editing',()=>{
+test('first project Share uses short native titles only without changing saved-share editing',()=>{
   const catalog={folders:[{id:'folder',displayName:'North'}],tasks};
   const html=directShareForm({projectName:'Site',tasks,selectionCatalog:catalog});
   const options=[...html.matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map(match=>match.slice(1));
-  assert.deepEqual(options,[['whole','Everything'],['except','Everything except unticked folders and tasks'],['only','Only ticked folders and tasks']]);
+  assert.deepEqual(options,[['whole','Everything'],['except','All except…'],['only','Only…']]);
+  assert.match(html,/<label><span>What this client can see<\/span><select name="mode">/);
+  assert.match(html,/<option value="whole" selected>Everything<\/option>/);
+  assert.doesNotMatch(html,/data-direct-mode-wording|Everything except unticked folders and tasks|Only ticked folders and tasks/);
   const saved=directProjectShareEditForm({grant:{clientDisplayName:'Acme'},...catalog});
   assert.match(saved,/Whole project except selected folders and tasks/);
   assert.doesNotMatch(saved,/unticked/);
+});
+
+test('first-share existing tree heading explains tick direction for each short title',()=>{
+  const legend={textContent:''},catalog={folders:[],tasks:[]};
+  const input={querySelector:selector=>selector==='[data-direct-share-targets] legend'?legend:null,querySelectorAll:()=>[]};
+  for(const [mode,heading] of [['only','Tick folders and tasks to include'],['except','Untick folders and tasks to exclude']]){
+    syncDirectProjectSelection(input,mode,catalog);
+    assert.equal(legend.textContent,heading);
+  }
 });
 
 test('first Except share sends only unticked targets as exclusions; Only sends ticked targets',()=>{
