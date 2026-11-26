@@ -450,7 +450,7 @@ test('the stated acres replace the computed area; ~ only when a parcel has none'
   // Merged: the stated values summed; the same record from two tiles counts once.
   const pair = [stated(1, 'SAMPLE FARMS LLC', 0, 0, 38.5), stated(2, 'SAMPLE FARMS LLC', 1, 0, 41.25), stated(2, 'SAMPLE FARMS LLC', 1, 0, 41.25)];
   assert.deepEqual(labels(pair, true), [['SAMPLE FARMS LLC', '79.8 ac']]);
-  assert.deepEqual(labels(pair, false).map(l => l[1]), ['38.5 ac', '41.3 ac', '41.3 ac']);
+  assert.deepEqual(labels(pair, false).map(l => l[1]), ['38.5 ac', '41.3 ac'], 'a record that arrived twice is labelled once');
   assert.deepEqual(labels([pair[0], stated(2, 'SAMPLE FARMS LLC', 1, 0)], true), [['SAMPLE FARMS LLC', '~80.0 ac']], 'one missing value: computed total');
   const [outline] = dissolveParcelsByOwner(pair);
   assert.equal(publishedAreaM2(outline, { covered: () => false }), null, 'no total until all the land is loaded');
@@ -536,4 +536,35 @@ test('choosing one record for the acres never changes what is drawn', () => {
   assert.deepEqual(plain.flatMap(o => o.parcels.map(p => p.id)).sort(), drawn);
   assert.equal(JSON.stringify(plain.map(o => o.lines)), lines);
   assert.ok(drawn.includes(1) && drawn.includes(2), 'both clipped records keep their own strokes');
+});
+
+const orders = n => n <= 1 ? [[0]] : orders(n - 1).flatMap(o => Array.from({ length: n }, (_, i) => [...o.slice(0, i), n - 1, ...o.slice(i)]));
+
+test('clipped and whole records of one parcel give the same estimate in every order', () => {
+  const land = forty(1, 'SAMPLE FARMS LLC', 0, 0), next = forty(2, 'SAMPLE FARMS LLC', 1, 0);
+  const clipped = { ...land, rings: [layout(box(0, 0, M / 2, M))], lines: [layout(box(0, 0, M / 2, M)).slice(0, 3)] };
+  for (const records of [[land, clipped], [land, clipped, next]]) {
+    const seen = new Set();
+    for (const order of orders(records.length)) {
+      // How the records group into outlines is the line drawing's own business; every label states the same size.
+      for (const c of ownerLabelCandidates(dissolveParcelsByOwner(order.map(i => records[i])), { acreage: { merged: true, covered: all } }))
+        seen.add(formatParcelArea(c.acreageM2, 'imperial', { approx: c.acreageApprox }));
+    }
+    assert.deepEqual([...seen], [records.length === 2 ? '~40.0 ac' : '~80.0 ac'], 'the whole footprint, never none');
+  }
+});
+
+test('a repeated record does not use up the corner budget and split an owner total', () => {
+  // B's corners split A's shared edge (a T-junction); B arrives twice.
+  const a = { id: 1, owner: 'SAMPLE FARMS LLC', acres: 3.9, rings: [layout(box(0, 0, 200, 200))] };
+  const b = { id: 2, owner: 'SAMPLE FARMS LLC', acres: 2.7, rings: [layout([[200, 50], [200, 150], [300, 150], [300, 50], [200, 50]])] };
+  const records = [a, b, { ...b }];
+  // Enough budget for A's edges against B's corners once, not twice.
+  const splitBudget = 5 * 5;
+  for (const order of orders(3)) {
+    const outlines = dissolveParcelsByOwner(order.map(i => records[i]), { splitBudget });
+    assert.equal(outlines.length, 1, `one outline (${order})`);
+    const [c] = ownerLabelCandidates(outlines, { acreage: { merged: true, covered: all } });
+    assert.equal(formatParcelArea(c.acreageM2, 'imperial', { approx: c.acreageApprox }), '6.6 ac', `${order}`);
+  }
 });

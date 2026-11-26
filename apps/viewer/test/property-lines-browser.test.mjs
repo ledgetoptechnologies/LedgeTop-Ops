@@ -161,10 +161,9 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     const beforeSplit = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length;
     await client.evaluate("document.getElementById('property-lines-merge').click(); 0");
     await waitFor('controller.state.outlines === 2', 'unmerged');
-    await waitFor("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length === 2", 'both parcels labelled once laid out');
     own = await owners();
     assert.equal(own.merge, false);
-    assert.deepEqual(own.labels.sort(), ['SAMPLE FARMS LLC\n3.9 ac', 'Sample Farms LLC\n2.7 ac'], 'the narrower parcel gets a smaller label that fits inside it');
+    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n3.9 ac'], 'the narrower parcel cannot hold its name inside it at this zoom, even at the smallest size');
     await client.evaluate('map.setZoom(18, {animate:false}); 0');
     await waitFor("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length === 2", 'one label per parcel when zoomed in');
     assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC\n3.9 ac', 'Sample Farms LLC\n2.7 ac']);

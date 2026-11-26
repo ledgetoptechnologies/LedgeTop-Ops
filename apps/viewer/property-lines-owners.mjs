@@ -192,6 +192,7 @@ function shapeKey(parcel) {
 // under two of the owner's records counts once.
 // covered(bounds): whether everything touching those lon/lat bounds is loaded.
 // Only needed for land that can be merged; a single parcel arrives whole.
+const footprintRank = parcel => (Array.isArray(parcel.lines) ? 1 : 0) * 1e15 - (parcelAreaM2(parcel) || 0) + (parcel.acres > 0 ? 0 : 1e-6);
 function landLoaded(outline, covered) {
   if (!covered) return false;
   for (const parcel of outline.parcels) for (const ring of parcel.rings) {
@@ -201,9 +202,18 @@ function landLoaded(outline, covered) {
   return true;
 }
 export function outlineAreaM2(outline, { merged = true, covered = null } = {}) {
-  if (outline.parcels.some(parcel => Array.isArray(parcel.lines))) return null;
+  // Records of one parcel (same id) count as its whole footprint whatever order they came in:
+  // an unclipped record first, then the largest.
+  const records = outline.records || outline.parcels, whole = new Map();
+  for (const parcel of records) {
+    if (parcel.id == null) continue;
+    const kept = whole.get(parcel.id);
+    if (!kept || footprintRank(parcel) < footprintRank(kept)) whole.set(parcel.id, parcel);
+  }
+  const chosen = outline.parcels.map(parcel => (parcel.id == null ? parcel : whole.get(parcel.id)));
+  if (chosen.some(parcel => Array.isArray(parcel.lines))) return null;
   if (merged && outline.ownerKey && !landLoaded(outline, covered)) return null;
-  const parcels = outline.parcels.length > 1 ? [...new Map(outline.parcels.map(parcel => [shapeKey(parcel), parcel])).values()] : outline.parcels;
+  const parcels = chosen.length > 1 ? [...new Map(chosen.map(parcel => [shapeKey(parcel), parcel])).values()] : chosen;
   if (parcels.some(parcel => soundAreaM2(parcel) == null)) return null;
   return parcels.length === 1 ? soundAreaM2(parcels[0]) : unionAreaM2(parcels);
 }
@@ -425,6 +435,8 @@ function mergeGroup(group, frame, snap, splitBudget) {
   for (const item of items) {
     const candidates = [];
     for (const other of items) if (other !== item && bboxTouch(item.bbox, other.bbox, snap)) candidates.push(...other.vertexIds);
+    // A corner shared by several neighbours (or repeated by a duplicate record) is checked once.
+    candidates.splice(0, candidates.length, ...new Set(candidates));
     const edges = item.rings.reduce((n, ids) => n + ids.length, 0);
     if (candidates.length && edges * candidates.length <= splitBudget) {
       const split = item.rings.map((ids, r) => splitAtVertices(ids, item.flags[r], index.verts, candidates, snap));
@@ -510,7 +522,7 @@ export function dissolveParcelsByOwner(parcels, { merge = true, snapMeters = OWN
     // record per piece of land, chosen over the owner's whole group (not just the
     // records left in one outline), so the order they arrived in never matters.
     const land = group.length > 1 ? new Map(sameLandOnce(group).map(parcel => [shapeKey(parcel), parcel])) : null;
-    const add = outline => { if (land) Object.defineProperty(outline, 'land', { value: land }); outlines.push(outline); };
+    const add = outline => { if (land) Object.defineProperty(outline, 'land', { value: land }); Object.defineProperty(outline, 'records', { value: group }); outlines.push(outline); };
     if (group.length === 1) { add(describe(ownerKey, group, parcelStrokeLines(group[0]))); continue; }
     for (const component of mergeGroup(group, frame, snapMeters, splitBudget))
       if (component.lines.length) add(describe(ownerKey, component.members, component.lines));
@@ -626,7 +638,15 @@ export function parcelLabelGeometry(parcel) {
 // owner name shows its area alone.
 export function ownerLabelCandidates(outlines, { acreage = null } = {}) {
   const out = [];
+  // A record that arrived twice (clipped and whole) may be drawn in an outline of
+  // its own. Its land is labelled once, where its whole footprint is, whatever the order.
+  const wholeOutline = new Map(), wholeRecord = new Map();
+  for (const outline of outlines) for (const parcel of outline.parcels) {
+    if (parcel.id == null) continue;
+    if (!wholeRecord.has(parcel.id) || footprintRank(parcel) < footprintRank(wholeRecord.get(parcel.id))) { wholeRecord.set(parcel.id, parcel); wholeOutline.set(parcel.id, outline); }
+  }
   for (const outline of outlines) {
+    if (outline.parcels.every(parcel => parcel.id != null && wholeOutline.get(parcel.id) !== outline)) continue;
     // The public value when every parcel has one; else the area of the lines, marked approximate.
     const published = acreage ? publishedAreaM2(outline, acreage) : null;
     const shownArea = published ?? (acreage ? outlineAreaM2(outline, acreage) : null);
