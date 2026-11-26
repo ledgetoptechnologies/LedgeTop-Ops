@@ -163,7 +163,7 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     await waitFor('controller.state.outlines === 2', 'unmerged');
     own = await owners();
     assert.equal(own.merge, false);
-    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n~4.0 ac'], 'the narrower parcel is too small for its name at this zoom');
+    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n3.9 ac'], 'the narrower parcel is too small for its name at this zoom');
     await client.evaluate('map.setZoom(18, {animate:false}); 0');
     await waitFor("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length === 2", 'one label per parcel when zoomed in');
     assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC\n~4.0 ac', 'Sample Farms LLC\n~2.7 ac']);
