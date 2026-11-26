@@ -1,5 +1,5 @@
 'use strict';
-// Viewer-owned task authorization generation (schema 88): persisted, backfilled,
+// Viewer-owned task authorization generation (schema 91): persisted, backfilled,
 // only ever increasing, bumped by every scope-affecting write, and compared at
 // mint, redemption and every live restricted-session check.
 const test = require('node:test');
@@ -35,7 +35,7 @@ function seedTasks(db, ids) {
 }
 const generationOf = (db, task) => db.prepare('SELECT generation FROM task_authorization_generations WHERE task_id=?').get(task)?.generation;
 
-test('upgrade from 48 backfills every existing task, stamps 88 and new tasks start at 1', t => {
+test('upgrade from 48 backfills every existing task, stamps 91 and new tasks start at 1', t => {
   const db = fileDb(t, 'upgrade');
   const all = [...MIGRATIONS];
   useMigrations(t, all.filter(item => item.version <= 48));
@@ -43,7 +43,7 @@ test('upgrade from 48 backfills every existing task, stamps 88 and new tasks sta
   seedTasks(db, ['task-1', 'task-2']);
   MIGRATIONS.splice(0, MIGRATIONS.length, ...all);
   applyMigrations(db);
-  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=88').get().name, 'task_authorization_generations');
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=91').get().name, 'task_authorization_generations');
   assert.equal(generationOf(db, 'task-1'), 1);
   assert.equal(generationOf(db, 'task-2'), 1);
   db.prepare(`INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,metadata_json,created_at,updated_at)
@@ -56,12 +56,12 @@ test('upgrade from 48 backfills every existing task, stamps 88 and new tasks sta
 // Schema 87 is separate work, so use a stand-in to exercise its ledger position.
 const synthetic87 = { version: 87, name: 'synthetic_87', sql: 'CREATE TABLE synthetic_87(id INTEGER PRIMARY KEY);' };
 for (const [label, steps] of [
-  ['86, then 88', [[86], [88]]],
-  ['86, then 87, then 88', [[86], [86, 87], [87, 88]]],
-  ['86, then 88, then a late 87', [[86], [88], [87, 88]]],
-  ['86, then 88, then a late 84', [[86], [88], [84, 88]]],
-  ['83, then 88', [[83], [88]]],
-  ['a fresh install with 84, 87 and 88', [[84, 87, 88]]],
+  ['86, then 91', [[86], [91]]],
+  ['86, then 87, then 91', [[86], [86, 87], [87, 91]]],
+  ['86, then 91, then a late 87', [[86], [91], [87, 91]]],
+  ['86, then 91, then a late 84', [[86], [91], [84, 91]]],
+  ['83, then 91', [[83], [91]]],
+  ['a fresh install with 84, 87 and 91', [[84, 87, 91]]],
 ]) test(`upgrade order: ${label}`, t => {
   const db = fileDb(t, 'order'), all = [...MIGRATIONS], seen = new Set();
   assert.equal(all.some(item => item.version === 87), false, 'use the real 87 migration once it lands');
@@ -77,34 +77,34 @@ for (const [label, steps] of [
     if (index === 0 && steps.length > 1) seedTasks(db, ['task-1']);
   }
   if (steps.length === 1) seedTasks(db, ['task-1']);
-  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=88').get().name, 'task_authorization_generations');
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=91').get().name, 'task_authorization_generations');
   assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=84').get()?.name,
     seen.has(84) ? 'viewer_coordinate_marks' : undefined);
   assert.equal(db.prepare('SELECT 1 FROM schema_migrations WHERE version=52').get(), undefined, '52 was never shipped');
-  assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, 88);
+  assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, 91);
   assert.equal(generationOf(db, 'task-1'), 1);
   applyMigrations(db);
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
 });
 
-test('88 refuses an install order without the 48 folder schema', t => {
+test('91 refuses an install order without the 48 folder schema', t => {
   const without48 = fileDb(t, 'no48');
-  useMigrations(t, [...MIGRATIONS].filter(item => item.version <= 42 || item.version === 88));
+  useMigrations(t, [...MIGRATIONS].filter(item => item.version <= 42 || item.version === 91));
   assert.throws(() => applyMigrations(without48), /require the version 48 folder schema/);
   assert.equal(without48.prepare("SELECT 1 FROM sqlite_master WHERE name='task_authorization_generations'").get(), undefined);
 });
 
-test('88 refuses half-built or unstamped objects', t => {
+test('91 refuses half-built or unstamped objects', t => {
   const db = fileDb(t, 'unstamped'), all = [...MIGRATIONS];
-  useMigrations(t, all.filter(item => item.version < 88));
+  useMigrations(t, all.filter(item => item.version < 91));
   applyMigrations(db);
   MIGRATIONS.splice(0, MIGRATIONS.length, ...all);
   db.exec('CREATE TABLE task_authorization_generations(task_id TEXT PRIMARY KEY, generation INTEGER, updated_at TEXT)');
   assert.throws(() => applyMigrations(db), { code: 'viewer_migration_history_conflict' });
-  assert.equal(db.prepare('SELECT 1 FROM schema_migrations WHERE version=88').get(), undefined);
+  assert.equal(db.prepare('SELECT 1 FROM schema_migrations WHERE version=91').get(), undefined);
 });
 
-test('an 88 stamp whose objects are missing is refused, never accepted', t => {
+test('a 91 stamp whose objects are missing is refused, never accepted', t => {
   const db = fileDb(t, 'stamp');
   applyMigrations(db);
   db.exec('DROP TRIGGER task_authorization_generation_task_update');

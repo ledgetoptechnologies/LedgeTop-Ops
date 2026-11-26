@@ -126,7 +126,7 @@ test('signed client catalog has bounded pagination, exact-task isolation and fre
 });
 
 test('a selection is applied to every catalog read, named back, validated, and starts at the shared folder', async t => {
-  const state = fixture(t, 88), { processing, database } = state, project = processing.createProject({ displayName: 'Selected delivery' });
+  const state = fixture(t, 92), { processing, database } = state, project = processing.createProject({ displayName: 'Selected delivery' });
   const outer = processing.createProjectFolder(project.id, { displayName: 'Synthetic outer' }, 'ops:test');
   const inner = processing.createProjectFolder(project.id, { displayName: 'Synthetic inner', parentId: outer.id }, 'ops:test');
   const [root, high, low] = ['Root flight', 'Outer flight', 'Inner flight'].map(name => publish(state, project, name));
