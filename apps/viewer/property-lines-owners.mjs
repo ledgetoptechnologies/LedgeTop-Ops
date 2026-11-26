@@ -433,12 +433,17 @@ function mergeGroup(group, frame, snap, splitBudget) {
   // it (very dense same-owner land), only edges whose corners already match
   // cancel, and a shared stretch with unmatched corners stays drawn.
   for (const item of items) {
-    const candidates = [];
-    for (const other of items) if (other !== item && bboxTouch(item.bbox, other.bbox, snap)) candidates.push(...other.vertexIds);
-    // A corner shared by several neighbours (or repeated by a duplicate record) is checked once.
-    candidates.splice(0, candidates.length, ...new Set(candidates));
-    const edges = item.rings.reduce((n, ids) => n + ids.length, 0);
-    if (candidates.length && edges * candidates.length <= splitBudget) {
+    // A corner shared by several neighbours (or repeated by a duplicate record) is
+    // checked once. Collected one at a time, stopping as soon as the budget is passed.
+    const edges = item.rings.reduce((n, ids) => n + ids.length, 0), seen = new Set();
+    let over = false;
+    for (const other of items) {
+      if (other === item || !bboxTouch(item.bbox, other.bbox, snap)) continue;
+      for (const id of other.vertexIds) { seen.add(id); if (edges * seen.size > splitBudget) { over = true; break; } }
+      if (over) break;
+    }
+    if (seen.size && !over) {
+      const candidates = [...seen];
       const split = item.rings.map((ids, r) => splitAtVertices(ids, item.flags[r], index.verts, candidates, snap));
       item.rings = split.map(s => s.ids); item.flags = split.map(s => s.flags);
     }

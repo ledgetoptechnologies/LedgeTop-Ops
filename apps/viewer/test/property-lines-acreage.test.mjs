@@ -568,3 +568,13 @@ test('a repeated record does not use up the corner budget and split an owner tot
     assert.equal(formatParcelArea(c.acreageM2, 'imperial', { approx: c.acreageApprox }), '6.6 ac', `${order}`);
   }
 });
+
+test('dense same-owner land past the corner budget is merged without running out of stack', () => {
+  // Two long, finely drawn neighbours of one owner (0.5 m between corners, 300,000 corners each).
+  const n = 300000, side = Array.from({ length: n }, (_, k) => [0, k * 0.5]);
+  const strip = x => ({ owner: 'SAMPLE FARMS LLC', rings: [layout([...side.map(([, y]) => [x, y]), [x + 10, n * 0.5], [x + 10, 0], [x, 0]])] });
+  const parcels = [{ id: 1, ...strip(0) }, { id: 2, ...strip(10) }];
+  let outlines;
+  assert.doesNotThrow(() => { outlines = dissolveParcelsByOwner(parcels); });
+  assert.ok(outlines.length >= 1);
+});
