@@ -15,6 +15,7 @@ import {
   propertyLinesRequestBounds,
   propertyLinesTilesForView,
   sampleGrid,
+  tilesCoverBounds,
   utmExtentToLonLatBounds,
 } from './property-lines.mjs';
 import { dissolveParcelsByOwner, ownerLabelCandidates, placeOwnerLabels } from './property-lines-owners.mjs';
@@ -144,7 +145,7 @@ export function createPropertyLinesController(deps) {
   try { merge = preferences.merged?.() !== false; } catch { merge = true; }
   let offered = false, source = null, hidden = false, suspended = false, status = 'off', count = 0, partial = false;
   let failedTiles = false, tileRetries = 0, tileRetryTimer = null, tileRetryKey = null;
-  let labelsEl = null, labelsMap = null, labelKey = null;
+  let labelsEl = null, labelsMap = null, labelKey = null, viewTilesKey = null;
   let life = 0, lifeKey = null, lifeProject = null, offerSeq = 0;
   let siteBounds = null, retryTimer = null, retries = 0, seq = 0;
   // One canvas renderer per Leaflet map, reused for every redraw.
@@ -193,7 +194,7 @@ export function createPropertyLinesController(deps) {
     retries = 0;
     fetcher.clear();
     tiles.clear();
-    siteBounds = null; current = null; count = 0; partial = false; failedTiles = false; tileRetries = 0; tileRetryKey = null; heightNote = ''; heightDraped = false; draped.clear();
+    siteBounds = null; current = null; viewTilesKey = null; count = 0; partial = false; failedTiles = false; tileRetries = 0; tileRetryKey = null; heightNote = ''; heightDraped = false; draped.clear();
     clearDrawings();
   }
 
@@ -279,8 +280,8 @@ export function createPropertyLinesController(deps) {
     clearLabels();
   }
 
-  // Owner names in the middle of each outline, in their own pane above the
-  // lines. Laid out again after every move or zoom (hidden while zooming);
+  // Owner names, with acreage under them, in the middle of each outline, in
+  // their own pane above the lines. Laid out again after every move or zoom (hidden while zooming);
   // only labels that fit their outline and clear each other are shown.
   function renderLabels() {
     const map = deps.getMap();
@@ -302,13 +303,24 @@ export function createPropertyLinesController(deps) {
       labelKey = null;
     }
     const zoom = map.getZoom(), size = map.getSize(), center = map.getCenter();
-    const key = `${drawKey()}|${zoom}|${size.x}x${size.y}|${center.lat.toFixed(6)},${center.lng.toFixed(6)}`;
+    // Owner totals only once every tile of this view has answered in full. A
+    // single parcel (merging off) arrives whole, so its area needs no wait.
+    const complete = Boolean(current.complete && !current.failed && !current.partial && current.key === viewTilesKey);
+    const units = deps.units?.() === 'metric' ? 'metric' : 'imperial';
+    const key = `${drawKey()}|${complete ? 'c' : 'i'}|${units}|${zoom}|${size.x}x${size.y}|${center.lat.toFixed(6)},${center.lng.toFixed(6)}`;
     labelsEl.style.visibility = '';
     if (key === labelKey) return;
     labelKey = key;
-    if (!current.candidates || current.candidates.mode !== current.outlines?.mode) current.candidates = { mode: current.outlines?.mode, list: ownerLabelCandidates(outlines()) };
+    const candidatesKey = `${merge ? 'merged' : 'raw'}|${complete}`;
+    if (current.candidates?.key !== candidatesKey) {
+      const covered = complete ? bounds => tilesCoverBounds(current.loaded, bounds) : null;
+      // Acreage where the source has owners: its shapes are whole parcels. An
+      // uploaded boundary file may hold open lines and shows none.
+      const acreage = source?.owners === 'yes' ? { merged: merge, covered } : null;
+      current.candidates = { key: candidatesKey, list: ownerLabelCandidates(outlines(), { acreage }) };
+    }
     const placed = placeOwnerLabels(current.candidates.list, {
-      zoom, measure, viewport: { width: size.x, height: size.y },
+      zoom, measure, units, viewport: { width: size.x, height: size.y },
       project: (lon, lat) => { const p = map.latLngToContainerPoint([lat, lon]); return [p.x, p.y]; },
     });
     labelsEl.replaceChildren(...placed.map(label => {
@@ -518,6 +530,7 @@ export function createPropertyLinesController(deps) {
       return;
     }
     const key = `tiles:${plan.tiles.map(tile => tile.key).join(';')}`;
+    viewTilesKey = key;
     if (key !== tileRetryKey) { tileRetryKey = key; tileRetries = 0; }
     if (current && current.key === key && current.complete && !current.failed) {
       tiles.cancel();
@@ -534,7 +547,7 @@ export function createPropertyLinesController(deps) {
     const result = await tiles.load(plan.tiles, { area: plan.area, immediate: immediate || tiles.cached(plan.tiles), onProgress });
     if (result.status === 'aborted' || !stillCurrent() || !isOn()) { if (lifeKey !== lifecycleKey().key) void refresh(); return; }
     if (result.status !== 'ok') { clearDrawings(); current = null; count = 0; partial = false; failedTiles = false; settle(result.status); return; }
-    current = { key, parcels: result.parcels, complete: true, failed: Boolean(result.failed) };
+    current = { key, parcels: result.parcels, complete: true, failed: Boolean(result.failed), partial: Boolean(result.partial || plan.partial), loaded: new Set(result.loaded || []) };
     count = result.parcels.length;
     partial = Boolean(result.partial || plan.partial);
     failedTiles = Boolean(result.failed);

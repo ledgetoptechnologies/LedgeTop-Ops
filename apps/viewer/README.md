@@ -646,7 +646,14 @@ WGS84 UTM 16N
   work budget; past that budget (very dense same-owner land), or where the
   two sides have no common corners, that stretch stays drawn and parcels
   joined by nothing else stay separate outlines. Map views label each outline with the owner's
-  name from zoom 14, only where the name fits and never overlapping another;
+  name from zoom 14, only where the name fits and never overlapping another,
+  and from zoom 15 with the parcel size under it ("40.2 ac", hectares in
+  metric): the owner's total while merged, each parcel's own otherwise. The
+  size is the parcel data's stated (assessed) acres; where a parcel has none,
+  the mapped shape's area on the ellipsoid is shown instead, marked "~40.2 ac".
+  A clipped parcel shows no computed size, and an owner's total
+  waits until every tile of the view has answered and all of that land lies
+  inside them;
   "Merge parcels by owner" in the card turns merging off to show every parcel
   (remembered in `ltds-viewer:property-lines-merge`). Map views fetch fixed
   map tiles (Web Mercator zoom 14, split down to 16 where a tile is dense)

@@ -140,7 +140,7 @@ function upstreamQueryUrl(bounds, source = WISCONSIN) {
 // Esri JSON (Web Mercator rings) -> { status, parcels: [{ id, rings: lon/lat, owner? }] }.
 // owner: the cleaned owner name, only when the source names an owner field
 // and the row has one. No other attribute is passed on.
-function normalizeUpstream(body, idField = WISCONSIN.query.idField, ownerField = null) {
+function normalizeUpstream(body, idField = WISCONSIN.query.idField, ownerField = null, acresField = null) {
   if (!body || typeof body !== 'object' || body.error) return { status: 'unavailable', parcels: [] };
   if (!Array.isArray(body.features)) return { status: 'unavailable', parcels: [] };
   if (body.exceededTransferLimit === true || body.features.length > LIMITS.maxParcels) return { status: 'too_many', parcels: [] };
@@ -159,7 +159,10 @@ function normalizeUpstream(body, idField = WISCONSIN.query.idField, ownerField =
     }
     const id = Number(feature?.attributes?.[idField]);
     const owner = ownerField ? cleanOwner(feature?.attributes?.[ownerField]) : '';
-    if (rings.length) parcels.push({ id: Number.isSafeInteger(id) ? id : null, rings, ...(owner ? { owner } : {}) });
+    // The stated parcel size, when the source has one: a positive number of acres. The field name is not passed on.
+    const stated = acresField ? Number(feature?.attributes?.[acresField]) : NaN;
+    const acres = feature?.attributes?.[acresField] != null && Number.isFinite(stated) && stated > 0 && stated < 1e6 ? Math.round(stated * 1e4) / 1e4 : null;
+    if (rings.length) parcels.push({ id: Number.isSafeInteger(id) ? id : null, rings, ...(owner ? { owner } : {}), ...(acres ? { acres } : {}) });
   }
   return { status: parcels.length ? 'ok' : 'none', parcels };
 }
@@ -560,7 +563,7 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, conf
     const text = await readLimited(response, limits.maxResponseBytes);
     let body;
     try { body = JSON.parse(text); } catch { return { status: 'unavailable', parcels: [] }; }
-    return normalizeUpstream(body, target.query.idField, target.query.ownerField || null);
+    return normalizeUpstream(body, target.query.idField, target.query.ownerField || null, target.query.acresField || null);
   }
 
   return {

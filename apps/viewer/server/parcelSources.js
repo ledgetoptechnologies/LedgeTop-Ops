@@ -75,7 +75,7 @@ const WISCONSIN = Object.freeze({
   extent: Object.freeze({ west: -92.89, south: 42.49, east: -86.76, north: 47.09 }),
   // OWNERNME1 is the first owner name. The state confirmed in writing on
   // 2026-11-18 that the statewide parcel data is public domain.
-  query: Object.freeze({ idField: 'OBJECTID', ownerField: 'OWNERNME1', outFields: 'OBJECTID,OWNERNME1', wkid: 3857, where: '1=1', geometryPrecision: 2 }),
+  query: Object.freeze({ idField: 'OBJECTID', ownerField: 'OWNERNME1', acresField: 'ASSDACRES', outFields: 'OBJECTID,OWNERNME1,ASSDACRES', wkid: 3857, where: '1=1', geometryPrecision: 2 }),
   // The service name carries no version. The version shows in the layer name
   // (V1200_WisconsinParcels_2026), the item's tags ("V12 Parcels", cumulative)
   // and its summary ("Version 12.0.0"). A new release may replace the layer in
@@ -105,9 +105,13 @@ function validExtent(e) {
 // startup. Changing a list needs the same approval as adding a source.
 //   wi-statewide-parcels: OBJECTID (row id) and OWNERNME1 (first owner name),
 //     approved by Beau on 2026-11-22 for owner labels; the state confirmed on
-//     2026-11-18 that the data is public domain.
+//     2026-11-18 that the data is public domain. ASSDACRES (assessed acres)
+//     for the parcel size under the owner name, asked for by Beau on 2026-11-25
+//     through the lead; of the three acreage fields it is the best filled
+//     (2026-11-25: ASSDACRES > 0 on 2,909,506 of 3,574,646 rows, DEEDACRES
+//     2,678,554, GISACRES 2,196,014).
 const APPROVED_PARCEL_FIELDS = Object.freeze({
-  'wi-statewide-parcels': Object.freeze({ idField: 'OBJECTID', ownerField: 'OWNERNME1' }),
+  'wi-statewide-parcels': Object.freeze({ idField: 'OBJECTID', ownerField: 'OWNERNME1', acresField: 'ASSDACRES' }),
 });
 
 // Fails loudly at startup on a config the fetcher cannot serve safely.
@@ -129,7 +133,8 @@ function validateParcelSource(source, approved = APPROVED_PARCEL_FIELDS) {
   else {
     if (q?.idField !== allowed.idField) problems.push('query.idField');
     if ((q?.ownerField ?? null) !== (allowed.ownerField ?? null)) problems.push('query.ownerField');
-    if (q?.outFields !== [allowed.idField, allowed.ownerField].filter(Boolean).join(',')) problems.push('query.outFields');
+    if ((q?.acresField ?? null) !== (allowed.acresField ?? null)) problems.push('query.acresField');
+    if (q?.outFields !== [allowed.idField, allowed.ownerField, allowed.acresField].filter(Boolean).join(',')) problems.push('query.outFields');
   }
   for (const key of ['shortName', 'vintage'])
     if (source?.[key] != null && (typeof source[key] !== 'string' || !source[key] || source[key].length > 80)) problems.push(key);

@@ -24,7 +24,8 @@ const MAIN_DESCRIPTION = '{"id":"wi-statewide-parcels","name":"Wisconsin Statewi
 
 // Owner labels added the owner-name field to the request and the data
 // vintage to the description; nothing else about either changed.
-const withOwner = url => url.replace('outFields=OBJECTID&', 'outFields=OBJECTID%2COWNERNME1&');
+// Parcel sizes added the stated-acres field after it.
+const withOwner = url => url.replace('outFields=OBJECTID&', 'outFields=OBJECTID%2COWNERNME1%2CASSDACRES&');
 const WI_MADISON_URL = withOwner(MAIN_MADISON_URL), WI_EDGE_URL = withOwner(MAIN_EDGE_URL);
 const WI_DESCRIPTION = JSON.stringify({ ...JSON.parse(MAIN_DESCRIPTION), shortName: 'WI statewide', vintage: 'V12, 2025 tax roll', dataUpdated: '2026-06-30', owners: 'yes' });
 
@@ -35,7 +36,7 @@ const NORTH = Object.freeze({
   extent: Object.freeze({ west: -92.0, south: 47.5, east: -89.0, north: 48.5 }),
 });
 // The test source's own field approval, passed explicitly; never in the real allowlist.
-const TEST_APPROVED = Object.freeze({ ...APPROVED_PARCEL_FIELDS, 'test-north': Object.freeze({ idField: 'OBJECTID', ownerField: 'OWNERNME1' }) });
+const TEST_APPROVED = Object.freeze({ ...APPROVED_PARCEL_FIELDS, 'test-north': Object.freeze({ idField: 'OBJECTID', ownerField: 'OWNERNME1', acresField: 'ASSDACRES' }) });
 
 function modelAt(id, lat, lon, zoneLon0) {
   const [e, n] = createUtmProjection({ zoneLon0Deg: zoneLon0, hemisphere: 'N' }).latLonToUtm(lat, lon);
@@ -82,7 +83,8 @@ test('registry: Wisconsin is the only source and keeps its config', () => {
   assert.deepEqual(PARCEL_SOURCES.map(s => s.id), ['wi-statewide-parcels']);
   assert.equal(WISCONSIN_PARCELS, WISCONSIN, 'the old export is the registry entry');
   assert.equal(Object.isFrozen(PARCEL_SOURCES) && Object.isFrozen(WISCONSIN), true);
-  assert.equal(WISCONSIN.query.outFields, 'OBJECTID,OWNERNME1', 'geometry, row id and the first owner name only');
+  assert.equal(WISCONSIN.query.outFields, 'OBJECTID,OWNERNME1,ASSDACRES', 'geometry, row id, the first owner name and the stated acres only');
+  assert.equal(WISCONSIN.query.acresField, 'ASSDACRES');
   assert.equal(WISCONSIN.query.ownerField, 'OWNERNME1');
   assert.deepEqual([WISCONSIN.shortName, WISCONSIN.vintage, WISCONSIN.dataUpdated], ['WI statewide', 'V12, 2025 tax roll', '2026-06-30']);
   assert.equal(WISCONSIN.discovery.currentVersion, 12);
@@ -90,7 +92,7 @@ test('registry: Wisconsin is the only source and keeps its config', () => {
 });
 
 test('registry: fields are an exact per-source allowlist', () => {
-  assert.deepEqual(APPROVED_PARCEL_FIELDS, { 'wi-statewide-parcels': { idField: 'OBJECTID', ownerField: 'OWNERNME1' } }, 'WI: OBJECTID, OWNERNME1 and geometry only');
+  assert.deepEqual(APPROVED_PARCEL_FIELDS, { 'wi-statewide-parcels': { idField: 'OBJECTID', ownerField: 'OWNERNME1', acresField: 'ASSDACRES' } }, 'WI: OBJECTID, OWNERNME1, ASSDACRES and geometry only');
   assert.equal(Object.isFrozen(APPROVED_PARCEL_FIELDS) && Object.isFrozen(APPROVED_PARCEL_FIELDS['wi-statewide-parcels']), true);
   assert.doesNotThrow(() => validateParcelSource(WISCONSIN));
   // A source with no approved entry is refused, whatever it asks for.
@@ -100,14 +102,15 @@ test('registry: fields are an exact per-source allowlist', () => {
   // Anything but the exact approved list is refused, including fields that look harmless.
   const wiQuery = WISCONSIN.query;
   for (const query of [
-    { ...wiQuery, outFields: 'OBJECTID,OWNERNME1,OWNERNME2' }, { ...wiQuery, outFields: 'OBJECTID,OWNERNME1,SITEADRESS' },
+    { ...wiQuery, outFields: 'OBJECTID,OWNERNME1,ASSDACRES,OWNERNME2' }, { ...wiQuery, outFields: 'OBJECTID,OWNERNME1,SITEADRESS' },
+    { ...wiQuery, acresField: 'GISACRES', outFields: 'OBJECTID,OWNERNME1,GISACRES' }, { ...wiQuery, acresField: undefined, outFields: 'OBJECTID,OWNERNME1' },
     { ...wiQuery, ownerField: 'OWNERNME2', outFields: 'OBJECTID,OWNERNME2' }, { ...wiQuery, ownerField: 'TAXROLLYEAR', outFields: 'OBJECTID,TAXROLLYEAR' },
     { ...wiQuery, outFields: '*' }, { ...wiQuery, outFields: 'OWNERNME1,OBJECTID' }, { ...wiQuery, idField: 'PARCELID', outFields: 'PARCELID,OWNERNME1' },
     { ...wiQuery, ownerField: null, outFields: 'OBJECTID' },
   ]) assert.throws(() => validateParcelSource({ ...WISCONSIN, query }), /query\./, JSON.stringify(query));
   // A geometry-only approval allows exactly the id field.
   const plain = { ...TEST_APPROVED, 'test-north': Object.freeze({ idField: 'OBJECTID' }) };
-  assert.doesNotThrow(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, ownerField: undefined, outFields: 'OBJECTID' } }, plain));
+  assert.doesNotThrow(() => validateParcelSource({ ...NORTH, query: { ...NORTH.query, ownerField: undefined, acresField: undefined, outFields: 'OBJECTID' } }, plain));
   assert.throws(() => validateParcelSource(NORTH, plain), /ownerField/);
 });
 
