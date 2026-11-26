@@ -50,7 +50,7 @@ test('upstream query is fixed: geometry and owner name only, Web Mercator, bound
   assert.equal(url.origin + url.pathname, `${WISCONSIN_PARCELS.layerUrl}/query`);
   assert.equal(url.hostname, 'services3.arcgis.com');
   const p = url.searchParams;
-  assert.equal(p.get('outFields'), 'OBJECTID,OWNERNME1', 'row id and first owner name; no address or value fields');
+  assert.equal(p.get('outFields'), 'OBJECTID,OWNERNME1,ASSDACRES', 'row id, first owner name and stated acres; no address or value fields');
   assert.doesNotMatch(url.search, /OWNERNME2|ADRESS|ADDRESS|VALUE|PSTL|SITE|\*/i);
   assert.equal(p.get('returnGeometry'), 'true');
   assert.equal(p.get('inSR'), '3857');
@@ -554,4 +554,16 @@ test('API: an uploaded boundary replaces the state layer behind the same access 
       assert.equal(upstream, 1);
     });
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('stated acres are passed on as a plain number, never the field name; missing or bad values are left out', () => {
+  const ring = [[[-9952185, 5323242], [-9952000, 5323242], [-9952000, 5323400], [-9952185, 5323242]]];
+  const { parcels } = normalizeUpstream({ features: [
+    { attributes: { OBJECTID: 1, OWNERNME1: 'SAMPLE', ASSDACRES: 40.123456 }, geometry: { rings: ring } },
+    ...[null, 0, -3, 'x', 2e6, undefined].map((ASSDACRES, i) => ({ attributes: { OBJECTID: i + 2, OWNERNME1: 'SAMPLE', ASSDACRES }, geometry: { rings: ring } })),
+  ] }, 'OBJECTID', 'OWNERNME1', 'ASSDACRES');
+  assert.equal(parcels[0].acres, 40.1235);
+  assert.ok(parcels.slice(1).every(parcel => !('acres' in parcel)));
+  assert.doesNotMatch(JSON.stringify(parcels), /ASSDACRES/);
+  assert.ok(!('acres' in normalizeUpstream({ features: [{ attributes: { OBJECTID: 1, ASSDACRES: 5 }, geometry: { rings: ring } }] }, 'OBJECTID', null, null).parcels[0]), 'only when the source names the field');
 });

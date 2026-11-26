@@ -192,32 +192,47 @@ function shapeKey(parcel) {
 // under two of the owner's records counts once.
 // covered(bounds): whether everything touching those lon/lat bounds is loaded.
 // Only needed for land that can be merged; a single parcel arrives whole.
+function landLoaded(outline, covered) {
+  if (!covered) return false;
+  for (const parcel of outline.parcels) for (const ring of parcel.rings) {
+    const { minX, minY, maxX, maxY } = bboxOf([ring]);
+    if (!covered({ west: minX, south: minY, east: maxX, north: maxY })) return false;
+  }
+  return true;
+}
 export function outlineAreaM2(outline, { merged = true, covered = null } = {}) {
   if (outline.parcels.some(parcel => Array.isArray(parcel.lines))) return null;
-  if (merged && outline.ownerKey) {
-    if (!covered) return null;
-    for (const parcel of outline.parcels) for (const ring of parcel.rings) {
-      const { minX, minY, maxX, maxY } = bboxOf([ring]);
-      if (!covered({ west: minX, south: minY, east: maxX, north: maxY })) return null;
-    }
-  }
+  if (merged && outline.ownerKey && !landLoaded(outline, covered)) return null;
   const parcels = outline.parcels.length > 1 ? [...new Map(outline.parcels.map(parcel => [shapeKey(parcel), parcel])).values()] : outline.parcels;
   if (parcels.some(parcel => soundAreaM2(parcel) == null)) return null;
   return parcels.length === 1 ? soundAreaM2(parcels[0]) : unionAreaM2(parcels);
 }
 
-// "≈ 40.2 ac": one decimal from 1 acre, two below, square feet under 0.1
-// acre; hectares or square metres in metric. Always approximate.
-export function formatParcelArea(squareMeters, units = 'imperial') {
+// The land of the outline's parcels as the public parcel data states it, in
+// square metres, or null when any parcel has no stated value (or, merged, when
+// the owner's land may continue past the loaded tiles). Each record counts
+// once; records over the same land count once.
+export function publishedAreaM2(outline, { merged = true, covered = null } = {}) {
+  if (merged && outline.ownerKey && !landLoaded(outline, covered)) return null;
+  const parcels = [...new Map(outline.parcels.map(parcel => [parcel.id ?? shapeKey(parcel), parcel])).values()];
+  const unique = [...new Map(parcels.map(parcel => [shapeKey(parcel), parcel])).values()];
+  if (!unique.length || unique.some(parcel => !(parcel.acres > 0))) return null;
+  return unique.reduce((sum, parcel) => sum + parcel.acres, 0) * SQUARE_METERS_PER_ACRE;
+}
+
+// "40.2 ac" for a stated value, "~40.2 ac" for one computed from the lines:
+// one decimal from 1 acre, two below, square feet under 0.1 acre; hectares or
+// square metres in metric.
+export function formatParcelArea(squareMeters, units = 'imperial', { approx = true } = {}) {
   if (!Number.isFinite(squareMeters) || squareMeters <= 0) return '';
   const metric = units === 'metric';
   const value = squareMeters / (metric ? 10_000 : SQUARE_METERS_PER_ACRE);
   if (value < 0.1) {
     const small = metric ? squareMeters : squareMeters / SQUARE_METERS_PER_ACRE * 43560;
-    return `≈ ${Math.max(10, Math.round(small / 10) * 10).toLocaleString('en-US')} ${metric ? 'm²' : 'sq ft'}`;
+    return `${approx ? '~' : ''}${Math.max(10, Math.round(small / 10) * 10).toLocaleString('en-US')} ${metric ? 'm²' : 'sq ft'}`;
   }
   const digits = value < 0.995 ? 2 : 1;
-  return `≈ ${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })} ${metric ? 'ha' : 'ac'}`;
+  return `${approx ? '~' : ''}${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })} ${metric ? 'ha' : 'ac'}`;
 }
 
 function signedArea(points) {
@@ -598,7 +613,9 @@ export function parcelLabelGeometry(parcel) {
 export function ownerLabelCandidates(outlines, { acreage = null } = {}) {
   const out = [];
   for (const outline of outlines) {
-    const shownArea = acreage ? outlineAreaM2(outline, acreage) : null;
+    // The public value when every parcel has one; else the area of the lines, marked approximate.
+    const published = acreage ? publishedAreaM2(outline, acreage) : null;
+    const shownArea = published ?? (acreage ? outlineAreaM2(outline, acreage) : null);
     if (!outline.owner && (shownArea == null || acreage.merged !== false)) continue;
     let best = null, area = 0;
     for (const parcel of outline.parcels) {
@@ -607,7 +624,7 @@ export function ownerLabelCandidates(outlines, { acreage = null } = {}) {
       area += geometry.areaM2;
       if (!best || geometry.radiusMeters > best.radiusMeters) best = geometry;
     }
-    if (best) out.push({ text: outline.owner, ownerKey: outline.ownerKey, lon: best.lonLat[0], lat: best.lonLat[1], radiusMeters: best.radiusMeters, areaM2: area, ...(shownArea == null ? {} : { acreageM2: shownArea }) });
+    if (best) out.push({ text: outline.owner, ownerKey: outline.ownerKey, lon: best.lonLat[0], lat: best.lonLat[1], radiusMeters: best.radiusMeters, areaM2: area, ...(shownArea == null ? {} : { acreageM2: shownArea, acreageApprox: published == null }) });
   }
   return out;
 }
@@ -666,7 +683,7 @@ export function placeOwnerLabels(candidates, { zoom, project, viewport, measure,
     }
     return placed;
   };
-  const acreage = candidate => (zoom >= limits.minAcreageZoom ? formatParcelArea(candidate.acreageM2, units) : '');
+  const acreage = candidate => (zoom >= limits.minAcreageZoom ? formatParcelArea(candidate.acreageM2, units, { approx: candidate.acreageApprox !== false }) : '');
   const placed = place(candidates.filter(c => c.text).map(c => fit(c, wrapOwnerLabel(c.text, limits))), []);
   placed.forEach((label, i) => {
     const line = acreage(label.candidate);

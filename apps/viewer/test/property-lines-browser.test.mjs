@@ -69,8 +69,8 @@ controller.loadOffer().then(() => { document.body.dataset.ready = 'true'; });
 // Two touching parcels of one (generic) owner, written with different case
 // and spacing, so they draw as one outline with one label.
 const PARCELS = { status: 'ok', parcels: [
-  { id: 1, owner: 'SAMPLE FARMS LLC', rings: [[[-89.4020, 43.0740], [-89.4020, 43.0752], [-89.4005, 43.0752], [-89.4005, 43.0740], [-89.4020, 43.0740]]] },
-  { id: 2, owner: 'Sample  Farms LLC', rings: [[[-89.4005, 43.0740], [-89.4005, 43.0752], [-89.3995, 43.0752], [-89.3995, 43.0740], [-89.4005, 43.0740]]] },
+  { id: 1, owner: 'SAMPLE FARMS LLC', acres: 3.9, rings: [[[-89.4020, 43.0740], [-89.4020, 43.0752], [-89.4005, 43.0752], [-89.4005, 43.0740], [-89.4020, 43.0740]]] },
+  { id: 2, owner: 'Sample  Farms LLC', acres: 2.7, rings: [[[-89.4005, 43.0740], [-89.4005, 43.0752], [-89.3995, 43.0752], [-89.3995, 43.0740], [-89.4005, 43.0740]]] },
 ] };
 
 test('property lines: shown by default with notice, states, Hide kept over reload and no foreign requests', { timeout: 90000 }, async t => {
@@ -153,7 +153,8 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
         inside: labels.every(l => { const r = l.getBoundingClientRect(), m = map.getContainer().getBoundingClientRect(); return r.left >= m.left && r.right <= m.right && r.top >= m.top && r.bottom <= m.bottom; }) }; })()`);
     let own = await owners();
     assert.equal(own.outlines, 1, 'touching parcels of one owner draw as one outline');
-    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n≈ 6.7 ac'], 'the owner total under the name');
+    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n6.6 ac'], 'the owner total under the name, from the stated acres');
+    { const { data } = await client.command('Page.captureScreenshot', { format: 'png' }); if (process.env.SHOTS) (await import('node:fs')).writeFileSync(`${process.env.SHOTS}/parcel-acres-merged.png`, Buffer.from(data, 'base64')); }
     assert.equal(own.inside, true);
     assert.deepEqual([own.merge, own.mergeShown], [true, true]);
     // Raw parcels on request, without fetching again; the choice is remembered.
@@ -162,10 +163,10 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     await waitFor('controller.state.outlines === 2', 'unmerged');
     own = await owners();
     assert.equal(own.merge, false);
-    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n≈ 4.0 ac'], 'the narrower parcel is too small for its name at this zoom');
+    assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n~4.0 ac'], 'the narrower parcel is too small for its name at this zoom');
     await client.evaluate('map.setZoom(18, {animate:false}); 0');
     await waitFor("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length === 2", 'one label per parcel when zoomed in');
-    assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC\n≈ 4.0 ac', 'Sample Farms LLC\n≈ 2.7 ac']);
+    assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC\n~4.0 ac', 'Sample Farms LLC\n~2.7 ac']);
     assert.equal(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length, beforeSplit, 'redrawn from the parcels already fetched');
     assert.equal(await client.evaluate("localStorage.getItem('ltds-viewer:property-lines-merge')"), '0');
     await client.evaluate("document.getElementById('property-lines-merge').click(); 0");

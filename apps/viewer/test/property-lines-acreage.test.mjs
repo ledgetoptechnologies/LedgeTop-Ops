@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { createUtmProjection } from '../utm-conversion.mjs';
 import { createParcelTileLoader, lonLatToTileXY, makeTile, tilesCoverBounds } from '../property-lines.mjs';
 import {
-  dissolveParcelsByOwner, formatParcelArea, outlineAreaM2, ownerLabelCandidates, parcelAreaM2, parcelLabelGeometry, placeOwnerLabels,
+  dissolveParcelsByOwner, formatParcelArea, outlineAreaM2, ownerLabelCandidates, publishedAreaM2, parcelAreaM2, parcelLabelGeometry, placeOwnerLabels,
 } from '../property-lines-owners.mjs';
 import { createPropertyLinesController } from '../property-lines-layer.mjs';
 
@@ -52,7 +52,7 @@ test('area: known 40 acres, quarter section and section within 0.05% at 42.6, 44
     const off = error(parcel, acres * ACRE);
     worst = Math.max(worst, off);
     assert.ok(off < 0.0005, `${acres} acres at ${lat}: ${(off * 100).toFixed(5)}%`);
-    assert.equal(formatParcelArea(parcelAreaM2(parcel)), `≈ ${acres.toFixed(1)} ac`);
+    assert.equal(formatParcelArea(parcelAreaM2(parcel)), `~${acres.toFixed(1)} ac`);
   }
   t.diagnostic(`worst error, coordinates rounded as served: ${(worst * 100).toFixed(5)}%`);
   assert.ok(worst < 0.0001, `worst ${(worst * 100).toFixed(5)}%`);
@@ -106,15 +106,15 @@ test('area: holes, islands, parts, ring direction and a hole touching its outer 
 
 test('units: one decimal from 1 acre, two below, square feet under 0.1 acre; hectares in metric', () => {
   const ac = n => n * ACRE;
-  assert.equal(formatParcelArea(ac(40.17)), '≈ 40.2 ac');
-  assert.equal(formatParcelArea(ac(1234.56)), '≈ 1,234.6 ac');
-  assert.equal(formatParcelArea(ac(1)), '≈ 1.0 ac');
-  assert.equal(formatParcelArea(ac(0.999)), '≈ 1.0 ac');
-  assert.equal(formatParcelArea(ac(0.256)), '≈ 0.26 ac');
-  assert.equal(formatParcelArea(ac(0.05)), '≈ 2,180 sq ft');
-  assert.equal(formatParcelArea(161874, 'metric'), '≈ 16.2 ha');
-  assert.equal(formatParcelArea(2560, 'metric'), '≈ 0.26 ha');
-  assert.equal(formatParcelArea(512, 'metric'), '≈ 510 m²');
+  assert.equal(formatParcelArea(ac(40.17)), '~40.2 ac');
+  assert.equal(formatParcelArea(ac(1234.56)), '~1,234.6 ac');
+  assert.equal(formatParcelArea(ac(1)), '~1.0 ac');
+  assert.equal(formatParcelArea(ac(0.999)), '~1.0 ac');
+  assert.equal(formatParcelArea(ac(0.256)), '~0.26 ac');
+  assert.equal(formatParcelArea(ac(0.05)), '~2,180 sq ft');
+  assert.equal(formatParcelArea(161874, 'metric'), '~16.2 ha');
+  assert.equal(formatParcelArea(2560, 'metric'), '~0.26 ha');
+  assert.equal(formatParcelArea(512, 'metric'), '~510 m²');
   for (const none of [null, undefined, NaN, 0, -5]) assert.equal(formatParcelArea(none), '');
 });
 
@@ -129,11 +129,11 @@ test('merged: the total is the sum of the parts; not merged: each parcel its own
   const merged = dissolveParcelsByOwner(parcels);
   const of = ids => merged.find(o => o.parcelIds.join() === ids);
   const total = outlineAreaM2(of('1,2,3'), { covered: all });
-  assert.equal(text(total), '≈ 120.0 ac');
+  assert.equal(text(total), '~120.0 ac');
   assert.ok(Math.abs(total - parcels.slice(0, 3).reduce((n, p) => n + parcelAreaM2(p), 0)) < 1e-6);
-  assert.equal(text(outlineAreaM2(of('5'), { covered: all })), '≈ 40.0 ac', 'separate tracts are separate totals');
+  assert.equal(text(outlineAreaM2(of('5'), { covered: all })), '~40.0 ac', 'separate tracts are separate totals');
   const raw = ownerLabelCandidates(dissolveParcelsByOwner(parcels, { merge: false }), { acreage: { merged: false } });
-  assert.deepEqual(raw.map(c => text(c.acreageM2)), Array(5).fill('≈ 40.0 ac'));
+  assert.deepEqual(raw.map(c => text(c.acreageM2)), Array(5).fill('~40.0 ac'));
 });
 
 test('merged: no total until everything touching the land is loaded; a single parcel needs no wait', () => {
@@ -146,7 +146,7 @@ test('merged: no total until everything touching the land is loaded; a single pa
   const [lone] = dissolveParcelsByOwner([forty(1, 'SAMPLE FARMS LLC', 0, 0)]);
   assert.equal(outlineAreaM2(lone, { covered: () => false }), null);
   const [raw] = dissolveParcelsByOwner([forty(1, 'SAMPLE FARMS LLC', 0, 0)], { merge: false });
-  assert.equal(text(outlineAreaM2(raw, { merged: false })), '≈ 40.0 ac');
+  assert.equal(text(outlineAreaM2(raw, { merged: false })), '~40.0 ac');
 });
 
 test('a parcel clipped by the server shows no acreage, and neither does a total that includes it', () => {
@@ -156,8 +156,8 @@ test('a parcel clipped by the server shows no acreage, and neither does a total 
   const { parcels } = clipParcels({ status: 'ok', parcels: whole }, { west: -91, south: 44, east, north: 45 });
   assert.ok(Array.isArray(parcels.find(p => p.id === 2).lines), 'parcel 2 is cut');
   const candidates = merge => ownerLabelCandidates(dissolveParcelsByOwner(parcels, { merge }), { acreage: { merged: merge, covered: all } });
-  assert.deepEqual(candidates(true).map(c => [c.text, text(c.acreageM2)]), [['SAMPLE FARMS LLC', ''], ['EXAMPLE OWNER', '≈ 40.0 ac']]);
-  assert.deepEqual(candidates(false).map(c => [c.text, text(c.acreageM2)]), [['SAMPLE FARMS LLC', '≈ 40.0 ac'], ['SAMPLE FARMS LLC', ''], ['EXAMPLE OWNER', '≈ 40.0 ac']]);
+  assert.deepEqual(candidates(true).map(c => [c.text, text(c.acreageM2)]), [['SAMPLE FARMS LLC', ''], ['EXAMPLE OWNER', '~40.0 ac']]);
+  assert.deepEqual(candidates(false).map(c => [c.text, text(c.acreageM2)]), [['SAMPLE FARMS LLC', '~40.0 ac'], ['SAMPLE FARMS LLC', ''], ['EXAMPLE OWNER', '~40.0 ac']]);
 });
 
 test('stacked records and shapes over the same land count once', () => {
@@ -165,10 +165,10 @@ test('stacked records and shapes over the same land count once', () => {
   const ring = base.rings[0], turned = [...ring.slice(2, -1), ...ring.slice(0, 3)];
   for (const stacked of [ring, ring.slice().reverse(), turned]) {
     const outline = { ownerKey: 'SAMPLE FARMS LLC', owner: 'SAMPLE FARMS LLC', parcels: [base, { ...base, id: 9, rings: [stacked] }, next] };
-    assert.equal(text(outlineAreaM2(outline, { covered: all })), '≈ 80.0 ac');
+    assert.equal(text(outlineAreaM2(outline, { covered: all })), '~80.0 ac');
   }
   const unit = { id: 8, owner: 'SAMPLE FARMS LLC', rings: [layout(box(50, 50, 60))] };
-  assert.equal(text(outlineAreaM2({ ownerKey: 'SAMPLE FARMS LLC', parcels: [base, next, unit] }, { covered: all })), '≈ 80.0 ac');
+  assert.equal(text(outlineAreaM2({ ownerKey: 'SAMPLE FARMS LLC', parcels: [base, next, unit] }, { covered: all })), '~80.0 ac');
   // Land inside the hole of its neighbour is not stacked.
   const ringed = { id: 7, owner: 'SAMPLE FARMS LLC', rings: [layout(box(0, 0, 400)), layout(box(100, 100, 200))] };
   const filled = { id: 6, owner: 'SAMPLE FARMS LLC', rings: [layout(box(100, 100, 200))] };
@@ -220,7 +220,7 @@ test('union area matches known areas: crossing shapes, holes, nesting, duplicate
 
 test('one record with crossed, doubled or overlapping rings shows no acreage', () => {
   const alone = rings => outlineAreaM2({ ownerKey: '', parcels: [{ id: 1, rings }] }, { merged: false });
-  assert.equal(text(alone([layout(box(0, 0, 400)), layout(box(500, 0, 400))])), '≈ 79.1 ac', 'two sound parts');
+  assert.equal(text(alone([layout(box(0, 0, 400)), layout(box(500, 0, 400))])), '~79.1 ac', 'two sound parts');
   assert.equal(alone([layout([[0, 0], [400, 400], [400, 0], [0, 400], [0, 0]])]), null, 'bow tie');
   assert.equal(alone([layout([[0, 0], [500, 400], [400, 0], [0, 300], [0, 0]])]), null, 'crossed ring');
   assert.equal(alone([layout(box(0, 0, 400)), layout(box(0, 0, 400))]), null, 'ring twice');
@@ -275,9 +275,9 @@ const place = (candidates, zoom, options = {}) => placeOwnerLabels(candidates, {
 
 test('labels: the acreage line is under the name, from zoom 15, in the Viewer units', () => {
   const candidates = ownerLabelCandidates(dissolveParcelsByOwner([forty(1, 'SAMPLE FARMS LLC', 0, 0), forty(2, 'SAMPLE FARMS LLC', 1, 0)]), { acreage: { merged: true, covered: all } });
-  assert.deepEqual(place(candidates, 16).map(l => l.lines), [['SAMPLE FARMS LLC', '≈ 80.0 ac']]);
-  assert.deepEqual(place(candidates, 16, { units: 'metric' }).map(l => l.lines), [['SAMPLE FARMS LLC', '≈ 32.4 ha']]);
-  assert.deepEqual(place(candidates, 15).map(l => l.lines), [['SAMPLE FARMS LLC', '≈ 80.0 ac']]);
+  assert.deepEqual(place(candidates, 16).map(l => l.lines), [['SAMPLE FARMS LLC', '~80.0 ac']]);
+  assert.deepEqual(place(candidates, 16, { units: 'metric' }).map(l => l.lines), [['SAMPLE FARMS LLC', '~32.4 ha']]);
+  assert.deepEqual(place(candidates, 15).map(l => l.lines), [['SAMPLE FARMS LLC', '~80.0 ac']]);
   for (const zoom of [14, 14.9]) assert.deepEqual(place(candidates.map(c => ({ ...c, radiusMeters: 2000, areaM2: 1e7 })), zoom).map(l => l.lines), [['SAMPLE FARMS LLC']], 'name only');
   assert.deepEqual(place(ownerLabelCandidates(dissolveParcelsByOwner([forty(1, 'SAMPLE FARMS LLC', 0, 0)])), 16).map(l => l.lines), [['SAMPLE FARMS LLC']], 'no acreage asked for');
   const [label] = place(candidates, 16);
@@ -288,7 +288,7 @@ test('labels: the acreage line is under the name, from zoom 15, in the Viewer un
 test('labels: the acreage line drops first when space is tight, and never costs a name its place', () => {
   const mpp16 = 40075016.686 * Math.cos(44.5 * RAD) / 2 ** 24;
   const base = { ownerKey: 'A', text: 'SAMPLE FARMS', lon: -90.2, lat: 44.5, acreageM2: 4 * ACRE, areaM2: 160000, radiusMeters: 60 * mpp16 };
-  assert.deepEqual(place([base], 16).map(l => l.lines), [['SAMPLE FARMS', '≈ 4.0 ac']]);
+  assert.deepEqual(place([base], 16).map(l => l.lines), [['SAMPLE FARMS', '~4.0 ac']]);
   // A radius of 15 px holds one 14 px line, not two (two need 16 px).
   assert.deepEqual(place([{ ...base, text: 'ABC', radiusMeters: 15 * mpp16 }], 16).map(l => l.lines), [['ABC']], 'outline too small for two lines');
   assert.deepEqual(place([{ ...base, acreageM2: 1e12, radiusMeters: 32 * mpp16 }], 16).map(l => l.lines), [['SAMPLE FARMS']], 'number too wide for the outline');
@@ -311,7 +311,7 @@ test('labels: with many neighbours the same names are placed with and without ac
   for (const zoom of [15, 16, 16.5, 17, 18]) {
     const plain = place(ownerLabelCandidates(outlines), zoom), withAcres = place(ownerLabelCandidates(outlines, { acreage: { merged: false } }), zoom);
     assert.deepEqual(withAcres.map(l => [l.text, l.x, l.y]), plain.map(l => [l.text, l.x, l.y]), `zoom ${zoom}`);
-    shown += withAcres.filter(l => l.lines.at(-1).startsWith('≈')).length;
+    shown += withAcres.filter(l => l.lines.at(-1).startsWith('~')).length;
     for (const [i, a] of withAcres.entries()) for (const b of withAcres.slice(i + 1))
       assert.ok(Math.abs(a.x - b.x) * 2 >= a.width + b.width || Math.abs(a.y - b.y) * 2 >= a.height + b.height, 'no overlap');
   }
@@ -321,9 +321,9 @@ test('labels: with many neighbours the same names are placed with and without ac
 test('labels: a parcel with no usable owner name shows its acreage alone, only when not merging', () => {
   const parcels = [forty(1, 'NOT AVAILABLE', 0, 0), forty(2, null, 1, 0), forty(3, 'EXAMPLE OWNER', 0, 1)];
   const lines = (merge, zoom = 16) => place(ownerLabelCandidates(dissolveParcelsByOwner(parcels, { merge }), { acreage: { merged: merge, covered: all } }), zoom).map(l => l.lines);
-  assert.deepEqual(lines(false), [['EXAMPLE OWNER', '≈ 40.0 ac'], ['≈ 40.0 ac'], ['≈ 40.0 ac']]);
-  assert.deepEqual(lines(true), [['EXAMPLE OWNER', '≈ 40.0 ac']]);
-  assert.ok(!lines(false, 14.5).flat().some(l => l.startsWith('≈')), 'nothing without a name below zoom 15');
+  assert.deepEqual(lines(false), [['EXAMPLE OWNER', '~40.0 ac'], ['~40.0 ac'], ['~40.0 ac']]);
+  assert.deepEqual(lines(true), [['EXAMPLE OWNER', '~40.0 ac']]);
+  assert.ok(!lines(false, 14.5).flat().some(l => l.startsWith('~')), 'nothing without a name below zoom 15');
 });
 
 // ── The map layer ────────────────────────────────────────────────────────
@@ -395,11 +395,11 @@ test('map: totals appear only once every tile of the view answered, and follow t
   assert.deepEqual(ctx.labels(), [CROSSING_TOTAL, FARM_TOTAL]);
   ctx.units = 'metric';
   await ctx.controller.refresh();
-  assert.match(ctx.labels().join('|'), /SAMPLE FARMS LLC\n≈ [\d.]+ ha/);
+  assert.match(ctx.labels().join('|'), /SAMPLE FARMS LLC\n~[\d.]+ ha/);
   assert.equal(ctx.requests.length, asked, 'no refetch');
   ctx.zoom = 14.5;
   await ctx.controller.refresh();
-  assert.ok(!ctx.labels().join().includes('≈'), 'no acreage below zoom 15');
+  assert.ok(!ctx.labels().join().includes('~'), 'no acreage below zoom 15');
 });
 
 test('map: land reaching past the tiles of the view shows no total', async () => {
@@ -439,4 +439,37 @@ test('map: an uploaded boundary file (no owners, maybe open lines) shows no acre
   void markup.controller.loadOffer();
   await flush();
   assert.deepEqual(markup.labels(), [`<b>X</b>\n${acres([FARM[0]])}`]);
+});
+
+test('the stated acres replace the computed area; ~ only when a parcel has none', () => {
+  const stated = (id, owner, i, j, acres) => ({ ...forty(id, owner, i, j), ...(acres ? { acres } : {}) });
+  const labels = (parcels, merge) => ownerLabelCandidates(dissolveParcelsByOwner(parcels, { merge }), { acreage: { merged: merge, covered: all } })
+    .map(c => [c.text, formatParcelArea(c.acreageM2, 'imperial', { approx: c.acreageApprox })]);
+  assert.deepEqual(labels([stated(1, 'SAMPLE FARMS LLC', 0, 0, 38.5)], false), [['SAMPLE FARMS LLC', '38.5 ac']]);
+  assert.deepEqual(labels([stated(1, 'SAMPLE FARMS LLC', 0, 0)], false), [['SAMPLE FARMS LLC', '~40.0 ac']], 'missing: computed, marked');
+  // Merged: the stated values summed; the same record from two tiles counts once.
+  const pair = [stated(1, 'SAMPLE FARMS LLC', 0, 0, 38.5), stated(2, 'SAMPLE FARMS LLC', 1, 0, 41.25), stated(2, 'SAMPLE FARMS LLC', 1, 0, 41.25)];
+  assert.deepEqual(labels(pair, true), [['SAMPLE FARMS LLC', '79.8 ac']]);
+  assert.deepEqual(labels(pair, false).map(l => l[1]), ['38.5 ac', '41.3 ac', '41.3 ac']);
+  assert.deepEqual(labels([pair[0], stated(2, 'SAMPLE FARMS LLC', 1, 0)], true), [['SAMPLE FARMS LLC', '~80.0 ac']], 'one missing value: computed total');
+  const [outline] = dissolveParcelsByOwner(pair);
+  assert.equal(publishedAreaM2(outline, { covered: () => false }), null, 'no total until all the land is loaded');
+  assert.equal(formatParcelArea(publishedAreaM2(outline, { covered: all }), 'metric', { approx: false }), '32.3 ha');
+});
+
+test('two adjacent parcels: each name and size sits inside its own parcel, merged or not', () => {
+  const parcels = [{ ...forty(1, 'SAMPLE FARMS LLC', 0, 0), acres: 40 }, { ...forty(2, 'EXAMPLE OWNER', 1, 0), acres: 39 }];
+  const inside = ([x, y], ring) => { let hit = false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) hit = !hit; } return hit; };
+  for (const merge of [true, false]) {
+    const candidates = ownerLabelCandidates(dissolveParcelsByOwner(parcels, { merge }), { acreage: { merged: merge, covered: all } });
+    assert.equal(candidates.length, 2);
+    for (const c of candidates) {
+      const own = parcels.find(p => p.owner === c.text), other = parcels.find(p => p !== own);
+      assert.ok(inside([c.lon, c.lat], own.rings[0]) && !inside([c.lon, c.lat], other.rings[0]), `${c.text} inside its own parcel`);
+      // The label box, at the zoom it shows, stays inside its parcel too.
+      const mppAt16 = 156543.03392 * Math.cos(c.lat * Math.PI / 180) / 2 ** 16;
+      assert.ok(c.radiusMeters / mppAt16 > 14, 'room for the label within the parcel');
+    }
+  }
 });

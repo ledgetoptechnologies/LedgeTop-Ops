@@ -511,8 +511,8 @@ export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-li
 }
 
 // Accept only the documented shape; drop anything else (including any
-// attribute the server should never have sent). The owner name is the one
-// attribute kept: plain text, at most 120 characters.
+// attribute the server should never have sent). Kept: the owner name (plain
+// text, at most 120 characters) and the stated acres (a positive number).
 export function normalizeParcelResponse(body) {
   const status = ['ok', 'none', 'too_many', 'outside'].includes(body?.status) ? body.status : 'unavailable';
   if (status !== 'ok') return { status, parcels: [] };
@@ -526,7 +526,8 @@ export function normalizeParcelResponse(body) {
     // Its rings then give the shape only (labels and merging).
     const lines = Array.isArray(parcel?.lines) ? parcel.lines.map(cleanLine).filter(line => line.length >= 2) : null;
     const owner = typeof parcel?.owner === 'string' ? parcel.owner.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) : '';
-    if (rings.length) parcels.push({ id: Number.isSafeInteger(parcel.id) ? parcel.id : null, rings, ...(owner ? { owner } : {}), ...(lines ? { lines } : {}) });
+    const acres = Number.isFinite(parcel?.acres) && parcel.acres > 0 && parcel.acres < 1e6 ? parcel.acres : null;
+    if (rings.length) parcels.push({ id: Number.isSafeInteger(parcel.id) ? parcel.id : null, rings, ...(owner ? { owner } : {}), ...(acres ? { acres } : {}), ...(lines ? { lines } : {}) });
   }
   return { status: parcels.length ? 'ok' : 'none', parcels };
 }
