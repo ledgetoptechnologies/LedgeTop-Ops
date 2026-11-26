@@ -76,7 +76,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   const refusalBearers = new WeakMap();
   const state = {
     ready: false, loading: false, busy: false, blocked: false, message: '',
-    marks: [], categories: [], audiences: [], deleted: [], starters: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
+    marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, starters: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
     // Why the last change failed, for the panel to offer what is possible instead.
     failure: '', recoveredChange: null,
   };
@@ -89,7 +89,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
 
   function hideInaccessibleMarks(error, message = 'Marks are hidden until access is restored.') {
     Object.assign(state, {
-      ready: false, marks: [], categories: [], audiences: [], deleted: [], starters: [], undo: [],
+      ready: false, marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, starters: [], undo: [],
       capabilities: readOnlyCapabilities(), recoveredChange: null, failure: error.code,
       message,
     });
@@ -214,7 +214,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     // Staff pick a client account when sharing a mark, if the server serves that choice.
     const audiences = data.capabilities.staff && data.capabilities.visibility.includes('client') ? (await scope.api('/audiences')).audiences : [];
     scope.check();
-    if (!data.capabilities.write) Object.assign(state, { undo: [], deleted: [] });
+    if (!data.capabilities.write) Object.assign(state, { undo: [], deleted: [], deletedTruncated: false });
     const first = !state.ready;
     if (first || !data.capabilities.shared) Object.assign(state, { marks: data.marks, categories: data.categories, starters: data.starters || [], capabilities: data.capabilities, audiences, ready: true });
     if (!data.capabilities.shared) return;
@@ -539,7 +539,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       pendingImports.clear();
       context = next;
       const scope = currentScope();
-      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], undo: [], recoveredChange: null,
+      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, undo: [], recoveredChange: null,
         starters: next?.mode === 'temporary' ? STARTER_CATEGORIES.map(starter => starter.key) : [],
         ready: next?.mode === 'temporary', loading: next?.mode === 'session',
         capabilities: { write: next?.mode === 'temporary', staff: false, visibility: ['private'] } });
@@ -746,7 +746,12 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
             const ids = new Set(entry.marks.map(mark => mark.id));
             state.marks = state.marks.filter(mark => !ids.has(mark.id));
           },
-          look: async scope => { gone = (await scope.api('/deleted')).marks; scope.check(); state.deleted = gone; },
+          look: async scope => {
+            const page = await scope.api('/deleted');
+            scope.check();
+            gone = page.marks;
+            Object.assign(state, { deleted: gone, deletedTruncated: Boolean(page.next) });
+          },
           landed: () => {
             if (entry.marks.every(mark => find(mark.id))) return undefined;
             if (!gone || !state.capabilities.write) return UNKNOWN;

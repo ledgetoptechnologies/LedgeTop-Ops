@@ -458,6 +458,23 @@ test('a periodic refresh that is cut short keeps what it read and says so', asyn
   assert.equal(store.state.marks.length, 1, 'a whole refresh replaces it again');
 });
 
+test('whether Recently deleted was cut short is only ever about the latest read', async () => {
+  let mode = 'cut';
+  const { store } = await pagedStore(n => (mode === 'cut' ? { marks: rows(n), next: 'c' + n } : { marks: rows(n), next: null }));
+  assert.equal(store.state.deletedTruncated, true);
+  mode = 'whole';
+  assert.equal(await store.loadDeleted(), true);
+  assert.equal(store.state.deletedTruncated, false, 'a later whole read');
+  mode = 'cut';
+  await store.loadDeleted();
+  assert.equal(store.state.deletedTruncated, true);
+  await store.setScope({ mode: 'session', key: 'another', token: () => 'synthetic-token-value' });
+  assert.equal(store.state.deletedTruncated, false, 'another scope');
+  await store.loadDeleted();
+  await store.setScope(null);
+  assert.deepEqual([store.state.deleted, store.state.deletedTruncated], [[], false]);
+});
+
 test('a cursor already read from ends paging, cut short', async () => {
   const { store, asked, sharedCut } = await pagedStore(n => ({ marks: rows(n), next: n % 2 ? 'one' : 'two' }));
   assert.deepEqual([asked.shared, asked.deleted], [3, 3]);
