@@ -278,7 +278,7 @@ test('labels: the acreage line is under the name, from zoom 15, in the Viewer un
   assert.deepEqual(place(candidates, 16).map(l => l.lines), [['SAMPLE FARMS LLC', '~80.0 ac']]);
   assert.deepEqual(place(candidates, 16, { units: 'metric' }).map(l => l.lines), [['SAMPLE FARMS LLC', '~32.4 ha']]);
   assert.deepEqual(place(candidates, 15).map(l => l.lines), [['SAMPLE FARMS LLC', '~80.0 ac']]);
-  for (const zoom of [14, 14.9]) assert.deepEqual(place(candidates.map(c => ({ ...c, radiusMeters: 2000, areaM2: 1e7 })), zoom).map(l => l.lines), [['SAMPLE FARMS LLC']], 'name only');
+  for (const zoom of [14, 14.9]) assert.deepEqual(place(candidates.map(c => ({ ...c, rings: undefined, radiusMeters: 2000, areaM2: 1e7 })), zoom).map(l => l.lines), [['SAMPLE FARMS LLC']], 'name only');
   assert.deepEqual(place(ownerLabelCandidates(dissolveParcelsByOwner([forty(1, 'SAMPLE FARMS LLC', 0, 0)])), 16).map(l => l.lines), [['SAMPLE FARMS LLC']], 'no acreage asked for');
   const [label] = place(candidates, 16);
   assert.equal(label.height, 2 * label.lineHeight);
@@ -472,4 +472,41 @@ test('two adjacent parcels: each name and size sits inside its own parcel, merge
       assert.ok(c.radiusMeters / mppAt16 > 14, 'room for the label within the parcel');
     }
   }
+});
+
+test('records over the same land give the same acres in any order', () => {
+  const land = forty(1, 'SAMPLE FARMS LLC', 0, 0);
+  const records = [{ ...land, id: 7, acres: 40.5 }, { ...land, id: 3, acres: 39.5 }, { ...land, id: 5 }, { ...land, id: 3, acres: 39.5 }];
+  const seen = new Set();
+  for (const order of [[0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1], [1, 3, 0, 2]]) {
+    const outline = { ownerKey: 'SAMPLE FARMS LLC', owner: 'SAMPLE FARMS LLC', parcels: order.map(i => records[i]) };
+    seen.add(formatParcelArea(publishedAreaM2(outline, { covered: all }), 'imperial', { approx: false }));
+  }
+  assert.deepEqual([...seen], ['39.5 ac'], 'the lowest id with a stated value speaks for the land');
+});
+
+test('next to a neighbour, the whole label box stays inside its own parcel, or is made smaller or left out', () => {
+  // A long name over a narrow strip beside a wide parcel: the box would run into the neighbour.
+  const strip = { id: 1, owner: 'A VERY LONG OWNER NAME TRUST', acres: 2, rings: [layout(box(0, 0, 60, 400))] };
+  const wide = { id: 2, owner: 'EXAMPLE OWNER', acres: 40, rings: [layout(box(60, 0, 400, 400))] };
+  const ring = strip.rings[0], west = Math.min(...ring.map(p => p[0])), east = Math.max(...ring.map(p => p[0]));
+  let strips = 0;
+  for (const merge of [true, false]) {
+    const candidates = ownerLabelCandidates(dissolveParcelsByOwner([strip, wide], { merge }), { acreage: { merged: merge, covered: all } });
+    for (const zoom of [16, 17, 18, 19]) {
+      const mpp = 156543.03392 * Math.cos(candidates[0].lat * Math.PI / 180) / 2 ** zoom;
+      const project = (lon, lat) => [(lon - west) * 111320 * Math.cos(lat * Math.PI / 180) / mpp + 50, (44.6 - lat) * 110540 / mpp + 50];
+      const placed = placeOwnerLabels(candidates, { zoom, project, measure: text => text.length * 7 });
+      for (const label of placed.filter(l => l.text === strip.owner)) {
+        const [left] = project(west, 0), [right] = project(east, 0);
+        strips++;
+        assert.ok(label.x - label.width / 2 >= left && label.x + label.width / 2 <= right, `zoom ${zoom}: box inside the strip`);
+      }
+      for (const label of placed.filter(l => l.text === wide.owner)) {
+        const [left] = project(east, 0);
+        assert.ok(label.x - label.width / 2 >= left - 1e-6, `zoom ${zoom}: the neighbour's label stays out of the strip`);
+      }
+    }
+  }
+  assert.ok(strips > 0, 'the strip is labelled once zoomed in far enough');
 });

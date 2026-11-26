@@ -76,6 +76,8 @@ export async function checkLayer(source, { fetchImpl = globalThis.fetch } = {}) 
   if (layer.geometryType !== 'esriGeometryPolygon') return { up: false, reason: `not a polygon layer (${layer.geometryType ?? 'missing'})` };
   const fields = Array.isArray(layer.fields) ? layer.fields.map(field => field?.name) : [];
   if (!fields.includes(source.query.idField)) return { up: false, reason: `the layer no longer has field ${source.query.idField}` };
+  // The query asks for the acres field by name: without it every parcel request fails.
+  if (source.query.acresField && !fields.includes(source.query.acresField)) return { up: false, reason: `the layer no longer has acres field ${source.query.acresField}; parcel requests will fail` };
   const warnings = [];
   const sr = layer.extent?.spatialReference;
   if (sr && ![sr.wkid, sr.latestWkid].includes(source.query.wkid)) warnings.push(`layer spatial reference is now ${sr.latestWkid ?? sr.wkid}, not ${source.query.wkid}`);

@@ -16,7 +16,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 
 const v12Layer = { type: 'Feature Layer', geometryType: 'esriGeometryPolygon', name: 'V1200_WisconsinParcels_2026',
   copyrightText: 'Product of the Version 12 Statewide Parcel Map Database Project (V12).',
-  extent: { spatialReference: { wkid: 102100, latestWkid: 3857 } }, fields: [{ name: 'OBJECTID' }, { name: 'PARCELID' }, { name: 'OWNERNME1' }],
+  extent: { spatialReference: { wkid: 102100, latestWkid: 3857 } }, fields: [{ name: 'OBJECTID' }, { name: 'PARCELID' }, { name: 'OWNERNME1' }, { name: 'ASSDACRES' }],
   editingInfo: { dataLastEditDate: Date.UTC(2026, 5, 30, 21, 21, 29) } };
 const v12Item = { title: 'Wisconsin Statewide Parcels DB', name: 'Wisconsin_Statewide_Parcels_DB', url: SERVICE.replace('/ArcGIS/', '/arcgis/'),
   snippet: 'Wisconsin Statewide Parcel Layer Version 12.0.0 (V12.0.0)', tags: ['V12 Parcels', 'V11 Parcels', 'V2 Parcels', 'Parcels'] };
@@ -74,7 +74,7 @@ test('check: configured layer up and no newer release', async () => {
 });
 
 test('check: newer layer data or a missing owner field is a warning, not an error', async () => {
-  const later = { ...v12Layer, fields: [{ name: 'OBJECTID' }], editingInfo: { dataLastEditDate: Date.UTC(2026, 9, 2) } };
+  const later = { ...v12Layer, fields: [{ name: 'OBJECTID' }, { name: 'ASSDACRES' }], editingInfo: { dataLastEditDate: Date.UTC(2026, 9, 2) } };
   const { fetchImpl } = mockFetch(baseRoutes({ [WISCONSIN.layerUrl]: later }));
   const report = await checkAll([WISCONSIN], { fetchImpl, now });
   const [r] = report.results;
@@ -224,4 +224,12 @@ test('workflow: monthly and manual only, small, minimal permissions, no install'
   assert.match(workflow, /permissions:\n\s+contents: read\n\s+issues: write\n/);
   assert.doesNotMatch(workflow, /npm (ci|install)|pnpm|yarn/);
   assert.match(workflow, /node apps\/viewer\/scripts\/check-parcel-releases\.mjs --github-issues/);
+});
+
+test('check: a layer without the acres field fails, since every parcel request would fail', async () => {
+  const { fetchImpl } = mockFetch(baseRoutes({ [WISCONSIN.layerUrl]: { ...v12Layer, fields: [{ name: 'OBJECTID' }, { name: 'OWNERNME1' }] } }));
+  const report = await checkAll([WISCONSIN], { fetchImpl, now });
+  assert.equal(report.results[0].layer.up, false);
+  assert.match(report.results[0].layer.reason, /no longer has acres field ASSDACRES/);
+  assert.notEqual(exitCodeFor(report), 0);
 });

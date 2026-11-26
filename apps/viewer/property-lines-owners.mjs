@@ -211,11 +211,15 @@ export function outlineAreaM2(outline, { merged = true, covered = null } = {}) {
 // The land of the outline's parcels as the public parcel data states it, in
 // square metres, or null when any parcel has no stated value (or, merged, when
 // the owner's land may continue past the loaded tiles). Each record counts
-// once; records over the same land count once.
+// once; records over the same land count once. Which record speaks for the
+// same land does not depend on the order they arrived in: the one with a
+// stated value and the lowest id, then the lowest value.
 export function publishedAreaM2(outline, { merged = true, covered = null } = {}) {
   if (merged && outline.ownerKey && !landLoaded(outline, covered)) return null;
-  const parcels = [...new Map(outline.parcels.map(parcel => [parcel.id ?? shapeKey(parcel), parcel])).values()];
-  const unique = [...new Map(parcels.map(parcel => [shapeKey(parcel), parcel])).values()];
+  const rank = parcel => [parcel.acres > 0 ? 0 : 1, Number.isSafeInteger(parcel.id) ? parcel.id : Infinity, parcel.acres > 0 ? parcel.acres : 0];
+  const ordered = [...outline.parcels].sort((a, b) => { const x = rank(a), y = rank(b); return x[0] - y[0] || (x[1] === y[1] ? 0 : x[1] < y[1] ? -1 : 1) || x[2] - y[2]; });
+  const first = (list, key) => { const kept = new Map(); for (const parcel of list) { const k = key(parcel); if (!kept.has(k)) kept.set(k, parcel); } return [...kept.values()]; };
+  const unique = first(first(ordered, parcel => parcel.id ?? shapeKey(parcel)), shapeKey);
   if (!unique.length || unique.some(parcel => !(parcel.acres > 0))) return null;
   return unique.reduce((sum, parcel) => sum + parcel.acres, 0) * SQUARE_METERS_PER_ACRE;
 }
@@ -617,14 +621,14 @@ export function ownerLabelCandidates(outlines, { acreage = null } = {}) {
     const published = acreage ? publishedAreaM2(outline, acreage) : null;
     const shownArea = published ?? (acreage ? outlineAreaM2(outline, acreage) : null);
     if (!outline.owner && (shownArea == null || acreage.merged !== false)) continue;
-    let best = null, area = 0;
+    let best = null, area = 0, home = null;
     for (const parcel of outline.parcels) {
       const geometry = parcelLabelGeometry(parcel);
       if (!geometry) continue;
       area += geometry.areaM2;
-      if (!best || geometry.radiusMeters > best.radiusMeters) best = geometry;
+      if (!best || geometry.radiusMeters > best.radiusMeters) { best = geometry; home = parcel; }
     }
-    if (best) out.push({ text: outline.owner, ownerKey: outline.ownerKey, lon: best.lonLat[0], lat: best.lonLat[1], radiusMeters: best.radiusMeters, areaM2: area, ...(shownArea == null ? {} : { acreageM2: shownArea, acreageApprox: published == null }) });
+    if (best) out.push({ text: outline.owner, ownerKey: outline.ownerKey, lon: best.lonLat[0], lat: best.lonLat[1], radiusMeters: best.radiusMeters, areaM2: area, rings: home.rings, ...(shownArea == null ? {} : { acreageM2: shownArea, acreageApprox: published == null }) });
   }
   return out;
 }
@@ -657,10 +661,33 @@ export function metersPerPixel(zoom, lat) {
 // (no owner name) come last.
 export function placeOwnerLabels(candidates, { zoom, project, viewport, measure, units = 'imperial', limits = OWNER_LABEL_LIMITS } = {}) {
   if (!Number.isFinite(zoom) || zoom < limits.minLabelZoom) return [];
-  const fontPx = ownerLabelFontPx(zoom, limits);
-  const lineHeight = Math.round(fontPx * 1.2);
+  const largest = ownerLabelFontPx(zoom, limits);
+  // The whole label box inside its own parcel: corners inside, no edge of the
+  // parcel crossing it. A label that does not fit is tried smaller, then left out.
+  const insideOwn = (candidate, box) => {
+    if (!candidate.rings) return true;
+    const rings = candidate.rings.map(ring => ring.map(([lon, lat]) => project(lon, lat)));
+    const inside = (px, py) => { let hit = false; for (const ring of rings) for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i], [xj, yj] = ring[j]; if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) hit = !hit; } return hit; };
+    const { left, top, right, bottom } = box;
+    if (![[left, top], [right, top], [left, bottom], [right, bottom]].every(([px, py]) => inside(px, py))) return false;
+    const crosses = ([x0, y0], [x1, y1]) => { let t0 = 0, t1 = 1; const dx = x1 - x0, dy = y1 - y0;
+      for (const [p, q] of [[-dx, x0 - left], [dx, right - x0], [-dy, y0 - top], [dy, bottom - y0]]) {
+        if (p === 0) { if (q < 0) return false; continue; }
+        const r = q / p; if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; } else { if (r < t0) return false; if (r < t1) t1 = r; } }
+      return true; };
+    return !rings.some(ring => ring.some((point, i) => i > 0 && crosses(ring[i - 1], point)));
+  };
   // The label for these lines, or null where it does not fit.
   const fit = (candidate, lines) => {
+    for (const fontPx of [...new Set([largest, limits.fontMinPx])]) {
+      const label = fitAt(candidate, lines, fontPx);
+      if (label) return label;
+    }
+    return null;
+  };
+  const fitAt = (candidate, lines, fontPx) => {
+    const lineHeight = Math.round(fontPx * 1.2);
     const mpp = metersPerPixel(zoom, candidate.lat);
     const radiusPx = candidate.radiusMeters / mpp, areaPx = candidate.areaM2 / (mpp * mpp);
     const width = Math.ceil(Math.max(...lines.map(line => measure(line, fontPx))));
@@ -671,6 +698,7 @@ export function placeOwnerLabels(candidates, { zoom, project, viewport, measure,
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
     // Whole labels only: one cut by the map edge is left out until panned into view.
     if (viewport && (x - width / 2 < 2 || y - height / 2 < 2 || x + width / 2 > viewport.width - 2 || y + height / 2 > viewport.height - 2)) return null;
+    if (!insideOwn(candidate, { left: x - width / 2 - 1, top: y - height / 2 - 1, right: x + width / 2 + 1, bottom: y + height / 2 + 1 })) return null;
     return { text: candidate.text, ownerKey: candidate.ownerKey, lines, x, y, width, height, fontPx, lineHeight, areaPx, candidate };
   };
   const pad = limits.paddingPx;
