@@ -391,34 +391,52 @@ test('a mark from before authorship was recorded keeps its content time through 
   assert.deepEqual([kept.mark.name, kept.changedBy, kept.changedAt], ['Legacy', 'staff', '2026-10-05T00:00:00.000Z']);
 });
 
-test('the store stops at its limit and on a page that does not move on', async () => {
+// A list served a page at a time by a fake server: page(n) answers request n (from 1), and every request is counted.
+async function pagedStore(page) {
   const { createMarksStore } = await import('../viewer-marks-store.mjs');
-  const row = (i, prefix) => ({ ...point({ id: `${prefix}${String(i).padStart(4, '0')}-0000-4000-8000-000000000000`.slice(0, 36) }), revision: 1, mine: false, editable: false });
   const answer = body => ({ ok: true, status: 200, json: async () => body });
-  for (const [name, page] of [
-    ['repeated', path => ({ marks: [row(1, 'a')], categories: [], next: 'same' })],
-    ['cycle', path => ({ marks: [], categories: [], next: path.includes('after=one') ? 'two' : 'one' })],
-    ['moving empty', path => { const n = Number(new URLSearchParams(path.split('?')[1] || '').get('after') || 0); return { marks: [], categories: [], next: String(n + 1) }; }],
-    ['endless', path => { const n = Number(new URLSearchParams(path.split('?')[1] || '').get('after') || 0); return { marks: Array.from({ length: 400 }, (_, i) => row(n * 400 + i, 'b')), categories: [], next: String(n + 1) }; }],
-  ]) {
-    const asked = [];
-    const request = async path => {
-      asked.push(path);
-      if (asked.length > 40) throw new Error('did not stop');
-      if (path === '/api/v1/marks') return answer({ marks: [], categories: [], starters: [], capabilities: { write: true, staff: true, visibility: ['shared', 'private'], shared: true } });
-      return answer(page(path));
-    };
-    const store = createMarksStore({ request });
-    await store.setScope({ mode: 'session', key: name, token: () => 'synthetic-token-value' });
-    const shared = asked.filter(path => path.startsWith('/api/v1/marks/shared')).length;
-    if (name === 'endless') assert.ok(store.state.marks.length <= 5000 && shared <= 13, name);
-    else if (name === 'moving empty') assert.ok(shared <= 101, `${name} ${shared}`);
-    else assert.ok(shared <= 3, `${name} ${shared}`);
-    asked.length = 0;
-    await store.loadDeleted();
-    const deleted = asked.filter(path => path.startsWith('/api/v1/marks/deleted')).length;
-    assert.ok(store.state.deleted.length <= 5000 && (name === 'endless' ? deleted <= 13 : deleted <= 101), `${name} deleted ${deleted}`);
-  }
+  const asked = { shared: 0, deleted: 0 };
+  const request = async path => {
+    if (path === '/api/v1/marks') return answer({ marks: [], categories: [], starters: [], capabilities: { write: true, staff: true, visibility: ['shared', 'private'], shared: true } });
+    const kind = path.startsWith('/api/v1/marks/shared') ? 'shared' : 'deleted';
+    asked[kind] += 1;
+    if (asked[kind] > 500) throw new Error('did not stop');
+    return answer({ categories: [], ...page(asked[kind], kind) });
+  };
+  const store = createMarksStore({ request });
+  await store.setScope({ mode: 'session', key: 'paged', token: () => 'synthetic-token-value' });
+  // The warning the panel shows after loading (a later action replaces messages).
+  const sharedCut = /Only the first/.test(store.state.message);
+  assert.equal(await store.loadDeleted(), true);
+  return { store, asked, sharedCut };
+}
+const rows = (n, count = 1) => Array.from({ length: count }, (_, i) => ({ ...point({ id: `00000000-0000-4000-8000-${String(n * 1000 + i).padStart(12, '0')}` }), revision: 1, mine: false, editable: false }));
+
+test('paging stops after exactly 100 requests on pages that keep moving on, and says the list is cut short', async () => {
+  const { store, asked, sharedCut } = await pagedStore(n => ({ marks: [], next: 'c' + n }));
+  assert.deepEqual([asked.shared, asked.deleted], [100, 100]);
+  assert.deepEqual([sharedCut, store.state.deletedTruncated], [true, true]);
+});
+
+test('a list that ends on its 100th page is whole', async () => {
+  const { store, asked, sharedCut } = await pagedStore(n => ({ marks: rows(n), next: n < 100 ? 'c' + n : null }));
+  assert.deepEqual([asked.shared, asked.deleted, store.state.marks.length, store.state.deleted.length], [100, 100, 100, 100]);
+  assert.deepEqual([sharedCut, store.state.deletedTruncated], [false, false]);
+});
+
+test('paging stops at 5000 rows, cut short if there is more and whole if not', async () => {
+  let { store, asked, sharedCut } = await pagedStore(n => ({ marks: rows(n, 400), next: 'c' + n }));
+  assert.deepEqual([asked.shared, asked.deleted, store.state.marks.length, store.state.deleted.length], [13, 13, 5000, 5000]);
+  assert.deepEqual([sharedCut, store.state.deletedTruncated], [true, true]);
+  ({ store, asked, sharedCut } = await pagedStore(n => ({ marks: rows(n, 500), next: n < 10 ? 'c' + n : null })));
+  assert.deepEqual([asked.shared, asked.deleted, store.state.marks.length], [10, 10, 5000]);
+  assert.deepEqual([sharedCut, store.state.deletedTruncated], [false, false]);
+});
+
+test('a cursor already read from ends paging, cut short', async () => {
+  const { store, asked, sharedCut } = await pagedStore(n => ({ marks: rows(n), next: n % 2 ? 'one' : 'two' }));
+  assert.deepEqual([asked.shared, asked.deleted], [3, 3]);
+  assert.deepEqual([sharedCut, store.state.deletedTruncated], [true, true]);
 });
 
 test('an empty page that moves on is followed to the next real one', async () => {

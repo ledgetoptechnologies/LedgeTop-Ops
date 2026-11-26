@@ -164,28 +164,33 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       updatedAt: now, author: 'client', mine: true, editable: true };
   }
 
-  // The cursor for the next page, unless it is one already read from (a page may be empty and
-  // still move on, as rows are left out after being counted), or there were pages enough.
-  function following(seen, next) {
-    if (!next || seen.has(next) || seen.size >= PAGE_LIMIT) return null;
-    seen.add(next);
-    return next;
-  }
-
-  async function readSharedPages(scope, receive) {
-    let count = 0, next = null;
+  // Reads a list a page at a time: at most PAGE_LIMIT requests and SHARED_LIMIT rows. A page
+  // may be empty and still move on (rows are left out after being counted), so only the end
+  // (no cursor) is the whole list; a cursor already read from, or a limit reached while there
+  // is more, makes it truncated.
+  async function readPages(scope, path, receive) {
+    let count = 0, requests = 0, next = null, truncated = false;
     const seen = new Set();
-    do {
-      const page = await scope.api('/shared' + (next ? '?after=' + encodeURIComponent(next) : ''));
+    for (;;) {
+      const page = await scope.api(path + (next ? '?after=' + encodeURIComponent(next) : ''));
+      requests += 1;
       scope.check();
-      if (!Array.isArray(page?.marks) || !Array.isArray(page.categories)) throw new Error('Incomplete shared marks page');
+      if (!Array.isArray(page?.marks)) throw new Error('Incomplete marks page');
       const marks = page.marks.slice(0, SHARED_LIMIT - count);
       receive({ ...page, marks });
       count += marks.length;
-      next = following(seen, page.next);
-    } while (next && count < SHARED_LIMIT);
-    return { count, next };
+      if (!page.next) break;
+      if (seen.has(page.next) || count >= SHARED_LIMIT || requests >= PAGE_LIMIT) { truncated = true; break; }
+      seen.add(page.next);
+      next = page.next;
+    }
+    return { count, truncated };
   }
+
+  const readSharedPages = (scope, receive) => readPages(scope, '/shared', page => {
+    if (!Array.isArray(page.categories)) throw new Error('Incomplete shared marks page');
+    receive(page);
+  });
 
   function addUnseen(list, records) {
     const ids = new Set(list.map(item => item.id));
@@ -215,7 +220,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     // until everything new is here.
     let marks = first ? null : [...data.marks], categories = first ? null : [...data.categories];
     try {
-      const { count, next } = await readSharedPages(scope, page => {
+      const { count, truncated } = await readSharedPages(scope, page => {
         if (first) {
           state.marks = addUnseen(state.marks, page.marks);
           state.categories = byName(addUnseen(state.categories, page.categories));
@@ -225,7 +230,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
           categories = addUnseen(categories, page.categories);
         }
       });
-      if (next) state.message ||= `Only the first ${count} marks shared with you are shown.`;
+      if (truncated) state.message ||= `Only the first ${count} marks shared with you are shown.`;
     } catch (error) {
       scope.check();
       if (accessLost(error)) throw error;
@@ -490,16 +495,11 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
 
   async function readDeletedRows(scope) {
     const marks = [];
-    let next = null;
-    const seen = new Set();
-    do {
-      const page = await scope.api('/deleted' + (next ? '?after=' + encodeURIComponent(next) : ''));
-      scope.check();
-      marks.push(...page.marks.slice(0, SHARED_LIMIT - marks.length));
-      next = following(seen, page.next);
-    } while (next && marks.length < SHARED_LIMIT);
+    const { truncated } = await readPages(scope, '/deleted', page => marks.push(...page.marks));
     scope.check();
+    // Whether Recently deleted has more than is listed.
     state.deleted = marks;
+    state.deletedTruncated = truncated;
     return marks;
   }
 
