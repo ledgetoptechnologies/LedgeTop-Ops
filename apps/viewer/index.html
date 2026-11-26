@@ -309,6 +309,15 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     #loading-text { color: #aaa; font-size: 13px; letter-spacing: 0.4px; }
     #loading-progress { color: var(--brand-orange); font-size: 13px; font-weight: 700; min-height: 18px; }
+    #loading-overlay.final { pointer-events: auto; }
+    #loading-overlay.final .spinner { display: none; }
+    #loading-overlay.final #loading-text { color: #fff; font-size: 16px; font-weight: 700; }
+    #loading-overlay.final #loading-progress { max-width: 460px; text-align: center; }
+    #loading-actions, #recovery-retry-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+    #loading-actions[hidden], #recovery-retry-actions[hidden] { display: none; }
+    #loading-actions :is(button, a), #recovery-retry-actions button { min-height: 44px; padding: 10px 16px; border-radius: 8px; font: inherit; cursor: pointer; }
+    #loading-actions button, #recovery-retry-actions button { border: 0; background: #cc4706; color: #fff; font-weight: 700; }
+    #loading-actions a { color: #fff; }
     #loading-cancel { display: none; pointer-events: auto; min-height: 40px; padding: 8px 14px; border-radius: 7px; border: 1px solid #ff8a65; background: #25252b; color: #fff; cursor: pointer; }
     body.session-bootstrap-failed #app { display: none; }
     #session-recovery { min-height: 100vh; display: grid; place-content: center; text-align: center; padding: 24px; background: #09090c; color: #fff; }
@@ -611,8 +620,10 @@
   </style>
 </head>
 <body>
-<main id="session-recovery" hidden>
-  <h1>Viewer session unavailable</h1>
+<main id="session-recovery" hidden aria-labelledby="recovery-title">
+  <div id="recovery-message"><h1 id="recovery-title" tabindex="-1">Viewer session unavailable</h1>
+  <p id="recovery-detail"></p></div>
+  <div id="recovery-retry-actions" hidden></div>
   <p id="recovery-top-level-guidance">Return to the Client Portal or reopen Viewer from Operations. If you still need access, contact your administrator.</p>
   <p id="recovery-embedded-guidance" hidden>Close this viewer and reopen the model from the Client Portal.</p>
   <div><a id="recovery-client-portal" hidden>Client Portal</a><a id="recovery-workspace" href="/workspace">Viewer workspace</a></div>
@@ -902,8 +913,9 @@
       <div id="loading-overlay">
         <div class="brand-loader">
           <div class="spinner"></div>
-          <div id="loading-text">Loading viewer...</div>
+          <div id="loading-text" tabindex="-1">Loading viewer...</div>
           <div id="loading-progress"></div>
+          <div id="loading-actions" hidden></div>
           <button id="loading-cancel" type="button">Cancel full mesh</button>
         </div>
       </div>
