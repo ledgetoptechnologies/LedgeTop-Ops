@@ -975,7 +975,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       });
       return h(document, 'li', {}, icon, h(document, 'span', { class: 'viewer-mark-list-name' }, h(document, 'span', { text: mark.name }),
         h(document, 'small', { text: new Date(mark.deletedAt).toLocaleDateString() })), restore);
-    }) : [h(document, 'li', { class: 'hint', text: `None in the last ${state.capabilities.recoveryDays} days.` })]));
+    }) : state.deletedTruncated === true ? [] : [h(document, 'li', { class: 'hint', text: `None in the last ${state.capabilities.recoveryDays} days.` })]));
     categorySave.textContent = categoryDraft ? 'Save' : 'Add';
     categoryCancel.hidden = !categoryDraft;
     exchange.hidden = !state.ready;

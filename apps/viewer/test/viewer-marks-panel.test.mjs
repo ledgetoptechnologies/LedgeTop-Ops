@@ -68,6 +68,43 @@ test('Recently deleted shows one partial warning only while deletedTruncated is 
   assert.doesNotMatch(panel.text(), /Only some recently deleted marks are shown\./);
 });
 
+test('Recently deleted only claims an empty read when complete, preserving rows and loading/disabled states', async t => {
+  const { mount, scope } = await openMarksPanel(t);
+  const panel = mount();
+  t.after(() => panel.marks.dispose());
+  await panel.marks.setScope(scope('client', 'client-a'));
+  panel.store.loadDeleted = async () => {};
+  await panel.q('.viewer-mark-open').click();
+  await panel.q('[data-tab=deleted]').click();
+  const deleted = panel.q('[id=viewer-marks-deleted]');
+  const list = panel.q('.viewer-mark-deleted');
+  const empty = `None in the last ${panel.store.state.capabilities.recoveryDays} days.`;
+  const mark = { id: 'deleted-pin', name: 'Deleted pin', color: '#1e88e5', icon: 'pin', deletedAt: '2026-01-01T00:00:00Z',
+    geometry: { type: 'Point', coordinates: [-87, 43] } };
+  for (const loading of [false, true]) {
+    for (const busy of [false, true]) {
+      for (const rows of [[], [mark]]) {
+        for (const truncated of [false, true, undefined]) {
+          Object.assign(panel.store.state, { deleted: rows, deletedTruncated: truncated, loading, busy });
+          panel.marks.setView({ map: true });
+          const notices = deleted.querySelectorAll('[role=status]').filter(node => !node.hidden && node.textContent);
+          assert.deepEqual(notices.map(node => node.textContent), truncated === true ? ['Only some recently deleted marks are shown.'] : []);
+          if (rows.length) {
+            assert.match(list.textContent, /Deleted pin/);
+            assert.equal(list.querySelector('[data-restore-mark]').disabled, busy);
+            assert.doesNotMatch(list.textContent, /None in the last/);
+          } else {
+            assert.equal(list.textContent, truncated === true ? '' : empty,
+              `empty read: truncated=${truncated}, loading=${loading}, busy=${busy}`);
+            assert.equal(list.querySelectorAll('li').length, truncated === true ? 0 : 1);
+          }
+          if (loading) assert.match(panel.text(), /Loading marks…/);
+        }
+      }
+    }
+  }
+});
+
 test('a file chosen in the panel imports into the scope it was chosen in', async t => {
   const { mount, scope } = await openMarksPanel(t);
   const panel = mount();
