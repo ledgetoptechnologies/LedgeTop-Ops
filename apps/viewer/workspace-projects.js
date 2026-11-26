@@ -1985,7 +1985,7 @@ function availableShareViews(output){
 }
 function shareViewControls(output,allowedViews=null){
   const views=availableShareViews(output),selected=allowedViews===null?views:allowedViews,labels=shareViewLabels();
-  return `<fieldset class="share-view-controls"><legend>Available views</legend><label class="check"><input type="checkbox" data-all-share-views ${views.length&&views.every(view=>selected.includes(view))?'checked':''}> All available views</label><details><summary>Choose individual views</summary>${views.map(view=>`<label class="check"><input type="checkbox" name="allowedViews" value="${view}" ${selected.includes(view)?'checked':''}> ${labels[view]}</label>`).join('')||'<p class="form-note">No verified views are available.</p>'}</details></fieldset>`;
+  return `<fieldset class="share-view-controls"><legend>Available views</legend><label class="check"><input type="checkbox" data-all-share-views ${views.length&&views.every(view=>selected.includes(view))?'checked':''}> All available views</label><details><summary>Choose individual views</summary><div class="share-view-list">${views.map(view=>`<label class="check"><input type="checkbox" name="allowedViews" value="${view}" ${selected.includes(view)?'checked':''}> ${labels[view]}</label>`).join('')||'<p class="form-note">No verified views are available.</p>'}</div></details></fieldset>`;
 }
 function bindShareViewControls(form){
   const all=form.querySelector('[data-all-share-views]'),inputs=[...form.querySelectorAll('input[name="allowedViews"]')];if(!all)return;
