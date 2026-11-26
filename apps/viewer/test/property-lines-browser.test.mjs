@@ -166,7 +166,8 @@ test('property lines: shown by default with notice, states, Hide kept over reloa
     assert.deepEqual(own.labels, ['SAMPLE FARMS LLC\n3.9 ac'], 'the narrower parcel is too small for its name at this zoom');
     await client.evaluate('map.setZoom(18, {animate:false}); 0');
     await waitFor("document.querySelectorAll('.leaflet-propertyLineLabels-pane .property-line-label').length === 2", 'one label per parcel when zoomed in');
-    assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC\n~4.0 ac', 'Sample Farms LLC\n~2.7 ac']);
+    assert.deepEqual((await owners()).labels.sort(), ['SAMPLE FARMS LLC\n3.9 ac', 'Sample Farms LLC\n2.7 ac']);
+    { const { data } = await client.command('Page.captureScreenshot', { format: 'png' }); if (process.env.SHOTS) (await import('node:fs')).writeFileSync(`${process.env.SHOTS}/parcel-acres-each.png`, Buffer.from(data, 'base64')); }
     assert.equal(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length, beforeSplit, 'redrawn from the parcels already fetched');
     assert.equal(await client.evaluate("localStorage.getItem('ltds-viewer:property-lines-merge')"), '0');
     await client.evaluate("document.getElementById('property-lines-merge').click(); 0");
