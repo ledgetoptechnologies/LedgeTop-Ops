@@ -224,7 +224,7 @@ export function sameLandOnce(parcels) {
 }
 export function publishedAreaM2(outline, { merged = true, covered = null } = {}) {
   if (merged && outline.ownerKey && !landLoaded(outline, covered)) return null;
-  const unique = sameLandOnce(outline.parcels);
+  const unique = sameLandOnce(sameLandOnce(outline.parcels).map(parcel => outline.land?.get(shapeKey(parcel)) ?? parcel));
   if (!unique.length || unique.some(parcel => !(parcel.acres > 0))) return null;
   return unique.reduce((sum, parcel) => sum + parcel.acres, 0) * SQUARE_METERS_PER_ACRE;
 }
@@ -505,12 +505,15 @@ export function dissolveParcelsByOwner(parcels, { merge = true, snapMeters = OWN
     ownerKey, owner: ownerDisplayName(members[0].owner), parcels: members,
     parcelIds: members.map(p => p.id).filter(id => id != null), lines,
   });
-  for (const { ownerKey, parcels: all } of groups.values()) {
-    // Records over the same land of one owner are one parcel before dissolving, so none is lost with its acres.
-    const group = all.length > 1 ? sameLandOnce(all) : all;
-    if (group.length === 1) { outlines.push(describe(ownerKey, group, parcelStrokeLines(group[0]))); continue; }
+  for (const { ownerKey, parcels: group } of groups.values()) {
+    // Lines are drawn from every record, as they arrived. Only the acres use one
+    // record per piece of land, chosen over the owner's whole group (not just the
+    // records left in one outline), so the order they arrived in never matters.
+    const land = group.length > 1 ? new Map(sameLandOnce(group).map(parcel => [shapeKey(parcel), parcel])) : null;
+    const add = outline => { if (land) Object.defineProperty(outline, 'land', { value: land }); outlines.push(outline); };
+    if (group.length === 1) { add(describe(ownerKey, group, parcelStrokeLines(group[0]))); continue; }
     for (const component of mergeGroup(group, frame, snapMeters, splitBudget))
-      if (component.lines.length) outlines.push(describe(ownerKey, component.members, component.lines));
+      if (component.lines.length) add(describe(ownerKey, component.members, component.lines));
   }
   return outlines;
 }
@@ -687,7 +690,11 @@ export function placeOwnerLabels(candidates, { zoom, project, viewport, measure,
   };
   // The label for these lines, or null where it does not fit.
   const fit = (candidate, lines) => {
-    for (let fontPx = largest; fontPx >= limits.fontMinPx; fontPx--) {
+    // Each whole pixel size down from the largest, ending at the exact minimum.
+    const sizes = [];
+    for (let size = largest; size > limits.fontMinPx; size--) sizes.push(size);
+    sizes.push(limits.fontMinPx);
+    for (const fontPx of sizes) {
       const label = fitAt(candidate, lines, fontPx);
       if (label) return label;
     }

@@ -523,3 +523,17 @@ test('records over the same land of one owner, alone or beside more of its land,
     assert.deepEqual([...seen], ['2:3.9 ac=3.9 ac', '3:6.9 ac=6.9 ac'], 'the record with the lowest id and a stated value, plus the rest of the land, once');
   }
 });
+
+test('choosing one record for the acres never changes what is drawn', () => {
+  const land = forty(1, 'SAMPLE FARMS LLC', 0, 0), next = forty(4, 'SAMPLE FARMS LLC', 1, 0);
+  const ring = land.rings[0];
+  const parcels = [{ ...land, id: 1, acres: 3.9, lines: [ring.slice(0, 3)] }, { ...land, id: 2, acres: 7.1, lines: [ring.slice(2)] }, next];
+  const outlines = dissolveParcelsByOwner(parcels);
+  const drawn = outlines.flatMap(o => o.parcels.map(p => p.id)).sort();
+  const lines = JSON.stringify(outlines.map(o => o.lines));
+  // Without acres in the picture at all, the same records and lines.
+  const plain = dissolveParcelsByOwner(parcels.map(({ acres, ...p }) => p));
+  assert.deepEqual(plain.flatMap(o => o.parcels.map(p => p.id)).sort(), drawn);
+  assert.equal(JSON.stringify(plain.map(o => o.lines)), lines);
+  assert.ok(drawn.includes(1) && drawn.includes(2), 'both clipped records keep their own strokes');
+});
