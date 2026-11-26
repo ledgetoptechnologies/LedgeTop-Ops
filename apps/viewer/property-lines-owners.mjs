@@ -214,12 +214,17 @@ export function outlineAreaM2(outline, { merged = true, covered = null } = {}) {
 // once; records over the same land count once. Which record speaks for the
 // same land does not depend on the order they arrived in: the one with a
 // stated value and the lowest id, then the lowest value.
+// One record per piece of land, the same whatever order the records came in:
+// the one with a stated value and the lowest id, then the lowest value.
+const recordRank = parcel => [parcel.acres > 0 ? 0 : 1, Number.isSafeInteger(parcel.id) ? parcel.id : Infinity, parcel.acres > 0 ? parcel.acres : 0];
+export function sameLandOnce(parcels) {
+  const ordered = [...parcels].sort((a, b) => { const x = recordRank(a), y = recordRank(b); return x[0] - y[0] || (x[1] === y[1] ? 0 : x[1] < y[1] ? -1 : 1) || x[2] - y[2]; });
+  const first = (list, key) => { const kept = new Map(); for (const parcel of list) { const k = key(parcel); if (!kept.has(k)) kept.set(k, parcel); } return [...kept.values()]; };
+  return first(first(ordered, parcel => parcel.id ?? shapeKey(parcel)), shapeKey);
+}
 export function publishedAreaM2(outline, { merged = true, covered = null } = {}) {
   if (merged && outline.ownerKey && !landLoaded(outline, covered)) return null;
-  const rank = parcel => [parcel.acres > 0 ? 0 : 1, Number.isSafeInteger(parcel.id) ? parcel.id : Infinity, parcel.acres > 0 ? parcel.acres : 0];
-  const ordered = [...outline.parcels].sort((a, b) => { const x = rank(a), y = rank(b); return x[0] - y[0] || (x[1] === y[1] ? 0 : x[1] < y[1] ? -1 : 1) || x[2] - y[2]; });
-  const first = (list, key) => { const kept = new Map(); for (const parcel of list) { const k = key(parcel); if (!kept.has(k)) kept.set(k, parcel); } return [...kept.values()]; };
-  const unique = first(first(ordered, parcel => parcel.id ?? shapeKey(parcel)), shapeKey);
+  const unique = sameLandOnce(outline.parcels);
   if (!unique.length || unique.some(parcel => !(parcel.acres > 0))) return null;
   return unique.reduce((sum, parcel) => sum + parcel.acres, 0) * SQUARE_METERS_PER_ACRE;
 }
@@ -500,7 +505,9 @@ export function dissolveParcelsByOwner(parcels, { merge = true, snapMeters = OWN
     ownerKey, owner: ownerDisplayName(members[0].owner), parcels: members,
     parcelIds: members.map(p => p.id).filter(id => id != null), lines,
   });
-  for (const { ownerKey, parcels: group } of groups.values()) {
+  for (const { ownerKey, parcels: all } of groups.values()) {
+    // Records over the same land of one owner are one parcel before dissolving, so none is lost with its acres.
+    const group = all.length > 1 ? sameLandOnce(all) : all;
     if (group.length === 1) { outlines.push(describe(ownerKey, group, parcelStrokeLines(group[0]))); continue; }
     for (const component of mergeGroup(group, frame, snapMeters, splitBudget))
       if (component.lines.length) outlines.push(describe(ownerKey, component.members, component.lines));
@@ -680,7 +687,7 @@ export function placeOwnerLabels(candidates, { zoom, project, viewport, measure,
   };
   // The label for these lines, or null where it does not fit.
   const fit = (candidate, lines) => {
-    for (const fontPx of [...new Set([largest, limits.fontMinPx])]) {
+    for (let fontPx = largest; fontPx >= limits.fontMinPx; fontPx--) {
       const label = fitAt(candidate, lines, fontPx);
       if (label) return label;
     }
