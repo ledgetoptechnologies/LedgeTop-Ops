@@ -14,6 +14,60 @@ function slowFile(text) {
 }
 const importInput = panel => panel.panel.querySelectorAll('input').find(node => node.getAttribute('type') === 'file');
 
+test('Recently deleted shows one partial warning only while deletedTruncated is true, including reopening', async t => {
+  const { mount, scope } = await openMarksPanel(t);
+  const panel = mount();
+  t.after(() => panel.marks.dispose());
+  await panel.marks.setScope(scope('client', 'client-a'));
+  // Exercise the real panel with synthetic state, independently of store reload/reset behavior.
+  panel.store.loadDeleted = async () => {};
+  const deleted = panel.q('[id=viewer-marks-deleted]');
+  const warning = 'Only some recently deleted marks are shown.';
+  const notices = () => deleted.querySelectorAll('[role=status]').filter(node => !node.hidden && node.textContent);
+  const render = () => panel.marks.setView({ map: true });
+  const assertWarning = () => {
+    assert.equal(notices().length, 1, 'one visible warning in Recently deleted');
+    assert.equal(notices()[0].textContent, warning);
+    assert.equal(notices()[0].getAttribute('aria-live'), 'polite');
+    assert.equal(notices()[0].classList.contains('hint'), true);
+    assert.equal(panel.text().split(warning).length - 1, 1, 'not duplicated elsewhere');
+  };
+  await panel.q('.viewer-mark-open').click();
+  await panel.q('[data-tab=deleted]').click();
+  assert.equal(panel.store.state.deletedTruncated, false, 'the store starts untruncated');
+  assert.equal(notices().length, 0, 'default false has no warning');
+
+  panel.store.state.deletedTruncated = true;
+  render();
+  assert.equal(deleted.hidden, false);
+  assertWarning();
+  render();
+  assertWarning();
+  await panel.q('[aria-label="Close marks"]').click();
+  await panel.q('.viewer-mark-open').click();
+  assert.equal(panel.q('.viewer-mark-box').hidden, false);
+  assertWarning();
+  await panel.q('[data-tab=list]').click();
+  assert.equal(deleted.hidden, true, 'warning stays in the Deleted tab');
+  await panel.q('[data-tab=deleted]').click();
+  assertWarning();
+
+  panel.store.state.deletedTruncated = false;
+  render();
+  assert.equal(notices().length, 0, 'cleared flag removes warning');
+  assert.doesNotMatch(panel.text(), /Only some recently deleted marks are shown\./);
+  await panel.q('[aria-label="Close marks"]').click();
+  await panel.q('.viewer-mark-open').click();
+  assert.equal(notices().length, 0, 'reopening does not revive a cleared warning');
+  panel.store.state.deletedTruncated = true;
+  render();
+  assertWarning();
+  delete panel.store.state.deletedTruncated;
+  render();
+  assert.equal(notices().length, 0, 'absent flag removes an existing warning');
+  assert.doesNotMatch(panel.text(), /Only some recently deleted marks are shown\./);
+});
+
 test('a file chosen in the panel imports into the scope it was chosen in', async t => {
   const { mount, scope } = await openMarksPanel(t);
   const panel = mount();

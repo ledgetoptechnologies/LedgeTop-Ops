@@ -228,13 +228,14 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     h(document, 'div', { class: 'viewer-mark-row' }, exportButton, importButton, importInput));
 
   // Recently deleted
+  const deletedNotice = h(document, 'p', { class: 'hint', role: 'status', 'aria-live': 'polite', hidden: true });
   const deletedList = h(document, 'ul', { class: 'viewer-mark-list viewer-mark-deleted', 'aria-label': 'Recently deleted marks' });
 
   // One panel: Categories, List, Deleted.
   const sections = {
     categories: h(document, 'div', { id: 'viewer-marks-categories', role: 'tabpanel' }, categoryTools, categoryList, starterSection, categoryForm),
     list: h(document, 'div', { id: 'viewer-marks-list', role: 'tabpanel' }, searchInput, list),
-    deleted: h(document, 'div', { id: 'viewer-marks-deleted', role: 'tabpanel' }, deletedList),
+    deleted: h(document, 'div', { id: 'viewer-marks-deleted', role: 'tabpanel' }, deletedNotice, deletedList),
   };
   const tabButtons = Object.entries({ categories: 'Categories', list: 'List', deleted: 'Deleted' }).map(([name, text]) =>
     h(document, 'button', { type: 'button', role: 'tab', 'data-tab': name, 'aria-controls': `viewer-marks-${name}`, text }));
@@ -940,6 +941,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       on(addOne, 'click', () => store.addStarter(starter));
       return h(document, 'li', {}, icon, h(document, 'span', { class: 'viewer-mark-list-name', text: starter.name }), addOne);
     }));
+    deletedNotice.textContent = state.deletedTruncated === true ? 'Only some recently deleted marks are shown.' : '';
+    deletedNotice.hidden = !deletedNotice.textContent;
     deletedList.replaceChildren(...(state.deleted.length ? state.deleted.map(mark => {
       const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
       icon.innerHTML = markBadge(mark);
