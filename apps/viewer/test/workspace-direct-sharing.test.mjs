@@ -1242,3 +1242,10 @@ test('the final transport check rejects a paused or expired authority for writes
     assert.equal(f.state.pendingOutputShares.size,receipt?1:0,change);
   }
 });
+
+test('individual views are a spaced, indented list like the other checks',()=>{
+  const css=readFileSync(new URL('../workspace-management.css',import.meta.url),'utf8');
+  assert.match(css,/\.share-dialog-form fieldset\{display:grid;gap:10px\}/);assert.match(css,/\.share-view-list\{display:grid;gap:10px;margin-top:10px;padding-left:24px\}/);
+  const f=fixture();f.state.sharePreflight.output={eligibleAssetKinds:['glb','ept']};f.context.shareModal('project','output');
+  assert.match(f.html(),/<summary>Choose individual views<\/summary><div class="share-view-list"><label class="check">/);
+});

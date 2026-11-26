@@ -86,7 +86,10 @@
 .manage-row.share-access-row{grid-template-columns:minmax(0,1fr) auto}
 .manage-row.share-access-row>.row-actions{grid-column:auto;align-items:center}
 /* Direct client sharing */
-.direct-share-form fieldset{display:grid;gap:.5rem}
+.share-dialog-form fieldset{display:grid;gap:10px}
+/* "Choose individual views": the same row height and gap as every other check, indented under its arrow. */
+.share-dialog-form details>summary{cursor:pointer}
+.share-view-list{display:grid;gap:10px;margin-top:10px;padding-left:24px}
 .client-picker{position:relative;display:grid;gap:.35rem;min-width:0}
 .client-picker-list{max-height:16rem;overflow:auto;margin:0;padding:.25rem;list-style:none;border:1px solid var(--border);border-radius:8px;background:#0d0e12;color:var(--text)}
 .client-picker-option{display:grid;gap:.1rem;padding:.45rem .55rem;border-radius:6px;cursor:pointer;overflow-wrap:anywhere}
