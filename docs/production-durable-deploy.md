@@ -272,8 +272,10 @@ with no other deployment row selects `operationsBaselineContract:
 'ops-sole-active-baseline-v1'` on the retained executor. The plans then carry
 no staged weights, and the executor refuses the selector with staged weights,
 canonical browser retirement, successor promotion, candidate resume, or a
-Client release. Every capture must show exactly that version at 100%, and the
-pinned plan baseline hash still binds the whole captured installation. The rest
+Client release. The starting capture must show exactly that version at 100%
+and no other row, and the pinned plan baseline hash still binds the whole
+captured installation. Later captures expect baseline 100% with candidate 0%,
+then candidate 100% alone. The rest
 of the release is unchanged: baseline 100% with the candidate at 0%, byte
 checks, then candidate 100%, with the baseline as the rollback version. The
 selector does not provide credentials, authority packets, migrations or an
