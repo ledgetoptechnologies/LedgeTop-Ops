@@ -596,7 +596,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
     ],
     operations: [
       "Operations",
-      "Detailed operational schedules, projects, and task queues managed in Project Alpha.",
+      "",
     ],
     clients: [
       "Client Hub",
@@ -604,37 +604,17 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
     ],
     notifications: [
       "Notifications",
-      "Review delivery notices and notification history without mixing them into operational work.",
+      "",
     ],
-    airspace: [
-      "Airspace",
-      "Official FAA TFR and special-use airspace information for Wisconsin.",
-    ],
-    delivery: [
-      "Data",
-      "Manage client delivery, incoming uploads, and shared links.",
-    ],
-    fleet: [
-      "Fleet & flight logs",
-      "Review staff flight logs and controller sign-ins.",
-    ],
-    viewer: [
-      "Models",
-      "3D models, orthophotos and point clouds: their health, quick sharing with clients, and the full Viewer workspace.",
-    ],
+    // Title only: no descriptive sentence under page headers.
+    airspace: ["Airspace", ""],
+    delivery: ["Data", ""],
+    fleet: ["Fleet & flight logs", ""],
+    viewer: ["Models", ""],
     team: ["Team", ""],
-    administration: [
-      "Administration",
-      "Connected services, integration synchronization, security, and audit history.",
-    ],
-    account: [
-      "Account",
-      "Your Operations profile and the emails you can sign in with.",
-    ],
-    intel: [
-      "Intel",
-      "Competitors, website visits and Google search results for each Ledge Top business.",
-    ],
+    administration: ["Administration", ""],
+    account: ["Account", ""],
+    intel: ["Intel", ""],
   };
   return (
     <div className="page-heading">

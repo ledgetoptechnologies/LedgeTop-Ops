@@ -125,8 +125,9 @@ test("Administration spaces and contains enabled recovery and audit panels", asy
       return { x: rect.x, right: rect.right, top: rect.top, bottom: rect.bottom };
     }));
     expect(main).not.toBeNull();
-    expect(boxes[0]!.top - (main!.y + main!.height)).toBeGreaterThanOrEqual(15);
-    expect(boxes[1]!.top - boxes[0]!.bottom).toBeGreaterThanOrEqual(15);
+    // Compact density: panels sit one --ops-gap (.75rem, 12px) apart.
+    expect(boxes[0]!.top - (main!.y + main!.height)).toBeGreaterThanOrEqual(12);
+    expect(boxes[1]!.top - boxes[0]!.bottom).toBeGreaterThanOrEqual(12);
     for (const box of boxes) {
       expect(box.x).toBeGreaterThanOrEqual(0);
       expect(box.right).toBeLessThanOrEqual(width);
