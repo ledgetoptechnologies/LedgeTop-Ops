@@ -57,3 +57,26 @@ test('a submission on a finalized dataset still freezes provenance at once',t=>{
   assert.ok(f.processing.getAttemptProvenance(result.attempt.id));
   assert.ok(f.processing.claimJob('worker'));
 });
+
+test('a failed preparation fails the runs waiting on it, unless another preparation is still running',t=>{
+  const f=fixture(t),first=f.addOperation('leased'),second=f.addOperation('leased');
+  const result=f.submit();
+  const fail=id=>{f.db.prepare("UPDATE dataset_operations SET lease_owner='w',lease_expires_at=? WHERE id=?").run(new Date(Date.now()+60000).toISOString(),id);return f.processing.failDatasetOperation(id,'w','copy_failed','Synthetic copy failure');};
+  assert.equal(fail(first),true);
+  assert.equal(f.processing.getAttempt(result.attempt.id).status,'pending','another preparation is still running');
+  assert.equal(fail(second),true);
+  const attempt=f.processing.getAttempt(result.attempt.id);
+  assert.equal(attempt.status,'failed');assert.equal(attempt.errorCode,'source_preparation_failed');
+  assert.equal(f.processing.getTask(result.task.id).status,'failed');
+  assert.equal(f.processing.claimJob('worker'),null,'no submit job is left to claim');
+});
+
+test('provenance frozen at finalize records when it was captured',t=>{
+  const f=fixture(t);f.addOperation('leased');
+  const result=f.submit();
+  f.db.prepare("UPDATE processing_attempts SET created_at='2026-01-01T00:00:00.000Z' WHERE id=?").run(result.attempt.id);
+  f.finalize();
+  const provenance=f.processing.getAttemptProvenance(result.attempt.id).submission;
+  assert.ok(provenance,'provenance is still frozen');
+  assert.ok(Date.parse(provenance.capturedAt)>Date.parse('2026-01-02T00:00:00.000Z'),'capturedAt is the finalize time, not the submission time');
+});
