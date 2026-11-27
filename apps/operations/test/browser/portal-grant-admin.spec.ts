@@ -130,7 +130,7 @@ test("an unbound folder can be linked only to its exact signed primary workspace
   await page.getByRole("tab", {name: "Client Workspace"}).click();
   // Linking is offered as its own step; it is not shown until asked for.
   await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toHaveCount(0);
-  await page.getByRole("button", {name: "Link folder to a Ledge Top Drone Services client workspace"}).click();
+  await page.getByRole("button", {name: "Link folder to a client workspace"}).click();
   await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toBeVisible();
   await expect(page.getByText("Linking grants no access", {exact: false})).toBeVisible();
   const workspaceSearch = page.getByRole("combobox", {name: "Projected workspace or project"});
@@ -196,14 +196,15 @@ async function openClientWorkspaceTab(page: Page) {
   await page.getByRole("button", {name: "Actions for Acme"}).click();
   await page.getByRole("menuitem", {name: "Share", exact: true}).click();
   await page.getByRole("tab", {name: "Client Workspace"}).click();
-  await page.getByRole("button", {name: "Link folder to a Ledge Top Drone Services client workspace"}).click();
+  await page.getByRole("button", {name: "Link folder to a client workspace"}).click();
   await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toBeVisible();
 }
 
 test("an unmapped folder links to an exact client in an authorized division without granting access", async ({page}) => {
   const {calls, searches} = await mockExplicit(page);
   await openClientWorkspaceTab(page);
-  await expect(page.getByText("This folder isn't part of a Project Alpha project", {exact: false})).toBeVisible();
+  // Title only: no explanatory paragraph, and no business or division name.
+  await expect(page.getByText("routing metadata only", {exact: false})).toHaveCount(0);
   const division = page.getByRole("combobox", {name: "Business division"});
   await expect(division).toBeVisible();
   await expect(page.getByRole("combobox", {name: "Client workspace or client"})).toHaveCount(0);
@@ -240,11 +241,11 @@ test("an unmapped folder links to an exact client in an authorized division with
   expect(calls.some(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")).toBe(false);
 });
 
-test("a single authorized division is shown as visible text and searched directly", async ({page}) => {
+test("a single authorized division is not shown and is searched directly", async ({page}) => {
   const {searches} = await mockExplicit(page, {divisions: [explicitDivisions[0]]});
   await openClientWorkspaceTab(page);
   await expect(page.getByRole("combobox", {name: "Business division"})).toHaveCount(0);
-  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toContainText("Business division North Division");
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).not.toContainText("North Division");
   await expect(page.getByRole("combobox", {name: "Client workspace or client"})).toBeVisible();
   await expect(page.getByRole("option", {name: /Client: Lori Koschnick/})).toBeVisible();
   expect(searches.at(-1)).toBe("division-north");
@@ -477,7 +478,8 @@ test("late primary history lands in the shared list labelled by division without
     return undefined;
   }); await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click(); await page.getByRole("tab", {name: "Client Workspace"}).click();
   await selectPrimary(page, "Network", /Acme Network Lead/); await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeVisible();
-  release(); await expect(accessList(page)).toContainText("Ledge Top Drone Services · Acme Workspace · Organization");
+  release(); await expect(accessList(page)).toContainText("Acme Workspace · Organization");
+  await expect(accessList(page)).not.toContainText(/Drone Services|Technologies/);
   await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeVisible(); await expect(page.getByRole("button", {name: "Review authenticated access"})).toHaveCount(0);
 });
 
@@ -588,9 +590,10 @@ test("client audiences can be searched, reviewed, granted, revoked, and restored
 
   await openPrimary(page);
   await client(page).fill("Acme");
-  // Both kinds are offered together, each with its kind and division shown.
+  // Both kinds are offered together, each with its kind shown and no division.
   await expect(page.getByRole("option", {name: /Acme Organization/})).toContainText("organization · current members");
-  await expect(page.getByRole("option", {name: /Acme Client/})).toContainText("Ledge Top Drone Services · Acme Workspace · client · current members");
+  await expect(page.getByRole("option", {name: /Acme Client/})).toContainText("Acme Workspace · client · current members");
+  await expect(page.getByRole("option", {name: /Acme Client/})).not.toContainText(/Drone Services|Technologies/);
   await page.getByRole("option", {name: /Acme Client/}).click();
   await expect(page.getByText(/All currently authorized members of this client/i)).toBeVisible();
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer");

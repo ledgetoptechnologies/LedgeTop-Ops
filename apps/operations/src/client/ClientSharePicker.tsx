@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "./api";
-import { anyTruncated, recipientDetail, validClientShareRecipientSearch, type ClientShareBackendState, type ClientShareRecipient } from "./client-share-routing";
+import { anyTruncated, recipientDetail, recipientDetails, validClientShareRecipientSearch, type ClientShareBackendState, type ClientShareRecipient } from "./client-share-routing";
 
 const INPUT_ID = "client-share-recipient-search", LIST_ID = "client-share-recipient-options";
 
@@ -32,8 +32,7 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
           if (!validClientShareRecipientSearch(result)) throw new Error("Client choices could not be verified. Search again.");
           setOptions(result.recipients); onPrimaryState?.(result.primary);
           // A failed half is said out loud; it never looks like "no matches".
-          const failed = [result.primary === "failed" ? "Ledge Top Drone Services" : "", result.native === "failed" ? "connected workspace" : ""].filter(Boolean);
-          setPartial(failed.length ? `Some ${failed.join(" and ")} clients could not be searched right now. Try again shortly.` : "");
+          setPartial(result.primary === "failed" || result.native === "failed" ? "Some clients could not be searched right now. Try again shortly." : "");
           setStatus(result.truncated.connected ? "Some connected-workspace clients may not be listed. Type more of the name to narrow the search."
             : result.recipients.length === 0 ? "No client you can share with matches this search."
             : anyTruncated(result.truncated) ? "More clients match. Keep typing to narrow the list." : "");
@@ -52,6 +51,7 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
     const index = all.indexOf(event.currentTarget);
     all[event.key === "ArrowDown" ? Math.min(all.length - 1, index + 1) : Math.max(0, index - 1)]?.focus();
   };
+  const details = recipientDetails(options);
   return <div className="client-share-picker">
     <label htmlFor={INPUT_ID}>Client</label>
     <input id={INPUT_ID} type="search" role="combobox" aria-autocomplete="list" aria-expanded={options.length > 0} aria-controls={LIST_ID}
@@ -62,12 +62,12 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
     {options.length > 0 && <div id={LIST_ID} className="client-workspace-typeahead" role="listbox" aria-label="Matching clients">
       {options.map(option => <button type="button" role="option" key={option.key} aria-selected={selected?.key === option.key} disabled={disabled}
         onKeyDown={move} onClick={() => { onSelect(option); setQuery(option.displayName); setOptions([]); setStatus(""); }}>
-        <strong>{option.displayName}</strong><small>{recipientDetail(option)}</small>
+        <strong>{option.displayName}</strong><small>{details.get(option.key)}</small>
       </button>)}
     </div>}
     {status && <small className="workspace-search-guidance" role="status">{status}</small>}
     {error && <small className="error" role="alert">{error}</small>}
     {partial && <small className="error" role="alert">{partial}</small>}
-    {selected && <small className="selected-audience-note" data-testid="client-share-selection">Selected: {selected.displayName} · {recipientDetail(selected)}</small>}
+    {selected && <small className="selected-audience-note" data-testid="client-share-selection">Selected: {selected.displayName} · {details.get(selected.key) ?? recipientDetail(selected)}</small>}
   </div>;
 }

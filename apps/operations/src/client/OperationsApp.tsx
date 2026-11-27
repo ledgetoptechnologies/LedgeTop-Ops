@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { OPERATIONS_APP_API, projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerPlatformOverview } from "@ltds/shared";
+import { OPERATIONS_APP_API, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerPlatformOverview } from "@ltds/shared";
 import { AccountMenu, Brand, Card, EmptyState, Loading, LoadError, LtMark, loadFailureText, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
@@ -4940,13 +4940,12 @@ function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, e
   // The containing Share dialog must not close over an in-flight grant or link.
   useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false); }, [busy, onBusyChange]);
   useEffect(() => { setRecipient(null); setLinkOpen(false); }, [folder.id]);
-  const primaryName = projectAlphaSourceName("project-alpha:primary");
   return <section className="client-workspace-grant authenticated-grant-panel">
     {!embedded && <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={busy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>}
     {expanded && <div className="client-workspace-grant-panel">
       <ClientSharePicker folderId={folder.id} disabled={busy || !creationEnabled} selected={recipient} onSelect={setRecipient} onPrimaryState={setPrimaryState} />
       {!creationEnabled && <div className="notice" role="status">New client access is paused. Existing access can still be reviewed and revoked.</div>}
-      {(linkNeeded || primaryState === "link_required") && creationEnabled && <p className="workspace-search-guidance">{primaryName} clients appear here after this folder is linked to their client workspace. <button type="button" className="button-ghost button-small" aria-expanded={linkOpen} disabled={busy} onClick={() => setLinkOpen(value => !value)}>Link folder to a {primaryName} client workspace</button></p>}
+      {(linkNeeded || primaryState === "link_required") && creationEnabled && <p className="workspace-search-guidance">Clients appear here after this folder is linked to their client workspace. <button type="button" className="button-ghost button-small" aria-expanded={linkOpen} disabled={busy} onClick={() => setLinkOpen(value => !value)}>Link folder to a client workspace</button></p>}
       <PrimaryAuthenticatedDeliveryGrantPanel key={`primary:${folder.id}:${refreshKey}`} folder={folder} canRevoke={canRevoke} creationEnabled={creationEnabled} onBusyChange={setPrimaryBusy}
         unified preselected={backend === "primary" ? recipient : null} historyTarget={historyNode} showLinkSetup={linkOpen} onLinkNeeded={linkState} onSelectionReset={clearRecipient}
         otherBackendSelected={backend === "native"} onHistoryState={primaryHistoryState} />
@@ -5120,10 +5119,9 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked,onBusyChange}:{folder:{id
         const verified=response.targets.filter(item=>validPrimaryWorkspaceBindingTarget(item,chosenDivision||null));
         if(verified.length!==response.targets.length)throw new ApiError("Projected workspace choices could not be verified.",409,{});
         setTargets(verified);
-        const divisionLabel=divisions?.find(item=>item.divisionId===chosenDivision)?.label;
         setStatus(verified.length?(chosenDivision?"Select the exact client workspace below.":"Select the exact projected workspace below.")
-          :chosenDivision?`No signed client workspace in ${divisionLabel??"this division"} matches. Project Alpha must publish that client before this folder can be linked.`
-            :`No signed ${projectAlphaSourceName("project-alpha:primary")} Project Alpha workspace contains this folder's project or client root yet. Project Alpha must publish and activate that workspace before it can be linked.`);})
+          :chosenDivision?"No signed client workspace matches. Project Alpha must publish that client before this folder can be linked."
+            :"No client workspace contains this folder's project or client yet. Project Alpha must publish that client before this folder can be linked.");})
       .catch(caught=>{if((caught as Error).name!=="AbortError")setError((caught as Error).message||"Projected workspaces could not be loaded.");})
       .finally(()=>{if(!controller.signal.aborted)setLoading(false);});
   },[folder.id,divisions]);
@@ -5168,15 +5166,11 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked,onBusyChange}:{folder:{id
   const searchLabel=explicit?"Client workspace or client":"Projected workspace or project";
   return <section className="primary-workspace-binding-setup" aria-label="Link folder to a Client Workspace">
     <h4>Link this folder to a Client Workspace</h4>
-    {explicit
-      ?<p>This folder isn't part of a Project Alpha project. Choose the business division it belongs to, then the exact client workspace. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>
-      :<p>This folder has no authenticated workspace link. Choose the exact workspace projected and signed by the {projectAlphaSourceName("project-alpha:primary")} Project Alpha connection. Linking is routing metadata only: it does not create a login, membership, grant, or public link.</p>}
     {divisions&&divisions.length>1&&<label>Business division<select value={divisionId} disabled={busy||uncertain}
       onChange={event=>{setDivisionId(event.target.value);setQuery("");resetChoice();}}>
       <option value="">Choose a division</option>
       {divisions.map(item=><option key={item.divisionId} value={item.divisionId}>{item.label}</option>)}
     </select></label>}
-    {divisions?.length===1&&division&&<p className="primary-workspace-binding-division"><strong>Business division</strong> {division.label}</p>}
     {(!explicit||divisionId)&&<>
       <label htmlFor="primary-workspace-binding-search">{searchLabel}</label>
       <input id="primary-workspace-binding-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded={targets.length>0}
@@ -5397,7 +5391,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
   const rows = grants.map(grant => {
           const latest = latestVersions.get(grant.grantId) === grant.version;
           return <section key={grant.id} className="authenticated-grant-row">
-            <span><strong>{grant.audienceLabel}</strong><small>{unified ? `${projectAlphaSourceName("project-alpha:primary")} · ` : ""}{grant.workspaceLabel} · {AUTHENTICATED_GRANT_AUDIENCE_LABEL[grant.audience.type]} · {grant.status} · version {grant.version}</small>
+            <span><strong>{grant.audienceLabel}</strong><small>{grant.workspaceLabel} · {AUTHENTICATED_GRANT_AUDIENCE_LABEL[grant.audience.type]} · {grant.status} · version {grant.version}</small>
               <small>{termsLabel(grant.accessTerms)}</small><small>{grant.dynamicAudience ? "Dynamic current authorized members" : `${grant.recipientCount} exact verified person`} · {grant.effectiveAccessExpiresAt ? `expires ${date(grant.effectiveAccessExpiresAt)}` : grant.accessTerms?.mode === "project_end" ? "awaiting verified project completion, then 7 days" : grant.expiresAt ? `expires ${date(grant.expiresAt)}` : "no fixed expiry"}</small></span>
             {latest && grant.status === "active" && canRevoke && <button type="button" className="button-danger button-small" disabled={disabled} onClick={() => void mutate(grant, "revoke")}>Revoke</button>}
             {latest && grant.status !== "active" && <button type="button" className="button-ghost button-small" disabled={disabled || !creationEnabled} onClick={() => void mutate(grant, "restore")}>Restore as new version</button>}
@@ -5444,7 +5438,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
           </button>)}
         </div>}
         {searchStatus && <small className="workspace-search-guidance" role="status">{searchStatus}</small>}</>}
-        {unified && selected && <p className="native-grant-selection">{AUTHENTICATED_GRANT_AUDIENCE_LABEL[selected.type]}: {selected.displayName} · {projectAlphaSourceName("project-alpha:primary")}{context.projectName ? ` · ${context.projectName}` : ""}</p>}
+        {unified && selected && <p className="native-grant-selection">{AUTHENTICATED_GRANT_AUDIENCE_LABEL[selected.type]}: {selected.displayName}{context.projectName ? ` · ${context.projectName}` : ""}</p>}
         {selected && <small className="selected-audience-note">
           {selected.type === "principal"
             ? "Exact verified person only. Their organization membership does not widen this grant."

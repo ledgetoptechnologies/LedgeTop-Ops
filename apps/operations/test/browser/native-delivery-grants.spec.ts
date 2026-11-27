@@ -66,13 +66,13 @@ async function late(route: Route, json: unknown) {try {await route.fulfill({json
 test("one client search routes a connected-workspace person to its own review, create and revoke", async ({page}) => {
   const calls = await mock(page); await openPanel(page);
   await client(page).fill("casey");
-  const option = page.getByRole("option", {name: /Casey Coastal/}); await expect(option).toContainText(division(targetB.sourceId)); await expect(option).toContainText(targetB.workspaceName);
+  const option = page.getByRole("option", {name: /Casey Coastal/}); await expect(option).not.toContainText(division(targetB.sourceId)); await expect(option).toContainText(targetB.workspaceName);
   await option.click();
   await expect(page.getByText(`Project (the only one available for this person): ${targetB.projectName}`, {exact: false})).toBeVisible();
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("collaborator");
   await page.getByRole("button", {name: "Review connected workspace access"}).click();
   const confirmation = page.getByRole("region", {name: "Review connected workspace access"});
-  await expect(confirmation).toContainText(targetB.sourceName); await expect(confirmation).toContainText(targetB.workspaceName); await expect(confirmation).toContainText(targetB.projectName); await expect(confirmation).toContainText(recipientB.email); await expect(confirmation).toContainText("Acme deliverables");
+  await expect(confirmation).not.toContainText(targetB.sourceName); await expect(confirmation).toContainText(targetB.workspaceName); await expect(confirmation).toContainText(targetB.projectName); await expect(confirmation).toContainText(recipientB.email); await expect(confirmation).toContainText("Acme deliverables");
   await expect(page.getByRole("heading", {name: "Confirm exact folder access"})).toBeFocused();
   await page.getByRole("button", {name: "Grant connected workspace access"}).click();
   await expect(page.getByRole("status").filter({hasText: "Connected workspace access granted"})).toBeVisible();
@@ -82,7 +82,7 @@ test("one client search routes a connected-workspace person to its own review, c
   expect(calls.find(call => call.path === "/api/delivery/client-share-recipients")?.query.get("folderRef")).toBe("folder-acme");
   // A connected-workspace person never reaches the primary grant routes.
   expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") && call.method === "POST")).toBe(false);
-  await expect(accessList(page)).toContainText(`${division(targetB.sourceId)} · ${targetB.workspaceName} · ${targetB.projectName}`);
+  await expect(accessList(page)).toContainText(`${targetB.workspaceName} · ${targetB.projectName}`); await expect(accessList(page)).not.toContainText(division(targetB.sourceId));
   page.once("dialog", dialog => {expect(dialog.message()).toContain(targetB.workspaceName); return dialog.accept();});
   await page.getByRole("button", {name: /^Revoke connected access\s*: Casey Coastal$/}).click();
   await expect(page.getByRole("status").filter({hasText: "Connected workspace access revoked"})).toBeVisible();
@@ -180,7 +180,8 @@ test("choosing another person clears the earlier terms and review and uses that 
 test("a Drone Services client opens the Drone Services steps and a connected person opens the connected steps", async ({page}, testInfo) => {
   const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: found([primaryOrganization, person(recipientB, targetB)])}) : undefined);
   await openPanel(page); await client(page).fill("ac");
-  await expect(page.getByRole("option", {name: /Acme Organization/})).toContainText("Ledge Top Drone Services");
+  await expect(page.getByRole("option", {name: /Acme Organization/})).toContainText("Acme Workspace");
+  await expect(page.getByRole("dialog")).not.toContainText(/Drone Services|Technologies|Coastal Survey Services|Mountain Survey Services/);
   await page.getByRole("option", {name: /Acme Organization/}).click();
   await expect(page.getByRole("button", {name: "Review authenticated access"})).toBeVisible();
   await expect(page.getByRole("button", {name: "Review connected workspace access"})).toHaveCount(0);
@@ -231,7 +232,8 @@ test("nothing granted, a moved folder, and a failed half of the search each say 
   // A missing folder is not "nothing granted".
   await expect(page.getByText("No client access is recorded for this folder.")).toHaveCount(0);
   failedHalf = true; await client(page).fill("casey");
-  await expect(page.getByRole("alert").filter({hasText: "Ledge Top Drone Services clients could not be searched"})).toBeVisible();
+  await expect(page.getByRole("alert").filter({hasText: "Some clients could not be searched right now"})).toBeVisible();
+  await expect(page.getByRole("dialog")).not.toContainText(/Drone Services|Technologies/);
   await expect(page.getByRole("option", {name: /Casey Coastal/})).toBeVisible();
 });
 
