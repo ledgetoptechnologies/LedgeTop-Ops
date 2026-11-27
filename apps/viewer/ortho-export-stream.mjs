@@ -182,10 +182,13 @@ export function crc32(bytes, crc = 0xffffffff) {
 function deflater(onChunk) {
   const stream = new CompressionStream('deflate');
   const writer = stream.writable.getWriter(), reader = stream.readable.getReader();
+  // A failed onChunk (the sink refused a write) stops the reader; the stream
+  // would then hold every later write forever. Fail them instead.
   const drained = (async () => { for (;;) { const { value, done } = await reader.read(); if (done) return; await onChunk(value); } })();
+  drained.catch(() => { writer.abort().catch(() => {}); });
   return {
-    write: (bytes) => writer.write(bytes),
-    async close() { await writer.close(); await drained; },
+    write: (bytes) => Promise.race([writer.write(bytes), drained]),
+    close: () => Promise.all([writer.close(), drained]),
     abort() { writer.abort().catch(() => {}); reader.cancel().catch(() => {}); },
   };
 }
@@ -338,7 +341,7 @@ export function createFileSink(writable) {
  * colors, propertyLines, propertyStyle, clip (UTM rings per parcel),
  * clipEdge, units }. `onProgress(fraction)` after each strip.
  */
-export async function streamOrthoExport({ ds, grid, format = 'png', epsg = null, layers = {}, sink, createCanvas, pool, signal, onProgress }) {
+export async function streamOrthoExport({ ds, grid, format = 'png', epsg = null, layers = {}, sink, createCanvas, pool, signal, onProgress, beforeClose }) {
   const print = format !== 'tif';
   const rows = stripRows(grid.width);
   const encoder = print ? createPngEncoder({ width: grid.width, height: grid.height, sink })
@@ -354,6 +357,9 @@ export async function streamOrthoExport({ ds, grid, format = 'png', epsg = null,
       onProgress?.(r1 / grid.height);
     }
     await encoder.finish();
+    // Last check before the file is committed (a file sink is final on close).
+    abortIf(signal);
+    await beforeClose?.();
   } catch (error) { encoder.abort(); sink.abort(); throw error; }
   return sink.close();
 }

@@ -1477,6 +1477,7 @@ function syncMeasurementActionVisibility() {
   setHidden('btn-capture-float', !measure);
   // Same rule as the print policy's `allowed`; the export re-checks the full policy.
   setHidden('ortho-print-actions', !measure);
+  if (typeof syncOrthoExportAction === 'function') syncOrthoExportAction();
   // The original processing report follows download permission independently.
   setHidden('panel-model-report', !measure && !download);
 }
@@ -4383,18 +4384,24 @@ async function orthoExportLayers(ortho, { format, contours, property }, plan, ta
 async function previewOrthoExport(options, signal) {
   checkOrthoExport(options);
   const ortho = await getDataset(ORTHO_URL, false, { signal });
+  checkOrthoExport(options);
   const plan = planOrthoExport(ortho, options.area);
-  const previewEdge = 900, previewCell = Math.max(plan.grid.extent.maxE - plan.grid.extent.minE, plan.grid.extent.maxN - plan.grid.extent.minN) / previewEdge;
+  // Never finer than the export itself: capped exports preview at their own size.
+  const previewEdge = plan.native ? 900 : Math.min(900, Math.max(plan.grid.width, plan.grid.height)), previewCell = Math.max(plan.grid.extent.maxE - plan.grid.extent.minE, plan.grid.extent.maxN - plan.grid.extent.minN) / previewEdge;
   const layers = await orthoExportLayers(ortho, options, plan, previewCell * 2.5, signal);
+  checkOrthoExport(options);
   const result = await renderExportPreview({ ds: ortho, extent: plan.grid.extent, longEdge: previewEdge, format: options.format, layers,
     createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal });
+  checkOrthoExport(options);
+  if (planOrthoExport(ortho, options.area).native !== plan.native) throw new DOMException('Access changed.', 'AbortError');
   if (!result) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
   return { canvas: result.canvas, width: plan.grid.width, height: plan.grid.height };
 }
 
 async function exportOrthoPrintFromViewer(options, dialogSignal, { writable = null, onProgress } = {}) {
   const { area, format } = options;
-  checkOrthoExport(options);
+  // A file the person already chose is discarded if the export cannot start.
+  try { checkOrthoExport(options); } catch (error) { writable?.abort?.()?.catch?.(() => {}); throw error; }
   // The export belongs to the viewer, model and version it started for, and
   // to the entitlement behind every choice it made: area, format and, once
   // planned, native resolution (download permission) or a screen-size cap.
@@ -4429,7 +4436,7 @@ async function exportOrthoPrintFromViewer(options, dialogSignal, { writable = nu
     current();
     const blob = await streamOrthoExport({ ds: ortho, grid: planned.grid, format, epsg: printEpsg(), layers, sink,
       createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal,
-      onProgress: (fraction) => { current(); onProgress?.(fraction); } });
+      onProgress: (fraction) => { current(); onProgress?.(fraction); }, beforeClose: current });
     // Rendering takes a while: the session may have expired or changed
     // meanwhile. Check again before the dialog saves anything.
     current();

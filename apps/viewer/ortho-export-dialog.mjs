@@ -7,6 +7,7 @@
 //   pickParcels() → Promise<count>; the dialog hides while the person picks on the map.
 
 export const LARGE_EXPORT_PIXELS = 100_000_000;
+export const MEMORY_WARNING_PIXELS = 250_000_000;
 const AREAS = [['full', 'Whole orthophoto'], ['view', 'Current view'], ['parcels', 'Selected parcels']];
 const FORMATS = [['png', 'PNG'], ['tif', 'GeoTIFF']];
 
@@ -108,6 +109,8 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
       result.canvas.className = 'oe-preview-canvas';
       canvasHost.replaceChildren(result.canvas);
       dims.textContent = `${result.width.toLocaleString('en-US')} × ${result.height.toLocaleString('en-US')} px`;
+      // Without a save-file picker the whole file is built in memory.
+      if (result.width * result.height >= MEMORY_WARNING_PIXELS && typeof windowRef?.showSaveFilePicker !== 'function') status.textContent = 'Very large file: this browser builds it in memory and may run out. Chrome or Edge on a computer saves it straight to disk.';
       previewState.className = 'oe-preview-state';
     } catch (error) {
       if (controller.signal.aborted || error?.name === 'AbortError') return;

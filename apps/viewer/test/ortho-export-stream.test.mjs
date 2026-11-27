@@ -83,6 +83,29 @@ test('streamed GeoTIFF round-trips: deflate strips, alpha kept, georeferenced in
   assert.equal(edge[0], 0, 'nodata stays transparent');
 });
 
+test('a sink that refuses a write fails the export instead of hanging, and the file is discarded', async () => {
+  const { ds } = ortho();
+  for (const format of ['png', 'tif']) {
+    let writes = 0, aborted = 0, closed = 0;
+    const sink = { async write() { if (++writes === 3) throw new Error('disk full'); }, async writeHeader() {}, async close() { closed++; }, abort() { aborted++; } };
+    const outcome = await Promise.race([
+      streamOrthoExport({ ds, grid: exportGrid(ds, ds), format, epsg: 32616, layers: {}, sink, createCanvas: fakeCanvas }).then(() => 'finished', e => e.message),
+      new Promise(resolve => setTimeout(() => resolve('hung'), 5000).unref()),
+    ]);
+    assert.equal(outcome, 'disk full', format);
+    assert.ok(aborted >= 1 && closed === 0, `${format}: discarded, never committed`);
+  }
+});
+
+test('the last check runs before the file is committed', async () => {
+  const { ds } = ortho();
+  let closed = 0;
+  const sink = { ...createBlobSink(), async close() { closed++; } };
+  await assert.rejects(streamOrthoExport({ ds, grid: exportGrid(ds, { minE: 500000, maxE: 500010, minN: 4700000, maxN: 4700010 }), format: 'png', layers: {}, sink, createCanvas: fakeCanvas,
+    beforeClose: () => { throw new DOMException('Export cancelled.', 'AbortError'); } }), { name: 'AbortError' });
+  assert.equal(closed, 0);
+});
+
 test('GeoTIFF needs a verified CRS', async () => {
   const { ds } = ortho();
   await assert.rejects(streamOrthoExport({ ds, grid: exportGrid(ds, ds), format: 'tif', epsg: null, sink: createBlobSink() }), { code: 'print_crs' });

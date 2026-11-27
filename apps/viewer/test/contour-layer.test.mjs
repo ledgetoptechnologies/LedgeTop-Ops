@@ -192,7 +192,12 @@ test('viewer wiring: Contours panel sits with the map layer panels; mode switche
   assert.doesNotMatch(sync, /viewerAccessAvailable|orthoPrintPermissions|orthoPrintPolicy/, 'self-contained: other tests sandbox this function');
   assert.match(main, /download: SHARE_PERMISSIONS\.download === true/);
   const exporter = main.slice(main.indexOf('const policyArea ='), main.indexOf('function pcApi()'));
-  assert.match(exporter, /^async function exportOrthoPrintFromViewer[^\n]*\s*const \{ area, format \} = options;\s*checkOrthoExport\(options\);/m, 'permission re-checked first');
+  assert.match(exporter, /^async function exportOrthoPrintFromViewer[^\n]*\s*const \{ area, format \} = options;\s*(\/\/[^\n]*\s*)*try \{ checkOrthoExport\(options\); \} catch \(error\) \{ writable\?\.abort\?\.\(\)\?\.catch\?\.\(\(\) => \{\}\); throw error; \}/m, 'permission re-checked first; a chosen file is discarded on refusal');
+  const preview = main.slice(main.indexOf('async function previewOrthoExport'), main.indexOf('async function exportOrthoPrintFromViewer'));
+  assert.equal(preview.match(/\bawait /g).length, 3);
+  assert.equal(preview.match(/checkOrthoExport\(options\);/g).length, 4, 'preview rechecks access after every await');
+  assert.match(preview, /plan\.native \? 900 : Math\.min\(900, Math\.max\(plan\.grid\.width, plan\.grid\.height\)\)/, 'capped previews are never finer than the export');
+  assert.match(main, /beforeClose: current \}\);/, 'checked once more before a chosen file is committed');
   assert.match(exporter, /assertOrthoPrintAllowed\(orthoPrintPermissions\(\), \{ area: policyArea\(area\), format \}\)/);
   assert.match(exporter, /isMapMode\(state\.activeMode\)/, 'map areas follow any map view');
   assert.match(exporter, /printLongEdge\(\{ area: 'view', requested: VIEW_EXPORT_MAX_EDGE, policy, viewPixels \}\)/, 'map areas capped without download');
