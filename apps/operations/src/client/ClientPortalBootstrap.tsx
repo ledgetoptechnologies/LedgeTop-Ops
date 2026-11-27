@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, EmptyState, StatusPill, Skeleton } from "@ltds/ui";
 import { api } from "./api";
+import { SearchFirstPicker } from "./SearchFirstPicker";
 import "./ClientPortalBootstrap.css";
 
 interface BootstrapAccount {
@@ -87,7 +88,7 @@ export function ClientPortalBootstrap({ onChanged }: { onChanged?: () => void })
     return counts;
   }, [state]);
   const uniqueEligible = eligible.filter(item => (accountNames.get(item.displayName.trim().toLocaleLowerCase()) || 0) === 1);
-  const account = eligible.find(item => item.id === accountId) ?? uniqueEligible[0] ?? null;
+  const account = eligible.find(item => item.id === accountId) ?? (uniqueEligible.length === 1 ? uniqueEligible[0]! : null);
   const accountAmbiguous = Boolean(account && (accountNames.get(account.displayName.trim().toLocaleLowerCase()) || 0) > 1);
   const sourceNames = useMemo(() => {
     const counts = new Map<string, number>();
@@ -105,7 +106,8 @@ export function ClientPortalBootstrap({ onChanged }: { onChanged?: () => void })
   const ready = Boolean(state?.workspaceMigrationApplied && account && source && account.activeMemberCount > 0 && !accountAmbiguous && !sourceAmbiguous);
 
   useEffect(() => {
-    if (!accountId && uniqueEligible[0]) setAccountId(uniqueEligible[0].id);
+    // Only the single unique account is chosen for the user; otherwise they type to find one.
+    if (!accountId && uniqueEligible.length === 1) setAccountId(uniqueEligible[0]!.id);
   }, [accountId, uniqueEligible]);
   useEffect(() => {
     setReviewing(false);
@@ -155,24 +157,20 @@ export function ClientPortalBootstrap({ onChanged }: { onChanged?: () => void })
           </ol>
           {!state.workspaceMigrationApplied && <p className="client-portal-bootstrap-warning" role="alert">Portal workspace storage is not ready in this deployment. Apply the Client portal migrations before setup.</p>}
           {eligible.length ? <div className="client-portal-bootstrap-form">
-            <label>Existing client portal account
-              <select value={account?.id || ""} disabled={busy} onChange={event => { setAccountId(event.target.value); setSourceId(""); setMessage(""); }}>
-                {eligible.map(item => {
-                  const duplicate = (accountNames.get(item.displayName.trim().toLocaleLowerCase()) || 0) > 1;
-                  return <option key={item.id} value={item.id} disabled={duplicate}>{item.displayName}{item.activationState === "projection_missing" ? " — finish existing setup" : ""}{duplicate ? " — duplicate name; review client accounts" : ""}</option>;
-                })}
-              </select>
-            </label>
-            <label>Project Alpha workspace root
-              <select value={source?.clientId || ""} disabled={busy || account?.activationState === "projection_missing"}
-                onChange={event => { setSourceId(event.target.value); setReviewing(false); setMessage(""); }}>
-                <option value="">Select an exact Project Alpha client</option>
-                {sources.map(item => {
-                  const duplicate = (sourceNames.get(sourceLabel(item).toLocaleLowerCase()) || 0) > 1;
-                  return <option key={item.clientId} value={item.clientId} disabled={duplicate}>{sourceLabel(item)}{duplicate ? " — duplicate name; review in Project Alpha" : ""}</option>;
-                })}
-              </select>
-            </label>
+            <SearchFirstPicker id="client-portal-bootstrap-account" label="Existing client portal account" placeholder="Type a client account" disabled={busy}
+              value={account?.id || ""} onChange={value => { setAccountId(value); setSourceId(""); setMessage(""); }}
+              options={eligible.map(item => {
+                const duplicate = (accountNames.get(item.displayName.trim().toLocaleLowerCase()) || 0) > 1;
+                return { value: item.id, label: item.displayName, disabled: duplicate,
+                  detail: [item.activationState === "projection_missing" ? "finish existing setup" : "", duplicate ? "duplicate name; review client accounts" : ""].filter(Boolean).join(" · ") || undefined };
+              })} />
+            <SearchFirstPicker id="client-portal-bootstrap-source" label="Project Alpha workspace root" placeholder="Type a Project Alpha client"
+              disabled={busy || account?.activationState === "projection_missing"}
+              value={source?.clientId || ""} onChange={value => { setSourceId(value); setReviewing(false); setMessage(""); }}
+              options={sources.map(item => {
+                const duplicate = (sourceNames.get(sourceLabel(item).toLocaleLowerCase()) || 0) > 1;
+                return { value: item.clientId, label: sourceLabel(item), disabled: duplicate, detail: duplicate ? "duplicate name; review in Project Alpha" : undefined };
+              })} />
             {account && <div className="client-portal-bootstrap-readiness">
               <div><span>Eligibility</span><StatusPill tone={account.activeMemberCount ? "success" : "warning"}>{account.activeMemberCount ? "Verified" : "Member needed"}</StatusPill></div>
               <p>{memberSummary(account)}. {account.verifiedIdentityCount.toLocaleString()} current verified identity record{account.verifiedIdentityCount === 1 ? "" : "s"}.</p>

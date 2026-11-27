@@ -47,8 +47,11 @@ test("Client Hub stages one exact Project Alpha portal root without treating aut
   await page.getByRole("button", { name: "Review legacy exceptions" }).click();
   await expect(page.getByText("1. Eligibility")).toBeVisible();
   await expect(page.getByText("Workspace creation never grants access by itself.")).toBeVisible();
-  await expect(page.getByLabel("Existing client portal account")).toHaveValue(account.id);
-  await page.getByLabel("Project Alpha workspace root").selectOption({ label: "Example Property Management LLC — Sample project contact" });
+  // The only unique account is chosen and shown; nothing lists every client until the user types.
+  await expect(page.getByRole("combobox", { name: "Existing client portal account" })).toHaveValue(account.displayName);
+  await expect(page.getByRole("option")).toHaveCount(0);
+  await page.getByRole("combobox", { name: "Project Alpha workspace root" }).fill("property");
+  await page.getByRole("option", { name: /Example Property Management LLC — Sample project contact/ }).click();
   await expect(page.getByText("2 verified active members · 1 manager.")).toBeVisible();
   await page.getByRole("button", { name: "Review portal setup" }).click();
   await expect(page.getByRole("heading", { name: "Review before creating access" })).toBeVisible();
@@ -69,8 +72,10 @@ test("Client Hub blocks empty membership and indistinguishable Project Alpha nam
   await page.getByRole("button", { name: "Review legacy exceptions" }).click();
   await expect(page.getByText("Member needed")).toBeVisible();
   await expect(page.getByText(/no verified active member/i)).toBeVisible();
-  const sourceSelect = page.getByLabel("Project Alpha workspace root");
-  await expect(sourceSelect.locator("option", { hasText: "duplicate name; review in Project Alpha" })).toHaveCount(2);
+  await page.getByRole("combobox", { name: "Project Alpha workspace root" }).fill("example");
+  const duplicates = page.getByRole("option").filter({ hasText: "duplicate name; review in Project Alpha" });
+  await expect(duplicates).toHaveCount(2);
+  for (const option of await duplicates.all()) await expect(option).toBeDisabled();
   await expect(page.getByRole("button", { name: "Review portal setup" })).toBeDisabled();
 });
 
