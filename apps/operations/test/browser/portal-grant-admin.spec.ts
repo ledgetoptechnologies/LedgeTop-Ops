@@ -241,11 +241,11 @@ test("an unmapped folder links to an exact client in an authorized division with
   expect(calls.some(call => call.path === "/api/delivery/authenticated-grants" && call.method === "POST")).toBe(false);
 });
 
-test("a single authorized division is shown as visible text and searched directly", async ({page}) => {
+test("a single authorized division is not shown and is searched directly", async ({page}) => {
   const {searches} = await mockExplicit(page, {divisions: [explicitDivisions[0]]});
   await openClientWorkspaceTab(page);
   await expect(page.getByRole("combobox", {name: "Business division"})).toHaveCount(0);
-  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).toContainText("Business division North Division");
+  await expect(page.getByRole("region", {name: "Link folder to a Client Workspace"})).not.toContainText("North Division");
   await expect(page.getByRole("combobox", {name: "Client workspace or client"})).toBeVisible();
   await expect(page.getByRole("option", {name: /Client: Lori Koschnick/})).toBeVisible();
   expect(searches.at(-1)).toBe("division-north");

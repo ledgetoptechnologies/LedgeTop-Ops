@@ -68,6 +68,6 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
     {status && <small className="workspace-search-guidance" role="status">{status}</small>}
     {error && <small className="error" role="alert">{error}</small>}
     {partial && <small className="error" role="alert">{partial}</small>}
-    {selected && <small className="selected-audience-note" data-testid="client-share-selection">Selected: {selected.displayName} · {recipientDetail(selected)}</small>}
+    {selected && <small className="selected-audience-note" data-testid="client-share-selection">Selected: {selected.displayName} · {details.get(selected.key) ?? recipientDetail(selected)}</small>}
   </div>;
 }

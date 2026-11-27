@@ -5107,9 +5107,8 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked,onBusyChange}:{folder:{id
         const verified=response.targets.filter(item=>validPrimaryWorkspaceBindingTarget(item,chosenDivision||null));
         if(verified.length!==response.targets.length)throw new ApiError("Projected workspace choices could not be verified.",409,{});
         setTargets(verified);
-        const divisionLabel=divisions?.find(item=>item.divisionId===chosenDivision)?.label;
         setStatus(verified.length?(chosenDivision?"Select the exact client workspace below.":"Select the exact projected workspace below.")
-          :chosenDivision?`No signed client workspace in ${divisionLabel??"this division"} matches. Project Alpha must publish that client before this folder can be linked.`
+          :chosenDivision?"No signed client workspace matches. Project Alpha must publish that client before this folder can be linked."
             :"No client workspace contains this folder's project or client yet. Project Alpha must publish that client before this folder can be linked.");})
       .catch(caught=>{if((caught as Error).name!=="AbortError")setError((caught as Error).message||"Projected workspaces could not be loaded.");})
       .finally(()=>{if(!controller.signal.aborted)setLoading(false);});
@@ -5160,7 +5159,6 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked,onBusyChange}:{folder:{id
       <option value="">Choose a division</option>
       {divisions.map(item=><option key={item.divisionId} value={item.divisionId}>{item.label}</option>)}
     </select></label>}
-    {divisions?.length===1&&division&&<p className="primary-workspace-binding-division"><strong>Business division</strong> {division.label}</p>}
     {(!explicit||divisionId)&&<>
       <label htmlFor="primary-workspace-binding-search">{searchLabel}</label>
       <input id="primary-workspace-binding-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded={targets.length>0}
