@@ -293,3 +293,27 @@ test('opening Share asks Operations whether it can email the client, and passes 
   assert.equal(fallback.status, 200); assert.deepEqual((await fallback.json()).capabilities, { replaces: true });
   assert.equal(older.envelopes.length, 2); assert.deepEqual(older.envelopes[1].listQuery, older.envelopes[0].listQuery);
 });
+
+test('Operations says it can store the model report choice beside the list; older Viewers drop that key', async t => {
+  const current = await fixture(t, () => json({ ...list, grantsNextCursor: null, capabilities: { replaces: true }, modelReport: true }));
+  const opened = await current.request(PATH + '?include=grants&limit=25&viewerProjectId=viewer-project');
+  assert.equal(opened.status, 200); assert.equal((await opened.json()).modelReport, true);
+  const picker = await current.request(PATH + '?include=clients&q=Syn');
+  assert.equal('modelReport' in await picker.json(), false, 'a client search does not carry it');
+  for (const modelReport of ['true', 1, null]) {
+    const bad = await fixture(t, () => json({ ...list, grantsNextCursor: null, modelReport }));
+    assert.equal((await bad.request(PATH + '?include=grants')).status, 502, String(modelReport));
+  }
+});
+
+test('a client share may carry the model report choice; anything but a boolean is refused before Operations', async t => {
+  const reported = { ...grant, permissions: { ...grant.permissions, report: false } };
+  const current = await fixture(t, () => json({ grant: reported, replayed: false }));
+  const body = { ...input, permissions: { ...input.permissions, report: false } };
+  assert.equal((await current.request(PATH, { method: 'POST', body })).status, 201);
+  assert.deepEqual(current.envelopes[0].grant.permissions, { measure: true, cameras: false, download: false, report: false });
+  for (const report of ['no', 0, null]) assert.equal((await current.request(PATH, { method: 'POST', body: { ...input, permissions: { ...input.permissions, report } } })).status, 400);
+  assert.equal(current.envelopes.length, 1);
+  const malformed = await fixture(t, () => json({ grant: { ...grant, permissions: { ...grant.permissions, report: 'yes' } }, replayed: false }));
+  assert.equal((await malformed.request(PATH, { method: 'POST', body: input })).status, 502);
+});

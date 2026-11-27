@@ -74,13 +74,29 @@ test('a new link stores every permission: what a request leaves out is off for c
   for(const permissions of [undefined,{view:true},{view:true,measure:true},{view:true,download:false}]){
     const c=await readyShareFixture(t),response=await c.request({body:{publishIfReady:true,...(permissions?{permissions}:{})}});
     assert.equal(response.status,201);const created=(await response.json()).share,stored=c.repository.getPublicShare(created.id);
-    assert.deepEqual(stored.permissions,{view:true,measure:true,cameras:false,download:false,marks:true});
+    assert.deepEqual(stored.permissions,{view:true,measure:true,cameras:false,download:false,report:false,marks:true});
     assert.deepEqual(created.permissions,stored.permissions);
     assert.equal(assetAllowed(stored,'shots'),false);assert.equal(assetAllowed(stored,'report'),false);assert.equal(assetAllowed(stored,'glb'),true);
   }
-  const c=await readyShareFixture(t),chosen={view:true,measure:false,cameras:true,download:true,marks:false};
+  const c=await readyShareFixture(t),chosen={view:true,measure:false,cameras:true,download:true,report:false,marks:false};
   const created=(await (await c.request({body:{publishIfReady:true,permissions:chosen}})).json()).share;
   assert.deepEqual(c.repository.getPublicShare(created.id).permissions,chosen);
+});
+test('the model report is chosen on its own: off on a new link, kept on an older link with downloads, and editable',async t=>{
+  let c=await readyShareFixture(t);
+  const withDownloads=(await (await c.request({body:{publishIfReady:true,permissions:{view:true,download:true}}})).json()).share;
+  assert.equal(c.repository.getPublicShare(withDownloads.id).permissions.report,false,'downloads alone do not include the report');
+  c=await readyShareFixture(t);
+  const chosen=(await (await c.request({body:{publishIfReady:true,permissions:{view:true,report:true}}})).json()).share;
+  assert.equal(c.repository.getPublicShare(chosen.id).permissions.report,true);assert.equal(c.repository.getPublicShare(chosen.id).permissions.download,false);
+  assert.equal((await c.request({body:{publishIfReady:true,permissions:{view:true,report:'yes'}}})).status,400);
+  const old=c.repository.createPublicShare({modelId:chosen.modelId,publicIdHash:crypto.randomBytes(32).toString('hex'),permissions:{view:true,download:true}});
+  assert.equal((await (await c.request({method:'GET'})).json()).shares.find(share=>share.id===old.id).permissions.report,true,'an older link with downloads keeps its report');
+  assert.equal((await c.manage(old.id,{method:'PATCH',suffix:'',body:{label:'Renamed'}})).status,200);
+  assert.equal(assetAllowed(c.repository.getPublicShare(old.id),'report'),true,'an edit that does not name it keeps it');
+  assert.equal((await c.manage(old.id,{method:'PATCH',suffix:'',body:{permissions:{view:true,report:false}}})).status,200);
+  assert.equal(assetAllowed(c.repository.getPublicShare(old.id),'report'),false);assert.equal(assetAllowed(c.repository.getPublicShare(old.id),'ortho'),true);
+  assert.equal((await c.manage(old.id,{method:'PATCH',suffix:'',body:{permissions:{view:true,report:1}}})).status,400);
 });
 test('a link that names no end gets 30 days; no end is an explicit null and nothing else',async t=>{
   let c=await readyShareFixture(t);near((await (await c.request()).json()).share.expiresAt,Date.now()+30*DAY);
@@ -99,7 +115,7 @@ test('existing links keep what they had: the list says what they really allow, a
   const shown=(await (await c.request({method:'GET'})).json()).shares.find(share=>share.id===old.id);
   assert.equal(shown.permissions.cameras,true);assert.equal(shown.permissions.download,false);assert.equal(shown.expiresAt,null);
   assert.deepEqual(c.repository.getPublicShare(old.id).permissions,{view:true});
-  for(const [share,expected] of [[old,{view:true,measure:true,cameras:true,download:false,marks:false}],[off,{view:true,measure:false,cameras:false,download:false,marks:false}]]){
+  for(const [share,expected] of [[old,{view:true,measure:true,cameras:true,download:false,report:false,marks:false}],[off,{view:true,measure:false,cameras:false,download:false,report:false,marks:false}]]){
     const response=await c.manage(share.id,{method:'PATCH',suffix:'',body:{permissions:{view:true}}});assert.equal(response.status,200);
     assert.deepEqual(c.repository.getPublicShare(share.id).permissions,expected);assert.equal(c.repository.getPublicShare(share.id).expiresAt,null);
   }
@@ -115,7 +131,7 @@ test('a partial permission edit preserves a separate permission saved while its 
   });
   const response=await c.manage(created.id,{method:'PATCH',suffix:'',body:{password:'ordinary edit',permissions:{view:true,cameras:true}}});
   assert.equal(response.status,200);
-  assert.deepEqual((await response.json()).share.permissions,{view:true,measure:true,cameras:true,download:true,marks:true});
+  assert.deepEqual((await response.json()).share.permissions,{view:true,measure:true,cameras:true,download:true,report:false,marks:true});
 });
 
 test('durable recopy is authenticated, encrypted, stable through edits and fails closed for unrecoverable legacy links',async t=>{

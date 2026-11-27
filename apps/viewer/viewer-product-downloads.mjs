@@ -14,6 +14,13 @@ export function safeProductTicket(value, origin = location.origin) {
     && !url.search && !url.hash ? url.href : null;
 }
 
+// Same rule as the server (publicSharePolicy reportAllowed): the model report has its own permission; a link or
+// session from before it had one keeps the report with downloads. A present field must be exactly true.
+export function reportPermitted(permissions) {
+  if (!permissions || typeof permissions !== 'object') return false;
+  return Object.hasOwn(permissions, 'report') ? permissions.report === true : permissions.download === true;
+}
+
 function formatSize(bytes) {
   if (!Number.isSafeInteger(bytes) || bytes < 0) return 'Size unavailable';
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -21,7 +28,7 @@ function formatSize(bytes) {
   return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 
-export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, permitted, documentRef = document, fetchRef = fetch,
+export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, permitted, reportPermitted: reportGate = permitted, documentRef = document, fetchRef = fetch,
   origin = location.origin } = {}) {
   if (!host || typeof getAssetRoot !== 'function') throw new Error('Product chooser needs a host and asset root');
   let disposed = false, controller = null, generation = 0, currentBase = null;
@@ -29,6 +36,7 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
     const node = documentRef.createElement(tag); if (text) node.textContent = text; if (className) node.className = className; return node;
   };
   const allowed = () => typeof permitted === 'function' ? permitted() === true : permitted === true;
+  const reportAllowed = () => typeof reportGate === 'function' ? reportGate() === true : reportGate === true;
   const container = element('section', '', 'viewer-product-controls');
   const open = element('button', 'Download products', 'tool-btn viewer-product-open'); open.type = 'button';
   container.append(open); host.append(container);
@@ -88,7 +96,7 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
   open.onclick = () => { if (allowed()) { dialog.showModal(); void load(); } };
   reportOpen.onclick = async () => {
     const base = sessionProductsUrl(getAssetRoot(), origin);
-    if (disposed || !allowed() || !base) return;
+    if (disposed || !reportAllowed() || !base) return;
     cancel(); const epoch = generation;
     controller = new AbortController(); const signal = controller.signal;
     reportOpen.disabled = true; reportStatus.textContent = '';
@@ -96,7 +104,7 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
       const response = await fetchRef(base, { signal, credentials: 'same-origin' });
       if (!response.ok) throw new Error(response.status === 403 ? 'Downloads are not permitted for this model.' : 'Could not load the model report. Please retry.');
       const data = await response.json();
-      if (disposed || epoch !== generation || !allowed()) return;
+      if (disposed || epoch !== generation || !reportAllowed()) return;
       const expected = `${base}/report/download-grants`;
       const report = Array.isArray(data.products) && data.products.find(product => product.kind === 'report' && product.grantUrl === expected);
       if (!report) { reportStatus.textContent = 'No model report for this version.'; return; }
@@ -104,7 +112,7 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
       if (!issued.ok) throw new Error(issued.status === 403 ? 'Download access expired or was revoked.' : 'The model report could not be downloaded.');
       const grant = await issued.json(), url = safeProductTicket(grant.url, origin);
       if (!url) throw new Error('Invalid download response.');
-      if (disposed || epoch !== generation || !allowed()) return;
+      if (disposed || epoch !== generation || !reportAllowed()) return;
       const link = element('a'); link.href = url; link.download = String(grant.fileName || 'report.pdf'); link.referrerPolicy = 'no-referrer';
       documentRef.body.append(link); link.click(); link.remove();
       reportStatus.textContent = '';
@@ -114,9 +122,13 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
   function refresh() {
     const nextBase = sessionProductsUrl(getAssetRoot(), origin), changed = currentBase !== nextBase;
     currentBase = nextBase;
+    const productsShown = !container.hidden, reportShown = !reportContainer.hidden;
     container.hidden = !allowed() || !nextBase;
-    reportContainer.hidden = container.hidden;
-    if (container.hidden || changed) { cancel(); reportOpen.disabled = false; reportStatus.textContent = ''; if (dialog.open) dialog.close(); }
+    reportContainer.hidden = !reportAllowed() || !nextBase;
+    // Stop work only when its permission was just taken away or the model changed; a session renewal changes neither.
+    const productsLost = productsShown && container.hidden, reportLost = reportShown && reportContainer.hidden;
+    if (changed || productsLost || reportLost) { cancel(); reportOpen.disabled = false; reportStatus.textContent = ''; }
+    if ((changed || container.hidden) && dialog.open) dialog.close();
   }
   refresh();
   return { refresh, destroy() { disposed = true; cancel(); dialog.remove(); container.remove(); reportContainer.remove(); style.remove(); } };

@@ -163,3 +163,49 @@ test('tampered products and replaced versions do not serve source bytes',async(t
   assert.equal((await fetch(c.base+grant.url)).status,409);
   c.model.activeVersionId='different-version';assert.equal((await fetch(c.base+grant.url)).status,403);
 });
+
+// Model report permission (2026-11-27): its own switch, off on new links, and
+// older links and sessions keep what they allowed (the report followed downloads).
+async function withReport(t){
+  const c=await fixture(t),body=Buffer.from('%PDF-model-report');fs.writeFileSync(path.join(c.root,'report.pdf'),body);
+  c.version.assets.push(asset('report','report.pdf',{format:'pdf',contentType:'application/pdf',published:false,byteSize:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex')}));
+  return {...c,body,base:`${c.base}/session-products/${c.viewerToken}/model`,origin:c.base};
+}
+const kinds=async url=>{const response=await fetch(url);return response.status===200?(await response.json()).products.map(p=>p.kind):response.status;};
+
+test('a session without the model report keeps every other download and refuses the report on each path',async t=>{
+  const c=await withReport(t);c.session.permissions.report=false;
+  assert.deepEqual(await kinds(c.base),['ortho']);
+  assert.equal((await fetch(`${c.base}/report/download-grants`,{method:'POST'})).status,403);
+  const ortho=await(await fetch(`${c.base}/ortho/download-grants`,{method:'POST'})).json();
+  assert.equal((await fetch(c.origin+ortho.url)).status,200);
+});
+
+test('a session with only the model report gets the report and nothing else',async t=>{
+  const c=await withReport(t);Object.assign(c.session.permissions,{download:false,report:true});
+  assert.deepEqual(await kinds(c.base),['report']);
+  assert.equal((await fetch(`${c.base}/ortho/download-grants`,{method:'POST'})).status,403);
+  const grant=await(await fetch(`${c.base}/report/download-grants`,{method:'POST'})).json();
+  assert.deepEqual(Buffer.from(await(await fetch(c.origin+grant.url)).arrayBuffer()),c.body);
+  c.session.permissions.report=false;
+  assert.equal((await fetch(c.origin+grant.url)).status,403,'turning the report off stops an issued download');
+  assert.equal(await kinds(c.base),403);
+});
+
+test('an older session without a report field keeps the report with downloads; anything but true or absent refuses',async t=>{
+  const c=await withReport(t);
+  assert.deepEqual(await kinds(c.base),['ortho','report']);
+  for(const value of ['true',1,null,{}]){c.session.permissions.report=value;assert.deepEqual(await kinds(c.base),['ortho'],String(value));}
+});
+
+test('a public link with the model report off refuses it; an older link keeps it with downloads',async t=>{
+  const c=await withReport(t),share={id:'share',modelId:'model',permissions:{view:true,download:true,report:false},versionPolicy:'active'};
+  c.repository.getPublicShare=id=>id==='share'?share:null;c.repository.publicShareLive=value=>!!value&&!value.revokedAt;
+  const token=auth.sign({kind:'share-asset',shareId:'share',modelId:'model'},60000),base=`${c.origin}/session-products/${token}/model`;
+  assert.deepEqual(await kinds(base),['ortho']);
+  assert.equal((await fetch(`${base}/report/download-grants`,{method:'POST'})).status,403);
+  delete share.permissions.report;
+  assert.deepEqual(await kinds(base),['ortho','report']);
+  const grant=await(await fetch(`${base}/report/download-grants`,{method:'POST'})).json();
+  share.permissions.report=false;assert.equal((await fetch(c.origin+grant.url)).status,403);
+});
