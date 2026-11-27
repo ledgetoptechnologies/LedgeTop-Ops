@@ -129,6 +129,8 @@ test('shareAll uses actual capability and only existing eligible owned marks, pr
   assert.equal(visible(p.button('Share all')), true);
   f.requests.length = 0;
   await p.button('Share all').click();
+  assert.deepEqual(f.requests, [], 'nothing is sent before the question is answered');
+  await p.confirm();
   assert.equal(p.store.find(privateMark.id).access, 'edit');
   assert.equal(p.store.state.marks.find(m => m.name === 'View').access, 'view');
   assert.deepEqual(f.requests, [['POST', '/api/v1/marks/batch/share']]);
@@ -216,7 +218,8 @@ test('staff can manage a colleague shared mark, while history and Share all rema
   const scope = f.scope('ops', 'colleague');
   await colleague.marks.setScope(scope);
   await colleague.open('Colleague mark');
-  assert.equal(visible(colleague.q('[name=visibility]')), true);
+  // Sharing is the owner's: the control is not offered on a colleague's mark.
+  assert.equal(visible(colleague.q('[name=visibility]')), false);
   await colleague.type('[name=note]', 'Staff edit'); await colleague.save();
   assert.equal(colleague.store.find(shared.id).access, 'view');
   assert.equal(visible(colleague.card('Delete')), true);
@@ -261,10 +264,14 @@ test('shareAll failure does not claim sharing succeeded or hide the retry action
   t.after(() => p.marks.dispose());
   await p.marks.setScope(f.scope('ops', 'staff-a'));
   const current = await p.store.create(mark('Private', { visibility: 'private' }));
-  await p.q('.viewer-mark-layers').click(); await p.button('Share all').click();
+  await p.q('.viewer-mark-layers').click(); await p.button('Share all').click(); await p.confirm();
   assert.equal(p.store.find(current.id).visibility, 'private');
   assert.match(p.text(), /Too many requests/);
+  assert.match(p.q('.viewer-mark-job').textContent, /0 of 1 changed/);
+  assert.equal(visible(p.button('Resume')), true);
   assert.equal(visible(p.button('Share all')), true);
+  assert.equal(p.button('Share all').disabled, true, 'the stopped job is resumed or closed first');
+  await p.q('[aria-label="Close sharing status"]').click();
   assert.equal(p.button('Share all').disabled, false);
 });
 
@@ -343,6 +350,8 @@ test('Chromium: staff Share all/history/revert and model-wide phone navigation, 
   await press('.viewer-mark-layers');
   assert.equal(await cdp.evaluate("!document.querySelector('.viewer-mark-box').hidden && document.querySelector('.viewer-mark-box').classList.contains('sheet')"), true);
   await cdp.evaluate("[...document.querySelectorAll('button')].find(b => b.textContent === 'Share all').click()");
+  assert.equal(await cdp.evaluate("document.activeElement.textContent === 'Cancel' && !document.querySelector('.viewer-mark-confirm').hidden"), true);
+  await cdp.evaluate("document.querySelector('.viewer-mark-confirm').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); [...document.querySelectorAll('.viewer-mark-confirm button')].find(b => b.textContent === 'Change').click()");
   await wait("marks.store.state.marks.find(m => m.name === 'Unshared').visibility === 'shared' && !marks.store.state.busy");
   await cdp.evaluate("[...document.querySelectorAll('.viewer-mark-list-item')].find(b => b.textContent.startsWith('Client changed')).click()");
   assert.equal(await cdp.evaluate("document.querySelector('.viewer-mark-box').hidden && !document.querySelector('.viewer-mark-card').hidden"), true);
