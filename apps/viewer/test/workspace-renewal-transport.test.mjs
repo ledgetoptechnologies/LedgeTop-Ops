@@ -12,7 +12,7 @@ const options={controllerOrigin:OPS,viewerOrigin:VIEWER,subject:'ops:staff',sess
 test('exact Ops protocol is credentialed CORS with session correlation and no Viewer bearer',async()=>{
   const calls=[];const result=await requestWorkspaceRenewalGrant({...options,fetchImpl:async(url,init)=>{calls.push({url,init});return response(url,calls.length===1?challenge():grant(),calls.length===1?200:201);}});
   assert.equal(result,GRANT);assert.equal(calls[0].url,endpoint+'/challenge');assert.equal(calls[1].url,endpoint);
-  for(const call of calls){assert.equal(call.init.credentials,'include');assert.equal(call.init.mode,'cors');assert.equal(call.init.redirect,'error');assert.equal(call.init.cache,'no-store');assert.equal(call.init.headers?.Authorization,undefined);}
+  for(const call of calls){assert.equal(call.init.credentials,'include');assert.equal(call.init.mode,'cors');assert.equal(call.init.redirect,'manual');assert.equal(call.init.cache,'no-store');assert.equal(call.init.headers?.Authorization,undefined);}
   assert.deepEqual(JSON.parse(calls[1].init.body),{protocolVersion:1,requestId:ID,sessionId:SESSION,subject:'ops:staff'});
   assert.equal(calls[1].init.headers['X-CSRF-Token'],CSRF);assert.equal(calls[1].init.headers['Idempotency-Key'],ID);
 });
@@ -57,8 +57,9 @@ test('signed-out recovery preserves work and unavailable endpoint retries withou
   for(const signedOut of [false,true]){
     const context=harness(async url=>response(url,{error:signedOut?'Cloudflare Access authentication required':'Not found'},signedOut?401:404));
     context.renewal.requestRenewal('timer');await tick();
-    assert.deepEqual(context.expired,signedOut?['revoked']:[]);assert.equal(context.sessions.length,0);assert.equal(context.renewal.accessToken,TOKEN);
-    if(!signedOut)assert.ok(context.timers.some(timer=>timer.delay===2000&&!timer.cleared));context.renewal.dispose();
+    // A sign-in answer before expiry keeps the session and retries; see workspace-idle-renewal.test.mjs for after expiry.
+    assert.deepEqual(context.expired,[]);assert.equal(context.sessions.length,0);assert.equal(context.renewal.accessToken,TOKEN);
+    assert.ok(context.timers.some(timer=>timer.delay===2000&&!timer.cleared));context.renewal.dispose();
   }
 });
 test('CORS redemption validates exact URL and stable identity before installing a session',async()=>{
