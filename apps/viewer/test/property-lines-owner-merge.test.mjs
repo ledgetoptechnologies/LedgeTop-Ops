@@ -36,7 +36,7 @@ test('owner match: case, punctuation, "&" and trust wording do not matter', () =
     ['JOHN Q SAMPLE TR', 'JOHN Q SAMPLE TTEE'],
     ["MARY O'EXAMPLE", 'MARY OEXAMPLE'],
     ['MARY SAMPLE-EXAMPLE', 'MARY SAMPLE EXAMPLE'],
-    ['SAMPLE FAMILY TRUST', 'SAMPLE FAMILY REV TRUST'],
+    ['MARY SAMPLE\u2013EXAMPLE', 'MARY SAMPLE-EXAMPLE'],
   ];
   for (const [a, b] of same) assert.equal(normalizeOwnerName(a), normalizeOwnerName(b), `${a} = ${b}`);
 });
@@ -52,9 +52,13 @@ test('owner match: different people never match', () => {
     ['SAMPLE TRUST', 'SAMPLE'],
     ['JOHN & MARY SAMPLE', 'JOHN SAMPLE'],
     ['SAMPLE FARMS LLC', 'SAMPLE FARMS INC'],
+    // Trusts that leave only a surname plus FAMILY, LLC or initials stay apart.
+    ['THE SAMPLE FAMILY TRUST', 'SAMPLE FAMILY IRREVOCABLE TRUST'],
+    ['J SAMPLE REV TRUST', 'J SAMPLE'],
+    ['SAMPLE LLC TRUST', 'SAMPLE LLC'],
   ];
   for (const [a, b] of different) assert.notEqual(normalizeOwnerName(a), normalizeOwnerName(b), `${a} != ${b}`);
-  for (const placeholder of ['NOT AVAILABLE', 'UNKNOWN OWNER', 'N/A']) assert.equal(normalizeOwnerName(placeholder), '', placeholder);
+  for (const placeholder of ['NOT AVAILABLE', 'UNKNOWN OWNER', 'N/A', 'UNKNOWN TRUST', 'NOT AVAILABLE TRUST', 'UNKNOWN & UNKNOWN']) assert.equal(normalizeOwnerName(placeholder), '', placeholder);
 });
 
 test('merge: one owner written two ways becomes one outline with the summed stated acres', () => {
@@ -101,6 +105,18 @@ test('stacked records over the same land never give stacked labels', () => {
     noOverlap(labels);
     assert.ok(labels.length >= 2, `merge ${merge}: ${labels.length} labels`);
   }
+});
+
+test('an owner-not-listed label whose acreage line would hit a neighbour keeps its first line', () => {
+  const mpp17 = 40075016.686 * Math.cos(LAT0 * Math.PI / 180) / 2 ** 25;
+  const base = { lon: LON0, lat: LAT0, areaM2: 1e6, radiusMeters: 200 * mpp17, acreageM2: 4 * 4046.8564224 };
+  const named = { ...base, text: 'EXAMPLE OWNER', ownerKey: 'EXAMPLE OWNER', areaM2: 2e6 };
+  const unknown = { ...base, text: '', unknownOwner: true, ownerKey: '', lat: LAT0 + 1 };
+  // The named label sits just below the unknown one: one line clears it, two do not.
+  const spots = new Map([[LAT0, [500, 534]], [LAT0 + 1, [500, 500]]]);
+  const labels = placeOwnerLabels([named, unknown], { zoom: 17, project: (lon, lat) => spots.get(lat), viewport: null, measure });
+  assert.deepEqual(labels.map(l => l.lines), [['EXAMPLE OWNER', '4.0 ac'], [UNKNOWN_OWNER_LABEL]].map(([a, b]) => b ? [a, '~' + b] : [a]));
+  noOverlap(labels);
 });
 
 test('an uploaded boundary file (no owners at all) gets no owner-not-listed labels', () => {

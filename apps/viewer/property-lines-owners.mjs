@@ -35,7 +35,7 @@ export const OWNER_LABEL_LIMITS = Object.freeze({
 // PRIVATE and REDACTED; the rest are common placeholders elsewhere.
 const PLACEHOLDER_OWNER_WORDS = new Set([
   'NOT', 'AVAILABLE', 'UNAVAILABLE', 'UNKNOWN', 'UNK', 'OWNER', 'OWNERS', 'OWNERSHIP', 'UNTILRESEARCHED', 'NONE', 'NULL',
-  'N/A', 'NA', 'TBD', 'REDACTED', 'WITHHELD', 'CONFIDENTIAL', 'PRIVATE', 'PROVIDED', 'LISTED', 'UNASSIGNED', 'NO', 'NAME',
+  'N/A', 'NA', 'TBD', 'REDACTED', 'WITHHELD', 'CONFIDENTIAL', 'PRIVATE', 'PROVIDED', 'LISTED', 'UNASSIGNED', 'NO', 'NAME', 'AND',
 ]);
 export function isPlaceholderOwner(normalized) {
   if (!normalized || !/\p{L}/u.test(normalized)) return true;
@@ -45,15 +45,19 @@ export function isPlaceholderOwner(normalized) {
 // Trust wording at the end of a name ("REV TRST", "REVOCABLE TRUST", "LIVING
 // TRUST", "TTEE"): the same person's land held in their trust. A run of these
 // words is dropped only when it holds a trust word itself, and only when at
-// least two words of the name remain, so SAMPLE TRUST never matches SAMPLE.
-// Words that tell people apart (JR, SR, ET AL, FAMILY, initials) always stay.
+// least two name words remain (FAMILY, company words and initials do not
+// count), so SAMPLE TRUST never matches SAMPLE and J SAMPLE TRUST never
+// matches J SAMPLE. Words that tell people apart (JR, SR, ET AL) always stay.
 const TRUST_WORDS = new Set(['TRUST', 'TRUSTS', 'TRST', 'TR', 'TRS', 'TRT', 'TRUSTEE', 'TRUSTEES', 'TTEE', 'TTEES']);
 const TRUST_MODIFIERS = new Set(['REV', 'REVOC', 'REVOCABLE', 'IRREV', 'IRREVOCABLE', 'LIVING', 'LIV', 'LVG']);
+const NOT_NAME_WORDS = new Set(['THE', 'FAMILY', 'AND', 'ETAL', 'ET', 'AL', 'LLC', 'INC', 'LTD', 'LP', 'LLP', 'CO', 'CORP', 'COMPANY']);
 function withoutTrustWording(words) {
   let end = words.length, trust = false;
   while (end > 0 && (TRUST_WORDS.has(words[end - 1]) || TRUST_MODIFIERS.has(words[end - 1]))) { trust ||= TRUST_WORDS.has(words[end - 1]); end--; }
-  const start = trust && words[0] === 'THE' ? 1 : 0;
-  return trust && end - start >= 2 ? words.slice(start, end) : words;
+  if (!trust) return { words, rest: words };
+  const start = words[0] === 'THE' ? 1 : 0, rest = words.slice(start, end);
+  const nameWords = rest.filter(word => word.length > 1 && !NOT_NAME_WORDS.has(word)).length;
+  return { words: nameWords >= 2 ? rest : words, rest };
 }
 
 // The key two parcels must share to count as one owner: case, punctuation,
@@ -64,9 +68,11 @@ export function normalizeOwnerName(name) {
   if (typeof name !== 'string') return '';
   const plain = name.normalize('NFKC').toUpperCase().replace(/[.,;]/g, ' ').replace(/\s+/g, ' ').trim();
   if (isPlaceholderOwner(plain)) return '';
-  const words = plain.replace(/&/g, ' AND ').replace(/['’`]/g, '').replace(/[-()"#:]/g, ' ').replace(/\s+/g, ' ').trim().split(' ');
-  const key = withoutTrustWording(words).join(' ');
-  return isPlaceholderOwner(key) ? '' : key;
+  const parts = plain.replace(/&/g, ' AND ').replace(/['\u2019`]/g, '').replace(/[-\u2010-\u2015()"#:]/g, ' ').replace(/\s+/g, ' ').trim().split(' ');
+  // A placeholder with trust wording (UNKNOWN TRUST) names nobody either.
+  const { words, rest } = withoutTrustWording(parts);
+  const key = words.join(' ');
+  return isPlaceholderOwner(key) || isPlaceholderOwner(rest.join(' ')) ? '' : key;
 }
 
 // Shown where the public data names no owner for a parcel.
@@ -724,9 +730,8 @@ export function metersPerPixel(zoom, lat) {
 // Names come first: they are placed exactly as without acreage. Then each
 // acreage line is added where the taller label still fits its outline and the
 // view and stays clear of every other label. Parcels with no listed owner come
-// last, as "Owner not listed" with the acreage under it (the acreage line
-// dropped first when space is tight); a candidate with neither a name nor an
-// unknown-owner mark shows its acreage alone.
+// last, as "Owner not listed" with the acreage under it; the acreage line is
+// dropped first when it does not fit or would touch another label.
 export function placeOwnerLabels(candidates, { zoom, project, viewport, measure, units = 'imperial', limits = OWNER_LABEL_LIMITS } = {}) {
   if (!Number.isFinite(zoom) || zoom < limits.minLabelZoom) return [];
   const largest = ownerLabelFontPx(zoom, limits);
@@ -776,10 +781,14 @@ export function placeOwnerLabels(candidates, { zoom, project, viewport, measure,
   const pad = limits.paddingPx;
   const clear = (label, others) => !others.some(other => Math.abs(other.x - label.x) * 2 < other.width + label.width + pad * 2
     && Math.abs(other.y - label.y) * 2 < other.height + label.height + pad * 2);
+  // Each entry is one label, or a list of versions tried in turn (fullest
+  // first) until one clears every label already placed.
   const place = (labels, placed) => {
-    for (const label of labels.filter(Boolean).sort((a, b) => b.areaPx - a.areaPx)) {
+    const options = labels.map(entry => (Array.isArray(entry) ? entry : [entry]).filter(Boolean)).filter(list => list.length);
+    for (const versions of options.sort((a, b) => b[0].areaPx - a[0].areaPx)) {
       if (placed.length >= limits.maxLabels) break;
-      if (clear(label, placed)) placed.push(label);
+      const label = versions.find(version => clear(version, placed));
+      if (label) placed.push(label);
     }
     return placed;
   };
@@ -790,10 +799,9 @@ export function placeOwnerLabels(candidates, { zoom, project, viewport, measure,
     const taller = line && fit(label.candidate, [...label.lines, line]);
     if (taller && clear(taller, placed.filter((_, j) => j !== i))) placed[i] = taller;
   });
-  const unnamed = candidates.filter(c => !c.text).map(c => {
+  const unnamed = candidates.filter(c => !c.text && c.unknownOwner).map(c => {
     const line = acreage(c);
-    if (!c.unknownOwner) return line ? fit(c, [line]) : null;
-    return (line && fit(c, [UNKNOWN_OWNER_LABEL, line])) || fit(c, [UNKNOWN_OWNER_LABEL]);
+    return [line && fit(c, [UNKNOWN_OWNER_LABEL, line]), fit(c, [UNKNOWN_OWNER_LABEL])];
   });
   place(unnamed, placed);
   return placed.map(({ candidate, ...label }) => label);
