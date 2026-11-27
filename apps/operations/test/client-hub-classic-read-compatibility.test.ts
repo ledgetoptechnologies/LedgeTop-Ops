@@ -42,14 +42,14 @@ async function fixture() {
     CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,display_name TEXT,email_hint TEXT,status TEXT,PRIMARY KEY(workspace_id,public_id));
     CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,revoked_at TEXT);
     CREATE TABLE client_service_requests(id TEXT PRIMARY KEY,account_id TEXT);
-    CREATE TABLE portal_v2_workspace_memberships(id TEXT PRIMARY KEY,workspace_id TEXT,identity_id TEXT);
+    CREATE TABLE portal_v2_workspace_memberships(id TEXT PRIMARY KEY,workspace_id TEXT,identity_id TEXT,status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,expires_at TEXT);
     CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT,source_generation TEXT,source_sequence INTEGER,status TEXT,complete INTEGER);
     CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT,source_sequence INTEGER);
     CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,parent_public_id TEXT,active INTEGER,source_version TEXT);
     CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT PRIMARY KEY,projection_source_id TEXT,source_workspace_id TEXT);
     CREATE TABLE pa_portal_source_authorities(source_id TEXT PRIMARY KEY,state TEXT,active_revision INTEGER);
     CREATE TABLE pa_portal_source_authority_revisions(source_id TEXT,revision INTEGER);
-    INSERT INTO portal_v2_workspace_memberships VALUES('membership','workspace','identity');
+    INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id) VALUES('membership','workspace','identity');
   `);
   return { ops, delivery };
 }

@@ -165,6 +165,9 @@ export function clientPortalStatus(client: ClientSummary): { label: string; tone
       description: "Client Delivery received this workspace update and is validating it before activation." };
   if (client.portal_status === "not_provisioned" && isProjectAlphaBusiness)
     return unlinkedProjectAlphaWorkspace;
+  if (client.portal_status === "no_sign_in")
+    return { label: "No portal sign-in", tone: "warning" as const,
+      description: "Project Alpha has no portal user for this client, so nobody can open shared work. For an individual, set the client type to Consumer in Project Alpha." };
   return { label: client.portal_status === "active" ? "Portal ready"
     : client.portal_status === "not_provisioned" ? "Portal not set up" : client.portal_status.replaceAll("_", " "),
     tone: statusTone(client.portal_status) };
