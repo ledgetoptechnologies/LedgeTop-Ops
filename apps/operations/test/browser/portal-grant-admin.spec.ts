@@ -124,7 +124,8 @@ test("an unbound folder can be linked only to its exact signed primary workspace
   await page.goto("/delivery");
   await page.getByRole("button", {name: "Actions for Acme"}).click();
   await page.getByRole("menuitem", {name: "Share", exact: true}).click();
-  await expect(page.getByRole("tab", {name: "Public link"})).toHaveAttribute("aria-selected", "true");
+  // An administrator lands on Client Workspace, the first method.
+  await expect(page.getByRole("tab", {name: "Client Workspace"})).toHaveAttribute("aria-selected", "true");
   expect(calls.some(call => call.path.includes("authenticated-grants/binding"))).toBe(false);
 
   await page.getByRole("tab", {name: "Client Workspace"}).click();

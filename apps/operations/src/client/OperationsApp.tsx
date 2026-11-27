@@ -5521,7 +5521,12 @@ function ShareDialog({
   const [recipientOptions, setRecipientOptions] = useState<ShareDirectoryAudience[]>([]);
   const [recipientSearchError, setRecipientSearchError] = useState("");
   const [imageLocationMapEnabled, setImageLocationMapEnabled] = useState(false);
-  const [shareMode, setShareMode] = useState<ShareMethod>(() => !fileTarget && authenticatedGrantsEnabled && canManageAuthenticatedGrants ? "workspace" : "public");
+  const workspaceDefault = !fileTarget && authenticatedGrantsEnabled && canManageAuthenticatedGrants;
+  const [shareMode, setShareMode] = useState<ShareMethod>(() => workspaceDefault ? "workspace" : "public");
+  // Until staff pick a tab, the default follows access that loads or changes while the dialog is open.
+  const methodChosen = useRef(false);
+  useEffect(() => { if (!methodChosen.current) setShareMode(workspaceDefault ? "workspace" : "public"); }, [workspaceDefault]);
+  const chooseShareMode = (mode: ShareMethod) => { methodChosen.current = true; setShareMode(mode); };
   const dialog = useRef<HTMLDivElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
@@ -5690,7 +5695,7 @@ function ShareDialog({
           <span>{fileTarget ? "File" : "Folder"}</span>
           <code>{fileTarget ? displayName(folder) : folder.prefix}</code>
         </div>
-        {!fileTarget && <ShareMethodTabs mode={shareMode} onChange={setShareMode} locked={locked}
+        {!fileTarget && <ShareMethodTabs mode={shareMode} onChange={chooseShareMode} locked={locked}
           disabledReason={authenticatedGrantsEnabled ? {} : { workspace: authenticatedGrantReadinessMessage }} />}
         {!fileTarget && !authenticatedGrantsEnabled && <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
         {!fileTarget && shareMode === "workspace" ? (
