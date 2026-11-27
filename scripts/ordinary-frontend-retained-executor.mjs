@@ -177,7 +177,14 @@ function appendProviderResponseDigest(directory, response) {
   try { fs.writeSync(fd, `${JSON.stringify(detail)}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
-async function verifyVersionAssets({ provider, application, workerName, entries, versionId, journalDirectory, receiptName }) {
+/** Bounded parallel static asset verification (#663): 1 to 3 lanes, explicit, default 1. */
+export function validateAssetVerificationConcurrency(value) {
+  if (value === undefined) return 1;
+  needFn(Number.isSafeInteger(value) && value >= 1 && value <= 3, 'Asset verification concurrency must be an integer from 1 to 3');
+  return value;
+}
+
+async function verifyVersionAssets({ provider, application, workerName, entries, versionId, journalDirectory, receiptName, concurrency = 1 }) {
   needFn(provider && ['createVerifier','fetchVerifierAsset','removeVerifier','verifierAbsent'].every(name => typeof provider[name] === 'function'),
     'Journaled native asset verifier provider required');
   needFn(['operations', 'client'].includes(application) && WORKERS[application].name === workerName
@@ -186,7 +193,7 @@ async function verifyVersionAssets({ provider, application, workerName, entries,
   const manifest = entries.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, contentType: mime }));
   appendIntent(journalDirectory, 'temporary-asset-verifier-create', { workerName, verifiedVersionId: versionId, verifierName: name,
     assetCount: manifest.length, receiptName, automaticRetry: false });
-  const result = await executeAssetVerification({ entries: manifest, timeoutMs: 300_000,
+  const result = await executeAssetVerification({ entries: manifest, timeoutMs: 300_000, concurrency,
     create: () => provider.createVerifier({ name, workerName,
       origin: WORKERS[application].origin, entries: manifest, nonceHash: nonce.nonceHash, versionId }),
     fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath,
@@ -404,12 +411,13 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
   frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
-  operationsBaselineContract,
+  operationsBaselineContract, assetVerificationConcurrency,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
   readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
   runNative = runNativeProductionCommand, captureFn = capture, readStaffCutover = readNativeStaffCutoverReadiness,
   sourceReader = deploymentSourceCommit, now = () => Date.now() } = {}) {
+  assetVerificationConcurrency = validateAssetVerificationConcurrency(assetVerificationConcurrency);
   frontendAuthorityReview = frontendAuthorityReview ? structuredClone(frontendAuthorityReview) : undefined;
   post0226StaffPreservationReview = post0226StaffPreservationReview ? structuredClone(post0226StaffPreservationReview) : undefined;
   const ordinaryPlan = pinnedPlan?.ordinaryPlan;
@@ -571,7 +579,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     priorReleasePlanSHA256: priorResumeProof.priorPlanSHA256, uploadReplayed: false,
   });
   const priorAssetBytes = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
-    entries: priorBytesRows, versionId: baselineVersionId, journalDirectory, receiptName: 'verified-prior-active-assets' });
+    concurrency: assetVerificationConcurrency, entries: priorBytesRows, versionId: baselineVersionId, journalDirectory, receiptName: 'verified-prior-active-assets' });
   const previousLedger = bootstrap
     ? completeOpsLegacyLedgerBootstrap(bootstrap, { verifiedAssets: priorAssetBytes, verifiedVersionId: baselineVersionId })
     : installedLedger;
@@ -676,7 +684,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && sameExceptSelectedDeployment(inactive, staged, app), 'Candidate namespace stage did not produce exact baseline100/candidate0 with unchanged controls');
   await qualifyStaff('before-candidate-asset-verification');
   const candidateAssetBytes = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
-    entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-candidate-assets' });
+    concurrency: assetVerificationConcurrency, entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-candidate-assets' });
   needFn(candidateAssetBytes.size === pinnedPlan.retentionLedger.assets.length && pinnedPlan.retentionLedger.assets.every(row => {
     const bytes = candidateAssetBytes.get(row.path); return Buffer.isBuffer(bytes) && bytes.length === row.size && sha(bytes) === row.sha256;
   }), 'Inactive candidate static asset bytes differ from retained ledger');
@@ -730,7 +738,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     'Exact baseline rollback version metadata changed; keep release held');
   await qualifyStaff('before-active-namespace-verification');
   const activeAssets = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
-    entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-active-assets' });
+    concurrency: assetVerificationConcurrency, entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-active-assets' });
   const postNamespaceRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
   if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, postNamespaceRaw.operations.version, {
     sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
@@ -811,7 +819,8 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
   frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract,
   canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId, operationsBaselineContract,
-  journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
+  assetVerificationConcurrency, journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
+  validateAssetVerificationConcurrency(assetVerificationConcurrency);
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && releaseCredentialAccepted(env.CLOUDFLARE_API_TOKEN, env),
   'Cloudflare account and API token are required by the explicitly invoked production executor');
@@ -850,6 +859,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     canonicalBrowserRetirementSelector,
     canonicalBrowserRetirementClientVersionId,
     operationsBaselineContract,
+    assetVerificationConcurrency,
     reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),
