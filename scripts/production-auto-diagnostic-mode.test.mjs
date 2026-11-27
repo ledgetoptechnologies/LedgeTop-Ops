@@ -156,7 +156,7 @@ test('the runtime-owned wiring guards the adapter: the real coordinator sees the
 test('the runtime uses the guarded wiring in diagnostic mode, passes it the caller-free defaults, and release mode its own transport', () => {
   const source = fs.readFileSync(path.join(here, 'production-auto-runtime.mjs'), 'utf8').replace(/\r\n/gu, '\n');
   assert.match(source, /const wiring = readonly \? guardReadonlyDiagnosticRuntime\(\{ fetchImpl, runtimeFactory, sink: diagnostic \}\)\n\s+: \{ runtimeFactory: options => runtimeFactory\(\{ \.\.\.options, fetchImpl \}\) \};/u);
-  assert.match(source, /wiring\.runtimeFactory\(\{ workerName, sourceCommit, triggerRun, env, recipientLoader: \(\) => recipient \}\)/u);
+  assert.match(source, /wiring\.runtimeFactory\(\{ workerName, sourceCommit, triggerRun, env, \.\.\.laneProfile, recipientLoader: \(\) => recipient \}\)/u);
   assert.match(source, /need\(fetchImpl === globalThis\.fetch && runtimeFactory === createProductionAutoReleaseAdapter && recipientLoader === loadPinnedProductionAutoRecipient\n\s+&& triggerReader === readProductionAutoTriggerRun && sourceReader === deploymentSourceCommit, 'runtime_diagnostic_injection_refused'\);/u);
   assert.match(source, /need\(readonlyRefusals === null \|\| \(Array\.isArray\(readonlyRefusals\) && fetchImpl === globalThis\.fetch\n\s+&& cloudflarePacer\?\.readonly === true\), 'runtime_diagnostic_transport_refused'\);/u);
   assert.doesNotMatch(source, /PRODUCTION_AUTO_RELEASE_ENABLED: 'true'/u, 'no gate substitution anywhere in the runtime');

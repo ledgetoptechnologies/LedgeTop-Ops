@@ -8,7 +8,9 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
-  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, scriptRuntimeShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
+  CANONICAL_INSTALLED_PROFILE_V5_SHA256, ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE, readCanonicalInstalledProfileV5,
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, scriptRuntimeShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath,
+  isHeldOpsSyncInactiveLatest, HELD_OPS_SYNC_INACTIVE_LATEST } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry,
   projectAcknowledgedProductionAutoUploadTagSettings } from './production-auto-provider.mjs';
@@ -25,6 +27,8 @@ import { validateProductionMigrationAdmission } from './production-auto-migratio
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
 import { createInstalledSchemaPreservationSession, isProductionInstalledSchemaPreservationAdmission } from './production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs';
+import { createInstalledSchemaPreservationV2Session, isProductionInstalledSchemaPreservationV2Admission }
+  from './production-auto-migration-profile/installed-schema-preservation-v2/installed-schema-preservation-v2.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor,
   projectVerifiedProductionAutoPredecessorTagSettings } from './production-auto-journal.mjs';
 import { readOwnedUploadTagBaseline } from './production-auto-upload-tag.mjs';
@@ -52,6 +56,17 @@ const WORKERS = Object.freeze({ operations: { name: 'ledgetop-ops', origin: 'htt
   client: { name: 'ledgetop-clients', origin: 'https://portal.ledgetop.app' } });
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const need = (ok, code) => { if (!ok) throw Error(code); };
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+/** The installed profile every automatic lane releases against: canonical installed profile v5. The release
+ * entry points pass it explicitly; the tracked v4 PROFILE stays accepted only for the unchanged v4 and legacy
+ * paths (and their tests). */
+export const AUTO_PROFILE = deepFreeze(readCanonicalInstalledProfileV5());
 export async function readProductionAutoSchemaAdmission({ session, previous, previousOptions, options,
   forceFresh = false, check }) {
   if (!forceFresh && previous && canonical(options) === canonical(previousOptions) && check(previous)) return previous;
@@ -140,23 +155,37 @@ export function productionAutoControlsSHA256(snapshot, selectedApp) {
   return hash(Buffer.from(canonical(controlsProjection(snapshot, selectedApp))));
 }
 export function productionAutoInstalledPreflight(profile, app) {
-  return hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256
-    ? { ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ordinaryFrontendApp: app } : {};
+  const digest = hash(Buffer.from(canonical(profile)));
+  return digest === CANONICAL_INSTALLED_PROFILE_V4_SHA256
+    ? { ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ordinaryFrontendApp: app }
+    : digest === CANONICAL_INSTALLED_PROFILE_V5_SHA256
+      ? { ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE, ordinaryFrontendApp: app } : {};
 }
 export function isProductionAutoCanonicalV4Profile(profile) {
   return hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256;
 }
+/** True only for the exact AUTO_PROFILE object, whose digest is canonical v5. */
+export function isProductionAutoProfile(profile) {
+  return profile === AUTO_PROFILE && hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V5_SHA256;
+}
+/** v5 Ops and Client lanes keep the strict all-Workers latest check (no selectedApp). The only addition is the
+ * one pinned held Sync state: when, and only when, the captured Sync state equals those pins exactly, its held
+ * latest id becomes an explicit Sync allowLatest. v4 and legacy lanes get nothing. */
+export function productionAutoHeldSyncAllowance(laneProfile, snapshot, pins = HELD_OPS_SYNC_INACTIVE_LATEST) {
+  return isProductionAutoProfile(laneProfile) && isHeldOpsSyncInactiveLatest('ops-sync', snapshot?.['ops-sync'], pins)
+    ? { 'ops-sync': pins.latestVersionId } : {};
+}
 function validatedCapture(snapshot, workerName, baselineAssetsConfig, baselineAssets, candidateVersionId, expectedDeploymentVersions,
-  ownedInactiveWitness = null, ownedInactiveIdentity = null) {
+  ownedInactiveWitness = null, ownedInactiveIdentity = null, laneProfile = PROFILE) {
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client';
-  const profile = structuredClone(PROFILE);
-  const preservationPreflight = productionAutoInstalledPreflight(PROFILE, app);
-  const exactCanonicalV4 = Object.keys(preservationPreflight).length > 0;
+  const profile = structuredClone(laneProfile);
+  const preservationPreflight = productionAutoInstalledPreflight(laneProfile, app);
+  const exactCanonicalV4 = Object.keys(preservationPreflight).length > 0; // v4 or v5 (canonical installed profile)
   // The normal profile pins the currently served asset association. Candidate
   // upload intentionally replaces that association; the fixed asset config,
   // every other protected control, and actual served bytes remain pinned.
-  const allowLatest = candidateVersionId ? { [app]: candidateVersionId }
-    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) } : {};
+  const allowLatest = { ...productionAutoHeldSyncAllowance(laneProfile, snapshot), ...(candidateVersionId ? { [app]: candidateVersionId }
+    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) } : {}) };
   if (baselineAssetsConfig === undefined) validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight,
     expectedDeploymentVersions: expectedDeploymentVersions ? { [app]: expectedDeploymentVersions } : {} });
   else {
@@ -216,11 +245,11 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   preservationReader = readProductionAutoStaffPreservation, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
   buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
   schemaPreservationSessionFactory,
-  schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
+  schemaPreservationAdmissionCheck,
   assetBootstrapReader = readPinnedAssetInventoryBootstrap, predecessorReader = readVerifiedProductionAutoPredecessor,
   cloudflarePacerFactory = fetchImpl === globalThis.fetch ? createProductionAutoCloudflarePacer : null, readonlyRefusals = null } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
-    && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
+    && typeof fetchImpl === 'function' && (profile === PROFILE || isProductionAutoProfile(profile)), 'runtime_target_or_profile_refused');
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client', target = WORKERS[app];
   const accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
   const ownedInactiveEnabled = readOwnedInactiveSelector(env, workerName, { diagnostic: readonlyRefusals !== null });
@@ -272,15 +301,22 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   const post0226Policy = workerName === 'ledgetop-ops' ? loadPinnedProductionAutoPost0226PreservationPolicy() : null;
   const preservationReceipts = [];
   let migrationPins, schemaPreservationSession, latestSchemaAdmission, latestSchemaAdmissionOptions;
-  const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
   const usesV4SchemaPreservation = isProductionAutoCanonicalV4Profile(profile);
+  const usesV5SchemaPreservation = isProductionAutoProfile(profile);
+  const schemaSessionFactory = schemaPreservationSessionFactory
+    ?? (usesV5SchemaPreservation ? createInstalledSchemaPreservationV2Session : createInstalledSchemaPreservationSession);
+  const schemaAdmissionCheck = schemaPreservationAdmissionCheck
+    ?? (usesV5SchemaPreservation ? isProductionInstalledSchemaPreservationV2Admission : isProductionInstalledSchemaPreservationAdmission);
+  // Owned-inactive supersession is v4-era (OWNED_INACTIVE_CLIENT_POLICY pins a v4 Client state). Under the v5
+  // AUTO_PROFILE it is refused here: PRODUCTION_AUTO_OWNED_INACTIVE_SUPERSESSION_ENABLED must stay false.
   need(!ownedInactiveEnabled || usesV4SchemaPreservation, 'runtime_owned_inactive_profile_refused');
   const currentLatestAllowance = () => candidateVersionId ? { [app]: candidateVersionId }
     : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) } : {};
   const checkMigrations = async ({ forceFresh = false } = {}) => {
-    if (usesV4SchemaPreservation) {
+    if (usesV4SchemaPreservation || usesV5SchemaPreservation) {
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
-        sourceCommit, canonicalV4Profile: profile, selectedApp: app, token,
+        sourceCommit, ...(usesV5SchemaPreservation ? { canonicalV5Profile: profile } : { canonicalV4Profile: profile }),
+        selectedApp: app, token,
         allowAssetAssociationRotation: app === 'operations' || app === 'client', allowUnselectedRecapture: false, fetchImpl: apiFetch,
         ...(ownedInactiveWitness ? { baselineAllowLatest: currentLatestAllowance() } : {}),
       });
@@ -292,7 +328,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       };
       latestSchemaAdmission = await readProductionAutoSchemaAdmission({ session: schemaPreservationSession,
         previous: latestSchemaAdmission, previousOptions: latestSchemaAdmissionOptions, options: admissionOptions,
-        forceFresh, check: schemaPreservationAdmissionCheck });
+        forceFresh, check: schemaAdmissionCheck });
       latestSchemaAdmissionOptions = admissionOptions;
       return latestSchemaAdmission;
     }
@@ -330,7 +366,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     const raw = await capture(provider, { selectedApp: app, expectedDeploymentVersions, allowUnselectedRecapture: false });
     const checked = validatedCapture(raw, workerName, baselineCapture?.[app]?.modern.assets?.config,
       baselineCapture?.[app]?.modern.assets,
-      candidateVersionId, expectedWeights, ownedInactiveWitness, ownedInactiveIdentity);
+      candidateVersionId, expectedWeights, ownedInactiveWitness, ownedInactiveIdentity, profile);
     if (ownedInactiveWitness && !candidateVersionId)
       verifyOwnedInactivePendingCapture(ownedInactiveAdmission ?? ownedInactiveWitness, ownedInactiveIdentity,
         checked, productionAutoControlsSHA256(checked, app));
@@ -346,7 +382,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       versions: deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage })) } };
   };
   const assertSchemaPreservationFresh = () => {
-    if (usesV4SchemaPreservation) need(schemaPreservationAdmissionCheck(latestSchemaAdmission),
+    if (usesV4SchemaPreservation || usesV5SchemaPreservation) need(schemaAdmissionCheck(latestSchemaAdmission),
       'runtime_schema_preservation_admission_stale');
   };
   const beforeDispatch = async info => {
@@ -938,7 +974,9 @@ export async function runProductionAutoRelease({ mode = 'release', diagnostic = 
   const triggerRun = trackProductionAutoStartupStage('trigger_shape', () => triggerReader(env));
   const sourceCommit = trackProductionAutoStartupStage('source', () => sourceReader(ROOT, env));
   trackProductionAutoStartupStage('source', () => need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch'));
-  const runtime = trackProductionAutoStartupStage('adapter', () => wiring.runtimeFactory({ workerName, sourceCommit, triggerRun, env, recipientLoader: () => recipient }));
+  // The reviewed production factory always releases against AUTO_PROFILE; an injected (test) factory keeps its own.
+  const laneProfile = runtimeFactory === createProductionAutoReleaseAdapter ? { profile: AUTO_PROFILE } : {};
+  const runtime = trackProductionAutoStartupStage('adapter', () => wiring.runtimeFactory({ workerName, sourceCommit, triggerRun, env, ...laneProfile, recipientLoader: () => recipient }));
   const adapter = runtime.adapter;
   return trackProductionAutoStartupStageAsync('coordination', async () => {
     try {

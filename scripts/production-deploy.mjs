@@ -15,8 +15,9 @@ export const ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE = 'ordinary-frontend-
 /** Canonical installed profile v5: v4 plus exactly the Ops StaffDirectory named-handler class that
  * main 331791ed installed. See production-deploy-profile-v5-provenance.md. */
 export const ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-canonical-v5';
-/** Every reviewed ordinary preflight mode. The StaffDirectory entrypoint contract and the v4 asset,
- * schema-preservation and Sync installed-control lanes stay limited to v4 explicitly. */
+/** Every reviewed ordinary preflight mode. The StaffDirectory entrypoint contract stays limited to v4.
+ * The asset-association rebasing and Sync installed-control exceptions accept exactly v4 or v5 (the
+ * automatic lanes run v5; see production-auto-runtime.mjs AUTO_PROFILE). */
 export const ORDINARY_FRONTEND_PREFLIGHT_MODES = Object.freeze(['ordinary-frontend-preserve-installed-v3',
   'ordinary-frontend-preserve-installed-canonical-v4', 'ordinary-frontend-preserve-installed-canonical-v5']);
 export const OPS_SUCCESSOR_READER_INSTALLED_CONTRACT = 'ops-successor-reader-a0-f4cdefd6';
@@ -280,6 +281,22 @@ export function validateCanonicalV4AssetAssociation({ profile, app, baselineAsse
   validateCanonicalV4AssetAssociationMetadata(baselineAssets, candidateAssets);
   return true;
 }
+/** The v5 counterpart: the same association rule, pinned to the exact canonical v5 profile. */
+export function validateCanonicalV5AssetAssociation({ profile, app, baselineAssets, candidateAssets } = {}) {
+  need(profile && hash(canonical(profile)) === CANONICAL_INSTALLED_PROFILE_V5_SHA256
+    && ['operations', 'client'].includes(app), 'Unreviewed canonical v5 asset profile');
+  const expectedBaseline = profile.workers?.[app]?.assetsSHA256;
+  need(/^[a-f0-9]{64}$/u.test(expectedBaseline ?? '') && hash(canonical(baselineAssets)) === expectedBaseline,
+    'Unreviewed canonical v5 asset baseline');
+  validateCanonicalV4AssetAssociationMetadata(baselineAssets, candidateAssets);
+  return true;
+}
+/** Canonical installed-profile modes that admit the asset-association and Sync installed-control exceptions. */
+const CANONICAL_INSTALLED_MODE_PROFILES = Object.freeze({
+  [ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE]: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+  [ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE]: CANONICAL_INSTALLED_PROFILE_V5_SHA256,
+});
+const canonicalInstalledMode = mode => typeof mode === 'string' && Object.hasOwn(CANONICAL_INSTALLED_MODE_PROFILES, mode);
 export function validateReviewedExpectedDeploymentVersions(value) {
   if (value === undefined) return undefined;
   need(exactDataObject(value, ['operations']), 'Unreviewed expected deployment weights');
@@ -299,7 +316,12 @@ export function validateReviewedExpectedDeploymentVersions(value) {
 /** The single reviewed held Ops Sync state (#663 companion evidence): Sync 6f8e224c active alone at 100% with
  * bc65f489, an API upload from 2026-11-13, as its inactive latest. When Sync is not the selected app, only this
  * exact state (ids, upload sources, and the SHA-256 of every captured Sync field) is admitted in place of the
- * native-metadata rule. Any other unselected inactive latest is refused as before. */
+ * native-metadata rule. Any other unselected inactive latest is refused as before.
+ * bc65f489 is the automatic Sync lane's own held candidate: its journal (ref
+ * ltds-production-auto-journal-ledgetop-ops-sync) records it as the held candidate of run 43384076571 over parent
+ * 6f8e224c. validateInstallation never admits it for a selected Sync by itself; only the v5 Sync lane
+ * (production-auto-sync-runtime.mjs) admits it, after this exact check, as an explicit allowLatest until its own
+ * fresh upload replaces it. */
 export const HELD_OPS_SYNC_INACTIVE_LATEST = Object.freeze({
   contract: 'held-ops-sync-inactive-latest-6f8e224c-bc65f489-v1',
   deploymentId: 'd16949c4-d637-4b9b-8f6d-e21cc303e795',
@@ -339,8 +361,8 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     'Unreviewed canonical v4 asset association override');
   const overrideApps = Object.keys(assetAssociationOverrides ?? {});
   if (overrideApps.length) {
-    need(ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
-      && preflightDescriptor.profileSHA256 === CANONICAL_INSTALLED_PROFILE_V4_SHA256
+    need(canonicalInstalledMode(ordinaryFrontendPreflightMode)
+      && preflightDescriptor.profileSHA256 === CANONICAL_INSTALLED_MODE_PROFILES[ordinaryFrontendPreflightMode]
       && overrideApps.length === 1 && overrideApps[0] === ordinaryFrontendApp
       && ['operations', 'client'].includes(ordinaryFrontendApp)
       && (selectedApp === undefined || selectedApp === ordinaryFrontendApp)
@@ -375,7 +397,7 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   need(opsStaffDirectoryCandidateId === undefined || opsStaffDirectoryEntrypointContract !== undefined,
     'Ops StaffDirectory candidate identity requires its exact contract');
   if (ordinaryFrontendPreflightMode !== undefined) {
-    const canonicalSyncInstalledControls = ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+    const canonicalSyncInstalledControls = canonicalInstalledMode(ordinaryFrontendPreflightMode)
       && ordinaryFrontendApp === 'ops-sync' && selectedApp === 'ops-sync';
     need(['operations', 'client'].includes(ordinaryFrontendApp) || canonicalSyncInstalledControls,
       'Ordinary frontend preflight is limited to Operations or Client UI plans, with exact canonical v4 installed-controls support for ops-sync');
@@ -441,7 +463,8 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     need(spec.forbiddenPlainNames.every(x => !Object.hasOwn(vars, x)), `${app}: omitted default flags were reintroduced`);
     need(equal(exactSet(s.schedules.schedules.map(x => x.cron)), spec.crons), `${app}: exact final schedules required; adapter never repairs them`);
     if (app !== 'ops-sync') need(s.modern.assets && typeof s.modern.assets === 'object', `${app}: existing opaque assets required`);
-    if (Object.hasOwn(assetAssociationOverrides, app)) validateCanonicalV4AssetAssociation({ profile, app,
+    if (Object.hasOwn(assetAssociationOverrides, app)) (preflightDescriptor.profileSHA256 === CANONICAL_INSTALLED_PROFILE_V5_SHA256
+      ? validateCanonicalV5AssetAssociation : validateCanonicalV4AssetAssociation)({ profile, app,
       baselineAssets: assetAssociationOverrides[app].baselineAssets, candidateAssets: s.modern.assets });
     else need(hash(canonical(s.modern.assets ?? null)) === spec.assetsSHA256, `${app}: unrecognized asset association`);
   }

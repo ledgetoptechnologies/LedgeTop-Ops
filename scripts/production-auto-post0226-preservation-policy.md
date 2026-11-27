@@ -1,11 +1,19 @@
 # Recurring post-0226 preservation policy
 
 `production-auto-post0226-policy.mjs` is a fixed-state policy compiler and
-fail-closed loader. The checked-in public policy is derived from the reviewed
+fail-closed loader. The checked-in public policy was first derived from the reviewed
 read-only observation captured at 2026-11-05T15:33:36.163Z on source commit
-`2686c535658398baf746b78a41e8af6b79f04538`. Its policy digest is
-`915025b52c29bc69ad8c92e503f4df2c9084f41157d0b148f4430de67dc91e33`; the
-observation digest is `7cb6ab22d324caafd86910b6f738a514d45cf37b589087a0e91d886013dcb29d`.
+`2686c535658398baf746b78a41e8af6b79f04538` (policy digest
+`915025b52c29bc69ad8c92e503f4df2c9084f41157d0b148f4430de67dc91e33`, observation digest
+`7cb6ab22d324caafd86910b6f738a514d45cf37b589087a0e91d886013dcb29d`).
+
+It was re-pinned from a read-only observation at 2026-11-27T20:19:11.336Z, after the
+reviewed migrations and grants since then changed four authority table counts
+(`staff_permission_overrides` 18 to 11, `permissions` 49 to 51, `role_permissions`
+112 to 116, `native_staff_management_delegations` 0 to 1) and so the base snapshot digest.
+The login schema digest, login rows, bridge mismatch and legacy-active counts are
+unchanged and native control stays disabled. The current policy digest is
+`6fafc55a1b69cf9113beb81737faa7ebe7d723c12c7e88e3f30c0229256eedab`.
 The provenance note contains no staff identities, row contents, or credentials.
 
 ## Policy boundary
