@@ -446,6 +446,11 @@ export function createMarkMapLayer({ L, getMap, onSelect = () => {}, onGroup = (
       const limit = size.y * (1 - covered) - 24;
       if (point[1] > limit) attachedMap.panBy([0, point[1] - limit], { animate: false });
     },
+    // Shifts the map so a mark is right of a panel docked on the left.
+    keepRightOf(geometry, x) {
+      const point = this.anchor(geometry);
+      if (point && point[0] < x) attachedMap.panBy([point[0] - x, 0], { animate: false });
+    },
     centre() { const centre = getMap()?.getCenter?.(); return centre ? toPosition(centre) : null; },
     nudge(position, dx, dy) {
       const point = attachedMap?.latLngToContainerPoint?.(latLng(position));

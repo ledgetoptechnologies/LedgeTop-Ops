@@ -62,6 +62,10 @@ export async function openMarksPanel(t, { rateLimited = () => false, maxRequestB
         await q('.viewer-mark-coords').fire('submit');
       },
       save: () => q('.viewer-mark-form').fire('submit'),
+      // Types a category name into the box, as a person leaving the field would.
+      async chooseCategory(text) { q('[name=category]').value = text; await q('[name=category]').fire('input'); await q('[name=category]').fire('change'); },
+      // What the box offers on focus.
+      async categoryOptions() { await q('[name=category]').fire('focus'); return q('.viewer-mark-suggest').querySelectorAll('li').map(node => node.textContent); },
       // Opens the card, and the editor when this person may edit.
       async show(name) { await panel.querySelector('[id=viewer-marks-list]').querySelectorAll('.viewer-mark-list-item').find(node => node.textContent.startsWith(name)).click(); },
       async open(name) { await this.show(name); if (!card('Edit').hidden) await card('Edit').click(); },

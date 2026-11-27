@@ -49,12 +49,12 @@ test('names count up, and follow the category until they are typed', async t => 
   for (const expected of ['Pin', 'Pin 2', 'Pin 3']) { await place(); assert.equal(panel.q('[name=name]').value, expected); await panel.save(); }
   for (const expected of ['Gates', 'Gates 2']) { await place('Gates'); assert.equal(panel.q('[name=name]').value, expected); await panel.save(); }
   await place('Gates');
-  assert.deepEqual([panel.q('[name=categoryId]').value, panel.q('[name=color]').value], [gates.id, '#1565c0']);
-  const choose = async id => { panel.q('[name=categoryId]').value = id; await panel.q('[name=categoryId]').fire('change'); };
-  await choose(water.id);
+  assert.deepEqual([panel.q('[name=category]').value, panel.q('[name=color]').value], ['Gates', '#1565c0']);
+  const choose = name => panel.chooseCategory(name);
+  await choose(water.name);
   assert.equal(panel.q('[name=name]').value, 'Water', 'not typed yet, so it follows');
   await panel.type('[name=name]', 'Spring');
-  await choose(gates.id);
+  await choose(gates.name);
   assert.equal(panel.q('[name=name]').value, 'Spring');
   await panel.save();
   assert.equal(panel.store.state.marks.at(-1).name, 'Spring');
@@ -326,8 +326,7 @@ test('the picker searches, previews, uses the category style and closes before t
   await panel.q('.viewer-mark-swatch[data-color="#c62828"]').click();
   assert.equal(toggle.textContent, 'Icon and colour: Gate, Red');
   assert.equal(panel.q('[data-icon=gate]').getAttribute('aria-pressed'), 'true');
-  panel.q('[name=categoryId]').value = water.id;
-  await panel.q('[name=categoryId]').fire('change');
+  await panel.chooseCategory(water.name);
   await panel.q('[data-icon=star]').click();
   const use = panel.q('.viewer-mark-picker').querySelectorAll('button').find(node => node.textContent === 'Use category style');
   await use.click();
@@ -348,15 +347,16 @@ test('the picker searches, previews, uses the category style and closes before t
   assert.equal(toggle.textContent, 'Icon and colour: Charcoal');
 });
 
-test('Coordinates, elevation and sharing are under More, which opens when one of them is wrong', async t => {
+test('coordinates, elevation and sharing are in view, with no More; a wrong one is said and focused', async t => {
   const { panel } = await open(t);
   await panel.place('43.05, -87');
-  const more = panel.q('.viewer-mark-more');
-  for (const name of ['pointCoordinates', 'elevation', 'visibility']) assert.ok(more.contains(panel.q(`[name=${name}]`)), name);
-  assert.ok(!more.contains(panel.q('[name=name]')) && !more.contains(panel.q('[name=note]')));
+  assert.equal(panel.q('.viewer-mark-more'), null);
+  assert.equal(panel.q('details'), panel.q('.viewer-mark-section'), 'the only fold left is Import / export');
+  const form = panel.q('.viewer-mark-form');
+  for (const name of ['pointCoordinates', 'elevation', 'visibility']) assert.ok(form.contains(panel.q(`[name=${name}]`)), name);
   await panel.type('[name=elevation]', 'high');
   await panel.save();
-  assert.equal(more.open, true);
+  assert.equal(panel.dom.document.activeElement, panel.q('[name=elevation]'));
   assert.match(panel.q('.viewer-mark-card-message').textContent, /must be a number/, 'said on the card, not only in the sidebar');
 });
 

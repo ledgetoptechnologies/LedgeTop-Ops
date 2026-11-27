@@ -16,6 +16,21 @@ const accountLabel = key => { const [type, id = ''] = String(key).split(/:(.*)/s
 const LABELS_KEY = 'ltds.viewer.marks.labels', GROUP_KEY = 'ltds.viewer.marks.group';
 const LABEL_MODES = { on: 'On', selected: 'Selected', off: 'Off' };
 const SHARED_REFRESH_MS = 30_000;
+// Line icons for the buttons (stroke only, in the button's colour).
+const GLYPHS = {
+  Point: '<path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>',
+  LineString: '<path d="M4 18l5-7 5 4 6-9"/><circle cx="4" cy="18" r="1.6"/><circle cx="20" cy="6" r="1.6"/>',
+  Polygon: '<path d="M5 8l7-4 7 5-2.5 10h-9z"/>',
+  add: '<path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><path d="M12 6.5v6M9 9.5h6"/>',
+  list: '<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>',
+};
+function glyph(document, name) {
+  const span = document.createElement('span');
+  span.className = 'viewer-mark-glyph';
+  span.setAttribute('aria-hidden', 'true');
+  span.innerHTML = `<svg viewBox="0 0 24 24" focusable="false">${GLYPHS[name]}</svg>`;
+  return span;
+}
 
 function readPreference(window, key, allowed, fallback) {
   try { const value = window.localStorage?.getItem(key); return allowed.includes(value) ? value : fallback; } catch { return fallback; }
@@ -107,7 +122,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // ---- skeleton -------------------------------------------------------------
   const root = panel.querySelector('[data-marks-root]') || panel;
   const status = h(document, 'p', { class: 'hint viewer-mark-status', role: 'status', 'aria-live': 'polite', tabindex: '-1' });
-  const addButtons = Object.keys(TYPE_LABEL).map(type => h(document, 'button', { type: 'button', class: 'tool-btn', 'data-add': type, 'aria-pressed': 'false', text: TYPE_LABEL[type] }));
+  const addButtons = Object.keys(TYPE_LABEL).map(type => h(document, 'button', { type: 'button', class: 'tool-btn', 'data-add': type, 'aria-pressed': 'false' },
+    glyph(document, type), h(document, 'span', { text: TYPE_LABEL[type] })));
   const tools = h(document, 'div', { class: 'viewer-mark-tools', role: 'toolbar', 'aria-label': 'Add marks' }, ...addButtons);
   const drawCount = h(document, 'span', { class: 'hint' });
   const drawUndo = h(document, 'button', { type: 'button', text: 'Undo point' });
@@ -116,7 +132,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const drawBar = h(document, 'div', { class: 'viewer-mark-row viewer-mark-draw', hidden: true }, drawCount, drawUndo, drawFinish, drawCancel);
 
   // Placing, over the map
-  const addButton = h(document, 'button', { type: 'button', class: 'viewer-mark-add', 'aria-label': 'Add mark', title: 'Add mark (M)', text: 'Add mark' });
+  // The map's own controls are one column on the right; these two join it.
+  const addButton = h(document, 'button', { type: 'button', class: 'viewer-mark-add viewer-mark-rail', 'aria-label': 'Add mark', title: 'Add mark (M)' }, glyph(document, 'add'));
   const stripTitle = h(document, 'strong', { role: 'status', 'aria-live': 'polite' });
   const chips = h(document, 'div', { class: 'viewer-mark-chips', role: 'group', 'aria-label': 'Category' });
   const severalButton = h(document, 'button', { type: 'button', text: 'Place several', 'aria-pressed': 'false' });
@@ -143,9 +160,13 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const field = (labelText, control, extra = {}) => h(document, 'label', extra, h(document, 'span', { text: labelText }), control);
   const editorTitle = h(document, 'h4');
   const nameInput = h(document, 'input', { name: 'name', maxlength: '100', required: true, autocomplete: 'off' });
-  const categorySelect = h(document, 'select', { name: 'categoryId' });
+  // Category: typed, with this map's categories offered under the box. A new name becomes a category on Save.
+  const categoryInput = h(document, 'input', { name: 'category', maxlength: '60', autocomplete: 'off', spellcheck: 'false', role: 'combobox',
+    'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': 'viewer-mark-category-options', placeholder: 'None' });
+  const categoryOptions = h(document, 'ul', { id: 'viewer-mark-category-options', class: 'viewer-mark-suggest', role: 'listbox', 'aria-label': 'Categories', hidden: true });
+  let suggestOpen = false, suggestIndex = -1;
   const picker = createMarkPicker({ document, on, getDraft: () => draft, onChange: () => render(),
-    categoryStyleOf: () => categoryStyle(chosenStarter() || categoryById(categorySelect.value)) });
+    categoryStyleOf: () => categoryStyle(chosenStarter() || chosenCategory()) });
   const { colorInput } = picker;
   const pointCoords = h(document, 'input', { name: 'pointCoordinates', autocomplete: 'off', spellcheck: 'false' });
   const pointCoordsField = field('Coordinates', pointCoords);
@@ -161,9 +182,11 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const saveButton = h(document, 'button', { type: 'submit', class: 'viewer-mark-primary', text: 'Save' });
   const deleteButton = h(document, 'button', { type: 'button', text: 'Delete' });
   const cancelButton = h(document, 'button', { type: 'button', text: 'Cancel' });
-  const more = h(document, 'details', { class: 'viewer-mark-more' }, h(document, 'summary', { text: 'More' }), pointCoordsField, coordReadout, elevationField, visibilityField, accountField);
+  // Every field in view: no More.
   const editor = h(document, 'form', { class: 'viewer-mark-form', hidden: true }, editorTitle,
-    field('Label', nameInput), field('Category', categorySelect), picker.element, field('Notes', noteInput), more,
+    field('Label', nameInput), h(document, 'div', { class: 'viewer-mark-combo' }, field('Category', categoryInput), categoryOptions),
+    picker.element, visibilityField, accountField, field('Notes', noteInput),
+    h(document, 'div', { class: 'viewer-mark-where' }, pointCoordsField, coordReadout), elevationField,
     h(document, 'div', { class: 'viewer-mark-row viewer-mark-editor-actions' }, saveButton, cancelButton));
 
   // The card: what a mark is, then Edit, Move or Delete.
@@ -237,20 +260,23 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     list: h(document, 'div', { id: 'viewer-marks-list', role: 'tabpanel' }, searchInput, list),
     deleted: h(document, 'div', { id: 'viewer-marks-deleted', role: 'tabpanel' }, deletedNotice, deletedList),
   };
-  const tabButtons = Object.entries({ categories: 'Categories', list: 'List', deleted: 'Deleted' }).map(([name, text]) =>
+  const tabButtons = Object.entries({ list: 'List', categories: 'Categories', deleted: 'Deleted' }).map(([name, text]) =>
     h(document, 'button', { type: 'button', role: 'tab', 'data-tab': name, 'aria-controls': `viewer-marks-${name}`, text }));
   const tabs = h(document, 'div', { class: 'viewer-mark-row viewer-mark-tabs', role: 'tablist', 'aria-label': 'Marks' }, ...tabButtons);
   const activeTab = () => tabButtons.find(button => button.dataset.tab === tab);
 
-  const openBox = h(document, 'button', { type: 'button', class: 'viewer-mark-open', text: 'Marks', 'aria-expanded': 'false' });
+  const openBoxCount = h(document, 'span', { class: 'viewer-mark-count' });
+  const openBox = h(document, 'button', { type: 'button', class: 'tool-btn full viewer-mark-open', 'aria-expanded': 'false' },
+    glyph(document, 'list'), h(document, 'span', { text: 'All marks' }), openBoxCount);
   root.replaceChildren(status, tools, openBox);
 
   // One Marks pop-up, from the map or the sidebar.
-  const boxButton = h(document, 'button', { type: 'button', class: 'viewer-mark-layers', 'aria-label': 'Marks', title: 'Marks (L)', 'aria-expanded': 'false', text: 'Marks' });
+  const boxButton = h(document, 'button', { type: 'button', class: 'viewer-mark-layers viewer-mark-rail', 'aria-label': 'Marks', title: 'Marks (L)', 'aria-expanded': 'false' }, glyph(document, 'list'));
+  const boxCount = h(document, 'span', { class: 'viewer-mark-count' });
   const boxClose = h(document, 'button', { type: 'button', class: 'viewer-mark-close', 'aria-label': 'Close marks', text: '\u00d7' });
   const boxMessage = h(document, 'p', { class: 'hint', role: 'status', 'aria-live': 'polite' });
   const box = h(document, 'section', { class: 'viewer-mark-box', role: 'dialog', 'aria-label': 'Marks', hidden: true },
-    h(document, 'div', { class: 'viewer-mark-card-head' }, h(document, 'h4', { text: 'Marks' }), boxClose), boxMessage, listHead, tabs, ...Object.values(sections), coordForm, exchange);
+    h(document, 'div', { class: 'viewer-mark-card-head' }, h(document, 'h4', { text: 'Marks' }), boxCount, boxClose), boxMessage, listHead, tabs, ...Object.values(sections), coordForm, exchange);
 
   // Several marks on one spot
   const pickTitle = h(document, 'h4'), pickList = h(document, 'ul', { class: 'viewer-mark-list', 'aria-label': 'Marks here' });
@@ -273,8 +299,21 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const categoryById = id => store.state.categories.find(category => category.id === id) || null;
   const visibleMarks = () => store.state.marks.filter(visibility.shows);
   const searched = mark => !search || [mark.name, mark.note, categoryById(mark.categoryId)?.name].some(value => value?.toLowerCase().includes(search));
-  // Picked in the editor but not made yet: 'starter:gate'.
-  const chosenStarter = () => store.starters().find(starter => 'starter:' + starter.key === categorySelect.value) || null;
+  // What the category box names: a category of this map, a suggested one not made yet, a new name, or nothing.
+  const sameText = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+  function categoryChoices() {
+    const keep = draft?.categoryId, own = store.state.categories.filter(category => usableCategory(category, keep));
+    const starters = store.canWrite() && !visibility.startersHidden() ? store.starters().filter(starter => !own.some(category => sameText(category.name, starter.name))) : [];
+    return [...own.map(category => ({ key: category.id, name: category.name, category })), ...starters.map(starter => ({ key: 'starter:' + starter.key, name: starter.name, starter }))];
+  }
+  function categoryChoice() {
+    const text = categoryInput.value.trim();
+    if (!text) return null;
+    return categoryChoices().find(choice => sameText(choice.name, text)) || { key: 'new', name: text.slice(0, 60), fresh: true };
+  }
+  const chosenCategory = () => categoryChoice()?.category || null;
+  const chosenStarter = () => categoryChoice()?.starter || null;
+  const newCategoryName = () => (categoryChoice()?.fresh ? categoryChoice().name : null);
   const categoryIds = () => [...store.state.categories.map(category => category.id), NO_CATEGORY];
   // Placing or saving into a hidden category shows it again.
   // After a change to what is hidden: nothing hidden at all is Show all, and a
@@ -328,7 +367,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   function startPlacing(type, { cross: useCross = false } = {}) {
     if (!canWrite() || store.state.busy || unsaved()) return;
     closeCard();
-    if (narrow()) boxOpen = false;
+    // Placing is done on the map: the list makes room for it.
+    boxOpen = false;
     placeChoice = onlyShown();
     setMode(type);
     crosshair = type === 'Point' && useCross;
@@ -382,7 +422,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     moving = false;
     setMode('idle');
     writeEditor();
-    if (starter) categorySelect.value = choice;
+    if (starter) categoryInput.value = starter.name;
     render();
     nameInput.focus?.();
     nameInput.select?.();
@@ -413,6 +453,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (focus) layer.focus(mark.geometry);
     render();
     if (narrow()) layer.keepAbove(mark.geometry, 0.46);
+    else if (boxRight()) layer.keepRightOf(mark.geometry, boxRight() + 24);
     (editButton.hidden ? closeButton : editButton).focus?.({ preventScroll: true });
   }
 
@@ -485,16 +526,32 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // ---- where the card goes ----------------------------------------------------
   const NARROW = 640;
   const narrow = () => (getMap()?.getSize?.().x ?? Infinity) <= NARROW;
+  // Wide map: the list is docked at the top left, beside the zoom buttons; the
+  // map's controls are a column on the right. A mark's card is beside its pin,
+  // between the two and never over either. Narrow map: sheets at the bottom.
+  const RAIL = 64, DOCK_LEFT = 56, GAP = 12;
+  const boxRight = () => (!box.hidden && !narrow() ? DOCK_LEFT + (box.offsetWidth || 340) + GAP : 0);
   function placeBeside(element, geometry, full) {
     const size = getMap()?.getSize?.(), sheet = narrow();
     element.classList.toggle('sheet', sheet);
     element.classList.toggle('full', sheet && full);
     const point = !sheet && size && geometry ? layer.anchor(geometry) : null;
-    if (!point) { element.style.left = element.style.top = ''; return; }
+    if (!point) { element.style.left = element.style.top = element.style.maxHeight = ''; return; }
     const width = element.offsetWidth || 300, height = element.offsetHeight || 260, gap = 28, edge = 8;
-    const right = point[0] + gap + width + edge <= size.x;
-    element.style.left = `${Math.max(edge, right ? point[0] + gap : point[0] - gap - width)}px`;
-    element.style.top = `${Math.max(edge, Math.min(point[1] - 60, size.y - height - edge))}px`;
+    const min = Math.max(edge, boxRight()), max = size.x - RAIL - width;
+    // Clear of the undo note at the bottom while it is there.
+    const bottom = size.y - edge - (undoBar.hidden ? 0 : (undoBar.offsetHeight || 48) + 16);
+    const right = point[0] + gap <= max;
+    const left = right ? point[0] + gap : point[0] - gap - width;
+    element.style.left = `${Math.max(min, Math.min(left, max))}px`;
+    element.style.top = `${Math.max(edge, Math.min(point[1] - 60, bottom - height))}px`;
+    element.style.maxHeight = `${bottom - edge}px`;
+  }
+  // The undo note sits at the bottom centre, above whatever is docked there.
+  function placeUndo() {
+    if (undoBar.hidden) return;
+    const below = [strip, ...(narrow() ? [card, pick, box] : [])].filter(element => !element.hidden).map(element => element.offsetHeight || 0);
+    undoBar.style.bottom = `${16 + (below.length ? Math.max(...below) + 8 : 0)}px`;
   }
   // A screen that becomes narrow has room for one: what is being worked on the map stays.
   function oneSheet() {
@@ -513,6 +570,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (!pick.hidden) placeBeside(pick, store.find(picked[0])?.geometry, false);
     box.classList.toggle('sheet', narrow());
     box.classList.toggle('full', narrow());
+    placeUndo();
   }
 
   // ---- unsaved work ---------------------------------------------------------
@@ -520,7 +578,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (drawing) return drawing.positions.length ? { kind: 'drawing', type: drawing.type, positions: structuredClone(drawing.positions) } : null;
     if (!draft || (draft.id && !store.find(draft.id)?.editable)) return null;
     return { kind: 'editor', id: draft.id, newId: draft.newId || null, revision: draft.id ? draft.revision : null, geometry: structuredClone(draft.geometry),
-      name: nameInput.value, note: noteInput.value, categoryId: chosenStarter() ? null : categorySelect.value || null, starter: chosenStarter()?.key || null, color: safeColor(colorInput.value), icon: keepIcon(draft.icon),
+      name: nameInput.value, note: noteInput.value, categoryId: chosenCategory()?.id || null, starter: chosenStarter()?.key || null, newCategory: newCategoryName(), color: safeColor(colorInput.value), icon: keepIcon(draft.icon),
       elevation: elevationInput.value, units: units() === 'metric' ? 'metric' : 'imperial', ...readSharing(),
       coordinates: draft.geometry.type === 'Point' && pointCoords.value !== writtenCoords ? pointCoords.value : null,
       ...(draft.sent && { sent: draft.sent }) };
@@ -546,7 +604,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       message('Your unfinished drawing was restored.');
       return;
     }
-    const { kind, units: savedUnits, elevation, coordinates, changedElsewhere, starter, ...fields } = reconcileMarkDraft(saved, store.find, newId);
+    const { kind, units: savedUnits, elevation, coordinates, changedElsewhere, starter, newCategory, ...fields } = reconcileMarkDraft(saved, store.find, newId);
     const metres = elevationToMetres(elevation, savedUnits);
     const current = fields.id ? store.find(fields.id) : null;
     draft = { ...(current || {}), ...fields, color: safeColor(fields.color), elevationNavd88M: Number.isFinite(metres) ? metres : null };
@@ -555,11 +613,13 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     draftBaseline = null;
     writeEditor();
     if (savedUnits === (units() === 'metric' ? 'metric' : 'imperial') || Number.isNaN(metres)) elevationInput.value = elevation;
-    if (starter && store.starters().some(item => item.key === starter)) categorySelect.value = 'starter:' + starter;
+    const starterBack = starter && store.starters().find(item => item.key === starter);
+    if (starterBack) categoryInput.value = starterBack.name;
+    else if (newCategory) categoryInput.value = newCategory;
     if (coordinates !== null && draft.geometry.type === 'Point') pointCoords.value = coordinates;
     store.expect(draft.id || draft.newId, draft.sent);
     // It was saved, only the answer was lost: nothing is unsaved.
-    if (current && draft.sent && coordinates === null && !chosenStarter() && sameMark(current, { ...readEditor(), icon: draft.icon, geometry: draft.geometry })) {
+    if (current && draft.sent && coordinates === null && !chosenStarter() && !newCategoryName() && sameMark(current, { ...readEditor(), icon: draft.icon, geometry: draft.geometry })) {
       closeCard();
       return;
     }
@@ -570,20 +630,11 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const usableCategory = (category, keep) => category.id === keep || category.mine
     || (store.state.capabilities.staff && category.author === 'staff');
 
-  function fillCategoryOptions(select, value, emptyLabel, usable = () => true) {
-    const options = [h(document, 'option', { value: '', text: emptyLabel })];
-    for (const category of store.state.categories.filter(usable)) options.push(h(document, 'option', { value: category.id, text: category.name }));
-    select.replaceChildren(...options);
-    select.value = value || '';
-  }
-
   function writeEditor() {
     if (!draft) return;
     nameInput.value = draft.name;
-    fillCategoryOptions(categorySelect, draft.categoryId, 'None', category => usableCategory(category, draft.categoryId));
-    if (store.canWrite() && !visibility.startersHidden()) {
-      categorySelect.append(...store.starters().map(starter => h(document, 'option', { value: 'starter:' + starter.key, text: starter.name })));
-    }
+    categoryInput.value = categoryById(draft.categoryId)?.name || '';
+    suggestOpen = false;
     colorInput.value = safeColor(draft.color);
     noteInput.value = draft.note || '';
     elevationInput.value = elevationForDisplay(draft.elevationNavd88M, units());
@@ -622,7 +673,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   function readEditor() {
     const elevation = elevationToMetres(elevationInput.value, units());
-    return { name: nameInput.value.trim(), categoryId: chosenStarter() ? null : categorySelect.value || null, color: safeColor(colorInput.value),
+    return { name: nameInput.value.trim(), categoryId: chosenCategory()?.id || null, color: safeColor(colorInput.value),
       note: noteInput.value.trim(), elevationNavd88M: elevation, ...readSharing() };
   }
 
@@ -736,6 +787,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     boxButton.hidden = !ready || !view.map;
     openBox.hidden = !ready;
     for (const button of [boxButton, openBox]) button.setAttribute('aria-expanded', String(boxOpen));
+    for (const count of [boxCount, openBoxCount]) count.textContent = ready && state.marks.length ? String(state.marks.length) : '';
     boxMessage.textContent = boxOpen ? state.message : '';
     boxMessage.hidden = !boxMessage.textContent;
     const here = (picked || []).map(id => store.find(id)).filter(mark => mark && visibility.shows(mark)).sort(byName);
@@ -830,9 +882,10 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (draft) {
       card.setAttribute('aria-label', draft.id ? 'Edit ' + draft.name : 'New mark');
       editorTitle.textContent = (draft.id ? 'Edit ' : 'New ') + TYPE_LABEL[draft.geometry.type].toLowerCase();
-      for (const control of [nameInput, categorySelect, noteInput, elevationInput, visibilitySelect, accountSelect, pointCoords, saveButton, ...picker.controls])
+      for (const control of [nameInput, categoryInput, noteInput, elevationInput, visibilitySelect, accountSelect, pointCoords, saveButton, ...picker.controls])
         control.disabled = !editable || state.busy;
       picker.render(draft);
+      renderSuggestions();
       pointCoordsField.hidden = draft.geometry.type !== 'Point';
       coordReadout.textContent = readout(draft.geometry);
       elevationLabel.textContent = `NAVD88 Elevation (${elevationUnit(units())})`;
@@ -1023,8 +1076,6 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(moveSave, 'click', () => saveDraft());
   on(moveCancel, 'click', () => { if (canMoveDraft()) cancelDraft(); });
   on(cancelButton, 'click', () => cancelDraft());
-  // Native details expansion changes the card height without a map movement.
-  on(more, 'toggle', () => placeCard());
   on(closeButton, 'click', () => closeCard({ focusPin: true }));
   on(drawUndo, 'click', () => { drawing?.positions.pop(); render(); });
   on(drawCancel, 'click', () => { setMode('idle'); render(); });
@@ -1137,7 +1188,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (!draft || draft.geometry.type !== 'Point') return true;
     if (pointCoords.value === writtenCoords) return true;
     const parsed = parseCoordinateInput(pointCoords.value, { georef: georef() });
-    if (!parsed.ok) { more.open = true; message(parsed.error || 'Enter coordinates.'); return false; }
+    if (!parsed.ok) { pointCoords.focus?.(); message(parsed.error || 'Enter coordinates.'); return false; }
     draft.geometry = { type: 'Point', coordinates: [Math.round(parsed.longitude * 1e8) / 1e8, Math.round(parsed.latitude * 1e8) / 1e8] };
     writeCoords();
     return true;
@@ -1146,16 +1197,74 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(pointCoords, 'change', () => {
     if (applyPointCoordinates()) { store.clearMessage(); render(); }
   });
-  on(categorySelect, 'change', () => {
-    const category = chosenStarter() || categoryById(categorySelect.value);
+  // The category named in the box gives the mark its look, and its name while the name is still the automatic one.
+  function applyCategory() {
     if (!draft) return;
-    draft.categoryId = category?.id || null;
-    if (category) {
-      Object.assign(draft, categoryStyle(category));
+    const choice = categoryChoice(), made = choice?.category || choice?.starter || null;
+    draft.categoryId = choice?.category?.id || null;
+    if (made) {
+      Object.assign(draft, categoryStyle(made));
       colorInput.value = draft.color;
-      if (!nameInput.value.trim() || nameInput.value === draft.autoName) draft.name = draft.autoName = nameInput.value = autoName(category.name.slice(0, 90));
     }
+    if (choice && (!nameInput.value.trim() || nameInput.value === draft.autoName)) draft.name = draft.autoName = nameInput.value = autoName(choice.name.slice(0, 90));
     render();
+  }
+  // All of them on focus; while typing, those whose name has the text in it.
+  const suggestions = () => {
+    const text = categoryInput.value.trim(), all = categoryChoices();
+    return !text || all.some(choice => sameText(choice.name, text)) ? all : all.filter(choice => choice.name.toLowerCase().includes(text.toLowerCase()));
+  };
+  function renderSuggestions() {
+    const shown = suggestOpen && draft && !categoryInput.disabled ? suggestions() : [];
+    if (suggestIndex >= shown.length) suggestIndex = shown.length - 1;
+    categoryOptions.hidden = !shown.length;
+    categoryInput.setAttribute('aria-expanded', String(!categoryOptions.hidden));
+    categoryOptions.replaceChildren(...shown.map((choice, index) => {
+      const icon = h(document, 'span', { class: 'viewer-mark-list-icon' });
+      icon.innerHTML = categoryBadge(choice.category || choice.starter);
+      const option = h(document, 'li', { role: 'option', id: 'viewer-mark-category-option-' + index, 'data-category': choice.key,
+        'aria-selected': String(index === suggestIndex) }, icon, h(document, 'span', { text: choice.name }));
+      // Pressing keeps the focus in the box, so the list is still there for the click.
+      on(option, 'mousedown', event => event.preventDefault());
+      on(option, 'click', () => pickSuggestion(choice));
+      return option;
+    }));
+    if (suggestIndex >= 0 && !categoryOptions.hidden) categoryInput.setAttribute('aria-activedescendant', 'viewer-mark-category-option-' + suggestIndex);
+    else categoryInput.removeAttribute?.('aria-activedescendant');
+  }
+  function openSuggestions(next) {
+    suggestOpen = next;
+    suggestIndex = -1;
+    renderSuggestions();
+  }
+  function pickSuggestion(choice) {
+    categoryInput.value = choice.name;
+    suggestOpen = false;
+    suggestIndex = -1;
+    applyCategory();
+    keepDraft();
+  }
+  on(categoryInput, 'focus', () => openSuggestions(true));
+  on(categoryInput, 'click', () => { if (!suggestOpen) openSuggestions(true); });
+  on(categoryInput, 'input', () => { suggestOpen = true; suggestIndex = -1; renderSuggestions(); });
+  on(categoryInput, 'blur', () => openSuggestions(false));
+  on(categoryInput, 'change', () => applyCategory());
+  on(categoryInput, 'keydown', event => {
+    const shown = categoryOptions.hidden ? [] : suggestions();
+    const step = { ArrowDown: 1, ArrowUp: -1 }[event.key];
+    if (step) {
+      event.preventDefault();
+      if (!suggestOpen || !shown.length) { openSuggestions(true); return; }
+      suggestIndex = suggestIndex < 0 ? (step > 0 ? 0 : shown.length - 1) : (suggestIndex + step + shown.length) % shown.length;
+      renderSuggestions();
+    } else if (event.key === 'Enter' && suggestIndex >= 0 && shown[suggestIndex]) {
+      event.preventDefault();
+      pickSuggestion(shown[suggestIndex]);
+    } else if (event.key === 'Escape' && !categoryOptions.hidden) {
+      // Closes the list only; the mark stays open.
+      event.preventDefault();
+      openSuggestions(false);
+    }
   });
   on(nameInput, 'input', () => { if (draft) draft.name = nameInput.value; });
   // Fields that do not redraw anything while typing.
@@ -1222,15 +1331,21 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (!applyPointCoordinates()) return;
     const values = readEditor();
     if (!values.name) { message('Give the mark a label.'); return; }
-    if (Number.isNaN(values.elevationNavd88M)) { more.open = true; message('NAVD88 Elevation must be a number.'); return; }
+    if (Number.isNaN(values.elevationNavd88M)) { elevationInput.focus?.(); message('NAVD88 Elevation must be a number.'); return; }
     if (values.visibility === 'client' && !values.shareAccount) { message('Choose a client account to share with.'); return; }
     const changes = { ...values, icon: keepIcon(draft.icon), geometry: draft.geometry };
-    const held = store.hold(), open = draft, starter = chosenStarter();
+    const held = store.hold(), open = draft, starter = chosenStarter(), fresh = newCategoryName();
     if (starter) {
       const made = await store.addStarter(starter);
       if (!made || !held.live() || draft !== open || !canWrite()) return;
       open.categoryId = changes.categoryId = made.id;
-      fillCategoryOptions(categorySelect, made.id, 'None', category => usableCategory(category, made.id));
+      categoryInput.value = made.name;
+    } else if (fresh) {
+      // A name typed for the first time is kept as a category of this map, in the mark's look.
+      const made = await store.saveCategory({ name: fresh, color: changes.color, icon: changes.icon });
+      if (!made || !held.live() || draft !== open || !canWrite()) return;
+      open.categoryId = changes.categoryId = made.id;
+      categoryInput.value = made.name;
     }
     // A new mark keeps one id, so saving again after a lost answer updates it instead of adding a copy.
     const current = store.find(draft.id || draft.newId);
@@ -1386,7 +1501,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         endMarkInput();
         // Nothing one person typed or picked stays in the panel for the next one.
         draft = null; selectedId = null; mode = 'idle'; drawing = null; history = null;
-        more.open = false;
+        suggestOpen = false;
         preview = null; placeChoice = null; several = false; crosshair = false;
         picker.close({ focus: false });
         boxOpen = false; picked = null;
@@ -1397,8 +1512,9 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         showCategoryIcon(DEFAULT_STYLE.icon);
         categoryColor.value = DEFAULT_STYLE.color;
         visibility.setScope(sessionScope && !publicReadOnly ? next.key : null);
-        for (const input of [searchInput, coordInput, nameInput, noteInput, elevationInput, pointCoords, categoryName]) input.value = '';
-        for (const choice of [categorySelect, accountSelect]) choice.replaceChildren();
+        for (const input of [searchInput, coordInput, nameInput, categoryInput, noteInput, elevationInput, pointCoords, categoryName]) input.value = '';
+        accountSelect.replaceChildren();
+        categoryOptions.replaceChildren();
         for (const shown of [coordDetected, coordReadout, editorTitle]) shown.textContent = '';
         card.setAttribute('aria-label', 'Mark');
       }

@@ -227,7 +227,7 @@ for (const device of [
   { name: 'short desktop', width: 1440, height: 520, mobile: false },
   { name: 'pocket', width: 640, height: 740, mobile: true },
   { name: 'phone', width: 390, height: 844, mobile: true },
-]) test(`Marks editor reachability: ${device.name} Edit > More needs no map pan`, { timeout: 60000 }, async t => {
+]) test(`Marks editor reachability: ${device.name} Edit needs no map pan, every field in view`, { timeout: 60000 }, async t => {
   const { app, database } = marksApi();
   t.after(() => database.close());
   await withBrowser(t, { app }, async h => {
@@ -259,9 +259,8 @@ for (const device of [
       await waitFor("!document.querySelector('.viewer-mark-view').hidden", 'normal pin card open');
       await press('.viewer-mark-view .viewer-mark-primary');
       await waitFor("!document.querySelector('.viewer-mark-form').hidden", 'editor open');
-      await press('.viewer-mark-more summary');
-      await waitFor("document.querySelector('.viewer-mark-more').open", 'More expanded');
-      // Give the native details toggle and layout callbacks a frame to settle.
+      assert.equal(await client.evaluate("document.querySelector('.viewer-mark-more')"), null, 'no More');
+      // Give layout callbacks a frame to settle.
       await client.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
       const actions = '.viewer-mark-form > .viewer-mark-row';
       for (const type of ['submit', 'button']) assert.equal((await pointFor(`${actions} [type=${type}]`)).reachable, true, 'both Save and Cancel reachable without scrolling');
@@ -552,15 +551,15 @@ for (const writable of [true, false]) {
             hit: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === button };
         })`);
         assert.deepEqual(controls.map(control => [control.text, control.name, control.title]), [
-          ['Add mark', 'Add mark', 'Add mark (M)'], ['Marks', 'Marks', 'Marks (L)'],
-        ], `visible labels match accessible names at ${width}px`);
+          ['', 'Add mark', 'Add mark (M)'], ['', 'Marks', 'Marks (L)'],
+        ], `icon buttons are named at ${width}px`);
         assert.equal(controls[0].hidden, !writable);
         assert.equal(controls[1].hidden, false);
         assert.equal(controls[1].expanded, 'false');
         for (const control of controls.filter(control => !control.hidden)) {
           assert.equal(control.disabled, false);
-          assert.equal(control.fits, true, `${control.text} label and touch target fit ${width}px`);
-          assert.equal(control.hit, true, `${control.text} is not covered at ${width}px`);
+          assert.equal(control.fits, true, `${control.name} icon and touch target fit ${width}px`);
+          assert.equal(control.hit, true, `${control.name} is not covered at ${width}px`);
         }
         if (writable) {
           const [x, y] = await client.evaluate(`(() => { const r = document.querySelector('.viewer-mark-add').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);

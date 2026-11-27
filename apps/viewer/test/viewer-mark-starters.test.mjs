@@ -122,19 +122,19 @@ test('in the editor: a suggestion is made on Save, once, and survives a reload b
   const first = page(), person = scope('client', 'client-a');
   await first.marks.setScope(person);
   await first.place('43.05, -87');
-  first.q('[name=categoryId]').value = 'starter:access';
-  await first.q('[name=categoryId]').fire('change');
+  assert.ok((await first.categoryOptions()).includes('Gate or access'), 'offered under the box');
+  await first.chooseCategory('gate or ACCESS');
   assert.deepEqual([first.q('[name=name]').value, first.q('[name=color]').value], ['Gate or access', starter('access').color]);
   assert.equal(rows(), 0);
   const second = page();
   await second.marks.setScope(person);
-  assert.equal(second.q('[name=categoryId]').value, 'starter:access');
+  assert.equal(second.q('[name=category]').value, 'Gate or access');
   await second.save();
   const [mark] = second.store.state.marks, [category] = second.store.state.categories;
   assert.deepEqual([mark.categoryId, mark.icon, mark.name, category.name, rows()], [category.id, 'gate', 'Gate or access', 'Gate or access', 1]);
   await second.open('Gate or access');
-  assert.equal(second.q('[name=categoryId]').value, category.id);
-  assert.ok(!second.q('[name=categoryId]').children.some(option => option.value === 'starter:access'));
+  assert.equal(second.q('[name=category]').value, category.name);
+  assert.deepEqual((await second.categoryOptions()).filter(name => name === 'Gate or access'), ['Gate or access'], 'offered once, as the category');
   // A second device that still shows the suggestion ends up with the same category.
   const stale = mount();
   await stale.marks.setScope(scope('client', 'client-b'));
@@ -142,8 +142,7 @@ test('in the editor: a suggestion is made on Save, once, and survives a reload b
   database.prepare('DELETE FROM viewer_mark_categories').run();
   const made = repository.createStarter(principal('client-b'), input('road')).category;
   await stale.place('43.06, -87');
-  stale.q('[name=categoryId]').value = 'starter:road';
-  await stale.q('[name=categoryId]').fire('change');
+  await stale.chooseCategory('Road or trail');
   await stale.save();
   assert.deepEqual([stale.store.state.marks[0].categoryId, rows()], [made.id, 1]);
 });
@@ -155,8 +154,7 @@ test('a suggestion that cannot be made leaves the mark unsaved and the editor op
   const made = repository.createStarter(principal('client-a'), input('other')).category;
   repository.deleteCategory(principal('client-a'), made.id, 1);
   await panel.place('43.05, -87');
-  panel.q('[name=categoryId]').value = 'starter:other';
-  await panel.q('[name=categoryId]').fire('change');
+  await panel.chooseCategory('Other');
   await panel.save();
   assert.equal(panel.q('.viewer-mark-form').hidden, false);
   assert.equal(database.prepare('SELECT count(*) n FROM viewer_marks').get().n, 0);
@@ -180,7 +178,7 @@ test('suggestions can be put away, stay away through Show all and Only, and come
   await button('Show all').click();
   assert.equal(list().hidden, true);
   await panel.place('43.05, -87');
-  assert.ok(!panel.q('[name=categoryId]').children.some(option => option.value.startsWith('starter:')));
+  assert.deepEqual(await panel.categoryOptions(), ['Water'], 'only the category made, no suggestions');
   const again = page();
   await again.marks.setScope(person);
   assert.equal(again.q('.viewer-mark-starters').hidden, true);
