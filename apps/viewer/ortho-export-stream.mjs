@@ -5,6 +5,7 @@
 // or a deflate-compressed RGBA GeoTIFF (BigTIFF past 4 GiB).
 import { drawContours } from './contours.mjs';
 import { isRgbNoData } from './orthophoto-mask.mjs';
+import { createJpegEncoder } from './ortho-export-jpeg.mjs';
 import { clampExtent, drawPrintLegend, printLayout, renderOrthoPixels } from './ortho-print-export.mjs';
 
 export const TILE_WIDTH = 4096;
@@ -344,7 +345,8 @@ export function createFileSink(writable) {
 export async function streamOrthoExport({ ds, grid, format = 'png', epsg = null, layers = {}, sink, createCanvas, pool, signal, onProgress, beforeClose }) {
   const print = format !== 'tif';
   const rows = stripRows(grid.width);
-  const encoder = print ? createPngEncoder({ width: grid.width, height: grid.height, sink })
+  const encoder = format === 'jpg' ? createJpegEncoder({ width: grid.width, height: grid.height, sink })
+    : print ? createPngEncoder({ width: grid.width, height: grid.height, sink })
     : createGeoTiffEncoder({ width: grid.width, height: grid.height, extent: grid.extent, epsg, rowsPerStrip: rows, sink });
   const scale = overlayScale(grid.width, grid.height);
   try {

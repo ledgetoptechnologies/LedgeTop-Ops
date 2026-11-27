@@ -25,6 +25,8 @@
       --font: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* The reset above drops the browser's centring of modal dialogs: every pop-up is centred. */
+    dialog:modal { margin: auto; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: var(--brand-dark); color: #f5f5f5; font-family: var(--font); }
     #app { position: fixed; inset: 0; display: flex; flex-direction: column; }
     canvas { display: block; }
@@ -400,25 +402,40 @@
     #contours-status:empty { display: none; }
     /* Downloads panel: products and image export side by side */
     .downloads-grid { grid-template-columns: 1fr; }
-    .downloads-slot > button, .downloads-slot .viewer-product-open { width: 100%; }
+    .downloads-slot > button { width: 100%; }
     .downloads-slot:empty { display: none; }
     #panel-model-report .tool-btn { width: 100%; }
     #panel-downloads:not(:has(.downloads-slot:not([hidden]) > :not([hidden]))) { display: none; }
-    /* Export image dialog (ortho-export-dialog.mjs) */
+    /* Download dialog (ortho-export-dialog.mjs): the products list and the orthophoto page */
     .oe-dialog { margin: auto; width: min(920px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; flex-direction: column;
       background: #141418; color: var(--brand-text); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; box-shadow: 0 24px 64px rgba(0,0,0,0.6); font-family: var(--font); }
     .oe-dialog[open] { display: flex; }
+    .oe-dialog [hidden] { display: none !important; }
+    .oe-dialog:has(.dl-page:not([hidden])) { width: min(520px, calc(100vw - 32px)); }
     .oe-dialog::backdrop { background: rgba(0,0,0,0.62); backdrop-filter: blur(2px); }
-    .oe-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 12px; border-bottom: 1px solid rgba(255,255,255,0.07); }
-    .oe-head h2 { font-size: 16px; font-weight: 700; letter-spacing: 0.2px; }
-    .oe-close { width: 32px; height: 32px; border-radius: 8px; border: 0; background: transparent; color: #bbb; cursor: pointer; display: grid; place-items: center; }
-    .oe-close svg { width: 18px; height: 18px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; }
-    .oe-close:hover { background: rgba(255,255,255,0.08); color: #fff; }
+    .oe-head { display: flex; align-items: center; gap: 6px; padding: 14px 14px 12px 18px; border-bottom: 1px solid rgba(255,255,255,0.07); }
+    .oe-head h2 { flex: 1; font-size: 16px; font-weight: 700; letter-spacing: 0.2px; user-select: none; }
+    .oe-close, .oe-back { flex: none; width: 32px; height: 32px; border-radius: 8px; border: 0; background: transparent; color: #bbb; cursor: pointer; display: grid; place-items: center; }
+    .oe-back { margin-left: -8px; }
+    .oe-close svg, .oe-back svg { width: 18px; height: 18px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .oe-close:hover, .oe-back:hover { background: rgba(255,255,255,0.08); color: #fff; }
+    .dl-page { padding: 14px 18px 4px; overflow: auto; min-height: 0; }
+    .dl-list { display: grid; gap: 8px; }
+    .dl-item { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 10px 12px 10px 14px; text-align: left; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #e6e6ea; font: inherit; cursor: pointer; transition: border-color .15s, background .15s; }
+    .dl-item:hover:not(:disabled) { border-color: rgba(238,80,7,0.6); background: rgba(238,80,7,0.06); }
+    .dl-item:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
+    .dl-item:disabled { opacity: 0.55; cursor: wait; }
+    .dl-item-text { flex: 1; min-width: 0; display: grid; gap: 3px; }
+    .dl-item-text strong { font-size: 14px; font-weight: 650; }
+    .dl-item-text small { font-size: 12px; color: #9aa0aa; font-variant-numeric: tabular-nums; }
+    .dl-item svg { flex: none; width: 18px; height: 18px; stroke: #9aa0aa; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .dl-item:hover svg { stroke: var(--brand-orange); }
     .oe-body { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 18px; padding: 16px 18px; overflow: auto; min-height: 0; }
     .oe-preview { position: relative; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-    .oe-preview-image { position: relative; height: min(460px, 58dvh); border-radius: 10px; overflow: hidden; display: grid; place-items: center;
+    /* One definite cell, so the preview scales to fit whole, however tall or wide the area is. */
+    .oe-preview-image { position: relative; height: min(460px, 58dvh); border-radius: 10px; overflow: hidden; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; padding: 10px;
       background: #0b0b0d repeating-conic-gradient(#17171b 0 25%, #0f0f12 0 50%) 0 0 / 18px 18px; border: 1px solid rgba(255,255,255,0.06); }
-    .oe-preview-canvas { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; box-shadow: 0 4px 18px rgba(0,0,0,0.45); }
+    .oe-preview-canvas { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; min-width: 0; min-height: 0; object-fit: contain; box-shadow: 0 4px 18px rgba(0,0,0,0.45); }
     .oe-preview-state { position: absolute; left: 0; right: 0; top: 0; height: min(460px, 58dvh); display: grid; place-items: center; font-size: 13px; color: #9aa0aa; pointer-events: none; }
     .oe-preview-state.oe-loading::after { content: ""; width: 26px; height: 26px; border-radius: 50%; border: 3px solid rgba(255,255,255,0.15); border-top-color: var(--brand-orange); animation: oe-spin 0.8s linear infinite; }
     @keyframes oe-spin { to { transform: rotate(360deg); } }
@@ -446,13 +463,15 @@
     .oe-toggle input:focus-visible ~ .oe-switch { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
     .oe-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 18px 16px; border-top: 1px solid rgba(255,255,255,0.07); }
     .oe-status { flex: 1; min-width: 0; font-size: 12px; color: #aab0ba; }
+    /* The list page has no actions: its footer shows only while there is something to say. */
+    .oe-foot:has(.oe-actions[hidden]):has(.oe-status:empty) { display: none; }
     .oe-progress { flex-basis: 100%; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.08); overflow: hidden; }
     .oe-progress-bar { width: 0; height: 100%; background: var(--brand-orange); transition: width .2s; }
     .oe-actions { display: flex; gap: 8px; margin-left: auto; }
     .oe-btn { padding: 9px 16px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.04); color: #eee; font: 600 13px var(--font); cursor: pointer; }
     .oe-btn:hover:not(:disabled) { border-color: var(--brand-orange); }
     .oe-btn:disabled { opacity: 0.45; cursor: default; }
-    .oe-btn:focus-visible, .oe-close:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
+    .oe-btn:focus-visible, .oe-close:focus-visible, .oe-back:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
     .oe-primary { background: var(--brand-orange); border-color: var(--brand-orange); color: #fff; min-width: 96px; }
     .oe-primary:hover:not(:disabled) { background: #ff6a1f; }
     .oe-parcels .oe-btn { padding: 6px 12px; font-size: 12px; }
@@ -464,7 +483,8 @@
     @media (max-width: 720px) {
       .oe-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
       .oe-body { grid-template-columns: 1fr; gap: 14px; padding: 12px 14px; }
-      .oe-head { padding: 12px 14px 10px; }
+      .oe-head { padding: 10px 10px 10px 14px; }
+      .dl-page { padding: 12px 14px 4px; }
       .oe-foot { padding: 10px 14px 14px; }
       .oe-preview-image, .oe-preview-state { height: min(240px, 32dvh); }
       .oe-seg { flex-direction: row; }
@@ -1000,8 +1020,7 @@
         <div class="panel" id="panel-downloads">
           <h3><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M4 19h16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg> Downloads</h3>
           <div class="tool-grid downloads-grid">
-            <div id="downloads-products" class="downloads-slot"></div>
-            <div id="ortho-print-actions" class="downloads-slot" hidden><button class="tool-btn" id="btn-export-image">Export image</button></div>
+            <div id="download-actions" class="downloads-slot" hidden><button class="tool-btn" id="btn-download">Download</button></div>
           </div>
         </div>
       </div>
