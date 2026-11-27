@@ -197,7 +197,7 @@ test('viewer wiring: Contours panel sits with the map layer panels; mode switche
   assert.equal(preview.match(/\bawait /g).length, 3);
   assert.equal(preview.match(/checkOrthoExport\(options\);/g).length, 4, 'preview rechecks access after every await');
   assert.match(preview, /plan\.native \? 900 : Math\.min\(900, Math\.max\(plan\.grid\.width, plan\.grid\.height\)\)/, 'capped previews are never finer than the export');
-  assert.match(main, /beforeClose: current \}\);/, 'checked once more before a chosen file is committed');
+  assert.match(main, /beforeClose: \(\) => \{ current\(\); if \(writable\) onCommit\?\.\(\); \} \}\);/, 'checked once more before a chosen file is committed');
   assert.match(exporter, /assertOrthoPrintAllowed\(orthoPrintPermissions\(\), \{ area: policyArea\(area\), format \}\)/);
   assert.match(exporter, /isMapMode\(state\.activeMode\)/, 'map areas follow any map view');
   assert.match(exporter, /printLongEdge\(\{ area: 'view', requested: VIEW_EXPORT_MAX_EDGE, policy, viewPixels \}\)/, 'map areas capped without download');
@@ -211,7 +211,8 @@ test('viewer wiring: Contours panel sits with the map layer panels; mode switche
   assert.match(run, /await getDataset\([^\n]*\);\s*current\(\);\s*planned = planOrthoExport\(ortho, area\);\s*current\(\);/, 'checked after opening the orthophoto and planning');
   assert.match(run, /await orthoExportLayers\([^\n]*\);\s*current\(\);/, 'checked after tracing');
   assert.match(run, /onProgress: \(fraction\) => \{ current\(\);/, 'checked after every strip');
-  assert.match(run, /await streamOrthoExport\([\s\S]*?\}\);\s*(\/\/[^\n]*\s*)*current\(\);(?:(?!await)[\s\S])*return \{/, 'checked after rendering, with nothing awaited before the file is saved');
+  // A chosen file is final once the stream closed it (beforeClose checked it); a blob is checked again before the dialog saves it.
+  assert.match(run, /await streamOrthoExport\([\s\S]*?\}\);\s*(\/\/[^\n]*\s*)*if \(writable\) return \{[^\n]*committed: true \};\s*(\/\/[^\n]*\s*)*current\(\);(?:(?!await)[\s\S])*return \{/, 'checked after rendering, with nothing awaited before the file is saved');
   const code = run.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
   assert.equal(code.match(/\bawait /g).length, 3, 'every await is covered above');
   const access = main.slice(main.indexOf('function setSessionAccessState('), main.indexOf('function recordSessionAccessFailure('));

@@ -3,7 +3,8 @@
 // access allows it; the work itself is done by the callbacks.
 //   defaults() → { areas: { full, view, parcels }, parcelCount, contoursAvailable, propertyAvailable, geotiffAvailable }
 //   preview(options, signal) → { canvas, width, height } (width/height of the final file)
-//   run(options, signal, { onProgress, writable }) → { blob | null, filename, note?, stillCurrent? }
+//   run(options, signal, { onProgress, onCommit, writable }) → { blob | null, filename, note?, stillCurrent?, committed? }
+//     onCommit(): the chosen file is being written for good; committed: it was.
 //   pickParcels() → Promise<count>; the dialog hides while the person picks on the map.
 
 export const LARGE_EXPORT_PIXELS = 100_000_000;
@@ -67,7 +68,7 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
   dialog.setAttribute('aria-label', 'Export orthophoto image');
   documentRef.body.append(dialog);
 
-  let available = {}, previewController = null, exportController = null, previewTimer = null, last = null, picking = false;
+  let available = {}, previewController = null, exportController = null, previewTimer = null, last = null, picking = null, committing = null; // committing: the export whose chosen file is being written
   const options = () => ({ area: area.value, format: format.value, contours: contours.input.checked, property: property.input.checked });
   const busy = () => Boolean(exportController);
 
@@ -86,6 +87,7 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
     parcelCount.textContent = n ? plural(n, 'parcel', 'parcels') : 'No parcels selected';
     pickButton.textContent = n ? 'Change' : 'Pick on map';
     exportButton.disabled = busy() || (parcels && !n) || !last;
+    cancel.disabled = Boolean(committing);
   }
 
   function schedulePreview() {
@@ -141,46 +143,63 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
     input.addEventListener('change', () => { status.textContent = ''; if (area.value === 'parcels' && !(available.parcelCount > 0) && input === area.inputs.parcels) { void startPicking(); return; } syncControls(); schedulePreview(); });
   }
 
-  async function startPicking() {
-    if (!pickParcels || busy()) return;
-    picking = true;
+  // One picking session at a time; the dialog comes back when it ends, however it ends.
+  function startPicking() {
+    if (picking) return picking;
+    if (!pickParcels || busy()) return Promise.resolve();
     stopAll();
+    let settle;
+    const run = picking = new Promise((resolve) => { settle = resolve; }).finally(() => { if (picking === run) picking = null; open({ keepStatus: true }); });
+    // Picking is marked before the dialog closes, so closing does not count as a cancel.
     dialog.close();
-    try { available.parcelCount = await pickParcels(); } finally { picking = false; }
-    open({ keepStatus: true });
+    Promise.resolve().then(() => pickParcels()).then((count) => { available.parcelCount = count; }, () => { /* keep the previous selection */ }).finally(settle);
+    return run;
   }
   pickButton.addEventListener('click', () => { void startPicking(); });
 
   close.addEventListener('click', () => dialog.close());
   cancel.addEventListener('click', () => { if (busy()) { stopExport(); status.textContent = 'Export cancelled.'; syncControls(); } else dialog.close(); });
-  dialog.addEventListener('close', () => { if (!picking) stopAll(); });
+  dialog.addEventListener('close', () => { if (!picking && !committing) stopAll(); });
   openButton?.addEventListener('click', () => open());
 
   exportButton.addEventListener('click', async () => {
     if (busy() || !last) return;
     const opts = options(), filename = exportFileName(opts);
-    let writable = null;
-    // Very large files go straight to disk where the browser can do that.
-    if (last.width * last.height >= LARGE_EXPORT_PIXELS && typeof windowRef?.showSaveFilePicker === 'function') {
-      try {
-        const handle = await windowRef.showSaveFilePicker({ suggestedName: filename, types: [{ description: opts.format === 'tif' ? 'GeoTIFF' : 'PNG image', accept: { [opts.format === 'tif' ? 'image/tiff' : 'image/png']: [opts.format === 'tif' ? '.tif' : '.png'] } }] });
-        writable = await handle.createWritable();
-      } catch (error) { if (error?.name === 'AbortError') return; writable = null; }
-    }
+    // The export is cancellable from here on: Cancel or Close while the save
+    // picker or the file is opening creates nothing and runs nothing.
     const controller = exportController = new AbortController(), signal = controller.signal;
     progress.hidden = false; bar.style.width = '0'; status.textContent = 'Exporting…'; syncControls();
+    let writable = null, committed = false;
+    const discard = () => { const w = writable; writable = null; w?.abort?.()?.catch?.(() => {}); };
     try {
+      // Very large files go straight to disk where the browser can do that.
+      if (last.width * last.height >= LARGE_EXPORT_PIXELS && typeof windowRef?.showSaveFilePicker === 'function') {
+        let handle = null;
+        try {
+          handle = await windowRef.showSaveFilePicker({ suggestedName: filename, types: [{ description: opts.format === 'tif' ? 'GeoTIFF' : 'PNG image', accept: { [opts.format === 'tif' ? 'image/tiff' : 'image/png']: [opts.format === 'tif' ? '.tif' : '.png'] } }] });
+        } catch (error) { if (error?.name === 'AbortError') { if (!signal.aborted) status.textContent = ''; return; } }
+        if (signal.aborted) return;
+        if (handle) {
+          try { writable = await handle.createWritable(); } catch { writable = null; }
+          if (signal.aborted) { discard(); return; }
+        }
+      }
       const result = await run({ ...opts, filename }, signal, {
         writable,
-        onProgress: (fraction) => { if (!signal.aborted) { bar.style.width = `${Math.round(fraction * 100)}%`; status.textContent = `Exporting… ${Math.round(fraction * 100)}%`; } },
+        onProgress: (fraction) => { if (!signal.aborted && committing !== controller) { bar.style.width = `${Math.round(fraction * 100)}%`; status.textContent = `Exporting… ${Math.round(fraction * 100)}%`; } },
+        // From here the chosen file is final: nothing is left to cancel.
+        onCommit: () => { if (exportController !== controller) return; committing = controller; status.textContent = 'Saving…'; syncControls(); },
       });
-      if (signal.aborted) return;
-      if (result.stillCurrent?.() === false) { status.textContent = ''; return; }
-      if (result.blob) {
-        const url = URL.createObjectURL(result.blob);
-        const a = el('a', { href: url, download: result.filename || filename });
-        documentRef.body.append(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      committed = result.committed === true;
+      if (!committed) {
+        if (signal.aborted) return;
+        if (result.stillCurrent?.() === false) { status.textContent = ''; return; }
+        if (result.blob) {
+          const url = URL.createObjectURL(result.blob);
+          const a = el('a', { href: url, download: result.filename || filename });
+          documentRef.body.append(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        }
       }
       status.textContent = result.note || `Saved ${result.filename || filename}`;
     } catch (error) {
@@ -188,6 +207,8 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
       status.textContent = error?.code ? error.message : 'Could not export the image.';
     } finally {
       if (exportController === controller) { exportController = null; progress.hidden = true; }
+      // Only this export's own commit ends here; an older one unwinding late leaves a newer commit alone.
+      if (committing === controller) committing = null;
       syncControls();
     }
   });

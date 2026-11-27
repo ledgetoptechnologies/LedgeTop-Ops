@@ -4,9 +4,9 @@ import { openMarksPanel } from './helpers/marks-panel.mjs';
 
 const PX = 1e-5; // degrees per pixel at zoom 18 in the stand-in
 
-async function open(t, { who = ['client', 'client-a'] } = {}) {
+async function open(t, { who = ['client', 'client-a'], mount = {} } = {}) {
   const setup = await openMarksPanel(t);
-  const panel = setup.mount();
+  const panel = setup.mount(mount);
   panel.dom.window.matchMedia = () => ({ matches: false });
   await panel.marks.setScope(setup.scope(...who));
   const box = () => panel.q('.viewer-mark-box'), card = () => panel.q('.viewer-mark-card');
@@ -243,4 +243,36 @@ test('on a mid-width map the list opens over an open card by closing the card', 
   assert.equal(card().hidden, false);
   await key('l');
   assert.deepEqual([box().hidden, card().hidden], [false, true]);
+});
+
+// The map's own buttons (Save view image, Reset, Fullscreen) are a row at the top right, wider than the rail.
+const controlsRow = (width, buttons = 3) => [{ x: width - 14 - (buttons * 38 + (buttons - 1) * 8), y: 14, width: buttons * 38 + (buttons - 1) * 8, height: 38 }];
+const overlaps = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+test('a card near the top right stays clear of the Reset and Fullscreen row, not only the rail', async t => {
+  let width = 1200;
+  const { panel, card, key, add } = await open(t, { mount: { mapControls: () => controlsRow(width) } });
+  panel.leaflet.setSize(1200, 800);
+  await add('Corner', { geometry: { type: 'Point', coordinates: [-87 + 520 * PX, 43 + 370 * PX] } });
+  await add('Low', { geometry: { type: 'Point', coordinates: [-87 + 520 * PX, 43 - 200 * PX] } });
+  for (const name of ['Corner', 'Low']) {
+    panel.leaflet.map.setView([43, -87]);
+    await panel.leaflet.pins().find(pin => pin.label.text === name).click();
+    panel.leaflet.fire('move');
+    const rect = { x: parseFloat(card().style.left), y: parseFloat(card().style.top), width: 300, height: 260 };
+    for (const control of controlsRow(width)) assert.ok(!overlaps(rect, control), `${name}: card ${JSON.stringify(rect)} clear of the controls ${JSON.stringify(control)}`);
+    assert.ok(rect.x + rect.width <= 1200 - 64, `${name}: clear of the rail`);
+    await key('Escape');
+  }
+});
+
+test('at 390 px a sheet never reaches up over the Reset and Fullscreen row', async t => {
+  const { panel, card } = await open(t, { mount: { mapControls: () => controlsRow(390, 2) } });
+  panel.leaflet.setSize(390, 320);
+  panel.leaflet.fire('resize');
+  await panel.place('43.05, -87');
+  assert.equal(card().classList.contains('sheet'), true);
+  assert.equal(card().classList.contains('full'), true);
+  const px = Number(/(\d+(?:\.\d+)?)px/.exec(card().style.maxHeight)?.[1]);
+  assert.ok(Number.isFinite(px) && 320 - px >= 14 + 38, `sheet top ${320 - px} is below the controls (max-height ${card().style.maxHeight})`);
 });

@@ -44,7 +44,7 @@ function writePreference(storage, key, value) {
 // overlay: where the pop-ups over the map go (the card, the strip while placing).
 export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = globalThis.fetch, newId = () => crypto.randomUUID(),
   onActivate = () => {}, onViewerAccessLost = () => {}, focusAfterAccessLoss,
-  georef = () => null, units = () => 'imperial', fileName = () => 'marks', obstacles = () => [] }) {
+  georef = () => null, units = () => 'imperial', fileName = () => 'marks', obstacles = () => [], mapControls = () => [] }) {
   const document = panel.ownerDocument, window = document.defaultView;
   const listeners = new AbortController();
   const on = (target, type, handler) => target.addEventListener(type, handler, { signal: listeners.signal });
@@ -584,21 +584,35 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const RAIL = 64, DOCK_LEFT = 56, GAP = 12;
   const roomBeside = () => (getMap()?.getSize?.().x ?? Infinity) >= DOCK_LEFT + (box.offsetWidth || 340) + GAP + 300 + RAIL;
   const boxRight = () => (!box.hidden && !narrow() ? DOCK_LEFT + (box.offsetWidth || 340) + GAP : 0);
+  // The map's own buttons (Reset, Fullscreen, Save view image), measured in the
+  // map's pixels where they are now: the row is wider than the rail.
+  const controlRects = () => (mapControls() || []).filter(rect => rect && rect.width > 0 && rect.height > 0);
+  // A sheet at the bottom stops below them.
+  const sheetCap = (size, percent) => {
+    const below = Math.max(0, ...controlRects().map(rect => rect.y + rect.height + GAP));
+    return below && size ? `min(${percent}%, ${Math.max(0, size.y - below)}px)` : '';
+  };
   function placeBeside(element, geometry, full) {
     const size = getMap()?.getSize?.(), sheet = narrow();
     element.classList.toggle('sheet', sheet);
     element.classList.toggle('full', sheet && full);
     const point = !sheet && size && geometry ? layer.anchor(geometry) : null;
-    if (!point) { element.style.left = element.style.top = element.style.maxHeight = ''; return; }
+    if (!point) { element.style.left = element.style.top = ''; element.style.maxHeight = sheet ? sheetCap(size, full ? 86 : 46) : ''; return; }
     const width = element.offsetWidth || 300, height = element.offsetHeight || 260, gap = 28, edge = 8;
-    const min = Math.max(edge, boxRight()), max = size.x - RAIL - width;
+    const min = Math.max(edge, boxRight());
     // Clear of the undo note at the bottom while it is there.
     const bottom = size.y - edge - (undoBar.hidden ? 0 : (undoBar.offsetHeight || 48) + 16);
+    // How far right a card at this height may reach: before the rail, and
+    // before any of the map's buttons beside it.
+    const reach = y => Math.min(size.x - RAIL, ...controlRects().filter(rect => rect.y < y + height + GAP && y < rect.y + rect.height + GAP).map(rect => rect.x - GAP)) - width;
+    let top = Math.max(edge, Math.min(point[1] - 60, bottom - height)), max = reach(top), below = false;
+    // No room beside them at this height: the card goes below them.
+    if (max < min) { top = Math.max(top, ...controlRects().map(rect => rect.y + rect.height + GAP)); max = reach(top); below = true; }
     const right = point[0] + gap <= max;
     const left = right ? point[0] + gap : point[0] - gap - width;
     element.style.left = `${Math.max(min, Math.min(left, max))}px`;
-    element.style.top = `${Math.max(edge, Math.min(point[1] - 60, bottom - height))}px`;
-    element.style.maxHeight = `${bottom - edge}px`;
+    element.style.top = `${top}px`;
+    element.style.maxHeight = `${Math.max(0, bottom - (below ? top : edge))}px`;
   }
   // The undo note sits at the bottom centre, above whatever is docked there.
   function placeUndo() {
@@ -624,6 +638,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (!pick.hidden) placeBeside(pick, store.find(picked[0])?.geometry, false);
     box.classList.toggle('sheet', narrow());
     box.classList.toggle('full', narrow());
+    box.style.maxHeight = narrow() ? sheetCap(getMap()?.getSize?.(), 86) : '';
     placeUndo();
   }
 
@@ -904,21 +919,42 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     render();
     (selecting ? selectDone : selectButton.hidden ? activeTab() : selectButton)?.focus?.({ preventScroll: true });
   }
-  // What a confirmation would start, if Change is chosen.
-  function askSharing(picked, value, account) {
+  // What a question would ask, worked out from what the controls show now:
+  // 'all' is Share all, 'bulk' the ticked marks still shown and the chosen sharing.
+  function sharingQuestion(source) {
+    const picked = source === 'all' ? store.state.marks.filter(mark => mark.mine && mark.visibility !== 'shared').map(mark => mark.id) : pickedShown();
+    const value = source === 'all' ? 'shared' : bulkVisibility.value, account = source === 'all' ? undefined : bulkAccount.value;
     const choice = choiceOf(value, account);
-    if (!picked.length || store.state.busy || jobOpen() || unsaved()) return;
-    if (choice.visibility === 'client' && !choice.shareAccount) { message('Choose a client account to share with.'); return; }
     // Only those it would change are counted and asked about.
     const ids = picked.filter(id => {
       const mark = store.find(id);
       return mark && (sharingValue(mark) !== value || (value === 'client' && (mark.shareAccount ?? null) !== choice.shareAccount));
     });
+    return { picked, value, choice, ids, key: JSON.stringify([source, picked, value, choice.shareAccount ?? null, ids]) };
+  }
+  // What a confirmation would start, if Change is chosen.
+  function askSharing(source) {
+    const { picked, value, choice, ids, key } = sharingQuestion(source);
+    if (!picked.length || store.state.busy || jobOpen() || unsaved()) return;
+    if (choice.visibility === 'client' && !choice.shareAccount) { message('Choose a client account to share with.'); return; }
     if (!ids.length) { message(`${picked.length === 1 ? 'It is' : 'They are'} already ${VISIBILITY_LABEL[value]}.`); return; }
-    confirming = { ids, choice, label: VISIBILITY_LABEL[value] };
+    confirming = { source, key, ids, choice, label: VISIBILITY_LABEL[value] };
     confirmArmed = false;
     render();
     confirmCancel.focus?.({ preventScroll: true });
+  }
+  // The question stands only for exactly what it asks about: the controls are
+  // locked while it is open, and if anything it depends on still changes (the
+  // ticks, the marks shown, the choice, the marks themselves), or the list
+  // closes, it is dropped and asked again.
+  function questionStands() {
+    if (!confirming) return true;
+    if (!boxOpen || (confirming.source === 'bulk' && !selecting) || sharingQuestion(confirming.source).key !== confirming.key) {
+      confirming = null;
+      confirmArmed = false;
+      return false;
+    }
+    return true;
   }
   function closeConfirm({ focus = true } = {}) {
     const was = confirming;
@@ -927,6 +963,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (focus && was) (selecting ? bulkApply : shareAllButton.hidden ? activeTab() : shareAllButton)?.focus?.({ preventScroll: true });
   }
   async function startSharing() {
+    // Change runs only what is asked about, as the controls show it right now.
+    if (!questionStands()) { render(); return; }
     const job = confirming;
     if (!job || !confirmArmed || store.state.busy || jobRunning()) return;
     confirming = null;
@@ -959,8 +997,9 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (selecting) {
       const shown = shownSelectable();
       selectCount.textContent = `${pickedShown().length} selected`;
-      selectAll.disabled = busy || shown.every(mark => selected.has(mark.id));
-      selectNone.disabled = busy || !selected.size;
+      const asking = Boolean(confirming);
+      selectAll.disabled = busy || asking || shown.every(mark => selected.has(mark.id));
+      selectNone.disabled = busy || asking || !selected.size;
       const options = sharingOptions(), value = options.includes(bulkVisibility.value) ? bulkVisibility.value : options[0];
       if ([...bulkVisibility.children].map(option => option.value).join() !== options.join())
         bulkVisibility.replaceChildren(...options.map(option => h(document, 'option', { value: option, text: VISIBILITY_LABEL[option] })));
@@ -972,7 +1011,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         bulkAccount.value = accounts.includes(kept) ? kept : '';
       }
       bulkAccount.hidden = value !== 'client';
-      bulkVisibility.disabled = bulkAccount.disabled = busy;
+      bulkVisibility.disabled = bulkAccount.disabled = busy || asking;
       bulkApply.disabled = busy || jobOpen() || !pickedShown().length || Boolean(confirming);
     }
     confirmBox.hidden = !confirming;
@@ -991,6 +1030,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   function render() {
     const { state } = store;
     const active = document.activeElement;
+    const asked = questionStands();
     const restoreFocus = hadMarksAccess && !state.ready && (pendingRestoreFocus?.()
       || (active && (panel.contains(active) || overlay.contains(active) || active.closest?.('.viewer-map-mark,.viewer-map-area,.viewer-map-group'))));
     const writeAccess = state.ready && state.capabilities.write;
@@ -1067,10 +1107,10 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       if (selecting) {
         // A tick for each of one's own marks; the row ticks it too.
         const can = selectable(mark), ticked = can && selected.has(mark.id);
-        const tick = h(document, 'input', { type: 'checkbox', 'data-select-mark': mark.id, 'aria-label': 'Select ' + mark.name, disabled: !can || state.busy });
+        const tick = h(document, 'input', { type: 'checkbox', 'data-select-mark': mark.id, 'aria-label': 'Select ' + mark.name, disabled: !can || state.busy || Boolean(confirming) });
         tick.checked = ticked;
         on(tick, 'change', () => toggleSelected(mark.id, tick.checked));
-        const row = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'aria-pressed': String(ticked), disabled: !can || state.busy }, icon, text);
+        const row = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'data-select-row': mark.id, 'aria-pressed': String(ticked), disabled: !can || state.busy || Boolean(confirming) }, icon, text);
         on(row, 'click', () => toggleSelected(mark.id, !selected.has(mark.id)));
         return h(document, 'li', { class: 'viewer-mark-selectable' }, tick, row);
       }
@@ -1079,9 +1119,18 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       on(button, 'click', () => select(mark.id));
       return h(document, 'li', {}, button);
     });
+    // Ticking rebuilds the rows: the focus stays on the same mark's tick or row.
+    const focusedTick = list.contains(active) ? active.getAttribute?.('data-select-mark') : null, focusedRow = list.contains(active) ? active.getAttribute?.('data-select-row') : null;
     list.replaceChildren(...rows);
+    if (focusedTick || focusedRow) [...list.querySelectorAll(focusedTick ? 'input' : 'button')].find(node => node.getAttribute(focusedTick ? 'data-select-mark' : 'data-select-row') === (focusedTick || focusedRow))?.focus?.({ preventScroll: true });
     renderSelecting();
+    // All and None: when the one pressed is spent, the focus goes to the other.
+    if (active === selectAll && selectAll.disabled && !selectNone.disabled) selectNone.focus?.({ preventScroll: true });
+    else if (active === selectNone && selectNone.disabled && !selectAll.disabled) selectAll.focus?.({ preventScroll: true });
+    // A question dropped under the focus hands it back to what asks it.
+    if (!asked && confirmBox.contains(active)) [selecting ? bulkApply : shareAllButton, activeTab()].find(node => node && !node.hidden && !node.disabled)?.focus?.({ preventScroll: true });
     searchInput.hidden = !state.marks.length;
+    searchInput.disabled = Boolean(confirming);
 
     // Categories
     const showDeleted = sessionScope && state.capabilities.write;
@@ -1222,14 +1271,14 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(moveButton, 'click', () => beginEdit({ move: true }));
   on(shareAllButton, 'click', () => {
     if (!shareAllAvailable()) return;
-    askSharing(store.state.marks.filter(mark => mark.mine && mark.visibility !== 'shared').map(mark => mark.id), 'shared');
+    askSharing('all');
   });
   on(selectButton, 'click', () => setSelecting(true));
   on(selectDone, 'click', () => setSelecting(false));
   on(selectAll, 'click', () => { for (const mark of shownSelectable()) selected.add(mark.id); render(); });
   on(selectNone, 'click', () => { selected = new Set(); render(); });
   on(bulkVisibility, 'change', () => render());
-  on(bulkApply, 'click', () => askSharing(pickedShown(), bulkVisibility.value, bulkAccount.value));
+  on(bulkApply, 'click', () => askSharing('bulk'));
   on(confirmCancel, 'click', () => closeConfirm());
   on(confirmGo, 'click', () => startSharing());
   // A held key does not answer the question: repeats are dropped, and a key press only

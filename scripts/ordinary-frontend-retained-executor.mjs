@@ -9,7 +9,8 @@ import { capture, CloudflareReader, deploymentSourceCommit, hash, canonical, nee
   stableState, validateBuildEnvironment, validateInstallation, validateStaffReadinessReceipt,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
   OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE,
-  ordinaryFrontendPreflightDescriptor, resourcesShape } from './production-deploy.mjs';
+  ordinaryFrontendPreflightDescriptor, resourcesShape, OPS_STAFF_DIRECTORY_ENTRYPOINT,
+  OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT } from './production-deploy.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET, releaseCredentialAccepted } from './native-staff-cutover-readiness.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT, validateOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority.mjs';
 import { readOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority-reader.mjs';
@@ -125,6 +126,98 @@ export function verifyExactOpsSuccessorNamedHandlerAddition(before, candidate, {
     sourceCommit, mainSHA256, sourceMapSHA256,
     className: SUCCESSOR_READER_CLASS, addedMethods: [...SUCCESSOR_READER_ADDITIONS],
     allOtherResourcesUnchanged: true });
+}
+
+/** ops-staff-directory-entrypoint-v1: the pinned Ops build adds exactly one new named-handler
+ * class, StaffDirectory, with exactly its three reviewed handlers. Top-level handlers, every other
+ * class and handler, bindings and runtime stay equal to the installed baseline. Not tied to a
+ * candidate id; the caller binds the runtime candidate id where the installation is validated. */
+export function verifyExactOpsStaffDirectoryEntrypointAddition(before, candidate, { sourceCommit, mainSHA256, sourceMapSHA256 } = {},
+  pins = OPS_STAFF_DIRECTORY_ENTRYPOINT) {
+  needFn(before?.operations?.version?.resources && candidate?.resources
+    && candidate.resources.script?.named_handlers && before.operations.version.resources.script?.named_handlers,
+  'Ops StaffDirectory entrypoint resource evidence is incomplete');
+  needFn(pins?.contract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT && typeof pins.className === 'string'
+    && Array.isArray(pins.handlers) && pins.handlers.length > 0
+    && HEX40.test(sourceCommit ?? '') && sourceCommit === pins.sourceCommit
+    && mainSHA256 === pins.mainSHA256 && sourceMapSHA256 === pins.sourceMapSHA256,
+  'Ops StaffDirectory entrypoint exception is pinned to the reviewed source, main bundle and source map');
+  const baseline = resourcesShape(before.operations.version.resources);
+  const actual = resourcesShape(candidate.resources);
+  const baseNames = baseline.script.named_handlers.map(({ name }) => name);
+  const actualNames = actual.script.named_handlers.map(({ name }) => name);
+  needFn(!baseNames.includes(pins.className) && equal(actual.script.handlers, baseline.script.handlers)
+    && equal(actualNames, [...baseNames, pins.className].sort((a, b) => a.localeCompare(b))),
+  'Ops candidate changed script exports or named-handler classes beyond the one reviewed StaffDirectory class');
+  const added = actual.script.named_handlers.find(row => row.name === pins.className);
+  needFn(added && equal(Object.keys(added).sort(), ['handlers', 'name'])
+    && equal([...added.handlers].sort(), [...pins.handlers].sort()),
+  'Ops candidate StaffDirectory handlers differ from the exact reviewed three');
+  const normalizedActual = structuredClone(actual);
+  normalizedActual.script.named_handlers = normalizedActual.script.named_handlers.filter(row => row.name !== pins.className);
+  needFn(equal(normalizedActual, baseline),
+    'Ops candidate changed resources beyond the reviewed StaffDirectory entrypoint');
+  return Object.freeze({ schemaVersion: 1, contract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT,
+    sourceCommit, mainSHA256, sourceMapSHA256, className: pins.className, addedHandlers: [...pins.handlers].sort(),
+    allOtherResourcesUnchanged: true });
+}
+
+/** Explicit opt-in gate for ops-staff-directory-entrypoint-v1 (a fresh upload only; no resume).
+ * Returns null when not selected; otherwise checks the app, pinned plan identity, the contract
+ * pinned in both plans, profile mode, baseline mode, staff authority contract and that no
+ * successor-reader or retirement contract is combined. Pure; throws before any provider read. */
+export function selectOpsStaffDirectoryEntrypoint({ app, contract, ordinaryPlan, pinnedPlan, ordinaryFrontendPreflightMode,
+  operationsBaselineContract, staffAuthorityContract, installedOpsSuccessorReaderContract,
+  opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector, expectedDeploymentVersions, resumeCandidate,
+  pins = OPS_STAFF_DIRECTORY_ENTRYPOINT } = {}) {
+  const pinnedBuild = app === 'operations' && ordinaryPlan?.sourceCommit === pins.sourceCommit
+    && ordinaryPlan?.release?.main?.sha256 === pins.mainSHA256
+    && ordinaryPlan?.release?.sourceMap?.sha256 === pins.sourceMapSHA256;
+  needFn(ordinaryPlan?.opsStaffDirectoryEntrypointContract === contract && pinnedPlan?.opsStaffDirectoryEntrypointContract === contract,
+    'Executor selector must exactly match the Ops StaffDirectory entrypoint contract pinned in both release plans');
+  if (contract === undefined) {
+    needFn(!pinnedBuild, 'The pinned StaffDirectory Ops build requires its explicit entrypoint contract');
+    return null;
+  }
+  needFn(contract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT && pins.contract === contract && pinnedBuild
+    && ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+    && operationsBaselineContract === OPS_SOLE_ACTIVE_BASELINE_CONTRACT
+    && staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT
+    && installedOpsSuccessorReaderContract === undefined && opsSuccessorReaderPromotionContract === undefined
+    && canonicalBrowserRetirementSelector === undefined && expectedDeploymentVersions === undefined
+    && ordinaryPlan.installedOpsSuccessorReaderContract === undefined
+    && ordinaryPlan.opsSuccessorReaderPromotionContract === undefined
+    && ordinaryPlan.canonicalBrowserRetirementSelector === undefined,
+  'Ops StaffDirectory entrypoint contract requires its exact pinned Operations build, canonical v4 profile, sole-active baseline and post-0226 authority');
+  needFn(!resumeCandidate, 'Ops StaffDirectory entrypoint contract is a fresh upload only; candidate resume is not supported');
+  return Object.freeze({ contract, freshUpload: true });
+}
+
+/** Choose the one named-handler exception for an uploaded Ops candidate and return a verifier the
+ * executor reuses at every later read of that version, plus the options for module verification and
+ * for post-activation installation checks. The two exceptions never apply together. */
+export function qualifyOpsCandidateNamedHandlers({ app, before, candidate, ordinaryPlan, staffDirectory = null,
+  pins = OPS_STAFF_DIRECTORY_ENTRYPOINT } = {}) {
+  const evidence = { sourceCommit: ordinaryPlan?.sourceCommit, mainSHA256: ordinaryPlan?.release?.main?.sha256,
+    sourceMapSHA256: ordinaryPlan?.release?.sourceMap?.sha256 };
+  if (staffDirectory) {
+    needFn(app === 'operations', 'Ops StaffDirectory entrypoint contract is Operations-only');
+    const verify = version => verifyExactOpsStaffDirectoryEntrypointAddition(before, version, evidence, pins);
+    const proof = verify(candidate);
+    return Object.freeze({ kind: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT, proof, verify,
+      moduleOptions: { opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT, opsStaffDirectoryPins: pins },
+      installationOptions: candidateId => ({ opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT,
+        opsStaffDirectoryCandidateId: candidateId, opsStaffDirectoryPins: pins }) });
+  }
+  const changed = app === 'operations'
+    && !equal(candidate.resources.script?.named_handlers, before[app].version.resources.script?.named_handlers);
+  if (!changed) return Object.freeze({ kind: null, proof: null, verify: () => null,
+    moduleOptions: { opsSuccessorReaderContract: undefined }, installationOptions: null });
+  const verify = version => verifyExactOpsSuccessorNamedHandlerAddition(before, version, evidence);
+  const proof = verify(candidate);
+  return Object.freeze({ kind: 'ops-successor-reader-additive-rpc-v1', proof, verify,
+    moduleOptions: { opsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT },
+    installationOptions: () => ({ opsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }) });
 }
 
 function activeVersion(state) {
@@ -411,7 +504,11 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
   frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
-  operationsBaselineContract, assetVerificationConcurrency,
+  operationsBaselineContract, opsStaffDirectoryEntrypointContract, assetVerificationConcurrency,
+  // Offline-test seams. Each defaults to the reviewed production value; the production entry point
+  // never passes them.
+  opsStaffDirectoryPins = OPS_STAFF_DIRECTORY_ENTRYPOINT, reviewedPreflightProfiles,
+  wranglerRuntimeSHA256 = PROFILE.wranglerRuntimeSHA256,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
   readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
@@ -429,7 +526,18 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && path.isAbsolute(artifactSourceRoot ?? '') && path.isAbsolute(executorSourceRoot ?? ''),
   'Ordinary retained executor inputs invalid');
   const ordinaryFrontendPreflightMode = ordinaryPlan.installationPreflight?.mode;
-  const preflight = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
+  const installSeams = reviewedPreflightProfiles === undefined ? {} : { reviewedPreflightProfiles };
+  const staffDirectoryPinSeam = opsStaffDirectoryPins === OPS_STAFF_DIRECTORY_ENTRYPOINT ? {} : { opsStaffDirectoryPins };
+  const staffDirectory = selectOpsStaffDirectoryEntrypoint({ app, contract: opsStaffDirectoryEntrypointContract, ordinaryPlan, pins: opsStaffDirectoryPins,
+    pinnedPlan, ordinaryFrontendPreflightMode, operationsBaselineContract, staffAuthorityContract,
+    installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
+    expectedDeploymentVersions: expectedDeploymentVersions ?? ordinaryPlan.expectedDeploymentVersions, resumeCandidate });
+  // Pre-activation installation checks under the contract admit only the exact held stray inactive
+  // Ops latest; the active Ops version stays the strict profile. Empty otherwise.
+  const staffDirectoryBaselineOptions = staffDirectory
+    ? { opsStaffDirectoryEntrypointContract: staffDirectory.contract, ...staffDirectoryPinSeam } : {};
+  const preflight = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode,
+    ...(reviewedPreflightProfiles === undefined ? [] : [reviewedPreflightProfiles]));
   needFn([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(ordinaryFrontendPreflightMode)
     && equal(ordinaryPlan.installationPreflight, preflight)
     && profile && Object.getPrototypeOf(profile) === Object.prototype
@@ -485,8 +593,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && sourceReader(executorSourceRoot) === executorCommit;
   const target = WORKERS[app], workerName = target.name;
   const cliPath = path.resolve(cli ?? path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`));
-  needFn(fs.existsSync(cliPath) && /^[a-f0-9]{64}$/u.test(PROFILE.wranglerRuntimeSHA256)
-    && hash(fs.readFileSync(cliPath)) === PROFILE.wranglerRuntimeSHA256,
+  needFn(fs.existsSync(cliPath) && /^[a-f0-9]{64}$/u.test(wranglerRuntimeSHA256 ?? '')
+    && hash(fs.readFileSync(cliPath)) === wranglerRuntimeSHA256,
   'Installed native Wrangler binary is missing or differs from locked production runtime');
   validateBuildEnvironment();
 
@@ -495,9 +603,10 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const liveAtStart = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions });
   const before = resumeCandidate
     ? validateInstallation(structuredClone(resumeCandidate.originalSnapshot), { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app })
+      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams })
     : validateTransitionControlCapture(liveAtStart, liveAtStart, pinnedPlan, { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, opsSuccessorReaderContract: baselineOpsReaderContract });
+      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams, opsSuccessorReaderContract: baselineOpsReaderContract,
+      ...staffDirectoryBaselineOptions });
   const baselineVersionId = before[app].version.id;
   const operationsBaselineRows = expectedDeploymentVersions?.operations
     ?? before.operations.deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage }));
@@ -588,6 +697,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
     installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}),
+    ...staffDirectoryBaselineOptions, ...installSeams,
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
     ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }) });
   writePrivateJson(journalDirectory, 'release-plan.private.json', { schemaVersion: 2, contract: pinnedPlan.contract,
@@ -605,13 +715,14 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   if (resumeCandidate) assertResumeControls(before, preuploadRaw, { app, candidateId: resumeCandidate.candidateId, profile, expectedDeploymentVersions });
   else {
     validateTransitionControlCapture(preuploadRaw, before, pinnedPlan, { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
-      opsSuccessorReaderContract: baselineOpsReaderContract });
+      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams,
+      opsSuccessorReaderContract: baselineOpsReaderContract, ...staffDirectoryBaselineOptions });
     needFn(equal(stableState(before, app), stableState(preuploadRaw, app)), 'Production controls changed before native asset/module upload');
   }
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
     installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}),
+    ...staffDirectoryBaselineOptions, ...installSeams,
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
     ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }) });
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate qualification');
@@ -633,15 +744,18 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const candidate = await readCandidateVersionWithVisibilityRetry(reader, workerName, candidateId);
   const modern = await reader.get(`/workers/workers/${workerName}/versions/${candidateId}?include=modules`);
   // A reviewed scalar-only transition changes binding resource shape by
-  // design. The successor-reader exception is only for exact script-handler
-  // additions; binding deltas are checked against the pinned transition plan.
-  const namedHandlerProof = app === 'operations'
-    && !equal(candidate.resources.script?.named_handlers, before[app].version.resources.script?.named_handlers)
-    ? verifyExactOpsSuccessorNamedHandlerAddition(before, candidate, { sourceCommit,
-      mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 }) : null;
-  const candidateContract = namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : undefined;
+  // design. The successor-reader and StaffDirectory exceptions are only for exact
+  // script-handler additions; binding deltas are checked against the pinned transition plan.
+  const namedHandlers = qualifyOpsCandidateNamedHandlers({ app, before, candidate, ordinaryPlan, staffDirectory,
+    pins: opsStaffDirectoryPins });
+  const namedHandlerProof = namedHandlers.proof;
   const moduleProof = verifyOrdinaryFrontendRetainedCandidateModules({ before, plan: pinnedPlan, candidate, modern,
-    opsSuccessorReaderContract: candidateContract });
+    ...namedHandlers.moduleOptions });
+  // Every post-activation installation check of the now-active candidate carries the same exception.
+  const activeContractOptions = operationsSuccessorPromotion
+    ? { opsSuccessorReaderContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT, opsSuccessorReaderReleaseCandidateId: candidateId }
+    : namedHandlers.installationOptions ? namedHandlers.installationOptions(candidateId)
+      : { opsSuccessorReaderContract: installedOpsSuccessorReaderContract };
   writePrivateJson(journalDirectory, 'verified-inactive-candidate.private.json', { candidateId,
     sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256,
     candidateResourcesSHA256: hash(canonical(resourcesShape(candidate.resources))),
@@ -651,8 +765,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const inactiveRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: candidateExpected });
   const inactive = validateTransitionControlCapture(inactiveRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: baselineOpsReaderContract });
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams,
+    opsSuccessorReaderContract: baselineOpsReaderContract, ...staffDirectoryBaselineOptions });
   const expectedInactive = structuredClone(before); expectedInactive[app].latest = candidateId;
   for (const [name, value] of Object.entries(ordinaryPlan.canonicalBrowserRetirementTransition?.targetScalars ?? [])) {
     const row = expectedInactive[app].settings.bindings.find(binding => binding.name === name);
@@ -678,8 +792,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const stagedRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations });
   const staged = validateTransitionControlCapture(stagedRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: baselineOpsReaderContract });
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams,
+    opsSuccessorReaderContract: baselineOpsReaderContract, ...staffDirectoryBaselineOptions });
   needFn(equal(deploymentRows(staged, app), [...stageRows].sort((a, b) => a.versionId.localeCompare(b.versionId)))
     && sameExceptSelectedDeployment(inactive, staged, app), 'Candidate namespace stage did not produce exact baseline100/candidate0 with unchanged controls');
   await qualifyStaff('before-candidate-asset-verification');
@@ -699,8 +813,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const preactivationRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations });
   const preactivation = validateTransitionControlCapture(preactivationRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: baselineOpsReaderContract });
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams,
+    opsSuccessorReaderContract: baselineOpsReaderContract, ...staffDirectoryBaselineOptions });
   needFn(equal(deploymentRows(preactivation, app), deploymentRows(staged, app))
     && equal(stableState(staged, app), stableState(preactivation, app)), 'Staged deployment or controls changed immediately before activation');
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before activation');
@@ -712,14 +826,10 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   await runNative(cliPath, ['versions', 'deploy', `${candidateId}@100%`, '--yes', '--config', configPath], journalDirectory, 'activate', journalDirectory);
   const activationExpectations = app === 'operations' ? {} : expectedDeploymentVersions;
   const afterRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
-  if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, afterRaw.operations.version, {
-    sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
+  if (namedHandlerProof) namedHandlers.verify(afterRaw.operations.version);
   const after = validatePostActivationCapture(afterRaw, before, pinnedPlan, { profile, selectedApp: app,
     expectedDeploymentVersions: activationExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
-      : namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract,
-    ...(operationsSuccessorPromotion ? { opsSuccessorReaderReleaseCandidateId: candidateId } : {}) });
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams, ...activeContractOptions });
   needFn(activeVersion(after[app]) === candidateId, 'Activation is uncertain; keep candidate and journal for GET-only reconciliation');
   needFn(deploymentRows(after, app)?.length === 1 && deploymentRows(after, app)[0].versionId === candidateId
     && deploymentRows(after, app)[0].percentage === 100, 'Postactivation distribution is not exactly candidate100');
@@ -728,10 +838,9 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   if (postactivationReadiness) writePrivateJson(journalDirectory, 'staff-after-activation.private.json', postactivationReadiness);
   const activeCandidate = await readCandidateVersionWithVisibilityRetry(reader, workerName, candidateId);
   const activeModern = await reader.get(`/workers/workers/${workerName}/versions/${candidateId}?include=modules`);
-  if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, activeCandidate, {
-    sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
+  if (namedHandlerProof) namedHandlers.verify(activeCandidate);
   const activeModulesProof = verifyOrdinaryFrontendRetainedCandidateModules({ before, plan: pinnedPlan,
-    candidate: activeCandidate, modern: activeModern, opsSuccessorReaderContract: candidateContract });
+    candidate: activeCandidate, modern: activeModern, ...namedHandlers.moduleOptions });
   const rollbackVersion = await readCandidateVersionWithVisibilityRetry(reader, workerName, baselineVersionId);
   const rollbackModern = await reader.get(`/workers/workers/${workerName}/versions/${baselineVersionId}?include=modules`);
   needFn(equal(rollbackVersion, before[app].version) && equal(rollbackModern, before[app].modern),
@@ -740,14 +849,10 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const activeAssets = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
     concurrency: assetVerificationConcurrency, entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-active-assets' });
   const postNamespaceRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
-  if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, postNamespaceRaw.operations.version, {
-    sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
+  if (namedHandlerProof) namedHandlers.verify(postNamespaceRaw.operations.version);
   const postNamespace = validatePostActivationCapture(postNamespaceRaw, before, pinnedPlan, {
     profile, selectedApp: app, expectedDeploymentVersions: activationExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
-      : namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract,
-    ...(operationsSuccessorPromotion ? { opsSuccessorReaderReleaseCandidateId: candidateId } : {}) });
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams, ...activeContractOptions });
   needFn(activeVersion(postNamespace[app]) === candidateId
     && deploymentRows(postNamespace, app)?.length === 1
     && deploymentRows(postNamespace, app)[0].versionId === candidateId
@@ -819,6 +924,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
   frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract,
   canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId, operationsBaselineContract,
+  opsStaffDirectoryEntrypointContract,
   assetVerificationConcurrency, journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
   validateAssetVerificationConcurrency(assetVerificationConcurrency);
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
@@ -859,6 +965,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     canonicalBrowserRetirementSelector,
     canonicalBrowserRetirementClientVersionId,
     operationsBaselineContract,
+    opsStaffDirectoryEntrypointContract,
     assetVerificationConcurrency,
     reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,

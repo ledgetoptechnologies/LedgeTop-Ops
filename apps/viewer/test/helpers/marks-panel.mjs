@@ -38,13 +38,13 @@ export async function openMarksPanel(t, { rateLimited = () => false, maxRequestB
   };
   const requests = [];
   const request = (path, init) => fetch(base + path, { ...init, redirect: 'follow' });
-  const mount = ({ dom = createMiniDocument(), units = () => 'imperial', map = true, request = null, georef = () => null, group = false, obstacles } = {}) => {
+  const mount = ({ dom = createMiniDocument(), units = () => 'imperial', map = true, request = null, georef = () => null, group = false, obstacles, mapControls } = {}) => {
     // Most tests put several marks on one spot; those about groups ask for them.
     if (!group) { try { dom.window.localStorage.setItem('ltds.viewer.marks.group', 'off'); } catch { /* a test of blocked storage */ } }
     const panel = dom.document.createElement('div'), sidebar = dom.document.createElement('div'), overlay = dom.document.createElement('div');
     panel.append(sidebar, overlay);
     const leaflet = createMiniLeaflet(dom.document);
-    const marks = mountViewerMarks({ panel: sidebar, overlay, L: leaflet.L, getMap: () => leaflet.map, units, georef, ...(obstacles && { obstacles }),
+    const marks = mountViewerMarks({ panel: sidebar, overlay, L: leaflet.L, getMap: () => leaflet.map, units, georef, ...(obstacles && { obstacles }), ...(mapControls && { mapControls }),
       request: (path, init) => { requests.push([init.method, path]); return (request || fetch)(base + path, { ...init, redirect: 'follow' }); } });
     if (map) marks.setView({ map: true });
     const q = selector => panel.querySelector(selector);

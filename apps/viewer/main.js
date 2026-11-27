@@ -2615,6 +2615,13 @@ function installViewerMarks() {
         return [...names].map(node => node.getBoundingClientRect()).filter(box => box.width && box.height)
           .map(box => ({ x: box.left - frame.left, y: box.top - frame.top, width: box.width, height: box.height }));
       },
+      // The map's own buttons (Reset, Fullscreen, Save view image) as they are now, in the map's pixels: a mark's card stays clear of them.
+      mapControls: () => {
+        const frame = map?.getContainer().getBoundingClientRect();
+        if (!frame) return [];
+        return [...document.querySelectorAll('#floating-controls > button')].map(node => node.getBoundingClientRect()).filter(box => box.width && box.height)
+          .map(box => ({ x: box.left - frame.left, y: box.top - frame.top, width: box.width, height: box.height }));
+      },
       L, getMap: () => map,
       // Placing or drawing a mark ends any measuring tool first.
       onActivate: () => { if (state.activeTool && state.activeTool !== 'none') setTool('none'); },
@@ -4344,20 +4351,29 @@ const policyArea = (area) => (area === 'parcels' ? 'view' : area);
  * screen pixels the area covers (at most VIEW_EXPORT_MAX_EDGE).
  */
 function planOrthoExport(ortho, area) {
-  let extent = { minE: ortho.minE, maxE: ortho.maxE, minN: ortho.minN, maxN: ortho.maxN }, clip = null;
-  if (area === 'view') {
-    // Ortho, DSM and DTM share the map, so the current view is the same area in each.
+  const policy = orthoPrintPermissions();
+  // Ortho, DSM and DTM share the map, so the current view is the same area in each.
+  const viewExtent = () => {
     const b = map.getBounds();
     const corners = [b.getNorthWest(), b.getNorthEast(), b.getSouthWest(), b.getSouthEast()].map((c) => latLonToUtm(c.lat, c.lng));
-    extent = { minE: Math.min(...corners.map((c) => c[0])), maxE: Math.max(...corners.map((c) => c[0])), minN: Math.min(...corners.map((c) => c[1])), maxN: Math.max(...corners.map((c) => c[1])) };
+    return { minE: Math.min(...corners.map((c) => c[0])), maxE: Math.max(...corners.map((c) => c[0])), minN: Math.min(...corners.map((c) => c[1])), maxN: Math.max(...corners.map((c) => c[1])) };
+  };
+  let extent = { minE: ortho.minE, maxE: ortho.maxE, minN: ortho.minN, maxN: ortho.maxN }, clip = null;
+  if (area === 'view') {
+    extent = viewExtent();
   } else if (area === 'parcels') {
     clip = orthoParcelPicker.rings().map((rings) => rings.map((ring) => ring.map(([lon, lat]) => latLonToUtm(lat, lon))));
     extent = ringsExtent(clip.flat());
     if (!extent) throw Object.assign(new Error('Pick parcels on the map first.'), { code: 'print_no_parcels' });
+    // Without download permission an export is never more than the viewer
+    // can see: the parcels are cut to the current view.
+    if (!policy.whole) {
+      extent = clampExtent(extent, viewExtent());
+      if (!extent) throw Object.assign(new Error('The selected parcels are outside the current view.'), { code: 'print_outside_view' });
+    }
   }
   const clamped = clampExtent(extent, ortho);
   if (!clamped) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
-  const policy = orthoPrintPermissions();
   let viewPixels = NaN, longEdge = null;
   if (!policy.whole) {
     // Screen pixels the exported area covers on the map, clipped to the orthophoto.
@@ -4410,7 +4426,7 @@ async function previewOrthoExport(options, signal) {
   return { canvas: result.canvas, width: plan.grid.width, height: plan.grid.height };
 }
 
-async function exportOrthoPrintFromViewer(options, dialogSignal, { writable = null, onProgress } = {}) {
+async function exportOrthoPrintFromViewer(options, dialogSignal, { writable = null, onProgress, onCommit } = {}) {
   const { area, format } = options;
   // A file the person already chose is discarded if the export cannot start.
   try { checkOrthoExport(options); } catch (error) { writable?.abort?.()?.catch?.(() => {}); throw error; }
@@ -4448,7 +4464,11 @@ async function exportOrthoPrintFromViewer(options, dialogSignal, { writable = nu
     current();
     const blob = await streamOrthoExport({ ds: ortho, grid: planned.grid, format, epsg: printEpsg(), layers, sink,
       createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal,
-      onProgress: (fraction) => { current(); onProgress?.(fraction); }, beforeClose: current });
+      onProgress: (fraction) => { current(); onProgress?.(fraction); },
+      // The last check before a chosen file is closed; once it passes, the file is final.
+      beforeClose: () => { current(); if (writable) onCommit?.(); } });
+    // A chosen file is committed: report it as saved, whatever happens next.
+    if (writable) return { blob: null, filename: options.filename, width: planned.grid.width, height: planned.grid.height, committed: true };
     // Rendering takes a while: the session may have expired or changed
     // meanwhile. Check again before the dialog saves anything.
     current();

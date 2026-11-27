@@ -237,3 +237,35 @@ test('download revoked after rendering, right before the dialog saves: no file',
   kept.context.applyViewerSession(session({ permissions: WITH_DOWNLOAD, expiresIn: 900_000 }));
   assert.equal(keptResult.stillCurrent(), true);
 });
+
+// A parcel reaching past the map's current view (E 500020–500380, N 4700020–4700180).
+const parcelRing = (minE, minN, maxE, maxN) => [[[minE, minN], [maxE, minN], [maxE, maxN], [minE, maxN]]];
+const pickParcels = (p, ...parcels) => { p.context.orthoParcelPicker = { rings: () => parcels }; };
+
+test('without download a parcel export stays inside the current view; with download it is the whole parcel', async () => {
+  const viewOnly = page({ permissions: WITHOUT_DOWNLOAD });
+  pickParcels(viewOnly, parcelRing(500000, 4700000, 500100, 4700100));
+  // E 500020–500100, N 4700020–4700100 at the map's 2 screen px per metre.
+  assert.deepEqual(await pngSize((await viewOnly.exportNow({ area: 'parcels', contours: false })).blob), [160, 160]);
+
+  const download = page({ permissions: WITH_DOWNLOAD });
+  pickParcels(download, parcelRing(500000, 4700000, 500100, 4700100));
+  assert.deepEqual(await pngSize((await download.exportNow({ area: 'parcels', contours: false })).blob), [50, 50], 'the whole parcel at 2 m');
+
+  const outside = page({ permissions: WITHOUT_DOWNLOAD });
+  pickParcels(outside, parcelRing(500385, 4700000, 500400, 4700015));
+  await assert.rejects(outside.exportNow({ area: 'parcels', contours: false }), { code: 'print_outside_view' });
+});
+
+test('a committed file is final: a late check after the file sink closed does not turn it into a cancel', async () => {
+  const p = page({ permissions: WITH_DOWNLOAD });
+  const writes = [];
+  let closed = false;
+  const writable = { write: async (chunk) => { writes.push(chunk); }, close: async () => { closed = true; p.context.applyViewerSession(session({ subject: 'person-two' })); }, abort: async () => {} };
+  let commits = 0;
+  const result = await p.context.exportOrthoPrintFromViewer({ area: 'full', format: 'png', filename: 'x.png' }, null, { writable, onCommit: () => { commits += 1; } });
+  assert.equal(closed, true);
+  assert.equal(commits, 1, 'the dialog is told when the commit starts');
+  assert.equal(result.committed, true);
+  assert.equal(result.blob, null);
+});
