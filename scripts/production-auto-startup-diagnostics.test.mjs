@@ -176,7 +176,8 @@ test('crash classes are found by prototype identity without running any getter',
 
 test('original failure details return only a fixed step and an exact built-in class', () => {
   assert.deepEqual(PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS, ['old_assets_final_fence','old_assets_schema','old_assets_ci',
-    'old_assets_capture','old_assets_predecessor','old_assets_complete_inventory','archive_root_html','merge_asset_ledger']);
+    'old_assets_capture','old_assets_predecessor','old_assets_complete_inventory','archive_root_html','merge_asset_ledger',
+    'mutation_fence_schema','mutation_fence_ci','mutation_fence_capture','mutation_fence_predecessor','deployment_capture']);
   for (const value of [null, undefined, 'TypeError', 7]) assert.deepEqual(productionAutoOriginalFailureDetails(value), {});
   assert.deepEqual(productionAutoOriginalFailureDetails(new TypeError('secret')), { errorType: 'TypeError' });
   assert.deepEqual(productionAutoOriginalFailureDetails(Error('secret')), { errorType: 'Error' });

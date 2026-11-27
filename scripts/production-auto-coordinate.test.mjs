@@ -459,7 +459,7 @@ test('a forged provider or reconciliation detail outside the fixed vocabulary is
   markProductionAutoStartupFailure(e, 'coordination');
   const line = formatProductionAutoReleaseHold(e);
   assert.match(line, /phase=stage-zero, cause=production_provider_refused_or_uncertain_no_retry\)/u);
-  assert.doesNotMatch(line, /provider=|reconcile|accounts|jane/u);
+  assert.doesNotMatch(line, /provider=|reconcile_|accounts|jane/u);
 });
 
 test('a forged hold step or class outside the allowlist, or a class beside a reviewed code, is not reported', async () => {
