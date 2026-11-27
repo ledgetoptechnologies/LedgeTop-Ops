@@ -14,7 +14,6 @@ import { ClientBusinessActivity } from "./ClientBusinessActivity";
 import { ClientAuditTimeline } from "./ClientAuditTimeline";
 import { ClientFeedbackHistory } from "./ClientFeedbackHistory";
 import { ClientInvitationPolicy } from "./ClientInvitationPolicy";
-import { ClientPortalBootstrap } from "./ClientPortalBootstrap";
 import { OrganizationOperationalContacts } from "./OrganizationOperationalContacts";
 import { ClientInternalNotes } from "./ClientInternalNotes";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
@@ -731,7 +730,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess, nativeDir
   </>;
 }
 
-export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess, canManagePortalSetup=false, nativeDirectoryProfileWrites=false, nativeDirectorySharedProfiles=false, reviewedImportEnrollment=false, nativeDirectoryBindingRefresh=false,nativeDirectoryBindingRefreshRecovery=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; canManagePortalSetup?: boolean; nativeDirectoryProfileWrites?: boolean; nativeDirectorySharedProfiles?: boolean; reviewedImportEnrollment?: boolean; nativeDirectoryBindingRefresh?: boolean;nativeDirectoryBindingRefreshRecovery?:boolean }) {
+export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess, nativeDirectoryProfileWrites=false, nativeDirectorySharedProfiles=false, reviewedImportEnrollment=false, nativeDirectoryBindingRefresh=false,nativeDirectoryBindingRefreshRecovery=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess; nativeDirectoryProfileWrites?: boolean; nativeDirectorySharedProfiles?: boolean; reviewedImportEnrollment?: boolean; nativeDirectoryBindingRefresh?: boolean;nativeDirectoryBindingRefreshRecovery?:boolean }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -759,7 +758,6 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invita
       <div className="client-hub-section-heading"><div><h2>Clients</h2><p>Organizations and standalone clients with their contacts, access, and shared work.</p></div>
         <OnboardClientButton /></div>
       <ClientDirectory nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} />
-      {canReview && canManagePortalSetup && <ClientPortalBootstrap />}
     </section>}
   </>;
 }

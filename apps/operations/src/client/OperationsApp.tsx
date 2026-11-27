@@ -958,7 +958,6 @@ function ClientHubSurface({ session }: { session: Session }) {
   return <>
     {selected === "directory" && <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions}
       feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration}
-      canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")}
       nativeDirectoryProfileWrites={session.capabilities?.nativeDirectoryProfileWrites?.enabled === true}
       nativeDirectorySharedProfiles={session.capabilities?.nativeDirectorySharedProfiles?.enabled === true}
       reviewedImportEnrollment={session.capabilities?.reviewedImportEnrollment?.enabled === true}
@@ -5457,7 +5456,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
         {!preview && <button type="button" className="button-orange button-small" disabled={disabled || !creationEnabled || !selected || !reasonCode || project && (!context.accessTermsSupported || !accessKind || !accessMode)} onClick={() => void review()}>Review authenticated access</button>}
         {preview && <section className="primary-authenticated-grant-review" aria-label="Review authenticated portal access"><h4 ref={reviewTitle} tabIndex={-1}>Confirm authenticated access</h4><dl>{[["Workspace", preview.workspaceLabel], ["Project", preview.projectName ?? "No project-specific access terms"], ["Recipient", preview.audienceLabel], ["Target type", selected ? AUTHENTICATED_GRANT_AUDIENCE_LABEL[selected.type] : "Unknown"], ["Recipient rule", selected?.type === "principal" ? "This exact verified person only" : "Current authorized members; membership is rechecked"], ["Recipient preview", selected?.type === "principal" ? `${preview.recipientCount} exact verified person` : preview.recipientCount > 0 ? `${preview.recipientPreview?.truncated ? "At least " : "Up to "}${preview.recipientCount} currently eligible people; final membership is checked when opened` : "Dynamic membership; final recipients are checked when opened"], ["Access terms", termsLabel(preview.accessTerms)], ["Access ends", preview.effectiveAccessExpiresAt ? date(preview.effectiveAccessExpiresAt) : preview.accessTerms?.mode === "project_end" ? "Awaiting verified project completion, then 7 days" : "When revoked"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{preview.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}<p>Confirm this recipient and scope. This grants only the reviewed folder access; it never widens an individual to their organization and creates no public link.</p><div className="actions"><button type="button" className="button-orange" disabled={disabled || !creationEnabled} onClick={create}>{restoreTarget ? "Restore authenticated access" : "Grant authenticated access"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setPreview(null)}>Cancel review</button></div></section>}
       </>}
-      {error && (!unified || !portalSetupNeeded || showLinkSetup) && <small className="error" role="alert">{error}{portalSetupNeeded && <> <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to review the exact client account, workspace, and verified membership.</>}</small>}
+      {error && (!unified || !portalSetupNeeded || showLinkSetup) && <small className="error" role="alert">{error}</small>}
       {portalSetupNeeded&&creationEnabled&&(!unified||showLinkSetup)&&<PrimaryWorkspaceBindingSetup folder={folder} onBusyChange={setBindingBusy} onLinked={()=>{setPortalSetupNeeded(false);setError("");void load();}}/>}
       {message && <small role="status">{message}</small>}
       {uncertain && pending.current && <button type="button" className="button-orange" disabled={busy || loading || !context || (pending.current.action === "revoke" ? !canRevoke : !creationEnabled)} onClick={() => void execute(pending.current!)}>Retry same access operation</button>}
@@ -5737,7 +5736,7 @@ function ShareDialog({
             title={!authenticatedGrantsEnabled ? authenticatedGrantReadinessMessage : undefined}
           >Client Workspace</button>
         </div>}
-        {!fileTarget && !authenticatedGrantsEnabled && <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
+        {!fileTarget && !authenticatedGrantsEnabled && <div className="notice" role="status">{authenticatedGrantReadinessMessage}</div>}
         {!fileTarget && shareMode === "workspace" ? (
           <section id="share-mode-panel-workspace" className="share-mode-panel" role="tabpanel" aria-labelledby="share-mode-tab-workspace">
             <header>
@@ -5748,7 +5747,7 @@ function ShareDialog({
               ? canManageAuthenticatedGrants
                 ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} creationEnabled={authenticatedGrantCreationEnabled} embedded onBusyChange={setGrantBusy} />
                 : <div className="notice" role="status">Administrator access is required to manage Client Workspace grants. Existing public-link sharing remains available.</div>
-              : <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
+              : <div className="notice" role="status">{authenticatedGrantReadinessMessage}</div>}
             {canProvisionDelegated && <details className="workspace-sharing-advanced">
               <summary>Advanced client-created link policy</summary>
               <ClientDelegatedFolderProvisioning folder={folder} />
