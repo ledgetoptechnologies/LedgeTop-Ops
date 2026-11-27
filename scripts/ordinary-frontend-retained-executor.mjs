@@ -45,6 +45,52 @@ const SUCCESSOR_READER_ADDITIONS = Object.freeze([
   'readWindowsDeliverySuccessorAuthorization',
 ].sort());
 
+/** Explicit Operations baseline selector for a release that starts from one
+ * active version at 100% and no other deployment row. Without it, an ordinary
+ * Operations release still requires the reviewed 0/100 rows pinned in its plan. */
+export const OPS_SOLE_ACTIVE_BASELINE_CONTRACT = 'ops-sole-active-baseline-v1';
+
+/** Decide which Operations baseline distribution this release may start from.
+ * Pure: returns 'not-operations', 'successor-promotion', 'sole-active' or
+ * 'reviewed-0-100', or throws before any provider read. */
+export function selectOperationsBaselineMode({ app, expectedDeploymentVersions, operationsSuccessorPromotion = false,
+  operationsBaselineContract, canonicalBrowserRetirementSelector, resumeCandidate } = {}) {
+  needFn(operationsBaselineContract === undefined || operationsBaselineContract === OPS_SOLE_ACTIVE_BASELINE_CONTRACT,
+    'Unreviewed Operations baseline contract');
+  if (app !== 'operations') {
+    needFn(operationsBaselineContract === undefined, 'Client release cannot select an Operations baseline contract');
+    return 'not-operations';
+  }
+  if (operationsSuccessorPromotion) {
+    needFn(expectedDeploymentVersions === undefined && operationsBaselineContract === undefined,
+      'Operations successor promotion requires the pinned sole-active-version baseline');
+    return 'successor-promotion';
+  }
+  if (operationsBaselineContract === OPS_SOLE_ACTIVE_BASELINE_CONTRACT) {
+    needFn(expectedDeploymentVersions === undefined && canonicalBrowserRetirementSelector === undefined && !resumeCandidate,
+      'Sole-active Operations baseline excludes pinned staged weights, browser retirement and candidate resume');
+    return 'sole-active';
+  }
+  const rows = expectedDeploymentVersions?.operations;
+  needFn(Array.isArray(rows) && rows.length === 2
+      && rows.filter(row => row.percentage === 100).length === 1
+      && rows.filter(row => row.percentage === 0).length === 1,
+    'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
+  return 'reviewed-0-100';
+}
+
+/** The captured Operations deployment must match the selected baseline mode. */
+export function assertOperationsBaselineRows(mode, rows, baselineVersionId) {
+  if (mode === 'not-operations') return true;
+  needFn(Array.isArray(rows) && UUID.test(baselineVersionId ?? ''), 'Reviewed Ops 100% baseline differs from captured active version');
+  if (mode === 'sole-active' || mode === 'successor-promotion') needFn(rows.length === 1
+      && rows[0].versionId === baselineVersionId && rows[0].percentage === 100,
+    'Reviewed Ops 100% baseline differs from captured active version');
+  else needFn(mode === 'reviewed-0-100' && rows.some(row => row.versionId === baselineVersionId && row.percentage === 100),
+    'Reviewed Ops 100% baseline differs from captured active version');
+  return true;
+}
+
 /** The reviewed inactive a0 candidate adds exactly two read-only successor RPC methods
  * to the existing Ops reader class. All other exports, handlers, runtime,
  * bindings and named-handler records stay byte-for-byte equivalent. */
@@ -358,6 +404,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
   frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
+  operationsBaselineContract,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
   readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
@@ -435,15 +482,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   'Installed native Wrangler binary is missing or differs from locked production runtime');
   validateBuildEnvironment();
 
-  if (app === 'operations') {
-    const rows = expectedDeploymentVersions?.operations;
-    if (operationsSuccessorPromotion) needFn(expectedDeploymentVersions === undefined,
-      'Operations successor promotion requires the pinned sole-active-version baseline');
-    else needFn(Array.isArray(rows) && rows.length === 2
-        && rows.filter(row => row.percentage === 100).length === 1
-        && rows.filter(row => row.percentage === 0).length === 1,
-      'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
-  }
+  const operationsBaselineMode = selectOperationsBaselineMode({ app, expectedDeploymentVersions, operationsSuccessorPromotion,
+    operationsBaselineContract, canonicalBrowserRetirementSelector, resumeCandidate });
   const liveAtStart = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions });
   const before = resumeCandidate
     ? validateInstallation(structuredClone(resumeCandidate.originalSnapshot), { profile, selectedApp: app, expectedDeploymentVersions,
@@ -453,11 +493,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const baselineVersionId = before[app].version.id;
   const operationsBaselineRows = expectedDeploymentVersions?.operations
     ?? before.operations.deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage }));
-  if (app === 'operations') needFn(operationsSuccessorPromotion
-    ? operationsBaselineRows.length === 1 && operationsBaselineRows[0].versionId === baselineVersionId
-      && operationsBaselineRows[0].percentage === 100
-    : expectedDeploymentVersions.operations.some(row => row.versionId === baselineVersionId && row.percentage === 100),
-  'Reviewed Ops 100% baseline differs from captured active version');
+  assertOperationsBaselineRows(operationsBaselineMode, operationsBaselineRows, baselineVersionId);
   if (resumeCandidate) assertResumeControls(before, liveAtStart, { app, candidateId: resumeCandidate.candidateId, profile,
     expectedDeploymentVersions, opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   const bootstrap = app === 'operations' ? prepareOpsLegacyLedgerBootstrap(before) : null;
@@ -774,7 +810,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
   staffAuthorityContract = 'native-staff-cutover-v1', artifactSourceRoot, staffReviewPath,
   frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract,
-  canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
+  canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId, operationsBaselineContract,
   journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
@@ -813,6 +849,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     opsSuccessorReaderPromotionContract,
     canonicalBrowserRetirementSelector,
     canonicalBrowserRetirementClientVersionId,
+    operationsBaselineContract,
     reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),

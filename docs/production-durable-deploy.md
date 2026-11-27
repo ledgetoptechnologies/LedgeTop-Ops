@@ -267,6 +267,18 @@ post-0226 staff preservation packet remains mandatory at every executor
 checkpoint. The existing fixed 0/100 Operations release contract and its
 pre-0226 counterpart remain separate and unchanged.
 
+An ordinary Operations release that starts from one active version at 100%
+with no other deployment row selects `operationsBaselineContract:
+'ops-sole-active-baseline-v1'` on the retained executor. The plans then carry
+no staged weights, and the executor refuses the selector with staged weights,
+canonical browser retirement, successor promotion, candidate resume, or a
+Client release. Every capture must show exactly that version at 100%, and the
+pinned plan baseline hash still binds the whole captured installation. The rest
+of the release is unchanged: baseline 100% with the candidate at 0%, byte
+checks, then candidate 100%, with the baseline as the rollback version. The
+selector does not provide credentials, authority packets, migrations or an
+accepted installed profile.
+
 Cloudflare Builds has a20-minute limit. The complete GitHub CI can take longer,
 so production deployment must be initiated after successful main CI through a
 qualified completion-event path. A successful build or restored toggle is not
