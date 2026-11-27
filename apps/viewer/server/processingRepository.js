@@ -143,7 +143,7 @@ function validLodProvenance(value, glbSha256, tilesManifestSha256, obj=null) {
     && value.audit.artifactCount>=2;
 }
 function bounded(value, max = 240) { return String(value || '').trim().slice(0, max); }
-const DIAGNOSTIC_DETAIL_KEYS=new Set(['recoveryRevision','sourceOutputId','sourceVersionId','targetVersionId','manifestSha256','derivativeType','manualRetryCount','operationType','status','verified','resourcePressure','exitCode','metric','observed','limit','grayZoneLimit','policyRevision','acceptance','numericalAgreement','equivalenceSha256','reason','replacementOutputId','proofFailureReason','unmappedFileCount','unmappedByteSize','artifactKind','errorCode','retryAfter','byteSize','trashId','preservedFileCount','preservationGroupCount','preservationMethod']);
+const DIAGNOSTIC_DETAIL_KEYS=new Set(['recoveryRevision','sourceOutputId','sourceVersionId','targetVersionId','manifestSha256','derivativeType','manualRetryCount','operationType','status','verified','resourcePressure','exitCode','metric','observed','limit','grayZoneLimit','policyRevision','acceptance','numericalAgreement','equivalenceSha256','reason','replacementOutputId','proofFailureReason','unmappedFileCount','unmappedByteSize','artifactKind','errorCode','retryAfter','byteSize','trashId','preservedFileCount','preservationGroupCount','preservationMethod','providerTaskId','engineStartedAt']);
 const DIAGNOSTIC_RESOURCE_KEYS=new Set(['pid','cpuCount','rssBytes','heapUsedBytes','externalBytes','maxRssKilobytes','processorCount','processThreads','workingSetBytes','privateMemoryBytes','gcHeapBytes','gcTotalAvailableBytes','gcHighMemoryThresholdBytes','threadPoolAvailableWorkers','threadPoolMaxWorkers','threadPoolAvailableIo','threadPoolMaxIo','cgroupPidsCurrent','cgroupPidsMax','cgroupMemoryCurrent','cgroupMemoryMax']);
 function diagnosticResources(value){const clean={};if(!value||typeof value!=='object'||Array.isArray(value))return clean;for(const[key,item]of Object.entries(value)){if(!DIAGNOSTIC_RESOURCE_KEYS.has(key))continue;if(Number.isSafeInteger(item)&&item>=0)clean[key]=item;else if(typeof item==='string'&&/^(?:max|\d{1,32})$/.test(item))clean[key]=item;}return clean;}
 function converterDiagnostic(value){if(!value||typeof value!=='object'||Array.isArray(value)||value.schemaVersion!==1)return null;const clean={schemaVersion:1};if(typeof value.eventName==='string'&&/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value.eventName))clean.eventName=value.eventName;for(const key of['fromParallelism','toParallelism'])if(Number.isSafeInteger(value[key])&&value[key]>=0)clean[key]=value[key];if(typeof value.resourcePressure==='boolean')clean.resourcePressure=value.resourcePressure;if(Array.isArray(value.exceptionTypes))clean.exceptionTypes=value.exceptionTypes.slice(0,12).filter(item=>typeof item==='string'&&/^[A-Za-z_][A-Za-z0-9_.+`]{0,119}$/.test(item));if(Array.isArray(value.exceptionHResults))clean.exceptionHResults=value.exceptionHResults.slice(0,12).filter(Number.isSafeInteger);const resources=diagnosticResources(value.resources);if(Object.keys(resources).length)clean.resources=resources;return clean;}
@@ -739,7 +739,40 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     return new Map(rows.map(row => [row.attempt_id, row.elapsed_ms]));
   }
 
+  // When the processing node started this provider task, recorded once from the first
+  // running observation: the node's own elapsed time when it reports one, otherwise the
+  // observation itself (at most one reconcile interval late). Never the upload time.
+  recordEngineStart(attempt, observation) {
+    if (observation?.status !== 'running' || !attempt.providerTaskId || observation.uuid !== attempt.providerTaskId) return;
+    const id = `engine-started:${attempt.id}:${attempt.providerTaskId}`;
+    if (this.database.prepare('SELECT 1 FROM processing_events WHERE id=?').get(id)) return;
+    const observedAt = Date.now(), elapsed = observation.processingTime;
+    const startedAtMs = Number.isSafeInteger(elapsed) && elapsed >= 0 && elapsed <= observedAt ? observedAt - elapsed : observedAt;
+    this.recordProcessingEvent({ id, attemptId: attempt.id, eventType: 'processing_attempt.engine_started', phase: 'running',
+      details: { providerTaskId: attempt.providerTaskId, engineStartedAt: new Date(startedAtMs).toISOString() } });
+  }
+
+  // Running attempts only: attempt id -> engine start (ms) for the attempt's current provider task.
+  engineStartTimes(attemptIds) {
+    if (attemptIds.length === 0) return new Map();
+    const rows = this.database.prepare(`
+      SELECT e.attempt_id, e.details_json
+      FROM processing_events e
+      JOIN processing_attempts a ON a.id=e.attempt_id AND a.status='running'
+        AND e.id='engine-started:' || a.id || ':' || a.provider_task_id
+      WHERE e.event_type='processing_attempt.engine_started'
+        AND e.attempt_id IN (${attemptIds.map(() => '?').join(',')})
+    `).all(...attemptIds);
+    const starts = new Map();
+    for (const row of rows) {
+      const startedAtMs = Date.parse(json(row.details_json, {})?.engineStartedAt || '');
+      if (Number.isFinite(startedAtMs)) starts.set(row.attempt_id, startedAtMs);
+    }
+    return starts;
+  }
+
   recordProviderEngineTiming(attempt, observation) {
+    this.recordEngineStart(attempt, observation);
     if (!observation || !attempt.providerTaskId || observation.uuid !== attempt.providerTaskId) return;
     const terminal = ['completed', 'failed', 'cancelled'].includes(observation.status);
     const elapsed = observation.processingTime;
