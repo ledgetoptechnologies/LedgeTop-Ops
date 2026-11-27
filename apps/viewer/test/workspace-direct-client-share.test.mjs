@@ -31,7 +31,7 @@ test('whole-project access is one grant that includes tasks published later',()=
   const read=readDirectShareForm(form({client:key}),{projectId:'project',projectName:'Site',tasks,clients});
   assert.equal(read.bodies()[0].confirmedScope,false,'only the Share click on the review confirms');
   assert.deepEqual(read.bodies({confirmed:true}),[{sourceId:'source-a',workspaceId:'ws-1',viewerProjectId:'project',permissions:{measure:true,cameras:true,download:false},
-    expiresAt:null,confirmedScope:true,notifyClient:true,taskId:null,scopeType:'project',includeFuturePublished:true}]);
+    expiresAt:null,confirmedScope:true,taskId:null,scopeType:'project',includeFuturePublished:true}]);
 });
 
 test('chosen tasks become exact task grants that never include later tasks',()=>{
@@ -214,9 +214,19 @@ test('a chosen task that can no longer be shared refuses the whole share and is 
 });
 
 test('every new share has an Email client box, ticked by default, that the share follows',()=>{
-  const markup=directShareForm({projectName:'Site',tasks});
+  const markup=directShareForm({projectName:'Site',tasks,notifyClient:true});
   assert.match(markup,/<label class="check"><input type="checkbox" name="notifyClient" checked> Email client<\/label>/);
+  // An Operations that does not offer the email shows no box, and the share asks for nothing.
+  assert.doesNotMatch(directShareForm({projectName:'Site',tasks}),/notifyClient|Email client/);
+  assert.equal('notifyClient' in readDirectShareForm(form({client:key}),{projectId:'project',projectName:'Site',tasks,clients}).bodies()[0],false);
   const read=options=>readDirectShareForm(form({client:key,scope:'tasks',checked:['task-1','task-2'],...options}),{projectId:'project',projectName:'Site',tasks,clients}).bodies();
   assert.deepEqual(read({notify:true}).map(body=>body.notifyClient),[true,true]);
   assert.deepEqual(read({notify:false}).map(body=>body.notifyClient),[false,false]);
+});
+
+test('the Email client offer comes from the first page Operations answers when Share opens',async()=>{
+  const offered=await loadDirectClientAccess(async()=>({clients:[],grants:[],grantsNextCursor:null,capabilities:['notify_client_v1']}),'project');
+  assert.deepEqual(offered.capabilities,['notify_client_v1']);
+  const older=await loadDirectClientAccess(async()=>({clients:[],grants:[],grantsNextCursor:null}),'project');
+  assert.equal(older.capabilities,undefined);
 });

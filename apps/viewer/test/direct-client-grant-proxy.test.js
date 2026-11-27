@@ -112,7 +112,8 @@ test('the older-Operations retry never widens, repeats or hides another refusal'
   for (const body of [undefined, { error: 'Invalid client picker query', code: 'invalid_request' }])
     assert.equal((await status(400, body)(PATH + '?include=grants')).calls, 1);
   const refusedShape = status(400, { error: shape });
-  const twice = await refusedShape(PATH + '?include=grants'); assert.equal(twice.calls, 2); assert.equal(twice.response.status, 400);
+  // Opening Share: without the Email client offer, then without include. Never more.
+  const twice = await refusedShape(PATH + '?include=grants'); assert.equal(twice.calls, 3); assert.equal(twice.response.status, 400);
   assert.equal((await refusedShape(PATH)).calls, 1); assert.equal((await refusedShape(PATH + '?include=all')).calls, 1);
   assert.equal((await refusedShape(PATH + '?include=grants&grantsCursor=grant-one')).calls, 1);
   assert.equal((await refusedShape(PATH, { method: 'POST', body: input })).calls, 1);
@@ -137,7 +138,35 @@ test('the Email client choice travels beside the grant, and an older Operations 
   assert.equal((await older.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } })).status, 201);
   assert.equal(older.envelopes.length, 2); assert.equal('notifyClient' in older.envelopes[1], false);
   assert.equal(older.envelopes[0].idempotencyKey, older.envelopes[1].idempotencyKey);
+  // Same key and the same grant: Operations can only ever make this share once.
+  assert.deepEqual(older.envelopes[1].grant, older.envelopes[0].grant);
+  assert.deepEqual({ ...older.envelopes[0], notifyClient: undefined }, { ...older.envelopes[1], notifyClient: undefined });
+  for (const code of [403, 409, 500]) {
+    const other = await fixture(t, () => json({ error: shape }, { status: code }));
+    await other.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } });
+    assert.equal(other.envelopes.length, 1, String(code));
+  }
   const refusing = await fixture(t, () => json({ error: shape }, { status: 400 }));
   assert.equal((await refusing.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } })).status, 400);
   assert.equal(refusing.envelopes.length, 2);
+});
+
+test('opening Share asks Operations whether it can email the client, and passes on only that answer', async t => {
+  const shape = 'Viewer client-grant request is invalid';
+  const current = await fixture(t, envelope => json({ ...list, grantsNextCursor: null, ...(envelope.capabilities ? { capabilities: ['notify_client_v1', 'future_thing'] } : {}) }));
+  const opened = await current.request(PATH + '?include=grants&limit=25&viewerProjectId=viewer-project');
+  assert.equal(opened.status, 200); assert.deepEqual((await opened.json()).capabilities, ['notify_client_v1']);
+  assert.equal(current.envelopes[0].capabilities, true);
+  // Only the dialog-open list asks; searches, later pages and other lists never do.
+  for (const path of ['?include=clients&q=Syn', '?include=grants&grantsCursor=grant-one', '?include=all', ''])
+    await current.request(PATH + path);
+  assert.equal(current.envelopes.slice(1).some(envelope => 'capabilities' in envelope), false);
+  for (const bad of ['notify_client_v1', [1], Array(11).fill('x')]) {
+    const odd = await fixture(t, () => json({ ...list, grantsNextCursor: null, capabilities: bad }));
+    assert.equal((await odd.request(PATH + '?include=grants')).status, 502);
+  }
+  const older = await fixture(t, envelope => 'capabilities' in envelope ? json({ error: shape }, { status: 400 }) : json({ ...list, grantsNextCursor: null }));
+  const fallback = await older.request(PATH + '?include=grants&limit=25');
+  assert.equal(fallback.status, 200); assert.equal('capabilities' in await fallback.json(), false);
+  assert.equal(older.envelopes.length, 2); assert.deepEqual(older.envelopes[1].listQuery, older.envelopes[0].listQuery);
 });

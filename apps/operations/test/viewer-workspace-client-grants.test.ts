@@ -325,6 +325,10 @@ describe("Email client choice over the machine bridge", () => {
       { ...create, notifyClient: "yes" },
       { ...create, connection: "native", notifyClient: true },
       { subject: "ops:staff-one", action: "list", connection: "direct", notifyClient: true },
+      { ...create, capabilities: true },
+      { subject: "ops:staff-one", action: "list", connection: "native", capabilities: true },
+      { subject: "ops:staff-one", action: "groups", connection: "direct", capabilities: true },
+      { subject: "ops:staff-one", action: "list", connection: "direct", capabilities: false },
       { subject: "ops:staff-one", action: "revoke", connection: "direct", idempotencyKey: "direct-notify-revoke-01", grantId: "grant-one", reason: "x", notifyClient: true },
     ].entries()) {
       const refused = await machine(body, `notify-refused-nonce-000${index}`);
