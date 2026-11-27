@@ -37,7 +37,7 @@ function sessionEnvelope(value, expected = {}) {
   if (expected.subject && session.subject !== expected.subject) throw new Error('workspace session subject changed');
   if (expected.accessToken && value.accessToken !== expected.accessToken) throw new Error('workspace bearer changed during renewal');
   if (value.accessToken !== undefined && !TOKEN_PATTERN.test(value.accessToken)) throw new Error('invalid workspace bearer');
-  if (expiresAtMs <= Date.now()) throw new Error('workspace session expired');
+  if (!expected.allowExpired && expiresAtMs <= Date.now()) throw new Error('workspace session expired');
   return { session, controllerOrigin: value.controllerOrigin, accessToken: value.accessToken, expiresAtMs };
 }
 
@@ -46,6 +46,7 @@ export class WorkspaceSessionRenewal {
     controllerWindow,
     envelope,
     accessToken,
+    allowExpired = false,
     fetchImpl = fetch,
     windowRef = window,
     documentRef = document,
@@ -58,7 +59,9 @@ export class WorkspaceSessionRenewal {
     onPaused = () => {},
     onResumed = () => {},
   }) {
-    const checked = sessionEnvelope({ ...envelope, accessToken: envelope.accessToken || accessToken });
+    // allowExpired: a reloaded tab may hold a lapsed session. It is renewed
+    // only through a fresh Operations grant redeemed with its own bearer.
+    const checked = sessionEnvelope({ ...envelope, accessToken: envelope.accessToken || accessToken }, { allowExpired });
     if (!TOKEN_PATTERN.test(accessToken || '')) throw new Error('invalid workspace bearer');
     this.controllerWindow = controllerWindow && !controllerWindow.closed ? controllerWindow : null;
     this.controllerOrigin = checked.controllerOrigin;
@@ -99,6 +102,8 @@ export class WorkspaceSessionRenewal {
     this.boundVisibility = () => { if (this.documentRef.visibilityState === 'visible') this.requestIfDue('visibility'); };
     this.boundPageShow = () => this.requestIfDue('pageshow');
     this.boundOnline = () => this.requestIfDue('online');
+    // Page Lifecycle: a frozen (sleeping) tab gets 'resume' before its timers run.
+    this.boundResume = () => this.requestIfDue('resume');
   }
 
   start() {
@@ -107,6 +112,7 @@ export class WorkspaceSessionRenewal {
     this.windowRef.addEventListener('pageshow', this.boundPageShow);
     this.windowRef.addEventListener('online', this.boundOnline);
     this.documentRef.addEventListener('visibilitychange', this.boundVisibility);
+    this.documentRef.addEventListener('resume', this.boundResume);
     this.schedule();
     this.post({ type: 'ltds-viewer:workspace-ready', sessionId: this.session.id, subject: this.session.subject, expiresAt: this.session.expiresAt });
   }
@@ -126,6 +132,8 @@ export class WorkspaceSessionRenewal {
       return this.expire('expired');
     }
     this.expiryTimer = this.setTimer(() => {
+      // Expiry is a new chance to renew even if earlier retries were spent.
+      if (!this.pendingRequestId) this.retryAttempt = 0;
       if (this.hasTransport()) this.requestRenewal('expiry');
       else this.expire('expired');
     }, remaining);
@@ -231,7 +239,9 @@ export class WorkspaceSessionRenewal {
     }catch(error){
       if(this.disposed||this.transportAttempt!==attempt)return;
       this.transportAttempt=null;this.finishRequest(requestId);
-      if(error?.renewalAuthenticationRequired===true){this.expire('revoked');return;}
+      // A sign-in answer while the session is still valid keeps it: the
+      // tab may be renewed again before it lapses. Only after expiry is it final.
+      if(error?.renewalAuthenticationRequired===true&&this.expiresAtMs<=this.now()){this.expire('revoked');return;}
       // Browser privacy restrictions or a temporary network failure can block
       // CORS while the original Ops tab still has a valid authenticated session.
       // Try that existing channel silently in the same bounded attempt.
@@ -387,6 +397,7 @@ export class WorkspaceSessionRenewal {
     this.windowRef.removeEventListener('pageshow', this.boundPageShow);
     this.windowRef.removeEventListener('online', this.boundOnline);
     this.documentRef.removeEventListener('visibilitychange', this.boundVisibility);
+    this.documentRef.removeEventListener('resume', this.boundResume);
     this.pendingRequestId = null;
   }
 }

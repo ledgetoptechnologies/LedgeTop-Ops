@@ -95,6 +95,7 @@ import { createParcelPicker } from './ortho-export-parcels.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
 import { bindProjectSwitcherNavigation, renderProjectSwitcherOptions } from './project-switcher.mjs';
+import { rememberModelSession, resumeExpiredModelSession } from './model-session-resume.mjs';
 import { classifyTileLoadFailure, releaseFailedTileReservations, createRenewedTileFetcher } from './lod-load-recovery.mjs';
 import {
   parseLodMemoryMode,
@@ -1687,6 +1688,7 @@ function applyViewerSession(session, { initialize = false } = {}) {
     session, { viewMode: VIEW_MODE, topLevel: window.parent === window });
   // Establish the redeemed session before init/ready can select its controller.
   activeViewerSession = session;
+  if (reviewSessionChannel) { try { rememberModelSession(sessionStorage, REVIEW_CONTROLLER_ID, session); } catch {} }
   if (initialize) {
     window.__ltdsViewerStartupDiagnostics?.mark('session-applied');
     sessionRenewalBackoffIndex = 0;
@@ -1731,7 +1733,14 @@ async function bootstrapSession() {
   try {
     const session = SESSION_GRANT
       ? await redeemViewerGrant(SESSION_GRANT)
-      : await currentViewerSession();
+      : await currentViewerSession().catch(async error => {
+        // A tab reloaded after its session lapsed asks its workspace first.
+        if (error?.status !== 401 || !reviewSessionChannel) throw error;
+        const resumed = await resumeExpiredModelSession({ channel: reviewSessionChannel, storage: sessionStorage,
+          controllerId: REVIEW_CONTROLLER_ID, redeem: (grant, options) => redeemViewerGrant(grant, options) });
+        if (!resumed) throw Object.assign(error, { keepBearer: true });
+        return resumed;
+      });
     if (SESSION_GRANT) {
       const activeUrl = new URL(location.href);
       activeUrl.pathname = `/session/active/${encodeURIComponent(session.sessionId)}`;
@@ -1740,7 +1749,8 @@ async function bootstrapSession() {
     applyViewerSession(session, { initialize: true });
   } catch (error) {
     window.__ltdsViewerStartupDiagnostics?.mark('bootstrap-failed');
-    if (sessionStorageKey) sessionCapabilities.clear(sessionStorageKey);
+    // A lapsed bearer is kept so a later reload can still ask the workspace.
+    if (sessionStorageKey && !error?.keepBearer) sessionCapabilities.clear(sessionStorageKey);
     updateLoading('Viewer session unavailable', String(error.message || error));
     showSessionRecovery();
   }

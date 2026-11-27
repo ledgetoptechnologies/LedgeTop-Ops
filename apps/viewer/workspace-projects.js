@@ -347,7 +347,7 @@ function publicationAuthorityLive(){
     &&!workspaceRenewal?.paused&&Date.parse(state.adminSession.expiresAt)>Date.now());
 }
 function beginWorkspaceReauthorization(){if(!state.adminSession||!state.token||!validOpsOrigin(sessionStorage.getItem(OPS_ORIGIN_KEY)))return false;void workspaceRecovery.pause();return true}
-function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidatePublicationAuthority();invalidateFolderAuthorization();const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;state.pendingOutputShares?.clear();state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
+function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidatePublicationAuthority();invalidateFolderAuthorization();const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);sessionStorage.removeItem('ltds-viewer-workspace-session');state.token=null;state.adminSession=null;state.pendingOutputShares?.clear();state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
 async function workspaceFetch(path,init={},beforeDispatch){
   await workspaceRecovery.wait(init.signal);
   if(workspaceRenewal&&workspaceRenewal.expiresAtMs<=Date.now()){
@@ -389,6 +389,15 @@ async function workspaceFetch(path,init={},beforeDispatch){
   return response;
 }
 async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){
+  const requestToken=state.token,requestSession=state.adminSession;
+  // A background read that races session expiry waits for silent renewal
+  // instead of signing the tab out. Its answer is discarded either way: it was
+  // authorized by the replaced session, and the repaint after renewal reloads it.
+  const renewedAfterUnauthorized=async()=>{
+    if(requestToken===state.token&&requestSession===state.adminSession&&workspaceRenewal)
+      await workspaceRenewal.waitForRenewal({signal,whileExpired:true});
+    return Boolean(state.token&&state.adminSession)&&(requestToken!==state.token||requestSession!==state.adminSession);
+  };
   const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};
   if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();
   if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}
@@ -399,6 +408,8 @@ async function api(path,{method='GET',body,headers={},signal,recoveryGuard,befor
   if(recoveryGuard){
     assertRequestCurrent();
     response=await fetch(path,init);
+    if(response.status===401&&workspaceRenewal&&await renewedAfterUnauthorized())
+      throw Object.assign(Error('Access was renewed; this request was not applied.'),{code:'recovery_session_changed'});
     assertRequestCurrent();
   }else response=await workspaceFetch(path,init,beforeDispatch);
   let payload;
@@ -430,9 +441,27 @@ async function mutate(path,options,message,onFailure){if(state.busy)return;state
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
 async function trashMutation(promptText,path,message){if(state.busy||!await dialogs.confirm(promptText,{title:'Move to Recycle Bin',submitLabel:'Move to Recycle Bin',destructive:true})||state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');try{const result=await api(path,{method:'DELETE',body:{}});await load();toast(message,false,{label:'View Recycle Bin',run:()=>navigateWorkspace({section:'trash'},'push')});return result}catch(error){toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 function consumeReauthorizationState(){const value=new URLSearchParams(location.hash.slice(1)).get('reauthorize');if(!value)return true;let pending=null;try{pending=JSON.parse(sessionStorage.getItem(REAUTH_STATE_KEY)||'null')}catch{}sessionStorage.removeItem(REAUTH_STATE_KEY);const valid=/^[A-Za-z0-9_-]{32,128}$/.test(value)&&pending?.nonce===value&&Number.isFinite(pending?.createdAt)&&Date.now()-pending.createdAt>=0&&Date.now()-pending.createdAt<=5*60*1000;if(valid&&pending?.view)applyWorkspaceView(pending.view);return valid}
-function installWorkspaceSession(envelope){invalidatePublicationAuthority();const checked=validateWorkspaceSessionEnvelope({...envelope,accessToken:envelope.accessToken||state.token});if(envelope.accessToken){state.token=envelope.accessToken;sessionStorage.setItem(TOKEN_KEY,state.token)}sessionStorage.setItem(OPS_ORIGIN_KEY,checked.controllerOrigin);workspaceAuthorizationClearing=false;invalidateFolderAuthorization();state.adminSession=checked.session;reviewSessionController.setAuthenticatedSubject(checked.session.subject);workspaceRenewal?.dispose();workspaceRenewal=new WorkspaceSessionRenewal({controllerWindow:workspaceController,envelope,accessToken:state.token,onSession:value=>{invalidateFolderAuthorization();state.adminSession=value.session;if(!can('viewer.client_grants.manage'))invalidatePublicationAuthority();repaintFolderAuthorization()},onExpired:clearWorkspaceAuthorization,onPaused:()=>{invalidatePublicationAuthority();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{reviewSessionController.setAuthenticatedSubject(state.adminSession.subject);storageUsagePoll.sync();scheduleOperationRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000);}}});workspaceRenewal.start()}
+function installWorkspaceSession(envelope,{allowExpired=false}={}){invalidatePublicationAuthority();const checked=validateWorkspaceSessionEnvelope({...envelope,accessToken:envelope.accessToken||state.token},{allowExpired});rememberWorkspaceSession(checked.session);if(envelope.accessToken){state.token=envelope.accessToken;sessionStorage.setItem(TOKEN_KEY,state.token)}sessionStorage.setItem(OPS_ORIGIN_KEY,checked.controllerOrigin);workspaceAuthorizationClearing=false;invalidateFolderAuthorization();state.adminSession=checked.session;reviewSessionController.setAuthenticatedSubject(checked.session.subject);workspaceRenewal?.dispose();workspaceRenewal=new WorkspaceSessionRenewal({controllerWindow:workspaceController,envelope,accessToken:state.token,allowExpired,onSession:value=>{invalidateFolderAuthorization();state.adminSession=value.session;rememberWorkspaceSession(value.session);if(!can('viewer.client_grants.manage'))invalidatePublicationAuthority();repaintFolderAuthorization()},onExpired:()=>clearWorkspaceAuthorization('expired'),onPaused:()=>{invalidatePublicationAuthority();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{reviewSessionController.setAuthenticatedSubject(state.adminSession.subject);storageUsagePoll.sync();scheduleOperationRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000);}}});workspaceRenewal.start()}
 async function redeemGrant(){const parts=location.pathname.split('/').filter(Boolean),grant=parts[0]==='workspace'&&parts[1]&&parts[1]!=='active'?decodeURIComponent(parts[1]):null;if(!grant)return false;if(!consumeReauthorizationState())throw responseError('invalid reauthorization state',400);const response=await fetch('/api/v1/admin-sessions/redeem',{method:'POST',headers:{'Content-Type':'application/json',...(state.token?{Authorization:`Bearer ${state.token}`}:{})},body:JSON.stringify({grant})});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization('unauthorized');throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Grant redemption failed (${response.status})`,response.status);installWorkspaceSession(body);syncWorkspaceView('replace');return true}
-async function restoreWorkspaceSession(){if(!state.token)return false;const response=await fetch('/api/v1/admin-sessions/current',{headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json'}});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Session check failed (${response.status})`,response.status);installWorkspaceSession(body);return true}
+// Session id, subject and expiry are routing hints, never credentials: they
+// let a reloaded tab ask Operations for a fresh grant for its own session.
+const SESSION_HINT_KEY='ltds-viewer-workspace-session';// also cleared by clearWorkspaceAuthorization
+function rememberWorkspaceSession(session){try{sessionStorage.setItem(SESSION_HINT_KEY,JSON.stringify({id:session.id,subject:session.subject,expiresAt:session.expiresAt}))}catch{}}
+function rememberedWorkspaceSession(){try{const value=JSON.parse(sessionStorage.getItem(SESSION_HINT_KEY)||'null');return value&&typeof value.id==='string'&&typeof value.subject==='string'&&typeof value.expiresAt==='string'?{id:value.id,subject:value.subject,expiresAt:value.expiresAt}:null}catch{return null}}
+// A tab the browser reloaded after sleep or memory saving renews its lapsed
+// session silently. If Operations refuses, the sign-in dialog keeps the tab.
+async function resumeLapsedWorkspaceSession(){
+  const session=rememberedWorkspaceSession(),controllerOrigin=sessionStorage.getItem(OPS_ORIGIN_KEY);
+  if(!state.token||!session||!validOpsOrigin(controllerOrigin))return false;
+  try{installWorkspaceSession({controllerOrigin,session},{allowExpired:true})}catch{return false}
+  if(await workspaceRenewal?.waitForRenewal({timeoutMs:25_000}))return true;
+  if(!state.token||!state.adminSession)return false;
+  // Still retrying (outage, offline after wake): open the workspace and keep
+  // renewing quietly; requests wait for it. Only a refusal opens the dialog.
+  if(workspaceRenewal&&!workspaceRenewal.disposed){toast('Viewer session renewal is temporarily unavailable; your current session was preserved',true);return true}
+  await workspaceRecovery.pause();return true;
+}
+async function restoreWorkspaceSession(){if(!state.token)return false;const response=await fetch('/api/v1/admin-sessions/current',{headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json'}});let body;try{body=await response.json()}catch{body={}}if(response.status===401){if(await resumeLapsedWorkspaceSession())return true;clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Session check failed (${response.status})`,response.status);installWorkspaceSession(body);return true}
 
 function renderNav(){renderWorkspaceNav({shell,container:document.querySelector('#workspace-navigation'),collapseButton:document.querySelector('#nav-collapse'),section:state.section,onSelect:section=>navigateWorkspace({section},'push')})}
 function metric(label,value,description){return`<article class="metric-card"><p>${esc(label)}</p><strong>${available(value)}</strong><small>${esc(description)}</small></article>`}

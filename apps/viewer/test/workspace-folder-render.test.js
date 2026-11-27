@@ -222,7 +222,7 @@ test('a late guarded 401 cannot clear renewed workspace authorization', async ()
   const start = source.indexOf('async function api('), end = source.indexOf('\nasync function authenticatedDownload', start);
   let resolveBody, clearCount = 0, captured;
   const context = {
-    state: { token: 'old' }, clearWorkspaceAuthorization: () => { clearCount++; },
+    state: { token: 'old' }, workspaceRenewal: null, clearWorkspaceAuthorization: () => { clearCount++; },
     fetch: (_path, request) => { captured = request.headers.Authorization; return { status: 401, ok: false, json: () => new Promise(resolve => { resolveBody = resolve; }) }; }
   };
   vm.createContext(context); vm.runInContext(source.slice(start, end), context);
