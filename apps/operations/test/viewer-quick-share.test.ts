@@ -83,6 +83,15 @@ describe("Viewer quick share", () => {
     expect(() => directShareBody({ project, task: null }, client, permissions, null)).toThrow("Share whole projects from the Viewer");
   });
 
+  it("leaves the model report off on a new task share once Operations can store that choice", async () => {
+    expect(directShareBody({ project, task }, client, permissions, null, true).permissions).toEqual({ ...permissions, report: false });
+    expect("report" in directShareBody({ project, task }, client, permissions, null, false).permissions).toBe(false);
+    const loaded = await loadDirectShareWorkspace(async () => ({ clients: [], clientsNextCursor: null, grants: [], grantsNextCursor: null, modelReport: true }), "vp-1");
+    expect(loaded.modelReport).toBe(true);
+    const older = await loadDirectShareWorkspace(async () => ({ clients: [], clientsNextCursor: null, grants: [], grantsNextCursor: null }), "vp-1");
+    expect(older.modelReport).toBeUndefined();
+  });
+
   it("lists only active grants that cover the chosen target", () => {
     const base = { sourceId: "s", workspaceId: "w", viewerProjectId: "vp-1", includeFuturePublished: false, permissions,
       expiresAt: null, revokedAt: null, createdAt: "x", clientDisplayName: null } as const;

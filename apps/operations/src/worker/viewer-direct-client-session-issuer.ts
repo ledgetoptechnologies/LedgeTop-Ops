@@ -72,7 +72,9 @@ async function decodeCursor(env: Env, raw: string, scope: string): Promise<Curso
 async function grantScope(context: {contextVersion:string;identityId:string;workspaceId:string;sourceId:string}, rows: Row[]) {
   return sha256(JSON.stringify([context.sourceId,context.workspaceId,context.identityId,context.contextVersion,
     rows.map(row=>[row.id,row.grant_version,row.viewer_project_id,row.task_id,row.scope_type,row.authorization_expires_at,
-      row.can_measure,row.can_view_cameras,row.can_download,...(row.selection ? [row.selection] : [])])]));
+      row.can_measure,row.can_view_cameras,row.can_download,...(row.selection ? [row.selection] : []),
+      // Only a share with a model report choice adds it, so earlier cursors and intents keep their digest.
+      ...(row.can_download_report === 0 || row.can_download_report === 1 ? [{report:row.can_download_report}] : [])])]));
 }
 
 export function directViewerProjectKey(sourceId:string,workspaceId:string,viewerProjectId:string):Promise<string>{
@@ -189,7 +191,9 @@ export async function issueDirectClientViewerSession(env: Env, request: DirectCl
     if(!await recheck())return failure("denied");
     const grant=await client.createSession({modelId:task.modelId,modelVersionId:task.modelVersionId,subject:`client:${input.identityId}`,
       audience:"client",idempotencyKey:key,authorizationExpiresAt:new Date(deadline).toISOString(),displayUnits:input.displayUnits,
-      permissions:{view:true,measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1,personalMeasurements:true},
+      permissions:{view:true,measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1,
+        // A share from before the choice sends none, and the Viewer keeps the report with downloads.
+        ...(row.can_download_report===0||row.can_download_report===1?{report:row.can_download_report===1}:{}),personalMeasurements:true},
       sourceAuthorization:{type:"direct_client_grant",id:row.id,version:row.grant_version},
       ...(row.selection ? { restrictedScope:{version:1,projectId:row.viewer_project_id,taskId:input.taskId,generation:generation!,selection:row.selection} as const } : {})});
     // Publication can change in Viewer while the remote session is being minted.
