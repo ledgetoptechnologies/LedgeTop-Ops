@@ -14,27 +14,44 @@ const clientKind=client=>client?.rootType==='organization'?'Organisation':client
 // "Ledge Top Drone Services Project Alpha" -> "Drone Services".
 export const clientBusinessWord=name=>name?String(name).replace(/^Ledge ?Top\s+/i,'').replace(/\s+Project Alpha$/i,'')||String(name):null;
 const nameOf=client=>client?.displayName||'Client',fold=text=>String(text).trim().toLocaleLowerCase();
-const keyOf=client=>JSON.stringify([client?.sourceId,client?.workspaceId]);
+const workspaceKey=client=>JSON.stringify([client?.sourceId,client?.workspaceId]);
+// One real client: rows with the same group key (a reviewed shared-profile link from Operations) are that client.
+const keyOf=client=>client?.groupKey||workspaceKey(client);
+// A row standing for one client in several divisions names all of its businesses.
+const businessOf=client=>client?.members?.length>1?[...new Set(client.members.map(member=>clientBusinessWord(member?.businessName)).filter(Boolean))].join(' and ')||null
+  :clientBusinessWord(client?.businessName);
 // Different clients that share a name each get one word that tells them apart: the business, else the organisation,
 // else the kind. Only when none of those differ, the end of the id. Rows are never merged by name.
 export function clientPickerWord(client,all=[]){
   const others=all.filter(item=>fold(nameOf(item))===fold(nameOf(client))&&keyOf(item)!==keyOf(client));
   if(!others.length)return null;
-  for(const word of [item=>clientBusinessWord(item?.businessName),item=>item?.organizationName||null,clientKind]){
+  for(const word of [businessOf,item=>item?.organizationName||null,clientKind]){
     const own=word(client);
     if(own&&others.every(item=>word(item)&&fold(word(item))!==fold(own)))return own;
   }
-  return [clientBusinessWord(client?.businessName),client?.workspaceId?`ref ${String(client.workspaceId).slice(-6)}`:null].filter(Boolean).join(', ')||null;
+  return [businessOf(client),client?.workspaceId?`ref ${String(client.workspaceId).slice(-6)}`:null].filter(Boolean).join(', ')||null;
+}
+// Adds server rows to the shown rows. A workspace whose group already has a row joins that row as another
+// destination; nothing else ever merges. Returns how many workspaces were new.
+export function addClientRows(rows,items,groupOf=()=>null){
+  const seen=new Set(rows.flatMap(row=>row.members||[row]).map(workspaceKey));let added=0;
+  for(const item of items){
+    const key=workspaceKey(item);if(seen.has(key))continue;seen.add(key);added++;
+    const group=groupOf(item),row=group?rows.find(candidate=>candidate.groupKey===group):null;
+    if(row)row.members.push(item);else rows.push(group?{...item,groupKey:group,members:[item]}:item);
+  }
+  return added;
 }
 // Pages whose rows were all withheld by the server's authority checks are skipped, up to this many in a row.
 export const CLIENT_PICKER_EMPTY_PAGE_LIMIT=5;
 
+// groupOf is fixed for the life of the picker: grouping never changes after rows are shown.
 export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_MS,setTimer=setTimeout,clearTimer=clearTimeout,
-  onChange=()=>{},onSelect=()=>{},initial=null,minQuery=0}={}){
+  onChange=()=>{},onSelect=()=>{},initial=null,minQuery=0,groupOf=()=>null}={}){
   const state={query:'',items:[],cursor:null,loading:false,loadingMore:false,error:null,open:false,active:-1,selected:null,loaded:false,minQuery};
   const tooShort=text=>text.trim().length<minQuery;
   let sequence=0,timer=null,controller=null,moreController=null;
-  if(initial&&Array.isArray(initial.clients)){state.items=initial.clients.slice();state.cursor=initial.clientsNextCursor||null;state.loaded=true;}
+  if(initial&&Array.isArray(initial.clients)){addClientRows(state.items,initial.clients,groupOf);state.cursor=initial.clientsNextCursor||null;state.loaded=true;}
   const changed=()=>onChange(state);
   const cancel=()=>{if(timer!==null){clearTimer(timer);timer=null}controller?.abort();moreController?.abort();controller=moreController=null};
   async function run(query){
@@ -47,7 +64,7 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
         page=await fetchPage({query,cursor:page.clientsNextCursor,signal:abort?.signal});
         if(mine!==sequence)return;
       }
-      state.items=Array.isArray(page?.clients)?page.clients.slice():[];state.cursor=page?.clientsNextCursor||null;
+      state.items=[];addClientRows(state.items,Array.isArray(page?.clients)?page.clients:[],groupOf);state.cursor=page?.clientsNextCursor||null;
       state.active=state.items.length?0:-1;state.loaded=true;
     }catch(error){
       if(mine!==sequence)return;
@@ -59,14 +76,11 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
     const mine=sequence,cursor=state.cursor,abort=typeof AbortController==='function'?new AbortController():null;moreController=abort;
     state.loadingMore=true;changed();
     try{
-      const seen=new Set(state.items.map(item=>JSON.stringify([item.sourceId,item.workspaceId])));
       let next=cursor,added=0,pages=0;
       do{
         const page=await fetchPage({query:state.query,cursor:next,signal:abort?.signal});
         if(mine!==sequence||cursor!==state.cursor)return;
-        for(const item of Array.isArray(page?.clients)?page.clients:[]){
-          const key=JSON.stringify([item.sourceId,item.workspaceId]);if(!seen.has(key)){seen.add(key);state.items.push(item);added++}
-        }
+        added+=addClientRows(state.items,Array.isArray(page?.clients)?page.clients:[],groupOf);
         next=page?.clientsNextCursor||null;
       }while(!added&&next&&++pages<CLIENT_PICKER_EMPTY_PAGE_LIMIT);
       state.cursor=next;
@@ -97,7 +111,9 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
     select(index){
       // Only results for the current text can be chosen.
       if(state.loading)return false;
-      const client=state.items[index];if(!client)return false;
+      const shown=state.items[index];if(!shown)return false;
+      // The choice is a copy: a later page adding a destination to this row does not change what was chosen.
+      const client=shown.members?{...shown,members:shown.members.slice()}:shown;
       state.selected=client;state.active=index;state.open=false;state.query=clientPickerLabel(client,state.items);changed();onSelect(client,state.query);return true;
     },
     key(name){
@@ -152,7 +168,7 @@ export function clientPickerStatus(state){
 export const clientPickerStatusShown=state=>!state.selected&&(state.loading||Boolean(state.error)
   ||state.open&&!state.items.length&&state.query.trim().length>=Math.max(1,state.minQuery||0));
 
-export function bindClientPicker(root,{fetchPage,onSelect,initial,id='direct-client-picker',setTimer,clearTimer,minQuery=CLIENT_PICKER_MIN_QUERY}){
+export function bindClientPicker(root,{fetchPage,onSelect,initial,id='direct-client-picker',setTimer,clearTimer,minQuery=CLIENT_PICKER_MIN_QUERY,groupOf}){
   const input=root.querySelector('[role="combobox"]'),list=root.querySelector('[data-client-picker-list]'),
     status=root.querySelector('[data-client-picker-status]'),hidden=root.querySelector('input[name="client"]');
   const render=state=>{
@@ -167,7 +183,7 @@ export function bindClientPicker(root,{fetchPage,onSelect,initial,id='direct-cli
     if(open&&state.cursor&&!state.loading&&!state.loadingMore&&Number.isFinite(list.scrollHeight)&&list.scrollHeight<=list.clientHeight+1)
       setTimeout(()=>void picker.more(),0);
   };
-  const picker=createClientPicker({fetchPage,initial,minQuery,onChange:render,...(setTimer?{setTimer}:{}),...(clearTimer?{clearTimer}:{}),
+  const picker=createClientPicker({fetchPage,initial,minQuery,onChange:render,...(groupOf?{groupOf}:{}),...(setTimer?{setTimer}:{}),...(clearTimer?{clearTimer}:{}),
     onSelect:(client,label)=>{hidden.value=client?JSON.stringify([client.sourceId,client.workspaceId]):'';if(client)input.value=label;onSelect?.(client,label)}});
   input.oninput=()=>picker.input(input.value);
   input.onfocus=()=>void picker.focus();
