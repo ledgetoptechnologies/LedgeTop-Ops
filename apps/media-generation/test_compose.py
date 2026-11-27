@@ -66,7 +66,8 @@ def render(files, values, expect_success=True):
 class MediaComposeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.base = render([BASE], VALUES)["services"]
+        # Every deployment renders with the same synthetic shared NAS link file, so their services stay comparable.
+        cls.base = render([BASE], VALUES | {"NAS_LINK_ENV_FILE": "@link"})["services"]
         cls.full = render([BASE, PREBUILT], VALUES | OPTIONAL)["services"]
         cls.all = render([ALL], VALUES | OPTIONAL)["services"]
 
@@ -209,7 +210,11 @@ class MediaComposeTests(unittest.TestCase):
         self.assertEqual(logs["pids_limit"], 256)
         self.assertEqual(logs["environment"], LINK | {"LOGS_INGRESS_HOST": "logs.example.test"},
             "only the shared NAS link file and the hostname; no per-service secrets")
-        self.assertRegex(ALL.read_text(), r"(?m)^    env_file:\n      - path: \$\{NAS_LINK_ENV_FILE:-[^}]+\}\n        required: false\n")
+        for text in (ALL.read_text(), BASE.read_text()):
+            self.assertIn("      - path: ${NAS_LINK_ENV_FILE:-/mnt/Plugins/App_Data/LedgeTop-Ops-Workers/shared/nas-link.env}\n        required: false\n", text)
+        self.assertEqual(ALL.read_text().count("${NAS_LINK_ENV_FILE:-/mnt/Plugins/App_Data/LedgeTop-Ops-Workers/shared/nas-link.env}"), 2, "flight-logs and queue-renderer, one line each")
+        self.assertEqual(self.all["queue-renderer"]["environment"]["NAS_LINK_CLIENT_ID"], LINK["NAS_LINK_CLIENT_ID"])
+        self.assertEqual(self.all["queue-renderer"]["environment"]["LTDSTHUMB_API_TOKEN"], "synthetic-renderer-token", "bearer kept until retirement")
         self.assertEqual([(port["host_ip"], str(port["published"]), port["target"]) for port in logs["ports"]],
             [("192.0.2.10", "8090", 8080)])
         self.assertEqual([(volume["source"], volume["target"]) for volume in logs["volumes"]], [("/synthetic/workers-app-data", "/app-data")])
@@ -228,8 +233,9 @@ class MediaComposeTests(unittest.TestCase):
         self.assertEqual(logs["environment"], {"LOGS_INGRESS_HOST": ""}, "no link values; Logs reads only its own logs.env")
         self.assertEqual(set(legacy), set(self.all), "the same services")
         for name in legacy:
-            if name != LOGS:
+            if name not in (LOGS, "queue-renderer"):
                 self.assertEqual(legacy[name], self.all[name], f"{name} unchanged by the link")
+        self.assertFalse(any(key.startswith("NAS_LINK_") for key in legacy["queue-renderer"]["environment"]))
         # A named shared file that does not exist yet is skipped, not fatal (required: false).
         absent = render([ALL], legacy_values | {"NAS_LINK_ENV_FILE": "/synthetic/not-created-yet/nas-link.env"})["services"][LOGS]
         self.assertEqual(absent["environment"], {"LOGS_INGRESS_HOST": ""})
