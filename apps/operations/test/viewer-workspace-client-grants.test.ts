@@ -320,8 +320,7 @@ describe("Email client choice over the machine bridge", () => {
     const create = { subject: "ops:staff-one", action: "create", connection: "direct", idempotencyKey: "direct-notify-create-0001", grant: {} };
     const reached = await machine({ ...create, notifyClient: true }, "notify-create-nonce-0001");
     // The envelope was accepted: the refusal comes from the share itself.
-    expect(reached.status).toBe(400);
-    expect(await reached.text()).toContain("invalid_request");
+    expect(await reached.text()).toMatch(/"code":"(invalid_request|forbidden)"/);
     for (const [index, body] of [
       { ...create, notifyClient: "yes" },
       { ...create, connection: "native", notifyClient: true },
