@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after } from 'node:test';
+import { isolatedBrowserArguments } from './launch-network-isolation.mjs';
 
 // One way to start and stop the headless Chrome/Edge used by the Viewer
 // browser tests, so a run never leaves a browser behind.
@@ -15,6 +16,9 @@ import { after } from 'node:test';
 // it. Cleanup runs from the test's finally block (stopBrowser), the file's
 // after() hook, process exit, SIGINT/SIGTERM and uncaught errors. It only
 // ever matches this run's own profile directories.
+//
+// Every launch also asks the browser to resolve only loopback, whatever the caller
+// passes. What that does and does not prove: see launch-network-isolation.mjs.
 
 const registry = new Map(); // resolved profile dir -> { child, removeProfile }
 const profileOf = new WeakMap(); // ChildProcess -> resolved profile dir
@@ -26,7 +30,7 @@ const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),
 // Start a browser on a fresh temporary profile. `args` is the browser's own
 // argument list, or a function of the profile dir that returns it (so callers
 // keep their exact flag order). Returns { child, profile, cleanup }.
-export function launchBrowser(executable, args, { prefix = 'ltds-browser-', spawnOptions = { windowsHide: true, stdio: 'ignore' }, removeProfile = true } = {}) {
+export function launchBrowser(executable, args, { prefix = 'ltds-browser-', spawnOptions = { windowsHide: true, stdio: 'ignore' }, removeProfile = true, networkException, spawnImpl } = {}) {
   if (!/^ltds-[A-Za-z0-9_-]*$/.test(prefix)) throw new Error(`launchBrowser profile prefix must start with ${PROFILE_PREFIX} and be a plain name: ${prefix}`);
   const profile = mkdtempSync(path.join(tmpdir(), prefix));
   let list = typeof args === 'function' ? args(profile) : [...args];
@@ -35,7 +39,13 @@ export function launchBrowser(executable, args, { prefix = 'ltds-browser-', spaw
     const url = list.length && !String(list.at(-1)).startsWith('-') ? [list.pop()] : [];
     list = [...list, `${USER_DATA_DIR}${profile}`, ...url];
   }
-  const child = spawnBrowser(executable, list, spawnOptions, { removeProfile });
+  let child;
+  try {
+    child = spawnBrowser(executable, list, spawnOptions, { removeProfile, networkException, spawnImpl });
+  } catch (error) {
+    if (!registry.has(path.resolve(profile))) removeProfileDir(profile); // refused before launch
+    throw error;
+  }
   return { child, profile, cleanup: (options) => stopBrowser(child, options) };
 }
 
@@ -57,14 +67,15 @@ export function assertOwnedProfile(profile) {
 // Drop-in for child_process.spawn() on a browser command line that already
 // carries --user-data-dir=<dir>. Registers that dir for cleanup before the
 // browser starts, so even a failed launch is swept.
-export function spawnBrowser(executable, args, spawnOptions = { windowsHide: true, stdio: 'ignore' }, { removeProfile = true } = {}) {
+export function spawnBrowser(executable, args, spawnOptions = { windowsHide: true, stdio: 'ignore' }, { removeProfile = true, networkException, spawnImpl = spawn } = {}) {
   const flag = args.find((arg) => String(arg).startsWith(USER_DATA_DIR));
   if (!flag) throw new Error('spawnBrowser needs a --user-data-dir=<temporary profile> argument');
   const profile = assertOwnedProfile(flag.slice(USER_DATA_DIR.length).replace(/^"(.*)"$/, '$1'));
+  const isolated = isolatedBrowserArguments(args, { networkException });
   installHooks();
   const entry = { child: null, removeProfile };
   registry.set(profile, entry);
-  const child = spawn(executable, args, spawnOptions);
+  const child = spawnImpl(executable, isolated, spawnOptions);
   entry.child = child;
   profileOf.set(child, profile);
   return child;

@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
+import { playwrightIsolationArguments } from './launch-network-isolation.mjs';
 
 // Opt in deliberately: ordinary Linux/unit runs do not import Playwright or
 // require a browser. An opted-in run fails if the build/browser is unavailable.
@@ -186,7 +187,7 @@ test('built Viewer shares directly to clients through the real browser UI', { sk
   assert.ok(existsSync(edge), `Microsoft Edge executable unavailable: ${edge}`);
   const release = await acquireBrowserHarnessLock({ root }); let browser;
   t.after(async () => { try { await browser?.close(); } finally { release(); } });
-  browser = await chromium.launch({ executablePath: edge, headless: true, args: ['--disable-gpu', '--no-first-run'] });
+  browser = await chromium.launch({ executablePath: edge, headless: true, args: playwrightIsolationArguments(['--disable-gpu']) });
 
   for (const replaces of [false, true]) await t.test(`${replaces ? 'new' : 'old'} list gates Edit selection; refusal preserves grants and fallback`, async child => {
     const state = await fixture(child, { replaces, seedProjectGrant: true, refuseReplace: true });
