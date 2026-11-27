@@ -14,7 +14,10 @@ import type { Env } from "./types";
  *   vdcg-notify-sent:<grant>:<id>           delivered to that identity
  *   vdcg-notify-closed:<grant>              nothing more will be sent for this grant
  * Mail goes out from the scheduled run, never inside the share request, so a
- * slow or failing mail server cannot block or fail a share.
+ * slow or failing mail server cannot block or fail a share. Delivery is at
+ * least once: a crash between the provider accepting a mail and its sent row
+ * resends once after the lease, with the same Message-ID, as in the other
+ * notification paths. A workspace of more than 200 members gets no email.
  */
 export const SHARE_NOTICE_ACTOR = "system:viewer-share-email";
 const REQUESTED = "grant.notify.requested", ATTEMPT = "grant.notify.attempt", SENT = "grant.notify.sent", CLOSED = "grant.notify.closed";
@@ -65,9 +68,15 @@ export async function processDirectViewerShareNotices(env: Env,
   const open = (await db.prepare(`SELECT g.id,g.workspace_id,g.source_id,g.viewer_project_id,g.task_id,g.scope_type,g.status,g.revoked_at,
       g.authorization_expires_at,request.created_at requested_at,request.details_json
     FROM viewer_direct_client_grant_audit request JOIN viewer_direct_client_grants g ON g.id=request.grant_id
-    WHERE request.action=? AND request.id='vdcg-notify:'||g.id AND datetime(request.created_at)<=datetime(?)
+    WHERE request.id>='vdcg-notify:' AND request.id<'vdcg-notify;' AND request.action=? AND request.id='vdcg-notify:'||g.id
       AND NOT EXISTS(SELECT 1 FROM viewer_direct_client_grant_audit closed WHERE closed.id='vdcg-notify-closed:'||g.id)
-    ORDER BY request.created_at,g.id LIMIT ?`).bind(REQUESTED, iso(nowMs - GRACE_MS), MAX_GRANTS).all<OpenGrant>()).results;
+    ORDER BY request.created_at,g.id LIMIT ?`).bind(REQUESTED, MAX_GRANTS).all<OpenGrant>()).results;
+  // The Viewer posts a multi-task share one task at a time. Hold every open request for a project
+  // and workspace until the newest of them is a minute old, so one click becomes one email.
+  const newest = new Map<string, number>();
+  for (const grant of open) { const key = JSON.stringify([grant.viewer_project_id, grant.workspace_id]);
+    newest.set(key, Math.max(newest.get(key) ?? 0, Date.parse(grant.requested_at))); }
+  const settled = (grant: OpenGrant) => newest.get(JSON.stringify([grant.viewer_project_id, grant.workspace_id]))! <= nowMs - GRACE_MS;
   let closed = 0, sent = 0;
   const close = async (grant: OpenGrant, reason: string) => {
     try { await auditRow(db, closedId(grant.id), grant.id, CLOSED, SHARE_NOTICE_ACTOR, closedId(grant.id), { reason }, now).run(); closed++; }
@@ -76,6 +85,7 @@ export async function processDirectViewerShareNotices(env: Env,
   const live: OpenGrant[] = [];
   for (const grant of open) {
     if (Date.parse(grant.requested_at) < nowMs - WINDOW_MS) await close(grant, "window-passed");
+    else if (!settled(grant)) continue;
     else if (grant.status !== "active" || grant.revoked_at !== null
       || (grant.authorization_expires_at !== null && !(Date.parse(grant.authorization_expires_at) > nowMs))) await close(grant, "share-not-active");
     else live.push(grant);
@@ -127,6 +137,7 @@ export async function processDirectViewerShareNotices(env: Env,
     groups.set(key, [...groups.get(key) ?? [], pair]);
   }
   const base = portalBase(env);
+  if (!base && groups.size) console.warn(JSON.stringify({ event: "viewer_share_email_portal_url_invalid" }));
   for (const [key, group] of groups) {
     if (!base || sent >= MAX_MAILS) break;
     const pending = group.filter(pair => !done(pair));
