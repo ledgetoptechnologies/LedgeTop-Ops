@@ -1502,6 +1502,48 @@ test('Duplicate opens a pre-filled task dialog and creates the copy in the same 
   await waitFor(client,`new URL(location.href).searchParams.get('task')==='task-submitted-1'`,'the copy did not open');
 }));
 
+test('Reprocess reruns a finished task on its photos with changed options', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-reprocess',width:1440,height:900,
+  configure:runtime=>{
+    const node=structuredClone(fixtures.providers[0]);node.runtimeHealthAt=new Date().toISOString();node.capabilities.options.push(...['pc-ept','gltf','3d-tiles'].map(name=>({name,type:'bool',value:true})));runtime.providers=[node];
+    runtime.taskOverrides={'task-quarry':{latestAttempt:{id:'attempt-quarry',attemptNumber:1,providerId:'provider-nodeodm',presetId:'preset-fast',status:'ready_for_review',options:{dsm:true,'feature-quality':'medium','pc-ept':true,gltf:true,'3d-tiles':true},createdAt:'2026-08-18T12:00:00.000Z',updatedAt:'2026-08-18T12:05:00.000Z'}}};}},
+  async({client,runtime,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-quarry`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))`,'task unavailable');
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} details.task-more-actions').open=true`);
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="reprocess-task"]').getAttribute('aria-disabled')`),null);
+  const start=runtime.requests.length;
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="reprocess-task"]').click()`);
+  await waitFor(client,`document.querySelector('dialog[aria-label="Reprocess task"][open] [name="providerId"]')?.value==='provider-nodeodm'`,'Reprocess did not open with the last node');
+  const form=await client.evaluate(`(()=>{const dialog=document.querySelector('dialog[aria-label="Reprocess task"]');
+    const modified=[...dialog.querySelectorAll('.task-options-list fieldset')].filter(row=>row.querySelector('span.form-note')?.textContent).map(row=>{const control=row.querySelector('select,input');return[row.querySelector('legend').textContent,control.type==='checkbox'?control.checked:control.value]});
+    return{title:dialog.querySelector('h2').textContent,preset:dialog.querySelector('[name="presetId"]').value,modified,photoControls:dialog.querySelectorAll('[data-source],input[type="file"]').length,optionsOpen:dialog.querySelector('.task-options-editor').open,submit:dialog.querySelector('button[type="submit"]').textContent}})()`);
+  assert.deepEqual(form,{title:'Reprocess',preset:'preset-fast',modified:[['dsm',true],['feature-quality','medium']],photoControls:0,optionsOpen:true,submit:'Reprocess'});
+  assert.deepEqual(runtime.requests.slice(start).filter(item=>item.method!=='GET'&&!item.path.endsWith('/capabilities/refresh')),[],'opening starts nothing');
+  await treeScreenshot(client,'desktop-1440-reprocess-dialog.png');
+  // Change one option, then rerun.
+  await client.evaluate(`(()=>{const row=[...document.querySelectorAll('dialog[aria-label="Reprocess task"] .task-options-list fieldset')].find(item=>item.querySelector('legend').textContent==='dsm');const box=row.querySelector('input');box.checked=false;box.dispatchEvent(new Event('change'));document.querySelector('dialog[aria-label="Reprocess task"] button[type="submit"]').click();})()`);
+  await waitForRequest(runtime,start,'POST','/api/v1/tasks/task-quarry/attempts');
+  const rerun=runtime.requests.slice(start).find(item=>item.method==='POST'&&item.path==='/api/v1/tasks/task-quarry/attempts');
+  assert.deepEqual(rerun.body,{providerId:'provider-nodeodm',presetId:'preset-fast',options:{'feature-quality':'medium'}});
+  assert.equal(runtime.requests.slice(start).filter(item=>item.method==='POST'&&['/api/v1/datasets','/api/v1/task-submissions','/api/v1/dataset-imports/copy'].includes(item.path)).length,0,'no photos are uploaded or copied');
+  await waitFor(client,`!document.querySelector('dialog[aria-label="Reprocess task"]')`,'the dialog did not close');
+  await treeScreenshot(client,'desktop-1440-reprocess-done.png');
+}));
+
+test('on a phone, Reprocess fits the screen', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-reprocess-phone',width:390,height:844,mobile:true,
+  configure:runtime=>{const node=structuredClone(fixtures.providers[0]);node.runtimeHealthAt=new Date().toISOString();node.capabilities.options.push(...['pc-ept','gltf','3d-tiles'].map(name=>({name,type:'bool',value:true})));runtime.providers=[node];
+    runtime.taskOverrides={'task-quarry':{latestAttempt:{id:'attempt-quarry',attemptNumber:1,providerId:'provider-nodeodm',presetId:'preset-fast',status:'failed',options:{dsm:true},createdAt:'2026-08-18T12:00:00.000Z',updatedAt:'2026-08-18T12:05:00.000Z'}}};}},
+  async({client,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-quarry`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))`,'task unavailable');
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} details.task-more-actions').open=true`);
+  await treeScreenshot(client,'phone-390-task-menu-reprocess.png');
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="reprocess-task"]').click()`);
+  await waitFor(client,`document.querySelector('dialog[aria-label="Reprocess task"][open] [name="providerId"]')?.value==='provider-nodeodm'`,'Reprocess did not open');
+  assert.equal(await client.evaluate(`(()=>{const r=document.querySelector('dialog[aria-label="Reprocess task"]').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&document.documentElement.scrollWidth<=innerWidth;})()`),true,'the dialog overflows a 390px screen');
+  await treeScreenshot(client,'phone-390-reprocess-dialog.png');
+}));
+
 test('on a phone, rows are 44px touch targets, drag is not offered and Move to… opens as a bottom sheet', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-phone',width:390,height:844,mobile:true,seed:processing=>{const folders=nestedFolders(processing);processing.moveTaskToFolder('task-quarry',folders.site.id,'staff');return folders;},quarryInJohnson:true},async({client,origin,top,site})=>{
   await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
   await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-johnson')}'))&&Boolean(document.querySelector('${treeRow(`f:${top.id}`)}'))`,'tree unavailable');
