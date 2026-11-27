@@ -19,6 +19,24 @@ const OPS_SUCCESSOR_READER_SOURCE_COMMIT = 'a0c8fd230d46690a7090c79190e125f5a02f
 const OPS_SUCCESSOR_READER_MAIN_SHA256 = 'f4cdefd633441df8db18cc5c0b192fc8faa72ebd7b1db730122bd77318164e68';
 const OPS_SUCCESSOR_READER_ADDITIONS = Object.freeze(['readWindowsCatalogSuccessorAuthorization',
   'readWindowsDeliverySuccessorAuthorization'].sort());
+/** Reviewed Ops StaffDirectory entrypoint exception (ops-staff-directory-entrypoint-v1). The pinned
+ * Ops build adds exactly one named-handler class, StaffDirectory, with exactly these three handlers;
+ * every other export, handler, binding and runtime field stays equal to the installed baseline.
+ * The contract itself never pins a fresh candidate id. `heldCandidateId` is the one already uploaded
+ * inactive version of this exact build (refused before activation, never resumed): the only id admitted
+ * as a stray inactive Ops latest over `baselineVersionId`, and the only id recognized as an installed
+ * active StaffDirectory version for unselected-app checks. */
+export const OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT = 'ops-staff-directory-entrypoint-v1';
+export const OPS_STAFF_DIRECTORY_ENTRYPOINT = Object.freeze({
+  contract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT,
+  sourceCommit: '331791ed56af4f2af24efc2a3003048a2d487ace',
+  mainSHA256: 'c5007a88247f801f1f51ba5950d6371c9e2f554e63df7aca564584849c206333',
+  sourceMapSHA256: '7865a50c3505c94be61a8fc3c3c1ef437797d2b45b11af70dc0d7955c0298e23',
+  className: 'StaffDirectory',
+  handlers: Object.freeze(['getPilotDeviceAuthority', 'isActiveStaff', 'resolvePilotUsername'].sort()),
+  baselineVersionId: 'b61e28eb-02c4-49b6-8bb0-c83aa6777c7d',
+  heldCandidateId: '65650d92-00fe-40ff-8946-7df9ec8a407e',
+});
 export const ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 = '6073b977db48843d9eaecba74cb3863815b92dff87afd4c6f144b5e1dbad48fe';
 export const CANONICAL_INSTALLED_PROFILE_V4_SHA256 = '2ef0f21be881bbe1567e4ea941255ea1f6e1be9a339c1f854174c5ac334a10fd';
 const ORDINARY_FRONTEND_PRESERVED_FLAGS = Object.freeze({
@@ -51,6 +69,51 @@ function expectedOpsSuccessorReaderScript(script) {
     'Installed Ops successor reader contract baseline is invalid');
   reader.handlers = [...reader.handlers, ...OPS_SUCCESSOR_READER_ADDITIONS].sort();
   return expected;
+}
+function validStaffDirectoryPins(pins) {
+  return !!pins && pins.contract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT && typeof pins.className === 'string'
+    && pins.className.length > 0 && Array.isArray(pins.handlers) && pins.handlers.length > 0
+    && new Set(pins.handlers).size === pins.handlers.length && pins.handlers.every(name => typeof name === 'string' && name)
+    && /^[a-f0-9]{40}$/.test(pins.sourceCommit ?? '') && /^[a-f0-9]{64}$/.test(pins.mainSHA256 ?? '')
+    && /^[a-f0-9]{64}$/.test(pins.sourceMapSHA256 ?? '') && UUID.test(pins.baselineVersionId ?? '')
+    && UUID.test(pins.heldCandidateId ?? '');
+}
+/** Baseline script plus exactly the one reviewed StaffDirectory class. */
+export function expectedOpsStaffDirectoryScript(script, pins = OPS_STAFF_DIRECTORY_ENTRYPOINT) {
+  need(validStaffDirectoryPins(pins), 'Ops StaffDirectory entrypoint pins are invalid');
+  const expected = scriptShape(script);
+  need(!expected.named_handlers.some(row => row.name === pins.className),
+    'Ops StaffDirectory entrypoint baseline already exports the class');
+  expected.named_handlers = named([...expected.named_handlers, { name: pins.className, handlers: exactSet([...pins.handlers]) }]);
+  return expected;
+}
+/** True only for exactly one index.js module whose bytes hash to the pinned main bundle. */
+export function opsStaffDirectoryMainMatches(modern, pins = OPS_STAFF_DIRECTORY_ENTRYPOINT) {
+  const rows = Array.isArray(modern?.modules) ? modern.modules.filter(row => row?.name === 'index.js') : [];
+  if (rows.length !== 1 || typeof rows[0].content_base64 !== 'string') return false;
+  const bytes = Buffer.from(rows[0].content_base64, 'base64');
+  return bytes.length > 0 && bytes.toString('base64') === rows[0].content_base64 && hash(bytes) === pins.mainSHA256;
+}
+/** The one reviewed held state: Ops baseline active alone at 100% with the pinned uploaded StaffDirectory
+ * build as its inactive latest. Admitted for unselected-app checks, and for an Operations-selected
+ * pre-activation check only under the explicit entrypoint contract. This is also the state
+ * after a rollback from the activated held version to the baseline, which stays admissible on purpose. */
+export function isHeldOpsStaffDirectoryInactiveLatest(app, state, pins = OPS_STAFF_DIRECTORY_ENTRYPOINT) {
+  if (app !== 'operations' || !validStaffDirectoryPins(pins) || !state || typeof state !== 'object') return false;
+  const rows = state.deployment?.versions;
+  if (!(Array.isArray(rows) && rows.length === 1 && rows[0]?.version_id === pins.baselineVersionId && rows[0]?.percentage === 100
+    && state.version?.id === pins.baselineVersionId && state.modern?.id === pins.baselineVersionId
+    && state.latest === pins.heldCandidateId && state.latestVersion?.id === pins.heldCandidateId
+    && state.latestModern?.id === pins.heldCandidateId
+    && state.latestVersion.resources?.script?.last_deployed_from === 'wrangler'
+    && state.version.resources?.script)) return false;
+  try {
+    return equal(scriptShape(state.latestVersion.resources.script), expectedOpsStaffDirectoryScript(state.version.resources.script, pins))
+      && equal(scriptRuntimeShape(state.latestVersion.resources.script_runtime), scriptRuntimeShape(state.version.resources.script_runtime))
+      && equal(named(state.latestVersion.resources.bindings), named(state.version.resources.bindings))
+      && equal(state.latestModern.assets ?? null, state.modern.assets ?? null)
+      && opsStaffDirectoryMainMatches(state.latestModern, pins);
+  } catch { return false; }
 }
 export function scriptRuntimeShape(runtime) {
   const value = clone(runtime), assets = value?.assets;
@@ -244,6 +307,7 @@ export function isHeldOpsSyncInactiveLatest(app, state, pins = HELD_OPS_SYNC_INA
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
   ordinaryFrontendPreflightMode, ordinaryFrontendApp, assetAssociationOverrides = {},
   opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId,
+  opsStaffDirectoryEntrypointContract, opsStaffDirectoryCandidateId, opsStaffDirectoryPins = OPS_STAFF_DIRECTORY_ENTRYPOINT,
   heldOpsSyncInactiveLatestPins = HELD_OPS_SYNC_INACTIVE_LATEST } = {}) {
   const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
   need(assetAssociationOverrides && Object.getPrototypeOf(assetAssociationOverrides) === Object.prototype,
@@ -270,6 +334,21 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     'Operations release candidate identity requires its exact promotion contract');
   if (opsSuccessorReaderContract !== undefined) need(selectedApp === undefined || Object.hasOwn(profile.workers, selectedApp),
     'Ops successor reader installed-state recognition is limited to a known profile capture');
+  // The explicit StaffDirectory contract is Operations-selected only and never combines with a
+  // successor-reader contract. Without a candidate id it is the pre-activation check: the active Ops
+  // version stays the strict profile and the selected latest may be only the exact held upload. With
+  // the runtime candidate id it is the post-activation check of that now-active candidate.
+  need(opsStaffDirectoryEntrypointContract === undefined || (opsStaffDirectoryEntrypointContract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT
+    && validStaffDirectoryPins(opsStaffDirectoryPins) && opsSuccessorReaderContract === undefined
+    && opsSuccessorReaderReleaseCandidateId === undefined && selectedApp === 'operations'
+    && (ordinaryFrontendPreflightMode === undefined
+      || (ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE && ordinaryFrontendApp === 'operations'))
+    && (opsStaffDirectoryCandidateId === undefined || UUID.test(opsStaffDirectoryCandidateId))),
+  'Ops StaffDirectory entrypoint contract is limited to its exact Operations checks');
+  const staffDirectoryPreActivation = opsStaffDirectoryEntrypointContract !== undefined && opsStaffDirectoryCandidateId === undefined;
+  const staffDirectoryActiveCandidate = opsStaffDirectoryEntrypointContract !== undefined && opsStaffDirectoryCandidateId !== undefined;
+  need(opsStaffDirectoryCandidateId === undefined || opsStaffDirectoryEntrypointContract !== undefined,
+    'Ops StaffDirectory candidate identity requires its exact contract');
   if (ordinaryFrontendPreflightMode !== undefined) {
     const canonicalSyncInstalledControls = ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
       && ordinaryFrontendApp === 'ops-sync' && selectedApp === 'ops-sync';
@@ -281,16 +360,36 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   for (const [app, spec] of Object.entries(profile.workers)) {
     const s = snapshot[app]; const id = activeId(s, expectedDeploymentVersions[app]);
     need(s.version.id === id && s.modern.id === id && UUID.test(s.latest), 'Active/version identity invalid');
-    if (!selectedApp || app === selectedApp) need(s.latest === (allowLatest[app] ?? id), 'Latest must equal the selected sole active version; reconcile an incomplete deployment first');
-    else if (s.latest !== id && !isHeldOpsSyncInactiveLatest(app, s, heldOpsSyncInactiveLatestPins)) {
+    if (!selectedApp || app === selectedApp) need(s.latest === (allowLatest[app] ?? id)
+      || (staffDirectoryPreActivation && app === 'operations' && allowLatest[app] === undefined
+        && isHeldOpsStaffDirectoryInactiveLatest(app, s, opsStaffDirectoryPins)),
+    'Latest must equal the selected sole active version; reconcile an incomplete deployment first');
+    else if (s.latest !== id && !isHeldOpsSyncInactiveLatest(app, s, heldOpsSyncInactiveLatestPins)
+      && !isHeldOpsStaffDirectoryInactiveLatest(app, s, opsStaffDirectoryPins)) {
       need(s.latestVersion?.id === s.latest && s.latestModern?.id === s.latest && s.latestVersion.resources.script.last_deployed_from === 'wrangler', 'Unselected inactive version lacks native metadata proof');
       need(equal(resourcesShape(s.latestVersion.resources), resourcesShape(s.version.resources)) && equal(s.latestModern.assets ?? null, s.modern.assets ?? null), 'Unselected rolling version changed resources or assets');
     }
     need(equal(without(s.settings, ['bindings', 'annotations']), spec.settings), `${app}: unrecognized production settings`);
     need(equal(named(s.settings.bindings), named(s.version.resources.bindings)), `${app}: settings/version bindings differ`);
     const successorReaderProfile = opsSuccessorReaderContract !== undefined && app === 'operations';
+    // StaffDirectory active recognition: the explicit contract with the just-activated candidate id,
+    // or, without any Ops contract and only when Ops is not the selected app, the exact pinned held
+    // build id. Either way the active main bytes must be the pinned bundle and the script must be the
+    // profile plus exactly one class. The pre-activation contract mode keeps the strict active profile.
+    const staffDirectoryProfile = app === 'operations' && !successorReaderProfile
+      && (staffDirectoryActiveCandidate
+        || (opsStaffDirectoryEntrypointContract === undefined && selectedApp !== 'operations'
+          && validStaffDirectoryPins(opsStaffDirectoryPins) && s.version.id === opsStaffDirectoryPins.heldCandidateId));
+    if (staffDirectoryProfile) {
+      need(spec.name === 'ledgetop-ops' && s.version.id === (staffDirectoryActiveCandidate
+        ? opsStaffDirectoryCandidateId : opsStaffDirectoryPins.heldCandidateId) && s.modern.id === s.version.id,
+      'Ops StaffDirectory entrypoint contract is limited to the exact active candidate');
+      need(opsStaffDirectoryMainMatches(s.modern, opsStaffDirectoryPins),
+        'Ops StaffDirectory active runtime bytes differ from the pinned reviewed bundle');
+    }
     const expectedScript = successorReaderProfile
-      ? expectedOpsSuccessorReaderScript(spec.script) : scriptShape(spec.script);
+      ? expectedOpsSuccessorReaderScript(spec.script)
+      : staffDirectoryProfile ? expectedOpsStaffDirectoryScript(spec.script, opsStaffDirectoryPins) : scriptShape(spec.script);
     if (successorReaderProfile) {
       const promotionCandidate = opsSuccessorReaderContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
         && opsSuccessorReaderReleaseCandidateId !== undefined;
@@ -345,11 +444,12 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
 }
 
 export function compileConfig(snapshot, app, main, profile = PROFILE, expectedDeploymentVersions, ordinaryFrontendPreflightMode,
-  opsSuccessorReaderContract) {
+  opsSuccessorReaderContract, opsStaffDirectoryEntrypointContract) {
   const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
   validateInstallation(snapshot, { profile, selectedApp: app, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
     ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
-    opsSuccessorReaderContract }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
+    opsSuccessorReaderContract,
+    ...(opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract }) }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
   const s = snapshot[app], spec = profile.workers[app];
   const annotations = clone(s.settings.annotations ?? {});
   delete annotations['workers/triggered_by']; // API-owned, rejected by native versions upload.
@@ -580,9 +680,19 @@ export function verifySourceMap(actual, original, { allowMissingInputEmptyReturn
   }
   need(equal(normalize(returned), expected), 'Returned native source map differs from genuine input map');
 }
-export function verifyCandidate(before, app, candidate, modern, js, sourceMap, { opsSuccessorReaderContract } = {}) {
+export function verifyCandidate(before, app, candidate, modern, js, sourceMap, { opsSuccessorReaderContract,
+  opsStaffDirectoryEntrypointContract, opsStaffDirectoryPins = OPS_STAFF_DIRECTORY_ENTRYPOINT } = {}) {
   need(UUID.test(candidate.id) && candidate.resources.script.last_deployed_from === 'wrangler', 'Native candidate provenance missing');
-  if (opsSuccessorReaderContract === undefined) {
+  if (opsStaffDirectoryEntrypointContract !== undefined) {
+    need(opsStaffDirectoryEntrypointContract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT && validStaffDirectoryPins(opsStaffDirectoryPins)
+      && opsSuccessorReaderContract === undefined && app === 'operations' && hash(js) === opsStaffDirectoryPins.mainSHA256,
+    'Ops StaffDirectory candidate contract is not the pinned reviewed runtime');
+    const baseline = before.operations.version.resources;
+    need(equal(scriptShape(candidate.resources.script), expectedOpsStaffDirectoryScript(baseline.script, opsStaffDirectoryPins))
+      && equal(scriptRuntimeShape(candidate.resources.script_runtime), scriptRuntimeShape(baseline.script_runtime))
+      && equal(named(candidate.resources.bindings), named(baseline.bindings)),
+    'Ops StaffDirectory candidate changed resources beyond the exact reviewed entrypoint addition');
+  } else if (opsSuccessorReaderContract === undefined) {
     need(equal(resourcesShape(candidate.resources), resourcesShape(before[app].version.resources)), 'Candidate resources/bindings/exports differ');
   } else {
     need(opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT && app === 'operations'
