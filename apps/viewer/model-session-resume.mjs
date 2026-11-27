@@ -48,12 +48,16 @@ export function resumeExpiredModelSession({channel,storage,controllerId,redeem,r
       try{
         const session=await redeem(data.grant,{signal:controller.signal});
         if(finished)return;
-        if(session?.model?.id!==stored.modelId)throw new Error('renewal grant is scoped to a different model');
+        if(session?.model?.id!==stored.modelId)throw Object.assign(new Error('renewal grant is scoped to a different model'),{status:403});
         post({version:1,type:'ltds-viewer:session-renewed',requestId:id,modelId:session.model.id,expiresAt:session.expiresAt});
         done(session);
-      }catch{
+      }catch(error){
         if(finished)return;
-        post({version:1,type:'ltds-viewer:session-renewal-failed',requestId:id,modelId:stored.modelId,retryable:false});
+        // Same classification as the live renewal path in main.js: only a
+        // refusal retires this tab's record in the workspace.
+        const status=Number(error?.status);
+        const retryable=error?.name==='AbortError'||!Number.isFinite(status)||[408,410,425,429].includes(status)||status>=500;
+        post({version:1,type:'ltds-viewer:session-renewal-failed',requestId:id,modelId:stored.modelId,retryable});
         done(null);
       }finally{clearTimer(limit);}
     }

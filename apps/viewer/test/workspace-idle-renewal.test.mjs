@@ -155,3 +155,13 @@ test('a guarded read passes its abort signal to the renewal wait; a reload durin
   assert.equal(seen,controller.signal);
   assert.match(source,/if\(workspaceRenewal&&!workspaceRenewal\.disposed\)\{toast\('Viewer session renewal is temporarily unavailable; your current session was preserved',true\);return true\}/);
 });
+
+test('only a refusal retires the model tab; a slow or failed redeem stays retryable',async()=>{
+  const storage=memoryStorage();rememberModelSession(storage,CONTROLLER,{model:{id:'model-1'},expiresAt:new Date().toISOString()});
+  for(const[failure,retryable]of [[Object.assign(new Error('x'),{name:'AbortError'}),true],[new TypeError('Failed to fetch'),true],[Object.assign(new Error('x'),{status:503}),true],[Object.assign(new Error('x'),{status:429}),true],[Object.assign(new Error('x'),{status:401}),false],[Object.assign(new Error('x'),{status:403}),false]]){
+    const {channel,sent,deliver}=channelPair();
+    const pending=resumeExpiredModelSession({channel,storage,controllerId:CONTROLLER,randomUUID:()=>ID,redeem:async()=>{throw failure;}});
+    deliver({version:1,type:'ltds-viewer:renew-session',requestId:ID,grant:MODEL_GRANT});
+    assert.equal(await pending,null);assert.equal(sent.at(-1).type,'ltds-viewer:session-renewal-failed');assert.equal(sent.at(-1).retryable,retryable);
+  }
+});
