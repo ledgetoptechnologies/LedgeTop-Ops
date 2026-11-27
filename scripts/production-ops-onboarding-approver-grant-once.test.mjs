@@ -65,7 +65,7 @@ function person(db, id, { role = 'role-owner', status = 'active', admitted = tru
 
 /** Synthetic Cloudflare: D1 metadata plus /query batches executed on the local file, shaped like the REST API. */
 function syntheticCloudflare(db, { name = APPROVER_GRANT_TARGET.databaseName, uuid = APPROVER_GRANT_TARGET.databaseId,
-  failAfterInsert = false } = {}) {
+  failAfterInsert = false, httpFailWrite = false, failReadAfterWrite = false } = {}) {
   const calls = [];
   const json = value => ({ ok: true, status: 200, redirected: false, headers: { get: () => null }, text: async () => JSON.stringify(value) });
   const fetchImpl = async (url, init) => {
@@ -73,6 +73,7 @@ function syntheticCloudflare(db, { name = APPROVER_GRANT_TARGET.databaseName, uu
     assert.ok(url.startsWith(`https://api.cloudflare.com/client/v4/accounts/${APPROVER_GRANT_TARGET.accountId}/d1/database/${uuid}`));
     if (init.method === 'GET') { calls.push({ kind: 'metadata' }); return json({ success: true, result: { uuid, name } }); }
     const body = JSON.parse(init.body);
+    if (failReadAfterWrite && calls.some(call => call.kind === 'write')) throw new Error('synthetic read failure');
     const result = body.batch.map(({ sql, params }) => {
       const statement = db.prepare(sql);
       if (/^\s*SELECT/iu.test(sql)) { calls.push({ kind: 'read' }); return { success: true, results: statement.all(...params).map(row => ({ ...row })), meta: { changes: 0 } }; }
@@ -81,6 +82,7 @@ function syntheticCloudflare(db, { name = APPROVER_GRANT_TARGET.databaseName, uu
       return { success: true, results: [], meta: { changes: Number(run.changes) } };
     });
     if (failAfterInsert && calls.at(-1).kind === 'write') throw new Error('synthetic connection reset');
+    if (httpFailWrite && calls.at(-1).kind === 'write') return { ...json({ success: false }), ok: false, status: 500 };
     return json({ success: true, result });
   };
   return { fetchImpl, calls };
@@ -332,4 +334,54 @@ test('the write guard inserts nothing if a precondition changed after the last r
   db.prepare("UPDATE staff_users SET status='inactive' WHERE id=?").run(OWNER);
   const run = db.prepare(APPROVER_GRANT_INSERT_SQL).run(OWNER, approverGrantDelegationId(OWNER));
   assert.equal(Number(run.changes), 0);
+});
+
+test('an HTTP failure answering the write is ambiguous, never refused', async () => {
+  const db = freshDb();
+  person(db, OWNER);
+  const cloudflare = syntheticCloudflare(db, { httpFailWrite: true });
+  const result = await mainApproverGrant(executeArgs(receiptPath()), deps(cloudflare).value);
+  assert.equal(result.status, 'reconciliation-required');
+  assert.equal(result.writesPerformed, null);
+  assert.equal(result.reconcile, 'granted-exactly');
+  assert.equal(cloudflare.calls.filter(call => call.kind === 'write').length, 1);
+});
+
+test('a failed read-back after an acknowledged write needs reconciliation and keeps writesPerformed 1', async () => {
+  const db = freshDb();
+  person(db, OWNER);
+  const result = await mainApproverGrant(executeArgs(receiptPath()), deps(syntheticCloudflare(db, { failReadAfterWrite: true })).value);
+  assert.equal(result.status, 'reconciliation-required');
+  assert.equal(result.writesPerformed, 1);
+});
+
+test('a guard refusal (changes 0) from the provider is refused and reconciled read-only', async () => {
+  const db = freshDb();
+  person(db, OWNER);
+  const cloudflare = syntheticCloudflare(db);
+  const value = { ...deps(cloudflare).value, confirm: async () => {
+    db.prepare("UPDATE staff_users SET status='inactive' WHERE id=?").run(OWNER); return true; } };
+  // The post-confirmation read sees the change, so force the guard path with a provider that skips that read.
+  const { createApproverGrantCloudflareProvider } = await import('./production-ops-onboarding-approver-grant-cloudflare-provider.mjs');
+  let reads = 0;
+  value.providerFactory = config => {
+    const real = createApproverGrantCloudflareProvider(config);
+    return { ...real, read: async input => { const row = await real.read(input);
+      return ++reads === 2 ? { ...row, staff_active: 1, native_identity_consistent: 1 } : row; } };
+  };
+  const result = await mainApproverGrant(executeArgs(receiptPath()), value);
+  assert.equal(result.status, 'refused');
+  assert.equal(result.write.outcome, 'guard-refused');
+  assert.equal(result.reconcile, 'not-granted');
+  assert.equal(db.prepare('SELECT count(*) n FROM native_staff_management_delegations WHERE actor_staff_id=?').get(OWNER).n, 0);
+});
+
+test('refuses an active existing allow row', async () => {
+  const db = freshDb();
+  person(db, OWNER);
+  db.prepare(`INSERT INTO native_staff_management_delegations(id,actor_staff_id,capability,effect,scope_kind,granted_by)
+    VALUES('allow-active',?,'staff.onboarding.approve','allow','global',?)`).run(OWNER, OWNER);
+  const result = await mainApproverGrant(args(null), deps(syntheticCloudflare(db)).value);
+  assert.equal(result.status, 'refused');
+  assert.ok(result.stop.refusals.includes('target_already_has_allow_row'));
 });

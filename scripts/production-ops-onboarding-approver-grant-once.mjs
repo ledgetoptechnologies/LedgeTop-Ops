@@ -190,7 +190,7 @@ export function openApproverGrantReceipt(filename) {
 // ---------------------------------------------------------------------------
 // Run
 
-const NOT_SENT = /^ops_approver_grant_provider:(?:writes_disabled|target_not_verified|grant_already_sent_no_retry|auth_unavailable|configuration_invalid|staff_id_invalid)$/u;
+const NOT_SENT = /^ops_approver_grant_provider:(?:writes_disabled|target_not_verified|auth_unavailable|configuration_invalid|staff_id_invalid)$/u;
 const RECONCILE_NOTE = 'Do not retry. Run --reconcile (read-only) and compare with this receipt.';
 const errorCode = error => (error instanceof Error && /^ops_approver_grant[a-z_]*:/u.test(error.message)) ? error.message
   : (error instanceof Error && /^production_ops_0226_runner_[a-z_]+$/u.test(error.message)) ? `ops_approver_grant:source_check_failed:${error.message}`
@@ -275,6 +275,11 @@ async function runGrant({ provider, mode = 'dry-run', target, staffId, approvalR
   }
   if (outcome?.changes === 0) {
     state.write = { outcome: 'guard-refused', changes: 0 };
+    try {
+      const seen = parseApproverGrantSnapshot(await provider.read({ staffId }));
+      state.reconcile = classifyApproverGrant(seen, staffId);
+      state.postRead = { counts: publicCounts(seen), classification: state.reconcile };
+    } catch (error) { state.reconcile = `read-failed:${errorCode(error)}`; }
     return stop('refused', 'write', 'ops_approver_grant:write_guard_refused_no_row_inserted');
   }
   if (outcome?.changes !== 1) {
@@ -383,11 +388,14 @@ export async function mainApproverGrant(args, dependencies = {}) {
     }
     const token = env.CLOUDFLARE_API_TOKEN;
     if (typeof token !== 'string' || token.length < 20 || token.length > 16_384) return refuse('command-line', new Error('ops_approver_grant:cloudflare_token_missing'));
-    const factory = dependencies.providerFactory
-      ?? (await import('./production-ops-onboarding-approver-grant-cloudflare-provider.mjs')).createApproverGrantCloudflareProvider;
-    const provider = factory({ getBearerToken: () => token, accountId: target.accountId, databaseId: target.databaseId,
-      databaseName: target.databaseName, allowWrites: options.mode === 'execute',
-      ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}) });
+    let provider;
+    try {
+      const factory = dependencies.providerFactory
+        ?? (await import('./production-ops-onboarding-approver-grant-cloudflare-provider.mjs')).createApproverGrantCloudflareProvider;
+      provider = factory({ getBearerToken: () => token, accountId: target.accountId, databaseId: target.databaseId,
+        databaseName: target.databaseName, allowWrites: options.mode === 'execute',
+        ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}) });
+    } catch (error) { return refuse('command-line', error); }
     const confirm = dependencies.confirm ?? (phrase => promptApproverGrantConfirmation(phrase,
       { input: dependencies.stdin ?? process.stdin, output: dependencies.stdout ?? process.stdout }));
     try {
@@ -404,7 +412,7 @@ async function runCommandLine(args) {
   try {
     const result = await mainApproverGrant(args);
     process.stdout.write(`${JSON.stringify({ status: result.status, mode: result.mode, stop: result.stop ?? null,
-      reconcile: result.reconcile ?? null, writesPerformed: result.writesPerformed ?? 0 })}\n`);
+      reconcile: result.reconcile ?? null, writesPerformed: result.writesPerformed === null ? 'unknown' : (result.writesPerformed ?? 0) })}\n`);
     if (result.receiptFailure) process.stderr.write(`${result.receiptFailure}\n`);
     process.exitCode = result.receiptFailure ? 1
       : ['complete', 'dry-run-passed', 'reconciled'].includes(result.status) ? 0 : result.status === 'cancelled' ? 2 : 1;
