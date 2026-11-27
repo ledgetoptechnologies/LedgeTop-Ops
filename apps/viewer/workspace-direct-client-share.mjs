@@ -48,12 +48,14 @@ export async function loadDirectClientAccess(api,projectId){
   const grants=[...first.grants];let cursor=first.grantsNextCursor||null,pages=1,replaces=first.capabilities?.replaces===true;
   // Only the first page is asked whether Operations can email the client.
   const notifyClient=first.capabilities?.notifyClient===true;
+  // Operations can store the model report choice: the Share form shows its box.
+  const modelReport=first.modelReport===true;
   while(cursor&&pages<DIRECT_GRANT_PAGE_LIMIT){
     const page=directClientAccess(await api(directClientsPath(projectId,{include:'grants',grantsCursor:cursor})));
     if(!page)return null;replaces=replaces&&page.capabilities?.replaces===true;
     grants.push(...page.grants);cursor=page.grantsNextCursor||null;pages++;
   }
-  return {...first,listedProjectId:projectId,capabilities:{replaces,...(notifyClient?{notifyClient}:{})},grants,grantsNextCursor:cursor,grantsIncomplete:!!cursor,clientNames:await sameNameClients(api,projectId,grants)};
+  return {...first,...(modelReport?{modelReport}:{}),listedProjectId:projectId,capabilities:{replaces,...(notifyClient?{notifyClient}:{})},grants,grantsNextCursor:cursor,grantsIncomplete:!!cursor,clientNames:await sameNameClients(api,projectId,grants)};
 }
 // A grant carries only the client's name. Where different clients share one, the client search says which business each is in.
 async function sameNameClients(api,projectId,grants){
@@ -128,7 +130,7 @@ export function directShareErrorText(error){
 // "Also share models published later" starts ticked with the whole project, and the review says so before anything is sent.
 export function directShareDefaultScope({entry=null,taskId=null}={}){return (entry||(taskId?'task':'project'))==='project'?'project':'tasks'}
 const permissionList=permissions=>{
-  const can=['view',permissions?.measure&&'measure',permissions?.cameras&&'see camera positions',permissions?.download&&'download'].filter(Boolean);
+  const can=['view',permissions?.measure&&'measure',permissions?.cameras&&'see camera positions',permissions?.download&&'download',permissions?.report===true&&'download the model report'].filter(Boolean);
   return can.length>1?`${can.slice(0,-1).join(', ')} and ${can.at(-1)}`:can[0];
 };
 // Saved replacements use a plain-text confirmation, with the saved permissions and end unchanged.
@@ -146,8 +148,9 @@ export function directShareReviewMarkup({client,what,permissions,expiresAt,dateT
 
 // The task this Share was opened on is gone from the project: nothing can be shared from here.
 export const SHARE_TARGET_MISSING='This task or its model is no longer in this project, so it can’t be shared from here. Close Share and open it again.';
-// notifyClient: Operations said it can email the client. Otherwise no box is shown.
-export function directShareForm({projectName,tasks,entry=null,taskId=null,taskName='',targetMissing=false,selectionCatalog=null,notifyClient=false}){
+// notifyClient: Operations said it can email the client. modelReport: it can store the model report choice.
+// Otherwise no box is shown.
+export function directShareForm({projectName,tasks,entry=null,taskId=null,taskName='',targetMissing=false,selectionCatalog=null,notifyClient=false,modelReport=false}){
   if(targetMissing)return `<p class="form-note" role="alert">${esc(SHARE_TARGET_MISSING)}</p>`;
   const scope=directShareDefaultScope({entry,taskId}),unpublished=taskId&&!tasks.some(task=>task.id===taskId);
   const projectEntry=scope==='project';
@@ -168,6 +171,7 @@ ${notice}<div class="direct-share-tasks" data-direct-task-list>${taskList}</div>
 </fieldset>
 <label><span>Expiry (optional)</span><input name="expiresAt" type="datetime-local"></label>
 ${PERMISSIONS.map(([name,label,checked])=>`<label class="check"><input type="checkbox" name="${name}" ${checked?'checked':''}> ${label}</label>`).join('')}
+${modelReport?'<label class="check"><input type="checkbox" name="report"> Model report</label>':''}
 ${notifyClient?'<label class="check"><input type="checkbox" name="notifyClient" checked> Email client</label>':''}
 <p class="direct-share-summary" role="status" data-direct-summary></p>
 <section class="direct-share-review" data-direct-review hidden tabindex="-1" aria-label="Review share"><h3>Review share</h3><dl data-direct-review-text></dl>
@@ -213,7 +217,8 @@ export function readDirectShareForm(form,{projectId,projectName,tasks,clients,kn
       const expires=form.elements.expiresAt.value?new Date(form.elements.expiresAt.value):null;
       if(expires&&!(expires.getTime()>Date.now()))throw new Error(ERRORS.expired_at_invalid);
       const common={sourceId:client.sourceId,workspaceId:client.workspaceId,viewerProjectId:projectId,
-        permissions:Object.fromEntries(PERMISSIONS.map(([name])=>[name,form.elements[name].checked])),
+        permissions:{...Object.fromEntries(PERMISSIONS.map(([name])=>[name,form.elements[name].checked])),
+          ...(form.elements.report?{report:form.elements.report.checked===true}:{})},
         expiresAt:expires?expires.toISOString():null,confirmedScope:confirmed===true,
         // Asks Operations to email the client's current members about this new share, only where the box is shown.
         ...(form.elements.notifyClient?{notifyClient:form.elements.notifyClient.checked===true}:{})};

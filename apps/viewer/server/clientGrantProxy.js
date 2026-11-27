@@ -133,7 +133,8 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
           // List providers may add metadata. Only recognized fields reach validation or the browser;
           // nested authority and every other response retain their exact contracts.
           if (response.ok && connection === 'direct' && action === 'list' && payload && typeof payload === 'object' && !Array.isArray(payload)) {
-            payload = Object.fromEntries(['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor', 'capabilities']
+            // modelReport: Operations can store the model report choice. A Viewer from before it drops the key here.
+            payload = Object.fromEntries(['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor', 'capabilities', 'modelReport']
               .filter(key => Object.hasOwn(payload, key)).map(key => [key, payload[key]]));
           }
           return { response, payload };
@@ -181,7 +182,7 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       stage = 'response_schema';
       if (!(action === 'groups' ? validDirectGroups(payload) : connection === 'direct' ? validDirectSnapshot(payload, action) : connection === 'native' ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
       if (connection === 'direct' && action === 'list' && include === 'clients') {
-        const { capabilities: _capabilities, ...picker } = payload;
+        const { capabilities: _capabilities, modelReport: _modelReport, ...picker } = payload;
         payload = picker;
       }
       const status = connection === 'direct' && ['create', 'revoke'].includes(action) && payload.sessionRevocation?.pending

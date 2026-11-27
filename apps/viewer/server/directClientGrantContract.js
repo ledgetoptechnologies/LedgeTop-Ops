@@ -15,7 +15,9 @@ const directClient = client => exact(client, ['sourceId', 'workspaceId', 'displa
   && (client.organizationName === undefined || client.organizationName === null || text(client.organizationName))
   && (client.rootType === undefined || ['organization', 'standalone_client'].includes(client.rootType));
 const exact = (value, fields) => object(value) && Object.keys(value).every(key => fields.includes(key));
-const permissions = value => exact(value, ['measure', 'cameras', 'download']) && ['measure', 'cameras', 'download'].every(key => typeof value[key] === 'boolean');
+// `report` (model report download) is optional: a share made before it existed, or by an Operations that cannot store it, has none.
+const permissions = value => exact(value, ['measure', 'cameras', 'download', 'report']) && ['measure', 'cameras', 'download'].every(key => typeof value[key] === 'boolean')
+  && (value.report === undefined || typeof value.report === 'boolean');
 
 function grantScope(value) {
   return source(value.sourceId) && id(value.workspaceId) && id(value.viewerProjectId)
@@ -47,7 +49,8 @@ function validDirectSnapshot(value, action) {
     && (value.sessionRevocation === undefined || validRevocation(value.sessionRevocation));
   if (action === 'revoke') return exact(value, ['success', 'replayed', 'sessionRevocation']) && value.success === true && typeof value.replayed === 'boolean'
     && validRevocation(value.sessionRevocation);
-  return exact(value, ['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor', 'capabilities'])
+  return exact(value, ['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor', 'capabilities', 'modelReport'])
+    && (value.modelReport === undefined || value.modelReport === true)
     && (value.capabilities === undefined || exact(value.capabilities, ['replaces', 'notifyClient']) && typeof value.capabilities.replaces === 'boolean'
       && (value.capabilities.notifyClient === undefined || value.capabilities.notifyClient === true))
     && Array.isArray(value.clients) && value.clients.length <= 50 && value.clients.every(directClient)
