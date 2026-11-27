@@ -19,6 +19,10 @@ const PAGE_LIMIT = 100;
 export const WRITE_MS = 30_000;
 export const READ_MS = 30_000;
 const BYTES_PER_MS = 8;
+// A sharing change for many marks: at most this many per request, and requests spaced
+// to stay under the server's limit of 180 changes a minute.
+const SHARE_CHUNK = 500;
+export const SHARE_PACE_MS = 400;
 const MESSAGES = {
   mark_revision_conflict: 'Someone else changed this mark. The list was reloaded.',
   mark_category_revision_conflict: 'Someone else changed this category. The list was reloaded.',
@@ -49,6 +53,7 @@ const MESSAGES = {
   mark_identity_required: 'This login cannot keep marks.',
   mark_share_account_unknown: 'Choose a client account to share with.',
   mark_visibility_forbidden: 'That sharing choice is not available for this mark.',
+  sharing_unclear: 'Some answers did not say the change was made. The list was read again.',
   invalid_mark: 'Check the label, colour and coordinates.',
   invalid_mark_batch: 'That file has marks the project cannot hold.',
 };
@@ -81,6 +86,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, starters: [], capabilities: { write: false, staff: false, visibility: ['private'] }, undo: [],
     // Why the last change failed, for the panel to offer what is possible instead.
     failure: '', recoveredChange: null,
+    // The one sharing change for several marks, while it runs, is paused, or has just ended.
+    sharing: null,
   };
   const emit = () => onChange(state);
   const temporary = () => context?.mode === 'temporary';
@@ -88,10 +95,16 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   const bearer = () => context?.token?.();
   const staleRefusal = error => refusalBearers.has(error) && refusalBearers.get(error) !== bearer();
   const readOnlyCapabilities = () => ({ write: false, staff: false, visibility: ['private'] });
+  // Each mark this tab deleted or restored, with when. A read that began before that has
+  // an older picture: it does not bring a deleted mark back, or a restored one into Deleted.
+  let generation = 0, fence = new Map();
+  const fenced = (since, id, kind) => fence.get(id)?.kind === kind && fence.get(id).at > since;
+  const fenceMark = (id, kind) => fence.set(id, { at: generation += 1, kind });
+  const unfenced = (since, rows) => rows.filter(row => !fenced(since, row.id, 'removed'));
 
   function hideInaccessibleMarks(error, message = 'Marks are hidden until access is restored.') {
     Object.assign(state, {
-      ready: false, marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, starters: [], undo: [],
+      ready: false, marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, starters: [], undo: [], sharing: null,
       capabilities: readOnlyCapabilities(), recoveredChange: null, failure: error.code,
       message,
     });
@@ -211,8 +224,10 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   }
 
   async function loadSnapshot(scope) {
+    const since = generation;
     const data = await scope.api('');
     scope.check();
+    data.marks = unfenced(since, data.marks);
     // Staff pick a client account when sharing a mark, if the server serves that choice.
     const audiences = data.capabilities.staff && data.capabilities.visibility.includes('client') ? (await scope.api('/audiences')).audiences : [];
     scope.check();
@@ -225,6 +240,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     let marks = first ? null : [...data.marks], categories = first ? null : [...data.categories];
     try {
       const { count, truncated } = await readSharedPages(scope, page => {
+        page = { ...page, marks: unfenced(since, page.marks) };
         if (first) {
           state.marks = addUnseen(state.marks, page.marks);
           state.categories = byName(addUnseen(state.categories, page.categories));
@@ -264,7 +280,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
     const token = bearer();
     let timedOut = false, current = false;
     const stopTimeout = later(() => { timedOut = true; refresh.abort(); }, READ_MS);
-    const marks = [], categories = new Map();
+    const marks = [], categories = new Map(), since = generation;
     let received = false, partial = false, refusal = null, truncated = false;
     try {
       ({ truncated } = await readSharedPages(scope, page => {
@@ -288,7 +304,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       emit();
       return;
     }
-    const nextMarks = addUnseen(state.marks.filter(mark => mark.mine), marks);
+    const nextMarks = addUnseen(state.marks.filter(mark => mark.mine), unfenced(since, marks));
     const nextCategories = byName(addUnseen(state.categories.filter(category => category.mine), [...categories.values()]));
     // A whole refresh takes back the notice that the list was cut short, and nothing else.
     const cleared = !partial && !truncated && cutShort !== null && state.message === cutShort;
@@ -480,6 +496,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   async function removeRaw(current, scope, { permanent = false } = {}) {
     if (!scope.temporary) await scope.api('/' + encodeURIComponent(current.id), 'DELETE', { revision: current.revision, ...(permanent && { permanent }) });
     scope.check();
+    fenceMark(current.id, 'removed');
     state.marks = state.marks.filter(mark => mark.id !== current.id);
   }
 
@@ -499,17 +516,18 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       throw error;
     }
     scope.check();
+    fenceMark(mark.id, 'restored');
     state.marks = find(mark.id) ? state.marks.map(row => row.id === mark.id ? mark : row) : [...state.marks, mark];
     state.deleted = state.deleted.filter(item => item.id !== mark.id);
     return mark;
   }
 
   async function readDeletedRows(scope) {
-    const marks = [];
+    const marks = [], since = generation;
     const { truncated } = await readPages(scope, '/deleted', page => marks.push(...page.marks));
     scope.check();
     // Whether Recently deleted has more than is listed.
-    state.deleted = marks;
+    state.deleted = marks.filter(row => !fenced(since, row.id, 'restored'));
     state.deletedTruncated = truncated;
     return marks;
   }
@@ -517,6 +535,129 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
   function restored(deleted) {
     const live = find(deleted.id);
     return live?.mine && live.revision > deleted.revision ? live : undefined;
+  }
+
+  // Whether a mark already has the sharing a choice asks for.
+  function atTarget(mark, choice) {
+    if (mark.visibility !== choice.visibility) return false;
+    if (choice.visibility === 'shared') return mark.access === choice.access;
+    return choice.visibility !== 'client' || (mark.shareAccount ?? null) === (choice.shareAccount ?? null);
+  }
+  // An answer row that says the change was made: the same mark, one's own, a newer
+  // version, with the sharing asked for, and whole.
+  const confirms = (row, sent, choice) => Boolean(row && typeof row === 'object' && row.id === sent.id && row.mine === true
+    && Number.isSafeInteger(row.revision) && row.revision > sent.revision && atTarget(row, choice)
+    && row.geometry && typeof row.geometry === 'object' && typeof row.name === 'string');
+  const pace = (scope, ms) => new Promise((resolve, reject) => {
+    if (!scope.live()) { reject(new ScopeEnded()); return; }
+    later(resolve, ms);
+  });
+
+  // What the job does next: its own marks not changed yet. Anything else is set aside, once.
+  function nextSharing(job) {
+    const next = [];
+    for (const id of job.ids) {
+      if (job.skipped.has(id)) continue;
+      const mark = find(id);
+      if (!mark || atTarget(mark, job.choice)) continue;
+      if (!mark.mine || !mark.editable) job.skipped.set(id, 'notYours');
+      else if (mark.revision !== job.base.get(id)) job.skipped.set(id, 'changed');
+      else next.push(mark);
+    }
+    return job.choice.visibility === 'shared' && state.capabilities.shareAll ? next.slice(0, SHARE_CHUNK) : next.slice(0, 1);
+  }
+
+  function applyConfirmed(job, rows, since) {
+    const saved = new Map(rows.filter(row => !fenced(since, row.id, 'removed')).map(row => [row.id, row]));
+    state.marks = state.marks.map(mark => saved.get(mark.id) || mark);
+    for (const [id, row] of saved) {
+      // The tab's own unanswered edit is no longer what is there.
+      attempts.delete(id);
+      job.base.set(id, row.revision);
+    }
+  }
+
+  async function sendSharing(scope, job, batch) {
+    const since = generation;
+    if (job.choice.visibility === 'shared' && state.capabilities.shareAll) {
+      const sent = batch.map(({ id, revision }) => ({ id, revision }));
+      const reply = await scope.api('/batch/share', 'POST', { marks: sent, access: job.choice.access });
+      scope.check();
+      const rows = new Map((Array.isArray(reply?.marks) ? reply.marks : []).filter(row => row && typeof row.id === 'string').map(row => [row.id, row]));
+      const confirmed = sent.map(item => rows.get(item.id)).filter((row, index) => confirms(row, sent[index], job.choice));
+      applyConfirmed(job, confirmed, since);
+      if (confirmed.length < sent.length) throw new MarksError('sharing_unclear', 0);
+      return;
+    }
+    const [mark] = batch, next = { ...mark, visibility: job.choice.visibility,
+      ...(job.choice.access && { access: job.choice.access }), ...(job.choice.visibility === 'client' && { shareAccount: job.choice.shareAccount ?? null }) };
+    const reply = await scope.api('/' + encodeURIComponent(mark.id), 'PUT', body(next, { revision: mark.revision }));
+    scope.check();
+    if (!confirms(reply?.mark, mark, job.choice)) throw new MarksError('sharing_unclear', 0);
+    applyConfirmed(job, [reply.mark], since);
+  }
+
+  async function runSharing(job) {
+    if (!context || state.blocked || !state.ready || state.busy || state.sharing !== job) return false;
+    cancelSharedRefresh();
+    const scope = currentScope();
+    Object.assign(job, { status: 'running', failure: '' });
+    Object.assign(state, { busy: true, message: '', failure: '' });
+    emit();
+    try {
+      if (doubt) await settleDoubt(scope, {});
+      // Resume: what is there now, before anything is sent again.
+      if (job.reread) {
+        await load(scope);
+        scope.check();
+        Object.assign(job, { reread: false, unsure: false });
+        emit();
+      }
+      let sent = false, reread = false;
+      for (;;) {
+        const batch = nextSharing(job);
+        if (!batch.length) break;
+        if (sent) await pace(scope, SHARE_PACE_MS);
+        scope.check();
+        sent = true;
+        try {
+          await sendSharing(scope, job, batch);
+          reread = false;
+        } catch (error) {
+          scope.check();
+          // Changed or deleted elsewhere: read again once; those are then set aside.
+          if (reread || !(error instanceof MarksError) || ![404, 409].includes(error.status)) throw error;
+          reread = true;
+          await load(scope);
+          scope.check();
+        }
+        emit();
+      }
+      job.status = 'done';
+      return true;
+    } catch (error) {
+      if (!scope.live() || staleRefusal(error)) return false;
+      if (accessLost(error)) { hideInaccessibleMarks(error); return false; }
+      Object.assign(job, { status: 'paused', failure: error.code || 'failed', reread: true });
+      // What was made is what the list says: read it again now, so the count is true.
+      try {
+        await load(scope);
+        scope.check();
+        job.unsure = false;
+      } catch (readError) {
+        if (!scope.live() || staleRefusal(readError)) return false;
+        if (accessLost(readError)) { hideInaccessibleMarks(readError); return false; }
+        job.unsure = true;
+      }
+      state.message = job.unsure ? 'Could not check which marks changed. Resume reads the list first.'
+        : MESSAGES[job.failure] || 'Could not change sharing for all of them.';
+      return false;
+    } finally {
+      if (scope.live()) {
+        state.busy = false;
+        emit();
+      }
+    }
   }
 
   const store = {
@@ -544,10 +685,11 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       controller = new AbortController();
       attempts = new Map();
       doubt = null;
+      fence = new Map();
       pendingImports.clear();
       context = next;
       const scope = currentScope();
-      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, undo: [], recoveredChange: null,
+      Object.assign(state, { blocked: false, busy: false, message: '', marks: [], categories: [], audiences: [], deleted: [], deletedTruncated: false, undo: [], recoveredChange: null, sharing: null,
         starters: next?.mode === 'temporary' ? STARTER_CATEGORIES.map(starter => starter.key) : [],
         ready: next?.mode === 'temporary', loading: next?.mode === 'session',
         capabilities: { write: next?.mode === 'temporary', staff: false, visibility: ['private'] } });
@@ -687,20 +829,49 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       return ok ? saved : null;
     },
 
-    // Staff: share all of one's own marks that are not, as many requests as it takes.
-    async shareAll(access = 'edit') {
-      const unshared = () => state.marks.filter(mark => mark.mine && mark.visibility !== 'shared');
-      let done = true;
-      while (done && state.capabilities.shareAll && unshared().length) {
-        const some = unshared().slice(0, 500).map(({ id, revision }) => ({ id, revision }));
-        done = await run(async scope => {
-          const { marks } = await scope.api('/batch/share', 'POST', { marks: some, access });
-          scope.check();
-          const saved = new Map(marks.map(mark => [mark.id, mark]));
-          state.marks = state.marks.map(mark => saved.get(mark.id) || mark);
-        }, { landed: () => (some.every(item => find(item.id)?.visibility === 'shared') ? true : undefined) });
+    // One sharing choice for several of one's own marks, as one job: paced requests, and
+    // never two at once. choice: { visibility, access?, shareAccount? }. Only an answer that
+    // says exactly what was made, or the list read again, counts a mark as changed. Marks
+    // that are not one's own, or were changed or deleted since, are left and counted.
+    async changeSharing(ids, choice) {
+      if (state.sharing?.status === 'running' || state.busy || !store.canWrite() || temporary()) return false;
+      const job = { ids: [], choice: { ...choice }, base: new Map(), skipped: new Map(), status: 'running', failure: '', unsure: false, reread: false };
+      for (const mark of [...new Set(ids)].map(find).filter(Boolean)) {
+        if (atTarget(mark, job.choice)) continue;
+        job.ids.push(mark.id);
+        job.base.set(mark.id, mark.revision);
       }
-      return done;
+      if (!job.ids.length) return true;
+      state.sharing = job;
+      return runSharing(job);
+    },
+    // Staff: share all of one's own marks that are not shared yet; already shared ones keep their access.
+    shareAll(access = 'edit') {
+      return store.changeSharing(state.marks.filter(mark => mark.mine && mark.visibility !== 'shared').map(mark => mark.id), { visibility: 'shared', access });
+    },
+    // A job that stopped part way: what is there is read again first, and nothing is redone.
+    async resumeSharing() {
+      const job = state.sharing;
+      return job?.status === 'paused' ? runSharing(job) : false;
+    },
+    dismissSharing() {
+      if (!state.sharing || state.sharing.status === 'running') return;
+      state.sharing = null;
+      emit();
+    },
+    // How far the job is, from what the list says now: never from what was only sent.
+    sharingProgress() {
+      const job = state.sharing;
+      if (!job) return null;
+      const counts = { notYours: 0, changed: 0, gone: 0 };
+      let done = 0;
+      for (const id of job.ids) {
+        const mark = find(id), why = job.skipped.get(id);
+        if (!mark) counts.gone += 1;
+        else if (atTarget(mark, job.choice)) done += 1;
+        else if (why) counts[why] += 1;
+      }
+      return { done, total: job.ids.length, ...counts, status: job.status, unsure: job.unsure, failure: job.failure };
     },
 
     // Staff: earlier versions of a shared mark, newest first, and going back to one.
@@ -752,6 +923,7 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
             }
             scope.check();
             const ids = new Set(entry.marks.map(mark => mark.id));
+            for (const id of ids) fenceMark(id, 'removed');
             state.marks = state.marks.filter(mark => !ids.has(mark.id));
           },
           look: async scope => {

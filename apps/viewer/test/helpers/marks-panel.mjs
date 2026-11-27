@@ -53,6 +53,8 @@ export async function openMarksPanel(t, { rateLimited = () => false, maxRequestB
       // The panel's own Undo, not the one beside Place several.
       button: text => panel.querySelectorAll('button').filter(node => node.textContent === text).sort((a, b) => Number(Boolean(b.closest('.viewer-mark-list-head'))) - Number(Boolean(a.closest('.viewer-mark-list-head'))))[0],
       bar: () => panel.querySelector('.viewer-mark-undo'),
+      // Answers the sharing question with Change, as a pointer does.
+      async confirm() { await q('.viewer-mark-confirm').fire('pointerdown'); await q('.viewer-mark-confirm').querySelectorAll('button').find(node => node.textContent === 'Change').click(); },
       text: () => panel.textContent,
       values: () => [...panel.querySelectorAll('input'), ...panel.querySelectorAll('textarea')].map(node => node.value).join('\n'),
       async type(selector, value) { q(selector).value = value; await q(selector).fire('input'); },

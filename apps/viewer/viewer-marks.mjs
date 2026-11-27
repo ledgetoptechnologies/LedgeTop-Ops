@@ -32,11 +32,13 @@ function glyph(document, name) {
   return span;
 }
 
-function readPreference(window, key, allowed, fallback) {
-  try { const value = window.localStorage?.getItem(key); return allowed.includes(value) ? value : fallback; } catch { return fallback; }
+// Labels and grouping: kept in this browser when signed in, and only in this tab for a
+// public link. Never sent anywhere.
+function readPreference(storage, key, allowed, fallback) {
+  try { const value = storage()?.getItem(key); return allowed.includes(value) ? value : fallback; } catch { return fallback; }
 }
-function writePreference(window, key, value) {
-  try { window.localStorage?.setItem(key, value); } catch { /* per-viewer convenience only */ }
+function writePreference(storage, key, value) {
+  try { storage()?.setItem(key, value); } catch { /* per-viewer convenience only */ }
 }
 
 // overlay: where the pop-ups over the map go (the card, the strip while placing).
@@ -47,7 +49,16 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const listeners = new AbortController();
   const on = (target, type, handler) => target.addEventListener(type, handler, { signal: listeners.signal });
   let view = { map: false }, mode = 'idle', drawing = null, draft = null, selectedId = null, preview = null;
-  let labels = readPreference(window, LABELS_KEY, Object.keys(LABEL_MODES), 'selected'), grouping = readPreference(window, GROUP_KEY, ['on', 'off'], 'on') === 'on';
+  let publicPreferences = false;
+  const preferenceStorage = () => (publicPreferences ? window.sessionStorage : window.localStorage);
+  let labels, grouping;
+  const readPreferences = () => {
+    labels = readPreference(preferenceStorage, LABELS_KEY, Object.keys(LABEL_MODES), 'selected');
+    grouping = readPreference(preferenceStorage, GROUP_KEY, ['on', 'off'], 'on') === 'on';
+  };
+  readPreferences();
+  // Several marks picked in the list, to change their sharing at once.
+  let selecting = false, selected = new Set(), confirming = null, confirmArmed = false;
   // The Marks pop-up, and the list for several marks on one spot.
   let boxOpen = false, picked = null;
   let tab = 'list', search = '', armedDelete = null, categoryDraft = null;
@@ -212,7 +223,30 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // What is hidden is always said, and leads to where it can be shown again.
   const hiddenButton = h(document, 'button', { type: 'button', class: 'viewer-mark-hidden-count' });
   const shareAllButton = h(document, 'button', { type: 'button', text: 'Share all' });
-  const listHead = h(document, 'div', { class: 'viewer-mark-row viewer-mark-list-head' }, undoButton, shareAllButton);
+  const selectButton = h(document, 'button', { type: 'button', text: 'Select' });
+  const listHead = h(document, 'div', { class: 'viewer-mark-row viewer-mark-list-head' }, undoButton, selectButton, shareAllButton);
+  // Select mode: how many, All, None, Done; and at the foot, the sharing for all of them.
+  const selectCount = h(document, 'span', { class: 'viewer-mark-select-count', role: 'status', 'aria-live': 'polite' });
+  const selectAll = h(document, 'button', { type: 'button', text: 'All' });
+  const selectNone = h(document, 'button', { type: 'button', text: 'None' });
+  const selectDone = h(document, 'button', { type: 'button', text: 'Done' });
+  const selectHead = h(document, 'div', { class: 'viewer-mark-row viewer-mark-select-head', hidden: true }, selectCount, selectAll, selectNone, selectDone);
+  const bulkVisibility = h(document, 'select', { name: 'bulkVisibility' });
+  const bulkAccount = h(document, 'select', { name: 'bulkAccount', 'aria-label': 'Client account' });
+  const bulkApply = h(document, 'button', { type: 'button', class: 'viewer-mark-primary', text: 'Apply' });
+  const bulkBar = h(document, 'div', { class: 'viewer-mark-bulk', hidden: true },
+    h(document, 'label', {}, h(document, 'span', { text: 'Visible to' }), bulkVisibility), bulkAccount, bulkApply);
+  // Asked once before a sharing change for several marks. Cancel has the focus.
+  const confirmText = h(document, 'p');
+  const confirmCancel = h(document, 'button', { type: 'button', text: 'Cancel' });
+  const confirmGo = h(document, 'button', { type: 'button', class: 'viewer-mark-primary', text: 'Change' });
+  const confirmBox = h(document, 'div', { class: 'viewer-mark-confirm', role: 'alertdialog', 'aria-label': 'Change sharing', hidden: true },
+    confirmText, h(document, 'div', { class: 'viewer-mark-row' }, confirmCancel, confirmGo));
+  // The sharing job: how far, why it stopped, Resume.
+  const jobText = h(document, 'span', { role: 'status', 'aria-live': 'polite' });
+  const jobResume = h(document, 'button', { type: 'button', text: 'Resume' });
+  const jobClose = h(document, 'button', { type: 'button', class: 'viewer-mark-close', 'aria-label': 'Close sharing status', text: '×' });
+  const jobBar = h(document, 'div', { class: 'viewer-mark-row viewer-mark-job', hidden: true }, jobText, jobResume, jobClose);
   const list = h(document, 'ul', { class: 'viewer-mark-list', 'aria-label': 'Marks' });
 
   // Categories
@@ -257,7 +291,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // One panel: Categories, List, Deleted.
   const sections = {
     categories: h(document, 'div', { id: 'viewer-marks-categories', role: 'tabpanel' }, categoryTools, categoryList, starterSection, categoryForm),
-    list: h(document, 'div', { id: 'viewer-marks-list', role: 'tabpanel' }, searchInput, list),
+    list: h(document, 'div', { id: 'viewer-marks-list', role: 'tabpanel' }, selectHead, searchInput, list, bulkBar),
     deleted: h(document, 'div', { id: 'viewer-marks-deleted', role: 'tabpanel' }, deletedNotice, deletedList),
   };
   const tabButtons = Object.entries({ list: 'List', categories: 'Categories', deleted: 'Deleted' }).map(([name, text]) =>
@@ -276,7 +310,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const boxClose = h(document, 'button', { type: 'button', class: 'viewer-mark-close', 'aria-label': 'Close marks', text: '\u00d7' });
   const boxMessage = h(document, 'p', { class: 'hint', role: 'status', 'aria-live': 'polite' });
   const box = h(document, 'section', { class: 'viewer-mark-box', role: 'dialog', 'aria-label': 'Marks', hidden: true },
-    h(document, 'div', { class: 'viewer-mark-card-head' }, h(document, 'h4', { text: 'Marks' }), boxCount, boxClose), boxMessage, listHead, tabs, ...Object.values(sections), coordForm, exchange);
+    h(document, 'div', { class: 'viewer-mark-card-head' }, h(document, 'h4', { text: 'Marks' }), boxCount, boxClose), boxMessage, jobBar, confirmBox, listHead, tabs, ...Object.values(sections), coordForm, exchange);
 
   // Several marks on one spot
   const pickTitle = h(document, 'h4'), pickList = h(document, 'ul', { class: 'viewer-mark-list', 'aria-label': 'Marks here' });
@@ -290,11 +324,22 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // ---- helpers --------------------------------------------------------------
   const canWrite = () => !publicReadOnly && store.canWrite() && Boolean(view.map);
   const canDelete = mark => !publicReadOnly && store.canWrite() && Boolean(mark?.deletable ?? (!sessionScope && mark?.mine && mark?.editable));
-  const canShare = mark => !publicReadOnly && store.canWrite() && (!mark?.id || mark.mine || (store.state.capabilities.staff && mark.visibility === 'shared'));
+  // Sharing is the owner's to choose: not offered on anyone else's mark, staff's included.
+  const canShare = mark => !publicReadOnly && store.canWrite() && (!mark?.id || mark.mine === true);
   const canHistory = mark => !publicReadOnly && store.canWrite() && store.state.capabilities.staff && store.state.capabilities.history && mark?.visibility === 'shared' && canDelete(mark);
+  const jobRunning = () => store.state.sharing?.status === 'running';
   const shareAllAvailable = () => !publicReadOnly && store.canWrite() && store.state.capabilities.staff && store.state.capabilities.shareAll
     && store.state.marks.some(mark => mark.mine && mark.visibility !== 'shared');
   const sharingValue = mark => mark?.visibility === 'shared' && mark.access === 'view' ? 'shared-view' : mark?.visibility;
+  // The sharing choices this person has, as the editor and the select bar offer them.
+  const sharingOptions = () => store.state.capabilities.visibility.flatMap(value => value === 'shared'
+    ? (store.state.capabilities.access || []).map(access => access === 'view' ? 'shared-view' : 'shared') : [value]);
+  const choiceOf = (value, account) => ({ visibility: value === 'shared-view' ? 'shared' : value,
+    ...(['shared', 'shared-view'].includes(value) ? { access: value === 'shared-view' ? 'view' : 'edit' } : {}),
+    ...(value === 'client' ? { shareAccount: account || null } : {}) });
+  const selectable = mark => canShare(mark) && Boolean(mark?.id) && mark.editable !== false;
+  const canSelect = () => sessionScope && !publicReadOnly && store.canWrite() && sharingOptions().length > 1 && store.state.marks.some(selectable);
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const canMoveDraft = () => Boolean(moving && view.map && draft?.id && store.editable(store.find(draft.id)));
   const categoryById = id => store.state.categories.find(category => category.id === id) || null;
   const visibleMarks = () => store.state.marks.filter(visibility.shows);
@@ -646,8 +691,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     colorInput.value = safeColor(draft.color);
     noteInput.value = draft.note || '';
     elevationInput.value = elevationForDisplay(draft.elevationNavd88M, units());
-    const options = store.state.capabilities.visibility.flatMap(value => value === 'shared'
-      ? (store.state.capabilities.access || []).map(access => access === 'view' ? 'shared-view' : 'shared') : [value]);
+    const options = sharingOptions();
     const selected = sharingValue(draft);
     if (selected && !options.includes(selected)) options.push(selected);
     visibilitySelect.replaceChildren(...options.map(value => h(document, 'option', { value, text: VISIBILITY_LABEL[value] })));
@@ -673,10 +717,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   function readSharing() {
     if (!canShare(draft)) return { visibility: draft.visibility, ...(draft.access && { access: draft.access }) };
-    const value = visibilitySelect.value;
-    return { visibility: value === 'shared-view' ? 'shared' : value,
-      ...(['shared', 'shared-view'].includes(value) ? { access: value === 'shared-view' ? 'view' : 'edit' } : {}),
-      ...(value === 'client' ? { shareAccount: accountSelect.value || null } : {}) };
+    return choiceOf(visibilitySelect.value, accountSelect.value);
   }
 
   function readEditor() {
@@ -845,6 +886,98 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (focusedChip) [...chips.children].find(chip => chip.dataset.chip === focusedChip)?.focus();
   }
 
+  // ---- select several, and the sharing job ------------------------------------
+  const shownSelectable = () => visibleMarks().filter(searched).filter(selectable);
+  function toggleSelected(id, on) {
+    if (!selecting || store.state.busy || !selectable(store.find(id))) return;
+    if (on) selected.add(id); else selected.delete(id);
+    render();
+  }
+  function setSelecting(next) {
+    selecting = next && canSelect();
+    selected = new Set();
+    confirming = null;
+    render();
+    (selecting ? selectDone : selectButton.hidden ? activeTab() : selectButton)?.focus?.({ preventScroll: true });
+  }
+  // What a confirmation would start, if Change is chosen.
+  function askSharing(ids, value, account) {
+    const choice = choiceOf(value, account), count = ids.length;
+    if (!count || store.state.busy || jobRunning() || unsaved()) return;
+    if (choice.visibility === 'client' && !choice.shareAccount) { message('Choose a client account to share with.'); return; }
+    confirming = { ids, choice, label: VISIBILITY_LABEL[value] };
+    confirmArmed = false;
+    render();
+    confirmCancel.focus?.({ preventScroll: true });
+  }
+  function closeConfirm({ focus = true } = {}) {
+    const was = confirming;
+    confirming = null;
+    render();
+    if (focus && was) (selecting ? bulkApply : shareAllButton.hidden ? activeTab() : shareAllButton)?.focus?.({ preventScroll: true });
+  }
+  async function startSharing() {
+    const job = confirming;
+    if (!job || !confirmArmed || store.state.busy || jobRunning()) return;
+    confirming = null;
+    if (selecting) { selecting = false; selected = new Set(); }
+    render();
+    jobBar.focus?.({ preventScroll: true });
+    await store.changeSharing(job.ids, job.choice);
+    render();
+  }
+  function jobSummary(progress) {
+    if (progress.unsure) return 'Stopped. Not sure how many changed.';
+    const head = progress.status === 'running' ? `Changing sharing: ${progress.done} of ${progress.total}`
+      : `${progress.done} of ${progress.total} changed.`;
+    const left = [progress.notYours && `${progress.notYours} not changed: not yours.`,
+      progress.changed && `${plural(progress.changed, 'mark')} changed elsewhere, left as they are.`,
+      progress.gone && `${progress.gone} deleted.`].filter(Boolean);
+    return [head, ...left].join(' ');
+  }
+  function renderSelecting() {
+    const { state } = store, busy = state.busy || jobRunning();
+    if (selecting && !canSelect()) { selecting = false; selected = new Set(); }
+    for (const id of [...selected]) if (!selectable(store.find(id))) selected.delete(id);
+    if (confirming && (!state.ready || !store.canWrite())) confirming = null;
+    selectButton.hidden = selecting || !canSelect();
+    selectButton.disabled = busy;
+    shareAllButton.hidden = selecting || !shareAllAvailable();
+    shareAllButton.disabled = busy;
+    listHead.hidden = !state.ready || (!state.undo.length && shareAllButton.hidden && selectButton.hidden);
+    selectHead.hidden = bulkBar.hidden = !selecting;
+    if (selecting) {
+      const shown = shownSelectable();
+      selectCount.textContent = `${selected.size} selected`;
+      selectAll.disabled = busy || shown.every(mark => selected.has(mark.id));
+      selectNone.disabled = busy || !selected.size;
+      const options = sharingOptions(), value = options.includes(bulkVisibility.value) ? bulkVisibility.value : options[0];
+      if ([...bulkVisibility.children].map(option => option.value).join() !== options.join())
+        bulkVisibility.replaceChildren(...options.map(option => h(document, 'option', { value: option, text: VISIBILITY_LABEL[option] })));
+      bulkVisibility.value = value;
+      const accounts = state.audiences.map(row => row.account);
+      if ([...bulkAccount.children].slice(1).map(option => option.value).join() !== accounts.join()) {
+        const kept = bulkAccount.value;
+        bulkAccount.replaceChildren(h(document, 'option', { value: '', text: 'Choose…' }), ...accounts.map(account => h(document, 'option', { value: account, text: accountLabel(account) })));
+        bulkAccount.value = accounts.includes(kept) ? kept : '';
+      }
+      bulkAccount.hidden = value !== 'client';
+      bulkVisibility.disabled = bulkAccount.disabled = busy;
+      bulkApply.disabled = busy || !selected.size || Boolean(confirming);
+    }
+    confirmBox.hidden = !confirming;
+    if (confirming) confirmText.textContent = `Change sharing for ${plural(confirming.ids.length, 'mark')} to ${confirming.label}?`;
+    confirmGo.disabled = busy;
+    const progress = store.sharingProgress();
+    jobBar.hidden = !progress;
+    if (progress) {
+      jobText.textContent = jobSummary(progress);
+      jobResume.hidden = progress.status !== 'paused';
+      jobResume.disabled = state.busy;
+      jobClose.hidden = progress.status === 'running';
+    }
+  }
+
   function render() {
     const { state } = store;
     const active = document.activeElement;
@@ -921,15 +1054,23 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         h(document, 'small', { text: [category?.name, !mark.mine ? (mark.author === 'staff' ? 'From project staff' : 'From a client')
           : mark.visibility === 'client' && mark.shareAccount ? accountLabel(mark.shareAccount)
             : sharingValue(mark) !== defaultVisibility() && VISIBILITY_LABEL[sharingValue(mark)]].filter(Boolean).join(' · ') }));
+      if (selecting) {
+        // A tick for each of one's own marks; the row ticks it too.
+        const can = selectable(mark), ticked = can && selected.has(mark.id);
+        const tick = h(document, 'input', { type: 'checkbox', 'data-select-mark': mark.id, 'aria-label': 'Select ' + mark.name, disabled: !can || state.busy });
+        tick.checked = ticked;
+        on(tick, 'change', () => toggleSelected(mark.id, tick.checked));
+        const row = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'aria-pressed': String(ticked), disabled: !can || state.busy }, icon, text);
+        on(row, 'click', () => toggleSelected(mark.id, !selected.has(mark.id)));
+        return h(document, 'li', { class: 'viewer-mark-selectable' }, tick, row);
+      }
       if (!view.map) return h(document, 'li', {}, icon, text);
       const button = h(document, 'button', { type: 'button', class: 'viewer-mark-list-item', 'aria-current': mark.id === selectedId ? 'true' : false }, icon, text);
       on(button, 'click', () => select(mark.id));
       return h(document, 'li', {}, button);
     });
     list.replaceChildren(...rows);
-    shareAllButton.hidden = !shareAllAvailable();
-    shareAllButton.disabled = state.busy;
-    listHead.hidden = !state.ready || (!state.undo.length && shareAllButton.hidden);
+    renderSelecting();
     searchInput.hidden = !state.marks.length;
 
     // Categories
@@ -1069,10 +1210,28 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(placeCancel, 'click', () => { setMode('idle'); render(); addButton.focus?.(); });
   on(editButton, 'click', () => beginEdit());
   on(moveButton, 'click', () => beginEdit({ move: true }));
-  on(shareAllButton, 'click', async () => {
-    if (!shareAllAvailable() || store.state.busy || unsaved()) return;
-    await store.shareAll('edit');
+  on(shareAllButton, 'click', () => {
+    if (!shareAllAvailable()) return;
+    askSharing(store.state.marks.filter(mark => mark.mine && mark.visibility !== 'shared').map(mark => mark.id), 'shared');
   });
+  on(selectButton, 'click', () => setSelecting(true));
+  on(selectDone, 'click', () => setSelecting(false));
+  on(selectAll, 'click', () => { for (const mark of shownSelectable()) selected.add(mark.id); render(); });
+  on(selectNone, 'click', () => { selected = new Set(); render(); });
+  on(bulkVisibility, 'change', () => render());
+  on(bulkApply, 'click', () => askSharing([...selected], bulkVisibility.value, bulkAccount.value));
+  on(confirmCancel, 'click', () => closeConfirm());
+  on(confirmGo, 'click', () => startSharing());
+  // A held key does not answer the question: repeats are dropped, and a key press only
+  // counts after the key that opened it was let go. A pointer answers at once.
+  for (const button of [confirmCancel, confirmGo, shareAllButton, bulkApply]) {
+    on(button, 'keydown', event => { if (event.repeat && (event.key === 'Enter' || event.key === ' ')) event.preventDefault(); });
+  }
+  on(confirmBox, 'keyup', () => { confirmArmed = true; });
+  on(confirmBox, 'pointerdown', () => { confirmArmed = true; });
+  on(confirmBox, 'mousedown', () => { confirmArmed = true; });
+  on(jobResume, 'click', async () => { if (!store.state.busy) await store.resumeSharing(); });
+  on(jobClose, 'click', () => { store.dismissSharing(); activeTab()?.focus?.({ preventScroll: true }); });
   on(historyButton, 'click', async () => {
     const current = store.find(selectedId), held = store.hold();
     if (!canHistory(current) || store.state.busy || unsaved()) return;
@@ -1122,6 +1281,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       else if (draft && canWrite()) cancelDraft();
       else if (mode !== 'idle' && canWrite()) { setMode('idle'); render(); }
       else if (selectedId && !card.hidden) closeCard({ focusPin: true });
+      else if (boxOpen && confirming) closeConfirm();
+      else if (boxOpen && selecting) setSelecting(false);
       else if (boxOpen) showBox(false);
       else return;
       event.preventDefault();
@@ -1383,8 +1544,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (kept) { selectedId = saved.id; render(); editButton.focus?.({ preventScroll: true }); } else layer.focusPin(saved.id);
   }
 
-  on(labelsSelect, 'change', () => { labels = labelsSelect.value; writePreference(window, LABELS_KEY, labels); render(); });
-  on(groupToggle, 'change', () => { grouping = groupToggle.checked; writePreference(window, GROUP_KEY, grouping ? 'on' : 'off'); render(); });
+  on(labelsSelect, 'change', () => { labels = labelsSelect.value; writePreference(preferenceStorage, LABELS_KEY, labels); render(); });
+  on(groupToggle, 'change', () => { grouping = groupToggle.checked; writePreference(preferenceStorage, GROUP_KEY, grouping ? 'on' : 'off'); render(); });
   // True while the focus has not been taken anywhere else since.
   function focusKeeper() {
     const from = document.activeElement;
@@ -1505,6 +1666,9 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     async setScope(next, { keepDraft: mayReturn = true } = {}) {
       publicReadOnly = next?.readOnly === true;
       sessionScope = next?.mode === 'session';
+      // A public link's labels and grouping are this tab's alone.
+      const publicView = publicReadOnly || next?.mode === 'temporary';
+      if (publicView !== publicPreferences) { publicPreferences = publicView; readPreferences(); }
       if (!mayReturn) recovery.clear();
       // Anyone else's unsaved work goes as soon as they are gone, map open or not.
       else if (sessionScope) recovery.read(next.key);
@@ -1517,6 +1681,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
         preview = null; placeChoice = null; several = false; crosshair = false;
         picker.close({ focus: false });
         boxOpen = false; picked = null;
+        selecting = false; selected = new Set(); confirming = null;
         hideBar();
         barSeen = null;
         recoveredSeen = null;
