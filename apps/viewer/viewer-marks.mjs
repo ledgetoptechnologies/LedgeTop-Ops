@@ -479,7 +479,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (focusPin && id) layer.focusPin(id);
   }
   function showBox(next, { to = tab } = {}) {
-    if (next && narrow()) { if (unsaved()) return; closeCard(); picked = null; if (mode !== 'idle') setMode('idle'); }
+    if (next && (narrow() || !roomBeside())) { if (unsaved()) return; closeCard(); picked = null; if (mode !== 'idle') setMode('idle'); }
     boxOpen = next;
     tab = to;
     render();

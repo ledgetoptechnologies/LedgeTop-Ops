@@ -234,3 +234,13 @@ test('an existing category typed in full and saved at once still gives its look'
   const saved = panel.store.state.marks.at(-1);
   assert.deepEqual([saved.categoryId, saved.color, saved.icon], [stand.id, '#2e7d32', 'tree']);
 });
+
+test('on a mid-width map the list opens over an open card by closing the card', async t => {
+  const { panel, box, card, key, add } = await open(t);
+  panel.leaflet.setSize(740, 700);
+  await add('Mid');
+  await panel.leaflet.pins()[0].click();
+  assert.equal(card().hidden, false);
+  await key('l');
+  assert.deepEqual([box().hidden, card().hidden], [false, true]);
+});
