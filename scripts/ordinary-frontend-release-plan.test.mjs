@@ -169,3 +169,32 @@ test('planner rejects an unsupported asset config rather than override native JW
 
 test('arbitrary pinned source map cannot replace the map native upload actually reads',t=>{const {release}=artifacts(t);const alternate=path.join(path.dirname(release.main.path),'alternate.js.map');fs.copyFileSync(release.sourceMap.path,alternate);release.sourceMap.path=alternate;assert.throws(()=>verifyOrdinaryFrontendArtifacts(release),/main sibling path/);});
 test('hard-linked release bytes are rejected consistently',t=>{const {release,assets}=artifacts(t);const link=path.join(path.dirname(assets),'linked-favicon.svg');fs.linkSync(path.join(assets,'favicon.svg'),link);assert.throws(()=>verifyOrdinaryFrontendArtifacts(release),/single-link regular file/);});
+
+// The compiler checks the installation for its one selected app, like compileConfig and the executor do.
+function unselectedRollingLatest(snapshot, app) {
+  const s = snapshot[app], LATEST = '99999999-9999-4999-8999-999999999999';
+  s.latest = LATEST;
+  s.latestVersion = { id: LATEST, resources: { ...clone(s.version.resources),
+    script: { ...clone(s.version.resources.script), last_deployed_from: 'wrangler' } } };
+  s.latestModern = { id: LATEST, assets: clone(s.modern.assets) };
+}
+test('an Operations plan admits an unselected Sync rolling latest exactly as the executor does', t => {
+  const { snapshot, options } = fixture(), { release } = artifacts(t);
+  unselectedRollingLatest(snapshot, 'ops-sync');
+  const plan = compileOrdinaryFrontendReleasePlan(snapshot, { app: 'operations', release, profile: options.profile });
+  assert.equal(plan.application, 'operations');
+  assert.equal(validateOrdinaryFrontendReleasePlan(snapshot, plan, { app: 'operations', release, profile: options.profile }), plan);
+});
+test('the selected app itself still needs latest equal to its sole active version', t => {
+  const { snapshot, options } = fixture(), { release } = artifacts(t);
+  unselectedRollingLatest(snapshot, 'operations');
+  assert.throws(() => compileOrdinaryFrontendReleasePlan(snapshot, { app: 'operations', release, profile: options.profile }),
+    /Latest must equal the selected sole active version/u);
+});
+test('an unselected Sync API upload is still refused by the Operations plan compiler', t => {
+  const { snapshot, options } = fixture(), { release } = artifacts(t);
+  unselectedRollingLatest(snapshot, 'ops-sync');
+  snapshot['ops-sync'].latestVersion.resources.script.last_deployed_from = 'api';
+  assert.throws(() => compileOrdinaryFrontendReleasePlan(snapshot, { app: 'operations', release, profile: options.profile }),
+    /lacks native metadata proof/u);
+});
