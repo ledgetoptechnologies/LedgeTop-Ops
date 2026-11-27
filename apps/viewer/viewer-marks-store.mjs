@@ -806,7 +806,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       if (temporary()) {
         const id = input.id || newId();
         const existing = state.categories.find(category => category.id === id);
-        if (state.categories.some(category => category.id !== id && category.name.toLowerCase() === input.name.trim().toLowerCase())) {
+        // A name is one person's once, as on the server.
+        if (state.categories.some(category => category.mine && category.id !== id && category.name.toLowerCase() === input.name.trim().toLowerCase())) {
           state.message = MESSAGES.mark_category_name_taken;
           emit();
           return null;

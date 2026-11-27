@@ -10,7 +10,7 @@ import { capture, CloudflareReader, deploymentSourceCommit, hash, canonical, nee
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
   OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE,
   ordinaryFrontendPreflightDescriptor, resourcesShape } from './production-deploy.mjs';
-import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET, releaseCredentialAccepted } from './native-staff-cutover-readiness.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT, validateOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority.mjs';
 import { readOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority-reader.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT, validatePost0226StaffPreservationReview } from './ordinary-frontend-authority-post0226.mjs';
@@ -44,6 +44,52 @@ const SUCCESSOR_READER_ADDITIONS = Object.freeze([
   'readWindowsCatalogSuccessorAuthorization',
   'readWindowsDeliverySuccessorAuthorization',
 ].sort());
+
+/** Explicit Operations baseline selector for a release that starts from one
+ * active version at 100% and no other deployment row. Without it, an ordinary
+ * Operations release still requires the reviewed 0/100 rows pinned in its plan. */
+export const OPS_SOLE_ACTIVE_BASELINE_CONTRACT = 'ops-sole-active-baseline-v1';
+
+/** Decide which Operations baseline distribution this release may start from.
+ * Pure: returns 'not-operations', 'successor-promotion', 'sole-active' or
+ * 'reviewed-0-100', or throws before any provider read. */
+export function selectOperationsBaselineMode({ app, expectedDeploymentVersions, operationsSuccessorPromotion = false,
+  operationsBaselineContract, canonicalBrowserRetirementSelector, resumeCandidate } = {}) {
+  needFn(operationsBaselineContract === undefined || operationsBaselineContract === OPS_SOLE_ACTIVE_BASELINE_CONTRACT,
+    'Unreviewed Operations baseline contract');
+  if (app !== 'operations') {
+    needFn(operationsBaselineContract === undefined, 'Client release cannot select an Operations baseline contract');
+    return 'not-operations';
+  }
+  if (operationsSuccessorPromotion) {
+    needFn(expectedDeploymentVersions === undefined && operationsBaselineContract === undefined,
+      'Operations successor promotion requires the pinned sole-active-version baseline');
+    return 'successor-promotion';
+  }
+  if (operationsBaselineContract === OPS_SOLE_ACTIVE_BASELINE_CONTRACT) {
+    needFn(expectedDeploymentVersions === undefined && canonicalBrowserRetirementSelector === undefined && !resumeCandidate,
+      'Sole-active Operations baseline excludes pinned staged weights, browser retirement and candidate resume');
+    return 'sole-active';
+  }
+  const rows = expectedDeploymentVersions?.operations;
+  needFn(Array.isArray(rows) && rows.length === 2
+      && rows.filter(row => row.percentage === 100).length === 1
+      && rows.filter(row => row.percentage === 0).length === 1,
+    'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
+  return 'reviewed-0-100';
+}
+
+/** The captured Operations deployment must match the selected baseline mode. */
+export function assertOperationsBaselineRows(mode, rows, baselineVersionId) {
+  if (mode === 'not-operations') return true;
+  needFn(Array.isArray(rows) && UUID.test(baselineVersionId ?? ''), 'Reviewed Ops 100% baseline differs from captured active version');
+  if (mode === 'sole-active' || mode === 'successor-promotion') needFn(rows.length === 1
+      && rows[0].versionId === baselineVersionId && rows[0].percentage === 100,
+    'Reviewed Ops 100% baseline differs from captured active version');
+  else needFn(mode === 'reviewed-0-100' && rows.some(row => row.versionId === baselineVersionId && row.percentage === 100),
+    'Reviewed Ops 100% baseline differs from captured active version');
+  return true;
+}
 
 /** The reviewed inactive a0 candidate adds exactly two read-only successor RPC methods
  * to the existing Ops reader class. All other exports, handlers, runtime,
@@ -131,7 +177,14 @@ function appendProviderResponseDigest(directory, response) {
   try { fs.writeSync(fd, `${JSON.stringify(detail)}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
-async function verifyVersionAssets({ provider, application, workerName, entries, versionId, journalDirectory, receiptName }) {
+/** Bounded parallel static asset verification (#663): 1 to 3 lanes, explicit, default 1. */
+export function validateAssetVerificationConcurrency(value) {
+  if (value === undefined) return 1;
+  needFn(Number.isSafeInteger(value) && value >= 1 && value <= 3, 'Asset verification concurrency must be an integer from 1 to 3');
+  return value;
+}
+
+async function verifyVersionAssets({ provider, application, workerName, entries, versionId, journalDirectory, receiptName, concurrency = 1 }) {
   needFn(provider && ['createVerifier','fetchVerifierAsset','removeVerifier','verifierAbsent'].every(name => typeof provider[name] === 'function'),
     'Journaled native asset verifier provider required');
   needFn(['operations', 'client'].includes(application) && WORKERS[application].name === workerName
@@ -140,7 +193,7 @@ async function verifyVersionAssets({ provider, application, workerName, entries,
   const manifest = entries.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, contentType: mime }));
   appendIntent(journalDirectory, 'temporary-asset-verifier-create', { workerName, verifiedVersionId: versionId, verifierName: name,
     assetCount: manifest.length, receiptName, automaticRetry: false });
-  const result = await executeAssetVerification({ entries: manifest, timeoutMs: 300_000,
+  const result = await executeAssetVerification({ entries: manifest, timeoutMs: 300_000, concurrency,
     create: () => provider.createVerifier({ name, workerName,
       origin: WORKERS[application].origin, entries: manifest, nonceHash: nonce.nonceHash, versionId }),
     fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath,
@@ -358,11 +411,13 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
   frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
+  operationsBaselineContract, assetVerificationConcurrency,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
   readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
   runNative = runNativeProductionCommand, captureFn = capture, readStaffCutover = readNativeStaffCutoverReadiness,
   sourceReader = deploymentSourceCommit, now = () => Date.now() } = {}) {
+  assetVerificationConcurrency = validateAssetVerificationConcurrency(assetVerificationConcurrency);
   frontendAuthorityReview = frontendAuthorityReview ? structuredClone(frontendAuthorityReview) : undefined;
   post0226StaffPreservationReview = post0226StaffPreservationReview ? structuredClone(post0226StaffPreservationReview) : undefined;
   const ordinaryPlan = pinnedPlan?.ordinaryPlan;
@@ -435,15 +490,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   'Installed native Wrangler binary is missing or differs from locked production runtime');
   validateBuildEnvironment();
 
-  if (app === 'operations') {
-    const rows = expectedDeploymentVersions?.operations;
-    if (operationsSuccessorPromotion) needFn(expectedDeploymentVersions === undefined,
-      'Operations successor promotion requires the pinned sole-active-version baseline');
-    else needFn(Array.isArray(rows) && rows.length === 2
-        && rows.filter(row => row.percentage === 100).length === 1
-        && rows.filter(row => row.percentage === 0).length === 1,
-      'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
-  }
+  const operationsBaselineMode = selectOperationsBaselineMode({ app, expectedDeploymentVersions, operationsSuccessorPromotion,
+    operationsBaselineContract, canonicalBrowserRetirementSelector, resumeCandidate });
   const liveAtStart = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions });
   const before = resumeCandidate
     ? validateInstallation(structuredClone(resumeCandidate.originalSnapshot), { profile, selectedApp: app, expectedDeploymentVersions,
@@ -453,11 +501,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const baselineVersionId = before[app].version.id;
   const operationsBaselineRows = expectedDeploymentVersions?.operations
     ?? before.operations.deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage }));
-  if (app === 'operations') needFn(operationsSuccessorPromotion
-    ? operationsBaselineRows.length === 1 && operationsBaselineRows[0].versionId === baselineVersionId
-      && operationsBaselineRows[0].percentage === 100
-    : expectedDeploymentVersions.operations.some(row => row.versionId === baselineVersionId && row.percentage === 100),
-  'Reviewed Ops 100% baseline differs from captured active version');
+  assertOperationsBaselineRows(operationsBaselineMode, operationsBaselineRows, baselineVersionId);
   if (resumeCandidate) assertResumeControls(before, liveAtStart, { app, candidateId: resumeCandidate.candidateId, profile,
     expectedDeploymentVersions, opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   const bootstrap = app === 'operations' ? prepareOpsLegacyLedgerBootstrap(before) : null;
@@ -535,7 +579,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     priorReleasePlanSHA256: priorResumeProof.priorPlanSHA256, uploadReplayed: false,
   });
   const priorAssetBytes = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
-    entries: priorBytesRows, versionId: baselineVersionId, journalDirectory, receiptName: 'verified-prior-active-assets' });
+    concurrency: assetVerificationConcurrency, entries: priorBytesRows, versionId: baselineVersionId, journalDirectory, receiptName: 'verified-prior-active-assets' });
   const previousLedger = bootstrap
     ? completeOpsLegacyLedgerBootstrap(bootstrap, { verifiedAssets: priorAssetBytes, verifiedVersionId: baselineVersionId })
     : installedLedger;
@@ -640,7 +684,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && sameExceptSelectedDeployment(inactive, staged, app), 'Candidate namespace stage did not produce exact baseline100/candidate0 with unchanged controls');
   await qualifyStaff('before-candidate-asset-verification');
   const candidateAssetBytes = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
-    entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-candidate-assets' });
+    concurrency: assetVerificationConcurrency, entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-candidate-assets' });
   needFn(candidateAssetBytes.size === pinnedPlan.retentionLedger.assets.length && pinnedPlan.retentionLedger.assets.every(row => {
     const bytes = candidateAssetBytes.get(row.path); return Buffer.isBuffer(bytes) && bytes.length === row.size && sha(bytes) === row.sha256;
   }), 'Inactive candidate static asset bytes differ from retained ledger');
@@ -694,7 +738,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     'Exact baseline rollback version metadata changed; keep release held');
   await qualifyStaff('before-active-namespace-verification');
   const activeAssets = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
-    entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-active-assets' });
+    concurrency: assetVerificationConcurrency, entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-active-assets' });
   const postNamespaceRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
   if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, postNamespaceRaw.operations.version, {
     sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
@@ -774,10 +818,11 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
   staffAuthorityContract = 'native-staff-cutover-v1', artifactSourceRoot, staffReviewPath,
   frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract,
-  canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
-  journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
+  canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId, operationsBaselineContract,
+  assetVerificationConcurrency, journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
+  validateAssetVerificationConcurrency(assetVerificationConcurrency);
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
-    && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
+    && releaseCredentialAccepted(env.CLOUDFLARE_API_TOKEN, env),
   'Cloudflare account and API token are required by the explicitly invoked production executor');
   validateBuildEnvironment(env);
   needFn(path.isAbsolute(artifactSourceRoot ?? ''), 'Pinned frontend artifact source checkout is required separately from executor source');
@@ -805,7 +850,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     needFn(!staffReviewPath && !frontendAuthorityReviewPath, 'Post-0226 preservation review cannot be combined with another authority packet');
   validateProductionAuthorityPacketSelection({ app, review, frontendReview, post0226Review });
   const assetVerifierProvider = createJournaledAssetVerifierProvider({ accountId: env.CLOUDFLARE_ACCOUNT_ID,
-    token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE, journalDirectory, sourceCommit: planSourceCommit });
+    token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE, journalDirectory, sourceCommit: planSourceCommit, env });
   return executeOrdinaryFrontendRetainedRelease({ app, plan, profile, expectedDeploymentVersions,
     assetVerifierProvider, staffAuthorityContract, staffCutoverReview: review, frontendAuthorityReview: frontendReview,
     post0226StaffPreservationReview: post0226Review,
@@ -813,6 +858,8 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     opsSuccessorReaderPromotionContract,
     canonicalBrowserRetirementSelector,
     canonicalBrowserRetirementClientVersionId,
+    operationsBaselineContract,
+    assetVerificationConcurrency,
     reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),
@@ -832,9 +879,9 @@ export function validateProductionAuthorityPacketSelection({ app, review, fronte
 
 /** Bind every temporary verifier mutation intent to the already validated plan. */
 export function createJournaledAssetVerifierProvider({ accountId, token, fetchImpl = fetch, profile = PROFILE,
-  journalDirectory, sourceCommit, Provider = ProductionCloudflareProvider } = {}) {
+  journalDirectory, sourceCommit, Provider = ProductionCloudflareProvider, env = process.env } = {}) {
   needFn(accountId === NATIVE_STAFF_PRODUCTION_TARGET.accountId && typeof token === 'string'
-    && /^[A-Za-z0-9_-]{20,1024}$/u.test(token) && typeof fetchImpl === 'function'
+    && releaseCredentialAccepted(token, env) && typeof fetchImpl === 'function'
     && path.isAbsolute(journalDirectory ?? '') && HEX40.test(sourceCommit ?? '') && typeof Provider === 'function',
   'Temporary asset verifier provider identity invalid');
   const recordIntent = intent => appendProviderIntent(journalDirectory, { ...intent, sourceCommit });

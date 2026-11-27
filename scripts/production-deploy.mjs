@@ -209,9 +209,42 @@ export function validateReviewedExpectedDeploymentVersions(value) {
   'Unreviewed expected deployment weights');
   return structuredClone(value);
 }
+/** The single reviewed held Ops Sync state (#663 companion evidence): Sync 6f8e224c active alone at 100% with
+ * bc65f489, an API upload from 2026-11-13, as its inactive latest. When Sync is not the selected app, only this
+ * exact state (ids, upload sources, and the SHA-256 of every captured Sync field) is admitted in place of the
+ * native-metadata rule. Any other unselected inactive latest is refused as before. */
+export const HELD_OPS_SYNC_INACTIVE_LATEST = Object.freeze({
+  contract: 'held-ops-sync-inactive-latest-6f8e224c-bc65f489-v1',
+  deploymentId: 'd16949c4-d637-4b9b-8f6d-e21cc303e795',
+  activeVersionId: '6f8e224c-4202-4904-9de5-b78886b52e74',
+  latestVersionId: 'bc65f489-e8dd-4ef8-8411-abca3b3ef464',
+  sha256: Object.freeze({
+    deployment: 'e3321a449696ea892042e87370dd8022e4449195f0ef4ff3e594a49e90a26ff3',
+    settings: '0eb83ed621f7b2db8efc1b978e3da439eced9db888c2f3b3ae0f0fe6365beb65',
+    schedules: '6649d9ca192b1e8e0f994860d0ff48375b84bcbc954511f8d3fe82a9f94b80d8',
+    version: 'acfe3a82434228074a49fe0c5dc37338b526bdfe5069b8855d43db65799086f0',
+    modern: 'a2203112a5c39e7ca47569fbd375a74ac8286966f218e29bd7d73578806a1970',
+    latestVersion: '0f44b987e51fd532f50f61438a5e1dd265dcbc4c1b29429418b3993569871309',
+    latestModern: '0992bc30b931bad81642c0b24584c5dcb269880e8254c19fae16acb1d12b6a7e',
+  }),
+});
+export function isHeldOpsSyncInactiveLatest(app, state, pins = HELD_OPS_SYNC_INACTIVE_LATEST) {
+  if (app !== 'ops-sync' || !pins?.sha256 || !state || typeof state !== 'object') return false;
+  const rows = state.deployment?.versions;
+  return equal(Object.keys(state).sort(), [...Object.keys(pins.sha256), 'latest'].sort())
+    && state.deployment.id === pins.deploymentId && Array.isArray(rows) && rows.length === 1
+    && rows[0]?.version_id === pins.activeVersionId && rows[0]?.percentage === 100
+    && state.version?.id === pins.activeVersionId && state.modern?.id === pins.activeVersionId
+    && state.latest === pins.latestVersionId && state.latest !== pins.activeVersionId
+    && state.latestVersion?.id === pins.latestVersionId && state.latestModern?.id === pins.latestVersionId
+    && state.version.resources?.script?.last_deployed_from === 'wrangler'
+    && state.latestVersion.resources?.script?.last_deployed_from === 'api'
+    && Object.entries(pins.sha256).every(([key, digest]) => hash(canonical(state[key])) === digest);
+}
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
   ordinaryFrontendPreflightMode, ordinaryFrontendApp, assetAssociationOverrides = {},
-  opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId } = {}) {
+  opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId,
+  heldOpsSyncInactiveLatestPins = HELD_OPS_SYNC_INACTIVE_LATEST } = {}) {
   const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
   need(assetAssociationOverrides && Object.getPrototypeOf(assetAssociationOverrides) === Object.prototype,
     'Unreviewed canonical v4 asset association override');
@@ -249,7 +282,7 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     const s = snapshot[app]; const id = activeId(s, expectedDeploymentVersions[app]);
     need(s.version.id === id && s.modern.id === id && UUID.test(s.latest), 'Active/version identity invalid');
     if (!selectedApp || app === selectedApp) need(s.latest === (allowLatest[app] ?? id), 'Latest must equal the selected sole active version; reconcile an incomplete deployment first');
-    else if (s.latest !== id) {
+    else if (s.latest !== id && !isHeldOpsSyncInactiveLatest(app, s, heldOpsSyncInactiveLatestPins)) {
       need(s.latestVersion?.id === s.latest && s.latestModern?.id === s.latest && s.latestVersion.resources.script.last_deployed_from === 'wrangler', 'Unselected inactive version lacks native metadata proof');
       need(equal(resourcesShape(s.latestVersion.resources), resourcesShape(s.version.resources)) && equal(s.latestModern.assets ?? null, s.modern.assets ?? null), 'Unselected rolling version changed resources or assets');
     }

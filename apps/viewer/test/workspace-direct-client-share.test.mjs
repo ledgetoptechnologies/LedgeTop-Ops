@@ -14,16 +14,17 @@ function form({client='',scope='project',checked=[],later=true,expiresAt='',perm
 }
 const key=JSON.stringify(['source-a','ws-1']);
 
-test('first project Share uses short native titles only without changing saved-share editing',()=>{
+test('first project Share and saved-share editing use the same short titles without project form notes',()=>{
   const catalog={folders:[{id:'folder',displayName:'North'}],tasks};
   const html=directShareForm({projectName:'Site',tasks,selectionCatalog:catalog});
   const options=[...html.matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map(match=>match.slice(1));
-  assert.deepEqual(options,[['whole','Everything'],['except','All except…'],['only','Only…']]);
+  assert.deepEqual(options,[['whole','Everything'],['except','All except'],['only','Only']]);
   assert.match(html,/<label><span>What this client can see<\/span><select name="mode">/);
   assert.match(html,/<option value="whole" selected>Everything<\/option>/);
   assert.doesNotMatch(html,/data-direct-mode-wording|Everything except unticked folders and tasks|Only ticked folders and tasks/);
   const saved=directProjectShareEditForm({grant:{clientDisplayName:'Acme'},...catalog});
-  assert.match(saved,/Whole project except selected folders and tasks/);
+  assert.deepEqual([...saved.matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map(match=>match.slice(1)),options);
+  for(const markup of [html,saved])assert.doesNotMatch(markup,/A folder includes its subfolders|class="form-note">No (folders|tasks)\./);
   assert.doesNotMatch(saved,/unticked/);
 });
 
@@ -333,13 +334,30 @@ const editForm=(mode,folderIds=[],taskIds=[],missing=[])=>({
 test('project edit is available only for a single editable share of that exact recipient and project',()=>{
   const options={projectId:'project',tasks,now:Date.parse('2030-01-01T00:00:00Z')};
   const other={...editableGrant,grantId:'other',workspaceId:'workspace-2'};
-  const access={grants:[editableGrant,other]};
+  const access={listedProjectId:'project',capabilities:{replaces:true},grants:[editableGrant,other]};
   assert.equal(editableDirectProjectGrant(access,'project','grant-1',options.now),editableGrant);
   assert.match(directGrantRows(access,options),/data-action="edit-direct-project-share" data-id="grant-1"/);
   assert.doesNotMatch(directGrantRows(access,{...options,taskId:'task-1'}),/Edit selection/);
   assert.doesNotMatch(directGrantRows({...access,grantsIncomplete:true},options),/Edit selection/);
-  assert.doesNotMatch(directGrantRows({grants:[editableGrant,{...editableGrant,grantId:'expired-sibling',scopeType:'task',
+  assert.doesNotMatch(directGrantRows({...access,listedProjectId:'other'},options),/Edit selection/);
+  assert.doesNotMatch(directGrantRows({...access,grants:[editableGrant,{...editableGrant,grantId:'expired-sibling',scopeType:'task',
     taskId:'task-1',expiresAt:'2020-01-01T00:00:00Z'}]},options),/Edit selection/);
+});
+
+test('Edit selection requires strictly true capability from the current relevant list, never grant rows',async()=>{
+  const options={projectId:'project',tasks,now:Date.parse('2030-01-01T00:00:00Z')};
+  for(const capabilities of [undefined,{},null,{replaces:false},{replaces:'true'},{replaces:1},{replaces:true}]){
+    const access=await loadDirectClientAccess(async()=>({clients:[],grants:[editableGrant],capabilities}),'project');
+    assert.equal(directGrantRows(access,options).includes('Edit selection'),capabilities?.replaces===true);
+    assert.match(directGrantRows(access,options),/Revoke/);
+    assert.equal(editableDirectProjectGrant(access,'other','grant-1',options.now),null);
+  }
+  const pages=[{clients:[],grants:[editableGrant],capabilities:{replaces:true},grantsNextCursor:'next'},
+    {clients:[],grants:[],grantsNextCursor:null}];
+  const mixed=await loadDirectClientAccess(async()=>pages.shift(),'project');
+  assert.doesNotMatch(directGrantRows(mixed,options),/Edit selection/);
+  const fresh=await loadDirectClientAccess(async()=>({clients:[],grants:[editableGrant]}),'project');
+  assert.doesNotMatch(directGrantRows(fresh,options),/Edit selection/);
 });
 
 test('project share review preserves the recipient, permissions, exact expiry and grant version',()=>{

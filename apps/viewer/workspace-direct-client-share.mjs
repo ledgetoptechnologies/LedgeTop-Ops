@@ -4,6 +4,8 @@
 import { clientBusinessWord, clientPickerLabel, clientPickerMarkup, clientPickerWord } from './workspace-client-picker.mjs';
 export { bindClientPicker } from './workspace-client-picker.mjs';
 export const DIRECT_CLIENT_GRANTS_PATH='/api/v1/workspace/direct-client-grants';
+export const DIRECT_CLIENT_GROUPS_PATH='/api/v1/workspace/direct-client-groups';
+export const DIRECT_CLIENT_GROUPS_TIMEOUT_MS=2500;
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
 // What a new client share starts with. Every choice is sent explicitly; existing shares keep theirs.
@@ -37,16 +39,19 @@ export function directClientsPath(projectId,{query='',cursor=null,include='all',
   return `${DIRECT_CLIENT_GRANTS_PATH}?${params}`;
 }
 // Grants are paged by the server; follow every page so the access list is complete.
+// Replacement support belongs to this project read, not to rows or picker searches.
+// A mixed-version page set must not retain an earlier page's capability.
 export const DIRECT_GRANT_PAGE_LIMIT=50;
 export async function loadDirectClientAccess(api,projectId){
   const first=directClientAccess(await api(directClientsPath(projectId,{include:'grants'})));
   if(!first)return null;
-  const grants=[...first.grants];let cursor=first.grantsNextCursor||null,pages=1;
+  const grants=[...first.grants];let cursor=first.grantsNextCursor||null,pages=1,replaces=first.capabilities?.replaces===true;
   while(cursor&&pages<DIRECT_GRANT_PAGE_LIMIT){
     const page=directClientAccess(await api(directClientsPath(projectId,{include:'grants',grantsCursor:cursor})));
-    if(!page)return null;grants.push(...page.grants);cursor=page.grantsNextCursor||null;pages++;
+    if(!page)return null;replaces=replaces&&page.capabilities?.replaces===true;
+    grants.push(...page.grants);cursor=page.grantsNextCursor||null;pages++;
   }
-  return {...first,grants,grantsNextCursor:cursor,grantsIncomplete:!!cursor,clientNames:await sameNameClients(api,projectId,grants)};
+  return {...first,listedProjectId:projectId,capabilities:{replaces},grants,grantsNextCursor:cursor,grantsIncomplete:!!cursor,clientNames:await sameNameClients(api,projectId,grants)};
 }
 // A grant carries only the client's name. Where different clients share one, the client search says which business each is in.
 async function sameNameClients(api,projectId,grants){
@@ -62,6 +67,35 @@ async function sameNameClients(api,projectId,grants){
   return found;
 }
 export const directClientKey=client=>JSON.stringify([client.sourceId,client.workspaceId]);
+// Asked once when Share opens. Operations links a client's workspaces in different divisions only through a reviewed
+// shared profile. A slow, failed or older Operations answers nothing here, and every workspace stays its own row.
+// Returns workspace key -> group key; the map never changes afterwards.
+export async function loadDirectClientGroups(api,{timeoutMs=DIRECT_CLIENT_GROUPS_TIMEOUT_MS,setTimer=setTimeout,clearTimer=clearTimeout}={}){
+  const groups=new Map(),abort=typeof AbortController==='function'?new AbortController():null;let timer=null;
+  try{
+    const late=new Promise(resolve=>{timer=setTimer(()=>{abort?.abort();resolve(null)},timeoutMs)});
+    const value=await Promise.race([api(DIRECT_CLIENT_GROUPS_PATH,{signal:abort?.signal}).catch(()=>null),late]);
+    if(!value||!Array.isArray(value.groups))return groups;
+    const valid=group=>Array.isArray(group)&&group.length>=2&&group.length<=4
+      &&group.every(pair=>Array.isArray(pair)&&pair.length===2&&typeof pair[0]==='string'&&typeof pair[1]==='string');
+    const found=new Map();
+    for(const group of value.groups.slice(0,250)){
+      if(!valid(group))continue;const key=JSON.stringify(group);
+      for(const [sourceId,workspaceId] of group){const workspace=directClientKey({sourceId,workspaceId});found.set(workspace,found.has(workspace)?null:key)}
+    }
+    // A workspace listed in two groups joins nothing.
+    for(const [workspace,key] of found)if(key)groups.set(workspace,key);
+    return groups;
+  }finally{if(timer!==null)clearTimer(timer)}
+}
+export const directClientGroupOf=groups=>client=>groups?.get(directClientKey(client))||null;
+// Where one client is in several divisions, staff choose the portal account the share goes to; it is never guessed.
+export function directDestinationMarkup(client){
+  const members=client?.members?.length>1?client.members:null;if(!members)return '';
+  return `<fieldset class="direct-share-destination"><legend>Portal account</legend>${members.map(member=>
+    `<label class="check"><input type="radio" name="destination" value="${esc(directClientKey(member))}"> ${esc(clientBusinessWord(member.businessName)||member.businessName||'Client')}`
+    +`<small class="direct-share-reference">Workspace ${esc(member.workspaceId)}</small></label>`).join('')}</fieldset>`;
+}
 export const directClientLabel=client=>client?.pickerLabel||clientPickerLabel(client);
 // The review names the exact client: always its business and organisation, and its full workspace reference.
 export function directClientReviewName(client){
@@ -120,6 +154,7 @@ export function directShareForm({projectName,tasks,entry=null,taskId=null,taskNa
   return `<form id="direct-client-grant-form" class="manage-form share-dialog-form direct-share-form">
 <fieldset><legend>Client</legend>
 ${clientPickerMarkup()}
+<div data-direct-destination></div>
 </fieldset>
 <fieldset><legend>What to share</legend>
 <label class="check"><input type="radio" name="scope" value="project" ${projectEntry?'checked':''}> ${projectEntry?'Project access':'The whole project'}</label>
@@ -138,7 +173,11 @@ ${PERMISSIONS.map(([name,label,checked])=>`<label class="check"><input type="che
 }
 
 export function readDirectShareForm(form,{projectId,projectName,tasks,clients,known=tasks,fresh=false,entry=null,selectionCatalog=null}){
-  const client=clients.find(item=>directClientKey(item)===form.elements.client.value)||null;
+  const picked=clients.find(item=>directClientKey(item)===form.elements.client.value)||null;
+  // A client in several divisions is sent to the one portal account chosen for it, never to all of them.
+  const destinations=picked?.members?.length>1?picked.members:null;
+  const chosenDestination=form.querySelector?.('input[name="destination"]:checked')?.value||null;
+  const client=destinations?destinations.find(member=>directClientKey(member)===chosenDestination)||null:picked;
   const scope=form.querySelector('input[name="scope"]:checked')?.value==='project'?'project':'tasks';
   const chosen=scope==='tasks'?[...form.querySelectorAll('input[name="taskId"]')].filter(input=>input.checked).map(input=>input.value):[];
   const taskNames=chosen.map(id=>(tasks.find(task=>task.id===id)||known.find(task=>task.id===id))?.name||'A chosen task');
@@ -158,6 +197,7 @@ export function readDirectShareForm(form,{projectId,projectName,tasks,clients,kn
     ||selectionSummary
     ||directScopeSummary({clientName,projectName,scope,taskNames}),
     bodies:({confirmed=false}={})=>{
+      if(picked&&!client)throw new Error('Choose the portal account to share with.');
       if(!client)throw new Error('Choose a client.');
       if(selectionError)throw selectionError;
       if(scope==='tasks'&&!chosen.length)throw new Error('Choose at least one task, or share the whole project.');
@@ -185,7 +225,7 @@ function savedSelectionSummary(selection,tasks,folders){
 }
 
 export function editableDirectProjectGrant(access,projectId,grantId,now=Date.now()){
-  if(!access||access.grantsIncomplete||access.grantsNextCursor)return null;
+  if(access?.listedProjectId!==projectId||access.capabilities?.replaces!==true||access.grantsIncomplete||access.grantsNextCursor)return null;
   const grant=access.grants.find(item=>item.grantId===grantId&&item.viewerProjectId===projectId&&!item.revokedAt);
   if(grant?.scopeType!=='project'||grant.taskId!==null||grant.includeFuturePublished!==true
     ||!grant.sourceId||!grant.workspaceId||!Number.isSafeInteger(grant.grantVersion)
@@ -199,9 +239,7 @@ export function editableDirectProjectGrant(access,projectId,grantId,now=Date.now
 const PROJECT_CHOICES_UNAVAILABLE='Folders and tasks could not be verified. Close and reopen Share to choose a project selection.';
 function projectSelectionFields(catalog,selection=null,{editing=false}={}){
   const active=selection?.mode||'whole';
-  const choices=editing
-    ?[['whole','Whole project'],['only','Only selected folders and tasks'],['except','Whole project except selected folders and tasks']]
-    :[['whole','Everything'],['except','All except…'],['only','Only…']];
+  const choices=[['whole','Everything'],['except','All except'],['only','Only']];
   const options=(name,items,selected=[],labelFor)=>{
     const available=new Set(items.map(item=>item.id));
     return [...items.map(item=>({id:item.id,label:labelFor(item),missing:false})),
@@ -216,9 +254,8 @@ ${choices
 </select></label>
 ${catalog?'':`<p class="form-note">${esc(PROJECT_CHOICES_UNAVAILABLE)}</p>`}
 <fieldset ${editing?'data-edit-share-targets':'data-direct-share-targets'} ${active==='whole'?'hidden disabled':''}><legend>Folders and tasks</legend>
-<p class="form-note">A folder includes its subfolders. Tasks become visible only after publication.</p>
-<div class="direct-share-tasks"><strong>Folders</strong>${folderOptions||'<p class="form-note">No folders.</p>'}
-<strong>Tasks</strong>${taskOptions||'<p class="form-note">No tasks.</p>'}</div></fieldset>`;
+<div class="direct-share-tasks"><strong>Folders</strong>${folderOptions}
+<strong>Tasks</strong>${taskOptions}</div></fieldset>`;
 }
 
 function projectSelectionSummary({selection,clientName,projectName,catalog}){
@@ -312,10 +349,16 @@ export function readDirectProjectShareEdit(form,{grant,projectName,tasks,folders
     replaces:[{grantId:grant.grantId,grantVersion:grant.grantVersion}]}};
 }
 
-export function directGrantRows(access,{projectId,tasks,folders=[],taskId=null,dateTime=value=>value,now=Date.now()}){
+export function directGrantRows(access,{projectId,tasks,folders=[],taskId=null,dateTime=value=>value,now=Date.now(),groups=null}){
   const grants=access.grants.filter(grant=>!grant.revokedAt&&grant.viewerProjectId===projectId&&(!taskId||grant.scopeType==='project'||grant.taskId===taskId));
   const known=new Map((access.clientNames||[]).map(client=>[directClientKey(client),client]));
-  const named=grant=>({...known.get(directClientKey(grant)),sourceId:grant.sourceId,workspaceId:grant.workspaceId,displayName:grant.clientDisplayName});
+  const groupOf=directClientGroupOf(groups);
+  // Grants to linked workspaces of one client read as that one client; revoking still acts on one grant.
+  const named=grant=>({...known.get(directClientKey(grant)),sourceId:grant.sourceId,workspaceId:grant.workspaceId,displayName:grant.clientDisplayName,
+    groupKey:groupOf(grant)||undefined});
+  // The same share in two divisions of one client: those rows say which division each is.
+  const twin=grant=>Boolean(groupOf(grant))&&grants.some(other=>other!==grant&&groupOf(other)===groupOf(grant)
+    &&other.scopeType===grant.scopeType&&other.taskId===grant.taskId);
   const incomplete=access.grantsIncomplete?'<p class="form-note" role="status">Some shares could not be listed. Close and reopen Share to load the rest.</p>':'';
   if(!grants.length)return incomplete||'<div class="empty-state">No clients have access yet.</div>';
   return `${incomplete}<div class="data-list top-gap">${grants.map(grant=>{
@@ -325,7 +368,8 @@ export function directGrantRows(access,{projectId,tasks,folders=[],taskId=null,d
     const expired=Boolean(grant.expiresAt)&&!(Date.parse(grant.expiresAt)>now);
     const details=[grant.permissions?`Can ${permissionList(grant.permissions)}`:null,
       expired?`Expired${Number.isNaN(Date.parse(grant.expiresAt))?', end date unknown':` ${dateTime(grant.expiresAt)}`}; revoke it to share this again`:grant.expiresAt?`Expires ${dateTime(grant.expiresAt)}`:'No end date'].filter(Boolean).join(' · ');
-    const word=clientPickerWord(named(grant),grants.map(named));
+    const own=named(grant),word=clientPickerWord(own,grants.map(named))
+      ||(twin(grant)?clientBusinessWord(own.businessName)||`ref ${String(grant.workspaceId).slice(-6)}`:null);
     const edit=!taskId&&grant.scopeType==='project'&&editableDirectProjectGrant(access,projectId,grant.grantId,now);
     return `<div class="manage-row share-access-row"><div><strong>${esc(grant.clientDisplayName||'Client')}${word?` <span class="client-picker-meta">${esc(word)}</span>`:''}</strong><small>${esc(what)}</small><small>${esc(details)}</small></div><div class="row-actions">${expired?'<span class="status expired">expired</span>':''}${edit?`<button class="secondary-button" data-action="edit-direct-project-share" data-id="${esc(grant.grantId)}">Edit selection</button>`:''}<button class="secondary-button" data-action="revoke-direct-client-grant" data-id="${esc(grant.grantId)}">Revoke</button></div></div>`;
   }).join('')}</div>`;

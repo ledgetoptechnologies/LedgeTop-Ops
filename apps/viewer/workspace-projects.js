@@ -20,7 +20,7 @@ import { createWorkspaceNavigationWork, workspaceNavigationState } from './works
 import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
-import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, directClientKey, shareableTasks } from './workspace-direct-client-share.mjs';
+import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, loadDirectClientGroups, directClientGroupOf, directDestinationMarkup, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, directClientKey, shareableTasks } from './workspace-direct-client-share.mjs';
 import { directProjectShareEditForm, directProjectShareReviewText, editableDirectProjectGrant, publicationFolderPath, readDirectProjectShareEdit, syncDirectProjectSelection } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
@@ -198,7 +198,7 @@ function canShareOutput(output) {
     &&['viewer.shares.create','viewer.shares.read','viewer.client_grants.manage'].some(can);
 }
 async function openShareModal(projectId,onlyOutputId=null){
-  state.clientNativeAccess=null;state.clientDirectAccess=null;
+  state.clientNativeAccess=null;state.clientDirectAccess=null;state.clientDirectGroups=new Map();
   // A task's Share stays that task's Share: what it was opened on is fixed now, not looked up again after a refresh.
   const openedTask=onlyOutputId?state.tasks.find(task=>task.id===state.outputs.find(output=>output.id===onlyOutputId)?.taskId):null;
   const context={projectId,onlyOutputId,taskId:openedTask?.id||null,taskName:openedTask?.displayName||'',id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
@@ -238,11 +238,14 @@ async function openShareModal(projectId,onlyOutputId=null){
   // Direct sharing uses its own access and folder reads. Legacy Operations lookups are independent.
   if(context.clientLoading)void(async()=>{
     const catalogRead=onlyOutputId?null:loadProjectShareSelectionCatalog(projectId,()=>current()&&can('viewer.client_grants.manage'));
+    // One grouping read per open, alongside the access list. The client panel waits for both (grouping gives up
+    // after a short wait), so the picker's grouping is fixed before any row is shown and never changes after.
+    const grouping=loadDirectClientGroups(api).catch(()=>new Map());
     let access=null;
     try{access=await loadDirectClientAccess(api,projectId);}catch{}
-    const catalog=catalogRead?await catalogRead:null;
+    const [groups,catalog]=await Promise.all([grouping,catalogRead]);
     if(!current()||!can('viewer.client_grants.manage'))return;
-    state.clientDirectAccess=access;context.directQuery='';context.selectionCatalog=catalog;
+    state.clientDirectAccess=access;state.clientDirectGroups=groups;context.directQuery='';context.selectionCatalog=catalog;
     if(context.loading)return;
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
@@ -1903,7 +1906,7 @@ function directShareContext(onlyOutputId){
 function directClientShareCard(onlyOutputId){
   const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
   return card('Share with a client',`${directShareForm(context)}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,
-    {...context,tasks:context.selectionCatalog?.tasks||context.tasks,folders:context.selectionCatalog?.folders||folderCache.get(context.projectId)?.folders||[],dateTime})}`);
+    {...context,tasks:context.selectionCatalog?.tasks||context.tasks,folders:context.selectionCatalog?.folders||folderCache.get(context.projectId)?.folders||[],dateTime,groups:state.clientDirectGroups})}`);
 }
 function rerenderClientSharePanel(projectId,onlyOutputId){
   const panel=modalContent.querySelector('[data-client-share-panel]');
@@ -1935,13 +1938,15 @@ async function editDirectProjectShare(projectId,button){
   }
   const project=state.projects.find(item=>item.id===projectId&&item.status==='active');
   if(!project)return;
+  state.clientDirectAccess=access;
   const edit={grant,...catalog,projectName:project.displayName||'this project'};
   modalContent.querySelector('#direct-client-grant-form')?.clientPicker?.dispose();
   openModal('Edit client share',directProjectShareEditForm(edit),'wide-modal');
   const form=modalContent.querySelector('#direct-project-share-edit'),status=form.querySelector('[role="status"]');
   const fields=form.querySelector('[data-edit-share-targets]'),mode=form.elements.mode;
   const back=form.querySelector('[data-edit-share-back]'),submit=form.querySelector('button[type="submit"]');
-  const live=()=>authorized()&&form.isConnected&&state.projects.some(item=>item.id===projectId&&item.status==='active');
+  const live=()=>authorized()&&form.isConnected&&state.clientDirectAccess===access
+    &&editableDirectProjectGrant(access,projectId,grantId)&&state.projects.some(item=>item.id===projectId&&item.status==='active');
   const requestKeys=new Map();
   const sync=()=>{fields.hidden=mode.value==='whole';fields.disabled=fields.hidden};
   mode.onchange=sync;
@@ -1966,7 +1971,19 @@ async function editDirectProjectShare(projectId,button){
       status.textContent='Updating access…';
       const result=await api(DIRECT_CLIENT_GRANTS_PATH,{method:'POST',body:change.body,
         headers:{'Idempotency-Key':requestKeys.get(serialized)},
-        beforeDispatch:()=>()=>{if(!reviewedAuthorityLive())throw new Error('Access changed while reviewing. Review the change again.')},
+        beforeDispatch:async()=>{
+          const requireReviewed=()=>{if(!reviewedAuthorityLive())throw new Error('Access changed while reviewing. Review the change again.')};
+          requireReviewed();
+          const [latest,latestCatalog]=await Promise.all([
+            loadDirectClientAccess(api,projectId),loadProjectShareSelectionCatalog(projectId,reviewedAuthorityLive),
+          ]);
+          requireReviewed();
+          const currentGrant=editableDirectProjectGrant(latest,projectId,grantId);
+          if(!currentGrant||JSON.stringify(currentGrant)!==JSON.stringify(grant)
+            ||!sameShareSelectionCatalog(catalog,latestCatalog,change.body.selection||{folderIds:[],taskIds:[]}))
+            throw Object.assign(new Error('This share changed. Review the updated access list.'),{code:'share_changed'});
+          return requireReviewed;
+        },
       });
       if(!result?.grant?.grantId)throw new Error('The update could not be confirmed. Retry to check the same change.');
       saved=true;
@@ -2021,14 +2038,16 @@ function bindDirectShare(form,projectId,onlyOutputId){
   // Choosing a client only fills the form; the review and its Share button are still required.
   const pickerRoot=form.querySelector('[data-client-picker]');
   // Search-first: no client is listed until staff type at least two characters.
-  if(pickerRoot)form.clientPicker=bindClientPicker(pickerRoot,{initial:null,
+  const destination=form.querySelector('[data-direct-destination]');
+  if(pickerRoot)form.clientPicker=bindClientPicker(pickerRoot,{initial:null,groupOf:directClientGroupOf(state.clientDirectGroups),
     fetchPage:async({query,cursor,signal})=>{
       const result=directClientAccess(await api(directClientsPath(projectId,{query,cursor,include:'clients'}),{signal}));
       if(!result)throw new Error('Clients could not be loaded.');if(!live())throw new Error('Share dialog closed');return result;
     },
     onSelect:(client,pickerLabel)=>{
       // Any change of client, including clearing it, needs a fresh review for the new recipient.
-      picked=client?{...client,...(pickerLabel?{pickerLabel}:{})}:null;if(form.reviewing)setReviewing(false);else if(form.isConnected)sync()}});
+      picked=client?{...client,...(pickerLabel?{pickerLabel}:{})}:null;if(destination)destination.innerHTML=directDestinationMarkup(picked);
+      if(form.reviewing)setReviewing(false);else if(form.isConnected)sync()}});
   sync();
   // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
   form.onsubmit=async event=>{

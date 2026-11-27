@@ -27,6 +27,54 @@ async function fixture(t, respond, allowed = true) {
 }
 const json = (payload, init = {}) => new Response(JSON.stringify(payload), { status: 200, ...init });
 
+test('direct lists accept additive provider metadata without forwarding it', async t => {
+  const known = { ...list, grantsNextCursor: null, capabilities: { replaces: true } };
+  for (const olderInclude of [false, true]) {
+    for (const include of ['all', 'clients', 'grants']) {
+      const { request } = await fixture(t, envelope => olderInclude && include !== 'all' && envelope.listQuery.include
+        ? json({ error: 'Viewer client-grant request is invalid' }, { status: 400 })
+        : json({ ...known, catalogRevision: 7, providerSummary: { label: 'Synthetic provider' } }));
+      const response = await request(PATH + '?include=' + include);
+      assert.equal(response.status, 200);
+      const expected = olderInclude && include === 'clients'
+        ? { clients: known.clients, grants: [], clientsNextCursor: null }
+        : olderInclude && include === 'grants' ? { ...known, clients: [] } : { ...known };
+      if (include === 'clients') delete expected.capabilities;
+      assert.deepEqual(await response.json(), expected);
+    }
+  }
+});
+
+for (const selection of [undefined, { version: 1, mode: 'only', folderIds: ['00000000-0000-4000-8000-000000000001'], taskIds: [] }])
+test(`refused replacement uses the existing plain error and sends the exact change once (${selection ? 'Only' : 'Everything'})`, async t => {
+  const body = { ...input, ...(selection ? { selection } : {}), replaces: [{ grantId: 'grant-old', grantVersion: 2 }] };
+  const { request, envelopes } = await fixture(t, () => json({ error: 'Viewer client-grant request is invalid' }, { status: 400 }));
+  const response = await request(PATH, { method: 'POST', body });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: 'Operations rejected the client access request', code: 'operations_request_failed' });
+  assert.equal(envelopes.length, 1);
+  assert.deepEqual(envelopes[0].grant, body);
+});
+
+test('old and capable direct lists preserve the explicit capability, including include compatibility reads', async t => {
+  for (const capabilities of [undefined, { replaces: false }, { replaces: true }]) {
+    const payload = { ...list, ...(capabilities === undefined ? {} : { capabilities }) };
+    for (const include of ['all', 'clients', 'grants']) {
+      for (const olderInclude of [false, true]) {
+        const { request } = await fixture(t, envelope => olderInclude && envelope.listQuery.include !== undefined && include !== 'all'
+          ? json({ error: 'Viewer client-grant request is invalid' }, { status: 400 }) : json(payload));
+        const response = await request(PATH + '?viewerProjectId=viewer-project&include=' + include);
+        assert.equal(response.status, 200);
+        assert.deepEqual((await response.json()).capabilities, include === 'clients' ? undefined : capabilities);
+      }
+    }
+  }
+  for (const capabilities of [null, [], { replaces: 'true' }, { replaces: 1 }, { replaces: true, extra: true }]) {
+    const { request } = await fixture(t, () => json({ ...list, capabilities }));
+    assert.equal((await request()).status, 502);
+  }
+});
+
 test('direct list signs bounded recipient query, preserves schema and permission boundary', async t => {
   const { request, envelopes } = await fixture(t, () => json(list));
   const response = await request(PATH + '?q=Synthetic&limit=10&viewerProjectId=viewer-project');
@@ -35,6 +83,24 @@ test('direct list signs bounded recipient query, preserves schema and permission
   for (const query of ['?limit=51', '?limit=2&limit=3', '?cursor=bad%2Fcursor', '?unexpected=true', '?q=control%0A']) assert.equal((await request(PATH + query)).status, 400);
   const denied = await fixture(t, () => { throw new Error('must not reach network'); }, false);
   assert.equal((await denied.request()).status, 403); assert.deepEqual(denied.envelopes, []);
+});
+
+test('replacement refusals preserve existing structured errors', async t => {
+  const body = { ...input, replaces: [{ grantId: 'grant-old', grantVersion: 2 }] };
+  for (const [status, payload, expected] of [
+    [400, { error: 'Viewer client-grant request is invalid', code: 'invalid_request' }, 'invalid_request'],
+    [400, { error: 'Different refusal' }, 'operations_request_failed'],
+    [403, { error: 'Viewer client-grant request is invalid' }, 'operations_request_failed'],
+    [409, { error: 'Changed', code: 'share_changed' }, 'share_changed'],
+    [503, { error: 'Viewer client-grant request is invalid' }, 'operations_request_failed'],
+  ]) {
+    const { request, envelopes } = await fixture(t, () => json(payload, { status }));
+    const response = await request(PATH, { method: 'POST', body });
+    assert.equal(response.status, status >= 500 ? 502 : status);
+    assert.equal((await response.json()).code, expected);
+    assert.equal(envelopes.length, 1);
+    assert.deepEqual(envelopes[0].grant, body);
+  }
 });
 
 test('direct list forwards the name-ordered picker and grant paging fields and accepts the richer client rows', async t => {
@@ -129,7 +195,7 @@ test('direct revoke uses path grant id, optional bounded reason and requires a t
 
 for (const bad of [{ ...list, clientsNextCursor: undefined }, { ...list, clients: [{ ...list.clients[0], sourceId: 'unknown' }] },
   { ...list, grants: [{ ...grant, scopeType: 'task', taskId: 'task-one', includeFuturePublished: true }] },
-  { ...list, grants: [{ ...grant, grantVersion: 0 }] }, { ...list, extra: 'unexpected' }]) test('direct list rejects malformed upstream authority', async t => {
+  { ...list, grants: [{ ...grant, grantVersion: 0 }] }]) test('direct list rejects malformed upstream authority', async t => {
   const { request } = await fixture(t, () => json(bad)); assert.equal((await request()).status, 502);
 });
 

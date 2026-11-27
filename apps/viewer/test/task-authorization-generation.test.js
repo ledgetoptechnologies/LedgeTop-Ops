@@ -111,7 +111,7 @@ test('a 91 stamp whose objects are missing is refused, never accepted', t => {
   assert.throws(() => applyMigrations(db), /explicit compatibility review/);
 });
 
-function lightFixture(t) {
+function lightFixture(t, { projectId = 'p', taskId = 't' } = {}) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
   db.exec(`
@@ -123,12 +123,12 @@ function lightFixture(t) {
     CREATE TABLE model_outputs(id TEXT PRIMARY KEY, model_id TEXT, task_id TEXT, project_id TEXT,
       attempt_id TEXT, updated_at TEXT, status TEXT);
     CREATE TABLE model_versions(id TEXT PRIMARY KEY, model_id TEXT, status TEXT);
-    INSERT INTO projects VALUES ('p','Project','metric','active');
-    INSERT INTO project_folders VALUES ('fa','p',NULL,'A'), ('fb','p',NULL,'B'), ('fc','p','fa','C');
+    INSERT INTO projects VALUES ('${projectId}','Project','metric','active');
+    INSERT INTO project_folders VALUES ('fa','${projectId}',NULL,'A'), ('fb','${projectId}',NULL,'B'), ('fc','${projectId}','fa','C');
     INSERT INTO models VALUES ('m','Model','v','ready');
     INSERT INTO model_versions VALUES ('v','m','ready');
-    INSERT INTO processing_tasks VALUES ('t','p','Task','now','ready',NULL,'m','fa'), ('u','p','Other','now','ready',NULL,NULL,NULL);
-    INSERT INTO model_outputs VALUES ('v','m','t','p','attempt','now','published');
+    INSERT INTO processing_tasks VALUES ('${taskId}','${projectId}','Task','now','ready',NULL,'m','fa'), ('u','${projectId}','Other','now','ready',NULL,NULL,NULL);
+    INSERT INTO model_outputs VALUES ('v','m','${taskId}','${projectId}','attempt','now','published');
   `);
   db.exec(TASK_AUTHORIZATION_GENERATIONS_V88_SQL);
   return db;
@@ -183,17 +183,21 @@ test('every scope-affecting write bumps the task generation in the same statemen
 });
 
 test('a missing generation row denies every restricted check', t => {
-  const db = lightFixture(t);
-  db.exec('DROP TRIGGER task_authorization_generation_permanent');
-  db.exec("DELETE FROM task_authorization_generations WHERE task_id='t'");
-  assert.equal(currentTaskAuthorizationGeneration(db, 't'), null);
+  const projectId = id(1), taskId = id(2);
+  const db = lightFixture(t, { projectId, taskId });
   const session = { audience: 'client', sessionMode: 'published', modelId: 'm', modelVersionId: 'v',
     sourceAuthorization: { type: 'direct_client_grant', id: 'g', version: 1 },
-    restrictedScope: { version: 1, projectId: id(1), taskId: id(2), generation: 1, selection: { version: 1, mode: 'except', folderIds: [], taskIds: [id(3)] } } };
+    permissions: { view: true, measure: true, cameras: false, download: false },
+    restrictedScope: { version: 1, projectId, taskId, generation: 1, selection: { version: 1, mode: 'except', folderIds: [], taskIds: [id(3)] } } };
+  assert.equal(restrictedSessionAllows(db, session), true, 'the same identifiers and selection are allowed before the row is removed');
+  db.exec('DROP TRIGGER task_authorization_generation_permanent');
+  db.prepare('DELETE FROM task_authorization_generations WHERE task_id=?').run(taskId);
+  assert.equal(currentTaskAuthorizationGeneration(db, taskId), null);
   assert.equal(restrictedSessionAllows(db, session), false);
   const noTable = new DatabaseSync(':memory:');
   t.after(() => noTable.close());
-  assert.equal(currentTaskAuthorizationGeneration(noTable, 't'), null);
+  assert.equal(currentTaskAuthorizationGeneration(noTable, taskId), null);
+  assert.equal(restrictedSessionAllows(noTable, session), false);
 });
 
 test('live restricted liveness reads tombstone, generation and eligibility in one snapshot (two connections)', t => {
@@ -231,7 +235,7 @@ test('live restricted liveness reads tombstone, generation and eligibility in on
   const generation = reader.prepare('SELECT generation FROM task_authorization_generations WHERE task_id=?').get(T).generation;
   const session = repo.createViewerSession({ tokenHash: 'restricted', modelId: M, modelVersionId: V, audience: 'client', subject: 'client:synthetic',
     sourceAuthorization: { type: 'direct_client_grant', id: 'grant', version: 1 },
-    permissions: { view: true, __authorizedUntil: new Date(Date.now() + 120_000).toISOString() },
+    permissions: { view: true, measure: true, cameras: false, download: false, __authorizedUntil: new Date(Date.now() + 120_000).toISOString() },
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
     restrictedScope: { version: 1, projectId: P, taskId: T, generation, selection: { version: 1, mode: 'except', folderIds: [FB], taskIds: [] } } });
   assert.equal(repo.viewerSessionLive(session), true);

@@ -20,7 +20,7 @@ for(const mode of ['only','except'])test(`first-share ${mode} inheritance uses r
   t.after(release);
   const script=`
 import * as share from '/workspace-direct-client-share.mjs';
-const {directShareForm,readDirectShareForm,syncDirectProjectSelection,directShareReviewMarkup,directClientKey,directShareErrorText,DIRECT_CLIENT_GRANTS_PATH}=share;
+const {directClientGroupOf,directDestinationMarkup,directShareForm,readDirectShareForm,syncDirectProjectSelection,directShareReviewMarkup,directClientKey,directShareErrorText,DIRECT_CLIENT_GRANTS_PATH}=share;
 const assert=(condition,message)=>{if(!condition)throw new Error(message)};
 try{
 ${['folderPath','projectShareSelectionCatalog','sameShareSelectionCatalog','bindDirectShare'].map(declaration).join('\n')}

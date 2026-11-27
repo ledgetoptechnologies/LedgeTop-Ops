@@ -176,6 +176,7 @@ describe('direct Viewer grant listing',()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'},{id:'ws-two',name:'Two'}]);await seedGrants(database,250);
   const ids:string[]=[];let cursor:string|null=null,pages=0;
   do{const page=await listDirectViewerClientGrantWorkspace(env,principal,{include:'grants',viewerProjectId:'viewer-project',...(cursor?{grantsCursor:cursor}:{})});
+   expect(page.capabilities).toEqual({replaces:true});
    expect(page.clients).toEqual([]);expect(page.grants.length).toBeLessThanOrEqual(100);
    ids.push(...page.grants.map(grant=>grant.grantId));cursor=page.grantsNextCursor;pages++;}while(cursor);
   expect(pages).toBe(3);expect(ids).toHaveLength(250);expect(new Set(ids).size).toBe(250);
@@ -184,7 +185,9 @@ describe('direct Viewer grant listing',()=>{
   await expect(listDirectViewerClientGrantWorkspace(env,principal,{})).rejects.toMatchObject({status:503,code:'grant_limit'});
   expect((await listDirectViewerClientGrantWorkspace(env,principal,{include:'all'})).grants).toHaveLength(100);
   const other=await listDirectViewerClientGrantWorkspace(env,principal,{include:'grants',viewerProjectId:'other-project'});
-  expect(other).toMatchObject({grants:[],grantsNextCursor:null});
+  expect(other).toMatchObject({grants:[],grantsNextCursor:null,capabilities:{replaces:true}});
+  const picker=await listDirectViewerClientGrantWorkspace(env,principal,{include:'clients',viewerProjectId:'viewer-project'});
+  expect(picker).not.toHaveProperty('capabilities');
  });
  it('reads the receipts of a whole page at once, not one read per share',async()=>{
   const {env,database}=await fixture([{id:'ws-one',name:'One'},{id:'ws-two',name:'Two'}]);await seedGrants(database,200);

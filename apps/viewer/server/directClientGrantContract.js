@@ -47,7 +47,8 @@ function validDirectSnapshot(value, action) {
     && (value.sessionRevocation === undefined || validRevocation(value.sessionRevocation));
   if (action === 'revoke') return exact(value, ['success', 'replayed', 'sessionRevocation']) && value.success === true && typeof value.replayed === 'boolean'
     && validRevocation(value.sessionRevocation);
-  return exact(value, ['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor'])
+  return exact(value, ['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor', 'capabilities'])
+    && (value.capabilities === undefined || exact(value.capabilities, ['replaces']) && typeof value.capabilities.replaces === 'boolean')
     && Array.isArray(value.clients) && value.clients.length <= 50 && value.clients.every(directClient)
     && Array.isArray(value.grants) && value.grants.length <= 500 && value.grants.every(validDirectGrant)
     && clientCursor(value.clientsNextCursor) && (value.grantsNextCursor === undefined || cursor(value.grantsNextCursor));
@@ -65,4 +66,16 @@ function directListQuery(query) {
     ...(query.include !== undefined ? { include: query.include } : {}), ...(query.grantsCursor !== undefined ? { grantsCursor: query.grantsCursor } : {}) };
 }
 
-module.exports = { validReplaces, validDirectGrantInput, validDirectSnapshot, directListQuery };
+// Optional grouping of one real client's workspaces across divisions (shared-profile link only).
+// Each group is 2-4 [sourceId, workspaceId] pairs in distinct sources; no workspace is in two groups.
+const DIRECT_GROUP_LIMIT = 250;
+function validDirectGroups(value) {
+  if (!exact(value, ['groups']) || !Array.isArray(value.groups) || value.groups.length > DIRECT_GROUP_LIMIT) return false;
+  const seen = new Set();
+  return value.groups.every(group => Array.isArray(group) && group.length >= 2 && group.length <= 4
+    && new Set(group.map(pair => Array.isArray(pair) ? pair[0] : null)).size === group.length
+    && group.every(pair => Array.isArray(pair) && pair.length === 2 && source(pair[0]) && id(pair[1])
+      && !seen.has(pair[1]) && seen.add(pair[1])));
+}
+
+module.exports = { validReplaces, validDirectGrantInput, validDirectSnapshot, directListQuery, validDirectGroups, DIRECT_GROUP_LIMIT };

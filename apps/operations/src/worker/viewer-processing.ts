@@ -14,6 +14,7 @@ import type { Env, StaffPrincipal } from "./types";
 import { introspectClientViewerSourceAuthorization } from "./viewer-session-issuer";
 import {createDirectViewerClientGrant,listDirectViewerClientGrantWorkspace,revokeDirectViewerClientGrant,
  directViewerClientGrantListQuerySchema,DirectViewerGrantError} from './viewer-direct-client-grants';
+import {listDirectViewerClientGroups} from './viewer-direct-client-groups';
 import {
   createNativeViewerClientGrant,
   listNativeViewerClientGrantWorkspace,
@@ -415,7 +416,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     catch { throw new HTTPException(400, { message: "Viewer client-grant request must be JSON" }); }
     const envelopeSchema = z.object({
       subject: z.string().regex(/^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
-      action: z.enum(["list", "create", "revoke"]),
+      action: z.enum(["list", "create", "revoke", "groups"]),
       connection: z.enum(["native","direct"]).optional(),
       listQuery: directViewerClientGrantListQuerySchema.optional(),
       idempotencyKey: idempotencyKey.optional(),
@@ -423,6 +424,9 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
       grantId: opaqueId.optional(),
       reason: z.string().trim().min(1).max(240).optional(),
     }).strict().superRefine((value, context) => {
+      // Grouping is an optional, separate read: direct connection only, with no other fields.
+      if (value.action === "groups" && (value.connection !== "direct" || value.listQuery || value.idempotencyKey || value.grant || value.grantId || value.reason))
+        context.addIssue({ code: "custom", message: "Groups take no fields" });
       if(value.listQuery && (value.connection!=='direct'||value.action!=='list'))
         context.addIssue({code:'custom',message:'List query is only valid for direct grant listing'});
       if (value.action === "list" && (value.idempotencyKey || value.grant || value.grantId || value.reason))
@@ -451,6 +455,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     if (parsed.data.connection === "direct") {
       try {
         if(parsed.data.action==='list')return c.json(await listDirectViewerClientGrantWorkspace(c.env,principal,parsed.data.listQuery));
+        if(parsed.data.action==='groups')return c.json(await listDirectViewerClientGroups(c.env,principal));
         if(parsed.data.action==='create'){
           const result=await createDirectViewerClientGrant({env:c.env,principal,grant:parsed.data.grant,
             idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw});

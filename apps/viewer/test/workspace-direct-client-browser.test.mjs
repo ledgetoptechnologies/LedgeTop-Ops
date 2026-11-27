@@ -8,9 +8,10 @@ import { fileURLToPath } from 'node:url';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 
 // Opt in deliberately: ordinary Linux/unit runs do not import Playwright or
-// require Edge. An opted-in run fails if the build/browser is unavailable.
+// require a browser. An opted-in run fails if the build/browser is unavailable.
 // Run after npm run build in apps/viewer:
 // $env:LTDS_DIRECT_SHARE_BROWSER='true'; node --test test/workspace-direct-client-browser.test.mjs
+// On Linux also set LTDS_CHROMIUM_EXECUTABLE to a local Chromium executable.
 const enabled = process.env.LTDS_DIRECT_SHARE_BROWSER === 'true';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIRECT = '/api/v1/workspace/direct-client-grants';
@@ -28,7 +29,7 @@ async function capture(page, name) {
   await page.screenshot({ path: path.join(directory, name), fullPage: false });
 }
 
-async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = false, deferLegacy = false, directUnavailable = false, deferDirectPost = false } = {}) {
+async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = false, deferLegacy = false, directUnavailable = false, deferDirectPost = false, replaces = false, seedProjectGrant = false, refuseReplace = false } = {}) {
   const built = realpathSync(path.join(root, 'dist'));
   assert.ok(existsSync(path.join(built, 'workspace.html')), 'Build Viewer before opting into browser acceptance');
   const requests = [], grants = [], receipts = new Map(), forbidden = [];
@@ -42,17 +43,27 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
   t.after(() => finishDirectPost?.());
   const project = { id: PROJECT, displayName: 'Synthetic property mapping', description: 'Local synthetic browser acceptance only', status: 'active' };
   const tasks = TASKS.map((id, index) => ({ id, projectId: PROJECT, datasetId: `dataset-${index}`, displayName: index ? 'South field' : 'North field',
-    status: 'published', createdAt: `2026-01-0${index + 1}T12:00:00.000Z`, metrics: { sourceImageCount: 3 }, latestAttempt: { id: `attempt-${index}`, status: 'published', attemptNumber: 1 } }));
+    folderId: null, status: 'published', createdAt: `2026-01-0${index + 1}T12:00:00.000Z`, metrics: { sourceImageCount: 3 }, latestAttempt: { id: `attempt-${index}`, status: 'published', attemptNumber: 1 } }));
   const outputs = tasks.map((task, index) => ({ id: `output-${index}`, taskId: task.id, projectId: PROJECT, modelId: `model-${index}`,
     displayName: task.displayName, status: 'published', activePublished: true, byteSize: 1024, assetCount: 1, assetKinds: ['glb'] }));
+  if (seedProjectGrant) grants.push({ ...CLIENT, grantId: 'seed-grant', grantVersion: 7, viewerProjectId: PROJECT,
+    scopeType: 'project', taskId: null, includeFuturePublished: true, permissions: { measure: true, cameras: true, download: true },
+    expiresAt: null, revokedAt: null, clientDisplayName: CLIENT.displayName });
   async function api(url, method, body, key) {
     const current = { method, path: url.pathname, query: Object.fromEntries(url.searchParams), body, key }; requests.push(current);
     if (method !== 'GET' && !url.pathname.startsWith(DIRECT)) {
       forbidden.push(current); return [405, { error: 'Synthetic fixture forbids unrelated mutations' }];
     }
-    if (url.pathname === DIRECT && method === 'GET') return directUnavailable ? [503, { error: 'Synthetic direct sharing unavailable' }] : [200, { clients: [CLIENT], clientsNextCursor: null, grants: grants.filter(grant => !grant.revokedAt) }];
+    if (url.pathname === '/api/v1/workspace/direct-client-groups' && method === 'GET') return [200, { groups: [] }];
+    if (url.pathname === DIRECT && method === 'GET') return directUnavailable ? [503, { error: 'Synthetic direct sharing unavailable' }] : [200, { clients: [CLIENT], clientsNextCursor: null, grants: grants.filter(grant => !grant.revokedAt), ...(replaces ? { capabilities: { replaces: true } } : {}) }];
     if (url.pathname === DIRECT && method === 'POST') {
       await directPostReady;
+      if (body.replaces) {
+        assert.equal(replaces, true);
+        assert.deepEqual(body.replaces, [{ grantId: 'seed-grant', grantVersion: 7 }]);
+        if (refuseReplace) return [400, { error: 'Operations rejected the client access request', code: 'operations_request_failed' }];
+        throw new Error('This synthetic case only permits a refused replacement');
+      }
       assert.deepEqual(Object.keys(body).sort(), grantKeys, 'UI must use direct client authority, without a PA/business project');
       assert.equal(body.sourceId, CLIENT.sourceId); assert.equal(body.workspaceId, CLIENT.workspaceId); assert.equal(body.viewerProjectId, PROJECT);
       assert.equal(body.confirmedScope, true); assert.match(key || '', /^[A-Za-z0-9._:-]{16,128}$/);
@@ -84,6 +95,7 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
     if (url.pathname === '/api/v1/projects') return [200, { projects: [project], nextCursor: null }];
     if (url.pathname === '/api/v1/datasets') return [200, { datasets: tasks.map(task => ({ id: task.datasetId, projectId: PROJECT, displayName: 'Synthetic source', status: 'finalized', fileCount: 3, byteSize: 1024 })), nextCursor: null }];
     if (url.pathname === '/api/v1/tasks') return [200, { tasks, nextCursor: null }];
+    if (url.pathname === `/api/v1/projects/${PROJECT}/folders`) return [200, { folders: [] }];
     if (url.pathname === '/api/v1/processing/outputs') return [200, { outputs, nextCursor: null }];
     if (url.pathname === '/api/v1/processing/providers') return [200, { providers: [], nextCursor: null }];
     if (url.pathname === '/api/v1/processing/presets') return [200, { presets: [] }];
@@ -105,6 +117,7 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
     return [404, { error: 'Unimplemented synthetic fixture API', path: url.pathname }];
   }
   const errors = [];
+  t.after(() => assert.deepEqual(errors.map(error => error.message), []));
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://127.0.0.1');
@@ -145,9 +158,9 @@ async function openShare(page, outputId = null) {
   const form = page.locator('#direct-client-grant-form'); await form.waitFor({ state: 'visible' });
   assert.equal(await form.getByRole('checkbox', { name: /^Camera positions/ }).isChecked(), true);
   // Search-first combobox: focus lists nobody; two typed characters search; choosing one only fills the form.
-  const combobox = form.getByRole('combobox', { name: 'Client' });
+  const combobox = form.getByRole('combobox', { name: 'Client', exact: true });
   await combobox.click();
-  assert.equal(await form.getByRole('option').count(), 0, 'No client is listed before typing');
+  assert.equal(await form.getByRole('listbox').getByRole('option').count(), 0, 'No client is listed before typing');
   await combobox.fill('Sy');
   await form.getByRole('option', { name: new RegExp(CLIENT.displayName) }).click();
   return form;
@@ -155,6 +168,7 @@ async function openShare(page, outputId = null) {
 // Two steps: Review share freezes the choices and repeats them; Share with client sends.
 async function reviewAndShare(form) {
   await form.getByRole('button', { name: 'Review share', exact: true }).click();
+  await form.page().waitForFunction(() => !document.querySelector('#direct-client-grant-form')?.shareBusy);
   const send = form.getByRole('button', { name: 'Share with client', exact: true });
   if (await send.isVisible()) await send.click();
 }
@@ -164,15 +178,45 @@ function assertNoUnrelatedWrites(state, pageErrors) {
   assert.deepEqual(pageErrors, [], 'The compiled production workspace must run without browser exceptions');
 }
 
-test('built Viewer shares directly to clients through the real Edge UI', { skip: !enabled, timeout: 120_000 }, async t => {
-  assert.equal(process.platform, 'win32', 'This opt-in acceptance test requires Windows Edge');
+test('built Viewer shares directly to clients through the real browser UI', { skip: !enabled, timeout: 120_000 }, async t => {
+  if (!process.env.LTDS_CHROMIUM_EXECUTABLE) assert.equal(process.platform, 'win32', 'Set LTDS_CHROMIUM_EXECUTABLE for local Chromium acceptance');
   const operationsRequire = createRequire(path.resolve(root, '../operations/package.json'));
   const { chromium } = operationsRequire('playwright');
-  const edge = process.env.LTDS_EDGE_EXECUTABLE || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+  const edge = process.env.LTDS_CHROMIUM_EXECUTABLE || process.env.LTDS_EDGE_EXECUTABLE || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   assert.ok(existsSync(edge), `Microsoft Edge executable unavailable: ${edge}`);
   const release = await acquireBrowserHarnessLock({ root }); let browser;
   t.after(async () => { try { await browser?.close(); } finally { release(); } });
   browser = await chromium.launch({ executablePath: edge, headless: true, args: ['--disable-gpu', '--no-first-run'] });
+
+  for (const replaces of [false, true]) await t.test(`${replaces ? 'new' : 'old'} list gates Edit selection; refusal preserves grants and fallback`, async child => {
+    const state = await fixture(child, { replaces, seedProjectGrant: true, refuseReplace: true });
+    const { page, pageErrors } = await openWorkspace(child, browser, state);
+    await openShare(page);
+    const edit = page.getByRole('button', { name: 'Edit selection', exact: true });
+    assert.equal(await edit.count(), replaces ? 1 : 0);
+    const before = JSON.stringify(state.grants);
+    assert.equal(await page.locator('.share-legacy').count(), 1);
+    if (replaces) {
+      await edit.click();
+      const form = page.locator('#direct-project-share-edit');
+      await form.locator('[name="mode"]').selectOption('only');
+      await form.locator(`[name="task"][value="${TASKS[0]}"]`).check();
+      await form.getByRole('button', { name: 'Review change', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Review share change', exact: true }).getByRole('button', { name: 'Save selection', exact: true }).click();
+      await form.getByText('Operations rejected the client access request', { exact: true }).waitFor();
+      assert.equal(state.requests.filter(req => req.method === 'POST').length, 1);
+      assert.equal(JSON.stringify(state.grants), before);
+      assert.equal(state.requests.filter(req => req.method === 'DELETE').length, 0);
+      await capture(page, 'viewer-replace-refusal.png');
+      await form.getByRole('button', { name: 'Back to access list', exact: true }).click();
+      await page.locator('.share-legacy').waitFor();
+    } else {
+      assert.equal(state.requests.some(req => req.body?.replaces), false);
+      await capture(page, 'viewer-old-list.png');
+    }
+    assert.equal(JSON.stringify(state.grants), before);
+    assertNoUnrelatedWrites(state, pageErrors);
+  });
 
   for (const deferLegacy of [false, true]) await t.test(`direct sharing works with ${deferLegacy ? 'pending then failed' : 'failed'} legacy project lookup`, async child => {
     const state = await fixture(child, { legacyUnavailable: true, deferLegacy });
@@ -194,7 +238,7 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     assert.equal(state.grants.length, 1, 'Independent direct authority still creates the explicitly selected grant');
     const refreshed = page.locator('#direct-client-grant-form');
     const beforeSearch = await refreshed.elementHandle();
-    await refreshed.getByRole('combobox', { name: 'Client' }).fill('Synthetic');
+    await refreshed.getByRole('combobox', { name: 'Client', exact: true }).fill('Synthetic');
     await refreshed.getByRole('option', { name: new RegExp(CLIENT.displayName) }).waitFor();
     assert.equal(await beforeSearch.evaluate(element => element.isConnected), true, 'Filtering updates the list in place, without re-rendering the form');
     assert.equal(await refreshed.locator('input[name="client"]').inputValue(), '', 'Typing clears the earlier choice');

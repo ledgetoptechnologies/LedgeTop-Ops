@@ -139,7 +139,7 @@ test('a name shows only that category, and Show all and Hide all do what they sa
   assert.deepEqual([pins(panel), only().getAttribute('aria-pressed')], [['Trail'], 'true']);
   // A new mark starts in the one category being shown.
   await panel.place('43.05, -87');
-  assert.equal(panel.q('[name=categoryId]').value, trails.id);
+  assert.equal(panel.q('[name=category]').value, trails.name);
   await panel.save();
   assert.deepEqual(pins(panel), ['Trail', 'Trails']);
   await only().click();
@@ -156,8 +156,7 @@ test('saving, restoring, importing or orphaning a mark never leaves it unseen', 
   const { panel, stands, trails } = await start(t);
   await eye(panel, stands.id).click();
   await panel.open('Trail');
-  panel.q('[name=categoryId]').value = stands.id;
-  await panel.q('[name=categoryId]').fire('change');
+  await panel.chooseCategory(stands.name);
   await panel.save();
   assert.deepEqual(pins(panel), ['Loose', 'Stand 1', 'Stand 2', 'Trail'], 'saved into a hidden category');
 
@@ -216,14 +215,14 @@ test('staff hide a client category like any other, and nothing is written', asyn
 test('the three tabs move with the arrow keys and Deleted is only offered where it exists', async t => {
   const { panel } = await start(t);
   const tabs = () => panel.panel.querySelectorAll('[role=tab]').filter(node => !node.hidden).map(node => [node.textContent, node.getAttribute('aria-selected')]);
-  assert.deepEqual(tabs(), [['Categories', 'false'], ['List', 'true'], ['Deleted', 'false']]);
-  await panel.q('[data-tab=list]').fire('keydown', { key: 'ArrowRight' });
+  assert.deepEqual(tabs(), [['List', 'true'], ['Categories', 'false'], ['Deleted', 'false']]);
+  await panel.q('[data-tab=categories]').fire('keydown', { key: 'ArrowRight' });
   assert.equal(panel.dom.document.activeElement, panel.q('[data-tab=deleted]'));
   await panel.q('[data-tab=deleted]').fire('keydown', { key: 'ArrowRight' });
-  assert.equal(panel.q('[id=viewer-marks-categories]').hidden, false);
+  assert.equal(panel.q('[id=viewer-marks-list]').hidden, false);
   await panel.q('[data-tab=deleted]').click();
   await panel.marks.setScope({ mode: 'temporary', key: 'public' });
-  assert.deepEqual(tabs(), [['Categories', 'false'], ['List', 'true']]);
+  assert.deepEqual(tabs(), [['List', 'true'], ['Categories', 'false']]);
 });
 
 const draftPins = panel => panel.leaflet.pins().length;
@@ -243,8 +242,7 @@ test('hiding the category of the open mark hides its pin and keeps the editor', 
   await panel.q('.viewer-mark-move').querySelectorAll('button').find(node => node.textContent === 'Cancel').click();
   await panel.card('Edit').click();
   // Another category picked but not saved does not bring it back; saving does.
-  panel.q('[name=categoryId]').value = stands.id;
-  await panel.q('[name=categoryId]').fire('change');
+  await panel.chooseCategory(stands.name);
   assert.equal(draftPins(panel), 3);
   await panel.save();
   assert.deepEqual(pins(panel), ['Loose', 'Stand 1', 'Stand 2', 'Trail']);

@@ -76,13 +76,11 @@ describe("Viewer quick share", () => {
     expect(validViewerCatalogTasks({ project, tasks: [{ ...task, modelId: "" }], nextCursor: null }, "vp-1")).toBe(false);
   });
 
-  it("builds a task share without future models, and a project share only with the explicit opt-in", () => {
-    expect(directShareBody({ project, task }, client, permissions, null, true)).toEqual({ sourceId: "project-alpha:primary",
+  it("builds only task shares and refuses whole projects", () => {
+    expect(directShareBody({ project, task }, client, permissions, null)).toEqual({ sourceId: "project-alpha:primary",
       workspaceId: "ws-1", viewerProjectId: "vp-1", taskId: "task-1", scopeType: "task", includeFuturePublished: false,
       confirmedScope: true, expiresAt: null, permissions });
-    expect(() => directShareBody({ project, task: null }, client, permissions, null, false)).toThrow();
-    expect(directShareBody({ project, task: null }, client, permissions, null, true))
-      .toMatchObject({ taskId: null, scopeType: "project", includeFuturePublished: true });
+    expect(() => directShareBody({ project, task: null }, client, permissions, null)).toThrow("Share whole projects from the Viewer");
   });
 
   it("lists only active grants that cover the chosen target", () => {
@@ -98,6 +96,15 @@ describe("Viewer quick share", () => {
     const ids = (target: ViewerShareTarget) => grantsForTarget(grants, target).map(grant => grant.grantId);
     expect(ids({ project, task })).toEqual(["project", "same-task"]);
     expect(ids({ project, task: null })).toEqual(["project"]);
+  });
+
+  it("does not infer model coverage from saved restricted project selections", () => {
+    const base: DirectShareGrant = { ...client, grantId: "whole", viewerProjectId: project.viewerProjectId, taskId: null,
+      scopeType: "project", includeFuturePublished: true, permissions, expiresAt: null, revokedAt: null,
+      createdAt: "2026-10-20T12:00:00Z", clientDisplayName: client.displayName };
+    const grants = [base, ...(["only", "except"] as const).map<DirectShareGrant>(mode => ({ ...base, grantId: mode,
+      selection: { version: 1, mode, folderIds: ["00000000-0000-4000-8000-000000000001"], taskIds: [] } }))];
+    expect(grantsForTarget(grants, { project, task }).map(grant => grant.grantId)).toEqual(["whole"]);
   });
 
   it("ends access at the close of the chosen Central-time day across daylight saving", () => {
