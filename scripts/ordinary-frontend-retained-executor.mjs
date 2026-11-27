@@ -505,6 +505,10 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
   opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
   operationsBaselineContract, opsStaffDirectoryEntrypointContract, assetVerificationConcurrency,
+  // Offline-test seams. Each defaults to the reviewed production value; the production entry point
+  // never passes them.
+  opsStaffDirectoryPins = OPS_STAFF_DIRECTORY_ENTRYPOINT, reviewedPreflightProfiles,
+  wranglerRuntimeSHA256 = PROFILE.wranglerRuntimeSHA256,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
   readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
@@ -522,14 +526,18 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && path.isAbsolute(artifactSourceRoot ?? '') && path.isAbsolute(executorSourceRoot ?? ''),
   'Ordinary retained executor inputs invalid');
   const ordinaryFrontendPreflightMode = ordinaryPlan.installationPreflight?.mode;
-  const staffDirectory = selectOpsStaffDirectoryEntrypoint({ app, contract: opsStaffDirectoryEntrypointContract, ordinaryPlan,
+  const installSeams = reviewedPreflightProfiles === undefined ? {} : { reviewedPreflightProfiles };
+  const staffDirectoryPinSeam = opsStaffDirectoryPins === OPS_STAFF_DIRECTORY_ENTRYPOINT ? {} : { opsStaffDirectoryPins };
+  const staffDirectory = selectOpsStaffDirectoryEntrypoint({ app, contract: opsStaffDirectoryEntrypointContract, ordinaryPlan, pins: opsStaffDirectoryPins,
     pinnedPlan, ordinaryFrontendPreflightMode, operationsBaselineContract, staffAuthorityContract,
     installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
     expectedDeploymentVersions: expectedDeploymentVersions ?? ordinaryPlan.expectedDeploymentVersions, resumeCandidate });
   // Pre-activation installation checks under the contract admit only the exact held stray inactive
   // Ops latest; the active Ops version stays the strict profile. Empty otherwise.
-  const staffDirectoryBaselineOptions = staffDirectory ? { opsStaffDirectoryEntrypointContract: staffDirectory.contract } : {};
-  const preflight = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
+  const staffDirectoryBaselineOptions = staffDirectory
+    ? { opsStaffDirectoryEntrypointContract: staffDirectory.contract, ...staffDirectoryPinSeam } : {};
+  const preflight = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode,
+    ...(reviewedPreflightProfiles === undefined ? [] : [reviewedPreflightProfiles]));
   needFn([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(ordinaryFrontendPreflightMode)
     && equal(ordinaryPlan.installationPreflight, preflight)
     && profile && Object.getPrototypeOf(profile) === Object.prototype
@@ -585,8 +593,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && sourceReader(executorSourceRoot) === executorCommit;
   const target = WORKERS[app], workerName = target.name;
   const cliPath = path.resolve(cli ?? path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`));
-  needFn(fs.existsSync(cliPath) && /^[a-f0-9]{64}$/u.test(PROFILE.wranglerRuntimeSHA256)
-    && hash(fs.readFileSync(cliPath)) === PROFILE.wranglerRuntimeSHA256,
+  needFn(fs.existsSync(cliPath) && /^[a-f0-9]{64}$/u.test(wranglerRuntimeSHA256 ?? '')
+    && hash(fs.readFileSync(cliPath)) === wranglerRuntimeSHA256,
   'Installed native Wrangler binary is missing or differs from locked production runtime');
   validateBuildEnvironment();
 
@@ -595,9 +603,9 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const liveAtStart = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions });
   const before = resumeCandidate
     ? validateInstallation(structuredClone(resumeCandidate.originalSnapshot), { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app })
+      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams })
     : validateTransitionControlCapture(liveAtStart, liveAtStart, pinnedPlan, { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, opsSuccessorReaderContract: baselineOpsReaderContract,
+      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams, opsSuccessorReaderContract: baselineOpsReaderContract,
       ...staffDirectoryBaselineOptions });
   const baselineVersionId = before[app].version.id;
   const operationsBaselineRows = expectedDeploymentVersions?.operations
@@ -605,10 +613,6 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   assertOperationsBaselineRows(operationsBaselineMode, operationsBaselineRows, baselineVersionId);
   if (resumeCandidate) assertResumeControls(before, liveAtStart, { app, candidateId: resumeCandidate.candidateId, profile,
     expectedDeploymentVersions, opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
-  // Installed StaffDirectory recognition covers only the exact held version and only for other apps.
-  // Hold an Ops release from it before any write until a reviewed profile includes the class.
-  needFn(app !== 'operations' || before.operations.version.id !== OPS_STAFF_DIRECTORY_ENTRYPOINT.heldCandidateId,
-    'Operations baseline is the held StaffDirectory version; a reviewed installed profile must include it before another Ops release');
   const bootstrap = app === 'operations' ? prepareOpsLegacyLedgerBootstrap(before) : null;
   const installedLedger = bootstrap ? null : readInstalledRetainedAssetLedger(before, { app, workerName });
   const priorBytesRows = bootstrap ? bootstrap.previousAssetRows : installedLedger.assets;
@@ -693,7 +697,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
     installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}),
-    ...staffDirectoryBaselineOptions,
+    ...staffDirectoryBaselineOptions, ...installSeams,
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
     ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }) });
   writePrivateJson(journalDirectory, 'release-plan.private.json', { schemaVersion: 2, contract: pinnedPlan.contract,
@@ -711,14 +715,14 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   if (resumeCandidate) assertResumeControls(before, preuploadRaw, { app, candidateId: resumeCandidate.candidateId, profile, expectedDeploymentVersions });
   else {
     validateTransitionControlCapture(preuploadRaw, before, pinnedPlan, { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+      ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams,
       opsSuccessorReaderContract: baselineOpsReaderContract, ...staffDirectoryBaselineOptions });
     needFn(equal(stableState(before, app), stableState(preuploadRaw, app)), 'Production controls changed before native asset/module upload');
   }
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
     installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}),
-    ...staffDirectoryBaselineOptions,
+    ...staffDirectoryBaselineOptions, ...installSeams,
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
     ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }) });
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate qualification');
@@ -742,7 +746,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   // A reviewed scalar-only transition changes binding resource shape by
   // design. The successor-reader and StaffDirectory exceptions are only for exact
   // script-handler additions; binding deltas are checked against the pinned transition plan.
-  const namedHandlers = qualifyOpsCandidateNamedHandlers({ app, before, candidate, ordinaryPlan, staffDirectory });
+  const namedHandlers = qualifyOpsCandidateNamedHandlers({ app, before, candidate, ordinaryPlan, staffDirectory,
+    pins: opsStaffDirectoryPins });
   const namedHandlerProof = namedHandlers.proof;
   const moduleProof = verifyOrdinaryFrontendRetainedCandidateModules({ before, plan: pinnedPlan, candidate, modern,
     ...namedHandlers.moduleOptions });
@@ -760,7 +765,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const inactiveRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: candidateExpected });
   const inactive = validateTransitionControlCapture(inactiveRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams,
     opsSuccessorReaderContract: baselineOpsReaderContract, ...staffDirectoryBaselineOptions });
   const expectedInactive = structuredClone(before); expectedInactive[app].latest = candidateId;
   for (const [name, value] of Object.entries(ordinaryPlan.canonicalBrowserRetirementTransition?.targetScalars ?? [])) {
@@ -787,7 +792,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const stagedRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations });
   const staged = validateTransitionControlCapture(stagedRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams,
     opsSuccessorReaderContract: baselineOpsReaderContract, ...staffDirectoryBaselineOptions });
   needFn(equal(deploymentRows(staged, app), [...stageRows].sort((a, b) => a.versionId.localeCompare(b.versionId)))
     && sameExceptSelectedDeployment(inactive, staged, app), 'Candidate namespace stage did not produce exact baseline100/candidate0 with unchanged controls');
@@ -808,7 +813,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const preactivationRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations });
   const preactivation = validateTransitionControlCapture(preactivationRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app,
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams,
     opsSuccessorReaderContract: baselineOpsReaderContract, ...staffDirectoryBaselineOptions });
   needFn(equal(deploymentRows(preactivation, app), deploymentRows(staged, app))
     && equal(stableState(staged, app), stableState(preactivation, app)), 'Staged deployment or controls changed immediately before activation');
@@ -824,7 +829,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   if (namedHandlerProof) namedHandlers.verify(afterRaw.operations.version);
   const after = validatePostActivationCapture(afterRaw, before, pinnedPlan, { profile, selectedApp: app,
     expectedDeploymentVersions: activationExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...activeContractOptions });
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams, ...activeContractOptions });
   needFn(activeVersion(after[app]) === candidateId, 'Activation is uncertain; keep candidate and journal for GET-only reconciliation');
   needFn(deploymentRows(after, app)?.length === 1 && deploymentRows(after, app)[0].versionId === candidateId
     && deploymentRows(after, app)[0].percentage === 100, 'Postactivation distribution is not exactly candidate100');
@@ -847,7 +852,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   if (namedHandlerProof) namedHandlers.verify(postNamespaceRaw.operations.version);
   const postNamespace = validatePostActivationCapture(postNamespaceRaw, before, pinnedPlan, {
     profile, selectedApp: app, expectedDeploymentVersions: activationExpectations,
-    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...activeContractOptions });
+    ordinaryFrontendPreflightMode, ordinaryFrontendApp: app, ...installSeams, ...activeContractOptions });
   needFn(activeVersion(postNamespace[app]) === candidateId
     && deploymentRows(postNamespace, app)?.length === 1
     && deploymentRows(postNamespace, app)[0].versionId === candidateId

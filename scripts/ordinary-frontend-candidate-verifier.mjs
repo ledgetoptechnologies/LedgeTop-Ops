@@ -241,7 +241,8 @@ export function verifyOrdinaryFrontendCandidate({ before, plan, candidate, moder
     opsSuccessorReaderContract: plan.opsSuccessorReaderPromotionContract ?? plan.installedOpsSuccessorReaderContract,
     ...(plan.opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract: plan.opsStaffDirectoryEntrypointContract }) });
   const app = plan.application;
-  const moduleProof = verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern });
+  const moduleProof = verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern,
+    ...(plan.opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract: plan.opsStaffDirectoryEntrypointContract }) });
   const assetProof = verifyOrdinaryFrontendAssetNamespace({ plan, candidateId: candidate.id, baselineVersionId: before[app].version.id, previousLedger,
     previousAssetBytes, namespaceEvidence, now, accountId });
   return Object.freeze({ candidateId: candidate.id, application: app, sourceCommit: plan.sourceCommit,
