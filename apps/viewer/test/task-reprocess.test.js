@@ -16,7 +16,7 @@ function fixture(t){
   return{processing,dataset,provider,task,first};
 }
 
-for(const status of ['ready_for_review','failed','cancelled']){
+for(const status of ['published','failed','cancelled']){
   test(`a ${status} run can be reprocessed with new options on the same photos`,t=>{
     const f=fixture(t);f.processing.transitionAttempt(f.first.id,status);
     const next=f.processing.createAttempt({taskId:f.task.id,providerId:f.provider.id,options:{dsm:false}});
@@ -26,7 +26,9 @@ for(const status of ['ready_for_review','failed','cancelled']){
   });
 }
 
-test('a running task refuses a second run',t=>{
-  const f=fixture(t);f.processing.transitionAttempt(f.first.id,'running');
-  assert.throws(()=>f.processing.createAttempt({taskId:f.task.id,providerId:f.provider.id,options:{}}),{code:'attempt_in_progress'});
-});
+for(const status of ['running','ready_for_review']){
+  test(`a ${status} run refuses a second run (a run awaiting review must stay publishable)`,t=>{
+    const f=fixture(t);f.processing.transitionAttempt(f.first.id,status);
+    assert.throws(()=>f.processing.createAttempt({taskId:f.task.id,providerId:f.provider.id,options:{}}),{code:'attempt_in_progress'});
+  });
+}

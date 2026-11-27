@@ -3,7 +3,8 @@ import {mountTaskOptions} from './workspace-task-options.mjs';
 
 // Reprocess: a new run of an existing task on the photos already on the server, with the node, preset and options
 // changed here. The task's published model stays published until a new run is published.
-export const REPROCESSABLE_STATUSES=new Set(['failed','cancelled','published','ready_for_review']);
+// A run awaiting review is not replaced: publish only accepts the active run, so it would be lost.
+export const REPROCESSABLE_STATUSES=new Set(['failed','cancelled','published']);
 const escape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const compatiblePreset=(preset,provider)=>Boolean(provider&&preset.enabled&&(!preset.providerType||preset.providerType===provider.type)&&(!preset.capabilityFingerprint||preset.capabilityFingerprint===provider.capabilityFingerprint));
 
@@ -32,8 +33,9 @@ export function mountTaskReprocess({container,task,attempt={},providers=[],prese
   }
   fillNodes();if(attempt.presetId)preset.innerHTML+=`<option value="${escape(attempt.presetId)}"></option>`;preset.value=attempt.presetId||'';sync();
   // The last run's options are its preset plus one-time changes: restore only the changes on top of that preset.
-  const inherited=currentPresets.find(item=>item.id===attempt.presetId)?.options||{};
-  taskOptions.setOverrides(Object.fromEntries(Object.entries(attempt.options||{}).filter(([name,value])=>!(Object.hasOwn(inherited,name)&&JSON.stringify(inherited[name])===JSON.stringify(value)))));
+  // If the last run's preset can no longer be used, all of its options become one-time changes so the run matches.
+  function restoreOptions(){const inherited=preset.value&&preset.value===attempt.presetId?currentPresets.find(item=>item.id===attempt.presetId)?.options||{}:{};taskOptions.setOverrides(Object.fromEntries(Object.entries(attempt.options||{}).filter(([name,value])=>!(Object.hasOwn(inherited,name)&&JSON.stringify(inherited[name])===JSON.stringify(value)))));}
+  restoreOptions();let edited=false;form.addEventListener('input',()=>{edited=true;},true);form.addEventListener('change',()=>{edited=true;},true);
   const editor=form.querySelector('.task-options-editor');if(editor)editor.open=true;
   node.onchange=()=>sync();preset.onchange=()=>sync();
   form.querySelector('[data-cancel]').onclick=()=>{dispose();onCancel();};
@@ -46,7 +48,7 @@ export function mountTaskReprocess({container,task,attempt={},providers=[],prese
     catch(error){if(!signal.aborted){say(error.message);busy=false;for(const element of form.querySelectorAll('select,button'))element.disabled=false;taskOptions.setDisabled(false);}}
   };
   // Fresh node options, without blocking the form.
-  void(async()=>{try{if(node.value)await api(`/api/v1/processing/providers/${encodeURIComponent(node.value)}/capabilities/refresh`,{method:'POST',body:{},signal});const [nodes,result]=await Promise.all([api('/api/v1/processing/providers?limit=100',{signal}),api('/api/v1/processing/presets',{signal})]);if(signal.aborted||busy)return;currentProviders=nodes.providers||currentProviders;currentPresets=result.presets||currentPresets;fillNodes();sync();}catch{/* Cached nodes stay usable; the server checks again on submit. */}})();
+  void(async()=>{try{if(node.value)await api(`/api/v1/processing/providers/${encodeURIComponent(node.value)}/capabilities/refresh`,{method:'POST',body:{},signal});const [nodes,result]=await Promise.all([api('/api/v1/processing/providers?limit=100',{signal}),api('/api/v1/processing/presets',{signal})]);if(signal.aborted||busy)return;const kept=preset.value;currentProviders=nodes.providers||currentProviders;currentPresets=result.presets||currentPresets;fillNodes();sync();if(kept&&kept===attempt.presetId&&preset.value!==kept&&!edited){restoreOptions();say('The earlier preset no longer matches this node.');}}catch{/* Cached nodes stay usable; the server checks again on submit. */}})();
   function dispose(){if(signal.aborted)return;controller.abort();taskOptions.dispose();}
-  return{dispose};
+  return{dispose,get busy(){return busy;}};
 }

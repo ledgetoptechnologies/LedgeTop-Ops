@@ -1502,10 +1502,10 @@ test('Duplicate opens a pre-filled task dialog and creates the copy in the same 
   await waitFor(client,`new URL(location.href).searchParams.get('task')==='task-submitted-1'`,'the copy did not open');
 }));
 
-test('Reprocess reruns a finished task on its photos with changed options', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-reprocess',width:1440,height:900,
+test('Reprocess reruns a published task on its photos with changed options', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-reprocess',width:1440,height:900,
   configure:runtime=>{
     const node=structuredClone(fixtures.providers[0]);node.runtimeHealthAt=new Date().toISOString();node.capabilities.options.push(...['pc-ept','gltf','3d-tiles'].map(name=>({name,type:'bool',value:true})));runtime.providers=[node];
-    runtime.taskOverrides={'task-quarry':{latestAttempt:{id:'attempt-quarry',attemptNumber:1,providerId:'provider-nodeodm',presetId:'preset-fast',status:'ready_for_review',options:{dsm:true,'feature-quality':'medium','pc-ept':true,gltf:true,'3d-tiles':true},createdAt:'2026-08-18T12:00:00.000Z',updatedAt:'2026-08-18T12:05:00.000Z'}}};}},
+    runtime.taskOverrides={'task-quarry':{latestAttempt:{id:'attempt-quarry',attemptNumber:1,providerId:'provider-nodeodm',presetId:'preset-fast',status:'published',options:{dsm:true,'feature-quality':'medium','pc-ept':true,gltf:true,'3d-tiles':true},createdAt:'2026-08-18T12:00:00.000Z',updatedAt:'2026-08-18T12:05:00.000Z'}}};}},
   async({client,runtime,origin})=>{
   await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-quarry`});
   await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))`,'task unavailable');
