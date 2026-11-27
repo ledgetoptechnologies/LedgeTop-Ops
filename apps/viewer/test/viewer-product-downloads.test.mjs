@@ -52,7 +52,7 @@ test('separate model report button downloads only the registered original report
   assert.deepEqual(calls,[['/session-products/token/model',undefined],['/session-products/token/model/report/download-grants','POST']]);
   assert.equal(fixture.clicked[0].href,'https://viewer.test'+ticket);
   assert.equal(fixture.clicked[0].download,'report.pdf');
-  assert.match(fixture.status.textContent,/Original report download started/);
+  assert.equal(fixture.status.textContent,'');
   fixture.deny();assert.equal(fixture.container.hidden,true);
   await fixture.button.onclick();assert.equal(calls.length,2);
   fixture.mounted.destroy();
@@ -62,7 +62,7 @@ test('missing original report explains availability without creating a substitut
   let calls=0;
   const fixture=reportFixture(async()=>{calls++;return {ok:true,json:async()=>({products:[]})};});
   await fixture.button.onclick();
-  assert.match(fixture.status.textContent,/No original processing and quality report/);
+  assert.match(fixture.status.textContent,/No model report for this version/);
   assert.equal(calls,1);assert.equal(fixture.clicked.length,0);assert.equal(fixture.button.disabled,false);
   fixture.mounted.destroy();
 });
