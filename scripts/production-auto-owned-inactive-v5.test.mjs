@@ -90,6 +90,12 @@ test('a held run\'s own inactive upload yields custody; the hold code is registe
   assert.equal(custody.ownedUploadTagBaseline, 'auto-4a1c05e6f1ff'); assert.equal(custody.oldSourceCommit, OLD);
   assert.equal(isOwnedInactiveV5Custody(JSON.parse(JSON.stringify(custody))), false, 'a copy is not custody');
   assert.ok(isProductionAutoHoldCode('owned_inactive_v5_custody_refused'));
+  // A later run that held before writing anything does not block supersession.
+  assert.ok(verifyJournalOwnedInactiveCustody(input(v => { const later = heldOperation({ source: '8'.repeat(40), stageZero: false });
+    later.createdAt = '2026-11-28T00:00:00.000Z'; later.updatedAt = '2026-11-28T00:01:00.000Z';
+    later.receipts = [later.receipts[0], { ...later.receipts[3], candidateVersionId: undefined, writesAttempted: false,
+      failureCode: 'release_initial_failed', phase: 'initial' }].map(row => JSON.parse(JSON.stringify(row)));
+    later.intents = []; later.responses = []; v.document.operations.push(later); })));
   // A run that held at candidate readback (no stage-zero intent at all) is the same case.
   assert.ok(verifyJournalOwnedInactiveCustody(input(v => { const op = held(v); op.intents.pop();
     op.receipts = [op.receipts[0], op.receipts[1], { ...op.receipts[3], failureCode: 'release_candidate_readback_failed', phase: 'candidate-readback' }]; })));
@@ -114,6 +120,17 @@ test('custody refuses anything the journal and the held run do not prove', () =>
     'an upload over a different parent': v => { held(v).intents[5].parentVersionId = OTHER; },
     'an upload whose module hash differs from the run': v => { held(v).intents[5].modules['index.js'] = '0'.repeat(64); },
     'an unacknowledged earlier write': v => { held(v).responses[3].providerAcknowledged = false; },
+    'two intents after the upload': v => { const op = held(v); op.intents.push({ ...op.intents.at(-1), requestId: uuid(98),
+      sequence: op.intents.length + 1 }); },
+    'a stage-zero intent over another parent': v => { held(v).intents.at(-1).parentVersionId = OTHER; },
+    'an unknown write before the upload': v => { held(v).intents[3].phase = 'temporary-verifier-rename'; },
+    'a response that belongs to no intent': v => { const op = held(v);
+      op.responses.push({ ...op.responses[0], requestId: uuid(97), ciphertextFile: `responses/${uuid(97)}.sealed.json` }); },
+    'two operations updated at the same time': v => { v.document.operations[0].updatedAt = held(v).updatedAt; },
+    'a later operation that recorded a write': v => { const later = heldOperation({ source: '8'.repeat(40), stageZero: false });
+      later.createdAt = '2026-11-28T00:00:00.000Z'; later.updatedAt = '2026-11-28T00:05:00.000Z';
+      later.receipts = later.receipts.slice(0, 2); later.intents = later.intents.slice(0, 1); later.responses = later.responses.slice(0, 1);
+      v.document.operations.push(later); },
     'a held receipt for another candidate': v => { held(v).receipts[3].candidateVersionId = OTHER; },
     'a held receipt that never attempted writes': v => { held(v).receipts[3].writesAttempted = false; },
     'an unknown failure code': v => { held(v).receipts[3].failureCode = 'release_activate_failed'; },
@@ -187,6 +204,9 @@ test('the live state refuses anything that is not exactly the held run\'s untouc
     'a split deployment': s => { s.deployment.versions = [{ version_id: PARENT, percentage: 100 }, { version_id: CANDIDATE, percentage: 0 }]; },
     'another active version': s => { s.version.id = OTHER; s.modern.id = OTHER; s.deployment.versions[0].version_id = OTHER; },
     'another latest version': s => { s.latest = OTHER; },
+    'a mismatched latest module read': s => { s.latestModern.id = OTHER; },
+    'a missing deployment timestamp': s => { delete s.deployment.created_on; },
+    'an unparseable deployment timestamp': s => { s.deployment.created_on = 'yesterday'; },
     'a changed binding on the upload': s => { s.latestVersion.resources.bindings.push({ name: 'EXTRA', type: 'kv_namespace', namespace_id: 'y' }); },
     'a changed compatibility date': s => { s.latestVersion.resources.script_runtime.compatibility_date = '2026-02-01'; },
     'a native (wrangler) upload': s => { s.latestVersion.resources.script.last_deployed_from = 'wrangler'; },

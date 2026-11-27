@@ -85,9 +85,15 @@ function selectHeldOperation(document, workerName, latestVersionId) {
     && list(op.receipts, 64).some(row => plain(row).candidateVersionId === latestVersionId));
   need(named.length === 1);
   const op = named[0];
-  // The held run must be this Worker's newest journal operation: nothing recorded after it.
-  const newest = operations.reduce((best, row) => Date.parse(row.updatedAt) > Date.parse(best.updatedAt) ? row : best);
-  need(newest === op && operations.filter(row => row.updatedAt === op.updatedAt).length === 1);
+  // The held run must be this Worker's newest journal operation that recorded any write intent. Later operations
+  // are allowed only if they never attempted a write (no intents; every receipt writesAttempted !== true), e.g. a
+  // later run that held before preparing; anything that may have written after it refuses.
+  need(iso(op.updatedAt) && operations.filter(row => row.updatedAt === op.updatedAt).length === 1);
+  for (const row of operations) {
+    if (row === op || !(Date.parse(row.updatedAt) > Date.parse(op.updatedAt) || Date.parse(row.createdAt) > Date.parse(op.createdAt))) continue;
+    need(iso(row.updatedAt) && list(row.intents, 512).length === 0 && list(row.responses, 512).length === 0
+      && list(row.receipts, 64).every(receipt => plain(receipt).writesAttempted !== true));
+  }
   need(op.workerName === workerName && op.releaseKind === 'retained-assets' && op.state === 'held'
     && COMMIT.test(op.sourceCommit ?? '') && SHA.test(op.releaseId ?? '')
     && op.releaseId === sha256(`${workerName}\n${op.sourceCommit}`) && iso(op.createdAt) && iso(op.updatedAt));
