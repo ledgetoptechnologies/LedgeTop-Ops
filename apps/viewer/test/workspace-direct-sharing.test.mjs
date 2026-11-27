@@ -28,7 +28,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   const state={token:'signed-in',adminSession:{id:'session',subject:'ops:me',expiresAt:'2099-01-01T00:00:00Z'},projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
     shares:{},sharePreflight:{},projectShares:{},clientAccess:{projects:[],associations:[],grants:[]},shareContext:{id:'context'},lastShareUrl:null};
   const calls=[],notices=[],rendered=[],decisions=[],copyButtons=[];
-  let nativeRespond=async()=>({targets:[],grants:[]}),directRespond=async()=>{throw Object.assign(new Error('Not found'),{status:404})};
+  let groupsRespond=async()=>({groups:[]}),nativeRespond=async()=>({targets:[],grants:[]}),directRespond=async()=>{throw Object.assign(new Error('Not found'),{status:404})};
   let receipt=async()=>{throw Object.assign(new Error('No saved receipt'),{status:404,code:'share_receipt_missing'})};
   let sequence=0,respond=async(path,options)=>options.method==='POST'
     ?{share:{id:'share',permissions:{view:true,download:false}},viewUrl:'https://viewer.test/view/capability'}
@@ -44,7 +44,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
     badge:value=>`<span>${esc(value)}</span>`,button:(action,id,label)=>`<button data-action="${action}" data-id="${id}">${label}</button>`,
     openModal:(title,html)=>{rendered.push({title,html});modal.open=true},injectProjectShareCard:()=>{},
     values:form=>({label:form.elements.label?.value||'',password:form.elements.password?.value||'',expiresAt:form.elements.expiresAt.value}),
-    api:async(path,options={})=>{if(options.beforeDispatch)(await options.beforeDispatch())();calls.push({path,options:JSON.parse(JSON.stringify(options))});if(options.headers?.['X-Viewer-Share-Receipt-Only'])return receipt(path,options);return path.startsWith('/api/v1/workspace/direct-client-grants')?directRespond(path,options):path.endsWith('/native-client-grants')?nativeRespond(path,options):respond(path,options)},
+    api:async(path,options={})=>{if(options.beforeDispatch)(await options.beforeDispatch())();calls.push({path,options:JSON.parse(JSON.stringify(options))});if(options.headers?.['X-Viewer-Share-Receipt-Only'])return receipt(path,options);return path==='/api/v1/workspace/direct-client-groups'?groupsRespond(path,options):path.startsWith('/api/v1/workspace/direct-client-grants')?directRespond(path,options):path.endsWith('/native-client-grants')?nativeRespond(path,options):respond(path,options)},
     outputFences:new Map(),projectDataGeneration:0,refreshProjectOutputs:async projectId=>{calls.refreshes=[...(calls.refreshes||[]),projectId]},
     mutate:async(...args)=>calls.push({mutation:args}),toast:(...args)=>notices.push(args),navigator:{clipboard:{writeText:async()=>{throw new Error('clipboard denied')}}},
     dialogs:{confirm:async()=>{decisions.push('confirm');return true},form:async()=>null},
@@ -56,7 +56,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   const receipts=()=>calls.filter(call=>call.options?.headers?.['X-Viewer-Share-Receipt-Only']);
   const posts=()=>calls.filter(call=>call.options?.method==='POST'&&!call.options.headers?.['X-Viewer-Share-Receipt-Only']);
   return {context,document,state,output,posts,receipts,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
-    respondReceipt(fn){receipt=fn},respond(fn){respond=fn},respondPost(fn){const base=respond;respond=(path,options)=>options.method==='POST'?fn(path,options):base(path,options)},respondNative(fn){nativeRespond=fn},respondDirect(fn){directRespond=fn},html:()=>rendered.at(-1)?.html||''};
+    respondReceipt(fn){receipt=fn},respond(fn){respond=fn},respondPost(fn){const base=respond;respond=(path,options)=>options.method==='POST'?fn(path,options):base(path,options)},respondNative(fn){nativeRespond=fn},respondDirect(fn){directRespond=fn},respondGroups(fn){groupsRespond=fn},html:()=>rendered.at(-1)?.html||''};
 }
 
 test('ready share preflight and cancel execute only reads and never reopen a closed modal',async()=>{
@@ -1248,4 +1248,24 @@ test('individual views are a spaced, indented list like the other checks',()=>{
   assert.match(css,/\.share-dialog-form fieldset\{display:grid;gap:10px\}/);assert.match(css,/\.share-view-list\{display:grid;gap:10px;margin-top:10px;padding-left:24px\}/);
   const f=fixture();f.state.sharePreflight.output={eligibleAssetKinds:['glb','ept']};f.context.shareModal('project','output');
   assert.match(f.html(),/<summary>Choose individual views<\/summary><div class="share-view-list"><label class="check">/);
+});
+
+test('client grouping is read once per Share open and joins only linked workspaces in the access list',async()=>{
+  const f=fixture();Object.assign(f.output,{status:'published',activePublished:true});
+  const A='project-alpha:division-a',B='project-alpha:division-b';
+  const grant=(grantId,sourceId,workspaceId,taskId)=>({grantId,sourceId,workspaceId,viewerProjectId:'project',scopeType:taskId?'task':'project',taskId,
+    includeFuturePublished:!taskId,revokedAt:null,clientDisplayName:'Acme Survey',expiresAt:null,permissions:{measure:true,cameras:false,download:false}});
+  f.respondGroups(async()=>({groups:[[[A,'ws-a'],[B,'ws-b']]]}));
+  f.respondDirect(async path=>path.includes('include=grants')
+    ?{clients:[],grants:[grant('g-1',A,'ws-a',null),grant('g-2',B,'ws-b','task')],clientsNextCursor:null}
+    :{clients:[{sourceId:A,workspaceId:'ws-a',displayName:'Acme Survey',businessName:'Ledge Top Drone Services Project Alpha'},
+      {sourceId:B,workspaceId:'ws-b',displayName:'Acme Survey',businessName:'Ledge Top Technologies Project Alpha'}],grants:[],clientsNextCursor:null});
+  await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  const groupCalls=()=>f.calls.filter(call=>call.path==='/api/v1/workspace/direct-client-groups').length;
+  assert.equal(groupCalls(),1);
+  const html=f.clientPanel.innerHTML;
+  assert.match(html,/data-id="g-1"/);assert.match(html,/data-id="g-2"/);
+  assert.doesNotMatch(html,/client-picker-meta/,'one client, not two divisions');
+  f.context.rerenderClientSharePanel('project',null);
+  assert.equal(groupCalls(),1,'never read again while the dialog is open');
 });
