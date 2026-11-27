@@ -280,7 +280,7 @@ export function createPropertyLinesController(deps) {
     clearLabels();
   }
 
-  // Owner names, with acreage under them, in the middle of each outline, in
+  // Owner names (or "Owner not listed"), with acreage under them, in the middle of each outline, in
   // their own pane above the lines. Laid out again after every move or zoom (hidden while zooming);
   // only labels that fit their outline and clear each other are shown.
   function renderLabels() {
@@ -325,7 +325,7 @@ export function createPropertyLinesController(deps) {
     });
     labelsEl.replaceChildren(...placed.map(label => {
       const node = document.createElement('div');
-      node.className = 'property-line-label';
+      node.className = label.unknownOwner ? 'property-line-label property-line-label-unknown' : 'property-line-label';
       node.textContent = label.lines.join('\n');   // text only, never HTML
       const point = map.containerPointToLayerPoint([label.x, label.y]);
       Object.assign(node.style, { width: `${label.width + 2}px`, fontSize: `${label.fontPx}px`, lineHeight: `${label.lineHeight}px`,
