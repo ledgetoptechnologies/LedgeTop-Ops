@@ -1478,8 +1478,8 @@ function syncMeasurementActionVisibility() {
   const setHidden = (id, hidden) => { const element = document.getElementById(id); if (element) element.hidden = hidden; };
   setHidden('measurement-report-actions', !measure);
   setHidden('btn-capture-float', !measure);
-  // Same rule as the print policy's `allowed`; the export re-checks the full policy.
-  setHidden('ortho-print-actions', !measure);
+  // Download: the products (download permission) and the orthophoto image (the
+  // print policy's `allowed`; the export re-checks the full policy).
   if (typeof syncOrthoExportAction === 'function') syncOrthoExportAction();
   // The original processing report has its own permission (older links and sessions: it came with downloads).
   setHidden('panel-model-report', !measure && !report);
@@ -1488,8 +1488,11 @@ function syncMeasurementActionVisibility() {
 // Export image needs an orthophoto and an area this viewer may export: the
 // whole orthophoto (download permission) or a map area (a map view open).
 function syncOrthoExportAction() {
-  const button = document.getElementById('btn-export-image');
-  if (button) button.hidden = !ORTHO_URL || (SHARE_PERMISSIONS.download !== true && !isMapMode(state.activeMode));
+  const actions = document.getElementById('download-actions');
+  if (!actions) return;
+  const policy = orthoPrintPermissions();
+  const image = Boolean(ORTHO_URL) && policy.allowed && (policy.whole || isMapMode(state.activeMode));
+  actions.hidden = !image && viewerProductDownloads?.available?.() !== true;
 }
 
 function sessionAccessLabel(prefix = 'LOD') {
@@ -2696,7 +2699,8 @@ function installMeasurementWorkspace() {
     onAccessLost:measurementAccessLost,
   });
   viewerProductDownloads?.destroy();
-  viewerProductDownloads=mountViewerProductDownloads({host:document.getElementById('downloads-products'),reportHost:document.getElementById('model-report-download'),getAssetRoot:()=>TILES_URL||EPT_URL||ORTHO_URL||DSM_URL||DTM_URL||GLB_URL,permitted:()=>SHARE_PERMISSIONS.download===true,reportPermitted:()=>reportPermitted(SHARE_PERMISSIONS)});
+  viewerProductDownloads=mountViewerProductDownloads({reportHost:document.getElementById('model-report-download'),getAssetRoot:()=>TILES_URL||EPT_URL||ORTHO_URL||DSM_URL||DTM_URL||GLB_URL,permitted:()=>SHARE_PERMISSIONS.download===true,reportPermitted:()=>reportPermitted(SHARE_PERMISSIONS)});
+  syncOrthoExportAction();
 }
 
 function setTool(tool) {
@@ -4288,15 +4292,16 @@ function installContours() {
   });
   orthoPrintDialog ||= mountOrthoExportDialog({
     documentRef: document,
-    openButton: document.getElementById('btn-export-image'),
+    openButton: document.getElementById('btn-download'),
     defaults: () => {
-      const policy = orthoPrintPermissions(), mapOpen = Boolean(map && isMapMode(state.activeMode));
+      // The image needs an orthophoto and the print policy; products follow download permission.
+      const policy = orthoPrintPermissions(), image = Boolean(ORTHO_URL) && policy.allowed, mapOpen = image && Boolean(map && isMapMode(state.activeMode));
       orthoParcelPicker.reset(orthoPrintIdentity());
       orthoParcelPicker.prune();
       const parcels = mapOpen && (propertyLines?.selectableParcels?.().length || 0) > 0;
       if (parcels) orthoParcelPicker.show();
       return {
-        areas: { full: policy.whole, view: mapOpen, parcels },
+        areas: { full: image && policy.whole, view: mapOpen, parcels },
         parcelCount: parcels ? orthoParcelPicker.count : 0,
         contoursAvailable: Boolean(DTM_URL), contoursOn: contourLines?.state.on === true,
         propertyAvailable: propertyLinesForPrint().lines.length > 0,
@@ -4306,6 +4311,12 @@ function installContours() {
     preview: (options, signal) => previewOrthoExport(options, signal),
     run: (options, signal, extra) => exportOrthoPrintFromViewer(options, signal, extra),
     pickParcels: () => { setTool('none'); viewerMarks?.cancelPlacement(); return orthoParcelPicker.pick(); },
+    // The model's products, through one-product tickets (remounted per model version).
+    products: {
+      available: () => viewerProductDownloads?.available?.() === true,
+      list: (signal) => viewerProductDownloads.list(signal),
+      download: (product, signal) => viewerProductDownloads.download(product, signal),
+    },
   });
   if (!orthoPrintDialog.closeHooked) {
     orthoPrintDialog.closeHooked = true;
@@ -4453,7 +4464,7 @@ async function exportOrthoPrintFromViewer(options, dialogSignal, { writable = nu
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
   };
   orthoPrintExports.add(job);
-  const sink = writable ? createFileSink(writable) : createBlobSink({ type: format === 'tif' ? 'image/tiff' : 'image/png' });
+  const sink = writable ? createFileSink(writable) : createBlobSink({ type: format === 'tif' ? 'image/tiff' : format === 'jpg' ? 'image/jpeg' : 'image/png' });
   try {
     const ortho = await getDataset(ORTHO_URL, false, { signal });
     current();

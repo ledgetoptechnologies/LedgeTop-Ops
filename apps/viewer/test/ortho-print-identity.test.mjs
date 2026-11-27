@@ -269,3 +269,13 @@ test('a committed file is final: a late check after the file sink closed does no
   assert.equal(result.committed, true);
   assert.equal(result.blob, null);
 });
+
+test('JPEG exports go through the same fenced pipeline and come out as JPEG', async () => {
+  const p = page({ permissions: WITH_DOWNLOAD });
+  const saved = await p.exportNow({ area: 'full', format: 'jpg', contours: false, filename: 'orthophoto.jpg' });
+  assert.equal(saved.blob.type, 'image/jpeg');
+  const bytes = new Uint8Array(await saved.blob.arrayBuffer());
+  assert.deepEqual([...bytes.subarray(0, 2), ...bytes.subarray(-2)], [0xff, 0xd8, 0xff, 0xd9]);
+  const sof = bytes.findIndex((b, i) => b === 0xff && bytes[i + 1] === 0xc0), view = new DataView(bytes.buffer);
+  assert.deepEqual([view.getUint16(sof + 7), view.getUint16(sof + 5)], [200, 100], 'full native size');
+});
