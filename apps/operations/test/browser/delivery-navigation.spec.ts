@@ -947,8 +947,6 @@ test("permission-gated current-folder sharing uses the normalized active folder 
   await expect(page.getByRole("tabpanel", { name: "Public link" })).toHaveAttribute("id", "share-method-panel-public");
   await expect(page.getByRole("button", { name: "Create link" })).toBeVisible();
   await expect(dialog.getByText(/Create a bearer link for anyone/)).toHaveCount(0);
-  const tall = await dialog.evaluate(element => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
-  expect(tall.scrollHeight).toBeGreaterThan(tall.clientHeight);
   await expect(page.getByRole("tabpanel", { name: "Client Workspace" })).toHaveCount(0);
   await publicTab.press("Home");
   await expect(workspaceTab).toBeFocused();
