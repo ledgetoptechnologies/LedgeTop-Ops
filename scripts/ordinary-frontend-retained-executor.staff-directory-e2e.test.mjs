@@ -224,11 +224,13 @@ test('the production StaffDirectory pins never admit the synthetic installation'
 
 test('offline seams default to the reviewed production values', async () => {
   const { REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
-    ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendPreflightDescriptor } = await import('./production-deploy.mjs');
+    ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendPreflightDescriptor, ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE,
+    CANONICAL_INSTALLED_PROFILE_V5_SHA256 } = await import('./production-deploy.mjs');
   assert.ok(Object.isFrozen(REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES));
   assert.deepEqual({ ...REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES }, {
     [ORDINARY_FRONTEND_PREFLIGHT_MODE]: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
-    [ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE]: CANONICAL_INSTALLED_PROFILE_V4_SHA256 });
+    [ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE]: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+    [ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE]: CANONICAL_INSTALLED_PROFILE_V5_SHA256 });
   const { profile, snapshot, reviewedPreflightProfiles } = syntheticCanonicalV4Installation();
   assert.throws(() => ordinaryFrontendPreflightDescriptor(profile, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE),
     /Unreviewed ordinary frontend accepted profile/u, 'the synthetic profile is never a reviewed production profile');

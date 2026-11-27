@@ -12,6 +12,13 @@ const DECLARATION = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/client-p
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 export const ORDINARY_FRONTEND_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-v3';
 export const ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-canonical-v4';
+/** Canonical installed profile v5: v4 plus exactly the Ops StaffDirectory named-handler class that
+ * main 331791ed installed. See production-deploy-profile-v5-provenance.md. */
+export const ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-canonical-v5';
+/** Every reviewed ordinary preflight mode. The StaffDirectory entrypoint contract and the v4 asset,
+ * schema-preservation and Sync installed-control lanes stay limited to v4 explicitly. */
+export const ORDINARY_FRONTEND_PREFLIGHT_MODES = Object.freeze(['ordinary-frontend-preserve-installed-v3',
+  'ordinary-frontend-preserve-installed-canonical-v4', 'ordinary-frontend-preserve-installed-canonical-v5']);
 export const OPS_SUCCESSOR_READER_INSTALLED_CONTRACT = 'ops-successor-reader-a0-f4cdefd6';
 export const OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT = 'ops-successor-reader-operations-promotion-fc9bc572-v1';
 const OPS_SUCCESSOR_READER_VERSION_ID = 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68';
@@ -40,6 +47,13 @@ export const OPS_STAFF_DIRECTORY_ENTRYPOINT = Object.freeze({
 });
 export const ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 = '6073b977db48843d9eaecba74cb3863815b92dff87afd4c6f144b5e1dbad48fe';
 export const CANONICAL_INSTALLED_PROFILE_V4_SHA256 = '2ef0f21be881bbe1567e4ea941255ea1f6e1be9a339c1f854174c5ac334a10fd';
+export const CANONICAL_INSTALLED_PROFILE_V5_SHA256 = 'd24694b5f028b065e6416be179166f92b65874d3e4ac8f79677d904e9a6362b7';
+/** A fresh parsed copy of the tracked canonical installed profile v5; its digest is checked. */
+export function readCanonicalInstalledProfileV5() {
+  const profile = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/production-deploy-profile-v5.json'), 'utf8'));
+  need(hash(canonical(profile)) === CANONICAL_INSTALLED_PROFILE_V5_SHA256, 'Tracked canonical installed profile v5 changed');
+  return profile;
+}
 const ORDINARY_FRONTEND_PRESERVED_FLAGS = Object.freeze({
   operations: 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED',
   client: 'CLIENT_VIEWER_ENABLED',
@@ -142,10 +156,11 @@ export function varsOf(state) {
 export const REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES = Object.freeze({
   [ORDINARY_FRONTEND_PREFLIGHT_MODE]: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
   [ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE]: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+  [ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE]: CANONICAL_INSTALLED_PROFILE_V5_SHA256,
 });
 export function ordinaryFrontendPreflightDescriptor(profile, mode, reviewedPreflightProfiles = REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES) {
   if (mode === undefined) return { mode: 'strict-default', profileSHA256: null };
-  const expectedProfileSHA256 = [ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(mode)
+  const expectedProfileSHA256 = ORDINARY_FRONTEND_PREFLIGHT_MODES.includes(mode)
     && reviewedPreflightProfiles && Object.hasOwn(reviewedPreflightProfiles, mode)
     && /^[a-f0-9]{64}$/.test(reviewedPreflightProfiles[mode] ?? '') ? reviewedPreflightProfiles[mode] : null;
   need(expectedProfileSHA256 !== null, 'Unreviewed ordinary frontend preflight mode');
@@ -174,7 +189,7 @@ export function ordinaryFrontendPreflightDescriptor(profile, mode, reviewedPrefl
  */
 export function validateOrdinaryFrontendPreflightPreservation(clientVars, operationsVars, profile, mode,
   reviewedPreflightProfiles = REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES) {
-  need([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(mode),
+  need(ORDINARY_FRONTEND_PREFLIGHT_MODES.includes(mode),
     'Unreviewed ordinary frontend preflight mode');
   ordinaryFrontendPreflightDescriptor(profile, mode, reviewedPreflightProfiles);
   const trueHash = hash('true');
