@@ -101,7 +101,9 @@ test('an Operations release without the include field still lists clients and sh
   const opened = await fixture(t, older);
   const grants = await opened.request(PATH + '?include=grants&limit=25&viewerProjectId=viewer-project');
   assert.equal(grants.status, 200); assert.deepEqual(await grants.json(), { clients: [], grants: [grant], clientsNextCursor: null, grantsNextCursor: 'grant-one' });
-  assert.deepEqual(opened.envelopes[1].listQuery, { limit: 1, viewerProjectId: 'viewer-project' });
+  // Asked first with the Email client offer, then without it, then the way this older release understands.
+  assert.equal(opened.envelopes.length, 3); assert.equal(opened.envelopes[0].capabilities, true); assert.equal('capabilities' in opened.envelopes[1], false);
+  assert.deepEqual(opened.envelopes[2].listQuery, { limit: 1, viewerProjectId: 'viewer-project' });
 });
 
 test('the older-Operations retry never widens, repeats or hides another refusal', async t => {
