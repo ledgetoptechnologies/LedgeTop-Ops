@@ -318,12 +318,13 @@ test('labels: with many neighbours the same names are placed with and without ac
   assert.ok(shown > 10, `${shown} acreage lines`);
 });
 
-test('labels: a parcel with no usable owner name shows its acreage alone, only when not merging', () => {
+test('labels: a parcel with no usable owner name says so and keeps its acreage, merged or not', () => {
   const parcels = [forty(1, 'NOT AVAILABLE', 0, 0), forty(2, null, 1, 0), forty(3, 'EXAMPLE OWNER', 0, 1)];
   const lines = (merge, zoom = 16) => place(ownerLabelCandidates(dissolveParcelsByOwner(parcels, { merge }), { acreage: { merged: merge, covered: all } }), zoom).map(l => l.lines);
-  assert.deepEqual(lines(false), [['EXAMPLE OWNER', '~40.0 ac'], ['~40.0 ac'], ['~40.0 ac']]);
-  assert.deepEqual(lines(true), [['EXAMPLE OWNER', '~40.0 ac']]);
-  assert.ok(!lines(false, 14.5).flat().some(l => l.startsWith('~')), 'nothing without a name below zoom 15');
+  const expected = [['EXAMPLE OWNER', '~40.0 ac'], ['Owner not listed', '~40.0 ac'], ['Owner not listed', '~40.0 ac']];
+  assert.deepEqual(lines(false), expected);
+  assert.deepEqual(lines(true), expected, 'merging never hides a parcel with no owner');
+  assert.ok(!lines(true, 14.5).flat().some(l => l.startsWith('~')), 'no acreage below zoom 15');
 });
 
 // ── The map layer ────────────────────────────────────────────────────────
