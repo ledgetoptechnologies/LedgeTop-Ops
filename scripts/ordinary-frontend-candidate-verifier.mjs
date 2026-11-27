@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import { canonical, hash, need, validateInstallation, verifyCandidate,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+  OPS_STAFF_DIRECTORY_ENTRYPOINT, OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT,
   ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { collectFrontendAssets, mergeAssetLedger, preserveRootHtmlArchive, validateAssetLedger } from './production-auto-assets.mjs';
@@ -128,7 +129,7 @@ export function ordinaryFrontendExecutionQualification(namespaceQualification) {
 
 /** Verify candidate runtime modules and native resource/config invariants. */
 export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern, allowProviderOmittedMap = false,
-  opsSuccessorReaderContract } = {}) {
+  opsSuccessorReaderContract, opsStaffDirectoryContract, opsStaffDirectoryPins = OPS_STAFF_DIRECTORY_ENTRYPOINT } = {}) {
   need(plan?.schemaVersion === 1 && ['operations','client'].includes(plan.application)
     && plan.offlineOnly === true && plan.deploymentEnabled === false,
   'Pinned offline ordinary frontend plan is required');
@@ -164,6 +165,14 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
       && plan.release.sourceMap.sha256 === '375962dbe22ed0038009d0790c1c12a33b0668010f99916b8addade0a489d08b',
     'Ops successor reader candidate plan differs from exact reviewed source bundle and source map');
   }
+  if (opsStaffDirectoryContract !== undefined) {
+    need(opsStaffDirectoryContract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT && opsSuccessorReaderContract === undefined
+      && app === 'operations' && !plan.canonicalBrowserRetirementTransition
+      && plan.sourceCommit === opsStaffDirectoryPins?.sourceCommit
+      && plan.release.main.sha256 === opsStaffDirectoryPins.mainSHA256
+      && plan.release.sourceMap.sha256 === opsStaffDirectoryPins.sourceMapSHA256,
+    'Ops StaffDirectory candidate plan differs from exact reviewed source bundle and source map');
+  }
   let candidateBaseline = before;
   if (plan.canonicalBrowserRetirementTransition) {
     const transition = compileCanonicalBrowserRetirementTransition(before, { app, profile: plan.beforeProfile,
@@ -174,7 +183,8 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
     candidateBaseline = structuredClone(before);
     candidateBaseline[app].version.resources.bindings = structuredClone(plan.expectedBindings);
   }
-  const runtimeProof = verifyCandidate(candidateBaseline, app, candidate, modern, pinnedMain, sourceMap, { opsSuccessorReaderContract });
+  const runtimeProof = verifyCandidate(candidateBaseline, app, candidate, modern, pinnedMain, sourceMap,
+    opsStaffDirectoryContract === undefined ? { opsSuccessorReaderContract } : { opsStaffDirectoryContract, opsStaffDirectoryPins });
   need(equal(candidate.resources.bindings, plan.expectedBindings)
     && equal(modern.assets ?? null, plan.expectedAssetsConfiguration),
   'Candidate bindings or asset routing config changed');
