@@ -33,6 +33,7 @@ function harness() {
     availableViewerModes: () => ['model', 'cloud', 'ortho', 'dsm', 'dtm'],
     ORTHO_URL: 'ortho', DSM_URL: 'dsm', DTM_URL: 'dtm', SHOTS_URL: '',
     SHARE_PERMISSIONS: { cameras: true, measure: true },
+    orthoPrintPermissions: () => ({ allowed: true, whole: false }), viewerProductDownloads: null,
     VIEW_MODE: 'session', sessionAccessState: 'active', activeViewerSession: { expiresAt: new Date(Date.now() + 600_000).toISOString() },
     rememberMapView() {}, viewerDiagnostic() {}, hideLoading() {}, updateStatus() {}, onResize() {},
     syncCameraLayer() {}, syncMapVolumeAvailability() {}, propertyLines: { refresh() { ctx.calls.push('property-lines-refresh'); } }, contourLines: null,
