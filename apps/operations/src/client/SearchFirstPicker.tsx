@@ -24,6 +24,8 @@ export function SearchFirstPicker({ id, label, options, value, onChange, disable
     if (typing.current) { typing.current = false; if (!selected) return; }
     setQuery(selected?.label ?? "");
   }, [selected?.value, selected?.label]);
+  // The flag covers only the render that follows the user's own clear.
+  useEffect(() => { typing.current = false; });
   const matches = selected && query === selected.label ? [] : filterPickerOptions(options, query);
   const listId = `${id}-options`;
   const move = (event: KeyboardEvent<HTMLButtonElement>) => {
