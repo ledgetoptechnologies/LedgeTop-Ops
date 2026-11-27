@@ -75,3 +75,45 @@ test('model change during report lookup cannot start a download for the prior mo
   await pending;assert.equal(fixture.clicked.length,0);assert.equal(fixture.status.textContent,'');
   assert.equal(fixture.button.disabled,false);fixture.mounted.destroy();
 });
+
+// The Download dialog's list and download, through the same fixture.
+const productsResponse = { products: [
+  { kind: 'ortho', label: 'Orthophoto', format: 'TIF', byteSize: 3 * 1024 ** 3, grantUrl: '/session-products/token/model/ortho/download-grants' },
+  { kind: 'dsm', label: 'Surface model (DSM)', format: 'TIF', byteSize: 1024, grantUrl: 'https://elsewhere.test/grant' },
+  { kind: 'report', label: 'Model report', format: 'PDF', byteSize: 10, grantUrl: '/session-products/token/model/report/download-grants' },
+] };
+function productFixture() {
+  const calls = [], ticket = '/session-product-downloads/' + 'b'.repeat(43);
+  const fixture = reportFixture(async (url, options = {}) => {
+    calls.push([url, options.method]);
+    return { ok: true, json: async () => (options.method === 'POST' ? { url: ticket, fileName: 'orthophoto.tif' } : productsResponse) };
+  });
+  return { ...fixture, calls, ticket };
+}
+
+test('the list offers only registered same-scope products, without the report that has its own button', async () => {
+  const f = productFixture();
+  const items = await f.mounted.list();
+  assert.deepEqual(items.map(item => [item.kind, item.label, item.format, item.size]), [['ortho', 'Orthophoto', 'TIF', '3.0 GiB']]);
+  assert.equal(f.mounted.available(), true);
+  f.mounted.destroy();
+});
+
+test('a product download hands one ticket to the browser, and nothing once access or the model changed', async () => {
+  const f = productFixture();
+  const [ortho] = await f.mounted.list();
+  await f.mounted.download(ortho);
+  assert.equal(f.clicked.length, 1);
+  assert.equal(f.clicked[0].href, 'https://viewer.test' + f.ticket);
+  assert.equal(f.clicked[0].referrerPolicy, 'no-referrer');
+  f.change();
+  await assert.rejects(f.mounted.download(ortho), /Reopen Download/);
+  assert.equal(f.clicked.length, 1, 'no ticket for the previous model');
+  const g = productFixture();
+  const [again] = await g.mounted.list();
+  g.deny();
+  await assert.rejects(g.mounted.download(again));
+  assert.equal(g.clicked.length, 0, 'no ticket once download permission is gone');
+  assert.equal(g.mounted.available(), false);
+  f.mounted.destroy(); g.mounted.destroy();
+});

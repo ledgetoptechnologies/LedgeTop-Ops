@@ -80,7 +80,7 @@ test('picking tears down what it set up, even when the map was replaced meanwhil
   assert.equal(t.p.count, 0, 'a finished session no longer selects');
 });
 
-function dialog({ pixels = 200_000_000, picker: withPicker = true, run, pickParcels, products = null, size = null, geotiff = true, parcels = () => 0, contours = false } = {}) {
+function dialog({ pixels = 200_000_000, picker: withPicker = true, run, pickParcels, products = null, size = null, geotiff = true, parcels = () => 0, contours = false, settleMs = 0 } = {}) {
   const { document, window } = miniDocument();
   const log = { pickers: [], writables: [], runs: [], picks: 0 };
   if (withPicker) {
@@ -105,7 +105,7 @@ function dialog({ pixels = 200_000_000, picker: withPicker = true, run, pickParc
     preview: async () => { log.previews = (log.previews || 0) + 1; return { canvas: document.createElement('canvas'), width: size?.[0] ?? side, height: size?.[1] ?? side }; },
     run: run || (async (options, signal, extra) => { log.runs.push({ options, signal, extra }); return { blob: null, filename: options.filename, committed: Boolean(extra.writable) }; }),
     pickParcels: pickParcels || (() => { log.picks += 1; return new Promise(() => {}); }),
-    products,
+    products, settleMs,
   });
   api.open();
   return { api, log, handle, document };
@@ -254,7 +254,7 @@ function productsStub(items = [
   const downloads = [];
   return { downloads, available: () => true, list: async () => items, download: async (product) => { downloads.push(product.kind); return { fileName: product.kind }; } };
 }
-const rows = (t) => t.api.controls.list.children;
+const rows = (t) => t.api.controls.list.children.map(item => item.children[0]);
 const rowText = (t) => rows(t).map(node => node.textContent);
 const shown = (node) => { for (let n = node; n; n = n.parent) if (n.hidden) return false; return true; };
 
@@ -355,6 +355,33 @@ test('regression: picking parcels never starts a download; only a press made in 
   void press(downloadButton);
   await tick();
   assert.equal(t.log.pickers.length, 1, 'the press starts the export');
+});
+
+test('regression: the second half of a double click on Done, or a key from before, does nothing in the reopened dialog', async () => {
+  let finishPick;
+  const t = dialog({ picker: false, pixels: 1_000_000, settleMs: 250, parcels: () => 2, pickParcels: () => new Promise((resolve) => { finishPick = resolve; }) });
+  await wait(300); await ready();
+  const { area, downloadButton } = t.api.controls;
+  area.value = 'parcels';
+  await area.inputs.parcels.fire('change');
+  await t.api.controls.pickButton.click();
+  await tick();
+  assert.equal(t.api.dialog.open, false, 'picking on the map');
+  finishPick(2);
+  await tick();
+  assert.equal(t.api.dialog.open, true);
+  // Within the settling time: a press carried over from the map, then the key that ended picking.
+  await press(downloadButton);
+  await downloadButton.fire('keyup', { key: 'Enter' });
+  await downloadButton.click();
+  await ready();
+  assert.equal(t.log.runs.length, 0, 'nothing ran');
+  await wait(300);
+  // A key going down on Download once settled (keyboard use) is a press.
+  await downloadButton.fire('keydown', { key: 'Enter' });
+  await downloadButton.click();
+  await tick();
+  assert.equal(t.log.runs.length, 1, 'a keyboard press starts it');
 });
 
 test('regression: a product row needs a press made in the open dialog', async () => {

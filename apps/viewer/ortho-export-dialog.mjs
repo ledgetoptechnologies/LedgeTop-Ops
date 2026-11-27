@@ -12,8 +12,9 @@
 //   pickParcels() → Promise<count>; the dialog hides while the person picks on the map.
 //   products: { available(), list(signal) → [{ kind, label, format, size }], download(product, signal) }
 // Nothing is downloaded or exported except by a press on a product or on
-// Download made inside the dialog after it (re)opened: a click carried over
-// from the map, or a held key, starts nothing.
+// Download that started inside the dialog once it had settled after it
+// (re)opened or changed page: a click carried over from the map (a double
+// click on Done), a key held or let go from before, starts nothing.
 
 export const LARGE_EXPORT_PIXELS = 100_000_000;
 export const MEMORY_WARNING_PIXELS = 250_000_000;
@@ -29,7 +30,7 @@ export function exportFileName({ area, format, contours }) {
   return `orthophoto${area === 'view' ? '-view' : area === 'parcels' ? '-parcels' : ''}${contours ? '-contours' : ''}.${format === 'tif' ? 'tif' : format === 'jpg' ? 'jpg' : 'png'}`;
 }
 
-export function mountOrthoExportDialog({ documentRef = document, windowRef = globalThis.window, openButton, defaults = () => ({}), preview, run, pickParcels, products = null }) {
+export function mountOrthoExportDialog({ documentRef = document, windowRef = globalThis.window, openButton, defaults = () => ({}), preview, run, pickParcels, products = null, settleMs = 350, now = () => globalThis.performance?.now?.() ?? Date.now() }) {
   const el = (tag, props = {}, children = []) => { const n = documentRef.createElement(tag); Object.assign(n, props); n.append(...children); return n; };
   const icon = (d) => { const svg = documentRef.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true'); const p = documentRef.createElementNS('http://www.w3.org/2000/svg', 'path'); p.setAttribute('d', d); svg.append(p); return svg; };
   const segmented = (name, options) => {
@@ -49,7 +50,6 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
   };
 
   const area = segmented('area', AREAS), format = segmented('format', FORMATS);
-  format.group.className = 'oe-seg oe-seg-3';
   const contours = toggle('Contour lines'), property = toggle('Property lines');
   const parcelCount = el('span', { className: 'oe-parcel-count' });
   const pickButton = el('button', { type: 'button', className: 'oe-btn', textContent: 'Pick on map' });
@@ -89,7 +89,7 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
   documentRef.body.append(dialog);
 
   let available = {}, previewController = null, exportController = null, previewTimer = null, last = null, picking = null, committing = null; // committing: the export whose chosen file is being written
-  let page = 'list', listController = null, orthoProduct = null, productRequest = null, armed = false;
+  let page = 'list', listController = null, orthoProduct = null, productRequest = null, armed = false, settledAt = 0;
   const options = () => ({ area: area.value, format: format.value, contours: contours.input.checked, property: property.input.checked });
   const busy = () => Boolean(exportController);
   const exportAvailable = () => Object.values(available.areas || {}).some(Boolean);
@@ -100,11 +100,15 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
   const jpegTooLarge = () => format.value === 'jpg' && Boolean(last) && (last.width > JPEG_MAX_SIDE || last.height > JPEG_MAX_SIDE);
 
   // ---- explicit intent ---------------------------------------------------------
-  // A press counts only when it starts inside the open dialog: pointer down, or
-  // a key let go. Opening, reopening after picking and changing page disarm it.
-  const arm = () => { armed = true; };
-  for (const type of ['pointerdown', 'mousedown', 'keyup']) dialog.addEventListener(type, arm);
+  // A press counts only when it starts inside the open dialog after it settled:
+  // pointer down, or a key going down (not a repeat). Opening, reopening after
+  // picking and changing page disarm it and start a new settling time, so the
+  // second half of a double click, or a key from before, does nothing.
+  const disarm = () => { armed = false; settledAt = now() + settleMs; };
+  const arm = (event) => { if (!event?.repeat && now() >= settledAt) armed = true; };
+  for (const type of ['pointerdown', 'mousedown', 'keydown']) dialog.addEventListener(type, arm);
   const dropRepeats = (event) => { if (event.repeat && (event.key === 'Enter' || event.key === ' ')) event.preventDefault?.(); };
+  dialog.addEventListener('keydown', dropRepeats);
 
   function syncControls() {
     const a = available.areas || {};
@@ -112,7 +116,8 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
     if (!a[area.value]) area.value = AREAS.map(([v]) => v).find(v => a[v]) || 'view';
     const tiff = Boolean(available.geotiffAvailable || orthoProduct);
     format.inputs.tif.closest('label').hidden = !tiff;
-    if (!tiff && format.value === 'tif') format.value = 'png';
+    // While the list loads the original may yet be offered: keep a TIFF choice until it is known.
+    if (!tiff && format.value === 'tif' && !listController) format.value = 'png';
     contours.input.disabled = !available.contoursAvailable; contours.row.hidden = !available.contoursAvailable;
     if (!available.contoursAvailable) contours.input.checked = false;
     property.input.disabled = !available.propertyAvailable; property.row.hidden = !available.propertyAvailable;
@@ -127,7 +132,7 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
     else if (last) dims.textContent = `${last.width.toLocaleString('en-US')} × ${last.height.toLocaleString('en-US')} px`;
     // Pages
     listPage.hidden = page !== 'list'; orthoPage.hidden = page !== 'ortho';
-    actions.hidden = page !== 'ortho'; back.hidden = page !== 'ortho' || !listOffersMore();
+    actions.hidden = page !== 'ortho'; back.hidden = page !== 'ortho' || !listOffersMore(); back.disabled = busy() || Boolean(committing);
     title.textContent = page === 'ortho' ? 'Orthophoto' : 'Download';
   }
   const listOffersMore = () => list.children.length > 1;
@@ -174,10 +179,10 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
       el('span', { className: 'dl-item-text' }, [el('strong', { textContent: label }), el('small', { textContent: meta })]),
       icon(opens ? 'M9 5l7 7-7 7' : 'M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 19h14'),
     ]);
-    button.setAttribute('role', 'listitem');
-    button.addEventListener('keydown', dropRepeats);
     button.addEventListener('click', () => { if (armed) onPress(button); });
-    return button;
+    const item = el('div', { className: 'dl-row' }, [button]);
+    item.setAttribute('role', 'listitem');
+    return item;
   }
   function orthoMeta() {
     const kinds = [(available.geotiffAvailable || orthoProduct) && 'TIFF', 'JPEG', 'PNG'].filter(Boolean);
@@ -209,8 +214,9 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
       renderList(items);
       status.textContent = items.length || exportAvailable() ? '' : 'Nothing to download for this view.';
     } catch (error) {
-      if (controller.signal.aborted || error?.name === 'AbortError') return;
-      status.textContent = error?.message || 'Could not load the downloads. Close and retry.';
+      if (controller.signal.aborted) return;
+      // Access or the model changed while loading: say nothing stale.
+      status.textContent = error?.name === 'AbortError' ? '' : error?.message || 'Could not load the downloads. Close and retry.';
     } finally { if (listController === controller) { listController = null; syncControls(); } }
   }
   async function downloadProduct(product, button) {
@@ -232,16 +238,17 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
   }
 
   function showPage(next) {
-    page = next; armed = false; status.textContent = '';
+    if (busy() || committing) return;
+    page = next; disarm(); status.textContent = '';
     if (next !== 'ortho') stopAll();
     syncControls();
     if (next === 'ortho') schedulePreview();
-    (next === 'ortho' ? area.inputs[area.value] : list.children[0] || close)?.focus?.();
+    (next === 'ortho' ? area.inputs[area.value] : list.querySelector?.('button') || close)?.focus?.();
   }
 
   function open({ keepStatus = false, page: to = 'list' } = {}) {
     available = defaults() || {};
-    armed = false;
+    disarm();
     if (!keepStatus) {
       // Property lines start off; contours follow the map.
       property.input.checked = false;
@@ -285,7 +292,6 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
   });
   dialog.addEventListener('close', () => { if (!picking && !committing) { stopAll(); listController?.abort(); } });
   openButton?.addEventListener('click', () => open());
-  downloadButton.addEventListener('keydown', dropRepeats);
 
   downloadButton.addEventListener('click', async () => {
     if (!armed || busy() || productRequest || tiffBlocked() || jpegTooLarge()) return;

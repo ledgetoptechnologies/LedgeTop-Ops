@@ -136,3 +136,13 @@ test('more than 65,535 px per side is refused before anything is written', () =>
   assert.throws(() => createJpegEncoder({ width: JPEG_MAX_EDGE + 1, height: 10, sink: { write() { throw new Error('wrote'); } } }), { code: 'print_jpeg_too_large' });
   assert.doesNotThrow(() => createJpegEncoder({ width: JPEG_MAX_EDGE, height: 1, sink: { write() {} } }));
 });
+
+test('noise and hard edges round-trip too (byte stuffing and long zero runs)', async () => {
+  let seed = 7;
+  const noise = new Uint8Array(96 * 80).map(() => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed >> 23; });
+  const pixel = (x, y) => { const v = y < 40 ? noise[y * 96 + x] : (x < 48 ? 0 : 255); return [v, v, v, 255]; };
+  const bytes = await encode(96, 80, pixel, { strip: 13, quality: 95 });
+  assert.ok(bytes.some((b, i) => b === 0xff && bytes[i + 1] === 0 && i > 600), 'stuffed 0xFF in the entropy data');
+  const image = decode(bytes);
+  assert.ok(psnr(image.rgb, 96, 80, pixel) > 25, `${psnr(image.rgb, 96, 80, pixel).toFixed(1)} dB`);
+});
