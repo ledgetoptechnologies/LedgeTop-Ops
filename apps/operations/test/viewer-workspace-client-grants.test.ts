@@ -300,3 +300,17 @@ describe('native Viewer workspace machine bridge',()=>{
     expect((await machine(wrong,'wrong-account-nonce-001')).status).toBe(404);
   });
 });
+
+describe("direct client groups over the machine bridge", () => {
+  it("answers a direct groups request with no groups when shared profiles are unavailable, and refuses any other shape", async () => {
+    const groups = await machine({ subject: "ops:staff-one", action: "groups", connection: "direct" }, "groups-nonce-value-0001");
+    expect(groups.status).toBe(200);
+    expect(await groups.json()).toEqual({ groups: [] });
+    for (const [index, body] of [
+      { subject: "ops:staff-one", action: "groups" },
+      { subject: "ops:staff-one", action: "groups", connection: "native" },
+      { subject: "ops:staff-one", action: "groups", connection: "direct", listQuery: { q: "Acme" } },
+      { subject: "ops:staff-one", action: "groups", connection: "direct", grantId: "grant-one" },
+    ].entries()) expect((await machine(body, `groups-refused-nonce-000${index}`)).status).toBe(400);
+  });
+});

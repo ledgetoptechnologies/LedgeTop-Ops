@@ -44,7 +44,7 @@ export async function readDirectViewerClientBusinessName(env:Env,sourceId:string
   .bind(sourceId).first<{display_name:string}>();
  return row?.display_name?.trim()||'Business';
 }
-async function manage(env:Env,principal:StaffPrincipal){
+export async function requireDirectViewerClientManage(env:Env,principal:StaffPrincipal){
  for(const permission of ['viewer.view','viewer.manage'] as const){const scope=await sqlScope(env,principal,permission);
   if(!scope.global||scope.deniedGlobal)fail(403,'forbidden','Global Viewer management permission required');}
 }
@@ -141,7 +141,7 @@ export async function readDirectViewerClientGrants(env:Env,input:{sourceId:strin
  if(rows.results.length>100)fail(503,'grant_limit','Client Viewer grant limit exceeded');return rows.results;
 }
 export async function listDirectViewerClientGrantWorkspace(env:Env,principal:StaffPrincipal,query:unknown={}){
- await manage(env,principal);const parsed=directViewerClientGrantListQuerySchema.safeParse(query);
+ await requireDirectViewerClientManage(env,principal);const parsed=directViewerClientGrantListQuerySchema.safeParse(query);
  if(!parsed.success)fail(400,'invalid_request','Invalid client picker query');const q=parsed.data,database=db(env);
  const rows=await database.prepare(`${recipientSql(env)} AND w.id>? AND (?='' OR instr(lower(root.display_name),lower(?))>0)
  ORDER BY w.id LIMIT ?`).bind(q.cursor??'',q.q??'',q.q??'',q.limit+1).all<Recipient>();
@@ -266,7 +266,7 @@ function mutationStatements(database:Pick<D1Database,'prepare'>,principal:StaffP
  .bind(crypto.randomUUID(),id,action,principal.id,idempotencyKey,JSON.stringify(response),now)];}
 export async function createDirectViewerClientGrant(input:{env:Env;principal:StaffPrincipal;grant:unknown;idempotencyKey:string;request:Request})
  :Promise<{grant:DirectViewerClientGrantPublicResult;replayed:boolean}>{
- const {env,principal}=input;await manage(env,principal);const parsed=inputSchema.safeParse(input.grant);
+ const {env,principal}=input;await requireDirectViewerClientManage(env,principal);const parsed=inputSchema.safeParse(input.grant);
  if(!parsed.success||!key.safeParse(input.idempotencyKey).success)fail(400,'invalid_request','Invalid Viewer sharing request');
  const g=parsed.data,fingerprint=await sha256(JSON.stringify(['direct.create',g]));
  const prior=await receipt(env,principal.id,input.idempotencyKey,fingerprint);
@@ -364,7 +364,7 @@ export async function drainDirectViewerClientGrantRevocations(env:Env,options:{l
  return {attempted:rows.results.length};
 }
 export async function revokeDirectViewerClientGrant(input:{env:Env;principal:StaffPrincipal;grantId:string;reason:string;idempotencyKey:string;request:Request}){
- const {env,principal}=input;await manage(env,principal);
+ const {env,principal}=input;await requireDirectViewerClientManage(env,principal);
  if(!opaque.safeParse(input.grantId).success||!key.safeParse(input.idempotencyKey).success||!z.string().trim().min(1).max(240).safeParse(input.reason).success)
   fail(400,'invalid_request','Invalid Viewer revocation');
  const fingerprint=await sha256(JSON.stringify(['direct.revoke',input.grantId,input.reason]));
