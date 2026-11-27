@@ -116,7 +116,8 @@ export function syncReconciliationLatestOwner({ state, expectedActiveVersionId, 
   const latest = state?.latest;
   if (candidateVersionId && latest === candidateVersionId && acknowledgedVersionId === latest) return 'candidate';
   if (latest === expectedActiveVersionId) return 'active';
-  need(typeof heldLatestVersionId === 'string' && latest === heldLatestVersionId && !(candidateVersionId && acknowledgedVersionId === latest)
+  // The held candidate is owned only until this run uploads its own candidate.
+  need(!candidateVersionId && typeof heldLatestVersionId === 'string' && latest === heldLatestVersionId
     && isHeldOpsSyncInactiveLatest(APP, state, pins), 'sync_reconciliation_latest_unowned');
   return 'held';
 }

@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
   CANONICAL_INSTALLED_PROFILE_V5_SHA256, ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE, readCanonicalInstalledProfileV5,
-  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, scriptRuntimeShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, scriptRuntimeShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath,
+  isHeldOpsSyncInactiveLatest, HELD_OPS_SYNC_INACTIVE_LATEST } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry,
   projectAcknowledgedProductionAutoUploadTagSettings } from './production-auto-provider.mjs';
@@ -167,25 +168,30 @@ export function isProductionAutoCanonicalV4Profile(profile) {
 export function isProductionAutoProfile(profile) {
   return profile === AUTO_PROFILE && hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V5_SHA256;
 }
+/** v5 Ops and Client lanes keep the strict all-Workers latest check (no selectedApp). The only addition is the
+ * one pinned held Sync state: when, and only when, the captured Sync state equals those pins exactly, its held
+ * latest id becomes an explicit Sync allowLatest. v4 and legacy lanes get nothing. */
+export function productionAutoHeldSyncAllowance(laneProfile, snapshot, pins = HELD_OPS_SYNC_INACTIVE_LATEST) {
+  return isProductionAutoProfile(laneProfile) && isHeldOpsSyncInactiveLatest('ops-sync', snapshot?.['ops-sync'], pins)
+    ? { 'ops-sync': pins.latestVersionId } : {};
+}
 function validatedCapture(snapshot, workerName, baselineAssetsConfig, baselineAssets, candidateVersionId, expectedDeploymentVersions,
   ownedInactiveWitness = null, ownedInactiveIdentity = null, laneProfile = PROFILE) {
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client';
   const profile = structuredClone(laneProfile);
   const preservationPreflight = productionAutoInstalledPreflight(laneProfile, app);
-  const exactCanonicalV4 = Object.keys(preservationPreflight).length > 0;
-  // v5 checks the other two Workers as unselected apps, so only the one pinned held Sync state is admitted there.
-  const selection = isProductionAutoProfile(laneProfile) ? { selectedApp: app } : {};
+  const exactCanonicalV4 = Object.keys(preservationPreflight).length > 0; // v4 or v5 (canonical installed profile)
   // The normal profile pins the currently served asset association. Candidate
   // upload intentionally replaces that association; the fixed asset config,
   // every other protected control, and actual served bytes remain pinned.
-  const allowLatest = candidateVersionId ? { [app]: candidateVersionId }
-    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) } : {};
-  if (baselineAssetsConfig === undefined) validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight, ...selection,
+  const allowLatest = { ...productionAutoHeldSyncAllowance(laneProfile, snapshot), ...(candidateVersionId ? { [app]: candidateVersionId }
+    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) } : {}) };
+  if (baselineAssetsConfig === undefined) validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight,
     expectedDeploymentVersions: expectedDeploymentVersions ? { [app]: expectedDeploymentVersions } : {} });
   else {
     const candidateAssetsSHA256 = hash(Buffer.from(canonical(snapshot[app].modern.assets ?? null)));
     if (!exactCanonicalV4) profile.workers[app].assetsSHA256 = candidateAssetsSHA256;
-    validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight, ...selection,
+    validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight,
       ...(exactCanonicalV4 ? { assetAssociationOverrides: { [app]: { baselineAssets } } } : {}),
       expectedDeploymentVersions: expectedDeploymentVersions ? { [app]: expectedDeploymentVersions } : {} });
     need(canonical(snapshot[app].modern.assets?.config) === canonical(baselineAssetsConfig), 'runtime_asset_config_drift');

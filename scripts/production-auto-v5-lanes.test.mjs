@@ -8,8 +8,9 @@ import { PROFILE, canonical, hash, validateInstallation, readCanonicalInstalledP
   CANONICAL_INSTALLED_PROFILE_V4_SHA256, CANONICAL_INSTALLED_PROFILE_V5_SHA256, HELD_OPS_SYNC_INACTIVE_LATEST,
   ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V5_PREFLIGHT_MODE,
   OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT } from './production-deploy.mjs';
-import { AUTO_PROFILE, isProductionAutoProfile, productionAutoInstalledPreflight,
+import { AUTO_PROFILE, isProductionAutoProfile, productionAutoInstalledPreflight, productionAutoHeldSyncAllowance,
   createProductionAutoReleaseAdapter } from './production-auto-runtime.mjs';
+import { syntheticCanonicalV4Installation } from './test-fixtures/ops-staff-directory-synthetic-installation.mjs';
 import { createProductionAutoSyncAdapter, syncHeldLatestAdmission, syncReconciliationLatestOwner } from './production-auto-sync-runtime.mjs';
 import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
@@ -154,6 +155,33 @@ test('the release entry points hand AUTO_PROFILE to their reviewed default facto
   assert.match(sync, /runtimeFactory\(\{ sourceCommit, triggerRun, env, fetchImpl,\n\s+\.\.\.laneProfile, recipientLoader/u);
 });
 
+test('v5 Ops and Client captures keep the strict all-Workers latest check and add only the exact pinned held Sync', () => {
+  const source = fs.readFileSync(new URL('./production-auto-runtime.mjs', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
+  const body = source.slice(source.indexOf('function validatedCapture('), source.indexOf('function git('));
+  assert.ok(body.length > 0 && !/selectedApp/u.test(body), 'the lane capture never selects an app, so no unselected-latest rule applies');
+  assert.match(body, /const allowLatest = \{ \.\.\.productionAutoHeldSyncAllowance\(laneProfile, snapshot\),/u);
+  const state = heldSyncState(), pins = pinsFor(state);
+  assert.deepEqual(productionAutoHeldSyncAllowance(AUTO_PROFILE, { 'ops-sync': state }, pins), { 'ops-sync': HELD });
+  for (const profile of [PROFILE, clone(AUTO_PROFILE)])
+    assert.deepEqual(productionAutoHeldSyncAllowance(profile, { 'ops-sync': state }, pins), {}, 'v4 and legacy lanes get nothing');
+  assert.deepEqual(productionAutoHeldSyncAllowance(AUTO_PROFILE, { 'ops-sync': state }), {}, 'production pins never match synthetic data');
+  const wrangler = clone(state); wrangler.latestVersion.resources.script.last_deployed_from = 'wrangler';
+  assert.deepEqual(productionAutoHeldSyncAllowance(AUTO_PROFILE, { 'ops-sync': wrangler }, pins), {},
+    'a native inactive latest with unchanged resources is not admitted');
+  assert.deepEqual(productionAutoHeldSyncAllowance(AUTO_PROFILE, { 'ops-sync': heldSyncState({ held: false }) }, pins), {});
+  // Without selectedApp every Worker's latest must equal its active version unless explicitly allowed.
+  const { profile, snapshot, reviewedPreflightProfiles } = syntheticCanonicalV4Installation();
+  const sync = snapshot['ops-sync'], other = '66666666-6666-4666-8666-666666666666';
+  sync.latest = other;
+  sync.latestVersion = { id: other, resources: clone(sync.version.resources) };
+  sync.latestModern = { id: other, modules: [{ name: 'index.js', content_base64: Buffer.from('other code').toString('base64') }] };
+  const options = { profile, reviewedPreflightProfiles, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+    ordinaryFrontendApp: 'operations' };
+  assert.throws(() => validateInstallation(snapshot, { ...options, allowLatest: {} }), /Latest must equal the selected sole active version/u);
+  assert.throws(() => validateInstallation(snapshot, { ...options, allowLatest: { 'ops-sync': HELD } }), /Latest must equal/u);
+  assert.equal(validateInstallation(snapshot, { ...options, allowLatest: { 'ops-sync': other } }), snapshot);
+});
+
 test('held Sync admission is exact: only the pinned held state, and null when latest is the active version', () => {
   const state = heldSyncState(), pins = pinsFor(state);
   assert.equal(syncHeldLatestAdmission(state, pins), HELD);
@@ -183,6 +211,8 @@ test('read-only Sync reconciliation owns only the parent, the acknowledged candi
     heldLatestVersionId: HELD, pins }), 'candidate');
   assert.throws(() => syncReconciliationLatestOwner({ ...base, state: uploaded, candidateVersionId: CANDIDATE, acknowledgedVersionId: undefined,
     heldLatestVersionId: HELD, pins }), /sync_reconciliation_latest_unowned/u);
+  assert.throws(() => syncReconciliationLatestOwner({ ...base, state, candidateVersionId: CANDIDATE, acknowledgedVersionId: CANDIDATE,
+    heldLatestVersionId: HELD, pins }), /sync_reconciliation_latest_unowned/u, 'the held candidate is not owned after this run uploads');
 });
 
 function syncProviderFactory(syncState, reads) {
