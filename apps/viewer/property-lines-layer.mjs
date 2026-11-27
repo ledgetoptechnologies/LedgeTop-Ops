@@ -660,5 +660,10 @@ export function createPropertyLinesController(deps) {
         drawn: { map: Boolean(mapLayers), three: Boolean(threeGroup?.visible), potree: potreeShown } };
     },
     stats: () => ({ ...fetcher.stats(), tiles: tiles.stats() }),
+    /** Outlines as drawn on the map, for picking: { key, owner, rings: [[lon, lat], ...][] }. */
+    selectableParcels: () => (isOn() && mapLayers ? outlines() : []).map((outline, i) => ({
+      key: outline.parcelIds.length ? `id:${outline.parcelIds.join('+')}` : `o:${outline.ownerKey || ''}#${i}`,
+      owner: outline.owner, rings: outline.parcels.flatMap(parcel => parcel.rings),
+    })),
   };
 }

@@ -1,15 +1,18 @@
 // Export identity continuity: the shipped exportOrthoPrintFromViewer,
-// applyViewerSession, setSessionAccessState and the export fence run in a VM
-// with the real export pipeline and the real dialog. An export belongs to the
-// viewer (audience and subject), model and version it started for: if the page
-// moves to anything else mid-export, even a viewer that may also print, no file
-// is saved and no error is shown.
+// planOrthoExport, applyViewerSession, setSessionAccessState and the export
+// fence run in a VM with the real streamed export pipeline. An export belongs
+// to the viewer (audience and subject), model and version it started for: if
+// the page moves to anything else mid-export, even a viewer that may also
+// print, it ends as a cancel and nothing is saved.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { CONTOUR_COLORS } from '../contours.mjs';
-import { assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge } from '../ortho-print-export.mjs';
+import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, clampExtent, orthoPrintPolicy, printLongEdge, verifyOrthoCrs } from '../ortho-print-export.mjs';
+import { createBlobSink, createFileSink, exportGrid, ringsExtent, streamOrthoExport } from '../ortho-export-stream.mjs';
+
+globalThis.ImageData ||= class ImageData { constructor(data, width, height) { this.data = data; this.width = width; this.height = height; } };
 
 const source = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 function extract(signature) {
@@ -22,10 +25,11 @@ function region(from, to) {
   assert.ok(start >= 0 && end > start, from);
   return source.slice(start + 1, end + 1);
 }
+const line = (prefix) => { const start = source.indexOf(`\n${prefix}`); assert.ok(start >= 0, prefix); return source.slice(start + 1, source.indexOf('\n', start + 1) + 1); };
 // viewerAccessAvailable, orthoPrintPermissions and the export fence (the in-flight set, identity and cancel hook).
-const SHIPPED = [region('function viewerAccessAvailable()', 'function syncMeasurementActionVisibility()'),
-  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()',
-    'async function exportOrthoPrintFromViewer('].map(extract)].join('\n');
+const SHIPPED = [region('function viewerAccessAvailable()', 'function syncMeasurementActionVisibility()'), line('const policyArea ='),
+  ...['function setSessionAccessState(', 'function applyViewerSession(', 'function printEpsg()', 'function planOrthoExport(',
+    'function checkOrthoExport(', 'async function orthoExportLayers(', 'async function exportOrthoPrintFromViewer('].map(extract)].join('\n');
 
 const tick = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve)); };
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
@@ -38,73 +42,49 @@ function session({ subject = 'person-one', version = 'v1', permissions = { view:
     expiresAt: new Date(Date.now() + expiresIn).toISOString() };
 }
 
-// 400 x 200 m orthophoto in EPSG:32616, one level.
-function orthoDataset() {
-  const image = {
-    getWidth: () => 200, getHeight: () => 100,
-    getGeoKeys: () => ({ ProjectedCSTypeGeoKey: 32616 }), getResolution: () => [2, -2, 0], getFileDirectory: () => ({ getValue: () => undefined }),
-    async readRasters({ window: [x0, y0, x1, y1] }) { return [0, 1, 2].map(() => new Uint8Array((x1 - x0) * (y1 - y0)).fill(120)); },
-  };
-  return { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200, nodata: NaN, images: [image] };
-}
-
-function fakeDocument() {
-  const downloads = [];
-  const node = tag => ({
-    tagName: tag, children: [], listeners: {}, value: '', hidden: false, disabled: false, textContent: '',
-    append(...kids) {
-      for (const kid of kids) { this.children.push(kid); if (tag === 'select' && this.value === '') this.value = kid.value; }
-    },
-    remove() {}, setAttribute() {},
-    addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
-    fire(type) { return Promise.all((this.listeners[type] || []).map(fn => fn())); },
-    click() { if (tag === 'a') downloads.push(this.download); return this.fire('click'); },
-    querySelector(selector) { const value = /value="([^"]*)"/.exec(selector)[1]; return this.children.find(c => c.value === value); },
-    showModal() {}, close() { return this.fire('close'); },
-  });
-  return { createElement: node, body: node('body'), downloads };
-}
-
-function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissions = undefined, beforeSave = null } = {}) {
-  const log = { opens: [], traces: [], blobs: [], canvases: [] };
-  const ortho = orthoDataset();
+function page({ holdOpen = false, holdTrace = false, holdRead = false, permissions = undefined } = {}) {
+  const log = { opens: [], traces: [], reads: [], canvases: [] };
   const hold = (enabled, list, value, extra) => {
     if (!enabled) { list.push({ ...extra }); return Promise.resolve(value); }
     const d = deferred();
     list.push({ ...extra, resolve: () => d.resolve(value) });
     return d.promise;
   };
+  // 400 x 200 m orthophoto in EPSG:32616 at 2 m, one level.
+  const image = {
+    getWidth: () => 200, getHeight: () => 100,
+    getGeoKeys: () => ({ ProjectedCSTypeGeoKey: 32616 }), getResolution: () => [2, -2, 0], getFileDirectory: () => ({ getValue: () => undefined }),
+    readRasters({ window: [x0, y0, x1, y1], signal }) {
+      return hold(holdRead, log.reads, [0, 1, 2].map(() => new Uint8Array((x1 - x0) * (y1 - y0)).fill(120)), { signal });
+    },
+  };
+  const ortho = { minE: 500000, maxE: 500400, minN: 4700000, maxN: 4700200, nodata: NaN, images: [image] };
   const canvas = () => {
+    const c = { width: 0, height: 0 };
     const ctx = new Proxy({
-      createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
-      getImageData: () => ({ data: new Uint8ClampedArray([255, 255, 255, 255]) }),
-      measureText: text => ({ width: text.length * 7 }),
+      canvas: c, measureText: text => ({ width: text.length * 7 }),
+      getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(200) }),
     }, { get: (target, key) => (key in target ? target[key] : () => {}), set: () => true });
-    const c = {
-      width: 0, height: 0, getContext: () => ctx,
-      toBlob(callback) {
-        const blob = new Blob(['png'], { type: 'image/png' });
-        if (!holdBlob) { log.blobs.push({}); callback(blob); return; }
-        log.blobs.push({ resolve: () => callback(blob) });
-      },
-    };
+    c.getContext = () => ctx;
     log.canvases.push(c);
     return c;
   };
   const first = session({ permissions });
+  // A 720 x 320 px map showing E 500020–500380, N 4700020–4700180 (lat = N, lng = E here).
   const map = {
     getBounds: () => ({ getNorthWest: () => ({ lat: 4700180, lng: 500020 }), getNorthEast: () => ({ lat: 4700180, lng: 500380 }),
       getSouthWest: () => ({ lat: 4700020, lng: 500020 }), getSouthEast: () => ({ lat: 4700020, lng: 500380 }) }),
-    getSize: () => ({ x: 720, y: 320 }),
+    latLngToContainerPoint: ([lat, lng]) => ({ x: (lng - 500020) * 2, y: (4700180 - lat) * 2 }),
   };
   const context = vm.createContext({
-    orthoPrintPolicy, assertOrthoPrintAllowed, clampExtent, printLongEdge, exportOrthoPrint,
+    orthoPrintPolicy, assertOrthoPrintAllowed, clampExtent, printLongEdge, verifyOrthoCrs, VIEW_EXPORT_MAX_EDGE,
+    exportGrid, ringsExtent, streamOrthoExport, createBlobSink, createFileSink, orthoParcelPicker: null,
     AbortController, DOMException, console: { warn() {} }, reviewSessionChannel: null,
     VIEW_MODE: 'session', PROJECT: first.model, activeViewerSession: first, SHARE_PERMISSIONS: first.permissions,
     sessionAccessState: 'active', sessionAccessReason: null, sessionRenewalBlocked: false,
     ORTHO_URL: '/ortho.tif', DTM_URL: '/dtm.tif', DISPLAY_UNITS: 'metric', TILES_URL: null,
     map, state: { activeMode: 'ortho', cloudMode: 'none', meshSource: 'none' }, isMapMode: mode => mode === 'ortho',
-    latLonToUtm: (lat, lng) => [lng, lat], window: { devicePixelRatio: 1 },
+    latLonToUtm: (lat, lng) => [lng, lat], utmToLatLon: (e, n) => [n, e], window: { devicePixelRatio: 1 },
     document: { createElement: canvas },
     // Inert sources: they answer when the test says so, whatever happened meanwhile.
     getDataset: (url, isDem, { signal }) => hold(holdOpen, log.opens, ortho, { url, signal }),
@@ -123,169 +103,137 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissio
     syncMeasurementActionVisibility() {}, syncViewerMarks() {}, sessionAccessLabel: () => '',
   });
   vm.runInContext(SHIPPED, context);
-  const doc = fakeDocument();
-  // `beforeSave` runs after the export resolves and before the dialog creates the download.
-  const run = async (options, signal) => { const result = await context.exportOrthoPrintFromViewer(options, signal); beforeSave?.(context); return result; };
-  const dialog = mountOrthoPrintDialog({ documentRef: doc, run });
-  dialog.controls.contours.checked = true;
-  return { context, log, doc, dialog, inFlight: () => vm.runInContext('orthoPrintExports.size', context) };
+  // What the dialog does: run, then save only if the export is still current.
+  const dialog = new AbortController();
+  const exportNow = async (options = {}) => {
+    try {
+      const result = await context.exportOrthoPrintFromViewer({ area: 'view', format: 'png', contours: true, property: false, filename: 'orthophoto-view.png', ...options }, dialog.signal);
+      return result.stillCurrent() ? result : null;
+    } catch (error) { if (error?.name === 'AbortError') return null; throw error; }
+  };
+  return { context, log, dialog, exportNow, inFlight: () => vm.runInContext('orthoPrintExports.size', context) };
 }
 
-// The dialog revokes its object URL a minute later; keep that timer from holding the test process open.
-const objectUrls = [];
-const realSetTimeout = globalThis.setTimeout, realCreate = URL.createObjectURL, realRevoke = URL.revokeObjectURL;
-test.beforeEach(() => {
-  objectUrls.length = 0;
-  globalThis.setTimeout = (fn, ms, ...args) => { const t = realSetTimeout(fn, ms, ...args); t.unref?.(); return t; };
-  URL.createObjectURL = blob => { objectUrls.push(blob); return `blob:test/${objectUrls.length}`; };
-  URL.revokeObjectURL = () => {};
-});
-test.afterEach(() => { globalThis.setTimeout = realSetTimeout; URL.createObjectURL = realCreate; URL.revokeObjectURL = realRevoke; });
+async function pngSize(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer()), view = new DataView(bytes.buffer);
+  assert.deepEqual([...bytes.subarray(1, 4)], [80, 78, 71]);
+  return [view.getUint32(16), view.getUint32(20)];
+}
 
-function assertNoFile(p, message) {
-  assert.deepEqual(p.doc.downloads, [], `${message}: nothing downloaded`);
-  assert.equal(objectUrls.length, 0, `${message}: no object URL made`);
-  assert.equal(p.dialog.controls.status.textContent, '', `${message}: no error or stale "Rendering" shown`);
-  assert.equal(p.dialog.controls.exportButton.disabled, false, `${message}: dialog usable again`);
+function assertNothing(p, saved, message) {
+  assert.equal(saved, null, `${message}: nothing saved`);
   assert.equal(p.inFlight(), 0, `${message}: export released`);
+  assert.ok(p.log.canvases.every(c => c.width === 0), `${message}: canvases released`);
 }
 
-test('happy path: a plain renewal mid-export keeps the export, and the file is saved', async () => {
+test('happy path: a plain renewal mid-export keeps the export; without download a view stays at its screen size', async () => {
   const p = page({ holdOpen: true });
-  const done = p.dialog.controls.exportButton.fire('click');
+  const done = p.exportNow();
   await tick();
   assert.equal(p.log.opens.length, 1);
   // Same viewer, model and version with a later expiry: not a context change.
   p.context.applyViewerSession(session({ expiresIn: 900_000 }));
   assert.equal(p.log.opens[0].signal.aborted, false, 'renewal does not cancel');
   p.log.opens[0].resolve();
-  await done;
+  const saved = await done;
   assert.equal(p.log.traces.length, 1, 'contours traced');
-  assert.deepEqual(p.doc.downloads, ['orthophoto-720px.png']);
-  assert.equal(objectUrls.length, 1);
-  assert.match(p.dialog.controls.status.textContent, /limited by your access/);
-  assert.equal(p.log.canvases.length, 1);
-  assert.equal(p.log.canvases[0].width, 0, 'canvas released after saving');
+  assert.deepEqual(await pngSize(saved.blob), [720, 320]);
   assert.equal(p.inFlight(), 0);
 });
 
 test('a delayed export is cancelled when another viewer who may also print takes over the page', async () => {
   const p = page({ holdOpen: true });
-  const done = p.dialog.controls.exportButton.fire('click');
+  const done = p.exportNow();
   await tick();
   assert.equal(p.inFlight(), 1);
   const opening = p.log.opens[0];
-  // Same model and version, a different subject with print permission of its own.
   p.context.applyViewerSession(session({ subject: 'person-two' }));
   assert.equal(opening.signal.aborted, true, 'cancelled by the session change itself');
-  assert.equal(p.inFlight(), 1, 'still awaiting the orthophoto');
-  // The inert source answers after the switch anyway.
   opening.resolve();
-  await done;
+  const saved = await done;
   assert.equal(p.log.traces.length, 0, 'no overlays traced for the old export');
-  assert.equal(p.log.canvases.length, 0, 'nothing rendered');
-  assertNoFile(p, 'subject switch while opening the orthophoto');
+  assert.equal(p.log.reads.length, 0, 'nothing rendered');
+  assertNothing(p, saved, 'subject switch while opening the orthophoto');
 });
 
 test('a model version change during the contour trace stops the export, even without a session event', async () => {
   const p = page({ holdTrace: true });
-  const done = p.dialog.controls.exportButton.fire('click');
+  const done = p.exportNow();
   await tick();
   assert.equal(p.log.traces.length, 1);
-  // The page's model moves to v2 underneath; printing is still allowed.
   p.context.PROJECT = model('v2');
   p.log.traces[0].resolve();
-  await done;
-  assert.equal(p.log.canvases.length, 0, 'nothing rendered after the trace');
-  assertNoFile(p, 'version change during the trace');
+  const saved = await done;
+  assert.equal(p.log.reads.length, 0, 'nothing rendered after the trace');
+  assertNothing(p, saved, 'version change during the trace');
 });
 
-test('a subject switch while the file is being encoded releases the canvas and saves nothing', async () => {
-  const p = page({ holdBlob: true });
-  const done = p.dialog.controls.exportButton.fire('click');
+test('a subject switch while the image is being rendered saves nothing', async () => {
+  const p = page({ holdRead: true });
+  const done = p.exportNow();
   await tick();
-  assert.equal(p.log.blobs.length, 1, 'encoding in progress');
+  assert.equal(p.log.reads.length, 1, 'rendering in progress');
   p.context.applyViewerSession(session({ subject: 'person-two' }));
-  p.log.blobs[0].resolve();
-  await done;
-  assert.equal(p.log.canvases[0].width, 0, 'canvas released');
-  assertNoFile(p, 'subject switch during encoding');
+  p.log.reads[0].resolve();
+  assertNothing(p, await done, 'subject switch during rendering');
 });
 
 test('lost access cancels at once; closing the dialog is its own abort', async () => {
   const expired = page({ holdOpen: true });
-  const first = expired.dialog.controls.exportButton.fire('click');
+  const first = expired.exportNow();
   await tick();
   expired.context.setSessionAccessState('unavailable', 'session-expired');
   assert.equal(expired.log.opens[0].signal.aborted, true);
   expired.log.opens[0].resolve();
-  await first;
-  assertNoFile(expired, 'access lost');
+  assertNothing(expired, await first, 'access lost');
 
   const closed = page({ holdOpen: true });
-  const second = closed.dialog.controls.exportButton.fire('click');
+  const second = closed.exportNow();
   await tick();
-  await closed.dialog.dialog.close();
+  closed.dialog.abort();
   assert.equal(closed.log.opens[0].signal.aborted, true, 'Close aborts the export');
   closed.log.opens[0].resolve();
-  await second;
-  assert.deepEqual(closed.doc.downloads, []);
-  assert.equal(objectUrls.length, 0);
-  assert.equal(closed.inFlight(), 0);
+  assertNothing(closed, await second, 'dialog closed');
 });
 
-// A same-subject renewal that drops download but keeps measure: a current-view
-// PNG planned above the no-download cap (here the 720 px screen) must not be saved.
 const WITH_DOWNLOAD = { view: true, measure: true, download: true };
 const WITHOUT_DOWNLOAD = { view: true, measure: true, download: false };
 
-test('download kept: a 2048 px current-view PNG planned with download is saved', async () => {
-  const p = page({ holdBlob: true, permissions: WITH_DOWNLOAD });
-  p.dialog.controls.size.value = '2048';
-  const done = p.dialog.controls.exportButton.fire('click');
-  await tick();
-  p.context.applyViewerSession(session({ permissions: WITH_DOWNLOAD, expiresIn: 900_000 }));
-  p.log.blobs[0].resolve();
-  await done;
-  assert.deepEqual(p.doc.downloads, ['orthophoto-2048px.png']);
+test('with download the export is full native resolution: whole orthophoto and current view', async () => {
+  const whole = page({ permissions: WITH_DOWNLOAD });
+  assert.deepEqual(await pngSize((await whole.exportNow({ area: 'full' })).blob), [200, 100]);
+  const view = page({ permissions: WITH_DOWNLOAD });
+  assert.deepEqual(await pngSize((await view.exportNow()).blob), [180, 80], 'the view at the orthophoto\'s own 2 m pixels');
+  const denied = page({ permissions: WITHOUT_DOWNLOAD });
+  await assert.rejects(denied.context.exportOrthoPrintFromViewer({ area: 'full', format: 'png' }), { code: 'print_not_permitted' });
 });
 
-test('download revoked by a same-subject renewal during encoding: no file', async () => {
-  const p = page({ holdBlob: true, permissions: WITH_DOWNLOAD });
-  p.dialog.controls.size.value = '2048';
-  const done = p.dialog.controls.exportButton.fire('click');
+test('download revoked by a same-subject renewal during rendering: no file, with or without a session event', async () => {
+  const p = page({ holdRead: true, permissions: WITH_DOWNLOAD });
+  const done = p.exportNow();
   await tick();
-  assert.equal(p.log.blobs.length, 1, 'encoding in progress');
-  assert.equal(p.log.canvases[0].width, 2048, 'planned above the no-download cap');
+  assert.equal(p.log.reads.length, 1, 'rendering in progress');
   p.context.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD }));
-  assert.equal(p.log.traces[0].signal.aborted, true, 'cancelled by the session change itself');
-  assert.equal(p.inFlight(), 1);
-  p.log.blobs[0].resolve();
-  await done;
-  assert.equal(p.log.canvases[0].width, 0, 'canvas released');
-  assertNoFile(p, 'download revoked during encoding');
+  assert.equal(p.log.reads[0].signal.aborted, true, 'cancelled by the session change itself');
+  p.log.reads[0].resolve();
+  assertNothing(p, await done, 'download revoked during rendering');
 
-  // The same downgrade with no session event at all is caught after encoding.
-  const q = page({ holdBlob: true, permissions: WITH_DOWNLOAD });
-  q.dialog.controls.size.value = '2048';
-  const quiet = q.dialog.controls.exportButton.fire('click');
+  const q = page({ holdRead: true, permissions: WITH_DOWNLOAD });
+  const quiet = q.exportNow();
   await tick();
   q.context.SHARE_PERMISSIONS = WITHOUT_DOWNLOAD;
-  q.log.blobs[0].resolve();
-  await quiet;
-  assertNoFile(q, 'download revoked without a session event');
+  q.log.reads[0].resolve();
+  assertNothing(q, await quiet, 'download revoked without a session event');
 });
 
-test('download revoked immediately before the dialog saves: no file', async () => {
-  const p = page({ permissions: WITH_DOWNLOAD, beforeSave: context => context.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD })) });
-  p.dialog.controls.size.value = '2048';
-  await p.dialog.controls.exportButton.fire('click');
-  assert.equal(p.log.blobs.length, 1, 'the file was encoded');
-  assertNoFile(p, 'download revoked before save');
-
-  // Control: the same renewal that keeps download saves the file.
-  const kept = page({ permissions: WITH_DOWNLOAD, beforeSave: context => context.applyViewerSession(session({ permissions: WITH_DOWNLOAD })) });
-  kept.dialog.controls.size.value = '2048';
-  await kept.dialog.controls.exportButton.fire('click');
-  assert.deepEqual(kept.doc.downloads, ['orthophoto-2048px.png']);
+test('download revoked after rendering, right before the dialog saves: no file', async () => {
+  const p = page({ permissions: WITH_DOWNLOAD });
+  const result = await p.context.exportOrthoPrintFromViewer({ area: 'view', format: 'png', filename: 'x.png' }, null);
+  assert.ok(result.blob);
+  p.context.applyViewerSession(session({ permissions: WITHOUT_DOWNLOAD }));
+  assert.equal(result.stillCurrent(), false);
+  const kept = page({ permissions: WITH_DOWNLOAD });
+  const keptResult = await kept.context.exportOrthoPrintFromViewer({ area: 'view', format: 'png', filename: 'x.png' }, null);
+  kept.context.applyViewerSession(session({ permissions: WITH_DOWNLOAD, expiresIn: 900_000 }));
+  assert.equal(keptResult.stillCurrent(), true);
 });

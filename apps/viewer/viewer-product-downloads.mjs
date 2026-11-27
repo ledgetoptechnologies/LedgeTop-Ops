@@ -30,11 +30,11 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
   };
   const allowed = () => typeof permitted === 'function' ? permitted() === true : permitted === true;
   const container = element('section', '', 'viewer-product-controls');
-  const open = element('button', 'Download products', 'viewer-product-open'); open.type = 'button';
+  const open = element('button', 'Download products', 'tool-btn viewer-product-open'); open.type = 'button';
   container.append(open); host.append(container);
   const reportContainer = element('section', '', 'viewer-product-controls');
-  const reportOpen = element('button', 'Model report — processing & quality', 'viewer-product-open'); reportOpen.type = 'button';
-  const reportStatus = element('p'); reportStatus.setAttribute('role', 'status'); reportStatus.setAttribute('aria-live', 'polite');
+  const reportOpen = element('button', 'Model report', 'tool-btn full viewer-product-open'); reportOpen.type = 'button';
+  const reportStatus = element('p', '', 'hint'); reportStatus.setAttribute('role', 'status'); reportStatus.setAttribute('aria-live', 'polite');
   reportContainer.append(reportOpen, reportStatus); reportHost?.append(reportContainer);
   const dialog = element('dialog', '', 'viewer-product-dialog'); dialog.setAttribute('aria-label', 'Download model products');
   const heading = element('h2', 'Download products');
@@ -43,7 +43,7 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
   const list = element('div', '', 'viewer-product-list');
   dialog.append(heading, close, status, list); documentRef.body.append(dialog);
   const style = element('style');
-  style.textContent = '.viewer-product-controls{margin-top:12px}.viewer-product-open{width:100%;padding:9px}.viewer-product-dialog{width:min(440px,calc(100vw - 32px));max-height:80vh;overflow:auto;background:#111216;color:#eee;border:1px solid #444;border-radius:12px;padding:18px}.viewer-product-dialog::backdrop{background:#000a}.viewer-product-dialog h2{font-size:17px;margin:0 60px 14px 0}.viewer-product-close{position:absolute;right:14px;top:12px}.viewer-product-list{display:grid;gap:8px}.viewer-product-item{display:block;width:100%;text-align:left;padding:12px;background:#1b1c21;color:#eee;border:1px solid #444;border-radius:8px;cursor:pointer}.viewer-product-item small{display:block;color:#a9b2c1;margin-top:4px}.viewer-product-item:focus-visible,.viewer-product-dialog button:focus-visible{outline:2px solid #ee5007;outline-offset:2px}.viewer-product-item:disabled{opacity:.6;cursor:wait}.viewer-product-dialog p{font-size:12px;line-height:1.5;color:#adb6c4}';
+  style.textContent = '.viewer-product-controls{display:contents}#model-report-download .viewer-product-controls{display:grid;gap:6px;margin-top:8px}#model-report-download .viewer-product-controls p:empty{display:none}.viewer-product-open{width:100%}.viewer-product-dialog{width:min(440px,calc(100vw - 32px));max-height:80vh;overflow:auto;background:#111216;color:#eee;border:1px solid #444;border-radius:12px;padding:18px}.viewer-product-dialog::backdrop{background:#000a}.viewer-product-dialog h2{font-size:17px;margin:0 60px 14px 0}.viewer-product-close{position:absolute;right:14px;top:12px}.viewer-product-list{display:grid;gap:8px}.viewer-product-item{display:block;width:100%;text-align:left;padding:12px;background:#1b1c21;color:#eee;border:1px solid #444;border-radius:8px;cursor:pointer}.viewer-product-item small{display:block;color:#a9b2c1;margin-top:4px}.viewer-product-item:focus-visible,.viewer-product-dialog button:focus-visible{outline:2px solid #ee5007;outline-offset:2px}.viewer-product-item:disabled{opacity:.6;cursor:wait}.viewer-product-dialog p{font-size:12px;line-height:1.5;color:#adb6c4}';
   documentRef.head.append(style);
   const cancel = () => { generation++; controller?.abort(); controller = null; reportOpen.disabled = false; };
   close.onclick = () => dialog.close();
@@ -91,7 +91,7 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
     if (disposed || !allowed() || !base) return;
     cancel(); const epoch = generation;
     controller = new AbortController(); const signal = controller.signal;
-    reportOpen.disabled = true; reportStatus.textContent = 'Finding the original model report…';
+    reportOpen.disabled = true; reportStatus.textContent = '';
     try {
       const response = await fetchRef(base, { signal, credentials: 'same-origin' });
       if (!response.ok) throw new Error(response.status === 403 ? 'Downloads are not permitted for this model.' : 'Could not load the model report. Please retry.');
@@ -99,7 +99,7 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
       if (disposed || epoch !== generation || !allowed()) return;
       const expected = `${base}/report/download-grants`;
       const report = Array.isArray(data.products) && data.products.find(product => product.kind === 'report' && product.grantUrl === expected);
-      if (!report) { reportStatus.textContent = 'No original processing and quality report is available for this model version.'; return; }
+      if (!report) { reportStatus.textContent = 'No model report for this version.'; return; }
       const issued = await fetchRef(expected, { method: 'POST', signal, credentials: 'same-origin' });
       if (!issued.ok) throw new Error(issued.status === 403 ? 'Download access expired or was revoked.' : 'The model report could not be downloaded.');
       const grant = await issued.json(), url = safeProductTicket(grant.url, origin);
@@ -107,7 +107,7 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
       if (disposed || epoch !== generation || !allowed()) return;
       const link = element('a'); link.href = url; link.download = String(grant.fileName || 'report.pdf'); link.referrerPolicy = 'no-referrer';
       documentRef.body.append(link); link.click(); link.remove();
-      reportStatus.textContent = 'Original report download started. Check your browser Downloads panel.';
+      reportStatus.textContent = '';
     } catch (error) { if (error.name !== 'AbortError' && epoch === generation) reportStatus.textContent = error.message; }
     finally { if (epoch === generation) reportOpen.disabled = false; }
   };

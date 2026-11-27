@@ -281,6 +281,15 @@ checks, then candidate 100%, with the baseline as the rollback version. The
 selector does not provide credentials, authority packets, migrations or an
 accepted installed profile.
 
+The installation check also admits one reviewed held Ops Sync state while Sync
+is not the selected app: Sync `6f8e224c` active alone at 100% with `bc65f489`,
+an API upload from 2026-11-13, as its inactive latest
+(`HELD_OPS_SYNC_INACTIVE_LATEST`). It requires those exact ids and upload
+sources and the SHA-256 of every captured Sync field, taken from the #663
+companion evidence. Any other unselected inactive latest is still refused, and
+a release that selects Sync still requires its latest to equal its active
+version. It changes nothing on the Sync Worker.
+
 Cloudflare Builds has a20-minute limit. The complete GitHub CI can take longer,
 so production deployment must be initiated after successful main CI through a
 qualified completion-event path. A successful build or restored toggle is not
