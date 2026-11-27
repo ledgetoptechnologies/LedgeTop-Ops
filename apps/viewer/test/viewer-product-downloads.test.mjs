@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {sessionProductsUrl,safeProductTicket,mountViewerProductDownloads} from '../viewer-product-downloads.mjs';
+import {sessionProductsUrl,safeProductTicket,mountViewerProductDownloads,reportPermitted} from '../viewer-product-downloads.mjs';
 
 test('product endpoint is derived only from known same-origin scoped asset URLs',()=>{
   const origin='https://viewer.test';
@@ -74,4 +74,30 @@ test('model change during report lookup cannot start a download for the prior mo
   resolve({ok:true,json:async()=>({products:[{kind:'report',grantUrl:'/session-products/token/model/report/download-grants'}]})});
   await pending;assert.equal(fixture.clicked.length,0);assert.equal(fixture.status.textContent,'');
   assert.equal(fixture.button.disabled,false);fixture.mounted.destroy();
+});
+
+test('the model report button follows its own permission, apart from other downloads',async()=>{
+  assert.equal(reportPermitted({download:true}),true,'an older link or session: the report came with downloads');
+  assert.equal(reportPermitted({download:true,report:false}),false);
+  assert.equal(reportPermitted({download:false,report:true}),true);
+  assert.equal(reportPermitted({download:true,report:'true'}),false);
+  assert.equal(reportPermitted(null),false);
+  const calls=[];
+  class Element {
+    constructor(tag) { this.tag=tag; this.children=[]; }
+    append(...children) { this.children.push(...children); }
+    setAttribute() {} addEventListener() {} remove() {} focus() {} replaceChildren(...children) { this.children=children; } close() {} showModal() {} click() {}
+  }
+  const documentRef={createElement:tag=>new Element(tag),body:new Element('body'),head:new Element('head')};
+  let download=true,report=false;
+  const host=new Element('div'),reportHost=new Element('div');
+  const mounted=mountViewerProductDownloads({host,reportHost,getAssetRoot:()=>'/session-assets/token/model/models/a.glb',permitted:()=>download,reportPermitted:()=>report,documentRef,
+    fetchRef:async url=>{calls.push(url);return {ok:true,json:async()=>({products:[]})};},origin:'https://viewer.test'});
+  const products=host.children[0],reportBox=reportHost.children[0],[reportButton]=reportBox.children;
+  assert.equal(products.hidden,false);assert.equal(reportBox.hidden,true);
+  await reportButton.onclick();assert.deepEqual(calls,[],'a hidden report button does nothing');
+  download=false;report=true;mounted.refresh();
+  assert.equal(products.hidden,true);assert.equal(reportBox.hidden,false);
+  await reportButton.onclick();assert.deepEqual(calls,['/session-products/token/model']);
+  mounted.destroy();
 });

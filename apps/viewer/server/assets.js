@@ -11,7 +11,7 @@ const store = require('./store');
 const shareStore = require('./shareStore');
 const auth = require('./auth');
 const { createAssetRateLimiter } = require('./assetRateLimiter');
-const {revisionMatches,assetAllowed}=require('./publicSharePolicy');
+const {revisionMatches,assetAllowed,reportAllowed}=require('./publicSharePolicy');
 const { isAdminRequest } = require('./adminAuth');
 const { SHARE_COOKIE } = require('./shareApi');
 const { VIEWER_COOKIE } = require('./apiV1');
@@ -108,6 +108,7 @@ function viewerSessionAccessInSnapshot(tokenHash, projectId, { reviewAllowed = t
       : model?.status === 'ready' && model.activeVersionId === session.modelVersionId);
   return { live: true, access: allowed ? {
     model, review, cameras: session.permissions?.cameras !== false, download: session.permissions?.download === true,
+    report: reportAllowed(session.permissions),
     viewer: { tokenHash, projectId, reviewAllowed, sessionId: session.id, modelVersionId: session.modelVersionId },
   } : null };
 }
@@ -253,7 +254,7 @@ async function pathTokenAuthorization(req, projectId) {
         && share.modelId === requestedModelId
         && model?.status === 'ready'
         && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId);
-      return allowed ? { model, share, review: false, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
+      return allowed ? { model, share, review: false, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true, report: reportAllowed(share.permissions) } : false;
     }
     return legacyShareAccess(payload.shareId, projectId);
   }
@@ -267,7 +268,7 @@ async function pathTokenAuthorization(req, projectId) {
       && selected?.modelId === requestedModelId
       && selected.modelVersionId === payload.modelVersionId
       && model?.activeVersion?.id === payload.modelVersionId;
-    return allowed ? { model, review: false, publicOnly: true, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
+    return allowed ? { model, review: false, publicOnly: true, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true, report: reportAllowed(share.permissions) } : false;
   }
   return false;
 }
@@ -439,14 +440,16 @@ function productAssets(version){
   const report=(version?.lodVerificationAssets||[]).find(asset=>asset.kind==='report');
   return report?[...assets,report]:assets;
 }
+// The model report has its own permission; every other product follows download permission.
+function productPermitted(access,kind){return kind==='report'?access?.report===true:access?.download===true;}
 
 router.get('/session-products/:token/:id', async (req,res,next) => {
   try {
     const access=await pathTokenAuthorization(req,req.params.id);
-    if(!access?.download)return res.status(403).json({error:'Downloads are not permitted for this model'});
+    if(!access?.download&&!access?.report)return res.status(403).json({error:'Downloads are not permitted for this model'});
     res.setHeader('Cache-Control','private, no-store');
     const base=`/session-products/${encodeURIComponent(req.params.token)}/${encodeURIComponent(req.params.id)}`;
-    res.json({products:registeredProducts(productAssets(access.model?.activeVersion).filter(asset=>!access.share||assetAllowed(access.share,asset.kind)),{review:access.review,cameras:access.cameras,modelReport:true})
+    res.json({products:registeredProducts(productAssets(access.model?.activeVersion).filter(asset=>productPermitted(access,asset.kind)&&(!access.share||assetAllowed(access.share,asset.kind))),{review:access.review,cameras:access.cameras,modelReport:access.report===true})
       .map(product=>({...product,grantUrl:`${base}/${encodeURIComponent(product.kind)}/download-grants`}))});
   }catch(error){next(error);}
 });
@@ -457,19 +460,19 @@ router.post('/session-products/:token/:id/:kind/download-grants',async(req,res,n
     if(origin&&origin!==new URL(config.publicBaseUrl||`${req.protocol}://${req.get('host')}`).origin)return res.sendStatus(403);
     if(canonicalRepository?.rateLimited(`product-grant:${auth.hashToken(req.params.token)}:${req.ip}`,120,5*60_000))return res.sendStatus(429);
     const access=await pathTokenAuthorization(req,req.params.id);
-    if(!access?.download)return res.sendStatus(403);
+    if(!productPermitted(access,req.params.kind))return res.sendStatus(403);
     const asset=productAssets(access.model?.activeVersion).find(candidate=>candidate.kind===req.params.kind);
     if(access.share&&!assetAllowed(access.share,asset?.kind))return res.sendStatus(403);
-    const product=productDescriptor(asset,{review:access.review,cameras:access.cameras,modelReport:true});
+    const product=productDescriptor(asset,{review:access.review,cameras:access.cameras,modelReport:access.report===true});
     if(!product)return res.sendStatus(404);
     // Retain only a minimal authorization request; never retain Express req
     // objects, bodies or sockets for the duration of a capability.
     const original={params:{token:req.params.token}},id=req.params.id,versionId=access.model.activeVersion.id;
     const authorizedProduct=current=>{
-      if(!current?.download||current.model?.activeVersion?.id!==versionId)return null;
+      if(!productPermitted(current,asset.kind)||current.model?.activeVersion?.id!==versionId)return null;
       const registered=productAssets(current.model.activeVersion).find(candidate=>candidate.id===asset.id&&candidate.sha256===asset.sha256);
       if(current.share&&!assetAllowed(current.share,registered?.kind))return null;
-      const descriptor=productDescriptor(registered,{review:current.review,cameras:current.cameras,modelReport:true});
+      const descriptor=productDescriptor(registered,{review:current.review,cameras:current.cameras,modelReport:current.report===true});
       return descriptor?{model:current.model,asset:registered,product:descriptor}:null;
     };
     const ticket=productTickets.issue(access.viewer

@@ -21,7 +21,7 @@ import { readRasterBandMetadata, resolveRasterVerticalUnits } from './raster-ver
 import { resolveMeasurementDisplayElevations } from './measurement-display-elevations.mjs';
 import { resolveRenderedMeshBoundary, resolveRenderedPointBoundary, renderedPointNodeDescriptor } from './measurement-rendered-surface.mjs';
 import { preflightBrowserRasterHeader } from './measurement-raster-header.mjs';
-import { mountViewerProductDownloads } from './viewer-product-downloads.mjs';
+import { mountViewerProductDownloads, reportPermitted } from './viewer-product-downloads.mjs';
 import 'leaflet/dist/leaflet.css';
 import { fromUrl as openGeoTiff, Pool as GeoTiffPool } from 'geotiff';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
@@ -1472,15 +1472,15 @@ function syncMeasurementActionVisibility() {
   const accessAvailable = sessionAccessState !== 'unavailable'
     && (VIEW_MODE !== 'session' || (activeViewerSession && Date.parse(activeViewerSession.expiresAt) > Date.now()));
   const measure = accessAvailable && SHARE_PERMISSIONS.measure !== false;
-  const download = accessAvailable && SHARE_PERMISSIONS.download === true;
+  const report = accessAvailable && reportPermitted(SHARE_PERMISSIONS);
   const setHidden = (id, hidden) => { const element = document.getElementById(id); if (element) element.hidden = hidden; };
   setHidden('measurement-report-actions', !measure);
   setHidden('btn-capture-float', !measure);
   // Same rule as the print policy's `allowed`; the export re-checks the full policy.
   setHidden('ortho-print-actions', !measure);
   if (typeof syncOrthoExportAction === 'function') syncOrthoExportAction();
-  // The original processing report follows download permission independently.
-  setHidden('panel-model-report', !measure && !download);
+  // The original processing report has its own permission (older links and sessions: it came with downloads).
+  setHidden('panel-model-report', !measure && !report);
 }
 
 // Export image needs an orthophoto and an area this viewer may export: the
@@ -2687,7 +2687,7 @@ function installMeasurementWorkspace() {
     onAccessLost:measurementAccessLost,
   });
   viewerProductDownloads?.destroy();
-  viewerProductDownloads=mountViewerProductDownloads({host:document.getElementById('downloads-products'),reportHost:document.getElementById('model-report-download'),getAssetRoot:()=>TILES_URL||EPT_URL||ORTHO_URL||DSM_URL||DTM_URL||GLB_URL,permitted:()=>SHARE_PERMISSIONS.download===true});
+  viewerProductDownloads=mountViewerProductDownloads({host:document.getElementById('downloads-products'),reportHost:document.getElementById('model-report-download'),getAssetRoot:()=>TILES_URL||EPT_URL||ORTHO_URL||DSM_URL||DTM_URL||GLB_URL,permitted:()=>SHARE_PERMISSIONS.download===true,reportPermitted:()=>reportPermitted(SHARE_PERMISSIONS)});
 }
 
 function setTool(tool) {
