@@ -46,9 +46,11 @@ export function validateInstalledRetainedLedger(snapshot, { app, workerName, acc
 
 function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, previousAssetBytes, observedAt,
   installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
-  canonicalBrowserRetirementClientVersionId } = {}) {
+  canonicalBrowserRetirementClientVersionId, opsStaffDirectoryEntrypointContract } = {}) {
   need(ordinaryPlan?.schemaVersion === 1 && ['operations', 'client'].includes(ordinaryPlan.application),
     'Version 1 pinned ordinary frontend plan required');
+  need(opsStaffDirectoryEntrypointContract === ordinaryPlan.opsStaffDirectoryEntrypointContract,
+    'Retained plan must preserve the exact Ops StaffDirectory entrypoint contract of the ordinary plan');
   need(installedOpsSuccessorReaderContract === ordinaryPlan.installedOpsSuccessorReaderContract
     && (installedOpsSuccessorReaderContract === undefined
       || (installedOpsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT && ordinaryPlan.application === 'client'))
@@ -77,7 +79,8 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
     ordinaryFrontendPreflightMode: preflightMode, installedOpsSuccessorReaderContract,
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
     ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }),
-    ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }) });
+    ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }),
+    ...(opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract }) });
   const app = ordinaryPlan.application, workerName = WORKERS[app], accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
   const parentVersionId = snapshot?.[app]?.version?.id;
   need(UUID.test(parentVersionId ?? ''), 'Captured active parent version is required');
@@ -108,6 +111,7 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
     application: app, workerName, accountId, sourceCommit: ordinaryPlan.sourceCommit, parentVersionId,
     ...(installedOpsSuccessorReaderContract === undefined ? {} : { installedOpsSuccessorReaderContract }),
     ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }),
+    ...(opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract }),
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
     ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }),
     rootHtmlArchive: retained.archive,
@@ -190,7 +194,7 @@ export function retainedNativeConfig(plan, staged) {
 /** Verify the v2 ledger plus exact main and provider-optional map while
  * delegating runtime, returned-map, binding and assets-config checks. */
 export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, candidate, modern, opsSuccessorReaderContract,
-  opsStaffDirectoryContract, opsStaffDirectoryPins } = {}) {
+  opsStaffDirectoryEntrypointContract, opsStaffDirectoryPins } = {}) {
   need(plan?.schemaVersion === 2 && plan.contract === 'ordinary-frontend-retained-native-module-v2'
     && Array.isArray(modern?.modules) && modern.modules.length >= 2 && modern.modules.length <= 3
     && new Set(modern.modules.map(row => row?.name)).size === modern.modules.length,
@@ -209,7 +213,7 @@ export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, c
   const nativeModules = modern.modules.filter(row => row.name !== module.name);
   const runtimeProof = verifyOrdinaryFrontendCandidateModules({ before, plan: plan.ordinaryPlan, candidate,
     modern: { ...modern, modules: nativeModules }, allowProviderOmittedMap: true, opsSuccessorReaderContract,
-    ...(opsStaffDirectoryContract === undefined ? {} : { opsStaffDirectoryContract,
+    ...(opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract,
       ...(opsStaffDirectoryPins === undefined ? {} : { opsStaffDirectoryPins }) }) });
   return Object.freeze({ ...runtimeProof, retainedLedgerModuleVerified: true,
     retainedLedgerSHA256: plan.retentionLedgerSHA256, retainedAssetCount: ledger.assets.length,

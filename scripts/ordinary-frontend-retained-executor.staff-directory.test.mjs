@@ -7,13 +7,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROFILE, hash, canonical, validateInstallation, verifyCandidate, isHeldOpsStaffDirectoryInactiveLatest,
+import { PROFILE, hash, canonical, validateInstallation, verifyCandidate, isHeldOpsStaffDirectoryInactiveLatest, compileConfig,
   OPS_STAFF_DIRECTORY_ENTRYPOINT, OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT, OPS_SUCCESSOR_READER_INSTALLED_CONTRACT,
   OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
   ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
-import { OPS_SOLE_ACTIVE_BASELINE_CONTRACT, qualifyOpsCandidateNamedHandlers, qualifyPriorCandidateResumeJournal,
-  selectOperationsBaselineMode, selectOpsStaffDirectoryEntrypoint, verifyExactOpsStaffDirectoryEntrypointAddition }
+import { OPS_SOLE_ACTIVE_BASELINE_CONTRACT, qualifyOpsCandidateNamedHandlers,
+  selectOpsStaffDirectoryEntrypoint, verifyExactOpsStaffDirectoryEntrypointAddition }
   from './ordinary-frontend-retained-executor.mjs';
+import { compileOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
+import { compileOrdinaryFrontendRetainedPlan } from './ordinary-frontend-retained-plan.mjs';
 import { verifyOrdinaryFrontendCandidateModules } from './ordinary-frontend-candidate-verifier.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 
@@ -106,8 +108,7 @@ test('reviewed production pins are exactly the StaffDirectory build and carry no
     sourceMapSHA256: '7865a50c3505c94be61a8fc3c3c1ef437797d2b45b11af70dc0d7955c0298e23',
     className: 'StaffDirectory', handlers: HANDLERS,
     baselineVersionId: 'b61e28eb-02c4-49b6-8bb0-c83aa6777c7d',
-    heldCandidateId: '65650d92-00fe-40ff-8946-7df9ec8a407e',
-    priorVerifierSourceSHA256: 'e6bdbe06ef1655d50c9960b7f8b28a0860e4d32259705199c54bde9c6425e09f' });
+    heldCandidateId: '65650d92-00fe-40ff-8946-7df9ec8a407e' });
   assert.ok(Object.isFrozen(OPS_STAFF_DIRECTORY_ENTRYPOINT) && Object.isFrozen(OPS_STAFF_DIRECTORY_ENTRYPOINT.handlers));
 });
 
@@ -138,7 +139,7 @@ test('exact addition passes candidate, module and post-activation installation c
   const { profile, snapshot: before } = fixture();
   const { candidate, modern } = candidateFrom(before, NEW);
   const named = qualifyOpsCandidateNamedHandlers({ app: 'operations', before, candidate, ordinaryPlan: ordinaryPlanFor(pins),
-    staffDirectory: { resume: false }, pins });
+    staffDirectory: { contract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT }, pins });
   assert.equal(named.kind, OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT);
   assert.equal(named.moduleOptions.opsSuccessorReaderContract, undefined, 'the two contracts never combine');
   assert.deepEqual(verifyCandidate(before, 'operations', candidate, modern, MAIN, MAP, named.moduleOptions),
@@ -156,7 +157,7 @@ test('exact addition passes candidate, module and post-activation installation c
     expectedBindings: clone(candidate.resources.bindings), expectedAssetsConfiguration: clone(modern.assets) };
   assert.equal(verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern, ...named.moduleOptions }).candidateModulesVerified, true);
   assert.throws(() => verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern,
-    opsStaffDirectoryContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT }), /plan differs from exact reviewed source bundle/u,
+    opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT }), /plan differs from exact reviewed source bundle/u,
   'the production pins never match a synthetic plan');
   for (const [name, mutate] of Object.entries(DRIFT)) {
     const drifted = candidateFrom(before, NEW, mutate);
@@ -190,7 +191,7 @@ test('exact addition passes candidate, module and post-activation installation c
 
   // Contract scope.
   for (const extra of [{ opsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }, { selectedApp: 'client' },
-    { opsStaffDirectoryContract: 'ops-staff-directory-entrypoint-v2' }, { opsStaffDirectoryCandidateId: undefined },
+    { opsStaffDirectoryEntrypointContract: 'ops-staff-directory-entrypoint-v2' }, { opsStaffDirectoryCandidateId: 'not-a-uuid' },
     { ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: 'operations' }])
     assert.throws(() => validateInstallation(after, { ...options, ...extra }),
       /StaffDirectory entrypoint contract is limited|Unreviewed ordinary frontend accepted profile/u, JSON.stringify(extra));
@@ -211,17 +212,18 @@ test('named-handler dispatch keeps the successor exception separate and refuses 
   const none = qualifyOpsCandidateNamedHandlers({ app: 'operations', before, candidate: unchanged, ordinaryPlan: ordinaryPlanFor(pins), pins });
   assert.equal(none.proof, null); assert.equal(none.installationOptions, null);
   assert.throws(() => qualifyOpsCandidateNamedHandlers({ app: 'client', before, candidate, ordinaryPlan: ordinaryPlanFor(pins),
-    staffDirectory: { resume: false }, pins }), /Operations-only/u);
+    staffDirectory: { contract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT }, pins }), /Operations-only/u);
 });
 
-test('the explicit selector requires the pinned build, canonical v4, sole-active baseline and post-0226 authority', () => {
-  const real = ordinaryPlanFor(OPS_STAFF_DIRECTORY_ENTRYPOINT);
+test('the explicit selector requires the pinned build in both plans, canonical v4, sole-active baseline, post-0226 authority and a fresh upload', () => {
+  const real = { ...ordinaryPlanFor(OPS_STAFF_DIRECTORY_ENTRYPOINT), opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT };
   const exact = { app: 'operations', contract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT, ordinaryPlan: real,
+    pinnedPlan: { opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT },
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
     operationsBaselineContract: OPS_SOLE_ACTIVE_BASELINE_CONTRACT, staffAuthorityContract: POST0226_STAFF_PRESERVATION_CONTRACT };
-  assert.deepEqual({ ...selectOpsStaffDirectoryEntrypoint(exact) }, { resume: false });
+  assert.deepEqual({ ...selectOpsStaffDirectoryEntrypoint(exact) }, { contract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT, freshUpload: true });
   for (const change of [
-    { app: 'client' }, { contract: 'ops-staff-directory-entrypoint-v2' },
+    { app: 'client' },
     { ordinaryPlan: { ...real, sourceCommit: 'b'.repeat(40) } },
     { ordinaryPlan: { ...real, release: { ...real.release, main: { sha256: 'c'.repeat(64) } } } },
     { ordinaryPlan: { ...real, release: { ...real.release, sourceMap: { sha256: 'd'.repeat(64) } } } },
@@ -234,17 +236,16 @@ test('the explicit selector requires the pinned build, canonical v4, sole-active
     { expectedDeploymentVersions: { operations: [] } },
   ]) assert.throws(() => selectOpsStaffDirectoryEntrypoint({ ...exact, ...change }), /StaffDirectory entrypoint contract requires/u,
     JSON.stringify(change));
-  assert.throws(() => selectOpsStaffDirectoryEntrypoint({ ...exact, contract: undefined }), /requires its explicit entrypoint contract/u);
-  assert.equal(selectOpsStaffDirectoryEntrypoint({ ...exact, contract: undefined, ordinaryPlan: ordinaryPlanFor(pins) }), null);
-  assert.equal(selectOpsStaffDirectoryEntrypoint({ ...exact, app: 'client', contract: undefined }), null);
-  assert.deepEqual({ ...selectOpsStaffDirectoryEntrypoint({ ...exact,
-    resumeCandidate: { candidateId: OPS_STAFF_DIRECTORY_ENTRYPOINT.heldCandidateId } }) }, { resume: true });
-  assert.throws(() => selectOpsStaffDirectoryEntrypoint({ ...exact, resumeCandidate: { candidateId: NEW } }),
-    /limited to the exact held uploaded candidate/u);
-  assert.equal(selectOperationsBaselineMode({ app: 'operations', operationsBaselineContract: OPS_SOLE_ACTIVE_BASELINE_CONTRACT,
-    resumeCandidate: { candidateId: HELD }, opsStaffDirectoryResume: true }), 'sole-active');
-  assert.throws(() => selectOperationsBaselineMode({ app: 'operations', operationsBaselineContract: OPS_SOLE_ACTIVE_BASELINE_CONTRACT,
-    resumeCandidate: { candidateId: HELD } }), /excludes pinned staged weights/u);
+  for (const change of [{ contract: 'ops-staff-directory-entrypoint-v2' }, { pinnedPlan: {} },
+    { ordinaryPlan: { ...real, opsStaffDirectoryEntrypointContract: undefined } }])
+    assert.throws(() => selectOpsStaffDirectoryEntrypoint({ ...exact, ...change }), /pinned in both release plans/u, JSON.stringify(change));
+  assert.throws(() => selectOpsStaffDirectoryEntrypoint({ ...exact, resumeCandidate: { candidateId: OPS_STAFF_DIRECTORY_ENTRYPOINT.heldCandidateId } }),
+    /fresh upload only/u, 'the held upload is never resumed');
+  const unpinned = { ...ordinaryPlanFor(OPS_STAFF_DIRECTORY_ENTRYPOINT) };
+  assert.throws(() => selectOpsStaffDirectoryEntrypoint({ ...exact, contract: undefined, ordinaryPlan: unpinned, pinnedPlan: {} }),
+    /requires its explicit entrypoint contract/u);
+  assert.equal(selectOpsStaffDirectoryEntrypoint({ ...exact, contract: undefined, ordinaryPlan: ordinaryPlanFor(pins), pinnedPlan: {} }), null);
+  assert.equal(selectOpsStaffDirectoryEntrypoint({ ...exact, app: 'client', contract: undefined, ordinaryPlan: unpinned, pinnedPlan: {} }), null);
 });
 
 function heldLatest() {
@@ -301,60 +302,64 @@ test('the activated held StaffDirectory version is recognized for later Client r
     opsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }), /successor reader/u);
 });
 
-function heldJournal(t, { a0Shape = false, verifierSHA256 = pins.priorVerifierSourceSHA256, candidateId = HELD } = {}) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ops-staff-directory-resume-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const baselineVersionId = pins.baselineVersionId, sourceCommit = pins.sourceCommit;
-  const ordinaryPlan = { ...ordinaryPlanFor(pins), browserProof: { inventorySHA256: '7'.repeat(64) } };
-  const pinnedPlan = { contract: 'ordinary-frontend-retained-native-module-v2', sourceCommit, ordinaryPlan,
-    ordinaryPlanSHA256: '8'.repeat(64), retentionLedgerSHA256: '9'.repeat(64), retentionLedger: { assets: Array.from({ length: 12 }, () => ({})) },
-    assetProviderIdentifierProvenance: { schema: 'sha256-prefix32-v1' } };
-  const verifierName = 'ops-ui-verify-1234567890abcdef12345678', verifierPath = `/workers/scripts/${verifierName}`;
-  const worker = a0Shape ? {} : { workerName: 'ledgetop-ops' };
-  const rows = [
-    { sequence: 1, at: '2026-11-27T00:00:00.000Z', phase: 'temporary-asset-verifier-create', workerName: 'ledgetop-ops',
-      verifiedVersionId: baselineVersionId, verifierName, assetCount: 10, receiptName: 'verified-prior-active-assets', automaticRetry: false },
-    { sequence: 2, at: '2026-11-27T00:00:01.000Z', phase: 'temporary-verifier-create', requestId: '1', method: 'PUT', path: verifierPath,
-      name: verifierName, workerName: 'ledgetop-ops', sourceSHA256: verifierSHA256, sourceCommit, automaticRetry: false },
-    { sequence: 3, at: '2026-11-27T00:00:02.000Z', phase: 'temporary-verifier-enable', requestId: '2', method: 'POST',
-      path: `${verifierPath}/subdomain`, name: verifierName, ...worker, sourceCommit, automaticRetry: false },
-    { sequence: 4, at: '2026-11-27T00:00:03.000Z', phase: 'temporary-verifier-delete', requestId: '3', method: 'DELETE', path: verifierPath,
-      name: verifierName, ...worker, ...(a0Shape ? {} : { sourceSHA256: verifierSHA256 }), sourceCommit, automaticRetry: false },
-    { sequence: 5, at: '2026-11-27T00:00:04.000Z', phase: 'native-version-upload', sourceCommit, workerName: 'ledgetop-ops',
-      parentVersionId: baselineVersionId, mainSHA256: pins.mainSHA256, mapSHA256: pins.sourceMapSHA256,
-      ledgerSHA256: pinnedPlan.retentionLedgerSHA256, assetInventorySHA256: ordinaryPlan.browserProof.inventorySHA256, automaticRetry: false },
-  ];
-  fs.writeFileSync(path.join(directory, 'journal.jsonl'), `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
-  fs.writeFileSync(path.join(directory, 'candidate.private.json'), JSON.stringify({ candidateId, parentVersionId: baselineVersionId }));
-  fs.writeFileSync(path.join(directory, 'release-plan.private.json'), JSON.stringify({ schemaVersion: 2, contract: pinnedPlan.contract,
-    application: 'operations', sourceCommit, baselineVersionId, ordinaryPlanSHA256: pinnedPlan.ordinaryPlanSHA256,
-    ledgerSHA256: pinnedPlan.retentionLedgerSHA256, rollbackVersionId: baselineVersionId,
-    assetProviderIdentifierProvenance: pinnedPlan.assetProviderIdentifierProvenance, oldAssetCount: 10, retainedAssetCount: 12 }));
-  fs.writeFileSync(path.join(directory, 'upload-exit.json'), JSON.stringify({ code: 0 }));
-  fs.writeFileSync(path.join(directory, 'upload-intent.json'), JSON.stringify({ phase: 'upload', automaticRetry: false,
-    argv: [process.execPath, '--no-warnings', process.execPath, 'versions', 'upload', '--config', path.join(directory, 'wrangler.retained.private.json')] }));
-  fs.writeFileSync(path.join(directory, 'upload.private.log'), `Worker Version ID: ${candidateId}`);
-  fs.writeFileSync(path.join(directory, 'upload-pid.json'), JSON.stringify({ pid: 1 }));
-  fs.writeFileSync(path.join(directory, 'staff-before-upload.private.json'), JSON.stringify({ synthetic: true }));
-  fs.writeFileSync(path.join(directory, 'verified-prior-active-assets.private.json'), JSON.stringify({ versionId: baselineVersionId,
-    assetCount: 10, totalBytes: 999, temporaryVerifierRemoved: true, absenceVerified: true, automaticRetry: false }));
-  return { directory, pinnedPlan, resume: { candidateId: HELD, priorJournalDirectory: directory, originalSnapshot: {} } };
-}
-test('resume journal accepts only the held StaffDirectory upload shape, verifier source and ids', t => {
-  const options = h => ({ app: 'operations', baselineVersionId: pins.baselineVersionId, pinnedPlan: h.pinnedPlan,
-    oldAssetCount: 10, oldAssetBytes: 999, cliPath: process.execPath, staffDirectoryPins: pins });
-  const h = heldJournal(t);
-  assert.equal(qualifyPriorCandidateResumeJournal(h.resume, options(h)).candidateId, HELD);
-  assert.throws(() => qualifyPriorCandidateResumeJournal(h.resume, { ...options(h), staffDirectoryPins: null }), /baseline verifier/u,
-    'the a0 journal rule does not accept the StaffDirectory upload');
-  const a0 = heldJournal(t, { a0Shape: true });
-  assert.throws(() => qualifyPriorCandidateResumeJournal(a0.resume, options(a0)), /baseline verifier/u);
-  const otherVerifier = heldJournal(t, { verifierSHA256: 'e'.repeat(64) });
-  assert.throws(() => qualifyPriorCandidateResumeJournal(otherVerifier.resume, options(otherVerifier)), /baseline verifier/u);
-  assert.throws(() => qualifyPriorCandidateResumeJournal({ ...h.resume, candidateId: NEW }, options(h)), /exact held candidate/u);
-  assert.throws(() => qualifyPriorCandidateResumeJournal(h.resume, { ...options(h), baselineVersionId: NEW }), /exact held candidate/u);
-  const otherCandidate = heldJournal(t, { candidateId: NEW });
-  assert.throws(() => qualifyPriorCandidateResumeJournal(otherCandidate.resume, options(otherCandidate)), /do not match the supplied candidate/u);
-  assert.throws(() => qualifyPriorCandidateResumeJournal(h.resume, { ...options(h),
-    pinnedPlan: { ...h.pinnedPlan, sourceCommit: 'b'.repeat(40) } }), /exact held candidate, baseline and pinned build/u);
+test('a fresh Ops release admits the exact held stray latest only under the explicit contract, before activation', () => {
+  const { profile, snapshot } = heldLatest();
+  const contract = { opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT, opsStaffDirectoryPins: pins };
+  // Compile capture and executor baseline/pre-upload checks: Ops selected, held upload is latest.
+  assert.throws(() => validateInstallation(snapshot, { profile, selectedApp: 'operations', opsStaffDirectoryPins: pins }),
+    /Latest must equal the selected sole active version/u, 'without the contract the stray latest blocks the release (the refusal on main)');
+  assert.equal(validateInstallation(snapshot, { profile, selectedApp: 'operations', ...contract }), snapshot);
+  // compileConfig forwards the contract to its own installation check (scope refusal proves the forwarding;
+  // acceptance there uses the frozen production pins, which synthetic ids never match).
+  assert.throws(() => compileConfig(snapshot, 'client', '/synthetic/index.js', profile, undefined, undefined, undefined,
+    OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT), /StaffDirectory entrypoint contract is limited/u);
+  assert.throws(() => compileConfig(snapshot, 'operations', '/synthetic/index.js', profile), /Latest must equal/u);
+  // After the fresh upload the new candidate is latest as usual.
+  const inactive = clone(snapshot); inactive.operations.latest = NEW;
+  const fresh = candidateFrom(snapshot, NEW); inactive.operations.latestVersion = fresh.candidate; inactive.operations.latestModern = fresh.modern;
+  assert.equal(validateInstallation(inactive, { profile, selectedApp: 'operations', allowLatest: { operations: NEW }, ...contract }), inactive);
+  assert.throws(() => validateInstallation(snapshot, { profile, selectedApp: 'operations', allowLatest: { operations: NEW }, ...contract }),
+    /Latest must equal/u, 'the held latest is never admitted once a candidate is the expected latest');
+  // The active Ops version stays the strict profile in this mode.
+  const activeStaffDirectory = activated(snapshot, fresh.candidate, fresh.modern);
+  assert.throws(() => validateInstallation(activeStaffDirectory, { profile, selectedApp: 'operations', ...contract }), /unrecognized exports/u);
+  // Only the exact held state.
+  const mutations = {
+    ...Object.fromEntries(Object.entries(DRIFT).map(([name, mutate]) => [name, s => mutate(s.operations.latestVersion)])),
+    'main bytes': s => { s.operations.latestModern.modules[0].content_base64 = Buffer.from('other').toString('base64'); },
+    'api upload': s => { s.operations.latestVersion.resources.script.last_deployed_from = 'api'; },
+    'other latest id': s => { s.operations.latest = NEW; s.operations.latestVersion.id = NEW; s.operations.latestModern.id = NEW; },
+    'staged': s => { s.operations.deployment.versions.push({ version_id: HELD, percentage: 0 }); },
+  };
+  for (const [name, mutate] of Object.entries(mutations)) {
+    const changed = clone(snapshot); mutate(changed);
+    assert.throws(() => validateInstallation(changed, { profile, selectedApp: 'operations', ...contract }), undefined, name);
+  }
+  // Scope: never for another selected app, never with the successor contract, never at the production pins for synthetic ids.
+  assert.throws(() => validateInstallation(snapshot, { profile, selectedApp: 'client', ...contract }), /StaffDirectory entrypoint contract is limited/u);
+  assert.throws(() => validateInstallation(snapshot, { profile, selectedApp: 'operations', ...contract,
+    opsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }), /StaffDirectory entrypoint contract is limited/u);
+  assert.throws(() => validateInstallation(snapshot, { profile, selectedApp: 'operations',
+    opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT }), /Latest must equal/u);
+});
+
+test('plan compilers carry the contract only for the exact pinned Ops build and refuse mismatches', () => {
+  const { profile, snapshot } = heldLatest();
+  const release = { application: 'operations', sourceCommit: 'b'.repeat(40), main: { sha256: 'c'.repeat(64) }, sourceMap: { sha256: 'd'.repeat(64) } };
+  const base = { app: 'operations', release, profile, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+    opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT };
+  assert.throws(() => compileOrdinaryFrontendReleasePlan(snapshot, base), /requires its exact pinned Operations build/u);
+  const pinnedRelease = { ...release, sourceCommit: OPS_STAFF_DIRECTORY_ENTRYPOINT.sourceCommit,
+    main: { sha256: OPS_STAFF_DIRECTORY_ENTRYPOINT.mainSHA256 }, sourceMap: { sha256: OPS_STAFF_DIRECTORY_ENTRYPOINT.sourceMapSHA256 } };
+  for (const change of [{ app: 'client', release: { ...pinnedRelease, application: 'client' } },
+    { ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE },
+    { expectedDeploymentVersions: { operations: [] } },
+    { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT },
+    { opsStaffDirectoryEntrypointContract: 'ops-staff-directory-entrypoint-v2' }])
+    assert.throws(() => compileOrdinaryFrontendReleasePlan(snapshot, { ...base, release: pinnedRelease, ...change }),
+      /requires its exact pinned Operations build|successor-reader promotion/u, JSON.stringify(change));
+  assert.throws(() => compileOrdinaryFrontendRetainedPlan(snapshot, { ordinaryPlan: { schemaVersion: 1, application: 'operations' },
+    opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT }), /exact Ops StaffDirectory entrypoint contract/u);
+  assert.throws(() => compileOrdinaryFrontendRetainedPlan(snapshot, { ordinaryPlan: { schemaVersion: 1, application: 'operations',
+    opsStaffDirectoryEntrypointContract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT } }), /exact Ops StaffDirectory entrypoint contract/u);
 });

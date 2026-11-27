@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonical, hash, need, compileConfig, validateInstallation, validateReviewedExpectedDeploymentVersions,
   ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT,
+  OPS_STAFF_DIRECTORY_ENTRYPOINT, OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT,
   ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { domainRecognitionProfile } from './production-domain-recognition.mjs';
 import { compileCanonicalBrowserRetirementTransition, normalizeCanonicalBrowserRetirementPredecessor }
@@ -98,8 +99,20 @@ export function verifyOrdinaryFrontendArtifacts(release) {
 export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   profile = domainRecognitionProfile('portal-entry-canonical'), expectedDeploymentVersions, ordinaryFrontendPreflightMode,
   installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
-  canonicalBrowserRetirementClientVersionId } = {}) {
+  canonicalBrowserRetirementClientVersionId, opsStaffDirectoryEntrypointContract } = {}) {
   need(['operations', 'client'].includes(app) && release?.application === app, 'Exact frontend application required');
+  // ops-staff-directory-entrypoint-v1: only the exact pinned Ops build, canonical v4, sole-active capture,
+  // and no other Ops contract. It admits the held stray inactive latest in this compile capture only.
+  const staffDirectory = opsStaffDirectoryEntrypointContract !== undefined;
+  need(!staffDirectory || (opsStaffDirectoryEntrypointContract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT
+    && app === 'operations' && ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+    && expectedDeploymentVersions === undefined && installedOpsSuccessorReaderContract === undefined
+    && opsSuccessorReaderPromotionContract === undefined && canonicalBrowserRetirementSelector === undefined
+    && canonicalBrowserRetirementClientVersionId === undefined
+    && release.sourceCommit === OPS_STAFF_DIRECTORY_ENTRYPOINT.sourceCommit
+    && release.main?.sha256 === OPS_STAFF_DIRECTORY_ENTRYPOINT.mainSHA256
+    && release.sourceMap?.sha256 === OPS_STAFF_DIRECTORY_ENTRYPOINT.sourceMapSHA256),
+  'Ops StaffDirectory entrypoint contract requires its exact pinned Operations build, canonical v4 and sole-active capture');
   const opsPromotion = opsSuccessorReaderPromotionContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT;
   need(opsSuccessorReaderPromotionContract === undefined || (opsPromotion && app === 'operations'
     && installedOpsSuccessorReaderContract === undefined && expectedDeploymentVersions === undefined),
@@ -120,7 +133,8 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   validateInstallation(preflightSnapshot, { profile: beforeProfile, selectedApp: app,
     expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
     ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
-    opsSuccessorReaderContract: opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract,
+    ...(staffDirectory ? { opsStaffDirectoryEntrypointContract } : {}) });
   const browserProof = verifyOrdinaryFrontendArtifacts(release);
   const state = before[app], bindings = state.version.resources.bindings;
   if (browserTransition) need((app === 'operations'
@@ -136,7 +150,8 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   need(assets && equal(Object.keys(assets), ['config']) && assets.config.base_path === '/'
     && Object.keys(assets.config).every(key => ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first'].includes(key)), 'Unsupported installed asset configuration');
   const config = compileConfig(preflightSnapshot, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions,
-    ordinaryFrontendPreflightMode, opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract);
+    ordinaryFrontendPreflightMode, opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract,
+    staffDirectory ? opsStaffDirectoryEntrypointContract : undefined);
   config.find_additional_modules = false;
   config.keep_vars = false;
   config.unsafe.metadata.keep_bindings = [];
@@ -172,6 +187,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
     installationPreflight,
     ...(installedOpsSuccessorReaderContract === undefined ? {} : { installedOpsSuccessorReaderContract }),
     ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }),
+    ...(staffDirectory ? { opsStaffDirectoryEntrypointContract } : {}),
     ...(browserTransition ? { canonicalBrowserRetirementSelector: browserTransition.selector } : {}),
     ...(browserTransition?.clientRetirement ? { canonicalBrowserRetirementClientVersionId: browserTransition.clientRetirement.versionId } : {}),
     ...(reviewedExpectedDeploymentVersions ? { expectedDeploymentVersions: clone(reviewedExpectedDeploymentVersions) } : {}),

@@ -68,6 +68,7 @@ function planProfile(before, plan, profile, expectedDeploymentVersions) {
     ...(plan.canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector: plan.canonicalBrowserRetirementSelector }),
     ...(plan.canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId: plan.canonicalBrowserRetirementClientVersionId }),
     ...(plan.opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract: plan.opsSuccessorReaderPromotionContract }),
+    ...(plan.opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract: plan.opsStaffDirectoryEntrypointContract }),
   });
   return { expected, preflightMode };
 }
@@ -129,7 +130,7 @@ export function ordinaryFrontendExecutionQualification(namespaceQualification) {
 
 /** Verify candidate runtime modules and native resource/config invariants. */
 export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern, allowProviderOmittedMap = false,
-  opsSuccessorReaderContract, opsStaffDirectoryContract, opsStaffDirectoryPins = OPS_STAFF_DIRECTORY_ENTRYPOINT } = {}) {
+  opsSuccessorReaderContract, opsStaffDirectoryEntrypointContract, opsStaffDirectoryPins = OPS_STAFF_DIRECTORY_ENTRYPOINT } = {}) {
   need(plan?.schemaVersion === 1 && ['operations','client'].includes(plan.application)
     && plan.offlineOnly === true && plan.deploymentEnabled === false,
   'Pinned offline ordinary frontend plan is required');
@@ -165,8 +166,8 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
       && plan.release.sourceMap.sha256 === '375962dbe22ed0038009d0790c1c12a33b0668010f99916b8addade0a489d08b',
     'Ops successor reader candidate plan differs from exact reviewed source bundle and source map');
   }
-  if (opsStaffDirectoryContract !== undefined) {
-    need(opsStaffDirectoryContract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT && opsSuccessorReaderContract === undefined
+  if (opsStaffDirectoryEntrypointContract !== undefined) {
+    need(opsStaffDirectoryEntrypointContract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT && opsSuccessorReaderContract === undefined
       && app === 'operations' && !plan.canonicalBrowserRetirementTransition
       && plan.sourceCommit === opsStaffDirectoryPins?.sourceCommit
       && plan.release.main.sha256 === opsStaffDirectoryPins.mainSHA256
@@ -184,7 +185,7 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
     candidateBaseline[app].version.resources.bindings = structuredClone(plan.expectedBindings);
   }
   const runtimeProof = verifyCandidate(candidateBaseline, app, candidate, modern, pinnedMain, sourceMap,
-    opsStaffDirectoryContract === undefined ? { opsSuccessorReaderContract } : { opsStaffDirectoryContract, opsStaffDirectoryPins });
+    opsStaffDirectoryEntrypointContract === undefined ? { opsSuccessorReaderContract } : { opsStaffDirectoryEntrypointContract, opsStaffDirectoryPins });
   need(equal(candidate.resources.bindings, plan.expectedBindings)
     && equal(modern.assets ?? null, plan.expectedAssetsConfiguration),
   'Candidate bindings or asset routing config changed');
@@ -237,7 +238,8 @@ export function verifyOrdinaryFrontendCandidate({ before, plan, candidate, moder
   validateInstallation(before, { profile, selectedApp: plan.application,
     ...(expected === undefined ? {} : { expectedDeploymentVersions: expected }),
     ordinaryFrontendPreflightMode: preflightMode, ordinaryFrontendApp: plan.application,
-    opsSuccessorReaderContract: plan.opsSuccessorReaderPromotionContract ?? plan.installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: plan.opsSuccessorReaderPromotionContract ?? plan.installedOpsSuccessorReaderContract,
+    ...(plan.opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract: plan.opsStaffDirectoryEntrypointContract }) });
   const app = plan.application;
   const moduleProof = verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern });
   const assetProof = verifyOrdinaryFrontendAssetNamespace({ plan, candidateId: candidate.id, baselineVersionId: before[app].version.id, previousLedger,
