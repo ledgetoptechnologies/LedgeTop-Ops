@@ -763,3 +763,74 @@ test('unselected inactive rolling candidate requires matching immutable metadata
 for (const failure of ['native', 'assets', 'concurrent']) test(`no activation or retry after ${failure} failure`, async t => {
   const { operation, calls } = await flow(t, failure);await assert.rejects(operation);assert.deepEqual(calls, ['upload']);
 });
+
+// Held Ops Sync: exactly one reviewed unselected inactive latest (API upload) is admissible.
+const heldSync = () => import('./production-deploy.mjs');
+function heldSyncFixture() {
+  const { profile, snapshot } = fixture();
+  const s = snapshot['ops-sync'], LATEST = '55555555-5555-4555-8555-555555555555';
+  s.latest = LATEST;
+  s.latestVersion = { id: LATEST, resources: { ...clone(s.version.resources),
+    script: { ...clone(s.version.resources.script), etag: 'b'.repeat(64), last_deployed_from: 'api' } } };
+  s.latestModern = { id: LATEST, modules: [{ name: 'index.js', content_base64: Buffer.from('held').toString('base64') }] };
+  const pins = { contract: 'synthetic', deploymentId: s.deployment.id, activeVersionId: s.version.id, latestVersionId: LATEST,
+    sha256: Object.fromEntries(['deployment', 'settings', 'schedules', 'version', 'modern', 'latestVersion', 'latestModern']
+      .map(key => [key, hash(canonical(s[key]))])) };
+  return { profile, snapshot, pins };
+}
+
+test('held Ops Sync pins are the reviewed #663 companion values', async () => {
+  const { HELD_OPS_SYNC_INACTIVE_LATEST: pins } = await heldSync();
+  assert.equal(pins.deploymentId, 'd16949c4-d637-4b9b-8f6d-e21cc303e795');
+  assert.equal(pins.activeVersionId, '6f8e224c-4202-4904-9de5-b78886b52e74');
+  assert.equal(pins.latestVersionId, 'bc65f489-e8dd-4ef8-8411-abca3b3ef464');
+  assert.deepEqual({ ...pins.sha256 }, {
+    deployment: 'e3321a449696ea892042e87370dd8022e4449195f0ef4ff3e594a49e90a26ff3',
+    settings: '0eb83ed621f7b2db8efc1b978e3da439eced9db888c2f3b3ae0f0fe6365beb65',
+    schedules: '6649d9ca192b1e8e0f994860d0ff48375b84bcbc954511f8d3fe82a9f94b80d8',
+    version: 'acfe3a82434228074a49fe0c5dc37338b526bdfe5069b8855d43db65799086f0',
+    modern: 'a2203112a5c39e7ca47569fbd375a74ac8286966f218e29bd7d73578806a1970',
+    latestVersion: '0f44b987e51fd532f50f61438a5e1dd265dcbc4c1b29429418b3993569871309',
+    latestModern: '0992bc30b931bad81642c0b24584c5dcb269880e8254c19fae16acb1d12b6a7e' });
+  assert.ok(Object.isFrozen(pins) && Object.isFrozen(pins.sha256));
+});
+
+test('an unselected Ops Sync API-uploaded latest is refused unless it is exactly the pinned held state', async () => {
+  const { profile, snapshot, pins } = heldSyncFixture();
+  assert.throws(() => validateInstallation(snapshot, { profile, selectedApp: 'operations' }), /lacks native metadata proof/u);
+  assert.equal(validateInstallation(snapshot, { profile, selectedApp: 'operations', heldOpsSyncInactiveLatestPins: pins }), snapshot);
+});
+
+test('any difference from the pinned held Sync state is refused', async () => {
+  const { isHeldOpsSyncInactiveLatest } = await heldSync();
+  const { snapshot, pins } = heldSyncFixture();
+  assert.equal(isHeldOpsSyncInactiveLatest('ops-sync', snapshot['ops-sync'], pins), true);
+  const mutations = [
+    s => { s.latestVersion.resources.script.last_deployed_from = 'wrangler'; },
+    s => { s.version.resources.script.last_deployed_from = 'api'; },
+    s => { s.latestModern.modules[0].content_base64 = Buffer.from('other').toString('base64'); },
+    s => { s.settings.annotations['workers/message'] = 'changed'; },
+    s => { s.schedules.schedules.push({ cron: '* * * * *', created_on: 'x' }); },
+    s => { s.deployment.versions[0].percentage = 90; },
+    s => { s.deployment.versions.push({ version_id: s.latest, percentage: 0 }); },
+    s => { s.latest = '66666666-6666-4666-8666-666666666666'; },
+    s => { s.extra = true; },
+    s => { delete s.latestModern; },
+  ];
+  for (const [index, mutate] of mutations.entries()) {
+    const s = clone(snapshot['ops-sync']); mutate(s);
+    assert.equal(isHeldOpsSyncInactiveLatest('ops-sync', s, pins), false, `mutation ${index}`);
+  }
+  for (const app of ['operations', 'client'])
+    assert.equal(isHeldOpsSyncInactiveLatest(app, snapshot['ops-sync'], pins), false);
+  assert.equal(isHeldOpsSyncInactiveLatest('ops-sync', snapshot['ops-sync'], undefined), false,
+    'the frozen production pins do not match synthetic data');
+});
+
+test('the held Sync allowance never applies when Sync itself is the selected or only-checked app', () => {
+  const { profile, snapshot, pins } = heldSyncFixture();
+  assert.throws(() => validateInstallation(snapshot, { profile, selectedApp: 'ops-sync', heldOpsSyncInactiveLatestPins: pins }),
+    /Latest must equal the selected sole active version/u);
+  assert.throws(() => validateInstallation(snapshot, { profile, heldOpsSyncInactiveLatestPins: pins }),
+    /Latest must equal the selected sole active version/u);
+});

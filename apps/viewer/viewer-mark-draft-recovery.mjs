@@ -50,6 +50,7 @@ export function validMarkDraft(draft) {
     && text(draft.name, 100) && text(draft.note, 2000) && idOrNull(draft.categoryId) && text(draft.color, 7) && text(draft.icon, 32)
     && text(draft.elevation, 40) && ['imperial', 'metric'].includes(draft.units) && (draft.coordinates === null || text(draft.coordinates, 120))
     && text(draft.visibility, 16) && (draft.starter === undefined || draft.starter === null || text(draft.starter, 32))
+    && (draft.newCategory === undefined || draft.newCategory === null || text(draft.newCategory, 60))
     && (draft.sent === undefined || (Array.isArray(draft.sent) && draft.sent.length <= SENT_LIMIT && draft.sent.every(validSent)));
 }
 
