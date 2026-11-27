@@ -393,7 +393,7 @@ async function api(path,{method='GET',body,headers={},signal,recoveryGuard,befor
   // authorized by the replaced session, and the repaint after renewal reloads it.
   const renewedAfterUnauthorized=async()=>{
     if(requestToken===state.token&&requestSession===state.adminSession&&workspaceRenewal)
-      await workspaceRenewal.waitForRenewal({whileExpired:true});
+      await workspaceRenewal.waitForRenewal({signal,whileExpired:true});
     return Boolean(state.token&&state.adminSession)&&(requestToken!==state.token||requestSession!==state.adminSession);
   };
   const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};
@@ -452,8 +452,11 @@ async function resumeLapsedWorkspaceSession(){
   const session=rememberedWorkspaceSession(),controllerOrigin=sessionStorage.getItem(OPS_ORIGIN_KEY);
   if(!state.token||!session||!validOpsOrigin(controllerOrigin))return false;
   try{installWorkspaceSession({controllerOrigin,session},{allowExpired:true})}catch{return false}
-  if(await workspaceRenewal?.waitForRenewal({whileExpired:true}))return true;
+  if(await workspaceRenewal?.waitForRenewal({timeoutMs:25_000}))return true;
   if(!state.token||!state.adminSession)return false;
+  // Still retrying (outage, offline after wake): open the workspace and keep
+  // renewing quietly; requests wait for it. Only a refusal opens the dialog.
+  if(workspaceRenewal&&!workspaceRenewal.disposed){toast('Viewer session renewal is temporarily unavailable; your current session was preserved',true);return true}
   await workspaceRecovery.pause();return true;
 }
 async function restoreWorkspaceSession(){if(!state.token)return false;const response=await fetch('/api/v1/admin-sessions/current',{headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json'}});let body;try{body=await response.json()}catch{body={}}if(response.status===401){if(await resumeLapsedWorkspaceSession())return true;clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Session check failed (${response.status})`,response.status);installWorkspaceSession(body);return true}

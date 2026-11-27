@@ -1724,10 +1724,9 @@ async function bootstrapSession() {
       : await currentViewerSession().catch(async error => {
         // A tab reloaded after its session lapsed asks its workspace first.
         if (error?.status !== 401 || !reviewSessionChannel) throw error;
-        updateLoading('Starting secure viewer session...', '');
         const resumed = await resumeExpiredModelSession({ channel: reviewSessionChannel, storage: sessionStorage,
-          controllerId: REVIEW_CONTROLLER_ID, redeem: grant => redeemViewerGrant(grant) });
-        if (!resumed) throw error;
+          controllerId: REVIEW_CONTROLLER_ID, redeem: (grant, options) => redeemViewerGrant(grant, options) });
+        if (!resumed) throw Object.assign(error, { keepBearer: true });
         return resumed;
       });
     if (SESSION_GRANT) {
@@ -1738,7 +1737,8 @@ async function bootstrapSession() {
     applyViewerSession(session, { initialize: true });
   } catch (error) {
     window.__ltdsViewerStartupDiagnostics?.mark('bootstrap-failed');
-    if (sessionStorageKey) sessionCapabilities.clear(sessionStorageKey);
+    // A lapsed bearer is kept so a later reload can still ask the workspace.
+    if (sessionStorageKey && !error?.keepBearer) sessionCapabilities.clear(sessionStorageKey);
     updateLoading('Viewer session unavailable', String(error.message || error));
     showSessionRecovery();
   }

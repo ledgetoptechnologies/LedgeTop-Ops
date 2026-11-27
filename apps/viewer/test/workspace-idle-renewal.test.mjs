@@ -129,3 +129,29 @@ test('a model tab with no workspace answer falls back to the unavailable page',a
   deliver({version:1,type:'ltds-viewer:session-unavailable',requestId:ID,modelId:'model-1',reason:'authorization-required'});
   assert.equal(await refused,null);
 });
+
+test('a model tab re-asks when its workspace comes back, and ignores a redeem that lands after giving up',async()=>{
+  const storage=memoryStorage(),{channel,sent,deliver}=channelPair(),ids=['a7e240dc-985d-4bda-a7b8-17ad766a4438','b7e240dc-985d-4bda-a7b8-17ad766a4438'];
+  rememberModelSession(storage,CONTROLLER,{model:{id:'model-1'},expiresAt:new Date(Date.now()-60000).toISOString()});
+  const renewed={model:{id:'model-1'},expiresAt:new Date(Date.now()+1800000).toISOString()};
+  const resumed=resumeExpiredModelSession({channel,storage,controllerId:CONTROLLER,randomUUID:()=>ids.shift(),redeem:async()=>renewed});
+  deliver({version:1,type:'ltds-viewer:controller-ready',channelId:CONTROLLER,modelId:'model-1'});
+  assert.equal(sent.length,2);assert.equal(sent[1].requestId,'b7e240dc-985d-4bda-a7b8-17ad766a4438');
+  deliver({version:1,type:'ltds-viewer:renew-session',requestId:'a7e240dc-985d-4bda-a7b8-17ad766a4438',grant:MODEL_GRANT});
+  deliver({version:1,type:'ltds-viewer:renew-session',requestId:'b7e240dc-985d-4bda-a7b8-17ad766a4438',grant:MODEL_GRANT});
+  assert.equal(await resumed,renewed);assert.equal(sent.at(-1).requestId,'b7e240dc-985d-4bda-a7b8-17ad766a4438');
+  // A redeem still running when the wait ends never reports success.
+  const late=channelPair();let release,fire;const gate=new Promise(resolve=>{release=resolve;});
+  const pending=resumeExpiredModelSession({channel:late.channel,storage,controllerId:CONTROLLER,randomUUID:()=>ID,redeem:async(_grant,{signal})=>{await gate;assert.equal(signal.aborted,true);return renewed;},
+    setTimer:(handler,delay)=>{if(delay===120000)fire=handler;return delay;},clearTimer:()=>{}});
+  late.deliver({version:1,type:'ltds-viewer:renew-session',requestId:ID,grant:MODEL_GRANT});
+  fire();release();assert.equal(await pending,null);await tick();
+  assert.equal(late.sent.length,1);
+});
+
+test('a guarded read passes its abort signal to the renewal wait; a reload during an outage opens without a dialog',async()=>{
+  let seen;const ctx=apiHarness({renew:async(_context,args)=>{seen=args.signal;return false;}}),controller=new AbortController(),session=ctx.state.adminSession;
+  await assert.rejects(ctx.run('/x',{signal:controller.signal,recoveryGuard:()=>ctx.state.adminSession===session}));
+  assert.equal(seen,controller.signal);
+  assert.match(source,/if\(workspaceRenewal&&!workspaceRenewal\.disposed\)\{toast\('Viewer session renewal is temporarily unavailable; your current session was preserved',true\);return true\}/);
+});
