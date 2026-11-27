@@ -246,7 +246,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const jobText = h(document, 'span', { role: 'status', 'aria-live': 'polite' });
   const jobResume = h(document, 'button', { type: 'button', text: 'Resume' });
   const jobClose = h(document, 'button', { type: 'button', class: 'viewer-mark-close', 'aria-label': 'Close sharing status', text: '×' });
-  const jobBar = h(document, 'div', { class: 'viewer-mark-row viewer-mark-job', hidden: true }, jobText, jobResume, jobClose);
+  const jobBar = h(document, 'div', { class: 'viewer-mark-row viewer-mark-job', tabindex: '-1', hidden: true }, jobText, jobResume, jobClose);
   const list = h(document, 'ul', { class: 'viewer-mark-list', 'aria-label': 'Marks' });
 
   // Categories
@@ -328,6 +328,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const canShare = mark => !publicReadOnly && store.canWrite() && (!mark?.id || mark.mine === true);
   const canHistory = mark => !publicReadOnly && store.canWrite() && store.state.capabilities.staff && store.state.capabilities.history && mark?.visibility === 'shared' && canDelete(mark);
   const jobRunning = () => store.state.sharing?.status === 'running';
+  // A stopped job is resumed or closed before another starts: it is never replaced unseen.
+  const jobOpen = () => Boolean(store.state.sharing) && store.state.sharing.status !== 'done';
   const shareAllAvailable = () => !publicReadOnly && store.canWrite() && store.state.capabilities.staff && store.state.capabilities.shareAll
     && store.state.marks.some(mark => mark.mine && mark.visibility !== 'shared');
   const sharingValue = mark => mark?.visibility === 'shared' && mark.access === 'view' ? 'shared-view' : mark?.visibility;
@@ -337,7 +339,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const choiceOf = (value, account) => ({ visibility: value === 'shared-view' ? 'shared' : value,
     ...(['shared', 'shared-view'].includes(value) ? { access: value === 'shared-view' ? 'view' : 'edit' } : {}),
     ...(value === 'client' ? { shareAccount: account || null } : {}) });
-  const selectable = mark => canShare(mark) && Boolean(mark?.id) && mark.editable !== false;
+  const selectable = mark => canShare(mark) && Boolean(mark?.id) && mark.editable === true;
   const canSelect = () => sessionScope && !publicReadOnly && store.canWrite() && sharingOptions().length > 1 && store.state.marks.some(selectable);
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const canMoveDraft = () => Boolean(moving && view.map && draft?.id && store.editable(store.find(draft.id)));
@@ -888,6 +890,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
 
   // ---- select several, and the sharing job ------------------------------------
   const shownSelectable = () => visibleMarks().filter(searched).filter(selectable);
+  // What Apply changes: the ticked marks still shown after search and hidden categories.
+  const pickedShown = () => shownSelectable().filter(mark => selected.has(mark.id)).map(mark => mark.id);
   function toggleSelected(id, on) {
     if (!selecting || store.state.busy || !selectable(store.find(id))) return;
     if (on) selected.add(id); else selected.delete(id);
@@ -903,7 +907,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // What a confirmation would start, if Change is chosen.
   function askSharing(picked, value, account) {
     const choice = choiceOf(value, account);
-    if (!picked.length || store.state.busy || jobRunning() || unsaved()) return;
+    if (!picked.length || store.state.busy || jobOpen() || unsaved()) return;
     if (choice.visibility === 'client' && !choice.shareAccount) { message('Choose a client account to share with.'); return; }
     // Only those it would change are counted and asked about.
     const ids = picked.filter(id => {
@@ -947,14 +951,14 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     for (const id of [...selected]) if (!selectable(store.find(id))) selected.delete(id);
     if (confirming && (!state.ready || !store.canWrite())) confirming = null;
     selectButton.hidden = selecting || !canSelect();
-    selectButton.disabled = busy;
+    selectButton.disabled = busy || jobOpen();
     shareAllButton.hidden = selecting || !shareAllAvailable();
-    shareAllButton.disabled = busy;
+    shareAllButton.disabled = busy || jobOpen();
     listHead.hidden = !state.ready || (!state.undo.length && shareAllButton.hidden && selectButton.hidden);
     selectHead.hidden = bulkBar.hidden = !selecting;
     if (selecting) {
       const shown = shownSelectable();
-      selectCount.textContent = `${selected.size} selected`;
+      selectCount.textContent = `${pickedShown().length} selected`;
       selectAll.disabled = busy || shown.every(mark => selected.has(mark.id));
       selectNone.disabled = busy || !selected.size;
       const options = sharingOptions(), value = options.includes(bulkVisibility.value) ? bulkVisibility.value : options[0];
@@ -969,7 +973,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       }
       bulkAccount.hidden = value !== 'client';
       bulkVisibility.disabled = bulkAccount.disabled = busy;
-      bulkApply.disabled = busy || !selected.size || Boolean(confirming);
+      bulkApply.disabled = busy || jobOpen() || !pickedShown().length || Boolean(confirming);
     }
     confirmBox.hidden = !confirming;
     if (confirming) confirmText.textContent = `Change sharing for ${plural(confirming.ids.length, 'mark')} to ${confirming.label}?`;
@@ -1225,7 +1229,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   on(selectAll, 'click', () => { for (const mark of shownSelectable()) selected.add(mark.id); render(); });
   on(selectNone, 'click', () => { selected = new Set(); render(); });
   on(bulkVisibility, 'change', () => render());
-  on(bulkApply, 'click', () => askSharing([...selected], bulkVisibility.value, bulkAccount.value));
+  on(bulkApply, 'click', () => askSharing(pickedShown(), bulkVisibility.value, bulkAccount.value));
   on(confirmCancel, 'click', () => closeConfirm());
   on(confirmGo, 'click', () => startSharing());
   // A held key does not answer the question: repeats are dropped, and a key press only

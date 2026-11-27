@@ -221,6 +221,8 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       if (!staleRefusal(error)) throw error;
       await loadSnapshot(scope);
     }
+    // A stopped sharing job counts from this list now.
+    if (state.sharing?.status === 'paused') state.sharing.unsure = false;
   }
 
   async function loadSnapshot(scope) {
@@ -636,18 +638,26 @@ export function createMarksStore({ request = globalThis.fetch, newId = () => cry
       job.status = 'done';
       return true;
     } catch (error) {
-      if (!scope.live() || staleRefusal(error)) return false;
-      if (accessLost(error)) { hideInaccessibleMarks(error); return false; }
+      if (!scope.live()) return false;
+      // Unlike a single change, the job stays: it is never left running.
       Object.assign(job, { status: 'paused', failure: error.code || 'failed', reread: true });
+      const unsure = () => {
+        job.unsure = true;
+        state.message = 'Could not check which marks changed. Resume reads the list first.';
+        return false;
+      };
+      // Refused for a session that has since been renewed: Resume reads with the new one.
+      if (staleRefusal(error)) return unsure();
+      if (accessLost(error)) { hideInaccessibleMarks(error); return false; }
       // What was made is what the list says: read it again now, so the count is true.
       try {
         await load(scope);
         scope.check();
         job.unsure = false;
       } catch (readError) {
-        if (!scope.live() || staleRefusal(readError)) return false;
-        if (accessLost(readError)) { hideInaccessibleMarks(readError); return false; }
-        job.unsure = true;
+        if (!scope.live()) return false;
+        if (!staleRefusal(readError) && accessLost(readError)) { hideInaccessibleMarks(readError); return false; }
+        return unsure();
       }
       state.message = job.unsure ? 'Could not check which marks changed. Resume reads the list first.'
         : MESSAGES[job.failure] || 'Could not change sharing for all of them.';

@@ -270,6 +270,8 @@ test('shareAll failure does not claim sharing succeeded or hide the retry action
   assert.match(p.q('.viewer-mark-job').textContent, /0 of 1 changed/);
   assert.equal(visible(p.button('Resume')), true);
   assert.equal(visible(p.button('Share all')), true);
+  assert.equal(p.button('Share all').disabled, true, 'the stopped job is resumed or closed first');
+  await p.q('[aria-label="Close sharing status"]').click();
   assert.equal(p.button('Share all').disabled, false);
 });
 

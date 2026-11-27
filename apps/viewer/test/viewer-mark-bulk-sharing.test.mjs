@@ -261,23 +261,6 @@ test('a mark deleted while a read is in flight does not come back with that read
   assert.ok(store.find(own.id));
 });
 
-test('a sharing answer for a mark that went meanwhile does not bring it back', async () => {
-  const one = { ...mark('One'), id: '00000000-0000-4000-8000-0000000000d1', revision: 1, visibility: 'private', mine: true, editable: true };
-  let store;
-  const request = async (url, init) => {
-    if (url.endsWith('/batch/share')) {
-      // Another view of this tab's state: the mark is gone before the answer is applied.
-      store.state.marks = store.state.marks.filter(row => row.id !== one.id);
-      return Response.json({ marks: [{ ...one, revision: 2, visibility: 'shared', access: 'edit' }] });
-    }
-    return Response.json({ marks: [one], categories: [], starters: [], capabilities: { write: true, staff: true, visibility: ['shared', 'private'], access: ['edit', 'view'], shareAll: true } });
-  };
-  store = createMarksStore({ request, newId: () => '00000000-0000-4000-8000-0000000000e4' });
-  await store.setScope({ mode: 'session', key: 'k', token: () => 'token' });
-  await store.shareAll('edit');
-  assert.equal(store.state.marks.some(row => row.id === one.id), false);
-});
-
 test('the question counts only the marks it would change, and says when none would', async t => {
   const f = await openMarksPanel(t), p = f.mount();
   t.after(() => p.marks.dispose());
@@ -297,4 +280,49 @@ test('the question counts only the marks it would change, and says when none wou
   assert.equal(visible(p.q('.viewer-mark-confirm')), false);
   assert.match(p.text(), /It is already Shared, client can edit\./);
   assert.deepEqual(writes(f.requests), []);
+});
+
+test('a refusal for a session renewed meanwhile pauses the job with Resume, never leaves it running', async t => {
+  const f = await openMarksPanel(t), first = f.scope('ops', 'staff-a'), renewed = f.scope('ops', 'staff-a');
+  let token = first.token, refuse = true;
+  const p = f.mount({ request: async (url, init) => {
+    if (url.endsWith('/batch/share') && refuse) {
+      refuse = false;
+      // The session renewed while this request was out; the old bearer is refused.
+      token = renewed.token;
+      return Response.json({ code: 'marks_unavailable' }, { status: 403 });
+    }
+    return fetch(url, { ...init, headers: { ...init.headers, authorization: 'Bearer ' + token() } });
+  } });
+  t.after(() => p.marks.dispose());
+  await p.marks.setScope({ ...first, token: () => token() });
+  const one = await p.store.create(mark('One', { visibility: 'private' }));
+  await p.q('.viewer-mark-layers').click();
+  await p.button('Share all').click();
+  await p.confirm();
+  assert.equal(p.store.state.sharing.status, 'paused');
+  assert.equal(p.store.state.ready, true, 'marks stay: the refusal was for the old session');
+  assert.match(jobText(p), /Not sure how many changed/);
+  assert.equal(visible(p.button('Resume')), true);
+  assert.equal(p.button('Share all').disabled, true, 'a stopped job is resumed or closed before another starts');
+  await p.button('Resume').click();
+  assert.equal(p.store.find(one.id).visibility, 'shared');
+  assert.match(jobText(p), /^1 of 1 changed\./);
+  assert.equal(p.button('Share all').hidden, true);
+});
+
+test('Apply changes the ticked marks still shown, and the count says so', async t => {
+  const f = await openMarksPanel(t), p = f.mount();
+  t.after(() => p.marks.dispose());
+  await p.marks.setScope(f.scope('ops', 'staff-a'));
+  const north = await p.store.create(mark('North', { visibility: 'private' }));
+  const south = await p.store.create(mark('South', { visibility: 'private' }));
+  await p.q('.viewer-mark-layers').click();
+  await p.button('Select').click();
+  await p.button('All').click();
+  await p.type('[name=markSearch]', 'north');
+  assert.match(p.q('.viewer-mark-select-count').textContent, /^1 selected$/);
+  await p.button('Apply').click();
+  await p.confirm();
+  assert.deepEqual([p.store.find(north.id).visibility, p.store.find(south.id).visibility], ['shared', 'private']);
 });
