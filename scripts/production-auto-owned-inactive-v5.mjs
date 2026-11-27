@@ -31,8 +31,7 @@ import { createHash } from 'node:crypto';
 import { canonical, scriptRuntimeShape } from './production-deploy.mjs';
 import { assertOwnedUploadAnnotations } from './production-auto-upload-tag.mjs';
 
-const CODE = 'owned_inactive_v5_custody_refused';
-const fail = () => { throw Error(CODE); };
+const fail = () => { throw Error('owned_inactive_v5_custody_refused'); };
 const need = condition => { if (!condition) fail(); };
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const SHA = /^[a-f0-9]{64}$/u, COMMIT = /^[a-f0-9]{40}$/u;
@@ -215,7 +214,7 @@ export function verifyJournalOwnedInactiveCustody({ workerName, latestVersionId,
       moduleSHA256: op.runtime.moduleSha256, ledgerSHA256: op.runtime.ledgerSha256, newSourceCommit: sourceCommit });
     custodies.set(custody, true);
     return custody;
-  } catch { throw Error(CODE); }
+  } catch { throw Error('owned_inactive_v5_custody_refused'); }
 }
 
 export function isOwnedInactiveV5Custody(value) { return Boolean(value && typeof value === 'object' && custodies.has(value)); }
@@ -262,7 +261,7 @@ export function verifyOwnedInactiveLiveState(custody, { snapshot, projectedContr
       newSourceCommit: custody.newSourceCommit });
     allowances.set(allowance, custody);
     return allowance;
-  } catch { throw Error(CODE); }
+  } catch { throw Error('owned_inactive_v5_custody_refused'); }
 }
 
 export function isOwnedInactiveV5Allowance(value) { return Boolean(value && typeof value === 'object' && allowances.has(value)); }
