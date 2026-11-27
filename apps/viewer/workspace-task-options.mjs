@@ -95,13 +95,13 @@ export function createTaskOptionsModel({ provider = null, presetOptions = {} } =
   ] };
 }
 
-// NodeODM help strings are Python argparse templates. The node default is already shown before the help, so a
-// "Default: %(default)s" sentence is dropped; any other placeholder gets the real value.
+// NodeODM help strings are Python argparse templates. The inherited value is already shown before the help, so a
+// "Default: %(default)s" phrase is dropped; any other placeholder gets the node's value.
 export function optionHelpText(spec) {
   const value = spec?.value === undefined || spec?.value === null || spec?.value === '' ? '' : String(spec.value);
   const choices = Array.isArray(spec?.domain) ? spec.domain.map(String).join(', ') : '';
   return String(spec?.help || '')
-    .replace(/\s*\(?\bdefaults?\b\s*(?:is|:|=)?\s*['"]?%\(default\)s['"]?\)?\s*\.?/gi, ' ')
+    .replace(/\s*\(?\b(?:the\s+)?defaults?\b\s*(?:is|to|:|=)?\s*['"]?%\(default\)s['"]?\)?\s*\.?/gi, ' ')
     .replace(/%\(default\)s/g, value)
     .replace(/%\(choices\)s/g, choices)
     .replace(/%%/g, '%')

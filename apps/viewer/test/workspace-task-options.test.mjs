@@ -143,5 +143,7 @@ test('option help never shows a raw argparse placeholder',async()=>{
   assert.equal(optionHelpText({help:'Orthophoto resolution in cm / pixel. Default: %(default)s',value:5}),'Orthophoto resolution in cm / pixel.');
   assert.equal(optionHelpText({help:'Use %(default)s threads, 100%% of them.',value:4}),'Use 4 threads, 100% of them.');
   assert.equal(optionHelpText({help:'Plain help.'}),'Plain help.');
+  assert.equal(optionHelpText({help:'Sets the value; the default is %(default)s.'}),'Sets the value;');
+  assert.equal(optionHelpText({help:'Threads. Defaults to %(default)s'}),'Threads.');
   for(const spec of odmChoiceSpecs)assert.doesNotMatch(optionHelpText(spec),/%\(/);
 });

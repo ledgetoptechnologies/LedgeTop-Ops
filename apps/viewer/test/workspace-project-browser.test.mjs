@@ -1456,6 +1456,17 @@ test('a task menu near the bottom opens clear of the toast and upload tray', {ti
   assert.equal(await client.evaluate(`(()=>{const a=document.querySelector('#workspace-toast').getBoundingClientRect(),b=document.querySelector('#workspace-notices > .task-transfer-tray').getBoundingClientRect();return a.bottom<=b.top;})()`),true);
 }));
 
+test('a task menu clamped by a short window scrolls inside itself', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-menu-clamped',width:1280,height:400,quarryInJohnson:true},async({client,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-johnson')}'))`,'tasks unavailable');
+  await client.evaluate(`(()=>{const toast=document.querySelector('#workspace-toast');toast.textContent='Task restarted';toast.style.display='flex';document.querySelector('${treeRow('t:task-johnson')}').scrollIntoView({block:'center'});})()`);
+  await client.evaluate(`document.querySelector('${treeRow('t:task-johnson')} details.task-more-actions > summary').click()`);
+  await waitFor(client,`document.querySelector('details.task-more-actions[open] > .project-more-menu')?.hasAttribute('data-max-height')`,'the menu was not clamped');
+  await client.evaluate(`(()=>{const menu=document.querySelector('details.task-more-actions[open] > .project-more-menu');menu.scrollTop=60;menu.dispatchEvent(new Event('scroll'));})()`);
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(await client.evaluate(`document.querySelector('details.task-more-actions[open] > .project-more-menu').scrollTop`),60);
+}));
+
 test('Duplicate opens a pre-filled task dialog and creates the copy in the same folder only when started', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-duplicate',width:1440,height:900,
   seed:processing=>{const folder=processing.createProjectFolder('project-quarry',{displayName:'Benches'},'staff');processing.moveTaskToFolder('task-quarry',folder.id,'staff');return{folder};},
   configure:runtime=>{

@@ -1756,7 +1756,7 @@ function placeTreeMenu(menu,panel){
 }
 function placeOpenTreeMenu(){const menu=content.querySelector('details.tree-menu[open]'),panel=menu?.querySelector(':scope > .project-more-menu');if(panel&&!panel.hasAttribute('popover'))placeTreeMenu(menu,panel);}
 {const notices=document.querySelector('#workspace-notices');if(notices&&typeof ResizeObserver==='function')new ResizeObserver(placeOpenTreeMenu).observe(notices);}
-window.addEventListener('resize',placeOpenTreeMenu);document.addEventListener('scroll',placeOpenTreeMenu,{capture:true,passive:true});
+window.addEventListener('resize',placeOpenTreeMenu);document.addEventListener('scroll',event=>{if(!event.target?.closest?.('details.tree-menu'))placeOpenTreeMenu();},{capture:true,passive:true});
 document.addEventListener('click',event=>{if(!event.target.closest?.('details.tree-menu'))closeTreeMenus();});
 document.addEventListener('keydown',event=>{
   if(event.key==='Escape'&&content.querySelector('details.tree-menu[open]')&&!modal.open)closeTreeMenus();
