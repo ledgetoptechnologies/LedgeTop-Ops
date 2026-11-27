@@ -123,3 +123,21 @@ test('the older-Operations retry never widens, repeats or hides another refusal'
     : json({ ...list, clients: [{ ...list.clients[0], email: 'x@example.test' }] }));
   assert.equal((await malformed.request(PATH + '?include=grants')).status, 502);
 });
+
+test('the Email client choice travels beside the grant, and an older Operations still gets the share once without it', async t => {
+  const shape = 'Viewer client-grant request is invalid';
+  const current = await fixture(t, () => json({ grant, replayed: false }));
+  assert.equal((await current.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } })).status, 201);
+  assert.deepEqual(current.envelopes[0].grant, input); assert.equal(current.envelopes[0].notifyClient, true);
+  assert.equal((await current.request(PATH, { method: 'POST', body: { ...input, notifyClient: false }, key: 'direct-proxy-idempotency-0002' })).status, 201);
+  assert.equal('notifyClient' in current.envelopes[1], false);
+  for (const bad of ['yes', 1, null]) assert.equal((await current.request(PATH, { method: 'POST', body: { ...input, notifyClient: bad } })).status, 400);
+  assert.equal(current.envelopes.length, 2);
+  const older = await fixture(t, envelope => 'notifyClient' in envelope ? json({ error: shape }, { status: 400 }) : json({ grant, replayed: false }, { status: 201 }));
+  assert.equal((await older.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } })).status, 201);
+  assert.equal(older.envelopes.length, 2); assert.equal('notifyClient' in older.envelopes[1], false);
+  assert.equal(older.envelopes[0].idempotencyKey, older.envelopes[1].idempotencyKey);
+  const refusing = await fixture(t, () => json({ error: shape }, { status: 400 }));
+  assert.equal((await refusing.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } })).status, 400);
+  assert.equal(refusing.envelopes.length, 2);
+});

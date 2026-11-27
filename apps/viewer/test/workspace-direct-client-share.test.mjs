@@ -4,10 +4,11 @@ import { directClientReviewName, SHARE_TARGET_MISSING, directClientAccess, direc
 
 const clients=[{sourceId:'source-a',workspaceId:'ws-1',displayName:'Acme Construction',businessName:'Ledge Top'},{sourceId:'source-a',workspaceId:'ws-2',displayName:'Harbor Works',businessName:null}];
 const tasks=[{id:'task-1',name:'North wall'},{id:'task-2',name:'South wall'}];
-function form({client='',scope='project',checked=[],later=true,expiresAt='',permissions={measure:true,cameras:true,download:false}}={}){
+function form({client='',scope='project',checked=[],later=true,expiresAt='',permissions={measure:true,cameras:true,download:false},notify}={}){
   const taskInputs=tasks.map(task=>({value:task.id,checked:checked.includes(task.id)}));
   return {elements:{client:{value:client},includeLater:{checked:later},expiresAt:{value:expiresAt},
-    measure:{checked:permissions.measure},cameras:{checked:permissions.cameras},download:{checked:permissions.download}},
+    measure:{checked:permissions.measure},cameras:{checked:permissions.cameras},download:{checked:permissions.download},
+    ...(notify===undefined?{}:{notifyClient:{checked:notify}})},
     querySelector:selector=>selector==='input[name="scope"]:checked'?{value:scope}:null,
     querySelectorAll:selector=>selector==='input[name="taskId"]'?taskInputs:[]};
 }
@@ -30,7 +31,7 @@ test('whole-project access is one grant that includes tasks published later',()=
   const read=readDirectShareForm(form({client:key}),{projectId:'project',projectName:'Site',tasks,clients});
   assert.equal(read.bodies()[0].confirmedScope,false,'only the Share click on the review confirms');
   assert.deepEqual(read.bodies({confirmed:true}),[{sourceId:'source-a',workspaceId:'ws-1',viewerProjectId:'project',permissions:{measure:true,cameras:true,download:false},
-    expiresAt:null,confirmedScope:true,taskId:null,scopeType:'project',includeFuturePublished:true}]);
+    expiresAt:null,confirmedScope:true,notifyClient:true,taskId:null,scopeType:'project',includeFuturePublished:true}]);
 });
 
 test('chosen tasks become exact task grants that never include later tasks',()=>{
@@ -210,4 +211,12 @@ test('a chosen task that can no longer be shared refuses the whole share and is 
   assert.throws(()=>readDirectShareForm(picked,context).bodies({confirmed:true}),/“South wall” can no longer be shared. Nothing was sent/);
   assert.throws(()=>readDirectShareForm(picked,{...context,known:[]}).bodies(),/A chosen task can no longer be shared/);
   assert.match(readDirectShareForm(form({client:key}),{...context,fresh:true}).what,/Published now: “North wall”, and later ones/);
+});
+
+test('every new share has an Email client box, ticked by default, that the share follows',()=>{
+  const markup=directShareForm({projectName:'Site',tasks});
+  assert.match(markup,/<label class="check"><input type="checkbox" name="notifyClient" checked> Email client<\/label>/);
+  const read=options=>readDirectShareForm(form({client:key,scope:'tasks',checked:['task-1','task-2'],...options}),{projectId:'project',projectName:'Site',tasks,clients}).bodies();
+  assert.deepEqual(read({notify:true}).map(body=>body.notifyClient),[true,true]);
+  assert.deepEqual(read({notify:false}).map(body=>body.notifyClient),[false,false]);
 });
