@@ -36,7 +36,7 @@ describe("one Share dialog for files, folders and models", () => {
   it("has no explanatory blurbs under the tabs", () => {
     const sources = read("OperationsApp.tsx") + read("ViewerQuickShare.tsx");
     for (const blurb of ["Authenticated Client Workspace access", "Choose an exact individual, a department, or an organization",
-      "Create a bearer link for anyone", "Create a link for anyone who receives", "They'll see it in their Ledge Top portal",
+      "Create a bearer link for anyone", "Create a link for anyone who receives", "Choose a client or organization. They'll see it",
       "share-mode-description"]) expect(sources).not.toContain(blurb);
   });
 });
