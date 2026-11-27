@@ -114,7 +114,7 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
   const root = document.createElement('details'); root.className = 'task-options-editor';
   const summary = document.createElement('summary'); summary.textContent = title; root.append(summary);
   const search = document.createElement('input'); search.type = 'search'; search.placeholder = 'Search options'; search.setAttribute('aria-label', 'Search processing options'); root.append(search);
-  const help = document.createElement('p'); help.className = 'form-note'; help.textContent = helpText; root.append(help);
+  const help = document.createElement('p'); help.className = 'form-note'; help.textContent = helpText; help.hidden = !helpText; root.append(help);
   const list = document.createElement('div'); list.className = 'task-options-list'; root.append(list);
   const status = document.createElement('p'); status.setAttribute('role', 'status'); root.append(status); container.append(root);
   let rows = [], disposed = false, disabled = false;
