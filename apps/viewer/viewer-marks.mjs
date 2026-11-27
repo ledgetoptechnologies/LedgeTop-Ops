@@ -901,10 +901,16 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     (selecting ? selectDone : selectButton.hidden ? activeTab() : selectButton)?.focus?.({ preventScroll: true });
   }
   // What a confirmation would start, if Change is chosen.
-  function askSharing(ids, value, account) {
-    const choice = choiceOf(value, account), count = ids.length;
-    if (!count || store.state.busy || jobRunning() || unsaved()) return;
+  function askSharing(picked, value, account) {
+    const choice = choiceOf(value, account);
+    if (!picked.length || store.state.busy || jobRunning() || unsaved()) return;
     if (choice.visibility === 'client' && !choice.shareAccount) { message('Choose a client account to share with.'); return; }
+    // Only those it would change are counted and asked about.
+    const ids = picked.filter(id => {
+      const mark = store.find(id);
+      return mark && (sharingValue(mark) !== value || (value === 'client' && (mark.shareAccount ?? null) !== choice.shareAccount));
+    });
+    if (!ids.length) { message(`${picked.length === 1 ? 'It is' : 'They are'} already ${VISIBILITY_LABEL[value]}.`); return; }
     confirming = { ids, choice, label: VISIBILITY_LABEL[value] };
     confirmArmed = false;
     render();

@@ -277,3 +277,24 @@ test('a sharing answer for a mark that went meanwhile does not bring it back', a
   await store.shareAll('edit');
   assert.equal(store.state.marks.some(row => row.id === one.id), false);
 });
+
+test('the question counts only the marks it would change, and says when none would', async t => {
+  const f = await openMarksPanel(t), p = f.mount();
+  t.after(() => p.marks.dispose());
+  await p.marks.setScope(f.scope('ops', 'staff-a'));
+  await p.store.create(mark('Already', { visibility: 'shared', access: 'edit' }));
+  await p.store.create(mark('Private', { visibility: 'private' }));
+  await p.q('.viewer-mark-layers').click();
+  await p.button('Select').click();
+  await p.button('All').click();
+  await choose(p, 'shared');
+  await p.button('Apply').click();
+  assert.match(p.q('.viewer-mark-confirm').textContent, /for 1 mark to Shared, client can edit/);
+  await p.q('.viewer-mark-confirm').querySelectorAll('button').find(node => node.textContent === 'Cancel').click();
+  await row(p, 'Private').click();
+  f.requests.length = 0;
+  await p.button('Apply').click();
+  assert.equal(visible(p.q('.viewer-mark-confirm')), false);
+  assert.match(p.text(), /It is already Shared, client can edit\./);
+  assert.deepEqual(writes(f.requests), []);
+});
