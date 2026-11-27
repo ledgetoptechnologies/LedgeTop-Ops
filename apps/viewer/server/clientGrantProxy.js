@@ -64,14 +64,23 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       const listQuery = directListQuery(req.query);
       if (!listQuery) return invalid(res);
       envelope.listQuery = listQuery;
+      // Only the list that opens Share asks what Operations can do (today: email the client).
+      if (listQuery.include === 'grants' && listQuery.grantsCursor === undefined) envelope.capabilities = true;
     }
     if (action === 'create') {
       // The direct Viewer workspace endpoint has always accepted the grant
       // fields as its request body. Keep the legacy client-grants endpoint's
       // `{ grant }` envelope, but validate the direct body's exact scope
       // without requiring a second wrapper.
-      const grant = connection === 'direct' ? supplied : supplied.grant;
+      let grant = connection === 'direct' ? supplied : supplied.grant;
       if (!grant || typeof grant !== 'object' || Array.isArray(grant)) return invalid(res);
+      // "Email client" travels beside the grant, never inside it, and only when asked for.
+      if (connection === 'direct' && 'notifyClient' in grant) {
+        const { notifyClient, ...rest } = grant;
+        if (typeof notifyClient !== 'boolean') return invalid(res);
+        grant = rest;
+        if (notifyClient) envelope.notifyClient = true;
+      }
       if (!IDEMPOTENCY_KEY.test(String(req.get('Idempotency-Key') || ''))) return invalid(res, 'valid Idempotency-Key is required');
       envelope.idempotencyKey = req.get('Idempotency-Key');
       if (connection === 'direct' && !validDirectGrantInput(grant)) return invalid(res);
@@ -131,6 +140,12 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
         } catch { throw new Error('invalid_response'); }
       };
       let { response, payload } = await send(envelope);
+      // An Operations release from before "Email client" refuses these fields outright, before it changes anything.
+      // Ask once more without them: a create keeps its idempotency key and grant, so it can never make a second share.
+      if (response.status === 400 && payload?.error === LIST_SHAPE_REFUSAL && (envelope.notifyClient || envelope.capabilities)) {
+        delete envelope.notifyClient; delete envelope.capabilities;
+        ({ response, payload } = await send(envelope));
+      }
       // An Operations release from before the name-ordered picker refuses `include` outright.
       // Ask it once more the way it understands, and keep only the half that was asked for.
       const include = envelope.listQuery?.include;

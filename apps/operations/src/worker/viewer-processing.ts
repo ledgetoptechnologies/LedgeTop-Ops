@@ -14,6 +14,7 @@ import type { Env, StaffPrincipal } from "./types";
 import { introspectClientViewerSourceAuthorization } from "./viewer-session-issuer";
 import {createDirectViewerClientGrant,listDirectViewerClientGrantWorkspace,revokeDirectViewerClientGrant,
  directViewerClientGrantListQuerySchema,DirectViewerGrantError} from './viewer-direct-client-grants';
+import {directViewerShareNotifies} from './viewer-direct-client-share-notifications';
 import {listDirectViewerClientGroups} from './viewer-direct-client-groups';
 import {
   createNativeViewerClientGrant,
@@ -423,7 +424,13 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
       grant: z.unknown().optional(),
       grantId: opaqueId.optional(),
       reason: z.string().trim().min(1).max(240).optional(),
+      notifyClient: z.boolean().optional(),
+      capabilities: z.literal(true).optional(),
     }).strict().superRefine((value, context) => {
+      if (value.notifyClient !== undefined && (value.action !== "create" || value.connection !== "direct"))
+        context.addIssue({ code: "custom", message: "Email client is only for a new direct share" });
+      if (value.capabilities !== undefined && (value.action !== "list" || value.connection !== "direct"))
+        context.addIssue({ code: "custom", message: "Capabilities are only for a direct list" });
       // Grouping is an optional, separate read: direct connection only, with no other fields.
       if (value.action === "groups" && (value.connection !== "direct" || value.listQuery || value.idempotencyKey || value.grant || value.grantId || value.reason))
         context.addIssue({ code: "custom", message: "Groups take no fields" });
@@ -454,11 +461,16 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     };
     if (parsed.data.connection === "direct") {
       try {
-        if(parsed.data.action==='list')return c.json(await listDirectViewerClientGrantWorkspace(c.env,principal,parsed.data.listQuery));
+        if(parsed.data.action==='list'){
+          const list=await listDirectViewerClientGrantWorkspace(c.env,principal,parsed.data.listQuery);
+          // Only a Viewer that asks is told about the email: an older Viewer accepts no other capability.
+          return c.json(parsed.data.capabilities&&list.capabilities&&directViewerShareNotifies(c.env)
+            ?{...list,capabilities:{...list.capabilities,notifyClient:true}}:list);
+        }
         if(parsed.data.action==='groups')return c.json(await listDirectViewerClientGroups(c.env,principal));
         if(parsed.data.action==='create'){
           const result=await createDirectViewerClientGrant({env:c.env,principal,grant:parsed.data.grant,
-            idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw});
+            idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw,notifyClient:parsed.data.notifyClient===true});
           return c.json(result,result.sessionRevocation?.pending?202:result.replayed?200:201);
         }
         const result=await revokeDirectViewerClientGrant({env:c.env,principal,grantId:parsed.data.grantId!,

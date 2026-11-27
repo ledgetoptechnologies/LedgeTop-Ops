@@ -5,6 +5,7 @@ import {sqlScope} from './acl';
 import {sha256} from './crypto';
 import {portalRootAccessAllowedSql} from './client-portal-root-access';
 import {viewerServiceClient} from './viewer-integration';
+import {shareNoticeRequestStatement} from './viewer-direct-client-share-notifications';
 import {portalProjectionSourceGuard,readPortalProjectionSourceProof} from '../../../client/src/worker/project-alpha-portal-authority';
 import type {Env,StaffPrincipal} from './types';
 
@@ -521,7 +522,8 @@ async function drainReplaced(env:Env,replaces:DirectViewerReplaced[]){
   .bind(listed).first<number>('n');
  return {pending:(open??0)>0,revokedGrants:replaces.length};
 }
-export async function createDirectViewerClientGrant(input:{env:Env;principal:StaffPrincipal;grant:unknown;idempotencyKey:string;request:Request})
+/** notifyClient asks for the client email. Only a new share asks; a replay or a refusal never does. */
+export async function createDirectViewerClientGrant(input:{env:Env;principal:StaffPrincipal;grant:unknown;idempotencyKey:string;request:Request;notifyClient?:boolean})
  :Promise<{grant:DirectViewerClientGrantPublicResult;replayed:boolean;sessionRevocation?:{pending:boolean;revokedGrants:number}}>{
  const {env,principal}=input;await requireDirectViewerClientManage(env,principal);const parsed=inputSchema.safeParse(input.grant);
  if(!parsed.success||!key.safeParse(input.idempotencyKey).success)fail(400,'invalid_request','Invalid Viewer sharing request');
@@ -542,10 +544,13 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  const expiresAt=canonicalExpiry(g.expiresAt);
  if(expiresAt===undefined)fail(400,'expired_at_invalid','Expiration is outside the supported range');
  if(expiresAt!==null&&Date.parse(expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
+ // Names for the client email, read from the catalog this share was checked against.
+ let shareNames:{projectName:string;taskName:string|null}={projectName:'',taskName:null};
  try{
   const catalog=await viewerServiceClient(env).clientDeliveryCatalog({projectId:g.viewerProjectId,...(g.taskId?{taskId:g.taskId}:{}),...(g.selection?{selection:g.selection,validateSelection:true}:{})});
   if(catalog.project.id!==g.viewerProjectId)fail(409,'task_not_in_project','Viewer project does not match');
   if(g.taskId&&(catalog.tasks.length!==1||catalog.tasks[0]?.id!==g.taskId))fail(409,'task_not_published','Task is not published in this project');
+  shareNames={projectName:catalog.project.displayName,taskName:g.taskId?catalog.tasks[0]?.displayName??null:null};
  }catch(error){
   // A competing replacement can commit while this request waits for the Viewer.
   if(replaces){const replay=await readCommittedResult();if(replay)return replay;}
@@ -622,6 +627,9 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  ...mutationStatements(database,principal,input.idempotencyKey,fingerprint,id,'grant.create',result,now,
    (g.selection ? {version:3,grant:result,recipientAuthorityPin:pin,selection:g.selection}
     : {version:1,grant:result,recipientAuthorityPin:pin}) satisfies CreateReceiptEnvelope),
+  // A replacement edits an existing share, which never emails.
+  ...(input.notifyClient===true&&!replaces?[shareNoticeRequestStatement(database,{grantId:id,staffId:principal.id,idempotencyKey:input.idempotencyKey,now,
+   ...shareNames})]:[]),
  ...(replaces?[database.prepare(`INSERT INTO viewer_direct_client_grant_audit(id,grant_id,action,actor_staff_id,idempotency_key,details_json,created_at)
   SELECT lower(hex(randomblob(16))),id,'grant.revoke',?,?,json_object('success',json('true'),'replacedBy',?),? FROM viewer_direct_client_grants WHERE revoke_reason=?`)
   .bind(principal.id,input.idempotencyKey,id,now,marker)]:[])]);

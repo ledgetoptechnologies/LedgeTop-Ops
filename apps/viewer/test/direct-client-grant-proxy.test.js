@@ -220,7 +220,9 @@ test('an Operations release without the include field still lists clients and sh
   const opened = await fixture(t, older);
   const grants = await opened.request(PATH + '?include=grants&limit=25&viewerProjectId=viewer-project');
   assert.equal(grants.status, 200); assert.deepEqual(await grants.json(), { clients: [], grants: [grant], clientsNextCursor: null, grantsNextCursor: 'grant-one' });
-  assert.deepEqual(opened.envelopes[1].listQuery, { limit: 1, viewerProjectId: 'viewer-project' });
+  // Asked first with the Email client offer, then without it, then the way this older release understands.
+  assert.equal(opened.envelopes.length, 3); assert.equal(opened.envelopes[0].capabilities, true); assert.equal('capabilities' in opened.envelopes[1], false);
+  assert.deepEqual(opened.envelopes[2].listQuery, { limit: 1, viewerProjectId: 'viewer-project' });
 });
 
 test('the older-Operations retry never widens, repeats or hides another refusal', async t => {
@@ -231,7 +233,8 @@ test('the older-Operations retry never widens, repeats or hides another refusal'
   for (const body of [undefined, { error: 'Invalid client picker query', code: 'invalid_request' }])
     assert.equal((await status(400, body)(PATH + '?include=grants')).calls, 1);
   const refusedShape = status(400, { error: shape });
-  const twice = await refusedShape(PATH + '?include=grants'); assert.equal(twice.calls, 2); assert.equal(twice.response.status, 400);
+  // Opening Share: without the Email client offer, then without include. Never more.
+  const twice = await refusedShape(PATH + '?include=grants'); assert.equal(twice.calls, 3); assert.equal(twice.response.status, 400);
   assert.equal((await refusedShape(PATH)).calls, 1); assert.equal((await refusedShape(PATH + '?include=all')).calls, 1);
   assert.equal((await refusedShape(PATH + '?include=grants&grantsCursor=grant-one')).calls, 1);
   assert.equal((await refusedShape(PATH, { method: 'POST', body: input })).calls, 1);
@@ -241,4 +244,52 @@ test('the older-Operations retry never widens, repeats or hides another refusal'
   const malformed = await fixture(t, envelope => envelope.listQuery.include ? json({ error: shape }, { status: 400 })
     : json({ ...list, clients: [{ ...list.clients[0], email: 'x@example.test' }] }));
   assert.equal((await malformed.request(PATH + '?include=grants')).status, 502);
+});
+
+test('the Email client choice travels beside the grant, and an older Operations still gets the share once without it', async t => {
+  const shape = 'Viewer client-grant request is invalid';
+  const current = await fixture(t, () => json({ grant, replayed: false }));
+  assert.equal((await current.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } })).status, 201);
+  assert.deepEqual(current.envelopes[0].grant, input); assert.equal(current.envelopes[0].notifyClient, true);
+  assert.equal((await current.request(PATH, { method: 'POST', body: { ...input, notifyClient: false }, key: 'direct-proxy-idempotency-0002' })).status, 201);
+  assert.equal('notifyClient' in current.envelopes[1], false);
+  for (const bad of ['yes', 1, null]) assert.equal((await current.request(PATH, { method: 'POST', body: { ...input, notifyClient: bad } })).status, 400);
+  assert.equal(current.envelopes.length, 2);
+  const older = await fixture(t, envelope => 'notifyClient' in envelope ? json({ error: shape }, { status: 400 }) : json({ grant, replayed: false }, { status: 201 }));
+  assert.equal((await older.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } })).status, 201);
+  assert.equal(older.envelopes.length, 2); assert.equal('notifyClient' in older.envelopes[1], false);
+  assert.equal(older.envelopes[0].idempotencyKey, older.envelopes[1].idempotencyKey);
+  // Same key and the same grant: Operations can only ever make this share once.
+  assert.deepEqual(older.envelopes[1].grant, older.envelopes[0].grant);
+  assert.deepEqual({ ...older.envelopes[0], notifyClient: undefined }, { ...older.envelopes[1], notifyClient: undefined });
+  for (const code of [403, 409, 500]) {
+    const other = await fixture(t, () => json({ error: shape }, { status: code }));
+    await other.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } });
+    assert.equal(other.envelopes.length, 1, String(code));
+  }
+  const refusing = await fixture(t, () => json({ error: shape }, { status: 400 }));
+  assert.equal((await refusing.request(PATH, { method: 'POST', body: { ...input, notifyClient: true } })).status, 400);
+  assert.equal(refusing.envelopes.length, 2);
+});
+
+test('opening Share asks Operations whether it can email the client, and passes on only that answer', async t => {
+  const shape = 'Viewer client-grant request is invalid';
+  const current = await fixture(t, envelope => json({ ...list, grantsNextCursor: null,
+    capabilities: { replaces: true, ...(envelope.capabilities ? { notifyClient: true } : {}) } }));
+  const opened = await current.request(PATH + '?include=grants&limit=25&viewerProjectId=viewer-project');
+  assert.equal(opened.status, 200); assert.deepEqual((await opened.json()).capabilities, { replaces: true, notifyClient: true });
+  assert.equal(current.envelopes[0].capabilities, true);
+  // Only the dialog-open list asks; searches, later pages and other lists never do.
+  for (const path of ['?include=clients&q=Syn', '?include=grants&grantsCursor=grant-one', '?include=all', ''])
+    await current.request(PATH + path);
+  assert.equal(current.envelopes.slice(1).some(envelope => 'capabilities' in envelope), false);
+  for (const bad of [{ replaces: true, notifyClient: false }, { replaces: true, notifyClient: 'true' }, { notifyClient: true }, ['notify_client_v1']]) {
+    const odd = await fixture(t, () => json({ ...list, grantsNextCursor: null, capabilities: bad }));
+    assert.equal((await odd.request(PATH + '?include=grants')).status, 502);
+  }
+  const older = await fixture(t, envelope => 'capabilities' in envelope ? json({ error: shape }, { status: 400 })
+    : json({ ...list, grantsNextCursor: null, capabilities: { replaces: true } }));
+  const fallback = await older.request(PATH + '?include=grants&limit=25');
+  assert.equal(fallback.status, 200); assert.deepEqual((await fallback.json()).capabilities, { replaces: true });
+  assert.equal(older.envelopes.length, 2); assert.deepEqual(older.envelopes[1].listQuery, older.envelopes[0].listQuery);
 });

@@ -1972,6 +1972,7 @@ function directShareContext(onlyOutputId){
   return {projectId,projectName:project?.displayName||'this project',tasks:shareableTasks(projectId,state.tasks,state.outputs),
     entry:onlyOutputId?'task':'project',selectionCatalog:state.shareContext.selectionCatalog,
     taskId,taskName:onlyOutputId?state.shareContext.taskName||'':'',
+    notifyClient:state.clientDirectAccess?.capabilities?.notifyClient===true,
     // The task and the model it was opened on must both still be there, in this project.
     targetMissing:Boolean(onlyOutputId)&&!(task?.projectId===projectId&&state.outputs.some(output=>output.id===onlyOutputId&&output.taskId===taskId))};
 }

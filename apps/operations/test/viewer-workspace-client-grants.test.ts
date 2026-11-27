@@ -360,3 +360,26 @@ describe("direct client groups over the machine bridge", () => {
     ].entries()) expect((await machine(body, `groups-refused-nonce-000${index}`)).status).toBe(400);
   });
 });
+
+describe("Email client choice over the machine bridge", () => {
+  it("accepts notifyClient only on a direct create and passes it on to the share", async () => {
+    const create = { subject: "ops:staff-one", action: "create", connection: "direct", idempotencyKey: "direct-notify-create-0001", grant: {} };
+    const reached = await machine({ ...create, notifyClient: true }, "notify-create-nonce-0001");
+    // The envelope was accepted: the refusal comes from the share itself.
+    expect(await reached.text()).toMatch(/"code":"(invalid_request|forbidden)"/);
+    for (const [index, body] of [
+      { ...create, notifyClient: "yes" },
+      { ...create, connection: "native", notifyClient: true },
+      { subject: "ops:staff-one", action: "list", connection: "direct", notifyClient: true },
+      { ...create, capabilities: true },
+      { subject: "ops:staff-one", action: "list", connection: "native", capabilities: true },
+      { subject: "ops:staff-one", action: "groups", connection: "direct", capabilities: true },
+      { subject: "ops:staff-one", action: "list", connection: "direct", capabilities: false },
+      { subject: "ops:staff-one", action: "revoke", connection: "direct", idempotencyKey: "direct-notify-revoke-01", grantId: "grant-one", reason: "x", notifyClient: true },
+    ].entries()) {
+      const refused = await machine(body, `notify-refused-nonce-000${index}`);
+      expect(refused.status).toBe(400);
+      expect(await refused.text()).toContain("Viewer client-grant request is invalid");
+    }
+  });
+});

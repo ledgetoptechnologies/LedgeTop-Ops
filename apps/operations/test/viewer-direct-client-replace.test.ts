@@ -60,6 +60,13 @@ const row=async(f:Fixture,id:string)=>(await f.database.prepare('SELECT * FROM v
 const count=async(f:Fixture,sql:string)=>await f.database.prepare(`SELECT count(*) n FROM ${sql}`).first<number>('n');
 
 describe('replacing a client’s shares in a project',()=>{
+ it('never asks for a client email when an existing share is edited',async()=>{
+  const f=await fixture(),first=(await share(f.env)).grant;
+  await createDirectViewerClientGrant({env:f.env,principal,idempotencyKey:'replace-notify-0001',request,notifyClient:true,
+   grant:{...CLIENT,viewerProjectId:'project-one',taskId:null,scopeType:'project',includeFuturePublished:true,confirmedScope:true,expiresAt:null,
+    permissions:{measure:true,cameras:false,download:false},selection:only,replaces:[ref(first)]}});
+  expect(await count(f,`viewer_direct_client_grant_audit WHERE id LIKE 'vdcg-notify%'`)).toBe(0);
+ },120_000);
  it('revokes exactly the listed rows, marks them, queues their tombstones and creates one share, with any mix of kinds',async()=>{
   const f=await fixture();
   const whole=(await share(f.env)).grant,one=(await task(f.env,'task-one')).grant,two=(await task(f.env,'task-two',{expiresAt:'2030-01-01T00:00:00.000Z'})).grant;

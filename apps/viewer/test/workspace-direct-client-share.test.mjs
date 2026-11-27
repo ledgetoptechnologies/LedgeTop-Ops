@@ -5,10 +5,11 @@ import { directProjectShareEditForm, editableDirectProjectGrant, publicationFold
 
 const clients=[{sourceId:'source-a',workspaceId:'ws-1',displayName:'Acme Construction',businessName:'Ledge Top'},{sourceId:'source-a',workspaceId:'ws-2',displayName:'Harbor Works',businessName:null}];
 const tasks=[{id:'task-1',name:'North wall'},{id:'task-2',name:'South wall'}];
-function form({client='',scope='project',checked=[],later=true,expiresAt='',permissions={measure:true,cameras:true,download:false}}={}){
+function form({client='',scope='project',checked=[],later=true,expiresAt='',permissions={measure:true,cameras:true,download:false},notify}={}){
   const taskInputs=tasks.map(task=>({value:task.id,checked:checked.includes(task.id)}));
   return {elements:{client:{value:client},includeLater:{checked:later},expiresAt:{value:expiresAt},
-    measure:{checked:permissions.measure},cameras:{checked:permissions.cameras},download:{checked:permissions.download}},
+    measure:{checked:permissions.measure},cameras:{checked:permissions.cameras},download:{checked:permissions.download},
+    ...(notify===undefined?{}:{notifyClient:{checked:notify}})},
     querySelector:selector=>selector==='input[name="scope"]:checked'?{value:scope}:null,
     querySelectorAll:selector=>selector==='input[name="taskId"]'?taskInputs:[]};
 }
@@ -319,6 +320,24 @@ test('a chosen task that can no longer be shared refuses the whole share and is 
   assert.throws(()=>readDirectShareForm(picked,context).bodies({confirmed:true}),/“South wall” can no longer be shared. Nothing was sent/);
   assert.throws(()=>readDirectShareForm(picked,{...context,known:[]}).bodies(),/A chosen task can no longer be shared/);
   assert.match(readDirectShareForm(form({client:key}),{...context,fresh:true}).what,/Published now: “North wall”, and later ones/);
+});
+
+test('every new share has an Email client box, ticked by default, that the share follows',()=>{
+  const markup=directShareForm({projectName:'Site',tasks,notifyClient:true});
+  assert.match(markup,/<label class="check"><input type="checkbox" name="notifyClient" checked> Email client<\/label>/);
+  // An Operations that does not offer the email shows no box, and the share asks for nothing.
+  assert.doesNotMatch(directShareForm({projectName:'Site',tasks}),/notifyClient|Email client/);
+  assert.equal('notifyClient' in readDirectShareForm(form({client:key}),{projectId:'project',projectName:'Site',tasks,clients}).bodies()[0],false);
+  const read=options=>readDirectShareForm(form({client:key,scope:'tasks',checked:['task-1','task-2'],...options}),{projectId:'project',projectName:'Site',tasks,clients}).bodies();
+  assert.deepEqual(read({notify:true}).map(body=>body.notifyClient),[true,true]);
+  assert.deepEqual(read({notify:false}).map(body=>body.notifyClient),[false,false]);
+});
+
+test('the Email client offer comes from the first page Operations answers when Share opens',async()=>{
+  const offered=await loadDirectClientAccess(async()=>({clients:[],grants:[],grantsNextCursor:null,capabilities:{replaces:true,notifyClient:true}}),'project');
+  assert.deepEqual(offered.capabilities,{replaces:true,notifyClient:true});
+  const older=await loadDirectClientAccess(async()=>({clients:[],grants:[],grantsNextCursor:null,capabilities:{replaces:true}}),'project');
+  assert.deepEqual(older.capabilities,{replaces:true});
 });
 
 const editableGrant={grantId:'grant-1',grantVersion:4,sourceId:'project-alpha:native',workspaceId:'workspace-1',
