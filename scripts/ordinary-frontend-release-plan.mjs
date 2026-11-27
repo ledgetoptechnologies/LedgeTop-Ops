@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, hash, need, compileConfig, validateInstallation, validateReviewedExpectedDeploymentVersions,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ORDINARY_FRONTEND_PREFLIGHT_MODES,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT,
   OPS_STAFF_DIRECTORY_ENTRYPOINT, OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT,
   ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
@@ -209,7 +209,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
       'Exact previous version rollback and previous version asset-byte checks'],
     retentionPolicy: { minimumHours: 48, automaticPruning: false, satisfiedByThisOfflinePlan: false },
     nativeExecutionQualification: { ready: false,
-      reason: [ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE]
+      reason: ORDINARY_FRONTEND_PREFLIGHT_MODES
         .includes(ordinaryFrontendPreflightMode)
         && installationPreflight.profileSHA256 === hash(canonical(beforeProfile))
         ? 'ordinary-frontend-mode-is-precompile-only; executor-candidate-and-post-upload-verifiers-remain-strict'

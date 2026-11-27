@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { canonical, hash, need, validateInstallation, verifyCandidate,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE,
   OPS_STAFF_DIRECTORY_ENTRYPOINT, OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT,
-  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ORDINARY_FRONTEND_PREFLIGHT_MODES, ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { collectFrontendAssets, mergeAssetLedger, preserveRootHtmlArchive, validateAssetLedger } from './production-auto-assets.mjs';
 import { compileCanonicalBrowserRetirementTransition, validateCanonicalBrowserRetirementTarget }
@@ -55,7 +55,7 @@ function planProfile(before, plan, profile, expectedDeploymentVersions) {
   'A pinned offline ordinary frontend plan is required');
   const preflightMode = plan.installationPreflight?.mode;
   const preflight = ordinaryFrontendPreflightDescriptor(profile, preflightMode);
-  need([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(preflightMode)
+  need(ORDINARY_FRONTEND_PREFLIGHT_MODES.includes(preflightMode)
     && canonical(plan.installationPreflight) === canonical(preflight)
     && profile && Object.getPrototypeOf(profile) === Object.prototype,
   'Exact pinned installed frontend profile and matching ordinary preflight mode are required');

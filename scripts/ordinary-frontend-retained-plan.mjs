@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, hash, need, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ORDINARY_FRONTEND_PREFLIGHT_MODES,
   ordinaryFrontendPreflightDescriptor, OPS_SUCCESSOR_READER_INSTALLED_CONTRACT,
   OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
@@ -63,7 +63,7 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
   const preflightMode = ordinaryPlan.installationPreflight?.mode;
   const preflight = ordinaryFrontendPreflightDescriptor(profile, preflightMode,
     ...(reviewedPreflightProfiles === undefined ? [] : [reviewedPreflightProfiles]));
-  need([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(preflightMode)
+  need(ORDINARY_FRONTEND_PREFLIGHT_MODES.includes(preflightMode)
     && equal(ordinaryPlan.installationPreflight, preflight),
   'Exact pinned installed frontend profile and matching ordinary preflight mode required');
   need(ordinaryPlan.canonicalBrowserRetirementSelector === undefined

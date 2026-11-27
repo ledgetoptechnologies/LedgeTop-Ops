@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { capture, CloudflareReader, deploymentSourceCommit, hash, canonical, need, PROFILE,
   preparePrivateProductionDirectory, readStaffCutoverReview, runNativeProductionCommand,
   stableState, validateBuildEnvironment, validateInstallation, validateStaffReadinessReceipt,
-  OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+  OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ORDINARY_FRONTEND_PREFLIGHT_MODES,
   OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE,
   ordinaryFrontendPreflightDescriptor, resourcesShape, OPS_STAFF_DIRECTORY_ENTRYPOINT,
   OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT } from './production-deploy.mjs';
@@ -538,7 +538,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     ? { opsStaffDirectoryEntrypointContract: staffDirectory.contract, ...staffDirectoryPinSeam } : {};
   const preflight = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode,
     ...(reviewedPreflightProfiles === undefined ? [] : [reviewedPreflightProfiles]));
-  needFn([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(ordinaryFrontendPreflightMode)
+  needFn(ORDINARY_FRONTEND_PREFLIGHT_MODES.includes(ordinaryFrontendPreflightMode)
     && equal(ordinaryPlan.installationPreflight, preflight)
     && profile && Object.getPrototypeOf(profile) === Object.prototype
     && (ordinaryPlan.canonicalBrowserRetirementSelector === undefined
