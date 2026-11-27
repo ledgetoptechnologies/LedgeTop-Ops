@@ -12,12 +12,14 @@ export type DirectShareClient = { sourceId: string; workspaceId: string; display
 export type DirectShareGrant = {
   grantId: string; sourceId: string; workspaceId: string; viewerProjectId: string; taskId: string | null;
   scopeType: "project" | "task"; includeFuturePublished: boolean;
-  permissions: { measure: boolean; cameras: boolean; download: boolean };
+  permissions: { measure: boolean; cameras: boolean; download: boolean; report?: boolean };
   expiresAt: string | null; revokedAt: string | null; createdAt: string; clientDisplayName: string | null;
   selection?: ViewerProjectSelection;
 };
 type GrantWorkspace = { clients: DirectShareClient[]; clientsNextCursor: string | null; grants: DirectShareGrant[];
-  grantsNextCursor?: string | null; grantsIncomplete?: boolean };
+  grantsNextCursor?: string | null; grantsIncomplete?: boolean;
+  /** Operations can keep a share's model report choice. */
+  modelReport?: true };
 /** Quick share sends only published tasks. A null task is refused before sending. */
 export type ViewerShareTarget = { project: { viewerProjectId: string; name: string }; task: ViewerCatalogTask | null };
 
@@ -102,7 +104,8 @@ export async function loadDirectShareWorkspace(fetchJson: (path: string) => Prom
     if (!validGrantWorkspace(page)) throw new Error("invalid_response");
     grants.push(...page.grants); cursor = typeof page.grantsNextCursor === "string" ? page.grantsNextCursor : null; pages++;
   }
-  return { ...first, grants, grantsNextCursor: cursor, grantsIncomplete: !!cursor };
+  const { modelReport: _modelReport, ...rest } = first;
+  return { ...rest, ...(first.modelReport === true ? { modelReport: true as const } : {}), grants, grantsNextCursor: cursor, grantsIncomplete: !!cursor };
 }
 
 /** Confirmed coverage only. The catalog has no folder ancestry to resolve saved project selections. */
@@ -112,14 +115,15 @@ export function grantsForTarget(grants: DirectShareGrant[], target: ViewerShareT
       : target.task !== null && grant.taskId === target.task.taskId));
 }
 
-/** The exact task grant body. Whole-project sharing belongs in Viewer. */
+/** The exact task grant body. Whole-project sharing belongs in Viewer. Quick share has no Model report box:
+ * once Operations can keep that choice, a new share leaves the report off (staff turn it on in the Viewer). */
 export function directShareBody(target: ViewerShareTarget, client: DirectShareClient,
-  permissions: DirectShareGrant["permissions"], expiresAt: string | null) {
+  permissions: DirectShareGrant["permissions"], expiresAt: string | null, modelReport = false) {
   if (!target.task) throw new Error("Share whole projects from the Viewer");
   return {
     sourceId: client.sourceId, workspaceId: client.workspaceId, viewerProjectId: target.project.viewerProjectId,
     taskId: target.task.taskId, scopeType: "task", includeFuturePublished: false,
-    confirmedScope: true, expiresAt, permissions,
+    confirmedScope: true, expiresAt, permissions: modelReport ? { ...permissions, report: false } : permissions,
   };
 }
 
@@ -510,7 +514,7 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
       void send(); return;
     }
     if (!client || !target.task || busy || sameScope || (!neverExpires && !expiresAt)) return;
-    pending.current = { body: JSON.stringify(directShareBody(target, client, permissions, expiresAt)), key: crypto.randomUUID(), sentAt: Date.now(),
+    pending.current = { body: JSON.stringify(directShareBody(target, client, permissions, expiresAt, workspace?.modelReport === true)), key: crypto.randomUUID(), sentAt: Date.now(),
       clientName: client.displayName, client, permissions, neverExpires, expiryDay, expiresAt };
     void send();
   };

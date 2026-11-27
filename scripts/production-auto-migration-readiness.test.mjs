@@ -120,8 +120,8 @@ test('reads both actual source inventories against fixed ordered D1 ledgers', as
     '0242_native_staff_onboarding_approval_actor_authority.sql', '0243_staff_logs_device_eligibility.sql',
     '0244_staff_operations_access_writer.sql', '0247_client_onboarding_destination_target_proofs.sql',
     '0248_client_onboarding_invite_mail_outbox.sql']);
-  assert.equal(names('apps/client/migrations').length, 161);
-  assert.equal(names('apps/client/migrations').at(-1), '0242_client_ops_triage_inquiries.sql');
+  assert.equal(names('apps/client/migrations').length, 162);
+  assert.equal(names('apps/client/migrations').at(-1), '0243_viewer_direct_grant_model_report.sql');
   const fixture = makeFetch();
   const result = await readProductionMigrationReadiness({
     sourceCommit: COMMIT, root: ROOT, token: TOKEN, fetchImpl: fixture.fetchImpl,
@@ -133,7 +133,7 @@ test('reads both actual source inventories against fixed ordered D1 ledgers', as
   assert.equal(result.databases[0].databaseId, DB_OPS);
   assert.equal(result.databases[0].migrationCount, 238);
   assert.equal(result.databases[1].databaseId, DB_CLIENT);
-  assert.equal(result.databases[1].migrationCount, 161);
+  assert.equal(result.databases[1].migrationCount, 162);
   assert.ok(result.databases.every((row) => /^[a-f0-9]{64}$/.test(row.sourceInventorySha256)
     && /^[a-f0-9]{64}$/.test(row.ledgerNamesSha256)));
   assert.equal(fixture.calls.length, 2);

@@ -1,17 +1,41 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
-import { TARGET, READ_SQL, EMPTY_TARGET_SQL, runOneShot,
-  bindingsMetadataSha256, selectProductionClientBindings,
-  validateReleaseCheckout, verifyPostSnapshot } from './production-client-0242-once.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROFILE_DIR = path.join(ROOT, 'scripts/production-auto-migration-profile/source38-inventory-v2');
 const manifest = JSON.parse(readFileSync(path.join(PROFILE_DIR, 'reconciliation-manifest.json'), 'utf8'));
+
+// The 0242 one-shot is finished and pinned to the 161-file Client source of its
+// reviewed profile; a later Client migration on main makes it refuse, as it should.
+// These tests run an unchanged copy of the operator over exactly that pinned
+// source, rebuilt from Git blobs and checked byte for byte against the profile.
+const pinnedRoot = mkdtempSync(path.join(os.tmpdir(), 'client-0242-once-pinned-'));
+process.on('exit', () => rmSync(pinnedRoot, { recursive: true, force: true }));
+for (const file of ['scripts/production-client-0242-once.mjs',
+  'scripts/production-auto-migration-profile/client-0242-targeted-v1/packet.mjs',
+  'scripts/production-auto-migration-profile/source38-inventory-v2/gate.mjs',
+  'scripts/production-auto-migration-profile/source38-inventory-v2/reconciliation-manifest.json',
+  'scripts/production-auto-migration-profile/source38-inventory-v2/append-plan.json']) {
+  mkdirSync(path.dirname(path.join(pinnedRoot, file)), { recursive: true });
+  copyFileSync(path.join(ROOT, file), path.join(pinnedRoot, file));
+}
+mkdirSync(path.join(pinnedRoot, 'apps/client/migrations'), { recursive: true });
+for (const row of manifest.databases.client.sourceMigrations) {
+  const bytes = execFileSync('git', ['cat-file', 'blob', row.gitBlobOid], { cwd: ROOT, maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), row.sha256, `pinned bytes for ${row.name}`);
+  writeFileSync(path.join(pinnedRoot, 'apps/client/migrations', row.name), bytes);
+}
+const { TARGET, READ_SQL, EMPTY_TARGET_SQL, runOneShot,
+  bindingsMetadataSha256, selectProductionClientBindings,
+  validateReleaseCheckout, verifyPostSnapshot } = await import(
+  pathToFileURL(path.join(pinnedRoot, 'scripts/production-client-0242-once.mjs')).href);
 const baselineRows = manifest.databases.client.orderedRows;
 const workspaces = new Set();
 
@@ -259,4 +283,17 @@ test('postflight rejects unexpected ledger/schema changes and optional pending m
       { sql: 'CREATE INDEX e ON b(id)' }, {} ] } }), /post_ledger_not_exact/);
     assert.equal(packet.apps?.client?.appendInExactSourceOrder?.length > 0, true);
   }
+});
+
+test('the finished operator refuses the current Client source once it has moved past the pinned 161 files', async (t) => {
+  const current = (await import('./production-client-0242-once.mjs')).runOneShot;
+  const live = readdirSync(path.join(ROOT, 'apps/client/migrations')).filter(name => /^\d{4}_.+\.sql$/u.test(name));
+  if (live.length === manifest.databases.client.sourceMigrations.length) return t.skip('current source still equals the pinned source');
+  const db = makeDb(), mock = createMockRequest(db);
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'client-0242-once-live-'));
+  try {
+    await assert.rejects(current({ mode: 'prepare', request: mock.request, artifactDir: dir }),
+      /inventory_current_source_mismatch/);
+    assert.equal(mock.calls.some(call => Array.isArray(call.body.batch) && call.body.batch.length === 9), false);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

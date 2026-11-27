@@ -64,13 +64,15 @@ test('actual unavailable credential resolver stays pending and recovers when res
 
 test('repeated output persistence failures preserve cursor and do not falsely fail upstream work',async t=>{
  for(const mode of ['log','cursor','warning']){
-  const f=fixture(t),append=f.processing.appendLog.bind(f.processing),setCursor=f.processing.setOutputCursor.bind(f.processing);
+  const f=fixture(t),append=f.processing.appendLog.bind(f.processing),appendMany=f.processing.appendLogs.bind(f.processing),setCursor=f.processing.setOutputCursor.bind(f.processing);
   f.processing.appendLog=(id,level,message)=>{if((mode==='log'&&level==='provider')||(mode==='warning'&&level==='warn'))throw new Error('secret-local-storage-error');return append(id,level,message)};
+  // Provider output is written as one batch.
+  f.processing.appendLogs=(id,level,messages)=>{if(mode==='log'&&level==='provider')throw new Error('secret-local-storage-error');return appendMany(id,level,messages)};
   if(mode==='cursor')f.processing.setOutputCursor=()=>{throw new Error('secret-local-storage-error')};
   const factory=()=>({status:async()=>({status:'running',progress:.5}),output:async()=>{if(mode==='warning')throw Error('unavailable');return{lines:['provider record'],nextLine:1}}});
   for(let i=0;i<6;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne({processing:f.processing,config:{},adapterFactory:factory},'storage-worker');}
   const job=f.db.prepare("SELECT status,error_code,error_message FROM processing_jobs WHERE id='poll'").get();assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_observation_persistence_unavailable');assert.doesNotMatch(job.error_message,/secret/);assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');assert.equal(f.processing.getAttempt(f.attempt.id).providerOutputCursor,0);
-  f.processing.appendLog=append;f.processing.setOutputCursor=setCursor;f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne({processing:f.processing,config:{},adapterFactory:factory},'recovered-storage-worker');
+  f.processing.appendLog=append;f.processing.appendLogs=appendMany;f.processing.setOutputCursor=setCursor;f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne({processing:f.processing,config:{},adapterFactory:factory},'recovered-storage-worker');
   assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');assert.equal(f.processing.getAttempt(f.attempt.id).providerOutputCursor,mode==='warning'?0:1);
  }
 });

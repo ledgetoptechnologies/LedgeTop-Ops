@@ -12,7 +12,7 @@ import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS,
 
 export const PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_CONTRACT = 'production-auto-post0226-preservation-policy-v1';
 export const PRODUCTION_AUTO_POST0226_PRESERVATION_RECEIPT_CONTRACT = 'production-auto-post0226-preservation-receipt-v1';
-export const PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256 = '915025b52c29bc69ad8c92e503f4df2c9084f41157d0b148f4430de67dc91e33';
+export const PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256 = '6fafc55a1b69cf9113beb81737faa7ebe7d723c12c7e88e3f30c0229256eedab';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const POLICY_PATH = path.join(ROOT, 'scripts/production-auto-post0226-preservation-policy.json');
 const MAX_AGE_MS = 60_000;

@@ -188,7 +188,7 @@ test('Ops adapter reads the fixed post-0226 contract without the legacy review s
   const second = await runtime.adapter.post0226Preservation({ sourceCommit });
   assert.equal(reads, 2);
   assert.equal(first.contract, 'production-auto-post0226-preservation-receipt-v1');
-  assert.equal(first.policySha256, '915025b52c29bc69ad8c92e503f4df2c9084f41157d0b148f4430de67dc91e33');
+  assert.equal(first.policySha256, '6fafc55a1b69cf9113beb81737faa7ebe7d723c12c7e88e3f30c0229256eedab');
   assert.equal(second.stateSha256, first.stateSha256);
   assert.equal(Object.hasOwn(env, 'NATIVE_STAFF_CUTOVER_REVIEW_JSON'), false);
 });

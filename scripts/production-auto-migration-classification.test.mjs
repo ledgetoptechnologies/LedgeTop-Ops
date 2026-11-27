@@ -318,12 +318,12 @@ test('unknown, tampered, or stale append profile refuses before provider request
   }), { code: 'append_readiness_stale' });
 });
 
-test('current 0242 Client source successor is refused by the unchanged Client profile before provider requests', async () => {
+test('current 0243 Client source successor is refused by the unchanged Client profile before provider requests', async () => {
   const provider = fakeProvider(baseRows);
   const currentClientNames = readdirSync(path.join(root, 'apps/client/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
-  assert.equal(currentClientNames.length, 161);
-  assert.equal(currentClientNames.at(-1), '0242_client_ops_triage_inquiries.sql');
+  assert.equal(currentClientNames.length, 162);
+  assert.equal(currentClientNames.at(-1), '0243_viewer_direct_grant_model_report.sql');
   const fixtureClientNames = readdirSync(path.join(approvedFixture, 'apps/client/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
   assert.equal(fixtureClientNames.length, 160);

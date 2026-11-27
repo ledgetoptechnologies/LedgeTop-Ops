@@ -86,6 +86,18 @@ describe("direct Viewer recipient authorization",()=>{
     expect(mock.create).toHaveBeenCalledWith(expect.objectContaining({modelId:"model-one",modelVersionId:"version-one",audience:"client",
       sourceAuthorization:{type:"direct_client_grant",id:"grant-one",version:1},permissions:{view:true,measure:false,cameras:true,download:false,personalMeasurements:true}}));
   });
+  it("passes a share's model report choice to the Viewer, and nothing for a share from before it",async()=>{
+    for(const [stored,expected] of [[0,false],[1,true]] as const){
+      mock.create.mockClear();mock.rows.mockResolvedValue([{...row(),can_download_report:stored}]);
+      expect(await issueDirectClientViewerSession(env(),{...session,idempotencyKey:`direct-client-session-report-${stored}`})).toMatchObject({ok:true});
+      expect(mock.create.mock.calls[0]![0].permissions).toEqual({view:true,measure:false,cameras:true,download:false,report:expected,personalMeasurements:true});
+    }
+    for(const stored of [null,undefined]){
+      mock.create.mockClear();mock.rows.mockResolvedValue([{...row(),can_download_report:stored}]);
+      expect(await issueDirectClientViewerSession(env(),{...session,idempotencyKey:`direct-client-session-report-${String(stored)}`})).toMatchObject({ok:true});
+      expect("report" in mock.create.mock.calls[0]![0].permissions).toBe(false);
+    }
+  });
   it("accepts a claimed workspace grant only when its immutable authority and ownership pin matches",async()=>{
     const operationsSession={...session,identityId:operationsContext.identityId};
     mock.context.mockResolvedValue(operationsContext);mock.pin.mockResolvedValue(operationsPin);

@@ -9,11 +9,11 @@ import { verifyProductionAutoSourceMap } from './production-auto-source-map.mjs'
 import { fileURLToPath } from 'node:url';
 import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256, resourcesShape,
-  validateInstallation } from './production-deploy.mjs';
+  validateInstallation, isHeldOpsSyncInactiveLatest, HELD_OPS_SYNC_INACTIVE_LATEST } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, readCandidateVersionWithVisibilityRetry,
   projectAcknowledgedProductionAutoUploadTagSettings } from './production-auto-provider.mjs';
-import { readProductionAutoTriggerRun, runBuild, parseProductionAutoLedger,
+import { readProductionAutoTriggerRun, runBuild, parseProductionAutoLedger, AUTO_PROFILE, isProductionAutoProfile,
   productionAutoControlsSHA256, productionAutoBuildProfileSHA256, productionAutoInstalledPreflight } from './production-auto-runtime.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { readProductionAutoStaffPreservation } from './production-auto-staff-preservation-reader.mjs';
@@ -25,6 +25,8 @@ import { validateProductionMigrationAdmission } from './production-auto-migratio
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
 import { createInstalledSchemaPreservationSession, isProductionInstalledSchemaPreservationAdmission } from './production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs';
+import { createInstalledSchemaPreservationV2Session, isProductionInstalledSchemaPreservationV2Admission }
+  from './production-auto-migration-profile/installed-schema-preservation-v2/installed-schema-preservation-v2.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor,
   projectVerifiedProductionAutoPredecessorTagSettings } from './production-auto-journal.mjs';
 import { readOwnedUploadTagBaseline } from './production-auto-upload-tag.mjs';
@@ -64,11 +66,12 @@ function stableControls(snapshot) {
       assets: state.modern.assets ?? null }];
   }));
 }
-function projectCapture(snapshot, allowedLatestVersionId, acknowledgedUpload, sourceCommit) {
+function projectCapture(snapshot, allowedLatestVersionId, acknowledgedUpload, sourceCommit, heldLatestVersionId = null) {
   const app = snapshot[APP], deployment = app.deployment;
   need(deployment.versions.length === 1 && deployment.versions[0].percentage === 100
     && deployment.versions[0].version_id === app.version.id
-    && (app.latest === app.version.id || app.latest === allowedLatestVersionId),
+    && (app.latest === app.version.id || app.latest === allowedLatestVersionId
+      || (!allowedLatestVersionId && typeof heldLatestVersionId === 'string' && app.latest === heldLatestVersionId)),
   'sync_deployment_must_be_single_active');
   need(UUID.test(deployment.id ?? '') && isProviderUtcTimestamp(deployment.created_on),
     'sync_deployment_identity_invalid');
@@ -94,6 +97,29 @@ function codeFor(phase) {
   return ({ 'sync-prepare': 'release_sync_prepare_failed', 'sync-upload': 'release_sync_upload_failed',
     'sync-candidate-readback': 'release_sync_candidate_readback_failed', 'sync-activate': 'release_sync_activate_failed',
     'sync-verify': 'release_sync_verify_failed' })[phase] ?? 'release_sync_prepare_failed';
+}
+
+/** The v5 lane's held-candidate admission. A Sync latest that is not the active version is admitted only when
+ * the whole captured Sync state is exactly the pinned held state (HELD_OPS_SYNC_INACTIVE_LATEST: this lane's own
+ * held upload bc65f489 over 6f8e224c). Returns the admitted latest id, or null when latest is the active version. */
+export function syncHeldLatestAdmission(state, pins = HELD_OPS_SYNC_INACTIVE_LATEST) {
+  need(state && typeof state === 'object' && UUID.test(state.latest ?? '') && UUID.test(state.version?.id ?? ''),
+    'sync_held_latest_unadmitted');
+  if (state.latest === state.version.id) return null;
+  need(isHeldOpsSyncInactiveLatest(APP, state, pins), 'sync_held_latest_unadmitted');
+  return state.latest;
+}
+/** Which owned state a read-only reconciliation observed: the parent, this run's acknowledged candidate, or the
+ * still-unreplaced admitted held candidate (re-proven exactly against its pins). Anything else is unowned. */
+export function syncReconciliationLatestOwner({ state, expectedActiveVersionId, candidateVersionId, acknowledgedVersionId,
+  heldLatestVersionId = null, pins = HELD_OPS_SYNC_INACTIVE_LATEST }) {
+  const latest = state?.latest;
+  if (candidateVersionId && latest === candidateVersionId && acknowledgedVersionId === latest) return 'candidate';
+  if (latest === expectedActiveVersionId) return 'active';
+  // The held candidate is owned only until this run uploads its own candidate.
+  need(!candidateVersionId && typeof heldLatestVersionId === 'string' && latest === heldLatestVersionId
+    && isHeldOpsSyncInactiveLatest(APP, state, pins), 'sync_reconciliation_latest_unowned');
+  return 'held';
 }
 
 export function verifySyncBackendCandidate({ before, candidate, modern, moduleBytes, sourceMap, candidateVersionId }) {
@@ -123,12 +149,13 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   recipientLoader = loadPinnedProductionAutoRecipient, preservationReader = readProductionAutoStaffPreservation,
   buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
   schemaPreservationSessionFactory,
-  schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
+  schemaPreservationAdmissionCheck,
+  heldOpsSyncInactiveLatestPins = HELD_OPS_SYNC_INACTIVE_LATEST,
   predecessorReader = readVerifiedProductionAutoPredecessor,
   cloudflarePacerFactory = fetchImpl === globalThis.fetch ? createProductionAutoCloudflarePacer : null,
   monotonicNow = () => performance.now() } = {}) {
   need(COMMIT.test(sourceCommit ?? '') && triggerRun?.sourceCommit === sourceCommit && typeof fetchImpl === 'function'
-    && profile === PROFILE && env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
+    && (profile === PROFILE || isProductionAutoProfile(profile)) && env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
     && isGitHubHeaderCredential(env.GITHUB_TOKEN)
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? '')
@@ -150,19 +177,40 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     callsMade: githubCoreCalls.count, token: env.GITHUB_TOKEN, fetchImpl: apiFetch });
   const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: githubFetch }), token = env.CLOUDFLARE_API_TOKEN;
   let migrationPins, schemaPreservationSession, latestSchemaAdmission, latestSchemaAdmissionOptions;
-  const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
   const usesV4SchemaPreservation = hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256;
+  const usesV5SchemaPreservation = isProductionAutoProfile(profile);
+  const schemaSessionFactory = schemaPreservationSessionFactory
+    ?? (usesV5SchemaPreservation ? createInstalledSchemaPreservationV2Session : createInstalledSchemaPreservationSession);
+  const schemaAdmissionCheck = schemaPreservationAdmissionCheck
+    ?? (usesV5SchemaPreservation ? isProductionInstalledSchemaPreservationV2Admission : isProductionInstalledSchemaPreservationAdmission);
+  // v5 only: undefined until decided by one capture before the schema session starts; then the admitted held
+  // latest id, or null. It is the allowed Sync latest until this run's own upload replaces it.
+  let heldLatestVersionId = usesV5SchemaPreservation ? undefined : null;
+  const latestAllowance = () => candidateVersionId ? { [APP]: candidateVersionId }
+    : heldLatestVersionId ? { [APP]: heldLatestVersionId } : {};
+  const admitHeldLatest = async () => {
+    if (heldLatestVersionId !== undefined) return;
+    ensureProvider();
+    const raw = await capture(provider, { selectedApp: APP, allowUnselectedRecapture: false });
+    heldLatestVersionId = syncHeldLatestAdmission(raw?.[APP], heldOpsSyncInactiveLatestPins);
+  };
   const checkMigrations = async () => {
-    if (usesV4SchemaPreservation) {
-      if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
-        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token, allowUnselectedRecapture: false, fetchImpl: apiFetch,
-      });
-      const admissionOptions = { allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} };
+    if (usesV4SchemaPreservation || usesV5SchemaPreservation) {
+      if (!schemaPreservationSession) {
+        if (usesV5SchemaPreservation) await admitHeldLatest();
+        schemaPreservationSession = await schemaSessionFactory({
+          sourceCommit, ...(usesV5SchemaPreservation ? { canonicalV5Profile: profile,
+            ...(heldLatestVersionId ? { baselineAllowLatest: { [APP]: heldLatestVersionId } } : {}) }
+            : { canonicalV4Profile: profile }),
+          selectedApp: APP, token, allowUnselectedRecapture: false, fetchImpl: apiFetch,
+        });
+      }
+      const admissionOptions = { allowLatest: latestAllowance() };
       if (latestSchemaAdmission && canonical(admissionOptions) === canonical(latestSchemaAdmissionOptions)
-        && schemaPreservationAdmissionCheck(latestSchemaAdmission)) return latestSchemaAdmission;
+        && schemaAdmissionCheck(latestSchemaAdmission)) return latestSchemaAdmission;
       latestSchemaAdmission = await schemaPreservationSession.observe(admissionOptions);
       latestSchemaAdmissionOptions = admissionOptions;
-      need(typeof schemaPreservationAdmissionCheck === 'function' && schemaPreservationAdmissionCheck(latestSchemaAdmission),
+      need(typeof schemaAdmissionCheck === 'function' && schemaAdmissionCheck(latestSchemaAdmission),
         'sync_schema_preservation_admission_refused');
       return latestSchemaAdmission;
     }
@@ -174,7 +222,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     return observed;
   };
   const assertSchemaPreservationFresh = () => {
-    if (usesV4SchemaPreservation) need(schemaPreservationAdmissionCheck(latestSchemaAdmission),
+    if (usesV4SchemaPreservation || usesV5SchemaPreservation) need(schemaAdmissionCheck(latestSchemaAdmission),
       'sync_schema_preservation_admission_stale');
   };
   const leaseFresh = lease => lease && Number.isFinite(lease.startedMono)
@@ -215,10 +263,13 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   let phase = 'sync-prepare', readbackStep;
   const current = async () => {
     const raw = await capture(provider, { selectedApp: APP, allowUnselectedRecapture: false });
-    const preservationPreflight = productionAutoInstalledPreflight(PROFILE, APP);
+    const preservationPreflight = productionAutoInstalledPreflight(profile, APP);
     const snapshot = validateInstallation(raw, { profile, selectedApp: APP, ...preservationPreflight,
-      allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} });
-    return { snapshot, state: projectCapture(snapshot, candidateVersionId, acknowledgedCandidateUpload, sourceCommit) };
+      allowLatest: latestAllowance() });
+    if (!candidateVersionId && heldLatestVersionId)
+      need(syncHeldLatestAdmission(snapshot[APP], heldOpsSyncInactiveLatestPins) === heldLatestVersionId, 'sync_held_latest_unadmitted');
+    return { snapshot, state: projectCapture(snapshot, candidateVersionId, acknowledgedCandidateUpload, sourceCommit,
+      candidateVersionId ? null : heldLatestVersionId) };
   };
   const verifyPredecessor = async snapshot => {
     const proof = validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
@@ -241,13 +292,17 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     const raw = await capture(provider, { selectedApp: APP, allowUnselectedRecapture: false });
     const latest = raw?.[APP]?.latest;
     need(UUID.test(latest ?? ''), 'sync_reconciliation_latest_invalid');
-    const preservationPreflight = productionAutoInstalledPreflight(PROFILE, APP);
+    const preservationPreflight = productionAutoInstalledPreflight(profile, APP);
     const checked = validateInstallation(raw, { profile, selectedApp: APP, ...preservationPreflight, allowLatest: { [APP]: latest } });
     // Only the privately acknowledged upload can justify projecting its owned
-    // tag. A different latest version is not ours to normalize or reconcile.
-    const acknowledged = candidateVersionId && latest === candidateVersionId && acknowledgedCandidateUpload?.id === latest;
-    need(latest === expected?.activeVersionId || acknowledged, 'sync_reconciliation_latest_unowned');
-    const state = projectCapture(checked, acknowledged ? latest : undefined, acknowledgedCandidateUpload, sourceCommit);
+    // tag. A different latest version is not ours to normalize or reconcile,
+    // except the admitted held candidate this run has not yet replaced (v5).
+    const owner = syncReconciliationLatestOwner({ state: checked[APP], expectedActiveVersionId: expected?.activeVersionId,
+      candidateVersionId, acknowledgedVersionId: acknowledgedCandidateUpload?.id,
+      heldLatestVersionId: heldLatestVersionId ?? null, pins: heldOpsSyncInactiveLatestPins });
+    const acknowledged = owner === 'candidate';
+    const state = projectCapture(checked, acknowledged ? latest : undefined, acknowledgedCandidateUpload, sourceCommit,
+      owner === 'held' ? latest : null);
     return { activeVersionId: state.activeVersionId, latestVersionId: state.latestVersionId,
       deploymentId: state.deploymentId, controlsUnchanged: state.controlsSHA256 === expected?.controlsSHA256 };
   };
@@ -326,7 +381,9 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       await checkSourceAndCI({ migrationsChecked: true });
       await checkStaff(); ensureProvider();
       const start = await current(); baseline = start.snapshot; expected = start.state;
-      need(expected.activeVersionId === expected.latestVersionId, 'sync_incomplete_deployment_blocks_release');
+      need(expected.activeVersionId === expected.latestVersionId
+        || (typeof heldLatestVersionId === 'string' && expected.latestVersionId === heldLatestVersionId),
+      'sync_incomplete_deployment_blocks_release');
       const activeModule = baseline[APP].modern.modules?.find(row => row.name === 'index.js');
       need(activeModule && typeof activeModule.content_base64 === 'string', 'sync_active_module_missing');
       if (buildArtifactsReader) {
@@ -360,7 +417,8 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         'workers/tag': `auto-${sourceCommit.slice(0, 12)}` };
       const uploaded = await provider.createInactiveBackendVersion({ workerName: WORKER, state: observed.snapshot[APP],
         modules: { js: { bytes: build.moduleBytes, sha256: moduleSHA256 }, sourceMap: { bytes: build.sourceMapBytes,
-          sha256: hash(build.sourceMapBytes) } }, annotations });
+          sha256: hash(build.sourceMapBytes) } }, annotations,
+        ...(heldLatestVersionId ? { heldInactiveLatest: { versionId: heldLatestVersionId, pins: heldOpsSyncInactiveLatestPins } } : {}) });
       candidateVersionId = uploaded.id;
       acknowledgedCandidateUpload = uploaded;
       phase = 'sync-candidate-readback';
@@ -443,7 +501,10 @@ export async function runProductionAutoSyncRelease({ env = process.env, fetchImp
   const sourceCommit = trackProductionAutoStartupStage('source', () => sourceReader(ROOT, env));
   trackProductionAutoStartupStage('source', () => need(triggerRun.sourceCommit === sourceCommit && isExactMainCiWorkflowPath('.github/workflows/ci.yml@main'),
     'sync_trigger_source_mismatch'));
-  const runtime = trackProductionAutoStartupStage('adapter', () => runtimeFactory({ sourceCommit, triggerRun, env, fetchImpl, recipientLoader: () => recipient, sourceReader }));
+  // The reviewed production factory always releases against AUTO_PROFILE; an injected (test) factory keeps its own.
+  const laneProfile = runtimeFactory === createProductionAutoSyncAdapter ? { profile: AUTO_PROFILE } : {};
+  const runtime = trackProductionAutoStartupStage('adapter', () => runtimeFactory({ sourceCommit, triggerRun, env, fetchImpl,
+    ...laneProfile, recipientLoader: () => recipient, sourceReader }));
   return trackProductionAutoStartupStageAsync('coordination', async () => {
     try { return await runtime.adapter.release(); }
     finally { runtime.close?.(); }

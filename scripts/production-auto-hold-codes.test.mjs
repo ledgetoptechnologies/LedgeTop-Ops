@@ -12,6 +12,7 @@ function thrownCodes() {
   const modules = fs.readdirSync(here).sort().filter(name => /^production-auto-.*\.mjs$/u.test(name)
     && !name.endsWith('.test.mjs') && name !== 'production-auto-hold-codes.mjs');
   modules.push('production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs');
+  modules.push('production-auto-migration-profile/installed-schema-preservation-v2/installed-schema-preservation-v2.mjs');
   for (const name of modules) {
     const source = fs.readFileSync(path.join(here, name), 'utf8');
     for (const code of releaseLiteralCodes(source)) codes.add(code);
