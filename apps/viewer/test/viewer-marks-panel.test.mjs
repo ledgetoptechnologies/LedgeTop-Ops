@@ -381,8 +381,8 @@ test('an icon this build does not know survives an edit, undo, its category and 
   assert.equal(panel.store.state.marks.at(-1).icon, 'future-category');
   await panel.q(`[data-only="${category.id}"]`).click();
   await panel.open('Mark');
-  panel.q('[name=categoryId]').value = category.id;
-  await panel.q('[name=categoryId]').fire('change');
+  // Picking its own category again takes the category's look.
+  await panel.chooseCategory('Future two');
   await panel.save();
   assert.equal(panel.store.find(mark.id).icon, 'future-category');
   // Choosing one is still possible.

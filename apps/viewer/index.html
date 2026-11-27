@@ -135,8 +135,9 @@
      }
      .slider-row .val { min-width: 34px; text-align: right; color: var(--brand-muted); }
 
-    #panel-marks { display:grid; gap:8px; }
+    #panel-marks { display:grid; gap:10px; }
     #panel-marks h3 { margin-bottom:0; }
+    #panel-marks [data-marks-root] { display:grid; gap:8px; }
     #panel-marks button:not(.tool-btn):not(.viewer-mark-swatch):not(.viewer-mark-icon):not(.viewer-mark-list-item) {
       padding:6px 9px; border-radius:6px; border:1px solid rgba(255,255,255,0.12); background:rgba(255,255,255,0.05);
       color:#e0e0e0; font:600 12px var(--font); cursor:pointer; min-height:32px;
@@ -148,15 +149,29 @@
       border-radius:6px; padding:6px 8px; font:13px var(--font);
     }
     #panel-marks :is(button,input,select,textarea,summary):focus-visible { outline:2px solid var(--brand-orange); outline-offset:2px; }
-    .viewer-mark-tools { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+    .viewer-mark-tools { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+    #panel-marks .tool-btn { min-height:36px; }
+    #panel-marks .viewer-mark-open { width:100%; }
+    .viewer-mark-glyph { display:inline-grid; place-items:center; flex:none; pointer-events:none; }
+    .viewer-mark-glyph svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+    .viewer-mark-count { margin-left:auto; min-width:22px; padding:1px 7px; border-radius:999px; background:rgba(255,255,255,.1); color:#d8dbe0; font:600 11px var(--font); text-align:center; }
+    .viewer-mark-count:empty { display:none; }
+    .viewer-mark-open .viewer-mark-count { margin-left:4px; }
     .viewer-mark-row { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
     .viewer-mark-row > select { flex:1 1 120px; width:auto; }
     .viewer-mark-coords { display:grid; gap:6px; }
-    .viewer-mark-form { display:grid; gap:8px; padding:10px; border-radius:8px; background:rgba(0,0,0,.22); }
+    .viewer-mark-form { display:grid; gap:10px; padding:10px; border-radius:8px; background:rgba(0,0,0,.22); }
     .viewer-mark-form h4 { font-size:12px; color:#fff; }
-    .viewer-mark-form label { display:grid; gap:3px; font-size:11px; color:#c0c0c0; }
+    .viewer-mark-form label { display:grid; gap:4px; font-size:11px; font-weight:600; color:#b9c0c8; }
     .viewer-mark-form fieldset { border:0; display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
     .viewer-mark-form legend { font-size:11px; color:#c0c0c0; margin-bottom:3px; }
+    .viewer-mark-where { display:grid; gap:4px; }
+    .viewer-mark-where .hint { margin:0; }
+    .viewer-mark-suggest { list-style:none; margin:4px 0 0; padding:4px; display:grid; gap:2px; max-height:216px; overflow:auto;
+      background:#111417; border:1px solid rgba(255,255,255,.2); border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,.5); }
+    .viewer-mark-suggest[hidden] { display:none; }
+    .viewer-mark-suggest li { display:flex; align-items:center; gap:8px; min-height:40px; padding:4px 8px; border-radius:6px; cursor:pointer; font:13px var(--font); color:#e8eaed; }
+    .viewer-mark-suggest li:hover, .viewer-mark-suggest li[aria-selected=true] { background:rgba(238,80,7,.2); }
     .viewer-mark-swatch { width:26px; height:26px; border-radius:50%; border:2px solid rgba(255,255,255,.35); cursor:pointer; padding:0; }
     .viewer-mark-swatch[aria-pressed=true] { border-color:#fff; box-shadow:0 0 0 2px var(--brand-orange); }
     .viewer-mark-form input[type=color] { width:32px; height:28px; padding:0; border:0; background:none; }
@@ -168,13 +183,15 @@
     #panel-marks .viewer-mark-tabs > button.active { background:rgba(255,255,255,.16); color:#fff; }
     #panel-marks [role=tabpanel]:not([hidden]) { display:grid; gap:8px; }
     #panel-marks [role=tabpanel][hidden] { display:none; }
-    .viewer-mark-list { list-style:none; padding:0; display:grid; gap:2px; max-height:40vh; overflow:auto; }
-    .viewer-mark-list li { display:flex; align-items:center; gap:6px; }
-    .viewer-mark-list-item { flex:1; display:flex; align-items:center; gap:8px; min-width:0; padding:6px; border:0; border-radius:6px; background:none; color:#e0e0e0; font:12px var(--font); text-align:left; cursor:pointer; }
-    .viewer-mark-list-item:hover, .viewer-mark-list-item[aria-current=true] { background:rgba(238,80,7,.16); }
+    .viewer-mark-list { list-style:none; padding:0; margin:0; display:grid; gap:2px; max-height:40vh; overflow:auto; }
+    .viewer-mark-list li { display:flex; align-items:center; gap:6px; min-width:0; }
+    .viewer-mark-list-item { flex:1; display:flex; align-items:center; gap:10px; min-width:0; padding:6px 8px; border:0; border-radius:8px; background:none; color:#e8eaed; font:13px var(--font); text-align:left; cursor:pointer; }
+    .viewer-mark-list-item:hover { background:rgba(255,255,255,.06); }
+    .viewer-mark-list-item[aria-current=true], .viewer-mark-list-item[aria-pressed=true] { background:rgba(238,80,7,.16); }
     .viewer-mark-list-icon { flex:none; display:grid; }
-    .viewer-mark-list-name { flex:1; min-width:0; display:grid; overflow-wrap:anywhere; }
-    .viewer-mark-list-name small { color:var(--brand-muted); font-size:10px; }
+    .viewer-mark-list-name { flex:1; min-width:0; display:grid; gap:1px; overflow-wrap:anywhere; }
+    .viewer-mark-list-name > span { font-weight:600; }
+    .viewer-mark-list-name small { color:var(--brand-muted); font-size:11px; }
     .viewer-mark-category-form input[name=categoryName] { flex:1 1 110px; width:auto; }
     .viewer-mark-category-form input[type=color] { width:32px; height:30px; padding:0; border:0; background:none; }
     .viewer-mark-section summary { cursor:pointer; font-size:12px; font-weight:600; color:#e0e0e0; padding:4px 0; }
@@ -186,30 +203,49 @@
     .viewer-mark-icon-group { flex:1 0 100%; }
     .viewer-map-ghost { background:none; border:0; opacity:.75; }
     .viewer-map-ghost svg { display:block; overflow:visible; }
-    /* Over the map: add, the strip while placing, the card. */
+    /* Over the map. The map's controls are one column on the right (#floating-controls,
+       then Add mark, Marks and what is hidden); zoom is at the top left. The list is
+       docked beside the zoom; a mark's card is beside its pin, between the two; the
+       strip while placing and the undo note are at the bottom centre. Narrow: sheets. */
     #viewer-marks-ui { position:absolute; inset:0; z-index:118; pointer-events:none; overflow:hidden; }
     #viewer-marks-ui > * { pointer-events:auto; }
-    #viewer-marks-ui button:not(.viewer-mark-swatch):not(.viewer-mark-icon) { min-height:44px; padding:6px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.2); background:#23272d; color:#f5f5f5; font:600 13px var(--font); cursor:pointer; }
+    /* Low specificity, so the rules for each kind of button below win. */
+    #viewer-marks-ui button:where(:not(.viewer-mark-swatch, .viewer-mark-icon, .viewer-mark-list-item, .viewer-mark-rail)) { min-height:44px; padding:6px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.2); background:#23272d; color:#f5f5f5; font:600 13px var(--font); cursor:pointer; }
     #viewer-marks-ui button:disabled { opacity:.5; cursor:default; }
     #viewer-marks-ui .viewer-mark-primary { background:var(--brand-orange); border-color:var(--brand-orange); color:#fff; }
     #viewer-marks-ui :is(button,input,select,textarea,summary):focus-visible { outline:3px solid #fff; outline-offset:2px; box-shadow:0 0 0 6px #000; }
     #viewer-marks-ui :is(input:not([type=color]),select,textarea) { width:100%; min-width:0; min-height:40px; background:#111417; color:#f5f5f5; border:1px solid rgba(255,255,255,.25); border-radius:6px; padding:6px 8px; font:14px var(--font); }
-    #viewer-marks-ui .viewer-mark-add { position:absolute; right:14px; top:64px; min-width:48px; height:48px; box-shadow:0 2px 8px rgba(0,0,0,.6); }
-    .viewer-mark-undo { position:absolute; left:50%; top:14px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; max-width:calc(100% - 24px); padding:6px 8px 6px 14px; border-radius:12px; background:rgba(20,23,27,.97); color:#f5f5f5; box-shadow:0 4px 18px rgba(0,0,0,.6); font:14px var(--font); overflow-wrap:anywhere; }
+    #viewer-marks-ui .viewer-mark-rail { position:absolute; right:11px; width:44px; height:44px; padding:0; display:grid; place-items:center; border-radius:50%;
+      background:var(--brand-panel); border:1px solid var(--panel-border); color:#e0e0e0; box-shadow:0 2px 8px rgba(0,0,0,.5); cursor:pointer; }
+    #viewer-marks-ui .viewer-mark-rail:hover, #viewer-marks-ui .viewer-mark-rail[aria-expanded=true] { border-color:var(--brand-orange); color:var(--brand-orange); }
+    #viewer-marks-ui .viewer-mark-rail svg { width:20px; height:20px; }
+    #viewer-marks-ui .viewer-mark-add { top:62px; }
+    #viewer-marks-ui .viewer-mark-layers { top:114px; }
+    #viewer-marks-ui .viewer-mark-hidden-count { position:absolute; right:8px; top:166px; min-height:28px; padding:2px 10px; border-radius:14px; font-size:12px; box-shadow:0 2px 8px rgba(0,0,0,.6); }
+    .viewer-mark-undo { position:absolute; left:50%; bottom:16px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; max-width:calc(100% - 24px); padding:6px 8px 6px 14px; border-radius:12px; background:rgba(20,23,27,.97); color:#f5f5f5; box-shadow:0 4px 18px rgba(0,0,0,.6); font:14px var(--font); overflow-wrap:anywhere; }
     .viewer-mark-undo[hidden] { display:none; }
-    #viewer-marks-ui .viewer-mark-layers { position:absolute; right:14px; top:120px; min-width:48px; height:48px; box-shadow:0 2px 8px rgba(0,0,0,.6); }
-    #viewer-marks-ui .viewer-mark-hidden-count { position:absolute; right:14px; top:176px; border-radius:22px; box-shadow:0 2px 8px rgba(0,0,0,.6); }
     .viewer-map-group { background:none; border:0; }
     .viewer-mark-plate { display:flex; align-items:center; justify-content:center; gap:1px; height:36px; min-width:46px; padding:0 4px; box-sizing:border-box; border-radius:18px; background:#14171b; color:#fff; border:2px solid #fff; box-shadow:0 0 0 2px #0b0d10; font:700 13px var(--font); }
     .viewer-map-group::before { content:''; position:absolute; left:50%; top:50%; width:48px; height:44px; transform:translate(-50%,-50%); }
     .viewer-map-group:focus-visible { outline:3px solid #fff; outline-offset:3px; box-shadow:0 0 0 8px #000; border-radius:20px; }
-    .viewer-mark-box { position:absolute; right:74px; top:64px; width:340px; max-width:calc(100% - 90px); max-height:calc(100% - 80px); overflow:auto; display:grid; gap:8px; padding:12px; border-radius:12px; background:rgba(20,23,27,.97); color:#f5f5f5; box-shadow:0 4px 18px rgba(0,0,0,.6); font:14px var(--font); }
+    .viewer-mark-box { position:absolute; left:56px; top:12px; width:340px; max-width:calc(100% - 56px - 64px); max-height:calc(100% - 24px); overflow:auto; display:grid; align-content:start; gap:10px; padding:12px; border-radius:12px; background:rgba(20,23,27,.97); color:#f5f5f5; box-shadow:0 4px 18px rgba(0,0,0,.6); font:14px var(--font); }
     .viewer-mark-box.sheet { left:0; right:0; top:auto; bottom:0; width:auto; max-width:none; max-height:86%; border-radius:14px 14px 0 0; }
     .viewer-mark-box [role=tabpanel]:not([hidden]) { display:grid; gap:8px; }
-    .viewer-mark-close { margin-left:auto; }
+    .viewer-mark-box h4 { margin:0; font-size:15px; }
+    .viewer-mark-box .viewer-mark-list { max-height:none; }
+    #viewer-marks-ui .viewer-mark-tabs { gap:2px; padding:3px; border-radius:10px; background:rgba(255,255,255,.06); flex-wrap:nowrap; }
+    #viewer-marks-ui .viewer-mark-tabs > button { min-height:36px; border:0; background:none; color:#b9c0c8; }
+    #viewer-marks-ui .viewer-mark-tabs > button.active { background:#3a414a; color:#fff; }
+    #viewer-marks-ui .viewer-mark-list-item { min-height:44px; }
+    #viewer-marks-ui .viewer-mark-list li > button:not(.viewer-mark-list-item) { min-height:34px; padding:4px 10px; font-size:12px; }
+    #viewer-marks-ui .viewer-mark-close { margin-left:auto; width:36px; min-height:36px; height:36px; padding:0; border-radius:50%; border:0; background:rgba(255,255,255,.08); font-size:18px; line-height:1; }
+    #viewer-marks-ui .viewer-mark-count + .viewer-mark-close { margin-left:auto; }
+    .viewer-mark-box .viewer-mark-card-head .viewer-mark-count { margin-left:0; }
+    .viewer-mark-box > .viewer-mark-coords, .viewer-mark-box > .viewer-mark-section { padding-top:10px; border-top:1px solid rgba(255,255,255,.08); }
     .viewer-mark-strip, .viewer-mark-card { position:absolute; display:grid; gap:8px; padding:12px; border-radius:12px; background:rgba(20,23,27,.96); color:#f5f5f5; box-shadow:0 4px 18px rgba(0,0,0,.6); font:14px var(--font); }
     .viewer-mark-strip[hidden], .viewer-mark-card[hidden], .viewer-mark-box[hidden], .viewer-mark-cross[hidden], #viewer-marks-ui [hidden] { display:none; }
-    .viewer-mark-strip { left:50%; bottom:16px; transform:translateX(-50%); width:min(560px, calc(100% - 24px)); }
+    .viewer-mark-strip { left:50%; bottom:16px; transform:translateX(-50%); width:min(560px, calc(100% - 136px)); }
+    @media (max-width:640px) { .viewer-mark-strip { width:calc(100% - 24px); } }
     .viewer-mark-chips { display:flex; gap:6px; overflow-x:auto; padding:4px; }
     #viewer-marks-ui .viewer-mark-chip { flex:none; display:flex; align-items:center; gap:6px; }
     #viewer-marks-ui .viewer-mark-chip[aria-pressed=true], #viewer-marks-ui [aria-pressed=true]:not(.viewer-mark-swatch) { border-color:#fff; background:#3a414a; }
@@ -219,7 +255,7 @@
     .viewer-mark-card.sheet { left:0; right:0; top:auto; bottom:0; width:auto; max-width:none; max-height:46%; border-radius:14px 14px 0 0; }
     .viewer-mark-card.sheet.full { max-height:86%; }
     .viewer-mark-card .viewer-mark-form { padding:0; background:none; }
-    .viewer-mark-card .viewer-mark-editor-actions { position:sticky; bottom:0; padding-top:8px; background:#14171b; }
+    .viewer-mark-card .viewer-mark-editor-actions { position:sticky; bottom:-12px; margin-bottom:-12px; padding:8px 0 12px; background:#14171b; }
     .viewer-mark-card-head { display:flex; align-items:center; gap:8px; }
     .viewer-mark-card h4 { margin:0; overflow-wrap:anywhere; }
     .viewer-mark-view { display:grid; gap:8px; }
@@ -234,7 +270,7 @@
     .viewer-mark-vertex { background:#fff; border:2px solid #212121; border-radius:50%; }
     .leaflet-tooltip.viewer-mark-label { background:rgba(10,10,12,.78); color:#fff; border:0; box-shadow:none; font:600 11px var(--font); padding:2px 6px; }
     .leaflet-tooltip.viewer-mark-label::before { display:none; }
-    @media (pointer:coarse) { .viewer-mark-vertex { transform:scale(1.4); } #panel-marks button { min-height:40px; } }
+    @media (pointer:coarse) { .viewer-mark-vertex { transform:scale(1.4); } #panel-marks button { min-height:40px; } #viewer-marks-ui .viewer-mark-list li > button:not(.viewer-mark-list-item), #viewer-marks-ui .viewer-mark-close { min-height:44px; } #viewer-marks-ui .viewer-mark-close { width:44px; height:44px; } }
 
     #measure-output {
       margin-top: 10px; padding: 10px; border-radius: 8px; background: rgba(0,0,0,0.25);
