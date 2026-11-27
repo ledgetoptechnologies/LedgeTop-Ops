@@ -42,14 +42,35 @@ export function isPlaceholderOwner(normalized) {
   return normalized.split(' ').every(word => PLACEHOLDER_OWNER_WORDS.has(word));
 }
 
-// The key two parcels must share to count as one owner: case, punctuation
-// spacing and repeated whitespace do not matter. Empty means "no owner",
-// including placeholders such as NOT AVAILABLE or UNKNOWN.
+// Trust wording at the end of a name ("REV TRST", "REVOCABLE TRUST", "LIVING
+// TRUST", "TTEE"): the same person's land held in their trust. A run of these
+// words is dropped only when it holds a trust word itself, and only when at
+// least two words of the name remain, so SAMPLE TRUST never matches SAMPLE.
+// Words that tell people apart (JR, SR, ET AL, FAMILY, initials) always stay.
+const TRUST_WORDS = new Set(['TRUST', 'TRUSTS', 'TRST', 'TR', 'TRS', 'TRT', 'TRUSTEE', 'TRUSTEES', 'TTEE', 'TTEES']);
+const TRUST_MODIFIERS = new Set(['REV', 'REVOC', 'REVOCABLE', 'IRREV', 'IRREVOCABLE', 'LIVING', 'LIV', 'LVG']);
+function withoutTrustWording(words) {
+  let end = words.length, trust = false;
+  while (end > 0 && (TRUST_WORDS.has(words[end - 1]) || TRUST_MODIFIERS.has(words[end - 1]))) { trust ||= TRUST_WORDS.has(words[end - 1]); end--; }
+  const start = trust && words[0] === 'THE' ? 1 : 0;
+  return trust && end - start >= 2 ? words.slice(start, end) : words;
+}
+
+// The key two parcels must share to count as one owner: case, punctuation,
+// "&" against AND, apostrophes, hyphens, whitespace and trust wording do not
+// matter. Empty means "no owner", including placeholders such as NOT
+// AVAILABLE or UNKNOWN.
 export function normalizeOwnerName(name) {
   if (typeof name !== 'string') return '';
-  const key = name.normalize('NFKC').toUpperCase().replace(/[.,;]/g, ' ').replace(/\s+/g, ' ').trim();
+  const plain = name.normalize('NFKC').toUpperCase().replace(/[.,;]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (isPlaceholderOwner(plain)) return '';
+  const words = plain.replace(/&/g, ' AND ').replace(/['’`]/g, '').replace(/[-()"#:]/g, ' ').replace(/\s+/g, ' ').trim().split(' ');
+  const key = withoutTrustWording(words).join(' ');
   return isPlaceholderOwner(key) ? '' : key;
 }
+
+// Shown where the public data names no owner for a parcel.
+export const UNKNOWN_OWNER_LABEL = 'Owner not listed';
 
 // The text shown: the owner's name as published, with whitespace tidied;
 // nothing for a placeholder.
@@ -493,6 +514,15 @@ function mergeGroup(group, frame, snap, splitBudget) {
   }));
 }
 
+// The name shown for one owner's merged land, the same whatever order the
+// records came in: the spelling most of its records use, then the shortest,
+// then the first alphabetically.
+function sharedDisplayName(members) {
+  const counts = new Map();
+  for (const parcel of members) { const name = ownerDisplayName(parcel.owner); if (name) counts.set(name, (counts.get(name) || 0) + 1); }
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))[0]?.[0] || '';
+}
+
 // One outline per owner area. With merge on, parcels whose normalized owner
 // names match are joined where they share a boundary: an edge one parcel
 // has in one direction and another has in the opposite direction (same
@@ -519,7 +549,7 @@ export function dissolveParcelsByOwner(parcels, { merge = true, snapMeters = OWN
   });
   const outlines = [];
   const describe = (ownerKey, members, lines) => ({
-    ownerKey, owner: ownerDisplayName(members[0].owner), parcels: members,
+    ownerKey, owner: sharedDisplayName(members), parcels: members,
     parcelIds: members.map(p => p.id).filter(id => id != null), lines,
   });
   for (const { ownerKey, parcels: group } of groups.values()) {
@@ -639,8 +669,9 @@ export function parcelLabelGeometry(parcel) {
 // One label candidate per outline with an owner: at the label point of its
 // roomiest parcel, with the outline's total area as its priority.
 // acreage: null for names only, or { merged, covered } (see outlineAreaM2) to
-// add the area shown under the name. Without merging, a parcel with no usable
-// owner name shows its area alone.
+// add the area shown under the name. Where acreage is asked for (the source
+// has owner names), an outline with no usable owner name is never left out,
+// merged or not: it is labelled UNKNOWN_OWNER_LABEL with its area.
 export function ownerLabelCandidates(outlines, { acreage = null } = {}) {
   const out = [];
   // A record that arrived twice (clipped and whole) may be drawn in an outline of
@@ -655,7 +686,7 @@ export function ownerLabelCandidates(outlines, { acreage = null } = {}) {
     // The public value when every parcel has one; else the area of the lines, marked approximate.
     const published = acreage ? publishedAreaM2(outline, acreage) : null;
     const shownArea = published ?? (acreage ? outlineAreaM2(outline, acreage) : null);
-    if (!outline.owner && (shownArea == null || acreage.merged !== false)) continue;
+    if (!outline.owner && !acreage) continue;
     let best = null, area = 0, home = null;
     for (const parcel of outline.parcels) {
       const geometry = parcelLabelGeometry(parcel);
@@ -663,7 +694,7 @@ export function ownerLabelCandidates(outlines, { acreage = null } = {}) {
       area += geometry.areaM2;
       if (!best || geometry.radiusMeters > best.radiusMeters) { best = geometry; home = parcel; }
     }
-    if (best) out.push({ text: outline.owner, ownerKey: outline.ownerKey, lon: best.lonLat[0], lat: best.lonLat[1], radiusMeters: best.radiusMeters, areaM2: area, rings: home.rings, ...(shownArea == null ? {} : { acreageM2: shownArea, acreageApprox: published == null }) });
+    if (best) out.push({ text: outline.owner, ...(outline.owner ? {} : { unknownOwner: true }), ownerKey: outline.ownerKey, lon: best.lonLat[0], lat: best.lonLat[1], radiusMeters: best.radiusMeters, areaM2: area, rings: home.rings, ...(shownArea == null ? {} : { acreageM2: shownArea, acreageApprox: published == null }) });
   }
   return out;
 }
@@ -692,8 +723,10 @@ export function metersPerPixel(zoom, lat) {
 // project(lon, lat) -> [x, y]; measure(text, fontPx) -> width in pixels.
 // Names come first: they are placed exactly as without acreage. Then each
 // acreage line is added where the taller label still fits its outline and the
-// view and stays clear of every other label; labels that are acreage alone
-// (no owner name) come last.
+// view and stays clear of every other label. Parcels with no listed owner come
+// last, as "Owner not listed" with the acreage under it (the acreage line
+// dropped first when space is tight); a candidate with neither a name nor an
+// unknown-owner mark shows its acreage alone.
 export function placeOwnerLabels(candidates, { zoom, project, viewport, measure, units = 'imperial', limits = OWNER_LABEL_LIMITS } = {}) {
   if (!Number.isFinite(zoom) || zoom < limits.minLabelZoom) return [];
   const largest = ownerLabelFontPx(zoom, limits);
@@ -738,7 +771,7 @@ export function placeOwnerLabels(candidates, { zoom, project, viewport, measure,
     // Whole labels only: one cut by the map edge is left out until panned into view.
     if (viewport && (x - width / 2 < 2 || y - height / 2 < 2 || x + width / 2 > viewport.width - 2 || y + height / 2 > viewport.height - 2)) return null;
     if (!insideOwn(candidate, { left: x - width / 2 - 1, top: y - height / 2 - 1, right: x + width / 2 + 1, bottom: y + height / 2 + 1 })) return null;
-    return { text: candidate.text, ownerKey: candidate.ownerKey, lines, x, y, width, height, fontPx, lineHeight, areaPx, candidate };
+    return { text: candidate.text, ...(candidate.unknownOwner ? { unknownOwner: true } : {}), ownerKey: candidate.ownerKey, lines, x, y, width, height, fontPx, lineHeight, areaPx, candidate };
   };
   const pad = limits.paddingPx;
   const clear = (label, others) => !others.some(other => Math.abs(other.x - label.x) * 2 < other.width + label.width + pad * 2
@@ -757,6 +790,11 @@ export function placeOwnerLabels(candidates, { zoom, project, viewport, measure,
     const taller = line && fit(label.candidate, [...label.lines, line]);
     if (taller && clear(taller, placed.filter((_, j) => j !== i))) placed[i] = taller;
   });
-  place(candidates.filter(c => !c.text && acreage(c)).map(c => fit(c, [acreage(c)])), placed);
+  const unnamed = candidates.filter(c => !c.text).map(c => {
+    const line = acreage(c);
+    if (!c.unknownOwner) return line ? fit(c, [line]) : null;
+    return (line && fit(c, [UNKNOWN_OWNER_LABEL, line])) || fit(c, [UNKNOWN_OWNER_LABEL]);
+  });
+  place(unnamed, placed);
   return placed.map(({ candidate, ...label }) => label);
 }
