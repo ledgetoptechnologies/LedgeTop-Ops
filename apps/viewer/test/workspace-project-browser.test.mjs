@@ -802,7 +802,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('.task-more-actions > summary').click()`);
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
     // "⋯" holds the rest: Rename (F2), Move to…, Duplicate, the task pages, then Delete.
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>[button.firstChild.textContent,button.getAttribute('aria-disabled')==='true'])`),[['Rename',false],['Move to…',false],['Duplicate',false],['Download model files',false],['Details & processing',false],['Files & versions',false],['Processing history',false],['Ground control points',false],['Delete',true]]);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>[button.firstChild.textContent,button.getAttribute('aria-disabled')==='true'])`),[['Rename',false],['Move to…',false],['Duplicate',false],['Reprocess',true],['Download model files',false],['Details & processing',false],['Files & versions',false],['Processing history',false],['Ground control points',false],['Delete',true]]);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
@@ -1434,6 +1434,39 @@ test('Delete moves a task to the Recycle Bin with Undo and no confirmation', {ti
   await waitFor(client,`!document.querySelector('${treeRow('t:task-quarry')}')`,'the Delete key did not delete the task');
 }));
 
+test('a task menu near the bottom opens clear of the toast and upload tray', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-menu-notices',width:1280,height:620,quarryInJohnson:true},async({client,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))&&Boolean(document.querySelector('${treeRow('t:task-johnson')}'))`,'tasks unavailable');
+  const overlap=`(()=>{const menu=document.querySelector('details.task-more-actions[open] > .project-more-menu').getBoundingClientRect();return[...document.querySelectorAll('#workspace-notices > *')].filter(item=>{const r=item.getBoundingClientRect();return r.width&&r.height&&r.left<menu.right&&r.right>menu.left&&r.top<menu.bottom&&r.bottom>menu.top;}).length;})()`;
+  // A tray the size of the real one, and the toast above it.
+  await client.evaluate(`(()=>{const tray=document.createElement('aside');tray.className='task-transfer-tray';tray.innerHTML='<strong>Testing and Examples</strong><p>copying photos</p><progress max="100" value="40"></progress><div class="row-actions"><button type="button">View upload</button><button type="button">Stop / discard</button></div>';document.querySelector('#workspace-notices').append(tray);const toast=document.querySelector('#workspace-toast');toast.textContent='Task restarted';toast.style.display='flex';})()`);
+  for(const key of ['t:task-quarry','t:task-johnson']){
+    await client.evaluate(`(()=>{const row=document.querySelector('${treeRow(key)}');row.scrollIntoView({block:'end'});window.scrollBy(0,0);})()`);
+    await client.evaluate(`document.querySelector('${treeRow(key)} details.task-more-actions > summary').click()`);
+    await waitFor(client,`Boolean(document.querySelector('${treeRow(key)} details.task-more-actions[open]'))`,'menu did not open');
+    await new Promise(resolve=>setTimeout(resolve,50));
+    const debug=await client.evaluate(`JSON.stringify({menu:document.querySelector('details.task-more-actions[open] > .project-more-menu').getBoundingClientRect(),up:document.querySelector('details.task-more-actions[open]').className,max:document.querySelector('details.task-more-actions[open] > .project-more-menu').style.maxHeight,notices:[...document.querySelectorAll('#workspace-notices > *')].map(n=>n.getBoundingClientRect()),h:innerHeight})`);
+    assert.equal(await client.evaluate(overlap),0,`${key}: the open menu overlaps a notice ${debug}`);
+    const box=await client.evaluate(`(()=>{const r=document.querySelector('details.task-more-actions[open] > .project-more-menu').getBoundingClientRect();return{top:r.top,bottom:r.bottom,height:innerHeight};})()`);
+    assert.ok(box.top>=0&&box.bottom<=box.height,`${key}: the menu leaves the window`);
+    await treeScreenshot(client,`desktop-1280-task-menu-notices-${key.slice(2)}.png`);
+    await client.evaluate(`document.querySelector('${treeRow(key)} details.task-more-actions > summary').click()`);
+  }
+  // The toast and the tray stack instead of overlapping each other.
+  assert.equal(await client.evaluate(`(()=>{const a=document.querySelector('#workspace-toast').getBoundingClientRect(),b=document.querySelector('#workspace-notices > .task-transfer-tray').getBoundingClientRect();return a.bottom<=b.top;})()`),true);
+}));
+
+test('a task menu clamped by a short window scrolls inside itself', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-menu-clamped',width:1280,height:400,quarryInJohnson:true},async({client,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-johnson')}'))`,'tasks unavailable');
+  await client.evaluate(`(()=>{const toast=document.querySelector('#workspace-toast');toast.textContent='Task restarted';toast.style.display='flex';document.querySelector('${treeRow('t:task-johnson')}').scrollIntoView({block:'center'});})()`);
+  await client.evaluate(`document.querySelector('${treeRow('t:task-johnson')} details.task-more-actions > summary').click()`);
+  await waitFor(client,`document.querySelector('details.task-more-actions[open] > .project-more-menu')?.hasAttribute('data-max-height')`,'the menu was not clamped');
+  await client.evaluate(`(()=>{const menu=document.querySelector('details.task-more-actions[open] > .project-more-menu');menu.scrollTop=60;menu.dispatchEvent(new Event('scroll'));})()`);
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(await client.evaluate(`document.querySelector('details.task-more-actions[open] > .project-more-menu').scrollTop`),60);
+}));
+
 test('Duplicate opens a pre-filled task dialog and creates the copy in the same folder only when started', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-duplicate',width:1440,height:900,
   seed:processing=>{const folder=processing.createProjectFolder('project-quarry',{displayName:'Benches'},'staff');processing.moveTaskToFolder('task-quarry',folder.id,'staff');return{folder};},
   configure:runtime=>{
@@ -1467,6 +1500,48 @@ test('Duplicate opens a pre-filled task dialog and creates the copy in the same 
   await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-submitted-1')}'))&&!document.querySelector('dialog.new-task-modal')`,'the copy did not appear');
   assert.equal(await parentOf('t:task-submitted-1'),originalParent);
   await waitFor(client,`new URL(location.href).searchParams.get('task')==='task-submitted-1'`,'the copy did not open');
+}));
+
+test('Reprocess reruns a published task on its photos with changed options', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-reprocess',width:1440,height:900,
+  configure:runtime=>{
+    const node=structuredClone(fixtures.providers[0]);node.runtimeHealthAt=new Date().toISOString();node.capabilities.options.push(...['pc-ept','gltf','3d-tiles'].map(name=>({name,type:'bool',value:true})));runtime.providers=[node];
+    runtime.taskOverrides={'task-quarry':{latestAttempt:{id:'attempt-quarry',attemptNumber:1,providerId:'provider-nodeodm',presetId:'preset-fast',status:'published',options:{dsm:true,'feature-quality':'medium','pc-ept':true,gltf:true,'3d-tiles':true},createdAt:'2026-08-18T12:00:00.000Z',updatedAt:'2026-08-18T12:05:00.000Z'}}};}},
+  async({client,runtime,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-quarry`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))`,'task unavailable');
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} details.task-more-actions').open=true`);
+  assert.equal(await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="reprocess-task"]').getAttribute('aria-disabled')`),null);
+  const start=runtime.requests.length;
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="reprocess-task"]').click()`);
+  await waitFor(client,`document.querySelector('dialog[aria-label="Reprocess task"][open] [name="providerId"]')?.value==='provider-nodeodm'`,'Reprocess did not open with the last node');
+  const form=await client.evaluate(`(()=>{const dialog=document.querySelector('dialog[aria-label="Reprocess task"]');
+    const modified=[...dialog.querySelectorAll('.task-options-list fieldset')].filter(row=>row.querySelector('span.form-note')?.textContent).map(row=>{const control=row.querySelector('select,input');return[row.querySelector('legend').textContent,control.type==='checkbox'?control.checked:control.value]});
+    return{title:dialog.querySelector('h2').textContent,preset:dialog.querySelector('[name="presetId"]').value,modified,photoControls:dialog.querySelectorAll('[data-source],input[type="file"]').length,optionsOpen:dialog.querySelector('.task-options-editor').open,submit:dialog.querySelector('button[type="submit"]').textContent}})()`);
+  assert.deepEqual(form,{title:'Reprocess',preset:'preset-fast',modified:[['dsm',true],['feature-quality','medium']],photoControls:0,optionsOpen:true,submit:'Reprocess'});
+  assert.deepEqual(runtime.requests.slice(start).filter(item=>item.method!=='GET'&&!item.path.endsWith('/capabilities/refresh')),[],'opening starts nothing');
+  await treeScreenshot(client,'desktop-1440-reprocess-dialog.png');
+  // Change one option, then rerun.
+  await client.evaluate(`(()=>{const row=[...document.querySelectorAll('dialog[aria-label="Reprocess task"] .task-options-list fieldset')].find(item=>item.querySelector('legend').textContent==='dsm');const box=row.querySelector('input');box.checked=false;box.dispatchEvent(new Event('change'));document.querySelector('dialog[aria-label="Reprocess task"] button[type="submit"]').click();})()`);
+  await waitForRequest(runtime,start,'POST','/api/v1/tasks/task-quarry/attempts');
+  const rerun=runtime.requests.slice(start).find(item=>item.method==='POST'&&item.path==='/api/v1/tasks/task-quarry/attempts');
+  assert.deepEqual(rerun.body,{providerId:'provider-nodeodm',presetId:'preset-fast',options:{'feature-quality':'medium'}});
+  assert.equal(runtime.requests.slice(start).filter(item=>item.method==='POST'&&['/api/v1/datasets','/api/v1/task-submissions','/api/v1/dataset-imports/copy'].includes(item.path)).length,0,'no photos are uploaded or copied');
+  await waitFor(client,`!document.querySelector('dialog[aria-label="Reprocess task"]')`,'the dialog did not close');
+  await treeScreenshot(client,'desktop-1440-reprocess-done.png');
+}));
+
+test('on a phone, Reprocess fits the screen', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-reprocess-phone',width:390,height:844,mobile:true,
+  configure:runtime=>{const node=structuredClone(fixtures.providers[0]);node.runtimeHealthAt=new Date().toISOString();node.capabilities.options.push(...['pc-ept','gltf','3d-tiles'].map(name=>({name,type:'bool',value:true})));runtime.providers=[node];
+    runtime.taskOverrides={'task-quarry':{latestAttempt:{id:'attempt-quarry',attemptNumber:1,providerId:'provider-nodeodm',presetId:'preset-fast',status:'failed',options:{dsm:true},createdAt:'2026-08-18T12:00:00.000Z',updatedAt:'2026-08-18T12:05:00.000Z'}}};}},
+  async({client,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-quarry`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))`,'task unavailable');
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} details.task-more-actions').open=true`);
+  await treeScreenshot(client,'phone-390-task-menu-reprocess.png');
+  await client.evaluate(`document.querySelector('${treeRow('t:task-quarry')} [data-action="reprocess-task"]').click()`);
+  await waitFor(client,`document.querySelector('dialog[aria-label="Reprocess task"][open] [name="providerId"]')?.value==='provider-nodeodm'`,'Reprocess did not open');
+  assert.equal(await client.evaluate(`(()=>{const r=document.querySelector('dialog[aria-label="Reprocess task"]').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&document.documentElement.scrollWidth<=innerWidth;})()`),true,'the dialog overflows a 390px screen');
+  await treeScreenshot(client,'phone-390-reprocess-dialog.png');
 }));
 
 test('on a phone, rows are 44px touch targets, drag is not offered and Move to… opens as a bottom sheet', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-phone',width:390,height:844,mobile:true,seed:processing=>{const folders=nestedFolders(processing);processing.moveTaskToFolder('task-quarry',folders.site.id,'staff');return folders;},quarryInJohnson:true},async({client,origin,top,site})=>{

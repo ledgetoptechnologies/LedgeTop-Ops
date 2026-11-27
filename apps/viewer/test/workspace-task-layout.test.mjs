@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import { attemptProviderName } from '../workspace-provider-remove.mjs';
+import { REPROCESSABLE_STATUSES } from '../workspace-task-reprocess.mjs';
 
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 const lines=source.split(/\r?\n/);
@@ -20,7 +21,7 @@ const context=vm.createContext({state,projectDataGeneration:0,draggedFolderTask:
   // Keep the shipped render lifecycle hook, while forbidding node requests in
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
-  context.attemptProviderName=attemptProviderName;
+  context.attemptProviderName=attemptProviderName;context.REPROCESSABLE_STATUSES=REPROCESSABLE_STATUSES;
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
   vm.runInContext([...names,'taskOutputStage','logPanel'].map(declaration).concat(
     sourceBetween('function applyWorkspaceView(', '\nfunction validateWorkspaceView('),
@@ -95,7 +96,7 @@ test('task toolbar keeps View, Model report and Share primary with every seconda
   const html=f.context.taskQuickActions(f.task),[primary,menu]=html.split('<details');
   assert.deepEqual([...primary.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['view-output','download-report','share-output']);
   // The menu holds the rest, in this order.
-  assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['edit-task','folder-move-task','duplicate-task','download-output','task-settings','task-files','task-history','task-gcp','delete-task']);
+  assert.deepEqual([...menu.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['edit-task','folder-move-task','duplicate-task','reprocess-task','download-output','task-settings','task-files','task-history','task-gcp','delete-task']);
   assert.doesNotMatch(menu.match(/<button[^>]*data-action="duplicate-task"[^>]*>/)[0],/disabled/);
   assert.doesNotMatch(primary,/folder-move-task|>Move</,'no separate Move button on the row');
   assert.match(primary,/tabindex="-1"/,'row buttons are reached with the arrow keys, not Tab');
