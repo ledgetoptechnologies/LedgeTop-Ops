@@ -27,8 +27,8 @@ function jpeg(){const data=new Uint8Array(174),v=new DataView(data.buffer),base=
 const provider={id:'node',displayName:'Test node',type:'nodeodm',enabled:true,capabilityFingerprint:'fp',lastHealth:'healthy',lastHealthAt:new Date().toISOString(),capabilities:{options:[...['pc-ept','gltf','3d-tiles'].map(name=>({name,type:'bool',value:true})),{name:'auto-boundary',type:'bool',value:true},{name:'crop',type:'float',value:3}]}};
 const basePresets=[{id:'preset',displayName:'Good preset',enabled:true,providerType:'nodeodm',capabilityFingerprint:'fp',options:{crop:2}},{id:'wrong',displayName:'Wrong preset',enabled:true,providerType:'nodeodm',capabilityFingerprint:'other'}];let currentPresets=structuredClone(basePresets);
 const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('Cancelled','AbortError');calls.push({url,method:opts.method||'GET',body:opts.body,headers:opts.headers});
- if(url==='/api/v1/processing/providers/node/capabilities/refresh')return{capabilities:provider.capabilities,fingerprint:window.fixture?.changeCapabilities&&datasetStatus==='finalized'?'changed':'fp'};
- if(url.startsWith('/api/v1/processing/providers'))return{providers:[window.fixture?.changeCapabilities&&datasetStatus==='finalized'?{...provider,capabilityFingerprint:'changed'}:provider]};
+ if(url==='/api/v1/processing/providers/node/capabilities/refresh')return{capabilities:provider.capabilities,fingerprint:window.fixture?.changeCapabilities&&(datasetStatus==='finalized'||window.fixture.changeNow)?'changed':'fp'};
+ if(url.startsWith('/api/v1/processing/providers'))return{providers:[window.fixture?.changeCapabilities&&(datasetStatus==='finalized'||window.fixture.changeNow)?{...provider,capabilityFingerprint:'changed'}:provider]};
  if(url==='/api/v1/processing/presets'){if(!opts.method||opts.method==='GET')return{presets:currentPresets};if(window.fixture.failPreset){window.fixture.failPreset=false;throw new Error('Preset connection interrupted');}const preset={...opts.body,id:'saved-preset',providerType:'nodeodm',capabilityFingerprint:'fp'};currentPresets=[...currentPresets.filter(item=>item.id!==preset.id),preset];return{preset};}
  if(url.startsWith('/api/v1/dataset-imports/browse')){if(window.fixture?.holdBrowse)await new Promise(resolve=>window.fixture.releaseBrowse=resolve);return{path:'raw',parentPath:'',entries:[{name:'flight',relativePath:'raw/flight',kind:'folder'}],nextOffset:null};}
  if(url==='/api/v1/dataset-imports/photo-preview'){if(window.fixture?.holdPreview){window.fixture.previewSignal=opts.signal;await new Promise(resolve=>window.fixture.releasePreview=resolve);}return{points:[{latitude:45.5,longitude:-90.25,name:'Server photo'}],missingGpsCount:0,unscannedCount:0};}
@@ -42,8 +42,8 @@ const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('C
  if(url==='/api/v1/task-submissions'){submitCount++;if(mode==='pc'&&submitCount===1)throw new Error('Temporary submission failure');return{task:{id:'task'}};}
  throw new Error('Unexpected '+url);
 };
-window.fetch=async(url,options)=>{calls.push({url,chunk:true,bytes:options.body.byteLength});if(window.fixture.failChunk){window.fixture.failChunk=false;return new Response('{}',{status:413});}return new Response('{}',{status:201});};
-window.fixture={calls,mount(next='pc',settings={}){mode=next;currentPresets=structuredClone(basePresets);datasetStatus='draft';submitCount=0;complete=null;calls.length=0;handle?.dispose();document.querySelector('dialog')?.remove();const dialog=document.createElement('dialog');dialog.className='workspace-modal';dialog.innerHTML='<header class="modal-heading"><h2>New task</h2></header><div id="host"></div>';document.body.append(dialog);dialog.showModal();handle=mountNewTask({container:document.querySelector('#host'),dialog,project:{id:'project',displayName:'Farm'},providers:[],presets:currentPresets,api,token:()=> 'staff',onComplete:r=>complete=r,...settings});},select(gps=false,slow=false,contents='abcdef'){const dt=new DataTransfer(),file=new File([gps?jpeg():contents],'photo.jpg',{type:'image/jpeg'});if(slow)file.slice=()=>({arrayBuffer:()=>new Promise(resolve=>releaseRead=()=>resolve(jpeg().buffer))});dt.items.add(file);const input=document.querySelector('[data-files]');input.files=dt.files;input.dispatchEvent(new Event('change'));},release(){releaseRead?.();},reading:()=>!!releaseRead,submit(){document.querySelector('form').requestSubmit();},done:()=>complete,active:()=>handle.active,leaveBlocked(){const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;},close(){document.querySelector('dialog').close();}};
+window.fetch=async(url,options)=>{calls.push({url,chunk:true,bytes:options.body.byteLength});if(window.fixture.holdChunk){window.fixture.holdChunk=false;await new Promise(resolve=>window.fixture.releaseChunk=resolve);}if(window.fixture.failChunk){window.fixture.failChunk=false;return new Response('{}',{status:413});}return new Response('{}',{status:201});};
+window.fixture={calls,mount(next='pc',settings={}){mode=next;currentPresets=structuredClone(basePresets);datasetStatus='draft';submitCount=0;complete=null;calls.length=0;handle?.dispose();document.querySelector('dialog')?.remove();const dialog=document.createElement('dialog');dialog.className='workspace-modal';dialog.innerHTML='<header class="modal-heading"><h2>New task</h2></header><div id="host"></div>';document.body.append(dialog);dialog.showModal();handle=mountNewTask({container:document.querySelector('#host'),dialog,project:{id:'project',displayName:'Farm'},providers:[],presets:currentPresets,api,token:()=> 'staff',onComplete:r=>complete=r,...settings});},select(gps=false,slow=false,contents='abcdef'){const dt=new DataTransfer(),file=new File([gps?jpeg():contents],'photo.jpg',{type:'image/jpeg'});if(slow)file.slice=()=>({arrayBuffer:()=>new Promise(resolve=>releaseRead=()=>resolve(jpeg().buffer))});dt.items.add(file);const input=document.querySelector('[data-files]');input.files=dt.files;input.dispatchEvent(new Event('change'));},release(){releaseRead?.();},reading:()=>!!releaseRead,submit(){document.querySelector('form').requestSubmit();},done:()=>complete,active:()=>handle.active,handleState:()=>handle.navigationState,leaveBlocked(){const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;},close(){document.querySelector('dialog').close();}};
 fixture.startRecoveryUpload=()=>{
  const originalOpen=window.open;window.open=()=>({closed:false,focus(){},postMessage(){}});
  const previous={accessToken:'t'.repeat(40),controllerOrigin:'https://ops.example',session:{id:'retained-session',subject:'ops:one',expiresAt:new Date(Date.now()-1000).toISOString()}};
@@ -91,34 +91,38 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       assert.deepEqual(submit[1].body.options,{'auto-boundary':false,crop:0});
       assert.ok(calls.filter(x=>x.url==='/api/v1/processing/providers/node/capabilities/refresh').length>=3,'Capabilities refresh on open and before submission; listing cached providers is insufficient');
     });
-    await t.test('server folder selection copies recursively and waits for succeeded before submit',async()=>{
+    await t.test('server folder selection copies recursively and submits once the copy is accepted',async()=>{
       // Native dialog close is queued; let the previous dialog's event settle
       // before mounting another controller on this deliberately reused fixture.
       await delay(80);
       await client.eval("fixture.mount('server');document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));await client.eval("document.querySelector('[data-pick]').click();fixture.submit()");await until(()=>client.eval('!!fixture.done()'));const calls=await client.eval('fixture.calls');assert.deepEqual(calls.find(x=>x.url.endsWith('/copy')).body.paths,['raw/flight']);assert.ok(calls.findIndex(x=>x.url.startsWith('/api/v1/operations/'))<calls.findIndex(x=>x.url==='/api/v1/task-submissions'));assert.equal(calls.filter(x=>x.chunk).length,0);
     });
-    await t.test('provider changes during source preparation require review instead of silent submission',async()=>{
+    await t.test('node option changes found at submit require review instead of silent submission',async()=>{
       await delay(80);await client.eval("fixture.mount('server');fixture.changeCapabilities=true;document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]') && !!document.querySelector('[aria-label=\"crop\"]')"));
-      await client.eval(`{const preset=document.querySelector('[name=presetId]');preset.value='preset';preset.dispatchEvent(new Event('change'));const crop=document.querySelector('[aria-label="crop"]');crop.value='0';crop.dispatchEvent(new Event('input'));document.querySelector('[data-pick]').click();fixture.submit();}`);
-      await until(()=>client.eval("document.querySelector('[data-status]').textContent.includes('options changed while preparing photos')"));
+      await client.eval(`{const preset=document.querySelector('[name=presetId]');preset.value='preset';preset.dispatchEvent(new Event('change'));const crop=document.querySelector('[aria-label="crop"]');crop.value='0';crop.dispatchEvent(new Event('input'));document.querySelector('[data-pick]').click();fixture.changeNow=true;fixture.submit();}`);
+      await until(()=>client.eval("document.querySelector('[data-status]').textContent.includes('The node options changed')"));
       assert.equal(await client.eval("fixture.calls.some(x=>x.url==='/api/v1/task-submissions')"),false);
       assert.equal(await client.eval("document.querySelector('[aria-label=\"pc-ept\"]').disabled"),true);
       assert.equal(await client.eval("document.querySelector('[aria-label=\"crop\"]').value"),'0','Refreshed capabilities must not silently discard task edits');
       assert.equal(await client.eval("document.querySelector('[name=presetId]').value"),'preset','Incompatible selected preset must not become node defaults');
       assert.match(await client.eval("document.querySelector('[data-provider-note]').textContent"),/incompatible/);
-      await client.eval('fixture.changeCapabilities=false');
+      await client.eval('fixture.changeCapabilities=false;fixture.changeNow=false');
     });
     await t.test('late browse response cannot change a source while submission is preparing it',async()=>{
       await delay(80);await client.eval("fixture.mount('server');document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));
-      await client.eval("document.querySelector('[data-pick]').click();fixture.holdBrowse=true;document.querySelector('[data-open]').click();fixture.submit()");await until(()=>client.eval("fixture.calls.some(x=>x.url.endsWith('/copy'))&&!!fixture.releaseBrowse"));
+      await client.eval("document.querySelector('[data-pick]').click();fixture.holdBrowse=true;fixture.holdOperation=true;document.querySelector('[data-open]').click();fixture.submit()");await until(()=>client.eval("fixture.calls.some(x=>x.url.endsWith('/copy'))&&!!fixture.releaseBrowse&&!!fixture.releaseOperation"));
       await client.eval('fixture.releaseBrowse();fixture.holdBrowse=false');await until(()=>client.eval("!!document.querySelector('[data-pick]')"));
       assert.equal(await client.eval("document.querySelector('[data-pick]').disabled"),true);
-      await client.eval("const latePick=document.querySelector('[data-pick]');latePick.checked=false;latePick.dispatchEvent(new Event('change'));document.querySelector('[data-open]').click()");
+      await client.eval("const latePick=document.querySelector('[data-pick]');latePick.checked=false;latePick.dispatchEvent(new Event('change'));document.querySelector('[data-open]').click();fixture.holdOperation=false;fixture.releaseOperation();fixture.releaseOperation=null");
       await until(()=>client.eval('!!fixture.done()'));const calls=await client.eval('fixture.calls');assert.equal(calls.filter(x=>x.url==='/api/v1/dataset-imports/copy').length,1);assert.deepEqual(calls.find(x=>x.url==='/api/v1/dataset-imports/copy').body.paths,['raw/flight']);assert.equal(calls.filter(x=>x.url.startsWith('/api/v1/dataset-imports/browse')).length,2);assert.equal(calls.filter(x=>x.url==='/api/v1/task-submissions').length,1);
     });
-    await t.test('closing after accepted copy stops observation and never submits a processing job',async()=>{
+    await t.test('a server copy submits the task without waiting for the copy; leaving warns only until it is submitted',async()=>{
       await delay(80);
-      await client.eval("fixture.mount('server');document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));await client.eval("document.querySelector('[data-pick]').click();fixture.submit()");await until(()=>client.eval("fixture.calls.some(x=>x.url.endsWith('/copy'))"));await client.eval('fixture.close()');await delay(1700);assert.equal(await client.eval("fixture.calls.some(x=>x.url==='/api/v1/task-submissions')"),false);
+      await client.eval("fixture.mount('server');document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));await client.eval("document.querySelector('[data-pick]').click();fixture.holdOperation=true;fixture.submit()");await until(()=>client.eval('!!fixture.releaseOperation'));
+      assert.equal(await client.eval('fixture.leaveBlocked()'),true);
+      await client.eval('fixture.holdOperation=false;fixture.releaseOperation();fixture.releaseOperation=null');await until(()=>client.eval('!!fixture.done()'));
+      assert.equal(await client.eval('fixture.leaveBlocked()'),false);
+      const calls=await client.eval('fixture.calls');assert.equal(calls.filter(x=>x.url.startsWith('/api/v1/operations/')).length,1);assert.equal(calls.filter(x=>x.url==='/api/v1/task-submissions').length,1);
     });
     await t.test('reselecting identical photos after a chunk failure resumes the same dataset',async()=>{
       await delay(80);await client.eval("fixture.mount('resume');fixture.failChunk=true");
@@ -185,13 +189,16 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       await client.eval(`const control=document.querySelector('[aria-label="crop"]');control.value='5';control.dispatchEvent(new Event('input'));document.querySelector('[data-edit-options]').click();document.querySelector('[data-edit-options]').click()`);assert.equal(await client.eval("document.querySelector('[aria-label=\"crop\"]').value"),'5');
       await client.eval("document.querySelector('[name=presetId]').value='preset';document.querySelector('[name=presetId]').dispatchEvent(new Event('change'))");assert.equal(await client.eval("document.querySelector('[aria-label=\"Reset crop to preset\"]').disabled"),true);assert.equal(await client.eval("document.querySelector('[aria-label=\"crop\"]').value"),'2');await client.eval('fixture.close()');await delay(60);
     });
-    await t.test('upload tray shows the server stage and percent from the operation',async()=>{
-      await client.eval("fixture.mount('server',{allowBackground:true});fixture.nextOperation={id:'copy',status:'leased',phase:'copying_photos',progress:.42};fixture.holdOperation=true;document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));
-      await client.eval("document.querySelector('[data-pick]').click();fixture.submit()");await until(()=>client.eval('!!fixture.releaseOperation'));await client.eval('fixture.close()');await delay(50);
-      assert.equal(await client.eval("document.querySelector('.task-transfer-tray p').textContent"),'Copying photos · 42%');
-      assert.equal(await client.eval("document.querySelector('.task-transfer-tray progress').value"),42);
+    await t.test('closing the tab is blocked while photos upload from this computer, until the task is submitted',async()=>{
+      await client.eval("fixture.mount('upload',{allowBackground:true})");await until(()=>client.eval("document.querySelector('[name=providerId]').value==='node'"));
+      await client.eval("fixture.select();fixture.holdChunk=true;fixture.holdOperation=true;fixture.submit()");await until(()=>client.eval('!!fixture.releaseChunk'));
+      assert.equal(await client.eval('fixture.leaveBlocked()'),true);assert.equal(await client.eval('fixture.handleState().pendingUpload'),true);
       assert.doesNotMatch(await client.eval("document.querySelector('.task-transfer-tray').textContent"),/keep this browser tab open/i);
-      await client.eval("document.querySelector('[data-discard-upload]').click();fixture.holdOperation=false;fixture.releaseOperation();fixture.releaseOperation=null");await delay(60);
+      await client.eval('fixture.releaseChunk();fixture.releaseChunk=null');await until(()=>client.eval('!!fixture.releaseOperation'));
+      assert.equal(await client.eval('fixture.leaveBlocked()'),true,'the task is not submitted yet');
+      await client.eval('fixture.holdOperation=false;fixture.releaseOperation();fixture.releaseOperation=null');await until(()=>client.eval('!!fixture.done()'));
+      assert.equal(await client.eval('fixture.leaveBlocked()'),false);assert.equal(await client.eval('fixture.handleState().pendingUpload'),false);
+      assert.equal(await client.eval("fixture.calls.filter(x=>x.url==='/api/v1/task-submissions').length"),1);await delay(60);
     });
     await t.test('background preparation survives dialog close, reopens, completes and leaves unrelated dialog untouched',async()=>{
       await client.eval("fixture.mount('server',{allowBackground:true});fixture.holdOperation=true;document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));assert.equal(await client.eval('fixture.leaveBlocked()'),false);
@@ -214,7 +221,7 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       await delay(80);await client.eval('fixture.startRecoveryUpload()');
       await until(()=>client.eval("document.querySelector('[name=providerId]').value==='node'"));await client.eval('fixture.submit()');
       await until(()=>client.eval("!!document.querySelector('.workspace-recovery[open]')"));
-      assert.equal(await client.eval("document.querySelectorAll('dialog[open]').length"),2,'recovery must not close the working New task dialog');
+      assert.equal(await client.eval("fixture.active()&&!!document.querySelector('.task-transfer-tray')"),true,'recovery must not end the background New task');
       assert.equal(await client.eval('fixture.recovery.sameFile()&&fixture.recovery.unchangedUrl()'),true);
       assert.equal(await client.eval('fixture.leaveBlocked()'),true,'active paused upload still warns against closing tab');
       assert.equal(await client.eval('fixture.calls.filter(x=>x.chunk).length'),0,'no upload while access is paused');
