@@ -23,9 +23,10 @@ const OPS_SUCCESSOR_READER_ADDITIONS = Object.freeze(['readWindowsCatalogSuccess
  * Ops build adds exactly one named-handler class, StaffDirectory, with exactly these three handlers;
  * every other export, handler, binding and runtime field stays equal to the installed baseline.
  * The contract itself never pins a fresh candidate id. `heldCandidateId` is the one already uploaded
- * inactive version of this exact build (refused before activation, never resumed): the only id admitted
- * as a stray inactive Ops latest over `baselineVersionId`, and the only id recognized as an installed
- * active StaffDirectory version for unselected-app checks. */
+ * inactive version of this exact build (refused before activation, never resumed or activated): the only
+ * id admitted as a stray inactive Ops latest over `baselineVersionId`. It is never recognized as an
+ * active version. Every check takes these pins as an injectable parameter that defaults to this object;
+ * only offline tests pass synthetic pins. */
 export const OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT = 'ops-staff-directory-entrypoint-v1';
 export const OPS_STAFF_DIRECTORY_ENTRYPOINT = Object.freeze({
   contract: OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT,
@@ -96,8 +97,8 @@ export function opsStaffDirectoryMainMatches(modern, pins = OPS_STAFF_DIRECTORY_
 }
 /** The one reviewed held state: Ops baseline active alone at 100% with the pinned uploaded StaffDirectory
  * build as its inactive latest. Admitted for unselected-app checks, and for an Operations-selected
- * pre-activation check only under the explicit entrypoint contract. This is also the state
- * after a rollback from the activated held version to the baseline, which stays admissible on purpose. */
+ * pre-activation check only under the explicit entrypoint contract. Once a fresh candidate is uploaded
+ * it replaces the held version as latest, so this state cannot recur after that upload. */
 export function isHeldOpsStaffDirectoryInactiveLatest(app, state, pins = OPS_STAFF_DIRECTORY_ENTRYPOINT) {
   if (app !== 'operations' || !validStaffDirectoryPins(pins) || !state || typeof state !== 'object') return false;
   const rows = state.deployment?.versions;
@@ -135,11 +136,18 @@ export function varsOf(state) {
     need(typeof x.text === 'string', 'Plain binding value missing'); return [x.name, x.text];
   }));
 }
-export function ordinaryFrontendPreflightDescriptor(profile, mode) {
+/** Reviewed accepted-profile digests per ordinary preflight mode. Every check takes this table as an
+ * injectable parameter defaulting to these production digests; only offline tests that build a
+ * synthetic installation pass another table, and no production entry point accepts one. */
+export const REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES = Object.freeze({
+  [ORDINARY_FRONTEND_PREFLIGHT_MODE]: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+  [ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE]: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+});
+export function ordinaryFrontendPreflightDescriptor(profile, mode, reviewedPreflightProfiles = REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES) {
   if (mode === undefined) return { mode: 'strict-default', profileSHA256: null };
-  const expectedProfileSHA256 = mode === ORDINARY_FRONTEND_PREFLIGHT_MODE
-    ? ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
-    : mode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE ? CANONICAL_INSTALLED_PROFILE_V4_SHA256 : null;
+  const expectedProfileSHA256 = [ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(mode)
+    && reviewedPreflightProfiles && Object.hasOwn(reviewedPreflightProfiles, mode)
+    && /^[a-f0-9]{64}$/.test(reviewedPreflightProfiles[mode] ?? '') ? reviewedPreflightProfiles[mode] : null;
   need(expectedProfileSHA256 !== null, 'Unreviewed ordinary frontend preflight mode');
   need(profile && typeof profile === 'object' && Object.getPrototypeOf(profile) === Object.prototype,
     'Unreviewed ordinary frontend accepted profile for selected preflight mode');
@@ -164,10 +172,11 @@ export function ordinaryFrontendPreflightDescriptor(profile, mode) {
  * value is added only to this preflight copy. The checked snapshot is never
  * changed; no runtime/config value is enabled or written here.
  */
-export function validateOrdinaryFrontendPreflightPreservation(clientVars, operationsVars, profile, mode) {
+export function validateOrdinaryFrontendPreflightPreservation(clientVars, operationsVars, profile, mode,
+  reviewedPreflightProfiles = REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES) {
   need([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(mode),
     'Unreviewed ordinary frontend preflight mode');
-  ordinaryFrontendPreflightDescriptor(profile, mode);
+  ordinaryFrontendPreflightDescriptor(profile, mode, reviewedPreflightProfiles);
   const trueHash = hash('true');
   need(clientVars && Object.getPrototypeOf(clientVars) === Object.prototype
     && typeof clientVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.client] === 'string'
@@ -193,7 +202,7 @@ export function validateOrdinaryFrontendPreflightPreservation(clientVars, operat
     DECLARATION,
   );
   need(errors.length === 0, `Effective production release profile rejected: ${errors.join('; ')}`);
-  return ordinaryFrontendPreflightDescriptor(profile, mode);
+  return ordinaryFrontendPreflightDescriptor(profile, mode, reviewedPreflightProfiles);
 }
 function activeId(state, expectedVersions) {
   const rows = state.deployment.versions;
@@ -308,8 +317,9 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   ordinaryFrontendPreflightMode, ordinaryFrontendApp, assetAssociationOverrides = {},
   opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId,
   opsStaffDirectoryEntrypointContract, opsStaffDirectoryCandidateId, opsStaffDirectoryPins = OPS_STAFF_DIRECTORY_ENTRYPOINT,
-  heldOpsSyncInactiveLatestPins = HELD_OPS_SYNC_INACTIVE_LATEST } = {}) {
-  const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
+  heldOpsSyncInactiveLatestPins = HELD_OPS_SYNC_INACTIVE_LATEST,
+  reviewedPreflightProfiles = REVIEWED_ORDINARY_FRONTEND_PREFLIGHT_PROFILES } = {}) {
+  const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode, reviewedPreflightProfiles);
   need(assetAssociationOverrides && Object.getPrototypeOf(assetAssociationOverrides) === Object.prototype,
     'Unreviewed canonical v4 asset association override');
   const overrideApps = Object.keys(assetAssociationOverrides ?? {});
@@ -372,17 +382,13 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     need(equal(without(s.settings, ['bindings', 'annotations']), spec.settings), `${app}: unrecognized production settings`);
     need(equal(named(s.settings.bindings), named(s.version.resources.bindings)), `${app}: settings/version bindings differ`);
     const successorReaderProfile = opsSuccessorReaderContract !== undefined && app === 'operations';
-    // StaffDirectory active recognition: the explicit contract with the just-activated candidate id,
-    // or, without any Ops contract and only when Ops is not the selected app, the exact pinned held
-    // build id. Either way the active main bytes must be the pinned bundle and the script must be the
-    // profile plus exactly one class. The pre-activation contract mode keeps the strict active profile.
-    const staffDirectoryProfile = app === 'operations' && !successorReaderProfile
-      && (staffDirectoryActiveCandidate
-        || (opsStaffDirectoryEntrypointContract === undefined && selectedApp !== 'operations'
-          && validStaffDirectoryPins(opsStaffDirectoryPins) && s.version.id === opsStaffDirectoryPins.heldCandidateId));
+    // StaffDirectory active recognition only for the explicit contract with the just-activated candidate
+    // id: the active main bytes must be the pinned bundle and the script the profile plus exactly one
+    // class. The pre-activation contract mode, and every check without the contract, keep the strict
+    // active profile. (The held upload is never activated, so it is never recognized as active.)
+    const staffDirectoryProfile = app === 'operations' && !successorReaderProfile && staffDirectoryActiveCandidate;
     if (staffDirectoryProfile) {
-      need(spec.name === 'ledgetop-ops' && s.version.id === (staffDirectoryActiveCandidate
-        ? opsStaffDirectoryCandidateId : opsStaffDirectoryPins.heldCandidateId) && s.modern.id === s.version.id,
+      need(spec.name === 'ledgetop-ops' && s.version.id === opsStaffDirectoryCandidateId && s.modern.id === s.version.id,
       'Ops StaffDirectory entrypoint contract is limited to the exact active candidate');
       need(opsStaffDirectoryMainMatches(s.modern, opsStaffDirectoryPins),
         'Ops StaffDirectory active runtime bytes differ from the pinned reviewed bundle');
@@ -438,18 +444,20 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   } else {
     need(preflightDescriptor.profileSHA256 === hash(canonical(profile)),
       'Ordinary frontend profile pin changed');
-    validateOrdinaryFrontendPreflightPreservation(client, ops, profile, ordinaryFrontendPreflightMode);
+    validateOrdinaryFrontendPreflightPreservation(client, ops, profile, ordinaryFrontendPreflightMode, reviewedPreflightProfiles);
   }
   return snapshot;
 }
 
 export function compileConfig(snapshot, app, main, profile = PROFILE, expectedDeploymentVersions, ordinaryFrontendPreflightMode,
-  opsSuccessorReaderContract, opsStaffDirectoryEntrypointContract) {
+  opsSuccessorReaderContract, opsStaffDirectoryEntrypointContract, { opsStaffDirectoryPins, reviewedPreflightProfiles } = {}) {
   const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
   validateInstallation(snapshot, { profile, selectedApp: app, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
     ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
     opsSuccessorReaderContract,
-    ...(opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract }) }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
+    ...(opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract }),
+    ...(opsStaffDirectoryPins === undefined ? {} : { opsStaffDirectoryPins }),
+    ...(reviewedPreflightProfiles === undefined ? {} : { reviewedPreflightProfiles }) }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
   const s = snapshot[app], spec = profile.workers[app];
   const annotations = clone(s.settings.annotations ?? {});
   delete annotations['workers/triggered_by']; // API-owned, rejected by native versions upload.

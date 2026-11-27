@@ -46,7 +46,8 @@ export function validateInstalledRetainedLedger(snapshot, { app, workerName, acc
 
 function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, previousAssetBytes, observedAt,
   installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
-  canonicalBrowserRetirementClientVersionId, opsStaffDirectoryEntrypointContract } = {}) {
+  canonicalBrowserRetirementClientVersionId, opsStaffDirectoryEntrypointContract, opsStaffDirectoryPins,
+  reviewedPreflightProfiles } = {}) {
   need(ordinaryPlan?.schemaVersion === 1 && ['operations', 'client'].includes(ordinaryPlan.application),
     'Version 1 pinned ordinary frontend plan required');
   need(opsStaffDirectoryEntrypointContract === ordinaryPlan.opsStaffDirectoryEntrypointContract,
@@ -60,7 +61,8 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
         && ordinaryPlan.application === 'operations' && installedOpsSuccessorReaderContract === undefined)),
   'Retained plan must preserve the exact selected read-only Ops recognition contract');
   const preflightMode = ordinaryPlan.installationPreflight?.mode;
-  const preflight = ordinaryFrontendPreflightDescriptor(profile, preflightMode);
+  const preflight = ordinaryFrontendPreflightDescriptor(profile, preflightMode,
+    ...(reviewedPreflightProfiles === undefined ? [] : [reviewedPreflightProfiles]));
   need([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(preflightMode)
     && equal(ordinaryPlan.installationPreflight, preflight),
   'Exact pinned installed frontend profile and matching ordinary preflight mode required');
@@ -80,7 +82,10 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
     ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
     ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }),
     ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }),
-    ...(opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract }) });
+    ...(opsStaffDirectoryEntrypointContract === undefined ? {} : { opsStaffDirectoryEntrypointContract }),
+    // Offline-test seams only; defaults are the reviewed production pins.
+    ...(opsStaffDirectoryPins === undefined ? {} : { opsStaffDirectoryPins }),
+    ...(reviewedPreflightProfiles === undefined ? {} : { reviewedPreflightProfiles }) });
   const app = ordinaryPlan.application, workerName = WORKERS[app], accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
   const parentVersionId = snapshot?.[app]?.version?.id;
   need(UUID.test(parentVersionId ?? ''), 'Captured active parent version is required');
