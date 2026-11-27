@@ -121,6 +121,12 @@ describe("combined client share dialog source", () => {
       expect(source).not.toMatch(/\.sourceName\}|\["Source",|\.divisionLabel\}/);
     }
     expect(picker).toContain("recipientDetails(options)");
+    // Division labels may name a business: only the select that chooses one may show them, never status text.
+    expect(tab).not.toMatch(/\$\{divisionLabel|\{division\.label\}<\/p>|const divisionLabel=/);
+    // The selection note keeps the ref that told look-alike rows apart.
+    expect(picker).toContain("details.get(selected.key) ?? recipientDetail(selected)");
+    // Look-alike connected grants (same person, workspace and project in two instances) stay distinguishable.
+    expect(native).toContain("grantDetail(grant)");
   });
   it("filters as the user types against the combined endpoint and carries the id-based key", () => {
     expect(picker).toContain("/api/delivery/client-share-recipients?");
