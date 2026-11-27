@@ -105,7 +105,7 @@ function niceLength(target) {
   return p;
 }
 
-function drawLegend(ctx, { width, height, gsdE, units, contours, scale, colors }) {
+export function drawPrintLegend(ctx, { width, height, gsdE, units, contours, scale, colors }) {
   const pad = 10 * scale, line = 18 * scale;
   const u = unitMeters(units), suffix = unitSuffix(units);
   const barUnits = niceLength((width * 0.18) * gsdE / u);
@@ -282,7 +282,7 @@ export async function renderOrthoPrint({ ortho, extent: requested, longEdge = 40
     propertyCount = propertyLines.length;
   }
   if (print) {
-    drawLegend(ctx, { width, height, gsdE, units: contours?.units || units, contours, scale, colors });
+    drawPrintLegend(ctx, { width, height, gsdE, units: contours?.units || units, contours, scale, colors });
     // A canvas the browser could not back reads as blank: the print's
     // corner is always opaque (white or imagery).
     const corner = ctx.getImageData(width - 1, height - 1, 1, 1).data;
@@ -374,75 +374,4 @@ export async function exportOrthoPrint({ format = 'png', epsg = null, traceConto
   } finally { release(); }
   return { blob, width: result.width, height: result.height, extent: result.extent, contours: result.contours, propertyLines: result.propertyLines,
     filename: `orthophoto${contours?.features?.length ? '-contours' : ''}-${result.width}px.${format === 'tif' ? 'tif' : 'png'}`, gsd: width ? gsdE : null };
-}
-
-/**
- * Small dialog: area, size, format, layers. `run(options, signal)` returns
- * { blob, filename }; the dialog saves it with a temporary object URL.
- */
-export function mountOrthoPrintDialog({ documentRef = document, openButton, defaults = () => ({}), run }) {
-  const el = (tag, props = {}, children = []) => { const n = documentRef.createElement(tag); Object.assign(n, props); n.append(...children); return n; };
-  const select = (name, options) => el('select', { name }, options.map(([value, text]) => el('option', { value: String(value), textContent: text })));
-  const area = select('area', [['view', 'Current view'], ['full', 'Whole orthophoto']]);
-  const size = select('size', PRINT_SIZES.map(s => [s, `${s} px`])); size.value = '4096';
-  const format = select('format', [['png', 'PNG'], ['tif', 'GeoTIFF']]);
-  const contours = el('input', { type: 'checkbox', name: 'contours' });
-  const property = el('input', { type: 'checkbox', name: 'property' });
-  const status = el('p', { className: 'hint' }); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-  const exportButton = el('button', { type: 'button', className: 'tool-btn full', textContent: 'Export' });
-  const close = el('button', { type: 'button', className: 'ortho-print-close', textContent: 'Close' });
-  const row = (label, control) => el('label', { className: 'slider-row' }, [el('span', { textContent: label }), control]);
-  const check = (control, label) => el('label', { className: 'ortho-print-check' }, [control, el('span', { textContent: label })]);
-  const dialog = el('dialog', { className: 'ortho-print-dialog' }, [
-    el('h2', { textContent: 'Export image' }), close,
-    row('Area', area), row('Size', size), row('Format', format),
-    check(contours, 'Contour lines'), check(property, 'Property lines'),
-    exportButton, status,
-  ]);
-  dialog.setAttribute('aria-label', 'Export orthophoto image');
-  documentRef.body.append(dialog);
-  let controller = null;
-  const stop = () => { controller?.abort(); controller = null; exportButton.disabled = false; };
-  close.addEventListener('click', () => dialog.close());
-  dialog.addEventListener('close', stop);
-  openButton?.addEventListener('click', () => {
-    const d = defaults() || {};
-    contours.disabled = !d.contoursAvailable; contours.checked = Boolean(d.contoursAvailable && d.contoursOn);
-    property.disabled = !d.propertyAvailable; property.checked = Boolean(d.propertyAvailable && d.propertyOn);
-    // Options the viewer may not use are removed from view, not just greyed.
-    const gate = (selectEl, value, allowed, fallback) => {
-      const option = selectEl.querySelector(`option[value="${value}"]`);
-      option.disabled = !allowed; option.hidden = !allowed;
-      if (!allowed && selectEl.value === value) selectEl.value = fallback;
-    };
-    gate(format, 'tif', Boolean(d.geotiffAvailable), 'png');
-    gate(area, 'full', Boolean(d.wholeAvailable), 'view');
-    const sizes = Array.isArray(d.sizes) && d.sizes.length ? d.sizes : PRINT_SIZES;
-    for (const s of PRINT_SIZES) gate(size, String(s), sizes.includes(s), String(Math.max(...sizes.filter(x => x <= 4096), sizes[0])));
-    status.textContent = '';
-    if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
-  });
-  exportButton.addEventListener('click', async () => {
-    stop();
-    controller = new AbortController();
-    const signal = controller.signal;
-    exportButton.disabled = true;
-    status.textContent = 'Rendering…';
-    try {
-      const result = await run({ area: area.value, size: Number(size.value), format: format.value, contours: contours.checked, property: property.checked }, signal);
-      if (signal.aborted) return;
-      // The viewer may have switched to another model, version or viewer since `run` resolved.
-      if (result.stillCurrent?.() === false) { status.textContent = ''; return; }
-      const url = URL.createObjectURL(result.blob);
-      const a = el('a', { href: url, download: result.filename });
-      documentRef.body.append(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      status.textContent = result.note || `Saved ${result.filename}.`;
-    } catch (error) {
-      // Cancelled: by Close (the dialog is gone) or by a viewer change (no file, no error).
-      if (error?.name === 'AbortError') { if (!signal.aborted) status.textContent = ''; return; }
-      status.textContent = error?.code ? error.message : 'Could not export the image. Try a smaller size.';
-    } finally { if (!signal.aborted) exportButton.disabled = false; }
-  });
-  return { dialog, controls: { area, size, format, contours, property, exportButton, status } };
 }

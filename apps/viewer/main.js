@@ -88,7 +88,10 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { modelHorizontalDatum, verifiedUtmGeoref } from './property-lines.mjs';
 import { createPropertyLinesController } from './property-lines-layer.mjs';
 import { createContourController, dtmVerticalScale } from './contour-layer.mjs';
-import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, clampExtent, exportOrthoPrint, mountOrthoPrintDialog, orthoPrintPolicy, printLongEdge, supportedPrintSizes } from './ortho-print-export.mjs';
+import { VIEW_EXPORT_MAX_EDGE, assertOrthoPrintAllowed, clampExtent, orthoPrintPolicy, printLongEdge, verifyOrthoCrs } from './ortho-print-export.mjs';
+import { createBlobSink, createFileSink, exportGrid, renderExportPreview, ringsExtent, streamOrthoExport } from './ortho-export-stream.mjs';
+import { mountOrthoExportDialog } from './ortho-export-dialog.mjs';
+import { createParcelPicker } from './ortho-export-parcels.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
 import { bindProjectSwitcherNavigation, renderProjectSwitcherOptions } from './project-switcher.mjs';
@@ -740,6 +743,7 @@ function applyProjectConfig(p) {
   OBJ_URL = p.assets.obj;
   SHOTS_URL = p.assets.shots;
   ORTHO_URL = p.assets.ortho;
+  syncOrthoExportAction();
   DSM_URL = p.assets.dsm;
   DTM_URL = p.assets.dtm;
   EPT_URL = p.assets.ept;
@@ -1475,6 +1479,13 @@ function syncMeasurementActionVisibility() {
   setHidden('ortho-print-actions', !measure);
   // The original processing report follows download permission independently.
   setHidden('panel-model-report', !measure && !download);
+}
+
+// Export image needs an orthophoto and an area this viewer may export: the
+// whole orthophoto (download permission) or a map area (a map view open).
+function syncOrthoExportAction() {
+  const button = document.getElementById('btn-export-image');
+  if (button) button.hidden = !ORTHO_URL || (SHARE_PERMISSIONS.download !== true && !isMapMode(state.activeMode));
 }
 
 function sessionAccessLabel(prefix = 'LOD') {
@@ -2665,8 +2676,7 @@ function installMeasurementWorkspace() {
     onAccessLost:measurementAccessLost,
   });
   viewerProductDownloads?.destroy();
-  let productHost=document.getElementById('panel-products');if(!productHost){productHost=document.createElement('div');productHost.id='panel-products';productHost.className='panel';document.getElementById('sidebar-custom').append(productHost);}
-  viewerProductDownloads=mountViewerProductDownloads({host:productHost,reportHost:document.getElementById('model-report-download'),getAssetRoot:()=>TILES_URL||EPT_URL||ORTHO_URL||DSM_URL||DTM_URL||GLB_URL,permitted:()=>SHARE_PERMISSIONS.download===true});
+  viewerProductDownloads=mountViewerProductDownloads({host:document.getElementById('downloads-products'),reportHost:document.getElementById('model-report-download'),getAssetRoot:()=>TILES_URL||EPT_URL||ORTHO_URL||DSM_URL||DTM_URL||GLB_URL,permitted:()=>SHARE_PERMISSIONS.download===true});
 }
 
 function setTool(tool) {
@@ -4252,22 +4262,35 @@ function installContours() {
     projection: () => ({ zoneLon0Deg: UTM_PROJECTION.zoneLon0Deg, hemisphere: UTM_PROJECTION.hemisphere }),
     latLonToUtm: (lat, lon) => latLonToUtm(lat, lon),
   });
-  orthoPrintDialog ||= mountOrthoPrintDialog({
+  orthoParcelPicker ||= createParcelPicker({
+    L, getMap: () => map || null, documentRef: document, host: document.getElementById('viewer-wrap'),
+    getParcels: () => propertyLines?.selectableParcels?.() || [],
+  });
+  orthoPrintDialog ||= mountOrthoExportDialog({
     documentRef: document,
     openButton: document.getElementById('btn-export-image'),
     defaults: () => {
-      const policy = orthoPrintPermissions();
-      printSizes ||= supportedPrintSizes({ createCanvas: () => document.createElement('canvas') });
+      const policy = orthoPrintPermissions(), mapOpen = Boolean(map && isMapMode(state.activeMode));
+      orthoParcelPicker.reset(orthoPrintIdentity());
+      orthoParcelPicker.prune();
+      const parcels = mapOpen && (propertyLines?.selectableParcels?.().length || 0) > 0;
+      if (parcels) orthoParcelPicker.show();
       return {
+        areas: { full: policy.whole, view: mapOpen, parcels },
+        parcelCount: parcels ? orthoParcelPicker.count : 0,
         contoursAvailable: Boolean(DTM_URL), contoursOn: contourLines?.state.on === true,
-        propertyAvailable: propertyLinesForPrint().lines.length > 0, propertyOn: true,
-        geotiffAvailable: policy.geotiff && printEpsg() !== null, wholeAvailable: policy.whole,
-        // Without download permission a view export is capped at the screen size (at most 2048 px).
-        sizes: policy.whole ? printSizes : printSizes.filter((s) => s <= VIEW_EXPORT_MAX_EDGE),
+        propertyAvailable: propertyLinesForPrint().lines.length > 0,
+        geotiffAvailable: policy.geotiff && printEpsg() !== null,
       };
     },
-    run: (options, signal) => exportOrthoPrintFromViewer(options, signal),
+    preview: (options, signal) => previewOrthoExport(options, signal),
+    run: (options, signal, extra) => exportOrthoPrintFromViewer(options, signal, extra),
+    pickParcels: () => { setTool('none'); viewerMarks?.cancelPlacement(); return orthoParcelPicker.pick(); },
   });
+  if (!orthoPrintDialog.closeHooked) {
+    orthoPrintDialog.closeHooked = true;
+    orthoPrintDialog.dialog.addEventListener('close', () => { if (!orthoParcelPicker.picking) orthoParcelPicker.hide(); });
+  }
   contourLines.refresh();
 }
 
@@ -4276,7 +4299,7 @@ function printEpsg() {
   return crs.startsWith('EPSG:') ? Number(crs.slice(5)) : null;
 }
 
-let printSizes = null;
+let orthoParcelPicker = null;
 
 // Property lines exactly as drawn on the map (only when shown there). The
 // controller draws each outline twice in its own pane, a wide halo and the
@@ -4298,24 +4321,94 @@ function propertyLinesForPrint() {
   return { lines, color: typeof line.options.color === 'string' ? line.options.color : null };
 }
 
-async function exportOrthoPrintFromViewer({ area, size, format, contours, property }, dialogSignal) {
-  // Re-check here, not only when the dialog opened: the session may have
-  // expired or permissions changed since.
-  assertOrthoPrintAllowed(orthoPrintPermissions(), { area, format });
+// "Selected parcels" follows the current-view rule when access has no
+// download permission (it is never more than the viewer can see).
+const policyArea = (area) => (area === 'parcels' ? 'view' : area);
+
+/**
+ * Where and at what size an export renders. Full native resolution with
+ * download permission; without it, view and parcel exports stay at the
+ * screen pixels the area covers (at most VIEW_EXPORT_MAX_EDGE).
+ */
+function planOrthoExport(ortho, area) {
+  let extent = { minE: ortho.minE, maxE: ortho.maxE, minN: ortho.minN, maxN: ortho.maxN }, clip = null;
+  if (area === 'view') {
+    // Ortho, DSM and DTM share the map, so the current view is the same area in each.
+    const b = map.getBounds();
+    const corners = [b.getNorthWest(), b.getNorthEast(), b.getSouthWest(), b.getSouthEast()].map((c) => latLonToUtm(c.lat, c.lng));
+    extent = { minE: Math.min(...corners.map((c) => c[0])), maxE: Math.max(...corners.map((c) => c[0])), minN: Math.min(...corners.map((c) => c[1])), maxN: Math.max(...corners.map((c) => c[1])) };
+  } else if (area === 'parcels') {
+    clip = orthoParcelPicker.rings().map((rings) => rings.map((ring) => ring.map(([lon, lat]) => latLonToUtm(lat, lon))));
+    extent = ringsExtent(clip.flat());
+    if (!extent) throw Object.assign(new Error('Pick parcels on the map first.'), { code: 'print_no_parcels' });
+  }
+  const clamped = clampExtent(extent, ortho);
+  if (!clamped) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
+  const policy = orthoPrintPermissions();
+  let viewPixels = NaN, longEdge = null;
+  if (!policy.whole) {
+    // Screen pixels the exported area covers on the map, clipped to the orthophoto.
+    const dpr = window.devicePixelRatio || 1;
+    const nw = map.latLngToContainerPoint(utmToLatLon(clamped.minE, clamped.maxN)), se = map.latLngToContainerPoint(utmToLatLon(clamped.maxE, clamped.minN));
+    viewPixels = dpr * Math.max(Math.abs(se.x - nw.x), Math.abs(se.y - nw.y));
+    longEdge = printLongEdge({ area: 'view', requested: VIEW_EXPORT_MAX_EDGE, policy, viewPixels });
+  }
+  const grid = exportGrid(ortho, clamped, { longEdge });
+  if (!grid) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
+  return { grid, clip, viewPixels, native: grid.native };
+}
+
+function checkOrthoExport({ area, format }) {
+  // Re-checked on every run, not only when the dialog opened: the session
+  // may have expired or permissions changed since.
+  assertOrthoPrintAllowed(orthoPrintPermissions(), { area: policyArea(area), format });
   if (!ORTHO_URL) throw Object.assign(new Error('This model has no orthophoto.'), { code: 'print_no_ortho' });
-  if (area === 'view' && !(map && isMapMode(state.activeMode))) throw Object.assign(new Error('Open a map view to export the current view.'), { code: 'print_no_view' });
+  if (area !== 'full' && !(map && isMapMode(state.activeMode))) throw Object.assign(new Error('Open a map view to export this area.'), { code: 'print_no_view' });
+}
+
+async function orthoExportLayers(ortho, { format, contours, property }, plan, targetCell, signal) {
+  const drawn = property ? propertyLinesForPrint() : { lines: [], color: null };
+  const traced = contours && DTM_URL ? await contourLines.computeForExtent(plan.grid.extent, targetCell, { signal }) : null;
+  // Overlays and the parcel crop are placed in the model's UTM frame, so the
+  // orthophoto must be north-up in that same CRS (GeoTIFF must declare it).
+  const epsg = printEpsg();
+  if (format === 'tif' || (epsg && (traced || drawn.lines.length || plan.clip))) verifyOrthoCrs(ortho, epsg, { requireDeclared: format === 'tif' });
+  return {
+    contours: traced, colors: contourLines?.colors(), units: DISPLAY_UNITS,
+    propertyLines: drawn.lines.length ? drawn.lines : null, propertyStyle: drawn.color ? { color: drawn.color } : null,
+    clip: plan.clip, clipEdge: Boolean(plan.clip && property),
+  };
+}
+
+async function previewOrthoExport(options, signal) {
+  checkOrthoExport(options);
+  const ortho = await getDataset(ORTHO_URL, false, { signal });
+  const plan = planOrthoExport(ortho, options.area);
+  const previewEdge = 900, previewCell = Math.max(plan.grid.extent.maxE - plan.grid.extent.minE, plan.grid.extent.maxN - plan.grid.extent.minN) / previewEdge;
+  const layers = await orthoExportLayers(ortho, options, plan, previewCell * 2.5, signal);
+  const result = await renderExportPreview({ ds: ortho, extent: plan.grid.extent, longEdge: previewEdge, format: options.format, layers,
+    createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal });
+  if (!result) throw Object.assign(new Error('The selected area is outside the orthophoto.'), { code: 'print_outside' });
+  return { canvas: result.canvas, width: plan.grid.width, height: plan.grid.height };
+}
+
+async function exportOrthoPrintFromViewer(options, dialogSignal, { writable = null, onProgress } = {}) {
+  const { area, format } = options;
+  checkOrthoExport(options);
   // The export belongs to the viewer, model and version it started for, and
   // to the entitlement behind every choice it made: area, format and, once
-  // chosen, the pixel size (above the no-download cap only with download).
+  // planned, native resolution (download permission) or a screen-size cap.
   // A session change that breaks either cancels it (cancelStaleOrthoPrintExports),
   // closing the dialog cancels it, and after every await `current()` checks
   // both against the latest session. Any mismatch ends it as a cancel: no file.
   const controller = new AbortController(), signal = controller.signal;
-  let planned = null; // { longEdge, viewPixels } once the size is chosen
+  let planned = null;
   const permitted = () => {
     const now = orthoPrintPermissions();
-    try { assertOrthoPrintAllowed(now, { area, format }); } catch { return false; }
-    return !planned || planned.longEdge <= printLongEdge({ area, requested: size, policy: now, viewPixels: planned.viewPixels });
+    try { assertOrthoPrintAllowed(now, { area: policyArea(area), format }); } catch { return false; }
+    if (!planned) return true;
+    if (planned.native) return now.whole === true;
+    return planned.grid.width <= VIEW_EXPORT_MAX_EDGE && planned.grid.height <= VIEW_EXPORT_MAX_EDGE;
   };
   const job = { identity: orthoPrintIdentity(), permitted, cancel: () => controller.abort() };
   const fromDialog = () => controller.abort();
@@ -4325,43 +4418,27 @@ async function exportOrthoPrintFromViewer({ area, size, format, contours, proper
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
   };
   orthoPrintExports.add(job);
+  const sink = writable ? createFileSink(writable) : createBlobSink({ type: format === 'tif' ? 'image/tiff' : 'image/png' });
   try {
     const ortho = await getDataset(ORTHO_URL, false, { signal });
     current();
-    let extent = { minE: ortho.minE, maxE: ortho.maxE, minN: ortho.minN, maxN: ortho.maxN };
-    if (area === 'view') {
-      // Ortho, DSM and DTM share the map, so the current view is the same area in each.
-      const b = map.getBounds();
-      const corners = [b.getNorthWest(), b.getNorthEast(), b.getSouthWest(), b.getSouthEast()].map((c) => latLonToUtm(c.lat, c.lng));
-      extent = { minE: Math.min(...corners.map((c) => c[0])), maxE: Math.max(...corners.map((c) => c[0])), minN: Math.min(...corners.map((c) => c[1])), maxN: Math.max(...corners.map((c) => c[1])) };
-    }
-    const drawnLines = property ? propertyLinesForPrint() : { lines: [], color: null };
-    const policy = orthoPrintPermissions();
-    // Screen pixels the exported area actually covers: the view clipped to the
-    // orthophoto, not the whole map viewport.
-    let viewPixels = NaN;
-    if (area === 'view') {
-      const mapSize = map.getSize(), dpr = window.devicePixelRatio || 1, clipped = clampExtent(extent, ortho);
-      if (clipped) viewPixels = dpr * Math.max(mapSize.x * (clipped.maxE - clipped.minE) / (extent.maxE - extent.minE), mapSize.y * (clipped.maxN - clipped.minN) / (extent.maxN - extent.minN));
-    }
-    const longEdge = printLongEdge({ area, requested: size, policy, viewPixels });
-    planned = { longEdge, viewPixels };
-    // `checkpoint` runs after the contours are traced, after the pixels are
-    // rendered and after the file is encoded.
-    const result = await exportOrthoPrint({
-      ortho, extent, longEdge, format, epsg: printEpsg(),
-      traceContours: contours && DTM_URL ? (printExtent, targetCell) => contourLines.computeForExtent(printExtent, targetCell, { signal }) : null,
-      colors: contourLines?.colors(), propertyLines: drawnLines.lines.length ? drawnLines.lines : null,
-      propertyStyle: drawnLines.color ? { color: drawnLines.color } : null, units: DISPLAY_UNITS,
-      createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal, checkpoint: current,
-    });
+    planned = planOrthoExport(ortho, area);
+    current();
+    // Trace about one DTM cell per 2.5 output pixels: smooth at full size.
+    const layers = await orthoExportLayers(ortho, options, planned, planned.grid.gsdE * 2.5, signal);
+    current();
+    const blob = await streamOrthoExport({ ds: ortho, grid: planned.grid, format, epsg: printEpsg(), layers, sink,
+      createCanvas: () => document.createElement('canvas'), pool: ensureGeoTiffPool(), signal,
+      onProgress: (fraction) => { current(); onProgress?.(fraction); } });
     // Rendering takes a while: the session may have expired or changed
     // meanwhile. Check again before the dialog saves anything.
     current();
-    if (result.width < size && result.height < size && longEdge < size) result.note = `Saved at ${Math.max(result.width, result.height)} px (limited by your access).`;
-    // The dialog asks once more right before it saves the file.
-    result.stillCurrent = () => { try { current(); return true; } catch { return false; } };
-    return result;
+    return { blob, filename: options.filename, width: planned.grid.width, height: planned.grid.height,
+      // The dialog asks once more right before it saves the file.
+      stillCurrent: () => { try { current(); return true; } catch { return false; } } };
+  } catch (error) {
+    sink.abort();
+    throw error;
   } finally {
     orthoPrintExports.delete(job);
     dialogSignal?.removeEventListener('abort', fromDialog);
@@ -4881,6 +4958,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   document.getElementById('panel-slice').style.display = (is3D||isPC)?'block':'none';
   viewerSlice?.refresh();
   document.getElementById('panel-ortho').style.display = mode === 'ortho' ? 'block' : 'none';
+  syncOrthoExportAction();
   document.getElementById('panel-dem').style.display = isDem ? 'block' : 'none';
   syncMapVolumeAvailability();
 

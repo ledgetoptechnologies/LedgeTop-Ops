@@ -347,13 +347,80 @@
     }
     #layer-property-lines:disabled { cursor: not-allowed; opacity: 0.5; }
     #contours-status:empty { display: none; }
-    .ortho-print-dialog { width: min(360px, calc(100vw - 32px)); background: var(--brand-panel); color: var(--brand-text); border: 1px solid var(--panel-border); border-radius: 12px; padding: 18px; }
-    .ortho-print-dialog::backdrop { background: #000a; }
-    .ortho-print-dialog h2 { font-size: 17px; margin: 0 60px 12px 0; }
-    .ortho-print-close { position: absolute; right: 14px; top: 12px; }
-    .ortho-print-check { display: flex; gap: 8px; align-items: center; margin: 8px 0; font-size: 13px; }
-    .ortho-print-check input:disabled + span { opacity: 0.5; }
-    .ortho-print-dialog .tool-btn { margin-top: 10px; }
+    /* Downloads panel: products and image export side by side */
+    .downloads-grid { grid-template-columns: 1fr; }
+    .downloads-slot > button, .downloads-slot .viewer-product-open { width: 100%; }
+    .downloads-slot:empty { display: none; }
+    #panel-model-report .tool-btn { width: 100%; }
+    #panel-downloads:not(:has(.downloads-slot:not([hidden]) > :not([hidden]))) { display: none; }
+    /* Export image dialog (ortho-export-dialog.mjs) */
+    .oe-dialog { margin: auto; width: min(920px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; flex-direction: column;
+      background: #141418; color: var(--brand-text); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; box-shadow: 0 24px 64px rgba(0,0,0,0.6); font-family: var(--font); }
+    .oe-dialog[open] { display: flex; }
+    .oe-dialog::backdrop { background: rgba(0,0,0,0.62); backdrop-filter: blur(2px); }
+    .oe-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 12px; border-bottom: 1px solid rgba(255,255,255,0.07); }
+    .oe-head h2 { font-size: 16px; font-weight: 700; letter-spacing: 0.2px; }
+    .oe-close { width: 32px; height: 32px; border-radius: 8px; border: 0; background: transparent; color: #bbb; cursor: pointer; display: grid; place-items: center; }
+    .oe-close svg { width: 18px; height: 18px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; }
+    .oe-close:hover { background: rgba(255,255,255,0.08); color: #fff; }
+    .oe-body { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 18px; padding: 16px 18px; overflow: auto; min-height: 0; }
+    .oe-preview { position: relative; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+    .oe-preview-image { position: relative; height: min(460px, 58dvh); border-radius: 10px; overflow: hidden; display: grid; place-items: center;
+      background: #0b0b0d repeating-conic-gradient(#17171b 0 25%, #0f0f12 0 50%) 0 0 / 18px 18px; border: 1px solid rgba(255,255,255,0.06); }
+    .oe-preview-canvas { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; box-shadow: 0 4px 18px rgba(0,0,0,0.45); }
+    .oe-preview-state { position: absolute; left: 0; right: 0; top: 0; height: min(460px, 58dvh); display: grid; place-items: center; font-size: 13px; color: #9aa0aa; pointer-events: none; }
+    .oe-preview-state.oe-loading::after { content: ""; width: 26px; height: 26px; border-radius: 50%; border: 3px solid rgba(255,255,255,0.15); border-top-color: var(--brand-orange); animation: oe-spin 0.8s linear infinite; }
+    @keyframes oe-spin { to { transform: rotate(360deg); } }
+    .oe-preview figcaption { min-height: 18px; font-size: 12px; color: #9aa0aa; font-variant-numeric: tabular-nums; }
+    .oe-controls { display: flex; flex-direction: column; gap: 18px; }
+    .oe-field h3 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: #8d929b; margin-bottom: 8px; }
+    .oe-seg { display: flex; flex-direction: column; gap: 6px; }
+    .oe-seg-option { position: relative; display: block; cursor: pointer; }
+    .oe-seg-option input { position: absolute; opacity: 0; pointer-events: none; }
+    .oe-seg-option span { display: block; padding: 9px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); font-size: 13px; font-weight: 600; color: #d8d8dc; transition: border-color .15s, background .15s; }
+    .oe-seg-option:hover span { border-color: rgba(238,80,7,0.6); }
+    .oe-seg-option input:checked + span { border-color: var(--brand-orange); background: rgba(238,80,7,0.16); color: #fff; }
+    .oe-seg-option input:focus-visible + span { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
+    .oe-field:nth-child(2) .oe-seg { flex-direction: row; }
+    .oe-field:nth-child(2) .oe-seg-option { flex: 1; text-align: center; }
+    .oe-parcels { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; padding: 7px 8px 7px 12px; border-radius: 8px; background: rgba(255,255,255,0.05); font-size: 13px; }
+    .oe-parcel-count { color: #d8d8dc; font-weight: 600; }
+    .oe-toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; font-size: 13px; cursor: pointer; }
+    .oe-toggle + .oe-toggle { border-top: 1px solid rgba(255,255,255,0.06); }
+    .oe-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+    .oe-switch { position: relative; width: 34px; height: 20px; border-radius: 10px; background: rgba(255,255,255,0.16); transition: background .15s; flex: none; }
+    .oe-switch::after { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+    .oe-toggle input:checked ~ .oe-switch { background: var(--brand-orange); }
+    .oe-toggle input:checked ~ .oe-switch::after { transform: translateX(14px); }
+    .oe-toggle input:focus-visible ~ .oe-switch { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
+    .oe-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 18px 16px; border-top: 1px solid rgba(255,255,255,0.07); }
+    .oe-status { flex: 1; min-width: 0; font-size: 12px; color: #aab0ba; }
+    .oe-progress { flex-basis: 100%; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    .oe-progress-bar { width: 0; height: 100%; background: var(--brand-orange); transition: width .2s; }
+    .oe-actions { display: flex; gap: 8px; margin-left: auto; }
+    .oe-btn { padding: 9px 16px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.04); color: #eee; font: 600 13px var(--font); cursor: pointer; }
+    .oe-btn:hover:not(:disabled) { border-color: var(--brand-orange); }
+    .oe-btn:disabled { opacity: 0.45; cursor: default; }
+    .oe-btn:focus-visible, .oe-close:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
+    .oe-primary { background: var(--brand-orange); border-color: var(--brand-orange); color: #fff; min-width: 96px; }
+    .oe-primary:hover:not(:disabled) { background: #ff6a1f; }
+    .oe-parcels .oe-btn { padding: 6px 12px; font-size: 12px; }
+    .oe-pick-bar { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); z-index: 700; display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 16px;
+      background: rgba(20,20,24,0.96); border: 1px solid rgba(238,80,7,0.5); border-radius: 999px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); font: 600 13px var(--font); color: #fff; white-space: nowrap; }
+    .oe-bar-btn { padding: 7px 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.16); background: transparent; color: #eee; font: inherit; cursor: pointer; }
+    .oe-bar-done { background: var(--brand-orange); border-color: var(--brand-orange); }
+    .oe-picking, .oe-picking .leaflet-interactive { cursor: pointer !important; }
+    @media (max-width: 720px) {
+      .oe-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+      .oe-body { grid-template-columns: 1fr; gap: 14px; padding: 12px 14px; }
+      .oe-head { padding: 12px 14px 10px; }
+      .oe-foot { padding: 10px 14px 14px; }
+      .oe-preview-image, .oe-preview-state { height: min(240px, 32dvh); }
+      .oe-seg { flex-direction: row; }
+      .oe-seg-option { flex: 1; text-align: center; }
+      .oe-seg-option span { padding: 8px 4px; font-size: 12px; }
+      .oe-controls { gap: 12px; }
+    }
     #floating-controls { position: absolute; top: 14px; right: 14px; z-index: 120; display: flex; gap: 8px; }
     .icon-btn {
       width: 38px; height: 38px; border-radius: 50%;
@@ -755,7 +822,6 @@
           <div data-marks-root></div>
         </div>
 
-        <div class="panel" id="panel-model-report" hidden><h3>Reports</h3><div id="measurement-report-actions" hidden><button class="tool-btn full" id="btn-model-report">Measurements report</button><p class="hint">Your saved measurements, quantities, and overview images.</p></div><div id="model-report-download"></div></div>
         <div class="panel" id="panel-camera">
           <h3><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Camera</h3>
           <div class="tool-grid">
@@ -782,10 +848,6 @@
              <input type="range" id="ortho-opacity" min="0" max="100" step="5" value="100">
              <span class="val" id="ortho-opacity-val">100%</span>
            </div>
-           <div id="ortho-print-actions" class="tool-grid" style="margin-top:10px;">
-             <button class="tool-btn full" id="btn-export-image">Export image</button>
-           </div>
-           <div class="hint" style="margin-top:10px;">Full-resolution tiles stream from the GeoTIFF as you zoom. Use Measurements for map distance and area. Volume uses the published DSM or DTM elevation raster; an orthophoto alone has no height data.</div>
          </div>
 
          <div class="panel" id="panel-dem" style="display:none;">
@@ -882,6 +944,15 @@
            </div>
            <div class="hint" style="margin-top:10px;" id="pc2-quality-hint">Auto quality: the point budget tunes itself to keep your device smooth. Raise Points for more detail on strong hardware.</div>
          </div>
+
+        <div class="panel" id="panel-model-report" hidden><h3>Reports</h3><div id="measurement-report-actions" hidden><button class="tool-btn full" id="btn-model-report">Measurements report</button></div><div id="model-report-download"></div></div>
+        <div class="panel" id="panel-downloads">
+          <h3><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M4 19h16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg> Downloads</h3>
+          <div class="tool-grid downloads-grid">
+            <div id="downloads-products" class="downloads-slot"></div>
+            <div id="ortho-print-actions" class="downloads-slot" hidden><button class="tool-btn" id="btn-export-image">Export image</button></div>
+          </div>
+        </div>
       </div>
     </aside>
 
