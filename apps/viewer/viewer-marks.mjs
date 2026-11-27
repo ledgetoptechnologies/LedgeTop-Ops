@@ -894,8 +894,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const hideMove = !showMove;
     if (moveRow.hidden !== hideMove) syncMapKeys();
     moveRow.hidden = moveCancel.disabled = hideMove;
-    moveSave.disabled = !showMove || state.busy || Boolean(saving);
-    moveSave.textContent = saving && showMove ? 'Saving…' : 'Save';
+    moveSave.disabled = !showMove || state.busy || (Boolean(draft) && saving === draft);
+    moveSave.textContent = showMove && draft && saving === draft ? 'Saving…' : 'Save';
     stripTitle.textContent = showMove ? `Move ${draft.name}` : placing ? `Add ${TYPE_LABEL[mode].toLowerCase()}` : '';
     const focusedChip = [...chips.children].find(chip => chip === document.activeElement)?.dataset.chip;
     chips.replaceChildren(...(placing ? placeChoices().map(choice => {
@@ -1569,7 +1569,12 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   async function saveDraft() {
     if (!draft || saving === draft) return;
     // Refused access already says why; otherwise say that nothing was saved.
-    if (!canWrite() || (moving && !canMoveDraft())) { message(store.state.message || 'This mark can’t be saved here.'); return; }
+    if (!canWrite() || (moving && !canMoveDraft())) {
+      if (savedTimer) { clearTimeout(savedTimer); savedTimer = null; }
+      const lost = (store.state.blocked || !store.state.ready) && store.state.message;
+      message(lost || 'This mark can’t be saved here.');
+      return;
+    }
     const open = draft;
     saving = open;
     if (savedTimer) { clearTimeout(savedTimer); savedTimer = null; }
