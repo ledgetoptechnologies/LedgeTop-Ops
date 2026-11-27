@@ -103,7 +103,9 @@ export type DirectViewerReplaced={grantId:string;grantVersion:number};
 const REPLACED_PREFIX='replaced:';
 const inputSchema=z.object({sourceId:source,workspaceId:opaque,viewerProjectId:opaque,taskId:opaque.nullable(),
  scopeType:z.enum(['project','task']),includeFuturePublished:z.boolean(),confirmedScope:z.literal(true),
- expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict(),selection:selectionSchema.optional(),replaces:replacesSchema.optional()}).strict()
+ expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean(),
+  /** Model report download, chosen apart from other downloads. Left out: the share keeps the older rule (it follows download). */
+  report:z.boolean().optional()}).strict(),selection:selectionSchema.optional(),replaces:replacesSchema.optional()}).strict()
  .refine(g=>g.scopeType==='project'?g.taskId===null&&g.includeFuturePublished:g.taskId!==null&&!g.includeFuturePublished&&g.selection===undefined&&g.replaces===undefined);
 export class DirectViewerGrantError extends HTTPException {
  constructor(status:400|403|404|409|503,public readonly code:string,message:string,public readonly grantId?:string,
@@ -134,6 +136,11 @@ export async function readDirectViewerClientBusinessName(env:Env,sourceId:string
   .bind(sourceId).first<{display_name:string}>();
  return row?.display_name?.trim()||'Business';
 }
+/** Migration 0243 is applied: a share can keep its model report choice. Read each time; the answer can only change by a release. */
+export async function directViewerGrantsStoreModelReport(env:Env):Promise<boolean>{
+ return await db(env).prepare(`SELECT 1 present FROM pragma_table_info('viewer_direct_client_grants') WHERE name='can_download_report'`)
+  .first<number>('present')===1;
+}
 export async function requireDirectViewerClientManage(env:Env,principal:StaffPrincipal){
  for(const permission of ['viewer.view','viewer.manage'] as const){const scope=await sqlScope(env,principal,permission);
   if(!scope.global||scope.deniedGlobal)fail(403,'forbidden','Global Viewer management permission required');}
@@ -141,6 +148,8 @@ export async function requireDirectViewerClientManage(env:Env,principal:StaffPri
 export interface DirectViewerClientGrantRow {
  id:string;source_id:string;workspace_id:string;viewer_project_id:string;task_id:string|null;scope_type:'project'|'task';
  include_future_published:number;can_measure:number;can_view_cameras:number;can_download:number;authorization_expires_at:string|null;
+ /** NULL, or absent before migration 0243: a share from before the model report choice. */
+ can_download_report?:number|null;
  grant_version:number;status:'active'|'revoked';created_by_staff_id:string;created_at:string;updated_at:string;revoked_at:string|null;
  revoked_by_staff_id:string|null;revoke_reason:string|null;client_display_name?:string; selection?:Selection;
 }
@@ -154,7 +163,8 @@ type CreateReceiptEnvelope = Readonly<{version:1;grant:unknown;recipientAuthorit
  | {version:3;grant:unknown;recipientAuthorityPin:DirectViewerClientRecipientAuthorityPin;selection:Selection}>;
 export function directViewerClientGrantView(r:DirectViewerClientGrantRow){return {grantId:r.id,sourceId:r.source_id,workspaceId:r.workspace_id,
  viewerProjectId:r.viewer_project_id,taskId:r.task_id,scopeType:r.scope_type,includeFuturePublished:!!r.include_future_published,
- permissions:{measure:!!r.can_measure,cameras:!!r.can_view_cameras,download:!!r.can_download},expiresAt:r.authorization_expires_at,
+ permissions:{measure:!!r.can_measure,cameras:!!r.can_view_cameras,download:!!r.can_download,
+  ...(r.can_download_report===0||r.can_download_report===1?{report:r.can_download_report===1}:{})},expiresAt:r.authorization_expires_at,
  grantVersion:r.grant_version,revokedAt:r.revoked_at,createdAt:r.created_at,clientDisplayName:r.client_display_name??null,...(r.selection?{selection:r.selection}:{})};}
 function recipientSql(env:Env){return `SELECT w.id,w.project_alpha_source_id,mapping.source_workspace_id,root.display_name,w.root_type,
  COALESCE(w.pa_organization_public_id,w.pa_client_public_id) root_public_id,
@@ -322,6 +332,8 @@ export async function listDirectViewerClientGrantWorkspace(env:Env,principal:Sta
   if(rows.results.length>DIRECT_VIEWER_GRANT_PAGE_SIZE)grantsNextCursor=grants.at(-1)!.id;
  }
  return {clients,clientsNextCursor,grantsNextCursor,...(q.include==='clients'?{}:{capabilities:{replaces:true}}),
+  // Beside the list, not in capabilities: a Viewer from before it drops unknown list keys but refuses unknown capabilities.
+  ...(q.include!=='clients'&&await directViewerGrantsStoreModelReport(env)?{modelReport:true as const}:{}),
   grants:(await resolveRestrictedGrants(env, grants, true)).map((row, index) => directViewerClientGrantView(row
    // A row whose receipt contradicts it gives no access: staff see it as ended, never as a whole project.
    ?? { ...grants[index]!, authorization_expires_at: RESTRICTED_GRANT_EXPIRY }))};
@@ -369,6 +381,7 @@ function resolveRestrictedGrant(row: DirectViewerClientGrantRow, receipts: strin
    || grant.workspaceId !== row.workspace_id || grant.sourceId !== row.source_id
    || grant.permissions.measure !== (row.can_measure === 1) || grant.permissions.cameras !== (row.can_view_cameras === 1)
    || grant.permissions.download !== (row.can_download === 1)
+   || (grant.permissions.report === undefined ? null : grant.permissions.report ? 1 : 0) !== (row.can_download_report ?? null)
    || envelope.recipientAuthorityPin.workspaceId !== row.workspace_id
    || envelope.recipientAuthorityPin.sourceId !== row.source_id) return null;
  if (grant.expiresAt !== null && (!Number.isFinite(expiryMillis(grant.expiresAt))
@@ -432,8 +445,9 @@ function validCreateReceiptGrant(value:unknown):value is DirectViewerClientGrant
   &&typeof grant.viewerProjectId==='string'&&typeof grant.scopeType==='string'
   &&(grant.scopeType==='task'?typeof grant.taskId==='string'&&grant.includeFuturePublished===false
     :grant.scopeType==='project'&&grant.taskId===null&&grant.includeFuturePublished===true)
-  &&Object.keys(permission).length===3&&typeof permission.measure==='boolean'&&typeof permission.cameras==='boolean'
-  &&typeof permission.download==='boolean'&&(grant.expiresAt===null||typeof grant.expiresAt==='string')
+  &&Object.keys(permission).every(key=>['measure','cameras','download','report'].includes(key))
+  &&typeof permission.measure==='boolean'&&typeof permission.cameras==='boolean'
+  &&typeof permission.download==='boolean'&&(permission.report===undefined||typeof permission.report==='boolean')&&(grant.expiresAt===null||typeof grant.expiresAt==='string')
   &&grant.grantVersion===1&&grant.revokedAt===null&&typeof grant.createdAt==='string'
   &&(grant.clientDisplayName===null||typeof grant.clientDisplayName==='string');
 }
@@ -544,6 +558,10 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  const expiresAt=canonicalExpiry(g.expiresAt);
  if(expiresAt===undefined)fail(400,'expired_at_invalid','Expiration is outside the supported range');
  if(expiresAt!==null&&Date.parse(expiresAt)<=Date.now())fail(400,'expired_at_invalid','Expiration must be in the future');
+ // A database from before migration 0243 cannot keep the choice: refuse it rather than drop it.
+ const report=g.permissions.report;
+ if(report!==undefined&&!await directViewerGrantsStoreModelReport(env))
+  fail(409,'model_report_unsupported','Operations must be updated before a share can set the model report. Nothing was shared.');
  // Names for the client email, read from the catalog this share was checked against.
  let shareNames:{projectName:string;taskName:string|null}={projectName:'',taskName:null};
  try{
@@ -592,8 +610,8 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    SELECT id,grant_version,? FROM viewer_direct_client_grants WHERE revoke_reason=? AND status='revoked'`).bind(now,marker),
  ]:[]),
  database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
- can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
- SELECT ?,?,?,?,?,?,?,?,?,?,?,1,'active',?,?,? WHERE (${guard.sql})${replaces?REPLACEMENT_PROOF_SQL:''}
+ can_measure,can_view_cameras,can_download,${report===undefined?'':'can_download_report,'}authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
+ SELECT ?,?,?,?,?,?,?,?,?,?,${report===undefined?'':'?,'}?,1,'active',?,?,? WHERE (${guard.sql})${replaces?REPLACEMENT_PROOF_SQL:''}
  AND (SELECT count(*) FROM viewer_direct_client_grants cap WHERE cap.source_id=? AND cap.workspace_id=? AND ${effectiveGrantSql('cap')})<?
  AND EXISTS(${recipientSql(env)} AND w.id=? AND w.project_alpha_source_id=?
  AND checkpoint.active_generation_id=? AND checkpoint.source_sequence=? AND root.source_version=?
@@ -618,7 +636,7 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    WHERE authority.client_authority_id=claim.client_authority_id AND authority.workspace_id=w.id AND authority.state='active'
      AND authority.target_id=? AND authority.target_revision=? AND authority.ownership_epoch=? AND authority.root_kind=w.root_type)`:''})`)
  .bind(id,g.sourceId,g.workspaceId,g.viewerProjectId,g.taskId,g.scopeType,+g.includeFuturePublished,+g.permissions.measure,+g.permissions.cameras,+g.permissions.download,
- g.selection?RESTRICTED_GRANT_EXPIRY:result.expiresAt,principal.id,now,now,...guard.bindings,
+ ...(report===undefined?[]:[+report]),g.selection?RESTRICTED_GRANT_EXPIRY:result.expiresAt,principal.id,now,now,...guard.bindings,
  ...(replaces?[marker,replaces.length,marker,g.sourceId,g.workspaceId,g.viewerProjectId,listed,replaces.length,g.sourceId,g.workspaceId,g.viewerProjectId]:[]),
  g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
  g.workspaceId,g.sourceId,row.active_generation_id,row.source_sequence,row.root_version,

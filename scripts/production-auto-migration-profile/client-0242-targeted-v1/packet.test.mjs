@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,8 +19,16 @@ const manifest = JSON.parse(manifestBytes.toString('utf8'));
 const baseRows = manifest.databases.client.orderedRows;
 const migrationDirectory = path.join(root, 'apps/client/migrations');
 const sourceRows = manifest.databases.client.sourceMigrations;
-const localMigrationNames = readdirSync(migrationDirectory).filter(name => /^\d{4}_.+\.sql$/u.test(name)).sort();
-const sourceFiles = localMigrationNames.map(name => ({ name, bytes: readFileSync(path.join(migrationDirectory, name)) }));
+// The finished 0242 packet is pinned to the 161-file Client source of its reviewed
+// profile; later Client migrations on main make it refuse, as it should. These
+// tests use exactly that pinned source, read from Git blobs and checked byte for byte.
+const localMigrationNames = sourceRows.map(row => row.name);
+const sourceFiles = sourceRows.map(row => {
+  const bytes = execFileSync('git', ['cat-file', 'blob', row.gitBlobOid], { cwd: root, maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), row.sha256, `pinned bytes for ${row.name}`);
+  return { name: row.name, bytes };
+});
+const liveMigrationNames = readdirSync(migrationDirectory).filter(name => /^\d{4}_.+\.sql$/u.test(name)).sort();
 const migrationSql = sourceFiles.find(file => file.name === MIGRATION_NAME).bytes;
 const statementMeta = Object.freeze({ changes: 0, rows_written: 0, changed_db: false });
 const sourceEvidence = () => ({ manifestBytes, appendPlanBytes, sourceCommit: SOURCE_COMMIT, databaseId: DATABASE_ID,
@@ -252,4 +262,10 @@ test('wrong schema target and pending-object collision are rejected', () => {
     assert.throws(() => compileClient0242Packet({ ...sourceEvidence(), schemaSnapshot: missingSql,
       runId: TEST_RUN_ID }), /targeted_schema_object_invalid/);
   } finally { db.close(); }
+});
+
+test('the finished packet refuses the current Client source once it has moved past the pinned 161 files', { skip: liveMigrationNames.length === sourceRows.length && 'current source still equals the pinned source' }, () => {
+  const liveFiles = liveMigrationNames.map(name => ({ name, bytes: readFileSync(path.join(migrationDirectory, name)) }));
+  assert.throws(() => compileClient0242Packet({ ...sourceEvidence(), sourceFiles: liveFiles, localMigrationNames: liveMigrationNames,
+    schemaSnapshot: { schema: [], parent: [] }, runId: TEST_RUN_ID }), /inventory_current_source_mismatch/);
 });
