@@ -1830,15 +1830,17 @@ test("the tab opened for the 3D Viewer shows a styled Ledge Top placeholder whil
   await page.getByRole("button", { name: "Open 3D model" }).click();
   const placeholder = await popupWait;
   await expect.poll(() => releaseSession !== undefined).toBe(true);
-  await expect(placeholder.locator("body")).toContainText("Ledge Top");
-  await expect(placeholder.locator("body")).toContainText("Opening secure 3D Viewer…");
+  // The branded loading screen: the animated mark and a sweep bar, no visible words.
+  await expect(placeholder.getByRole("status")).toHaveText("Opening the 3D Viewer");
   const look = await placeholder.evaluate(() => {
-    const body = getComputedStyle(document.body), brand = getComputedStyle(document.querySelector("strong")!);
-    return { font: body.fontFamily, align: body.textAlign, background: body.backgroundColor, brand: brand.color };
+    const body = getComputedStyle(document.body), frame = document.querySelector("svg .frame")!;
+    const status = document.querySelector("[role=status] span")!.getBoundingClientRect();
+    return { background: body.backgroundColor, animation: getComputedStyle(frame).animationName,
+      accent: document.querySelector("svg .accent")!.getAttribute("stroke"), statusArea: status.width * status.height,
+      bar: getComputedStyle(document.querySelector(".bar")!, "::after").animationName };
   });
-  expect(look.font).toContain("sans-serif");
-  expect(look.font).not.toMatch(/(^|,\s*)serif/);
-  expect(look).toMatchObject({ align: "center", background: "rgb(17, 24, 29)", brand: "rgb(238, 80, 7)" });
+  expect(look).toMatchObject({ background: "rgb(17, 24, 29)", animation: "lt-trace", accent: "#ee5007", bar: "lt-sweep" });
+  expect(look.statusArea).toBeLessThanOrEqual(1);
   // Nothing outside the document is loaded: no scripts, stylesheets, images or fonts.
   expect(await placeholder.evaluate(() => document.querySelectorAll("script,link,img,iframe").length)).toBe(0);
   releaseSession!();

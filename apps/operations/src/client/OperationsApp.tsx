@@ -3867,8 +3867,19 @@ function ViewerPage({ session }: { session: Session }) {
   return <div className="viewer-page"><ViewerDataOverview session={session} /></div>;
 }
 
+/** A busy Viewer can briefly answer 503; the Models page retries once on its own before showing an error. */
+async function loadViewerOverview(): Promise<ViewerOverviewResponse> {
+  try {
+    return await api<ViewerOverviewResponse>("/api/viewer/overview");
+  } catch (caught) {
+    if (!(caught instanceof ApiError) || caught.status !== 503) throw caught;
+    await new Promise(resolve => setTimeout(resolve, 1_500));
+    return api<ViewerOverviewResponse>("/api/viewer/overview");
+  }
+}
+
 function ViewerDataOverview({session}:{session:Session}) {
-  const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
+  const { data, error, reload } = useLoad<ViewerOverviewResponse>(loadViewerOverview, []);
   const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
   const [popupBlocked, setPopupBlocked] = useState(false);
   const [reauthorization] = useState(() => parseViewerReauthorization(location.search));

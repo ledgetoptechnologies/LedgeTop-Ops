@@ -14,6 +14,8 @@ import { useAccessSignOut } from "./access-session";
 import { createViewerStartupDiagnostics, VIEWER_DIAGNOSTICS_TTL_MS, type ViewerStartupSnapshot } from "./viewer-startup-diagnostics";
 
 import { BRAND_COLORS, LT_MARK } from "./brand";
+import { writeViewerPlaceholder } from "./viewer-placeholder";
+export { VIEWER_PLACEHOLDER_CSS, writeViewerPlaceholder } from "./viewer-placeholder";
 /** Generic Ledge Top mark, identical on every domain and product. Defined once in brand.ts. */
 export { BRAND_COLORS, LT_FAVICON_SVG, LT_MARK, LT_MARK_SVG } from "./brand";
 
@@ -222,31 +224,6 @@ export function AccountMenu({
     </div>}
     {appApi && <GetAppDialog open={appOpen} onClose={() => setAppOpen(false)} appApi={appApi} />}
   </div>;
-}
-
-/**
- * Styles the blank tab shown while the secure 3D Viewer session is issued: generic Ledge Top only, system fonts,
- * no external assets and no caller data. Built with DOM nodes and fixed text, so nothing is parsed as markup.
- */
-function writeViewerPlaceholder(target: Document) {
-  const style = target.createElement("style");
-  style.textContent = "html,body{height:100%;margin:0}"
-    + "body{display:grid;place-items:center;background:#11181d;color:#f4f7f9;"
-    + "font:500 1rem/1.5 system-ui,-apple-system,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif;text-align:center}"
-    + "main{display:grid;justify-items:center;gap:.75rem;padding:1.5rem}"
-    + "strong{color:#ee5007;font-size:1.1rem;font-weight:850;letter-spacing:.02em}"
-    + "main::after{content:\"\";width:2.5rem;height:3px;border-radius:3px;background:#ee5007}";
-  const main = target.createElement("main");
-  const brand = target.createElement("strong");
-  brand.textContent = "Ledge Top";
-  const message = target.createElement("p");
-  message.style.margin = "0";
-  message.textContent = "Opening secure 3D Viewer…";
-  main.appendChild(brand);
-  main.appendChild(message);
-  target.head.appendChild(style);
-  target.body.textContent = "";
-  target.body.appendChild(main);
 }
 
 type ViewerMessage = {

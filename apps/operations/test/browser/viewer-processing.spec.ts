@@ -287,3 +287,36 @@ for (const invalidOrigin of [false, true]) {
     expect(context.pages()).toHaveLength(1);
   });
 }
+
+test("a busy Viewer's first 503 does not leave the Models page empty until refresh", async ({ page }) => {
+  let overviewCalls = 0;
+  await page.route("**/api/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") return route.fulfill({ json: {
+      user: {
+        id: "staff-one", email: "staff@example.test", displayName: "Staff", status: "Active",
+        profileType: "Administrator", isAdministrator: true, permissions: ["viewer.view"], divisions: [],
+      },
+      csrfToken: "csrf", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
+      units: { default: "imperial", resolved: "imperial" }, capabilities: {},
+    } });
+    if (url.pathname === "/api/viewer/overview") {
+      overviewCalls += 1;
+      if (overviewCalls === 1) return route.fulfill({ status: 503, json: { error: "3D Viewer is temporarily unavailable" } });
+      return route.fulfill({ json: {
+        enabled: true, viewerBaseUrl: "https://viewer.ledgetopdroneservices.com",
+        overview: {
+          schemaVersion: 1, generatedAt: "2026-08-18T14:00:00.000Z", projects: { active: 4, total: 5 },
+          models: { published: 8, total: 11, bytes: 4_294_967_296 }, jobs: { queued: 0, running: 0, reviewReady: 0, failed: 0 },
+          providers: { enabled: 2, healthy: 2, total: 2 }, storage: { usedBytes: 1, availableBytes: 2 },
+          platform: { ready: true, workerLive: true, lifecycleBlocked: false },
+        },
+      } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  await page.goto("/viewer");
+  await expect(page.getByText("11 total · 4.0 GB")).toBeVisible();
+  expect(overviewCalls).toBe(2);
+  await expect(page.getByText("3D Viewer is temporarily unavailable")).toHaveCount(0);
+});
