@@ -1,7 +1,7 @@
 //! ltds-dji-decode <input-log> <output-json>
 //!
-//! Decodes one DJI flight log with dji-log-parser and writes `{ version, details, frames }` (the same shape as the
-//! upstream `dji-log` CLI's JSON). Logs v13+ need keychains from the DJI Open API: the key is read from the file named
+//! Decodes one DJI flight log with dji-log-parser and writes `{ version, details, header, frames }` (the upstream
+//! `dji-log` CLI's JSON plus `header`: the log header's start time and product type). Logs v13+ need keychains from the DJI Open API: the key is read from the file named
 //! by DJI_API_KEY_FILE, never from argv, and is never printed. Nothing is written to stdout or stderr; the outcome is
 //! the exit code, so no parser message can carry a key or log content anywhere. It turns off core dumps for itself
 //! first, so a crash can never write the key or the log to disk (even through a piped core helper).
@@ -32,7 +32,17 @@ mod code {
 struct Output<'a> {
     version: u8,
     details: FrameDetails,
+    header: Header,
     frames: &'a Vec<Frame>,
+}
+
+/// Header fields that `FrameDetails` leaves out. The start time is the log header's own (UTC); the per-frame clock
+/// is garbled on some firmware, so the summary prefers this. `productType` is the parser's model name for the aircraft.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Header {
+    start_time: String,
+    product_type: String,
 }
 
 fn classify(error: &Error) -> u8 {
@@ -66,7 +76,11 @@ fn run(input: &str, output: &str) -> Result<(), u8> {
         None
     };
     let frames = parser.frames(keychains).map_err(|e| classify(&e))?;
-    let out = Output { version: parser.version, details: parser.details.clone().into(), frames: &frames };
+    let header = Header {
+        start_time: parser.details.start_time.to_rfc3339(),
+        product_type: format!("{:?}", parser.details.product_type),
+    };
+    let out = Output { version: parser.version, details: parser.details.clone().into(), header, frames: &frames };
     let file = fs::File::create(output).map_err(|_| code::OUTPUT_UNWRITABLE)?;
     let mut writer = BufWriter::new(file);
     serde_json::to_writer(&mut writer, &out).map_err(|_| code::OUTPUT_UNWRITABLE)?;
