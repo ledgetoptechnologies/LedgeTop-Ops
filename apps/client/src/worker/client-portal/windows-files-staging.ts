@@ -3,6 +3,7 @@ import { nativeDeliveryDeploymentEnabled } from "../operations-native-delivery-d
 import { createOperationsNativeQueueRouter } from "./operations-native-queue-routes";
 import { createWindowsPortalCatalogRouter, type WindowsPortalCatalogRouteEnv } from "./windows-portal-catalog-routes";
 import { createWindowsPortalSuccessorRouter } from "./windows-portal-successor-routes";
+import { createWindowsFilesPolicyRouter } from "./windows-files-policy-routes";
 
 export type WindowsPortalStagingDeployment = Readonly<{
   accountId: string; workerName: string; databaseId: string; bucketName: string; opsReaderWorkerName: string;
@@ -17,7 +18,7 @@ const ISSUER = "https://ledgetoptechnologies.cloudflareaccess.com";
 const PRODUCTION_AUDIENCE = "0fa9c4453634e4c74d4522e2d44407a49701320b06d8f21d8a58efa21e5f947f";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const STAGING_NAME = /^[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?-staging$/u;
-const FAMILIES = ["windows-catalog", "windows-successor", "queue"] as const;
+const FAMILIES = ["windows-catalog", "windows-successor", "queue", "windows-files"] as const;
 const BASE = "/api/client/operations/data/";
 function shape(value: unknown, keys: string): value is Record<string, unknown> {
   return !!value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype
@@ -63,5 +64,6 @@ export function createWindowsPortalStagingRouter(input: WindowsPortalStagingConf
   router.route("/", createWindowsPortalCatalogRouter(config));
   router.route("/", createWindowsPortalSuccessorRouter(config));
   router.route("/", createOperationsNativeQueueRouter(config));
+  router.route("/", createWindowsFilesPolicyRouter(config));
   return router;
 }

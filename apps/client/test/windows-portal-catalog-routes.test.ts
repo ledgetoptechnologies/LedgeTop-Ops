@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
+import { Miniflare } from "miniflare";
 import { canonicalOperationsPortalNativeDeliveryAuthorityCommand as canonical, sha256OperationsPortalNativeDeliveryAuthorityCommand as fingerprint, type OperationsPortalNativeDeliveryFeature } from "@ltds/shared/operations-portal-native-delivery-authority";
 import { fixture, id, principal } from "./helpers/windows-portal-successor-fixture";
 import { createWindowsPortalCatalogRouter, type WindowsPortalCatalogRouteEnv } from "../src/worker/client-portal/windows-portal-catalog-routes";
@@ -194,5 +195,47 @@ describe("continuous Windows catalog with signed human and distinct permission p
     expect((await f.call("/deliveries?cursor=x&%63ursor=y")).status).toBe(503);
     expect((await f.call("/files/" + "%77" + handle.slice(1))).status).toBe(404);
     expect(f.head).not.toHaveBeenCalled();
+  });
+});
+
+describe("Windows catalog listing against a real D1 index", () => {
+  it("hides dump folders at any depth, confines to the grant prefix, pages each entry once and stops on revocation", async () => {
+    const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}", d1Databases: { DB: crypto.randomUUID() } });
+    try {
+      const db = await runtime.getD1Database("DB") as unknown as D1Database;
+      // Test-only tables carrying just the columns the listing query reads.
+      await db.batch([db.prepare("CREATE TABLE file_index (r2_key TEXT PRIMARY KEY, etag TEXT NOT NULL, size INTEGER NOT NULL)"),
+        db.prepare("CREATE TABLE delivery_tombstones (physical_key TEXT NOT NULL, tombstone_kind TEXT NOT NULL, restored_at TEXT)")]);
+      const visible = Array.from({ length: 30 }, (_, n) => `synthetic/photos/file-${String(n).padStart(2, "0")}.bin`);
+      const keys = [...visible, "synthetic/photos/Dump/raw.jpg", "synthetic/photos/dump/raw.jpg", "synthetic/photos/a/b/DUMP/c/raw.jpg",
+        "synthetic/photos/a/b/ok.jpg", "synthetic/photos/Dumpsters/keep.jpg", "synthetic/photos/removed.jpg",
+        "synthetic/photoshoot/neighbour.jpg", "synthetic/other-client/theirs.jpg", "synthetic/photos.jpg"];
+      await db.batch([...keys.map(key => db.prepare("INSERT INTO file_index VALUES (?,?,1)").bind(key, "etag")),
+        db.prepare("INSERT INTO delivery_tombstones VALUES ('synthetic/photos/removed.jpg','exact',NULL)")]);
+      const f = await setup(), mock = f.env.DELIVERY_DB;
+      (f.env as { DELIVERY_DB: unknown }).DELIVERY_DB = { withSession: () => ({ prepare: (sql: string) =>
+        sql.includes("WITH candidates") ? db.prepare(sql) : mock.withSession("first-primary").prepare(sql) }) };
+      async function walk(folderId: string) {
+        const files: string[] = [], folders: Record<string, string> = {}; let cursor: string | null = null, pages = 0;
+        do {
+          const response = await f.call("/folders/" + folderId + (cursor ? "?cursor=" + cursor : "")); expect(response.status).toBe(200);
+          const page = await response.json() as Folder; pages++;
+          files.push(...page.files.map(x => x.name)); for (const x of page.folders) { expect(folders[x.name]).toBeUndefined(); folders[x.name] = x.id; }
+          cursor = page.cursor;
+        } while (cursor && pages < 10);
+        return { files, folders, pages };
+      }
+      const root = await walk(await f.rootHandle());
+      expect(root.pages).toBe(2);
+      expect(Object.keys(root.folders)).toEqual(["Dumpsters", "a"]);
+      expect(root.files).toEqual(visible.map(key => key.split("/").at(-1)));
+      expect(new Set(root.files).size).toBe(root.files.length);
+      const a = await walk(root.folders.a!); expect(a.files).toEqual([]); expect(Object.keys(a.folders)).toEqual(["b"]);
+      const b = await walk(a.folders.b!); expect(b.files).toEqual(["ok.jpg"]); expect(b.folders).toEqual({});
+      expect((await walk(root.folders.Dumpsters!)).files).toEqual(["keep.jpg"]);
+      f.catalogRpc.mockResolvedValue(JSON.stringify({ ok: false, protocolVersion: 1, code: "denied" }));
+      expect((await f.call("/folders/" + root.folders.a!)).status).toBe(404);
+      expect(f.head).not.toHaveBeenCalled(); expect(f.get).not.toHaveBeenCalled();
+    } finally { await runtime.dispose(); }
   });
 });

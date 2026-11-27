@@ -8,7 +8,7 @@ const ORIGIN = "https://portal-staging.ledgetopdroneservices.com";
 const ISSUER = "https://ledgetoptechnologies.cloudflareaccess.com";
 const AUDIENCE = "8eed2de9972afe7d653de2adb68c1b0ef7c6462a9a694203b31d9a32f4248bbc";
 const BASE = "/api/client/operations/data/";
-export const windowsPortalStagingPath = (path: string) => ["windows-catalog", "windows-successor", "queue"]
+export const windowsPortalStagingPath = (path: string) => ["windows-catalog", "windows-successor", "queue", "windows-files"]
   .some(name => path === BASE + name || path.startsWith(BASE + name + "/"));
 const unavailable = () => Response.json({ error: "windows_portal_staging_unavailable" }, { status: 503,
   headers: { "Cache-Control": "private, no-store", "Cloudflare-CDN-Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });

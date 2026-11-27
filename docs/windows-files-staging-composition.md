@@ -8,7 +8,7 @@ production mains and Wrangler configuration are unchanged.
 
 Only these path families are intercepted, for every verb and including their
 bare roots: `/api/staff/files`, `/api/admin/employee-files`, and Client
-`/api/client/operations/data/{windows-catalog,windows-successor,queue}`. A claimed
+`/api/client/operations/data/{windows-catalog,windows-successor,queue,windows-files}`. A claimed
 path never falls through after a factory 401/403/404/405/503. Prefix lookalikes
 and unrelated dashboard/public-link routes use the original handler. Ops queue
 and scheduled handlers, Client scheduled handling, and every reviewed runtime
