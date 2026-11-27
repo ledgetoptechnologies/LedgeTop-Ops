@@ -164,7 +164,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   const categoryInput = h(document, 'input', { name: 'category', maxlength: '60', autocomplete: 'off', spellcheck: 'false', role: 'combobox',
     'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': 'viewer-mark-category-options', placeholder: 'None' });
   const categoryOptions = h(document, 'ul', { id: 'viewer-mark-category-options', class: 'viewer-mark-suggest', role: 'listbox', 'aria-label': 'Categories', hidden: true });
-  let suggestOpen = false, suggestIndex = -1;
+  let suggestOpen = false, suggestIndex = -1, pickedKey = null;
   const picker = createMarkPicker({ document, on, getDraft: () => draft, onChange: () => render(),
     categoryStyleOf: () => categoryStyle(chosenStarter() || chosenCategory()) });
   const { colorInput } = picker;
@@ -306,10 +306,15 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const starters = store.canWrite() && !visibility.startersHidden() ? store.starters().filter(starter => !own.some(category => sameText(category.name, starter.name))) : [];
     return [...own.map(category => ({ key: category.id, name: category.name, category })), ...starters.map(starter => ({ key: 'starter:' + starter.key, name: starter.name, starter }))];
   }
+  // The one picked (or the mark's own) stays chosen while the box still shows its name, even when
+  // another category has the same name; typed text is matched by name.
   function categoryChoice() {
     const text = categoryInput.value.trim();
     if (!text) return null;
-    return categoryChoices().find(choice => sameText(choice.name, text)) || { key: 'new', name: text.slice(0, 60), fresh: true };
+    const all = categoryChoices(), kept = categoryById(pickedKey);
+    const picked = all.find(choice => choice.key === pickedKey) || (kept && { key: kept.id, name: kept.name, category: kept });
+    if (picked && sameText(picked.name, text)) return picked;
+    return all.find(choice => sameText(choice.name, text)) || { key: 'new', name: text.slice(0, 60), fresh: true };
   }
   const chosenCategory = () => categoryChoice()?.category || null;
   const chosenStarter = () => categoryChoice()?.starter || null;
@@ -422,7 +427,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     moving = false;
     setMode('idle');
     writeEditor();
-    if (starter) categoryInput.value = starter.name;
+    if (starter) { categoryInput.value = starter.name; pickedKey = choice; }
     render();
     nameInput.focus?.();
     nameInput.select?.();
@@ -530,6 +535,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // map's controls are a column on the right. A mark's card is beside its pin,
   // between the two and never over either. Narrow map: sheets at the bottom.
   const RAIL = 64, DOCK_LEFT = 56, GAP = 12;
+  const roomBeside = () => (getMap()?.getSize?.().x ?? Infinity) >= DOCK_LEFT + (box.offsetWidth || 340) + GAP + 300 + RAIL;
   const boxRight = () => (!box.hidden && !narrow() ? DOCK_LEFT + (box.offsetWidth || 340) + GAP : 0);
   function placeBeside(element, geometry, full) {
     const size = getMap()?.getSize?.(), sheet = narrow();
@@ -555,7 +561,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
   // A screen that becomes narrow has room for one: what is being worked on the map stays.
   function oneSheet() {
-    if (!boxOpen || !narrow() || (card.hidden && pick.hidden && strip.hidden)) return;
+    // A map too narrow for the list and a card side by side is the same: the list makes room.
+    if (!boxOpen || !(narrow() || !roomBeside()) || (card.hidden && pick.hidden && strip.hidden)) return;
     const inside = box.contains(document.activeElement);
     boxOpen = false;
     render();
@@ -614,7 +621,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     writeEditor();
     if (savedUnits === (units() === 'metric' ? 'metric' : 'imperial') || Number.isNaN(metres)) elevationInput.value = elevation;
     const starterBack = starter && store.starters().find(item => item.key === starter);
-    if (starterBack) categoryInput.value = starterBack.name;
+    if (starterBack) { categoryInput.value = starterBack.name; pickedKey = 'starter:' + starterBack.key; }
     else if (newCategory) categoryInput.value = newCategory;
     if (coordinates !== null && draft.geometry.type === 'Point') pointCoords.value = coordinates;
     store.expect(draft.id || draft.newId, draft.sent);
@@ -634,6 +641,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (!draft) return;
     nameInput.value = draft.name;
     categoryInput.value = categoryById(draft.categoryId)?.name || '';
+    pickedKey = draft.categoryId || null;
     suggestOpen = false;
     colorInput.value = safeColor(draft.color);
     noteInput.value = draft.note || '';
@@ -1239,6 +1247,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
   function pickSuggestion(choice) {
     categoryInput.value = choice.name;
+    pickedKey = choice.key;
     suggestOpen = false;
     suggestIndex = -1;
     applyCategory();
@@ -1334,6 +1343,9 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (Number.isNaN(values.elevationNavd88M)) { elevationInput.focus?.(); message('NAVD88 Elevation must be a number.'); return; }
     if (values.visibility === 'client' && !values.shareAccount) { message('Choose a client account to share with.'); return; }
     const changes = { ...values, icon: keepIcon(draft.icon), geometry: draft.geometry };
+    // A category typed in full and saved without leaving the box still gives its look.
+    const named = chosenCategory();
+    if (named && draft.categoryId !== named.id) Object.assign(changes, categoryStyle(named));
     const held = store.hold(), open = draft, starter = chosenStarter(), fresh = newCategoryName();
     if (starter) {
       const made = await store.addStarter(starter);

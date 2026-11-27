@@ -183,3 +183,54 @@ test('the sidebar: Pin, Line and Area in one row, then All marks with the count'
     assert.deepEqual([button.getAttribute('aria-label'), button.classList.contains('viewer-mark-rail')], [name, true]);
   }
 });
+
+test('two staff categories with one name: the mark keeps its own, and each can be picked', async t => {
+  const setup = await openMarksPanel(t);
+  const b = setup.mount();
+  await b.marks.setScope(setup.scope('ops', 'staff-b'));
+  const theirs = await b.store.saveCategory({ name: 'Gate', color: '#c62828', icon: 'gate' });
+  const mark = await b.store.create({ geometry: { type: 'Point', coordinates: [-87, 43] }, name: 'Back gate', color: '#c62828', icon: 'gate', note: '',
+    categoryId: theirs.id, visibility: b.store.state.capabilities.visibility[0] });
+  const a = setup.mount();
+  await a.marks.setScope(setup.scope('ops', 'staff-a'));
+  const mine = await a.store.saveCategory({ name: 'Gate', color: '#1565c0', icon: 'flag' });
+  assert.ok(mark && mine);
+  assert.equal(a.store.editable(a.store.find(mark.id)), true, 'staff may edit a shared staff mark');
+  {
+    await a.open('Back gate');
+    await a.type('[name=name]', 'Back gate 2');
+    await a.save();
+    assert.equal(a.store.find(mark.id).categoryId, theirs.id, 'saving without touching the category keeps it');
+  }
+  await a.place('43.05, -87');
+  const input = a.q('[name=category]');
+  await input.fire('focus');
+  const gates = a.q('.viewer-mark-suggest').querySelectorAll('li').filter(node => node.textContent === 'Gate');
+  assert.equal(gates.length, 2);
+  const second = gates.find(node => node.dataset.category === theirs.id);
+  await second.click();
+  await a.save();
+  assert.equal(a.store.state.marks.at(-1).categoryId, theirs.id, 'the one picked, not the first by name');
+});
+
+test('a mid-width map with no room for the list and a card beside it closes the list', async t => {
+  const { panel, box, card, key, add } = await open(t);
+  panel.leaflet.setSize(740, 700);
+  await add('Mid');
+  await key('l');
+  assert.equal(box().hidden, false);
+  await panel.leaflet.pins()[0].click();
+  assert.deepEqual([box().hidden, card().hidden, card().classList.contains('sheet')], [true, false, false]);
+  const left = parseFloat(card().style.left);
+  assert.ok(left >= 8 && left + 300 <= 740 - 64, `clear of the controls (${left})`);
+});
+
+test('an existing category typed in full and saved at once still gives its look', async t => {
+  const { panel } = await open(t);
+  const stand = await panel.store.saveCategory({ name: 'Tree stand', color: '#2e7d32', icon: 'tree' });
+  await panel.place('43.05, -87');
+  await panel.type('[name=category]', 'tree stand');
+  await panel.save();
+  const saved = panel.store.state.marks.at(-1);
+  assert.deepEqual([saved.categoryId, saved.color, saved.icon], [stand.id, '#2e7d32', 'tree']);
+});
