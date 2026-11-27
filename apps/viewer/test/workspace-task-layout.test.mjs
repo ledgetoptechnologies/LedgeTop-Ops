@@ -13,7 +13,7 @@ function sourceBetween(startMarker,endMarker){
   assert.ok(start>=0&&end>start,`Missing shipped declaration boundaries: ${startMarker}`);
   return source.slice(start,end);
 }
-const names=['LIVE_ATTEMPT_STATUSES','VIEWER_SUBMISSION_STATUSES','NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','taskPhaseCounts','esc','available','empty','field','button','dangerButton','badge','duration','durationFromMs','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','countLabel','activityChip','taskNeedsAttention','taskTimestamp','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render','MENU_SEPARATOR','TREE_GRIP','menuItem','treeMenu','treeIcon','treeDragAvailable','treeRowAttributes','canWriteFolders','isProjectOpen'];
+const names=['LIVE_ATTEMPT_STATUSES','VIEWER_SUBMISSION_STATUSES','NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','taskPhaseCounts','esc','available','empty','field','button','dangerButton','badge','liveElapsedStarts','liveElapsedStart','liveElapsedAttribute','tickLiveElapsed','duration','durationFromMs','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','countLabel','activityChip','taskNeedsAttention','taskTimestamp','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render','MENU_SEPARATOR','TREE_GRIP','menuItem','treeMenu','treeIcon','treeDragAvailable','treeRowAttributes','canWriteFolders','isProjectOpen'];
 function fixture(permissions=['viewer.gcp.read','viewer.gcp.write','viewer.processing.write','viewer.processing.publish','viewer.shares.create','viewer.storage.purge']){
 const task={id:'task',projectId:'project',datasetId:'dataset',displayName:'Church <test>',createdAt:'2026-09-01',status:'ready_for_review',latestAttempt:{id:'active',status:'ready_for_review',providerId:'provider'},metrics:{sourceImageCount:20}},dataset={id:'dataset',status:'finalized',displayName:'Source'},state={section:'dashboard',selectedProjectId:'project',expandedTaskId:'task',taskPage:null,projects:[{id:'project',displayName:'Site',status:'active'}],tasks:[task],datasets:[dataset],outputs:[],providers:[{id:'provider',displayName:'Processing node'}],presets:[],taskDetails:{task:{task,gcp:{sets:[]},storage:{task:{totalBytes:4096}}}}},events=[],listeners={};
   const content={innerHTML:''},title={textContent:''},location={origin:'https://viewer.test',href:'https://viewer.test/workspace?section=dashboard&project=project&task=task'};
@@ -300,6 +300,26 @@ test('workspace runtime ignores samples from other attempts and never uses compl
   assert.match(f.context.taskPanel(f.task),/0m 0s<\/strong><small>runtime/);
   f.task.metrics={processingDurationMs:9_000,processingDurationAttemptId:attempt.id};
   assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),/0m 9s/);
+});
+
+test('a running task shows its live runtime since the node started it, and it keeps counting',()=>{
+  const f=fixture(),attempt=f.task.latestAttempt;
+  Object.assign(attempt,{status:'running',startedAt:'2020-01-01T00:00:00Z'});
+  f.task.status='processing';
+  f.task.metrics={processingElapsedMs:125_000,processingElapsedAttemptId:attempt.id};
+  const panel=f.context.taskPanel(f.task);
+  const start=Number(/<strong data-live-elapsed-start="(\d+)">2m 5s<\/strong><small>runtime/.exec(panel)?.[1]);
+  assert.ok(Math.abs(Date.now()-125_000-start)<1_000,'runtime counts from the node start, not the upload');
+  // Re-rendering the same answer keeps the same start.
+  assert.match(f.context.taskPanel(f.task),new RegExp(`data-live-elapsed-start="${start}"`));
+  assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),new RegExp(`<dd data-live-elapsed-start="${start}">2m 5s</dd>`));
+  // The page ticker advances every live runtime on screen.
+  const element={dataset:{liveElapsedStart:String(start-60_000)},textContent:'2m 5s'};
+  f.context.tickLiveElapsed({querySelectorAll:()=>[element]});
+  assert.equal(element.textContent,'3m 5s');
+  // A sample for another attempt is never shown.
+  f.task.metrics={processingElapsedMs:125_000,processingElapsedAttemptId:'another-attempt'};
+  assert.match(f.context.taskPanel(f.task),/<strong>Unavailable<\/strong><small>runtime/);
 });
 
 test('workspace runtime falls back to attempt start-to-finish only when no engine sample exists',()=>{
