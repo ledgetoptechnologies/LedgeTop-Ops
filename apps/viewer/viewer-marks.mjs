@@ -612,7 +612,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const left = right ? point[0] + gap : point[0] - gap - width;
     element.style.left = `${Math.max(min, Math.min(left, max))}px`;
     element.style.top = `${top}px`;
-    element.style.maxHeight = `${bottom - (below ? top : edge)}px`;
+    element.style.maxHeight = `${Math.max(0, bottom - (below ? top : edge))}px`;
   }
   // The undo note sits at the bottom centre, above whatever is docked there.
   function placeUndo() {
@@ -963,6 +963,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (focus && was) (selecting ? bulkApply : shareAllButton.hidden ? activeTab() : shareAllButton)?.focus?.({ preventScroll: true });
   }
   async function startSharing() {
+    // Change runs only what is asked about, as the controls show it right now.
+    if (!questionStands()) { render(); return; }
     const job = confirming;
     if (!job || !confirmArmed || store.state.busy || jobRunning()) return;
     confirming = null;
@@ -1126,7 +1128,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     if (active === selectAll && selectAll.disabled && !selectNone.disabled) selectNone.focus?.({ preventScroll: true });
     else if (active === selectNone && selectNone.disabled && !selectAll.disabled) selectAll.focus?.({ preventScroll: true });
     // A question dropped under the focus hands it back to what asks it.
-    if (!asked && confirmBox.contains(active)) (selecting ? bulkApply : shareAllButton.hidden ? activeTab() : shareAllButton)?.focus?.({ preventScroll: true });
+    if (!asked && confirmBox.contains(active)) [selecting ? bulkApply : shareAllButton, activeTab()].find(node => node && !node.hidden && !node.disabled)?.focus?.({ preventScroll: true });
     searchInput.hidden = !state.marks.length;
     searchInput.disabled = Boolean(confirming);
 

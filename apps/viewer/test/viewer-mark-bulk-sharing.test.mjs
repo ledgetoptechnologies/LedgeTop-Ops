@@ -397,3 +397,22 @@ test('ticking by keyboard keeps the focus on the same mark\'s tick or row', asyn
   assert.equal(p.button('All').disabled, true);
   assert.ok(p.dom.document.activeElement === p.button('None'), 'focus moves to None when All is spent');
 });
+
+test('Change re-checks the question: a choice changed under it without a render applies nothing', async t => {
+  const f = await openMarksPanel(t), p = f.mount();
+  t.after(() => p.marks.dispose());
+  await p.marks.setScope(f.scope('ops', 'staff-a'));
+  const one = await p.store.create(mark('One', { visibility: 'private' }));
+  await p.q('.viewer-mark-layers').click();
+  await p.button('Select').click();
+  await row(p, 'One').click();
+  await choose(p, 'shared-view');
+  await p.button('Apply').click();
+  // The select moves without its change event (as a rebuilt option list does).
+  p.q('[name=bulkVisibility]').value = 'shared';
+  f.requests.length = 0;
+  await p.confirm();
+  assert.equal(p.store.find(one.id).visibility, 'private');
+  assert.deepEqual(writes(f.requests), []);
+  assert.equal(visible(p.q('.viewer-mark-confirm')), false, 'the stale question is gone');
+});
