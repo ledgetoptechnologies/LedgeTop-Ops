@@ -287,6 +287,10 @@ test('the activated held StaffDirectory version is recognized for later Client r
   const after = activated(before, candidate, modern);
   assert.throws(() => validateInstallation(after, { profile, selectedApp: 'client' }), /operations: unrecognized exports/u);
   assert.equal(validateInstallation(after, { profile, selectedApp: 'client', opsStaffDirectoryPins: pins }), after);
+  assert.equal(validateInstallation(after, { profile, selectedApp: 'ops-sync', opsStaffDirectoryPins: pins }), after);
+  assert.equal(validateInstallation(after, { profile, opsStaffDirectoryPins: pins }), after);
+  assert.throws(() => validateInstallation(after, { profile, selectedApp: 'operations', opsStaffDirectoryPins: pins }),
+    /operations: unrecognized exports/u, 'never as the baseline of another Ops release without a reviewed profile');
   const wrongBytes = clone(after); wrongBytes.operations.modern.modules[0].content_base64 = Buffer.from('x').toString('base64');
   assert.throws(() => validateInstallation(wrongBytes, { profile, selectedApp: 'client', opsStaffDirectoryPins: pins }), /runtime bytes differ/u);
   const extra = clone(after); opsClass(extra.operations.version, 'StaffDirectory').handlers.push('listStaff');

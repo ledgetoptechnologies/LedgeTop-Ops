@@ -38,7 +38,7 @@ export const OPS_STAFF_DIRECTORY_ENTRYPOINT = Object.freeze({
   heldCandidateId: '65650d92-00fe-40ff-8946-7df9ec8a407e',
   priorVerifierSourceSHA256: 'e6bdbe06ef1655d50c9960b7f8b28a0860e4d32259705199c54bde9c6425e09f',
 });
-export const ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 ='6073b977db48843d9eaecba74cb3863815b92dff87afd4c6f144b5e1dbad48fe';
+export const ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 = '6073b977db48843d9eaecba74cb3863815b92dff87afd4c6f144b5e1dbad48fe';
 export const CANONICAL_INSTALLED_PROFILE_V4_SHA256 = '2ef0f21be881bbe1567e4ea941255ea1f6e1be9a339c1f854174c5ac334a10fd';
 const ORDINARY_FRONTEND_PRESERVED_FLAGS = Object.freeze({
   operations: 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED',
@@ -96,7 +96,8 @@ export function opsStaffDirectoryMainMatches(modern, pins = OPS_STAFF_DIRECTORY_
   return bytes.length > 0 && bytes.toString('base64') === rows[0].content_base64 && hash(bytes) === pins.mainSHA256;
 }
 /** The one reviewed held state: Ops baseline active alone at 100% with the pinned uploaded StaffDirectory
- * build as its inactive latest. Admitted only when Ops is not the selected app. */
+ * build as its inactive latest. Admitted only when Ops is not the selected app. This is also the state
+ * after a rollback from the activated held version to the baseline, which stays admissible on purpose. */
 export function isHeldOpsStaffDirectoryInactiveLatest(app, state, pins = OPS_STAFF_DIRECTORY_ENTRYPOINT) {
   if (app !== 'operations' || !validStaffDirectoryPins(pins) || !state || typeof state !== 'object') return false;
   const rows = state.deployment?.versions;
@@ -365,11 +366,11 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     need(equal(named(s.settings.bindings), named(s.version.resources.bindings)), `${app}: settings/version bindings differ`);
     const successorReaderProfile = opsSuccessorReaderContract !== undefined && app === 'operations';
     // StaffDirectory recognition: the explicit contract for the just-activated candidate id, or,
-    // without any Ops contract, only the exact pinned held build id. Either way the active main
+    // without any Ops contract and only when Ops is not the selected app, the exact pinned held build id. Either way the active main
     // bytes must be the pinned bundle and the script must be the profile plus exactly one class.
     const staffDirectoryProfile = app === 'operations' && !successorReaderProfile
       && (opsStaffDirectoryContract !== undefined
-        || (validStaffDirectoryPins(opsStaffDirectoryPins) && s.version.id === opsStaffDirectoryPins.heldCandidateId));
+        || (selectedApp !== 'operations' && validStaffDirectoryPins(opsStaffDirectoryPins) && s.version.id === opsStaffDirectoryPins.heldCandidateId));
     if (staffDirectoryProfile) {
       need(spec.name === 'ledgetop-ops' && s.version.id === (opsStaffDirectoryContract !== undefined
         ? opsStaffDirectoryCandidateId : opsStaffDirectoryPins.heldCandidateId) && s.modern.id === s.version.id,
