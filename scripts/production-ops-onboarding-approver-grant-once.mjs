@@ -280,6 +280,8 @@ async function runGrant({ provider, mode = 'dry-run', target, staffId, approvalR
       state.reconcile = classifyApproverGrant(seen, staffId);
       state.postRead = { counts: publicCounts(seen), classification: state.reconcile };
     } catch (error) { state.reconcile = `read-failed:${errorCode(error)}`; }
+    // changes 0 proves this batch inserted nothing only when the read-back also shows no grant.
+    if (state.reconcile !== 'not-granted') return stop('reconciliation-required', 'write', 'ops_approver_grant:write_guard_refused_state_unconfirmed');
     return stop('refused', 'write', 'ops_approver_grant:write_guard_refused_no_row_inserted');
   }
   if (outcome?.changes !== 1) {

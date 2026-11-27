@@ -114,9 +114,10 @@ function claimedOnboarding(db) {
   for (const trigger of triggers) db.exec(`DROP TRIGGER ${trigger.name}`);
   db.prepare(`INSERT INTO native_staff_pending_onboarding(onboarding_id,proposed_staff_id,login_email,display_name,
     invitation_secret_sha256,expires_at,state,version,proposal_json,proposal_sha256,created_by_staff_id,created_by_subject,
-    reason,claimed_access_subject,claimed_at,claim_evidence_sha256) VALUES(?,?,?,?,?,?,'claimed',2,?,?,?,?,?,?,?,?)`)
+    reason,claimed_access_subject,claimed_at,claim_evidence_sha256,created_at) VALUES(?,?,?,?,?,?,'claimed',2,?,?,?,?,?,?,?,?,?)`)
     .run(ONBOARDING, PROPOSED, 'new-staff@example.test', 'New Staff', 'a'.repeat(64), new Date(Date.now() + 600_000).toISOString(),
-      PROPOSAL, sha(PROPOSAL), creator.id, creator.subject, 'Synthetic invitation', 'access|new-staff', new Date().toISOString(), 'b'.repeat(64));
+      PROPOSAL, sha(PROPOSAL), creator.id, creator.subject, 'Synthetic invitation', 'access|new-staff', new Date(Date.now() - 1000).toISOString(), 'b'.repeat(64),
+      new Date(Date.now() - 5000).toISOString());
   for (const trigger of triggers) db.exec(trigger.sql);
 }
 
