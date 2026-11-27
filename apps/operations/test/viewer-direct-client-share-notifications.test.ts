@@ -73,6 +73,8 @@ async function fixture(){
 async function share(env:Env,grant:unknown,notifyClient?:boolean,idempotencyKey=key()){
  return createDirectViewerClientGrant({env,principal,grant,idempotencyKey,request,...(notifyClient===undefined?{}:{notifyClient})});
 }
+const autoEnrollment=(env:Env)=>Object.assign(env,{CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:'true',
+ CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED:'true'});
 const recipients=(sent:OutboundMail[])=>sent.map(mail=>mail.to.toLowerCase()).sort();
 
 describe('Viewer direct share client email',()=>{
@@ -95,28 +97,44 @@ describe('Viewer direct share client email',()=>{
   expect(sent).toHaveLength(2);
  });
  it('emails a Project Alpha portal user who has not signed in yet, once per address, skipping blocked and revoked ones',async()=>{
-  const {database,env,sent,send}=await fixture();
+  const {database,env,sent,send}=await fixture();autoEnrollment(env);
   for(const statement of [
    `CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,identity_id TEXT,email_hint TEXT,display_name TEXT,status TEXT)`,
    `CREATE TABLE portal_v2_identity_eligibility_blocks(id TEXT,match_type TEXT,issuer TEXT,subject TEXT,normalized_email TEXT,status TEXT,valid_from TEXT,expires_at TEXT)`,
    // workspace-two: alice is a member; her own waiting login, a new person, a blocked, a revoked and a bound principal.
    `INSERT INTO pa_portal_principals VALUES('workspace-two','p-alice',NULL,'ALICE@example.test','Alice','active'),
     ('workspace-two','p-new',NULL,' New.Person@Example.test ','New Person','active'),
-    ('workspace-two','p-new-again',NULL,'new.person@example.test','New Person','active'),
     ('workspace-two','p-blocked',NULL,'blocked@example.test','Blocked','active'),
     ('workspace-two','p-revoked',NULL,'old@example.test','Old','revoked'),
     ('workspace-two','p-bound','id-gone','gone@example.test','Gone','active'),
-    ('workspace-one','p-other',NULL,'other-workspace@example.test','Other','active')`,
+    ('workspace-one','p-other',NULL,'other-workspace@example.test','Other','active'),
+    ('workspace-two','p-denied',NULL,'denied@example.test','Denied','active'),
+    ('workspace-two','p-removed',NULL,'gone@example.test','Removed','active'),
+    ('workspace-two','p-twin-a',NULL,'twin@example.test','Twin A','active'),('workspace-two','p-twin-b',NULL,'twin@example.test','Twin B','active')`,
    `INSERT INTO portal_v2_identity_eligibility_blocks VALUES('b1','email',NULL,NULL,'blocked@example.test','active','2020-01-01T00:00:00Z',NULL)`,
   ])await database.prepare(statement).run();
   await share(env,projectGrant('workspace-two'),true);
   await processDirectViewerShareNotices(env,{nowMs:LATER,send});
+  // A denied or removed person already has a portal identity, so their unbound login is not a way back in;
+  // two active logins for one address can never enrol, so neither is emailed.
   expect(recipients(sent)).toEqual(['alice@example.test','new.person@example.test']);
   await processDirectViewerShareNotices(env,{nowMs:LATER+60*60_000,send});
   expect(sent).toHaveLength(2);
  });
- it('emails an individual client whose only recipient is a waiting Project Alpha login',async()=>{
+ it('emails no waiting Project Alpha login while automatic enrollment is off',async()=>{
   const {database,env,sent,send}=await fixture();
+  for(const statement of [
+   `CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,identity_id TEXT,email_hint TEXT,display_name TEXT,status TEXT)`,
+   `CREATE TABLE portal_v2_identity_eligibility_blocks(id TEXT,match_type TEXT,issuer TEXT,subject TEXT,normalized_email TEXT,status TEXT,valid_from TEXT,expires_at TEXT)`,
+   `DELETE FROM portal_v2_workspace_memberships WHERE workspace_id='workspace-two'`,
+   `INSERT INTO pa_portal_principals VALUES('workspace-two','p-solo',NULL,'solo@example.test','Solo','active')`,
+  ])await database.prepare(statement).run();
+  await share(env,projectGrant('workspace-two'),true);
+  await processDirectViewerShareNotices(env,{nowMs:LATER,send});
+  expect(sent).toHaveLength(0);
+ });
+ it('emails an individual client whose only recipient is a waiting Project Alpha login',async()=>{
+  const {database,env,sent,send}=await fixture();autoEnrollment(env);
   for(const statement of [
    `CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,identity_id TEXT,email_hint TEXT,display_name TEXT,status TEXT)`,
    `CREATE TABLE portal_v2_identity_eligibility_blocks(id TEXT,match_type TEXT,issuer TEXT,subject TEXT,normalized_email TEXT,status TEXT,valid_from TEXT,expires_at TEXT)`,

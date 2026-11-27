@@ -1,5 +1,6 @@
 import { sendNotificationMail, smtpNotificationsEnabled, type OutboundMail } from "./mailer";
 import { portalRootAccessAllowedSql } from "./client-portal-root-access";
+import { portalAutomaticEligibilityEnabled } from "./portal-automatic-eligibility";
 import { sha256 } from "./crypto";
 import type { Env } from "./types";
 
@@ -18,9 +19,10 @@ import type { Env } from "./types";
  * least once: a crash between the provider accepting a mail and its sent row
  * resends once after the lease, with the same Message-ID, as in the other
  * notification paths. A workspace of more than 200 recipients gets no email.
- * Recipients are current members plus the workspace's active Project Alpha
- * portal users who have not signed in yet (an unbound principal, not blocked
- * by email), one per address. Their key is pa-principal:<public id>.
+ * Recipients are current members plus, while automatic enrollment is on, the
+ * workspace's active Project Alpha portal users who have never signed in (an
+ * unbound principal whose address has no portal identity, no email block and
+ * no second active principal here), one per address. Key: pa-principal:<id>.
  */
 export const SHARE_NOTICE_ACTOR = "system:viewer-share-email";
 const REQUESTED = "grant.notify.requested", ATTEMPT = "grant.notify.attempt", SENT = "grant.notify.sent", CLOSED = "grant.notify.closed";
@@ -99,8 +101,10 @@ export async function processDirectViewerShareNotices(env: Env,
         AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime(?2))
         AND (denial.scope_type='global' OR (denial.scope_type='workspace' AND denial.workspace_id=w.id AND denial.scope_public_id=w.id)))` : "";
   const members = new Map<string, Member[] | null>();
-  const principalsReady = live.length > 0 && (await db.prepare(`SELECT count(*) n FROM sqlite_master WHERE type='table'
-    AND name IN ('pa_portal_principals','portal_v2_identity_eligibility_blocks')`).first<number>("n")) === 2;
+  // Only while automatic enrollment is on can a waiting Project Alpha login actually open the share.
+  const principalsReady = live.length > 0 && portalAutomaticEligibilityEnabled(env) && (await db.prepare(`SELECT count(*) n
+    FROM sqlite_master WHERE type='table' AND name IN ('pa_portal_principals','portal_v2_identity_eligibility_blocks',
+      'portal_v2_identities')`).first<number>("n")) === 3;
   for (const grant of live) {
     if (members.has(grant.workspace_id)) continue;
     const rows = (await db.prepare(`SELECT identity.id identity_id,lower(trim(identity.verified_email)) email
@@ -111,14 +115,20 @@ export async function processDirectViewerShareNotices(env: Env,
         AND identity.revoked_at IS NULL AND identity.verified_email IS NOT NULL AND instr(identity.verified_email,'@')>1
       WHERE w.id=?1 AND w.status='active' AND w.legacy_account_id IS NULL AND ${portalRootAccessAllowedSql(env, "w")} ${denylist}
       ORDER BY identity.id LIMIT ?3`).bind(grant.workspace_id, now, MAX_RECIPIENTS + 1).all<Member>()).results;
-    // A Project Alpha portal user who has not signed in yet has no membership,
-    // but the share is waiting for them: email their verified PA login address.
+    // A Project Alpha portal user who has never signed in has no membership and
+    // no portal identity yet, but the share is waiting for them: email their PA
+    // login address. Anyone with any identity for that address (a member, or
+    // someone denied, revoked, removed or re-enrolled) is left to the member
+    // path above, so this never reaches a person staff have shut out.
     const waiting = principalsReady ? (await db.prepare(`SELECT 'pa-principal:'||principal.public_id identity_id,
         lower(trim(principal.email_hint)) email
       FROM portal_v2_workspaces w JOIN pa_portal_principals principal ON principal.workspace_id=w.id
       WHERE w.id=?1 AND w.status='active' AND w.legacy_account_id IS NULL AND ${portalRootAccessAllowedSql(env, "w")}
         AND principal.status='active' AND principal.identity_id IS NULL
-        AND length(trim(principal.email_hint)) BETWEEN 3 AND 320 AND instr(principal.email_hint,'@')>1
+        AND length(trim(principal.email_hint)) BETWEEN 3 AND 254 AND instr(principal.email_hint,'@')>1
+        AND NOT EXISTS(SELECT 1 FROM portal_v2_identities known WHERE lower(trim(known.verified_email))=lower(trim(principal.email_hint)))
+        AND NOT EXISTS(SELECT 1 FROM pa_portal_principals twin WHERE twin.workspace_id=principal.workspace_id
+          AND twin.public_id<>principal.public_id AND twin.status='active' AND lower(trim(twin.email_hint))=lower(trim(principal.email_hint)))
         AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_blocks block WHERE block.status='active'
           AND datetime(block.valid_from)<=datetime(?2) AND (block.expires_at IS NULL OR datetime(block.expires_at)>datetime(?2))
           AND block.match_type='email' AND block.normalized_email=lower(trim(principal.email_hint)))
@@ -126,7 +136,7 @@ export async function processDirectViewerShareNotices(env: Env,
     // One recipient per address; a signed-in member wins over their own waiting login.
     const seen = new Set(rows.map(row => row.email));
     const recipients = [...rows, ...waiting.filter(row => !seen.has(row.email) && seen.add(row.email))];
-    members.set(grant.workspace_id, recipients.length > MAX_RECIPIENTS ? null : recipients);
+    members.set(grant.workspace_id, recipients.length > MAX_RECIPIENTS || waiting.length > MAX_RECIPIENTS ? null : recipients);
   }
   // What is already recorded for every (grant, identity), read by primary key.
   const pairs: Pair[] = [];
