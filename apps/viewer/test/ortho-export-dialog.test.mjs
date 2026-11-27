@@ -208,3 +208,36 @@ test('parcel picking from the dialog is single-flight and reopens the dialog whe
   await tick();
   assert.equal(t.api.dialog.open, true);
 });
+
+test('a cancelled export that unwinds late does not reopen Cancel during a newer export\'s commit', async () => {
+  const runs = [];
+  const t = dialog({ picker: false, pixels: 1_000_000, run: (options, signal, extra) => {
+    const d = deferred();
+    runs.push({ signal, extra, ...d });
+    return d.promise;
+  } });
+  await ready();
+  const { exportButton, cancel, status } = t.api.controls;
+  void exportButton.click();
+  await tick();
+  await cancel.click();                       // A is cancelled but its run is still unwinding
+  void exportButton.click();
+  await tick();
+  assert.equal(runs.length, 2);
+  runs[1].extra.writable = {};
+  runs[1].extra.onCommit();                    // B starts writing its file
+  assert.equal(cancel.disabled, true);
+  runs[0].reject(new DOMException('Export cancelled.', 'AbortError'));
+  await tick();
+  assert.equal(cancel.disabled, true, 'A ending late leaves B\'s commit fenced');
+  runs[1].resolve({ blob: null, filename: 'orthophoto.png', committed: true });
+  await tick();
+  assert.match(status.textContent, /^Saved orthophoto/);
+  assert.equal(cancel.disabled, false);
+});
+
+test('the stream checks last, right before the file is closed', async () => {
+  const fs = await import('node:fs');
+  const source = fs.readFileSync(new URL('../ortho-export-stream.mjs', import.meta.url), 'utf8');
+  assert.match(source, /abortIf\(signal\);\s*await beforeClose\?\.\(\);\s*\} catch \(error\) \{ encoder\.abort\(\); sink\.abort\(\); throw error; \}\s*return sink\.close\(\);/);
+});

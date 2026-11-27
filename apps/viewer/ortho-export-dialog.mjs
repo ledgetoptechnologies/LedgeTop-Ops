@@ -68,7 +68,7 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
   dialog.setAttribute('aria-label', 'Export orthophoto image');
   documentRef.body.append(dialog);
 
-  let available = {}, previewController = null, exportController = null, previewTimer = null, last = null, picking = null, committing = false;
+  let available = {}, previewController = null, exportController = null, previewTimer = null, last = null, picking = null, committing = null; // committing: the export whose chosen file is being written
   const options = () => ({ area: area.value, format: format.value, contours: contours.input.checked, property: property.input.checked });
   const busy = () => Boolean(exportController);
 
@@ -87,7 +87,7 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
     parcelCount.textContent = n ? plural(n, 'parcel', 'parcels') : 'No parcels selected';
     pickButton.textContent = n ? 'Change' : 'Pick on map';
     exportButton.disabled = busy() || (parcels && !n) || !last;
-    cancel.disabled = committing;
+    cancel.disabled = Boolean(committing);
   }
 
   function schedulePreview() {
@@ -148,10 +148,11 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
     if (picking) return picking;
     if (!pickParcels || busy()) return Promise.resolve();
     stopAll();
-    const run = picking = (async () => {
-      dialog.close();
-      try { available.parcelCount = await pickParcels(); } catch { /* keep the previous selection */ }
-    })().finally(() => { if (picking === run) picking = null; open({ keepStatus: true }); });
+    let settle;
+    const run = picking = new Promise((resolve) => { settle = resolve; }).finally(() => { if (picking === run) picking = null; open({ keepStatus: true }); });
+    // Picking is marked before the dialog closes, so closing does not count as a cancel.
+    dialog.close();
+    Promise.resolve().then(() => pickParcels()).then((count) => { available.parcelCount = count; }, () => { /* keep the previous selection */ }).finally(settle);
     return run;
   }
   pickButton.addEventListener('click', () => { void startPicking(); });
@@ -185,9 +186,9 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
       }
       const result = await run({ ...opts, filename }, signal, {
         writable,
-        onProgress: (fraction) => { if (!signal.aborted && !committing) { bar.style.width = `${Math.round(fraction * 100)}%`; status.textContent = `Exporting… ${Math.round(fraction * 100)}%`; } },
+        onProgress: (fraction) => { if (!signal.aborted && committing !== controller) { bar.style.width = `${Math.round(fraction * 100)}%`; status.textContent = `Exporting… ${Math.round(fraction * 100)}%`; } },
         // From here the chosen file is final: nothing is left to cancel.
-        onCommit: () => { if (exportController !== controller) return; committing = true; status.textContent = 'Saving…'; syncControls(); },
+        onCommit: () => { if (exportController !== controller) return; committing = controller; status.textContent = 'Saving…'; syncControls(); },
       });
       committed = result.committed === true;
       if (!committed) {
@@ -206,7 +207,8 @@ export function mountOrthoExportDialog({ documentRef = document, windowRef = glo
       status.textContent = error?.code ? error.message : 'Could not export the image.';
     } finally {
       if (exportController === controller) { exportController = null; progress.hidden = true; }
-      committing = false;
+      // Only this export's own commit ends here; an older one unwinding late leaves a newer commit alone.
+      if (committing === controller) committing = null;
       syncControls();
     }
   });
