@@ -99,7 +99,7 @@ function page({ holdOpen = false, holdTrace = false, holdBlob = false, permissio
   };
   const context = vm.createContext({
     orthoPrintPolicy, assertOrthoPrintAllowed, clampExtent, printLongEdge, exportOrthoPrint,
-    AbortController, DOMException, console: { warn() {} },
+    AbortController, DOMException, console: { warn() {} }, reviewSessionChannel: null,
     VIEW_MODE: 'session', PROJECT: first.model, activeViewerSession: first, SHARE_PERMISSIONS: first.permissions,
     sessionAccessState: 'active', sessionAccessReason: null, sessionRenewalBlocked: false,
     ORTHO_URL: '/ortho.tif', DTM_URL: '/dtm.tif', DISPLAY_UNITS: 'metric', TILES_URL: null,

@@ -62,7 +62,7 @@ function page() {
   const first = session('v1');
   const context = vm.createContext({
     THREE, L, LineSegments2, LineSegmentsGeometry, LineMaterial, createPropertyLinesController, verifiedUtmGeoref, modelHorizontalDatum,
-    console: { warn() {} }, setTimeout: () => 0, clearTimeout() {}, setImmediate, Date, JSON, Array, Promise,
+    console: { warn() {} }, reviewSessionChannel: null, setTimeout: () => 0, clearTimeout() {}, setImmediate, Date, JSON, Array, Promise,
     window: {}, location: { href: 'https://viewer.invalid/view' },
     document: { getElementById: id => (nodes[id] ||= el()) },
     fetch: async url => {
