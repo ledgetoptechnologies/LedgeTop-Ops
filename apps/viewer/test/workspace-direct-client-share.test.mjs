@@ -400,3 +400,19 @@ test('project share review preserves the recipient, permissions, exact expiry an
   assert.match(whole.summary,/every published task in Site, including tasks published later/);
 
 });
+
+test('a Model report box, unticked, appears only when Operations can store it, and the share says so',async()=>{
+  const markup=directShareForm({projectName:'Site',tasks,modelReport:true});
+  assert.match(markup,/<label class="check"><input type="checkbox" name="report"> Model report<\/label>/);
+  assert.doesNotMatch(directShareForm({projectName:'Site',tasks}),/name="report"|Model report/);
+  const context={projectId:'project',projectName:'Site',tasks,clients};
+  assert.equal('report' in readDirectShareForm(form({client:key}),context).bodies()[0].permissions,false,'no box: nothing is sent');
+  const withBox=checked=>{const f=form({client:key});f.elements.report={checked};return readDirectShareForm(f,context).bodies()[0].permissions.report;};
+  assert.equal(withBox(false),false);assert.equal(withBox(true),true);
+  assert.match(directShareReviewMarkup({client:clients[0],what:'Site',permissions:{measure:false,cameras:false,download:false,report:true},expiresAt:null}),/download the model report/);
+  assert.doesNotMatch(directShareReviewMarkup({client:clients[0],what:'Site',permissions:{measure:false,cameras:false,download:true,report:false},expiresAt:null}),/model report/);
+  const offered=await loadDirectClientAccess(async()=>({clients:[],grants:[],grantsNextCursor:null,capabilities:{replaces:true},modelReport:true}),'project');
+  assert.equal(offered.modelReport,true);
+  const older=await loadDirectClientAccess(async()=>({clients:[],grants:[],grantsNextCursor:null,capabilities:{replaces:true}}),'project');
+  assert.equal(older.modelReport,undefined);
+});

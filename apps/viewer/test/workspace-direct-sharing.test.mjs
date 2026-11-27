@@ -285,7 +285,7 @@ test('dedicated ready sharing offers explicit link creation without publish UX o
   assert.match(f.html(),/Create public link/);assert.match(f.html(),/This model is private/);
   assert.doesNotMatch(f.html(),/Review & publish|publish-attempt|project-share-form|name="wholeProject"/);
   assert.match(f.html(),/Optional password/);
-  assert.match(f.html(),/Downloads, including model report/);
+  assert.match(f.html(),/name="download" checked> Downloads<\/label><label class="check"><input type="checkbox" name="report"> Model report<\/label>/,'the model report is its own box, off by default');
   assert.match(f.html(),/Direct Operations client sharing is not available/);
   assert.doesNotMatch(f.html(),/No Operations account|Links follow/);
   assert.match(f.html(),/class="segmented-tabs" role="tablist"[^>]*><button[^>]*data-share-mode="internal".*data-share-mode="public"/);

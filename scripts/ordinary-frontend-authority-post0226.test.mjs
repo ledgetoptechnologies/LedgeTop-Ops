@@ -225,7 +225,7 @@ test('offline compiler and fixed recurring preservation policy pin qualified sta
     try {
       const pinned = loadPinnedProductionAutoPost0226PreservationPolicy();
       assert.equal(sha(canonicalStaffReadiness(pinned)), PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256);
-      assert.equal(pinned.baseline.baseSnapshotSha256, '23a7e1603789e96d26b07aa60393411bdec3dc09494ad47464294b0ed62f860d');
+      assert.equal(pinned.baseline.baseSnapshotSha256, '40904bbfbcacac1e5e65b726046745724737d4b13344a7c9b953294887d3b1c3');
       assert.equal(pinned.baseline.nativeControlEnabled, 0);
       assert.equal(pinned.baseline.preservationOnly, true);
       assert.throws(() => validateProductionAutoPost0226PreservationPolicy({ ...pinned,

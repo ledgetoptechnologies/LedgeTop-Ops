@@ -50,6 +50,7 @@ import { AdminAuditHistory } from "./AdminAuditHistory";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { NativeDeliveryGrantPanel, type ShareHistoryState } from "./NativeDeliveryGrantPanel";
 import { ClientSharePicker } from "./ClientSharePicker";
+import { SearchFirstPicker } from "./SearchFirstPicker";
 import { backendForSource, type ClientShareBackendState, type ClientShareRecipient } from "./client-share-routing";
 import { deliveryViewCountText } from "./delivery-view-count";
 import { JobBriefPanel } from "./JobBriefPanel";
@@ -1429,18 +1430,20 @@ function FolderAssociation({
   accounts: PortalAccount[];
 }) {
   const [open, setOpen] = useState(false),
-    [message, setMessage] = useState("");
+    [message, setMessage] = useState(""),
+    [accountId, setAccountId] = useState("");
   return open ? (
     <form
       className="folder-association"
       onSubmit={async (event) => {
         event.preventDefault();
         const raw = Object.fromEntries(new FormData(event.currentTarget));
+        if (!accountId) return;
         try {
           await api("/api/client-portal/projects", {
             method: "POST",
             body: JSON.stringify({
-              accountId: raw.accountId,
+              accountId,
               projectAlphaProjectId: project.id,
               canRequestService: true,
             }),
@@ -1450,7 +1453,7 @@ function FolderAssociation({
             body: JSON.stringify({
               divisionId: raw.divisionId,
               r2Prefix: raw.r2Prefix,
-              accountId: raw.accountId,
+              accountId,
             }),
           });
           setMessage("Client workspace and delivery folder linked.");
@@ -1459,16 +1462,14 @@ function FolderAssociation({
         }
       }}
     >
-      <select name="accountId" required defaultValue="">
-        <option value="" disabled>
-          Select client account
-        </option>
-        {accounts.map((account) => (
-          <option key={account.id} value={account.id}>
-            {account.display_name}
-          </option>
-        ))}
-      </select>
+      <SearchFirstPicker
+        id={`folder-association-account-${project.id}`}
+        label="Client account"
+        placeholder="Type a client account"
+        options={accounts.map((account) => ({ value: account.id, label: account.display_name }))}
+        value={accountId}
+        onChange={setAccountId}
+      />
       <select name="divisionId">
         {session.user.divisions.map((div) => (
           <option key={div.id} value={div.id}>
@@ -1484,7 +1485,7 @@ function FolderAssociation({
       />
       <button
         className="button-orange button-small"
-        disabled={!accounts.length}
+        disabled={!accounts.length || !accountId}
       >
         Link workspace
       </button>
@@ -3867,8 +3868,19 @@ function ViewerPage({ session }: { session: Session }) {
   return <div className="viewer-page"><ViewerDataOverview session={session} /></div>;
 }
 
+/** A busy Viewer can briefly answer 503; the Models page retries once on its own before showing an error. */
+async function loadViewerOverview(): Promise<ViewerOverviewResponse> {
+  try {
+    return await api<ViewerOverviewResponse>("/api/viewer/overview");
+  } catch (caught) {
+    if (!(caught instanceof ApiError) || caught.status !== 503) throw caught;
+    await new Promise(resolve => setTimeout(resolve, 1_500));
+    return api<ViewerOverviewResponse>("/api/viewer/overview");
+  }
+}
+
 function ViewerDataOverview({session}:{session:Session}) {
-  const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
+  const { data, error, reload } = useLoad<ViewerOverviewResponse>(loadViewerOverview, []);
   const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
   const [popupBlocked, setPopupBlocked] = useState(false);
   const [reauthorization] = useState(() => parseViewerReauthorization(location.search));
@@ -6841,109 +6853,6 @@ type ClientWorkspaceRecoveryState = {
     members: Array<{ identityId: string; email: string | null; status: "active" | "suspended" | "revoked"; source: string; manager: boolean }>;
   }>;
 };
-
-type ClientAccountRootActivationState = {
-  workspaceMigrationApplied: boolean;
-  accounts: Array<{
-    id: string;
-    displayName: string;
-    status: string;
-    projectAlphaClientId: string | null;
-    projectAlphaOrganizationId: string | null;
-    updatedAt: string;
-    activationState: "unlinked" | "linked" | "projection_missing" | "manual_review" | "projected";
-  }>;
-  sources: Array<{
-    clientId: string;
-    clientName: string;
-    organizationId: string | null;
-    organizationName: string | null;
-    rootType: "organization" | "standalone_client";
-    rootPublicId: string;
-  }>;
-};
-
-function ClientAccountRootActivation() {
-  const state = useLoad(() => api<ClientAccountRootActivationState>("/api/admin/client-account-activation"), []);
-  const [accountId, setAccountId] = useState("");
-  const [sourceId, setSourceId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
-  const eligible = state.data?.accounts.filter(account => account.status === "active"
-    && (account.activationState === "unlinked" || account.activationState === "projection_missing")) ?? [];
-  const manualReview = state.data?.accounts.filter(account => account.activationState === "manual_review") ?? [];
-  const account = eligible.find(item => item.id === accountId) ?? eligible[0];
-  const source = state.data?.sources.find(item => item.clientId === sourceId);
-  useEffect(() => {
-    if (!accountId && eligible[0]) setAccountId(eligible[0].id);
-  }, [accountId, eligible]);
-  useEffect(() => {
-    setSourceId(account?.activationState === "projection_missing"
-      ? account.projectAlphaClientId ?? ""
-      : "");
-  }, [account?.id]);
-
-  const activate = async () => {
-    if (!account || !source || busy) return;
-    const rootLabel = source.rootType === "organization"
-      ? `${source.organizationName || "Project Alpha organization"} (${source.rootPublicId})`
-      : `${source.clientName} (${source.rootPublicId})`;
-    if (!confirm(`Permanently link ${account.displayName} to ${source.clientName}? Its one workspace root will be ${rootLabel}. Automatic remapping is prohibited.`)) return;
-    setBusy(true); setMessage("");
-    try {
-      await api(`/api/admin/client-account-activation/${encodeURIComponent(account.id)}`, {
-        method: "POST",
-        body: JSON.stringify({
-          projectAlphaClientId: source.clientId,
-          expectedUpdatedAt: account.updatedAt,
-        }),
-      });
-      setMessage(state.data?.workspaceMigrationApplied
-        ? "Project Alpha root linked and the complete legacy workspace projection was created atomically and audited."
-        : "Project Alpha root linked and audited. Apply Client migration 0121 next so the workspace-v2 shadow projection is created from this exact root.");
-      setAccountId("");
-      await state.reload();
-    } catch (caught) { setMessage((caught as Error).message); }
-    finally { setBusy(false); }
-  };
-
-  return <Card title="Client account Project Alpha activation">
-    <p>One-time bridge for an existing legacy Client account. Select the concrete Project Alpha client; an active parent organization becomes the single workspace root, otherwise the client is the standalone root.</p>
-    <ErrorLine error={state.error} />
-    {state.data?.workspaceMigrationApplied && <div className="notice" role="status">
-      Workspace migration 0121 is active. Linking creates the complete legacy projection in one audited transaction. Existing partial or conflicting projections remain blocked for manual review.
-    </div>}
-    {eligible.length && state.data?.sources.length ? <div className="form-grid">
-      <label>Existing portal account<select value={account?.id ?? ""} disabled={busy} onChange={event => setAccountId(event.target.value)}>
-        {eligible.map(item => <option key={item.id} value={item.id}>{item.displayName}{item.activationState === "projection_missing" ? " · projection repair" : ""}</option>)}
-      </select></label>
-      <label>Project Alpha client<select value={source?.clientId ?? ""}
-        disabled={busy || account?.activationState === "projection_missing"}
-        onChange={event => setSourceId(event.target.value)}>
-        <option value="" disabled>Select a Project Alpha client</option>
-        {state.data.sources.map(item => <option key={item.clientId} value={item.clientId}>
-          {item.organizationName ? `${item.organizationName} · ${item.clientName}` : `${item.clientName} · standalone`}
-        </option>)}
-      </select></label>
-      {source && <div className="notice full" role="status"><strong>Effective workspace root:</strong>{" "}
-        {source.rootType === "organization" ? source.organizationName : source.clientName} · <code>{source.rootPublicId}</code>
-      </div>}
-      <button type="button" className="button-orange" disabled={busy || !account || !source} onClick={() => void activate()}>
-        {busy ? "Linking…" : account?.activationState === "projection_missing" ? "Create missing projection" : "Link Project Alpha root"}
-      </button>
-    </div> : state.data && <EmptyState title="No account is ready for activation" detail={
-      manualReview.length
-        ? `${manualReview.length} account${manualReview.length === 1 ? " requires" : "s require"} manual projection review.`
-        : state.data.sources.length ? "Every active legacy account is already linked." : "No active, internally consistent Project Alpha client is available."
-    } />}
-    {message && <div className="notice" role="status">{message}</div>}
-    {!!state.data?.accounts.length && <div className="delegated-share-admin-list">
-      {state.data.accounts.map(item => <section className="delegated-share-admin-row" key={item.id}>
-        <span><strong>{item.displayName}</strong><small>{item.activationState.replace("_", " ")}{item.projectAlphaClientId ? ` · PA client ${item.projectAlphaClientId}` : ""}{item.projectAlphaOrganizationId ? ` · PA organization ${item.projectAlphaOrganizationId}` : ""}</small></span>
-      </section>)}
-    </div>}
-  </Card>;
-}
 
 function ClientWorkspaceManagerRecovery() {
   const state = useLoad(() => api<ClientWorkspaceRecoveryState>("/api/admin/client-workspaces/recovery"), []);

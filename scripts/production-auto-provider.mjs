@@ -5,7 +5,7 @@
  * Multipart map MIME matches locked Wrangler 4.118 createWorkerUploadForm. */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual as same } from "node:util";
-import { PROFILE, capture, scriptRuntimeShape } from "./production-deploy.mjs";
+import { PROFILE, capture, scriptRuntimeShape, isHeldOpsSyncInactiveLatest } from "./production-deploy.mjs";
 import { uploadAssetManifest } from "./production-auto-upload.mjs";
 import { PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from "./production-auto-cloudflare-pacer.mjs";
 import { ledgerBytes, validateAssetLedger } from "./production-auto-assets.mjs";
@@ -358,11 +358,16 @@ export class ProductionCloudflareProvider {
       candidateVersionId: result.result.id, annotations: Object.freeze({ ...metadata.annotations }) }));
     return result.result;
   }
-  async createInactiveBackendVersion({ workerName, state, modules, annotations }) {
+  async createInactiveBackendVersion({ workerName, state, modules, annotations, heldInactiveLatest }) {
     need(workerName === 'ledgetop-ops-sync'); const spec = this.#profile.workers['ops-sync']; need(spec?.name === workerName);
     const parentId = version(state?.version?.id);
     const baselineTag = readOwnedUploadTagBaseline(state);
-    need(state.latest === parentId && state.modern?.id === parentId
+    // The v5 Sync lane may supersede only its own admitted held upload, re-proven here against its exact pins.
+    const supersedingHeld = heldInactiveLatest !== undefined && heldInactiveLatest !== null
+      && typeof heldInactiveLatest.versionId === 'string' && state.latest === heldInactiveLatest.versionId
+      && state.latest !== parentId && isHeldOpsSyncInactiveLatest('ops-sync', state, heldInactiveLatest.pins);
+    need((heldInactiveLatest === undefined || supersedingHeld)
+      && (state.latest === parentId || supersedingHeld) && state.modern?.id === parentId
       && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
       && same(scriptRuntimeShape(state.version.resources?.script_runtime), scriptRuntimeShape(spec.runtime))
       && state.modern.assets == null && modules && Object.keys(modules).sort().join() === 'js,sourceMap');
@@ -389,7 +394,7 @@ export class ProductionCloudflareProvider {
     const result = await this.#request(`/workers/scripts/${workerName}/versions?bindings_inherit=strict`, { method: 'POST', body: form,
       intent: { phase: 'sync-version-upload', hashes: [], workerName, parentVersionId: parentId,
         modules: { 'index.js': hash(js), 'index.js.map': hash(sourceMap) } } });
-    version(result.result?.id); need(result.result.id !== parentId);
+    version(result.result?.id); need(result.result.id !== parentId && result.result.id !== state.latest);
     acknowledgedUploadTags.set(result.result, Object.freeze({ workerName, baselineTag,
       candidateVersionId: result.result.id, annotations: Object.freeze({ ...metadata.annotations }) }));
     return result.result;

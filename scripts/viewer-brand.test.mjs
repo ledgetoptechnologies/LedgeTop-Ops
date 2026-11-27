@@ -62,6 +62,12 @@ test('shared React tokens use the brand values', () => {
 test('Viewer pages show the shared mark file, not an inline copy or another site\'s logo', () => {
   for (const page of VIEWER_PAGES) {
     const source = viewer(page);
+    // The launch tab animates the mark, so it draws the paths inline; they must stay the shared ones.
+    if (page === 'review-launch.html') {
+      for (const d of [LT_MARK.frame, LT_MARK.accent, LT_MARK.letters]) assert.ok(source.includes(`d="${d}"`), `${page} mark drifted from brand.ts`);
+      assert.ok(source.includes(`viewBox="${LT_MARK.viewBox}"`), `${page} mark viewBox drifted`);
+      continue;
+    }
     assert.ok(!source.includes(LT_MARK.letters), `${page} carries an inline copy of the mark`);
     assert.doesNotMatch(source, /DroneLogo|<img[^>]+src="https?:/i, `${page} loads a logo from another origin`);
   }

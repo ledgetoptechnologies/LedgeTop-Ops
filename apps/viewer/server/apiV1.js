@@ -150,6 +150,9 @@ function permissions(value) {
     measure: input.measure !== false,
     cameras: input.cameras !== false,
     download: input.download === true,
+    // Left out by an Operations release from before the model report switch: the session keeps today's rule
+    // (the report comes with downloads, see reportAllowed). Sent: exactly true allows it.
+    ...(Object.hasOwn(input, 'report') ? { report: input.report === true } : {}),
     // Service grant issuer attests that subject identifies one person, not an
     // account/company. Legacy client grants intentionally do not persist notes.
     ...(input.personalMeasurements === true ? { personalMeasurements: true } : {}),

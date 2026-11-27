@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, hash, need, compileConfig, validateInstallation, validateReviewedExpectedDeploymentVersions,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ORDINARY_FRONTEND_PREFLIGHT_MODES,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT,
+  OPS_STAFF_DIRECTORY_ENTRYPOINT, OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT,
   ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { domainRecognitionProfile } from './production-domain-recognition.mjs';
 import { compileCanonicalBrowserRetirementTransition, normalizeCanonicalBrowserRetirementPredecessor }
@@ -98,8 +99,25 @@ export function verifyOrdinaryFrontendArtifacts(release) {
 export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   profile = domainRecognitionProfile('portal-entry-canonical'), expectedDeploymentVersions, ordinaryFrontendPreflightMode,
   installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
-  canonicalBrowserRetirementClientVersionId } = {}) {
+  canonicalBrowserRetirementClientVersionId, opsStaffDirectoryEntrypointContract,
+  opsStaffDirectoryPins = OPS_STAFF_DIRECTORY_ENTRYPOINT, reviewedPreflightProfiles } = {}) {
   need(['operations', 'client'].includes(app) && release?.application === app, 'Exact frontend application required');
+  // Offline-test seams only: both default to the reviewed production pins and are never written into the plan.
+  const seams = { ...(opsStaffDirectoryPins === OPS_STAFF_DIRECTORY_ENTRYPOINT ? {} : { opsStaffDirectoryPins }),
+    ...(reviewedPreflightProfiles === undefined ? {} : { reviewedPreflightProfiles }) };
+  // ops-staff-directory-entrypoint-v1: only the exact pinned Ops build, canonical v4, sole-active capture,
+  // and no other Ops contract. It admits the held stray inactive latest in this compile capture only.
+  const staffDirectory = opsStaffDirectoryEntrypointContract !== undefined;
+  need(!staffDirectory || (opsStaffDirectoryEntrypointContract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT
+    && app === 'operations' && ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+    && expectedDeploymentVersions === undefined && installedOpsSuccessorReaderContract === undefined
+    && opsSuccessorReaderPromotionContract === undefined && canonicalBrowserRetirementSelector === undefined
+    && canonicalBrowserRetirementClientVersionId === undefined
+    && opsStaffDirectoryPins?.contract === OPS_STAFF_DIRECTORY_ENTRYPOINT_CONTRACT
+    && release.sourceCommit === opsStaffDirectoryPins.sourceCommit
+    && release.main?.sha256 === opsStaffDirectoryPins.mainSHA256
+    && release.sourceMap?.sha256 === opsStaffDirectoryPins.sourceMapSHA256),
+  'Ops StaffDirectory entrypoint contract requires its exact pinned Operations build, canonical v4 and sole-active capture');
   const opsPromotion = opsSuccessorReaderPromotionContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT;
   need(opsSuccessorReaderPromotionContract === undefined || (opsPromotion && app === 'operations'
     && installedOpsSuccessorReaderContract === undefined && expectedDeploymentVersions === undefined),
@@ -113,14 +131,16 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   const browserTransition = canonicalBrowserRetirementSelector === undefined ? null
     : compileCanonicalBrowserRetirementTransition(before, { app, profile, selector: canonicalBrowserRetirementSelector,
       clientVersionId: canonicalBrowserRetirementClientVersionId });
-  const installationPreflight = ordinaryFrontendPreflightDescriptor(beforeProfile, ordinaryFrontendPreflightMode);
+  const installationPreflight = ordinaryFrontendPreflightDescriptor(beforeProfile, ordinaryFrontendPreflightMode,
+    ...(reviewedPreflightProfiles === undefined ? [] : [reviewedPreflightProfiles]));
   const preflightSnapshot = browserTransition
     ? normalizeCanonicalBrowserRetirementPredecessor(before, browserTransition) : before;
   // Check the installation for the one app this plan releases, as compileConfig and the executor do.
   validateInstallation(preflightSnapshot, { profile: beforeProfile, selectedApp: app,
     expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
     ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
-    opsSuccessorReaderContract: opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract,
+    ...(staffDirectory ? { opsStaffDirectoryEntrypointContract } : {}), ...seams });
   const browserProof = verifyOrdinaryFrontendArtifacts(release);
   const state = before[app], bindings = state.version.resources.bindings;
   if (browserTransition) need((app === 'operations'
@@ -136,7 +156,8 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   need(assets && equal(Object.keys(assets), ['config']) && assets.config.base_path === '/'
     && Object.keys(assets.config).every(key => ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first'].includes(key)), 'Unsupported installed asset configuration');
   const config = compileConfig(preflightSnapshot, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions,
-    ordinaryFrontendPreflightMode, opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract);
+    ordinaryFrontendPreflightMode, opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract,
+    staffDirectory ? opsStaffDirectoryEntrypointContract : undefined, seams);
   config.find_additional_modules = false;
   config.keep_vars = false;
   config.unsafe.metadata.keep_bindings = [];
@@ -172,6 +193,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
     installationPreflight,
     ...(installedOpsSuccessorReaderContract === undefined ? {} : { installedOpsSuccessorReaderContract }),
     ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }),
+    ...(staffDirectory ? { opsStaffDirectoryEntrypointContract } : {}),
     ...(browserTransition ? { canonicalBrowserRetirementSelector: browserTransition.selector } : {}),
     ...(browserTransition?.clientRetirement ? { canonicalBrowserRetirementClientVersionId: browserTransition.clientRetirement.versionId } : {}),
     ...(reviewedExpectedDeploymentVersions ? { expectedDeploymentVersions: clone(reviewedExpectedDeploymentVersions) } : {}),
@@ -187,7 +209,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
       'Exact previous version rollback and previous version asset-byte checks'],
     retentionPolicy: { minimumHours: 48, automaticPruning: false, satisfiedByThisOfflinePlan: false },
     nativeExecutionQualification: { ready: false,
-      reason: [ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE]
+      reason: ORDINARY_FRONTEND_PREFLIGHT_MODES
         .includes(ordinaryFrontendPreflightMode)
         && installationPreflight.profileSHA256 === hash(canonical(beforeProfile))
         ? 'ordinary-frontend-mode-is-precompile-only; executor-candidate-and-post-upload-verifiers-remain-strict'
