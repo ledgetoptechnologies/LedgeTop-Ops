@@ -30,10 +30,13 @@ export function modeledProductionAutoGitHubCoreCalls({ workerName, bucketCount, 
     && Number.isSafeInteger(bucketCount) && bucketCount >= 0
     && (workerName === 'ledgetop-ops-sync' ? bucketCount === 0 : bucketCount <= PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS)
     && typeof ownedInactiveSupersession === 'boolean'
-    && (!ownedInactiveSupersession || workerName === 'ledgetop-clients'),
+    && (!ownedInactiveSupersession || workerName !== 'ledgetop-ops-sync'),
   'production_auto_github_budget_input_invalid');
   if (workerName === 'ledgetop-ops-sync') return SYNC_FIXED_CALLS;
-  if (workerName === 'ledgetop-ops') return RETAINED_BASE_PER_BUCKET * bucketCount + RETAINED_OPS_FIXED;
+  // v5 journal-derived supersession reads the journal and the held run once (ref, commit, tree, blob, run, jobs,
+  // artifact); the same conservative allowance as the Client recovery covers it.
+  if (workerName === 'ledgetop-ops') return RETAINED_BASE_PER_BUCKET * bucketCount + RETAINED_OPS_FIXED
+    + (ownedInactiveSupersession ? bucketCount + 26 : 0);
   // One-off recovery: 4 early CI + 4 pinned journal + 3 custody metadata
   // + 1 first-claim head + (B+13) dispatch heads + 1 completion head.
   // The selector changes this conservative budget, never grants admission.

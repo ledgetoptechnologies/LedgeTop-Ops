@@ -14,6 +14,7 @@ import { carryProductionAutoFailureMarks as carry, markProductionAutoProviderFai
   productionAutoProviderEndpoint } from "./production-auto-startup-diagnostics.mjs";
 import { isOwnedInactiveAdmission, ownedInactiveProviderParentAllowed } from './production-auto-owned-inactive-admission.mjs';
 import { OWNED_INACTIVE_CLIENT_POLICY } from './production-auto-owned-inactive-policy.mjs';
+import { isOwnedInactiveV5Allowance, ownedInactiveV5ProviderParentAllowed } from './production-auto-owned-inactive-v5.mjs';
 import { readOwnedUploadTagBaseline, expectedOwnedUploadAnnotations,
   projectOwnedUploadTagSettings } from './production-auto-upload-tag.mjs';
 
@@ -156,7 +157,7 @@ export async function readCandidateVersionWithVisibilityRetry(provider, workerNa
 
 export class ProductionCloudflareProvider {
   #token; #fetch; #intent; #persist; #cleanupIntent; #profile; #timeout; #verifierPause; #beforeDispatch; #temporary = new Map();
-  #ownedInactiveAdmission = null; #ownedInactiveIdentity = null;
+  #ownedInactiveAdmission = null; #ownedInactiveIdentity = null; #ownedInactiveV5Allowance = null;
   #writeStarted = false;
   #allowUnselectedRecapture;
   constructor({ accountId, token, fetchImpl = fetch, recordIntent, persistResponse, profile = PROFILE, timeoutMs = 30000,
@@ -278,6 +279,13 @@ export class ProductionCloudflareProvider {
     finally { clearTimeout(timer); signal?.removeEventListener("abort", abortFromCaller); }
   }
   /** capture-compatible bounded metadata GETs; no arbitrary provider endpoints. */
+  /** v5: binds the one journal-derived owned-inactive allowance before any write. It only lets the version upload
+   * proceed while the newest version is exactly that superseded upload over the same parent at 100%. */
+  bindOwnedInactiveV5Allowance(allowance) {
+    need(!this.#writeStarted && this.#ownedInactiveAdmission === null && this.#ownedInactiveV5Allowance === null
+      && isOwnedInactiveV5Allowance(allowance));
+    this.#ownedInactiveV5Allowance = allowance;
+  }
   bindOwnedInactiveAdmission(admission, supplied) {
     need(!this.#writeStarted && this.#temporary.size === 0 && this.#ownedInactiveAdmission === null
       && isOwnedInactiveAdmission(admission, supplied) && supplied.accountId === this.account);
@@ -335,8 +343,9 @@ export class ProductionCloudflareProvider {
     prod(workerName); const spec = Object.values(this.#profile.workers).find(v => v.name === workerName); need(spec);
     const parentId = version(state?.version?.id);
     const baselineTag = readOwnedUploadTagBaseline(state);
-    const superseding = state.latest !== parentId && ownedInactiveProviderParentAllowed(
-      this.#ownedInactiveAdmission, this.#ownedInactiveIdentity, state);
+    const superseding = state.latest !== parentId && (ownedInactiveProviderParentAllowed(
+      this.#ownedInactiveAdmission, this.#ownedInactiveIdentity, state)
+      || ownedInactiveV5ProviderParentAllowed(this.#ownedInactiveV5Allowance, { workerName, parentVersionId: parentId, state }));
     need((state.latest === parentId || superseding) && state.modern?.id === parentId && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
       && same(scriptRuntimeShape(state.version.resources?.script_runtime), scriptRuntimeShape(spec.runtime))
       && samePinnedRootAssetConfig(state.modern.assets?.config, spec.metadata.assets?.config) && jwt(assetCompletionToken));
