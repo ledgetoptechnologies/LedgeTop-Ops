@@ -1472,7 +1472,9 @@ function syncMeasurementActionVisibility() {
   const accessAvailable = sessionAccessState !== 'unavailable'
     && (VIEW_MODE !== 'session' || (activeViewerSession && Date.parse(activeViewerSession.expiresAt) > Date.now()));
   const measure = accessAvailable && SHARE_PERMISSIONS.measure !== false;
-  const report = accessAvailable && reportPermitted(SHARE_PERMISSIONS);
+  // Same rule as reportPermitted (viewer-product-downloads.mjs), inline because tests run this function on its own.
+  const shared = SHARE_PERMISSIONS && typeof SHARE_PERMISSIONS === 'object' ? SHARE_PERMISSIONS : {};
+  const report = accessAvailable && (Object.hasOwn(shared, 'report') ? shared.report === true : shared.download === true);
   const setHidden = (id, hidden) => { const element = document.getElementById(id); if (element) element.hidden = hidden; };
   setHidden('measurement-report-actions', !measure);
   setHidden('btn-capture-float', !measure);
