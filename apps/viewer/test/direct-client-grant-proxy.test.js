@@ -300,7 +300,7 @@ test('Operations says it can store the model report choice beside the list; olde
   assert.equal(opened.status, 200); assert.equal((await opened.json()).modelReport, true);
   const picker = await current.request(PATH + '?include=clients&q=Syn');
   assert.equal('modelReport' in await picker.json(), false, 'a client search does not carry it');
-  for (const modelReport of [false, 'true', 1, null]) {
+  for (const modelReport of ['true', 1, null]) {
     const bad = await fixture(t, () => json({ ...list, grantsNextCursor: null, modelReport }));
     assert.equal((await bad.request(PATH + '?include=grants')).status, 502, String(modelReport));
   }

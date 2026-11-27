@@ -2255,7 +2255,7 @@ function selectedShareViews(form){
 }
 function shareSettingsSummary(share){
   const labels=shareViewLabels(),views=share.allowedViews===null||share.allowedViews===undefined?'All available views':share.allowedViews.map(view=>labels[view]||view).join(', ');
-  return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.hasPassword?'Password protected':'No password'} · ${!share.expiresAt?'No expiry':Number.isNaN(Date.parse(share.expiresAt))?'End date unknown':`Expires ${dateTime(share.expiresAt)}`}`;
+  return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.permissions?.report===true?'Model report':'No model report'} · ${share.hasPassword?'Password protected':'No password'} · ${!share.expiresAt?'No expiry':Number.isNaN(Date.parse(share.expiresAt))?'End date unknown':`Expires ${dateTime(share.expiresAt)}`}`;
 }
 // One rule for a public link everywhere in the dialog, the server's own (publicShareLive, projectShareLive):
 // an unreadable expiry is expired.

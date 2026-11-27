@@ -122,10 +122,13 @@ export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, pe
   function refresh() {
     const nextBase = sessionProductsUrl(getAssetRoot(), origin), changed = currentBase !== nextBase;
     currentBase = nextBase;
+    const productsShown = !container.hidden, reportShown = !reportContainer.hidden;
     container.hidden = !allowed() || !nextBase;
     reportContainer.hidden = !reportAllowed() || !nextBase;
-    if (reportContainer.hidden || changed) { cancel(); reportOpen.disabled = false; reportStatus.textContent = ''; }
-    if (container.hidden || changed) { cancel(); reportOpen.disabled = false; reportStatus.textContent = ''; if (dialog.open) dialog.close(); }
+    // Stop work only when its permission was just taken away or the model changed; a session renewal changes neither.
+    const productsLost = productsShown && container.hidden, reportLost = reportShown && reportContainer.hidden;
+    if (changed || productsLost || reportLost) { cancel(); reportOpen.disabled = false; reportStatus.textContent = ''; }
+    if ((changed || container.hidden) && dialog.open) dialog.close();
   }
   refresh();
   return { refresh, destroy() { disposed = true; cancel(); dialog.remove(); container.remove(); reportContainer.remove(); style.remove(); } };

@@ -50,7 +50,7 @@ function validDirectSnapshot(value, action) {
   if (action === 'revoke') return exact(value, ['success', 'replayed', 'sessionRevocation']) && value.success === true && typeof value.replayed === 'boolean'
     && validRevocation(value.sessionRevocation);
   return exact(value, ['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor', 'capabilities', 'modelReport'])
-    && (value.modelReport === undefined || value.modelReport === true)
+    && (value.modelReport === undefined || typeof value.modelReport === 'boolean')
     && (value.capabilities === undefined || exact(value.capabilities, ['replaces', 'notifyClient']) && typeof value.capabilities.replaces === 'boolean'
       && (value.capabilities.notifyClient === undefined || value.capabilities.notifyClient === true))
     && Array.isArray(value.clients) && value.clients.length <= 50 && value.clients.every(directClient)
