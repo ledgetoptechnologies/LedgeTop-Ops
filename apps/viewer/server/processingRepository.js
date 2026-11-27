@@ -964,7 +964,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   persistReconcileObservation(jobId,owner,attemptId,output){return this.transaction(()=>{
     const job=this.eligibleReconcileJob(jobId,owner);
     if(!job||job.attempt_id!==attemptId)return false;
-    if(output){for(const line of output.lines)this.appendLog(attemptId,'provider',line);this.setOutputCursor(attemptId,output.nextLine);}
+    if(output){this.appendLogs(attemptId,'provider',output.lines);this.setOutputCursor(attemptId,output.nextLine);}
     else this.appendLog(attemptId,'warn','Processing output could not be refreshed. Provider status is still being tracked; the output cursor has not advanced.');
     return true;
   });}
@@ -1435,7 +1435,21 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     return response;
   });}
   retryAttempt(id,actor) { const previous=this.getAttempt(id),provider=previous?.providerId&&this.getProvider(previous.providerId); if(!previous||!['failed','cancelled'].includes(previous.status)||!provider?.enabled) return null; return this.createAttempt({taskId:previous.taskId,datasetId:previous.datasetId,providerId:previous.providerId,presetId:previous.presetId,options:previous.options,capabilityFingerprint:previous.capabilityFingerprint,createdBy:actor,auditAction:'processing_attempt.retried',auditDetails:{previousAttemptId:id}}); }
-  appendLog(attemptId,level,message) { const clean=sanitizeLogMessage(message), bytes=Buffer.byteLength(clean); const used=this.database.prepare('SELECT COALESCE(SUM(byte_size),0) AS n FROM processing_logs WHERE attempt_id=?').get(attemptId).n; if(used>=this.logMaxBytes)return false; const clipped=Buffer.from(clean).subarray(0,Math.max(0,this.logMaxBytes-used)).toString('utf8'); if(!clipped)return false; this.database.prepare('INSERT INTO processing_logs(attempt_id,level,message,byte_size,created_at) VALUES (?,?,?,?,?)').run(attemptId,bounded(level,20)||'info',clipped,Buffer.byteLength(clipped),now()); return true; }
+  appendLog(attemptId,level,message) { return this.appendLogs(attemptId,level,[message])>0; }
+  // Reads the attempt's stored log size once per batch. Summing it once per line made a large
+  // ODM output batch hold the shared write lock for seconds, failing Viewer API writes meanwhile.
+  appendLogs(attemptId,level,messages) {
+    let used=this.database.prepare('SELECT COALESCE(SUM(byte_size),0) AS n FROM processing_logs WHERE attempt_id=?').get(attemptId).n,written=0;
+    const insert=this.database.prepare('INSERT INTO processing_logs(attempt_id,level,message,byte_size,created_at) VALUES (?,?,?,?,?)'),safeLevel=bounded(level,20)||'info',t=now();
+    for(const message of messages){
+      if(used>=this.logMaxBytes)break;
+      const clipped=Buffer.from(sanitizeLogMessage(message)).subarray(0,Math.max(0,this.logMaxBytes-used)).toString('utf8');
+      if(!clipped)continue;
+      const size=Buffer.byteLength(clipped);
+      insert.run(attemptId,safeLevel,clipped,size,t);used+=size;written++;
+    }
+    return written;
+  }
   listLogs(attemptId,limit=500) { return this.database.prepare('SELECT level,message,created_at FROM processing_logs WHERE attempt_id=? ORDER BY id DESC LIMIT ?').all(attemptId,Math.max(1,Math.min(Number(limit)||500,2000))).reverse(); }
   pruneLogs(retentionDays=30,at=Date.now()){return this.database.prepare('DELETE FROM processing_logs WHERE created_at<?').run(new Date(at-retentionDays*86400_000).toISOString()).changes;}
   recordWorkerHeartbeat(owner,details={}){const value=JSON.stringify({owner,at:now(),...details});this.database.prepare(`INSERT INTO app_state(key,value,updated_at) VALUES ('processing_worker_heartbeat',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`).run(value,now());}
