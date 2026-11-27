@@ -133,7 +133,8 @@ export function directShareReviewMarkup({client,what,permissions,expiresAt,dateT
 
 // The task this Share was opened on is gone from the project: nothing can be shared from here.
 export const SHARE_TARGET_MISSING='This task or its model is no longer in this project, so it can’t be shared from here. Close Share and open it again.';
-export function directShareForm({projectName,tasks,entry=null,taskId=null,taskName='',targetMissing=false}){
+// notifyClient: Operations said it can email the client (capability notify_client_v1). Otherwise no box is shown.
+export function directShareForm({projectName,tasks,entry=null,taskId=null,taskName='',targetMissing=false,notifyClient=false}){
   if(targetMissing)return `<p class="form-note" role="alert">${esc(SHARE_TARGET_MISSING)}</p>`;
   const scope=directShareDefaultScope({entry,taskId}),unpublished=taskId&&!tasks.some(task=>task.id===taskId);
   const taskList=tasks.length?tasks.map(task=>`<label class="check"><input type="checkbox" name="taskId" value="${esc(task.id)}" ${task.id===taskId?'checked':''}> ${esc(task.name)}</label>`).join('')
@@ -152,7 +153,7 @@ ${notice}<div class="direct-share-tasks" data-direct-task-list>${taskList}</div>
 </fieldset>
 <label><span>Expiry (optional)</span><input name="expiresAt" type="datetime-local"></label>
 ${PERMISSIONS.map(([name,label,checked])=>`<label class="check"><input type="checkbox" name="${name}" ${checked?'checked':''}> ${label}</label>`).join('')}
-<label class="check"><input type="checkbox" name="notifyClient" checked> Email client</label>
+${notifyClient?'<label class="check"><input type="checkbox" name="notifyClient" checked> Email client</label>':''}
 <p class="direct-share-summary" role="status" data-direct-summary></p>
 <section class="direct-share-review" data-direct-review hidden tabindex="-1" aria-label="Review share"><h3>Review share</h3><dl data-direct-review-text></dl>
 <div class="action-row"><button class="primary-button" data-direct-send>Share with client</button><button type="button" class="secondary-button" data-direct-back>Back</button></div></section>
@@ -188,8 +189,8 @@ export function readDirectShareForm(form,{projectId,projectName,tasks,clients,kn
       const common={sourceId:client.sourceId,workspaceId:client.workspaceId,viewerProjectId:projectId,
         permissions:Object.fromEntries(PERMISSIONS.map(([name])=>[name,form.elements[name].checked])),
         expiresAt:expires?expires.toISOString():null,confirmedScope:confirmed===true,
-        // Asks Operations to email the client's current members about this new share.
-        notifyClient:form.elements.notifyClient?.checked!==false};
+        // Asks Operations to email the client's current members about this new share, only where the box is shown.
+        ...(form.elements.notifyClient?{notifyClient:form.elements.notifyClient.checked===true}:{})};
       return scope==='project'?[{...common,taskId:null,scopeType:'project',includeFuturePublished:true}]
         :chosen.map(taskId=>({...common,taskId,scopeType:'task',includeFuturePublished:false}));
     }};

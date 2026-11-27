@@ -64,6 +64,8 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       const listQuery = directListQuery(req.query);
       if (!listQuery) return invalid(res);
       envelope.listQuery = listQuery;
+      // Only the list that opens Share asks what Operations can do (today: email the client).
+      if (listQuery.include === 'grants' && listQuery.grantsCursor === undefined) envelope.capabilities = true;
     }
     if (action === 'create') {
       // The direct Viewer workspace endpoint has always accepted the grant
@@ -129,11 +131,19 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
         try { return { response, payload: JSON.parse(text) }; } catch { throw new Error('invalid_response'); }
       };
       let { response, payload } = await send(envelope);
-      // An Operations release from before "Email client" refuses the field outright, before it changes anything.
-      // Share once more without it: the same idempotency key, so this can never make a second share.
-      if (response.status === 400 && payload?.error === LIST_SHAPE_REFUSAL && envelope.notifyClient) {
-        const { notifyClient: _notify, ...older } = envelope;
-        ({ response, payload } = await send(older));
+      // An Operations release from before "Email client" refuses these fields outright, before it changes anything.
+      // Ask once more without them: a create keeps its idempotency key and grant, so it can never make a second share.
+      if (response.status === 400 && payload?.error === LIST_SHAPE_REFUSAL && (envelope.notifyClient || envelope.capabilities)) {
+        delete envelope.notifyClient; delete envelope.capabilities;
+        ({ response, payload } = await send(envelope));
+      }
+      let capabilities;
+      if (response.ok && envelope.capabilities && payload && typeof payload === 'object' && 'capabilities' in payload) {
+        stage = 'response_schema';
+        if (!Array.isArray(payload.capabilities) || payload.capabilities.length > 10 || !payload.capabilities.every(item => typeof item === 'string' && item.length <= 64))
+          throw new Error('invalid_response');
+        capabilities = payload.capabilities.filter(item => item === 'notify_client_v1');
+        const { capabilities: _offered, ...rest } = payload; payload = rest;
       }
       // An Operations release from before the name-ordered picker refuses `include` outright.
       // Ask it once more the way it understands, and keep only the half that was asked for.
@@ -165,7 +175,7 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       if (!(action === 'groups' ? validDirectGroups(payload) : connection === 'direct' ? validDirectSnapshot(payload, action) : connection === 'native' ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
       const status = connection === 'direct' && action === 'revoke' && payload.sessionRevocation.pending
         ? 202 : action === 'create' && !payload.replayed ? 201 : 200;
-      return res.status(status).json(payload);
+      return res.status(status).json(capabilities ? { ...payload, capabilities } : payload);
     } catch {
       report(502, 'operations_unavailable');
       return res.status(502).json({ error: 'Operations client access service is unavailable', code: 'operations_unavailable' });

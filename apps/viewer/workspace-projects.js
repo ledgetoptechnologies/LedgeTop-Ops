@@ -1850,6 +1850,7 @@ function directShareContext(onlyOutputId){
   const taskId=onlyOutputId?state.shareContext.taskId||null:null,task=taskId?state.tasks.find(item=>item.id===taskId):null;
   return {projectId,projectName:project?.displayName||'this project',tasks:shareableTasks(projectId,state.tasks,state.outputs),
     entry:onlyOutputId?'task':'project',taskId,taskName:onlyOutputId?state.shareContext.taskName||'':'',
+    notifyClient:Array.isArray(state.clientDirectAccess?.capabilities)&&state.clientDirectAccess.capabilities.includes('notify_client_v1'),
     // The task and the model it was opened on must both still be there, in this project.
     targetMissing:Boolean(onlyOutputId)&&!(task?.projectId===projectId&&state.outputs.some(output=>output.id===onlyOutputId&&output.taskId===taskId))};
 }
