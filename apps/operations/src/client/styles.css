@@ -3146,3 +3146,9 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
 
 /* Administration's three service cards sit in one row on wide screens instead of leaving a gap under two. */
 @media (min-width: 1100px) { .configurations-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.search-first-picker { position: relative; display: grid; gap: .35rem; min-width: 0; }
+.search-first-picker-list { display: grid; max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.search-first-picker-list button { display: grid; gap: .15rem; min-height: 44px; padding: .6rem .7rem; border: 0; border-bottom: 1px solid var(--line); background: #fff; color: var(--ink); text-align: left; cursor: pointer; }
+.search-first-picker-list button:hover, .search-first-picker-list button:focus-visible { background: #fff4ed; outline: none; }
+.search-first-picker-list button:disabled { color: var(--muted); cursor: not-allowed; }
+.search-first-picker-list small { color: var(--muted); }
