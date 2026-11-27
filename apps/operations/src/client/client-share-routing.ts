@@ -95,10 +95,24 @@ export function autoSelectedProject(result: ClientShareProjects): { project: Cli
 export function recipientReference(recipient: Pick<ClientShareRecipient, "publicId">): string {
   return recipient.publicId.slice(-6);
 }
-/** Same-named rows stay distinguishable: division, workspace, then the email,
- * or the audience kind with a short reference. */
+/** Workspace, then the email, or the audience kind with a short reference.
+ * Never the business or division: staff choose a client, not a portal. */
 export function recipientDetail(recipient: ClientShareRecipient): string {
   const kind = recipient.audienceType === "principal" ? recipient.email || `Verified person · ref ${recipientReference(recipient)}`
     : `${recipient.audienceType} · current members · ref ${recipientReference(recipient)}`;
-  return `${recipient.divisionLabel} · ${recipient.workspaceName} · ${kind}`;
+  return `${recipient.workspaceName} · ${kind}`;
+}
+/** Details for a result list, keyed by row key. Rows that would read the same
+ * (for example one person in two Project Alpha instances) get their short
+ * reference, so they stay distinguishable without naming either instance. */
+export function recipientDetails(rows: readonly ClientShareRecipient[]): Map<string, string> {
+  const label = (row: ClientShareRecipient) => JSON.stringify([row.displayName.toLocaleLowerCase(), recipientDetail(row).toLocaleLowerCase()]);
+  const counts = new Map<string, number>();
+  for (const row of rows) counts.set(label(row), (counts.get(label(row)) ?? 0) + 1);
+  const details = new Map<string, string>();
+  for (const row of rows) {
+    const detail = recipientDetail(row);
+    details.set(row.key, (counts.get(label(row)) ?? 0) > 1 && !detail.includes(" · ref ") ? `${detail} · ref ${recipientReference(row)}` : detail);
+  }
+  return details;
 }

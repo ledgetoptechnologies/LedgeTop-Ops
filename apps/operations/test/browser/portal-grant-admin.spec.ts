@@ -203,7 +203,8 @@ async function openClientWorkspaceTab(page: Page) {
 test("an unmapped folder links to an exact client in an authorized division without granting access", async ({page}) => {
   const {calls, searches} = await mockExplicit(page);
   await openClientWorkspaceTab(page);
-  await expect(page.getByText("This folder isn't part of a Project Alpha project", {exact: false})).toBeVisible();
+  // Title only: no explanatory paragraph, and no business or division name.
+  await expect(page.getByText("routing metadata only", {exact: false})).toHaveCount(0);
   const division = page.getByRole("combobox", {name: "Business division"});
   await expect(division).toBeVisible();
   await expect(page.getByRole("combobox", {name: "Client workspace or client"})).toHaveCount(0);
