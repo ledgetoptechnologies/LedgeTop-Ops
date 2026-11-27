@@ -956,8 +956,8 @@ test("permission-gated current-folder sharing uses the normalized active folder 
   await expect(publicTab).toBeFocused();
   await publicTab.press("ArrowRight");
   await expect(workspaceTab).toBeFocused();
-  // An unlinked folder offers the Drone Services link as its own step.
-  await page.getByRole("button", { name: "Link folder to a Ledge Top Drone Services client workspace" }).click();
+  // An unlinked folder offers the client workspace link as its own step.
+  await page.getByRole("button", { name: "Link folder to a client workspace" }).click();
   await expect(page.getByRole("alert").filter({ hasText: "not linked to a Client Portal workspace" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open Client Hub portal setup" })).toHaveAttribute("href", "/clients#client-portal-setup");
   expect(authenticatedFolderRef).toBe(Buffer.from("Jobs/Clients/DC Construction").toString("base64url"));

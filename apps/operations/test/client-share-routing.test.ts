@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { autoSelectedProject, backendForSource, nativeTargetsForRecipient, recipientDetail, recipientKey, validClientShareProjects, validClientShareRecipient,
+import { autoSelectedProject, backendForSource, nativeTargetsForRecipient, recipientDetail, recipientDetails, recipientKey, validClientShareProjects, validClientShareRecipient,
   validClientShareRecipientSearch, type ClientShareAudienceType, type ClientShareRecipient } from "../src/client/client-share-routing";
 
 const primaryRow = (type: ClientShareAudienceType = "principal", publicId = "person-p"): ClientShareRecipient => ({
@@ -70,11 +70,24 @@ describe("client share recipient routing", () => {
   });
 
   it("keeps same-named clients distinguishable, including people without an email", () => {
-    expect(recipientDetail(primaryRow())).toBe("Ledge Top Drone Services · Harbor workspace · alex@example.test");
-    expect(recipientDetail(nativeRow())).toBe("Ledge Top Technologies · Harbor technology · alex.tech@example.test");
+    expect(recipientDetail(primaryRow())).toBe("Harbor workspace · alex@example.test");
+    expect(recipientDetail(nativeRow())).toBe("Harbor technology · alex.tech@example.test");
     const first = recipientDetail(nativeRow("person-aaa111", null)), second = recipientDetail(nativeRow("person-bbb222", null));
     expect(first).not.toBe(second); expect(first).toContain("ref aaa111");
-    expect(recipientDetail(primaryRow("organization", "org-123456"))).toBe("Ledge Top Drone Services · Harbor workspace · organization · current members · ref 123456");
+    expect(recipientDetail(primaryRow("organization", "org-123456"))).toBe("Harbor workspace · organization · current members · ref 123456");
+  });
+
+  it("never names a business or division, and tells apart rows that would otherwise read the same", () => {
+    const both = { ...nativeRow("person-n-777777", "alex@example.test"), workspaceName: "Harbor workspace" };
+    const other = { ...nativeRow("person-q"), displayName: "Blair Quay", email: "blair@example.test" };
+    const details = recipientDetails([primaryRow("principal", "person-p-111111"), both, other]);
+    for (const value of details.values()) expect(value).not.toMatch(/Drone Services|Technologies|Ledge Top/);
+    const one = details.get(primaryRow("principal", "person-p-111111").key)!, two = details.get(both.key)!;
+    expect(one).not.toBe(two);
+    expect(one).toBe("Harbor workspace · alex@example.test · ref 111111");
+    expect(two).toBe("Harbor workspace · alex@example.test · ref 777777");
+    // A row with no look-alike keeps its plain detail.
+    expect(details.get(other.key)).toBe("Harbor technology · blair@example.test");
   });
 });
 
@@ -98,6 +111,16 @@ describe("combined client share dialog source", () => {
     expect(app).toContain("Restore as new version");
     expect(native).toContain('"Cancel unpublished access"');
     expect(native).toContain("/api/delivery/client-share-recipients/projects?");
+  });
+  it("names no business or division anywhere in the Client Workspace tab", () => {
+    const start = app.indexOf("function AuthenticatedDeliveryGrantPanel("), end = app.indexOf("function ShareDialog(");
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    const tab = app.slice(start, end);
+    for (const source of [tab, native, picker]) {
+      expect(source).not.toMatch(/Drone Services|Ledge Top Technologies|projectAlphaSourceName\(|primaryName/);
+      expect(source).not.toMatch(/\.sourceName\}|\["Source",|\.divisionLabel\}/);
+    }
+    expect(picker).toContain("recipientDetails(options)");
   });
   it("filters as the user types against the combined endpoint and carries the id-based key", () => {
     expect(picker).toContain("/api/delivery/client-share-recipients?");
