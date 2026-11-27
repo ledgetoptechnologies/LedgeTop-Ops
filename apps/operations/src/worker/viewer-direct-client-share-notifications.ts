@@ -29,8 +29,8 @@ const MAX_RECIPIENTS = 200;              // per workspace; a larger workspace is
 const MAX_GRANTS = 50, MAX_MAILS = 25;   // bounded work per run; the next run continues
 
 /** What the Viewer Share dialog may offer. No box is shown for an email that would never be sent. */
-export function directViewerShareCapabilities(env: Pick<Env, "SMTP_NOTIFICATIONS_ENABLED">): string[] {
-  return smtpNotificationsEnabled(env) ? ["notify_client_v1"] : [];
+export function directViewerShareNotifies(env: Pick<Env, "SMTP_NOTIFICATIONS_ENABLED">): boolean {
+  return smtpNotificationsEnabled(env);
 }
 
 const requestId = (grant: string) => `vdcg-notify:${grant}`;

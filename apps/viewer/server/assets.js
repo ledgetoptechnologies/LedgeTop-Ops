@@ -87,8 +87,14 @@ async function cookieAuthorization(req, projectId) {
 
 // What one Viewer session allows for one model, read afresh: at admission, and again right before protected bytes leave.
 // `live` without `access` is a live session that does not cover this model; it is not some other authority.
-function viewerSessionAccess(tokenHash, projectId, { reviewAllowed = true } = {}) {
-  const requestedModelId = canonicalRepository?.resolveModelId(projectId);
+// Session, tombstone, task generation, selection and model come from one SQLite snapshot, so a commit in between cannot
+// combine old and new state. A response that passes is handed over and not interrupted; the next request is refused.
+function viewerSessionAccess(tokenHash, projectId, options) {
+  if (!canonicalRepository) return { live: false, access: null };
+  return canonicalRepository.readSnapshot(() => viewerSessionAccessInSnapshot(tokenHash, projectId, options));
+}
+function viewerSessionAccessInSnapshot(tokenHash, projectId, { reviewAllowed = true } = {}) {
+  const requestedModelId = canonicalRepository.resolveModelId(projectId);
   const session = requestedModelId ? canonicalRepository.getViewerSessionByHash(tokenHash) : null;
   if (!session || !canonicalRepository.viewerSessionLive(session)) return { live: false, access: null };
   const review = reviewAllowed && session.sessionMode === 'review';
@@ -108,11 +114,16 @@ function viewerSessionAccess(tokenHash, projectId, { reviewAllowed = true } = {}
 
 // Only the session that admitted this response is read again, never another cookie, token or share on the request: still
 // live, the same model version, still allowed to view, and still allowed camera positions when that is what is sent.
+function currentViewerAccess(viewer) {
+  const { access } = viewerSessionAccess(viewer.tokenHash, viewer.projectId, { reviewAllowed: viewer.reviewAllowed });
+  if (!access || access.viewer.sessionId !== viewer.sessionId || access.viewer.modelVersionId !== viewer.modelVersionId) return null;
+  return access;
+}
+
 function viewerStillAllows(viewer, { cameras = false } = {}) {
   if (!viewer) return true;
-  const { access } = viewerSessionAccess(viewer.tokenHash, viewer.projectId, { reviewAllowed: viewer.reviewAllowed });
-  return Boolean(access) && access.viewer.sessionId === viewer.sessionId
-    && access.viewer.modelVersionId === viewer.modelVersionId && (!cameras || access.cameras);
+  const access = currentViewerAccess(viewer);
+  return Boolean(access) && (!cameras || access.cameras);
 }
 
 function safeExistingFile(root, relPath) {
@@ -386,19 +397,24 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     if (Number(opened.stat.size) !== photo.byteSize) { await opened.handle.close(); return res.status(404).json({ error: 'photo not found' }); }
     const headers = { 'Cache-Control': 'private, no-store', 'Content-Type': photo.contentType, 'X-Content-Type-Options': 'nosniff' };
     // Access is re-checked after the (possibly slow) integrity check.
-    const stillAllows = async () => {
-      const current = authorization.share ? await pathTokenAuthorization(req, req.params.id) : null;
-      if ((!authorization.share || current?.cameras) && viewerStillAllows(authorization.viewer, { cameras: true })) return true;
-      res.status(403).json({ error: 'not authorized' });
-      return false;
+    const refuse = () => { res.status(403).json({ error: 'not authorized' }); return false; };
+    // A session answers at once; a link asks its source and is decided when that answers.
+    const stillAllows = () => {
+      if (!authorization.share) return viewerStillAllows(authorization.viewer, { cameras: true }) || refuse();
+      return pathTokenAuthorization(req, req.params.id).then(current => Boolean(current?.cameras) || refuse());
     };
     const accelerated = xAccelLocation(absolute);
     if (accelerated) {
       try { if (!await assetIntegrityCache.verifyWholeFile(absolute, opened.stat, photo.sha256, { handle: opened.handle })) return res.status(404).json({ error: 'photo not found' }); } finally { await opened.handle.close(); }
-      if (!await stillAllows()) return undefined;
-      res.set(headers);
-      res.setHeader('X-Accel-Redirect', accelerated);
-      return res.end();
+      const redirect = allowed => {
+        if (!allowed) return undefined;
+        res.set(headers);
+        res.setHeader('X-Accel-Redirect', accelerated);
+        return res.end();
+      };
+      const allowed = stillAllows();
+      if (typeof allowed?.then === 'function') return await allowed.then(redirect);
+      return redirect(allowed);
     }
     return deliverVerified(req, res, {
       ...opened,
@@ -413,13 +429,24 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
   } catch (error) { return next(error); }
 });
 
+// The original model report is never published (publishing would serve it
+// as a session asset without download permission), so the published-only
+// asset list from getModel leaves it out. The download-gated product routes
+// take it back from the version's full asset list.
+function productAssets(version){
+  const assets=version?.assets||[];
+  if(assets.some(asset=>asset.kind==='report'))return assets;
+  const report=(version?.lodVerificationAssets||[]).find(asset=>asset.kind==='report');
+  return report?[...assets,report]:assets;
+}
+
 router.get('/session-products/:token/:id', async (req,res,next) => {
   try {
     const access=await pathTokenAuthorization(req,req.params.id);
     if(!access?.download)return res.status(403).json({error:'Downloads are not permitted for this model'});
     res.setHeader('Cache-Control','private, no-store');
     const base=`/session-products/${encodeURIComponent(req.params.token)}/${encodeURIComponent(req.params.id)}`;
-    res.json({products:registeredProducts(access.model?.activeVersion?.assets.filter(asset=>!access.share||assetAllowed(access.share,asset.kind)),{review:access.review,cameras:access.cameras,modelReport:true})
+    res.json({products:registeredProducts(productAssets(access.model?.activeVersion).filter(asset=>!access.share||assetAllowed(access.share,asset.kind)),{review:access.review,cameras:access.cameras,modelReport:true})
       .map(product=>({...product,grantUrl:`${base}/${encodeURIComponent(product.kind)}/download-grants`}))});
   }catch(error){next(error);}
 });
@@ -431,21 +458,23 @@ router.post('/session-products/:token/:id/:kind/download-grants',async(req,res,n
     if(canonicalRepository?.rateLimited(`product-grant:${auth.hashToken(req.params.token)}:${req.ip}`,120,5*60_000))return res.sendStatus(429);
     const access=await pathTokenAuthorization(req,req.params.id);
     if(!access?.download)return res.sendStatus(403);
-    const asset=access.model?.activeVersion?.assets.find(candidate=>candidate.kind===req.params.kind);
+    const asset=productAssets(access.model?.activeVersion).find(candidate=>candidate.kind===req.params.kind);
     if(access.share&&!assetAllowed(access.share,asset?.kind))return res.sendStatus(403);
     const product=productDescriptor(asset,{review:access.review,cameras:access.cameras,modelReport:true});
     if(!product)return res.sendStatus(404);
     // Retain only a minimal authorization request; never retain Express req
     // objects, bodies or sockets for the duration of a capability.
     const original={params:{token:req.params.token}},id=req.params.id,versionId=access.model.activeVersion.id;
-    const ticket=productTickets.issue(async()=>{
-      const current=await pathTokenAuthorization(original,id);
+    const authorizedProduct=current=>{
       if(!current?.download||current.model?.activeVersion?.id!==versionId)return null;
-      const registered=current.model.activeVersion.assets.find(candidate=>candidate.id===asset.id&&candidate.sha256===asset.sha256);
+      const registered=productAssets(current.model.activeVersion).find(candidate=>candidate.id===asset.id&&candidate.sha256===asset.sha256);
       if(current.share&&!assetAllowed(current.share,registered?.kind))return null;
       const descriptor=productDescriptor(registered,{review:current.review,cameras:current.cameras,modelReport:true});
       return descriptor?{model:current.model,asset:registered,product:descriptor}:null;
-    });
+    };
+    const ticket=productTickets.issue(access.viewer
+      ?()=>authorizedProduct(currentViewerAccess(access.viewer))
+      :()=>pathTokenAuthorization(original,id).then(authorizedProduct));
     res.setHeader('Cache-Control','private, no-store');
     res.status(201).json({url:`/session-product-downloads/${ticket.token}`,expiresAt:ticket.expiresAt,fileName:product.fileName});
   }catch(error){next(error);}
@@ -463,7 +492,11 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
       ...integrityDelivery(canonicalRepository,model,asset,asset.relativePath,absolute,opened),
       onFailure:()=>res.sendStatus(409),
       // Integrity verification may be slow: honor revocation that happened while it ran.
-      beforeSend:async()=>{if(await admitted.revalidate())return true;res.sendStatus(403);return false;},
+      beforeSend:()=>{
+        const authorize = value => { if(value)return true;res.sendStatus(403);return false; };
+        const value = admitted.revalidate();
+        return typeof value?.then === 'function' ? value.then(authorize) : authorize(value);
+      },
       onError:(error)=>{if(!res.headersSent)next(error);}});
   }catch(error){next(error);}
 });

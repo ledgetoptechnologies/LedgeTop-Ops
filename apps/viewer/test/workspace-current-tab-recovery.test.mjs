@@ -150,6 +150,6 @@ test('startup uses local return recovery first; upload busy guard remains regist
   assert.ok(source.indexOf('await resumeCurrentTabWorkspaceRecovery(')<source.indexOf('relayWorkspaceRecoveryGrant()'));
   assert.match(source,/error\.fatal\|\|error\.status===401/);
   const upload=readFileSync(new URL('../workspace-new-task.mjs',import.meta.url),'utf8');
-  assert.match(upload,/if\(value&&!presetSaving\)view\.addEventListener\('beforeunload',leaveWarning\)/);
+  assert.match(upload,/if\(value\)view\.addEventListener\('beforeunload',leaveWarning\)/);
   assert.match(upload,/get navigationState\(\)/);
 });

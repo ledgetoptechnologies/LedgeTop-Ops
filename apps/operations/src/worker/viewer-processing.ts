@@ -14,7 +14,7 @@ import type { Env, StaffPrincipal } from "./types";
 import { introspectClientViewerSourceAuthorization } from "./viewer-session-issuer";
 import {createDirectViewerClientGrant,listDirectViewerClientGrantWorkspace,revokeDirectViewerClientGrant,
  directViewerClientGrantListQuerySchema,DirectViewerGrantError} from './viewer-direct-client-grants';
-import {directViewerShareCapabilities} from './viewer-direct-client-share-notifications';
+import {directViewerShareNotifies} from './viewer-direct-client-share-notifications';
 import {listDirectViewerClientGroups} from './viewer-direct-client-groups';
 import {
   createNativeViewerClientGrant,
@@ -461,19 +461,23 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     };
     if (parsed.data.connection === "direct") {
       try {
-        if(parsed.data.action==='list')return c.json({...await listDirectViewerClientGrantWorkspace(c.env,principal,parsed.data.listQuery),
-          ...(parsed.data.capabilities?{capabilities:directViewerShareCapabilities(c.env)}:{})});
+        if(parsed.data.action==='list'){
+          const list=await listDirectViewerClientGrantWorkspace(c.env,principal,parsed.data.listQuery);
+          // Only a Viewer that asks is told about the email: an older Viewer accepts no other capability.
+          return c.json(parsed.data.capabilities&&list.capabilities&&directViewerShareNotifies(c.env)
+            ?{...list,capabilities:{...list.capabilities,notifyClient:true}}:list);
+        }
         if(parsed.data.action==='groups')return c.json(await listDirectViewerClientGroups(c.env,principal));
         if(parsed.data.action==='create'){
           const result=await createDirectViewerClientGrant({env:c.env,principal,grant:parsed.data.grant,
             idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw,notifyClient:parsed.data.notifyClient===true});
-          return c.json(result,result.replayed?200:201);
+          return c.json(result,result.sessionRevocation?.pending?202:result.replayed?200:201);
         }
         const result=await revokeDirectViewerClientGrant({env:c.env,principal,grantId:parsed.data.grantId!,
           reason:parsed.data.reason!,idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw});
         return c.json(result,result.sessionRevocation.pending?202:200);
       }catch(error){if(error instanceof DirectViewerGrantError)return c.json({error:error.message,code:error.code,
-        ...(error.grantId?{grantId:error.grantId}:{})},error.status);throw error;}
+        ...(error.grantId?{grantId:error.grantId}:{}),...(error.grants?{grants:error.grants}:{})},error.status);throw error;}
     }
     if (parsed.data.connection === "native") {
       if (parsed.data.action === "list") return c.json(await listNativeViewerClientGrantWorkspace(c.env, principal));

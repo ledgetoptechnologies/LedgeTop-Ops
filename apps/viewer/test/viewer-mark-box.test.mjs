@@ -284,7 +284,12 @@ test('turning a wide screen narrow leaves one thing open and loses nothing', asy
   assert.ok(card().contains(panel.dom.document.activeElement), 'focus does not stay in what closed');
   await panel.card('Cancel').click();
   await panel.q('[aria-label=Close]').click();
-  await turn(() => panel.q('[data-add=LineString]').click());
+  // Placing is done on the map: the list makes room for it, wide or narrow.
+  panel.leaflet.setSize(1200, 800);
+  await key('l');
+  await panel.q('[data-add=LineString]').click();
+  assert.equal(box().hidden, true);
+  panel.leaflet.setSize(390, 700);
   panel.marks.mapClick({ lat: 43, lng: -87 });
   panel.leaflet.setSize(1200, 800);
   panel.leaflet.setSize(390, 700);

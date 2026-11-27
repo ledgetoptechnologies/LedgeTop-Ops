@@ -13,7 +13,7 @@ const opaque=z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 const key=z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/);
 function directError(error:unknown):Response{
   if(error instanceof DirectViewerGrantError)return Response.json({error:error.message,code:error.code,
-    ...(error.grantId?{grantId:error.grantId}:{})},{status:error.status,headers:{"Cache-Control":"private, no-store"}});
+    ...(error.grantId?{grantId:error.grantId}:{}),...(error.grants?{grants:error.grants}:{})},{status:error.status,headers:{"Cache-Control":"private, no-store"}});
   if(error instanceof ViewerServiceError){
     const status=error.status===404?404:503;
     return Response.json({error:status===404?"Published Viewer delivery is unavailable":"Viewer delivery catalog is unavailable"},
@@ -94,7 +94,7 @@ export function registerDirectViewerClientRoutes(app:App):void{
     if(!parsedKey.success)throw new HTTPException(400,{message:"A valid Idempotency-Key is required"});
     const result=await createDirectViewerClientGrant({env:c.env,principal:c.get("principal"),grant:await boundedJson(c.req.raw),
       idempotencyKey:parsedKey.data,request:c.req.raw});
-    return c.json(result,result.replayed?200:201);
+    return c.json(result,result.sessionRevocation?.pending?202:result.replayed?200:201);
     }catch(error){return directError(error);}
   });
   app.delete("/api/viewer/direct-client-grants/:grantId",async c=>{

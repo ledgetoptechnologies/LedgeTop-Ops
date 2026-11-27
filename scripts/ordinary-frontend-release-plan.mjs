@@ -116,7 +116,9 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   const installationPreflight = ordinaryFrontendPreflightDescriptor(beforeProfile, ordinaryFrontendPreflightMode);
   const preflightSnapshot = browserTransition
     ? normalizeCanonicalBrowserRetirementPredecessor(before, browserTransition) : before;
-  validateInstallation(preflightSnapshot, { profile: beforeProfile, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
+  // Check the installation for the one app this plan releases, as compileConfig and the executor do.
+  validateInstallation(preflightSnapshot, { profile: beforeProfile, selectedApp: app,
+    expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
     ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
     opsSuccessorReaderContract: opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract });
   const browserProof = verifyOrdinaryFrontendArtifacts(release);

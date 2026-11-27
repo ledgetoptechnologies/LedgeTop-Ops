@@ -124,7 +124,7 @@ test('map modes expose projected distance and area tools with deeper native-deta
   assert.match(html, /Lowest sampled point/);
   assert.match(html, /Average surface/);
   assert.match(html, /Custom elevation/);
-  assert.match(html, /Use Measurements for map distance and area/);
+  assert.doesNotMatch(html, /Use Measurements for map distance and area/, 'orthophoto panel has no explanatory blurb');
 });
 
 test('point-cloud parent accepts health messages only from its same-origin iframe', () => {

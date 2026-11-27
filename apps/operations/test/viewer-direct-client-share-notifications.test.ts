@@ -9,7 +9,7 @@ vi.mock('../src/worker/viewer-integration',()=>({viewerServiceClient:()=>({clien
 vi.mock('../src/worker/acl',()=>({sqlScope:mocks.scope}));
 vi.mock('../../client/src/worker/project-alpha-portal-authority',()=>({readPortalProjectionSourceProof:mocks.proof,portalProjectionSourceGuard:mocks.guard}));
 import {createDirectViewerClientGrant,revokeDirectViewerClientGrant} from '../src/worker/viewer-direct-client-grants';
-import {directViewerShareCapabilities,processDirectViewerShareNotices} from '../src/worker/viewer-direct-client-share-notifications';
+import {directViewerShareNotifies,processDirectViewerShareNotices} from '../src/worker/viewer-direct-client-share-notifications';
 
 const instances:Miniflare[]=[];
 const principal:StaffPrincipal={id:'staff-one',email:'staff@example.test',displayName:'Staff',accessSubject:'staff-subject',projectAlphaUserId:null};
@@ -198,8 +198,8 @@ describe('Viewer direct share client email',()=>{
   expect(sent).toHaveLength(0);
  });
  it('offers the Email client box only while notification mail is on',()=>{
-  expect(directViewerShareCapabilities({SMTP_NOTIFICATIONS_ENABLED:'true'} as Env)).toEqual(['notify_client_v1']);
-  expect(directViewerShareCapabilities({SMTP_NOTIFICATIONS_ENABLED:'false'} as Env)).toEqual([]);
-  expect(directViewerShareCapabilities({} as Env)).toEqual([]);
+  expect(directViewerShareNotifies({SMTP_NOTIFICATIONS_ENABLED:'true'} as Env)).toBe(true);
+  expect(directViewerShareNotifies({SMTP_NOTIFICATIONS_ENABLED:'false'} as Env)).toBe(false);
+  expect(directViewerShareNotifies({} as Env)).toBe(false);
  });
 });

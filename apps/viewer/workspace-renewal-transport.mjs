@@ -9,6 +9,8 @@ const terminalErrors=new Map([
   [403,new Set(['This Operations staff account is not bound to the current Access identity','Renewal subject does not match the authenticated Operations identity','Global viewer.view permission required'])],
 ]);
 async function readJson(response,url,signal){
+  // Access answers a lapsed sign-in with a redirect to its login page.
+  if(response.type==='opaqueredirect')throw failure(true);
   if(signal?.aborted||response.redirected||response.url!==url||['opaqueredirect','opaque','error'].includes(response.type)||!/^application\/json(?:\s*;|$)/i.test(response.headers?.get('content-type')||''))throw failure();
   const reader=response.body?.getReader();if(!reader)throw failure();
   let size=0,text='';const decoder=new TextDecoder();
@@ -25,7 +27,7 @@ async function readJson(response,url,signal){
 export async function requestWorkspaceRenewalGrant({controllerOrigin,viewerOrigin,subject,sessionId,requestId,signal,fetchImpl=fetch,now=()=>Date.now()}){
   if(signal?.aborted||!exactRenewalOrigin(controllerOrigin)||!exactRenewalOrigin(viewerOrigin)||!UUID.test(requestId)||typeof sessionId!=='string'||!/^[A-Za-z0-9_-]{16,128}$/.test(sessionId)||typeof subject!=='string'||!/^ops:[A-Za-z0-9._:@-]{1,196}$/.test(subject))throw failure();
   const endpoint=controllerOrigin+PATH,challengeUrl=endpoint+'/challenge';
-  const common={mode:'cors',credentials:'include',redirect:'error',cache:'no-store',referrerPolicy:'no-referrer',signal};
+  const common={mode:'cors',credentials:'include',redirect:'manual',cache:'no-store',referrerPolicy:'no-referrer',signal};
   const challenge=await readJson(await fetchImpl(challengeUrl,{...common,method:'GET'}),challengeUrl,signal);
   if(!keys(challenge,['protocolVersion','challenge','expiresAt'])||challenge.protocolVersion!==1||!TOKEN.test(challenge.challenge)||!Number.isSafeInteger(challenge.expiresAt)||challenge.expiresAt*1000<=now())throw failure();
   if(signal?.aborted)throw failure();

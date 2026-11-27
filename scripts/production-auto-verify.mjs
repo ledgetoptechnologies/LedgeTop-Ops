@@ -121,43 +121,56 @@ function notCancelled(signal) { if (signal?.aborted) fail(); }
  * verifier. Never pass a caller URL or arbitrary request headers through it.
  * The deadline covers the entire batch, including HEAD/GET and body reads;
  * a provider ignoring abort or cancellation cannot extend the caller's wait. */
-export async function collectVerifiedAssets({ entries, fetchAsset, signal, timeoutMs = 120_000 }) {
+export async function collectVerifiedAssets({ entries, fetchAsset, signal, timeoutMs = 120_000, concurrency = 1 }) {
   const rows = manifest(entries); need(typeof fetchAsset === "function"
-    && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 300_000);
+    && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 300_000
+    && Number.isSafeInteger(concurrency) && concurrency >= 1 && concurrency <= 3);
   notCancelled(signal);
   const result = new Map(), controller = new AbortController();
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-  let reader, timer, rejectDeadline;
-  const cancelReader = () => { try { void reader?.cancel().catch(() => {}); } catch {} };
-  const stop = () => { controller.abort(); cancelReader(); rejectDeadline(Error("static_asset_verification_refused")); };
+  const readers = new Set();
+  let next = 0, timer, rejectDeadline;
+  const cancelReader = reader => {
+    if (!readers.delete(reader)) return;
+    try { void reader.cancel().catch(() => {}); } catch {}
+  };
+  const cancelReaders = () => { for (const reader of readers) cancelReader(reader); };
+  const abort = () => { controller.abort(); cancelReaders(); };
+  const stop = () => { abort(); rejectDeadline(Error("static_asset_verification_refused")); };
   const deadline = new Promise((_, reject) => { rejectDeadline = reject; timer = setTimeout(stop, timeoutMs); });
   signal?.addEventListener("abort", stop, { once: true });
-  const operation = (async () => { try {
-    for (const entry of rows) {
+  async function verifyNextAssets() {
+    while (next < rows.length) {
       notCancelled(combined);
+      const entry = rows[next++];
       const head = await fetchAsset({ ...entry }, { method: "HEAD", signal: combined }); notCancelled(combined);
       responseMetadata(head, entry); need(head.body === null);
       const response = await fetchAsset({ ...entry }, { method: "GET", signal: combined }); notCancelled(combined);
       responseMetadata(response, entry);
-      reader = response.body?.getReader(); need(reader || entry.size === 0);
+      const reader = response.body?.getReader(); need(reader || entry.size === 0);
       const chunks = []; let size = 0;
+      if (reader) readers.add(reader);
       if (reader) try {
         for (;;) {
           notCancelled(combined); const value = await reader.read(); notCancelled(combined);
           if (value.done) break;
           size += value.value.byteLength;
-          if (size > entry.size) { cancelReader(); fail(); }
+          if (size > entry.size) { fail(); }
           chunks.push(Buffer.from(value.value));
         }
-      } catch { cancelReader(); fail(); }
-      finally { try { reader.releaseLock(); } catch {} reader = undefined; }
+      } catch { cancelReader(reader); fail(); }
+      finally { try { reader.releaseLock(); } catch {} readers.delete(reader); }
       const bytes = Buffer.concat(chunks, size);
       need(size === entry.size && digest(bytes) === entry.sha256); result.set(entry.path, bytes);
     }
-    return result;
-  } catch { fail(); } })();
-  try { return await Promise.race([operation, deadline]); }
-  catch { controller.abort(); cancelReader(); fail(); }
+  }
+  const operation = Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, () =>
+    verifyNextAssets().catch(error => { abort(); throw error; })));
+  try {
+    await Promise.race([operation, deadline]);
+    return new Map(rows.map(({ path }) => [path, result.get(path)]));
+  }
+  catch { abort(); fail(); }
   finally { clearTimeout(timer); signal?.removeEventListener("abort", stop); }
 }
 
@@ -165,11 +178,12 @@ export async function collectVerifiedAssets({ entries, fetchAsset, signal, timeo
  * newly-owned temporary name, and readAbsent must independently confirm 404.
  * A create exception may be ambiguous, so cleanup still runs exactly once.
  * Caller-owned before/after production snapshots remain mandatory. */
-export async function executeAssetVerification({ create, fetchAsset, remove, readAbsent, entries, signal, timeoutMs = 120_000 }) {
+export async function executeAssetVerification({ create, fetchAsset, remove, readAbsent, entries, signal, timeoutMs = 120_000, concurrency = 1 }) {
   manifest(entries); for (const fn of [create, fetchAsset, remove, readAbsent]) need(typeof fn === "function");
-  need(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 300_000);
+  need(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 300_000
+    && Number.isSafeInteger(concurrency) && concurrency >= 1 && concurrency <= 3);
   let assets, failure = false, removed = false, absent = false, createAttempted = false, cause = null;
-  try { notCancelled(signal); createAttempted = true; await create(); assets = await collectVerifiedAssets({ entries, fetchAsset, signal, timeoutMs }); }
+  try { notCancelled(signal); createAttempted = true; await create(); assets = await collectVerifiedAssets({ entries, fetchAsset, signal, timeoutMs, concurrency }); }
   catch (error) { failure = true; cause = registeredHoldCode(error); }
   finally {
     if (createAttempted) {

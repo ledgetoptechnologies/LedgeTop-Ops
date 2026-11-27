@@ -1,5 +1,7 @@
 'use strict';
 
+const { canonicalProjectSelection } = require('./projectSelection');
+
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const text = (value, max = 500) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
 const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
@@ -21,23 +23,33 @@ function grantScope(value) {
     && (value.scopeType === 'project' ? value.taskId === null && value.includeFuturePublished === true
       : id(value.taskId) && value.includeFuturePublished === false);
 }
+const selected = value => value.selection === undefined || value.scopeType === 'project' && canonicalProjectSelection(value.selection) !== null;
+// The shares a new one takes the place of: exact ids and versions, unique.
+const validReplaces = value => Array.isArray(value) && value.length <= 100
+  && value.every(item => exact(item, ['grantId', 'grantVersion']) && id(item.grantId) && Number.isSafeInteger(item.grantVersion) && item.grantVersion > 0)
+  && new Set(value.map(item => item.grantId)).size === value.length;
+const validRevocation = value => exact(value, ['pending', 'revokedGrants', 'revokedSessions']) && typeof value.pending === 'boolean'
+  && ['revokedGrants', 'revokedSessions'].every(key => value[key] === undefined || Number.isSafeInteger(value[key]) && value[key] >= 0);
 function validDirectGrantInput(value) {
-  return exact(value, ['sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt', 'confirmedScope'])
-    && grantScope(value) && value.confirmedScope === true;
+  return exact(value, ['sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt', 'confirmedScope', 'selection', 'replaces'])
+    && grantScope(value) && value.confirmedScope === true
+    && selected(value) && (value.replaces === undefined || value.scopeType === 'project' && validReplaces(value.replaces));
 }
 function validDirectGrant(value) {
   return exact(value, ['grantId', 'sourceId', 'workspaceId', 'viewerProjectId', 'taskId', 'scopeType', 'includeFuturePublished', 'permissions', 'expiresAt',
-    'grantVersion', 'revokedAt', 'clientDisplayName', 'createdAt', 'createdBy'])
+    'grantVersion', 'revokedAt', 'clientDisplayName', 'createdAt', 'createdBy', 'selection'])
     && id(value.grantId) && grantScope(value) && Number.isSafeInteger(value.grantVersion) && value.grantVersion > 0
     && date(value.revokedAt) && (value.clientDisplayName === null || text(value.clientDisplayName)) && value.createdAt !== null && date(value.createdAt)
-    && (value.createdBy === undefined || text(value.createdBy));
+    && (value.createdBy === undefined || text(value.createdBy)) && selected(value);
 }
 function validDirectSnapshot(value, action) {
-  if (action === 'create') return exact(value, ['grant', 'replayed']) && validDirectGrant(value.grant) && typeof value.replayed === 'boolean';
+  if (action === 'create') return exact(value, ['grant', 'replayed', 'sessionRevocation']) && validDirectGrant(value.grant) && typeof value.replayed === 'boolean'
+    && (value.sessionRevocation === undefined || validRevocation(value.sessionRevocation));
   if (action === 'revoke') return exact(value, ['success', 'replayed', 'sessionRevocation']) && value.success === true && typeof value.replayed === 'boolean'
-    && exact(value.sessionRevocation, ['pending', 'revokedGrants', 'revokedSessions']) && typeof value.sessionRevocation.pending === 'boolean'
-    && ['revokedGrants', 'revokedSessions'].every(key => value.sessionRevocation[key] === undefined || Number.isSafeInteger(value.sessionRevocation[key]) && value.sessionRevocation[key] >= 0);
-  return exact(value, ['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor'])
+    && validRevocation(value.sessionRevocation);
+  return exact(value, ['clients', 'grants', 'clientsNextCursor', 'grantsNextCursor', 'capabilities'])
+    && (value.capabilities === undefined || exact(value.capabilities, ['replaces', 'notifyClient']) && typeof value.capabilities.replaces === 'boolean'
+      && (value.capabilities.notifyClient === undefined || value.capabilities.notifyClient === true))
     && Array.isArray(value.clients) && value.clients.length <= 50 && value.clients.every(directClient)
     && Array.isArray(value.grants) && value.grants.length <= 500 && value.grants.every(validDirectGrant)
     && clientCursor(value.clientsNextCursor) && (value.grantsNextCursor === undefined || cursor(value.grantsNextCursor));
@@ -67,4 +79,4 @@ function validDirectGroups(value) {
       && !seen.has(pair[1]) && seen.add(pair[1])));
 }
 
-module.exports = { validDirectGrantInput, validDirectSnapshot, directListQuery, validDirectGroups, DIRECT_GROUP_LIMIT };
+module.exports = { validReplaces, validDirectGrantInput, validDirectSnapshot, directListQuery, validDirectGroups, DIRECT_GROUP_LIMIT };

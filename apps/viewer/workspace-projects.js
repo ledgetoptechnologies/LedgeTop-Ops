@@ -11,6 +11,8 @@ import { canRecoverExistingResult, recoverExistingResult } from './workspace-ing
 import { createWorkspaceDialogs } from './workspace-dialogs.mjs';
 import { mountPropertyLinesSource } from './workspace-property-lines.mjs';
 import { mountNewTask } from './workspace-new-task.mjs';
+import { mountTaskReprocess, REPROCESSABLE_STATUSES } from './workspace-task-reprocess.mjs';
+import { operationPercent, operationPhaseLabel } from './workspace-operation-progress.mjs';
 import { attemptProviderName, removeProcessingProvider } from './workspace-provider-remove.mjs';
 import { mountTaskOptions } from './workspace-task-options.mjs';
 import { createWorkspaceRecovery, relayWorkspaceRecoveryGrant } from './workspace-recovery.mjs';
@@ -21,6 +23,7 @@ import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setW
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
 import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, loadDirectClientGroups, directClientGroupOf, directDestinationMarkup, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, directClientKey, shareableTasks } from './workspace-direct-client-share.mjs';
+import { directProjectShareEditForm, directProjectShareReviewText, editableDirectProjectGrant, publicationFolderPath, readDirectProjectShareEdit, syncDirectProjectSelection } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -234,16 +237,17 @@ async function openShareModal(projectId,onlyOutputId=null){
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
   })();
-  // Direct sharing has its own authority and must not wait for project lookups.
+  // Direct sharing uses its own access and folder reads. Legacy Operations lookups are independent.
   if(context.clientLoading)void(async()=>{
+    const catalogRead=onlyOutputId?null:loadProjectShareSelectionCatalog(projectId,()=>current()&&can('viewer.client_grants.manage'));
     // One grouping read per open, alongside the access list. The client panel waits for both (grouping gives up
     // after a short wait), so the picker's grouping is fixed before any row is shown and never changes after.
     const grouping=loadDirectClientGroups(api).catch(()=>new Map());
     let access=null;
     try{access=await loadDirectClientAccess(api,projectId);}catch{}
-    const groups=await grouping;
+    const [groups,catalog]=await Promise.all([grouping,catalogRead]);
     if(!current()||!can('viewer.client_grants.manage'))return;
-    state.clientDirectAccess=access;state.clientDirectGroups=groups;context.directQuery='';
+    state.clientDirectAccess=access;state.clientDirectGroups=groups;context.directQuery='';context.selectionCatalog=catalog;
     if(context.loading)return;
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
@@ -345,8 +349,8 @@ function publicationAuthorityLive(){
     &&!workspaceRenewal?.paused&&Date.parse(state.adminSession.expiresAt)>Date.now());
 }
 function beginWorkspaceReauthorization(){if(!state.adminSession||!state.token||!validOpsOrigin(sessionStorage.getItem(OPS_ORIGIN_KEY)))return false;void workspaceRecovery.pause();return true}
-function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidatePublicationAuthority();invalidateFolderAuthorization();const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;state.pendingOutputShares?.clear();state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
-async function workspaceFetch(path,init={},beforeDispatch){
+function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidatePublicationAuthority();invalidateFolderAuthorization();const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);sessionStorage.removeItem('ltds-viewer-workspace-session');state.token=null;state.adminSession=null;state.pendingOutputShares?.clear();state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
+async function workspaceFetch(path,init={},beforeDispatch,publicShareCreate=false){
   await workspaceRecovery.wait(init.signal);
   if(workspaceRenewal&&workspaceRenewal.expiresAtMs<=Date.now()){
     const renewed=await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
@@ -360,7 +364,7 @@ async function workspaceFetch(path,init={},beforeDispatch){
   };
   if(beforeDispatch)(await beforeDispatch())();
   let response=await dispatch();
-  const isRecordedReceipt=response=>(Boolean(beforeDispatch)||init.headers?.['X-Viewer-Share-Receipt-Only']==='true')
+  const isRecordedReceipt=response=>(publicShareCreate||init.headers?.['X-Viewer-Share-Receipt-Only']==='true')
     &&(response.headers?.get('Idempotency-Replayed')==='true'||response.headers?.get('X-Viewer-Share-Receipt-Recorded')==='true');
   if(response.status!==401||isRecordedReceipt(response))return response;
   // Renewal retains the bearer but replaces the authenticated session envelope.
@@ -386,7 +390,16 @@ async function workspaceFetch(path,init={},beforeDispatch){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){
+async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch,publicShareCreate=false}={}){
+  const requestToken=state.token,requestSession=state.adminSession;
+  // A background read that races session expiry waits for silent renewal
+  // instead of signing the tab out. Its answer is discarded either way: it was
+  // authorized by the replaced session, and the repaint after renewal reloads it.
+  const renewedAfterUnauthorized=async()=>{
+    if(requestToken===state.token&&requestSession===state.adminSession&&workspaceRenewal)
+      await workspaceRenewal.waitForRenewal({signal,whileExpired:true});
+    return Boolean(state.token&&state.adminSession)&&(requestToken!==state.token||requestSession!==state.adminSession);
+  };
   const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};
   if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();
   if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}
@@ -397,8 +410,10 @@ async function api(path,{method='GET',body,headers={},signal,recoveryGuard,befor
   if(recoveryGuard){
     assertRequestCurrent();
     response=await fetch(path,init);
+    if(response.status===401&&workspaceRenewal&&await renewedAfterUnauthorized())
+      throw Object.assign(Error('Access was renewed; this request was not applied.'),{code:'recovery_session_changed'});
     assertRequestCurrent();
-  }else response=await workspaceFetch(path,init,beforeDispatch);
+  }else response=await workspaceFetch(path,init,beforeDispatch,publicShareCreate);
   let payload;
   try{payload=await response.json()}catch{}
   assertRequestCurrent();
@@ -407,7 +422,7 @@ async function api(path,{method='GET',body,headers={},signal,recoveryGuard,befor
     throw Object.assign(responseError('Operations client access request failed',response.status),
       clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));
   }
-  const shareRequest=Boolean(beforeDispatch)||init.headers['X-Viewer-Share-Receipt-Only']==='true';
+  const shareRequest=publicShareCreate||init.headers['X-Viewer-Share-Receipt-Only']==='true';
   const receiptReplayed=shareRequest&&response.headers?.get('Idempotency-Replayed')==='true';
   const receiptRecorded=shareRequest&&response.headers?.get('X-Viewer-Share-Receipt-Recorded')==='true';
   if(!response.ok&&(receiptReplayed||receiptRecorded)){
@@ -420,7 +435,7 @@ async function api(path,{method='GET',body,headers={},signal,recoveryGuard,befor
   if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);
   if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),
     payload?.code?{code:payload.code,grantId:payload.grantId}:{});
-  if(beforeDispatch&&response.status!==201)throw new Error('The link request outcome could not be read. Retry to check it.');
+  if(publicShareCreate&&response.status!==201)throw new Error('The link request outcome could not be read. Retry to check it.');
   return receiptReplayed?{...payload,receiptReplayed:true}:payload;
 }
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
@@ -428,9 +443,27 @@ async function mutate(path,options,message,onFailure){if(state.busy)return;state
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
 async function trashMutation(promptText,path,message){if(state.busy||!await dialogs.confirm(promptText,{title:'Move to Recycle Bin',submitLabel:'Move to Recycle Bin',destructive:true})||state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');try{const result=await api(path,{method:'DELETE',body:{}});await load();toast(message,false,{label:'View Recycle Bin',run:()=>navigateWorkspace({section:'trash'},'push')});return result}catch(error){toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 function consumeReauthorizationState(){const value=new URLSearchParams(location.hash.slice(1)).get('reauthorize');if(!value)return true;let pending=null;try{pending=JSON.parse(sessionStorage.getItem(REAUTH_STATE_KEY)||'null')}catch{}sessionStorage.removeItem(REAUTH_STATE_KEY);const valid=/^[A-Za-z0-9_-]{32,128}$/.test(value)&&pending?.nonce===value&&Number.isFinite(pending?.createdAt)&&Date.now()-pending.createdAt>=0&&Date.now()-pending.createdAt<=5*60*1000;if(valid&&pending?.view)applyWorkspaceView(pending.view);return valid}
-function installWorkspaceSession(envelope){invalidatePublicationAuthority();const checked=validateWorkspaceSessionEnvelope({...envelope,accessToken:envelope.accessToken||state.token});if(envelope.accessToken){state.token=envelope.accessToken;sessionStorage.setItem(TOKEN_KEY,state.token)}sessionStorage.setItem(OPS_ORIGIN_KEY,checked.controllerOrigin);workspaceAuthorizationClearing=false;invalidateFolderAuthorization();state.adminSession=checked.session;reviewSessionController.setAuthenticatedSubject(checked.session.subject);workspaceRenewal?.dispose();workspaceRenewal=new WorkspaceSessionRenewal({controllerWindow:workspaceController,envelope,accessToken:state.token,onSession:value=>{invalidateFolderAuthorization();state.adminSession=value.session;if(!can('viewer.client_grants.manage'))invalidatePublicationAuthority();repaintFolderAuthorization()},onExpired:clearWorkspaceAuthorization,onPaused:()=>{invalidatePublicationAuthority();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{reviewSessionController.setAuthenticatedSubject(state.adminSession.subject);storageUsagePoll.sync();scheduleOperationRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000);}}});workspaceRenewal.start()}
+function installWorkspaceSession(envelope,{allowExpired=false}={}){invalidatePublicationAuthority();const checked=validateWorkspaceSessionEnvelope({...envelope,accessToken:envelope.accessToken||state.token},{allowExpired});rememberWorkspaceSession(checked.session);if(envelope.accessToken){state.token=envelope.accessToken;sessionStorage.setItem(TOKEN_KEY,state.token)}sessionStorage.setItem(OPS_ORIGIN_KEY,checked.controllerOrigin);workspaceAuthorizationClearing=false;invalidateFolderAuthorization();state.adminSession=checked.session;reviewSessionController.setAuthenticatedSubject(checked.session.subject);workspaceRenewal?.dispose();workspaceRenewal=new WorkspaceSessionRenewal({controllerWindow:workspaceController,envelope,accessToken:state.token,allowExpired,onSession:value=>{invalidateFolderAuthorization();state.adminSession=value.session;rememberWorkspaceSession(value.session);if(!can('viewer.client_grants.manage'))invalidatePublicationAuthority();repaintFolderAuthorization()},onExpired:()=>clearWorkspaceAuthorization('expired'),onPaused:()=>{invalidatePublicationAuthority();reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);clearTimeout(state.operationTimer);},onResumed:()=>{reviewSessionController.setAuthenticatedSubject(state.adminSession.subject);storageUsagePoll.sync();scheduleOperationRefresh();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(LIVE_ATTEMPT_STATUSES.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000);}}});workspaceRenewal.start()}
 async function redeemGrant(){const parts=location.pathname.split('/').filter(Boolean),grant=parts[0]==='workspace'&&parts[1]&&parts[1]!=='active'?decodeURIComponent(parts[1]):null;if(!grant)return false;if(!consumeReauthorizationState())throw responseError('invalid reauthorization state',400);const response=await fetch('/api/v1/admin-sessions/redeem',{method:'POST',headers:{'Content-Type':'application/json',...(state.token?{Authorization:`Bearer ${state.token}`}:{})},body:JSON.stringify({grant})});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization('unauthorized');throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Grant redemption failed (${response.status})`,response.status);installWorkspaceSession(body);syncWorkspaceView('replace');return true}
-async function restoreWorkspaceSession(){if(!state.token)return false;const response=await fetch('/api/v1/admin-sessions/current',{headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json'}});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Session check failed (${response.status})`,response.status);installWorkspaceSession(body);return true}
+// Session id, subject and expiry are routing hints, never credentials: they
+// let a reloaded tab ask Operations for a fresh grant for its own session.
+const SESSION_HINT_KEY='ltds-viewer-workspace-session';// also cleared by clearWorkspaceAuthorization
+function rememberWorkspaceSession(session){try{sessionStorage.setItem(SESSION_HINT_KEY,JSON.stringify({id:session.id,subject:session.subject,expiresAt:session.expiresAt}))}catch{}}
+function rememberedWorkspaceSession(){try{const value=JSON.parse(sessionStorage.getItem(SESSION_HINT_KEY)||'null');return value&&typeof value.id==='string'&&typeof value.subject==='string'&&typeof value.expiresAt==='string'?{id:value.id,subject:value.subject,expiresAt:value.expiresAt}:null}catch{return null}}
+// A tab the browser reloaded after sleep or memory saving renews its lapsed
+// session silently. If Operations refuses, the sign-in dialog keeps the tab.
+async function resumeLapsedWorkspaceSession(){
+  const session=rememberedWorkspaceSession(),controllerOrigin=sessionStorage.getItem(OPS_ORIGIN_KEY);
+  if(!state.token||!session||!validOpsOrigin(controllerOrigin))return false;
+  try{installWorkspaceSession({controllerOrigin,session},{allowExpired:true})}catch{return false}
+  if(await workspaceRenewal?.waitForRenewal({timeoutMs:25_000}))return true;
+  if(!state.token||!state.adminSession)return false;
+  // Still retrying (outage, offline after wake): open the workspace and keep
+  // renewing quietly; requests wait for it. Only a refusal opens the dialog.
+  if(workspaceRenewal&&!workspaceRenewal.disposed){toast('Viewer session renewal is temporarily unavailable; your current session was preserved',true);return true}
+  await workspaceRecovery.pause();return true;
+}
+async function restoreWorkspaceSession(){if(!state.token)return false;const response=await fetch('/api/v1/admin-sessions/current',{headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json'}});let body;try{body=await response.json()}catch{body={}}if(response.status===401){if(await resumeLapsedWorkspaceSession())return true;clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Session check failed (${response.status})`,response.status);installWorkspaceSession(body);return true}
 
 function renderNav(){renderWorkspaceNav({shell,container:document.querySelector('#workspace-navigation'),collapseButton:document.querySelector('#nav-collapse'),section:state.section,onSelect:section=>navigateWorkspace({section},'push')})}
 function metric(label,value,description){return`<article class="metric-card"><p>${esc(label)}</p><strong>${available(value)}</strong><small>${esc(description)}</small></article>`}
@@ -438,7 +471,7 @@ function openModal(title,body,className=''){modal.className=`workspace-modal ${c
 
 function operationSource(operation){const source=operation.source||{},kind=typeof source==='string'?source:source.kind,label=({server_zip:'Server ZIP',server_folder:'Server folder',browser_upload:'Browser upload',server_mount:'Server import folder',existing_model:'Existing model'})[kind]||'Managed import';if(typeof source!=='object'||source===null)return label;if(source.browserTransferRequired&&!source.transferComplete)return`${label} · transfer pending`;if(source.browserTransferRequired&&source.transferComplete)return`${label} · transfer complete`;return label}
 function operationTitle(operation){const project=state.projects.find(item=>item.id===operation.projectId),fallback=operation.type==='raw_photo_copy'?'Copy source photos':isCompanionRepairOperation(operation)?'Restore missing products':operation.type==='lod_recovery'?'3D tile recovery version':'Background import',name=operation.result?.task?.displayName||operation.result?.displayName||fallback;return project?`${project.displayName} · ${name}`:name}
-function operationProgress(operation){const value=Number(operation.progress),percent=Math.max(0,Math.min(100,Math.round((Number.isFinite(value)?value:0)*100))),phaseLabels={existing_model:'Existing model',validating_source:'Validating recovery source',materializing_recovery:'Creating recovery version'},knownPhases=new Set(['queued','leased','assembling_upload','extracting','staging','discovering','adopting','registering','inspecting','existing_model','validating_source','materializing_recovery','awaiting_derivatives','succeeded','failed','cancelled']),raw=String(operation.phase||operation.status||'queued'),phase=phaseLabels[raw]||(knownPhases.has(raw)?raw:operation.status||'working').replaceAll('_',' '),heartbeat=operation.status==='awaiting_derivatives'?'Waiting for required derivatives':operation.heartbeatAt?`Worker heartbeat ${dateTime(operation.heartbeatAt)}`:OPERATION_ACTIVE.has(operation.status)?'Waiting for worker heartbeat':`Updated ${dateTime(operation.updatedAt)}`;return{percent,phase,heartbeat}}
+function operationProgress(operation){const percent=operationPercent(operation),phase=operationPhaseLabel(operation),heartbeat=operation.status==='awaiting_derivatives'?'Waiting for required derivatives':operation.heartbeatAt?`Worker heartbeat ${dateTime(operation.heartbeatAt)}`:OPERATION_ACTIVE.has(operation.status)?'Waiting for worker heartbeat':`Updated ${dateTime(operation.updatedAt)}`;return{percent,phase,heartbeat}}
 function backgroundMatches(values){const query=state.backgroundQuery.trim().toLocaleLowerCase('en-US');return!query||values.some(value=>String(value??'').toLocaleLowerCase('en-US').includes(query))}
 function backgroundControls(kind,shown,total){if(total<=shown)return'';return`<div class="row-actions background-list-actions">${button('load-more-background',kind,`Load ${Math.min(3,total-shown)} more`,false,`data-kind="${esc(kind)}"`)}${button('view-all-background',kind,`View all ${total}`,false,`data-kind="${esc(kind)}"`)}</div>`}
 function operationActivity(){const all=[...state.operations].sort((left,right)=>Date.parse(right.updatedAt||right.createdAt||0)-Date.parse(left.updatedAt||left.createdAt||0)),matching=all.filter(operation=>backgroundMatches([operationTitle(operation),operationSource(operation),operation.status,operation.phase,operation.errorCode])),operations=matching.slice(0,state.backgroundImportLimit),active=all.filter(operation=>OPERATION_ACTIVE.has(operation.status)).length;return`<section id="import-activity" class="import-activity content-card" aria-labelledby="import-activity-title"><div class="card-heading"><div><p class="eyebrow">Background work</p><h2 id="import-activity-title">Import activity</h2></div>${active?badge(`${active} active`):'<small>Newest imports and recoveries</small>'}</div><div class="operation-list" aria-live="polite">${operations.map(operation=>{const progress=operationProgress(operation),failed=operation.status==='failed',recovery=['lod_recovery','companion_repair'].includes(operation.type),canRetry=operation.retryable!==false&&(recovery?can('viewer.processing.write'):can('viewer.datasets.import'));return`<article class="operation-row" data-operation-id="${esc(operation.id)}"><div class="operation-heading"><div><strong>${esc(operationTitle(operation))}</strong><small>Source: ${esc(operationSource(operation))}</small></div>${badge(operation.status)}</div><div class="operation-progress"><progress value="${progress.percent}" max="100" aria-label="${esc(operationTitle(operation))} progress"></progress><strong>${progress.percent}%</strong></div><div class="operation-meta"><span>Phase: ${esc(progress.phase)}</span><span>${esc(progress.heartbeat)}</span><span>Attempt ${Math.max(1,Number(operation.attemptCount)||1)}</span></div>${failed?`<div class="operation-failure"><p>${esc(operation.errorMessage||operation.errorCode||(recovery?'The recovery failed. The existing model version remains safe.':'The import failed without additional details.'))}</p>${canRetry?button('retry-operation',operation.id,recovery?'Retry recovery':'Retry import'):''}</div>`:''}</article>`}).join('')||empty(state.backgroundQuery?'No imports or recoveries match this search.':'No imports or recoveries have been recorded yet.')}</div>${backgroundControls('imports',operations.length,matching.length)}</section>`}
@@ -494,7 +527,7 @@ function companionRepairAction(output) {
   return button('restore-products', output.id, 'Restore missing products', false,
     `data-endpoint="${esc(repair.endpoint)}" title="${esc('Restore ' + (repair.missingAssetKinds || []).join(', ') + ' in a new version; existing published versions remain unchanged.')}"`);
 }
-async function refreshOperations(){if(!state.token||state.operationRefreshBusy)return false;state.operationRefreshBusy=true;try{const previous=new Map(state.operations.map(operation=>[operation.id,operation.status])),previousDerivatives=new Map(state.derivativeJobs.map(job=>[job.id,job.status])),[result,derivatives]=await Promise.all([pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives')]);state.operations=result.operations;state.derivativeJobs=derivatives.derivatives||[];if(state.section==='background')render();else renderOperationActivity();const completed=state.operations.some(operation=>operation.status==='succeeded'&&previous.has(operation.id)&&previous.get(operation.id)!=='succeeded'),derivativeCompleted=state.derivativeJobs.some(job=>['complete','failed'].includes(job.status)&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)));if(completed||derivativeCompleted){toast(completed?'Background import completed':state.derivativeJobs.some(job=>job.status==='failed'&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)))?'Background derivative failed':'Background derivative completed');if(state.section==='dashboard'&&state.selectedProjectId){await refreshProjectWorkspace(true);scheduleOperationRefresh();}else await load();return true}}catch(error){if(error.status!==401)console.warn('Background work refresh failed',error.message)}finally{state.operationRefreshBusy=false}return false}
+async function refreshOperations(){if(!state.token||state.operationRefreshBusy)return false;state.operationRefreshBusy=true;try{const previous=new Map(state.operations.map(operation=>[operation.id,operation.status])),previousDerivatives=new Map(state.derivativeJobs.map(job=>[job.id,job.status])),[result,derivatives]=await Promise.all([pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives')]);state.operations=result.operations;state.derivativeJobs=derivatives.derivatives||[];if(state.section==='background')render();else{renderOperationActivity();patchTaskSourceNotices();}const completed=state.operations.some(operation=>operation.status==='succeeded'&&previous.has(operation.id)&&previous.get(operation.id)!=='succeeded'),derivativeCompleted=state.derivativeJobs.some(job=>['complete','failed'].includes(job.status)&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)));if(completed||derivativeCompleted){toast(completed?'Background import completed':state.derivativeJobs.some(job=>job.status==='failed'&&previousDerivatives.has(job.id)&&!['complete','failed'].includes(previousDerivatives.get(job.id)))?'Background derivative failed':'Background derivative completed');if(state.section==='dashboard'&&state.selectedProjectId){await refreshProjectWorkspace(true);scheduleOperationRefresh();}else await load();return true}}catch(error){if(error.status!==401)console.warn('Background work refresh failed',error.message)}finally{state.operationRefreshBusy=false}return false}
 function scheduleOperationRefresh(delay=null){clearTimeout(state.operationTimer);if(!state.token)return;const active=state.operations.some(operation=>OPERATION_ACTIVE.has(operation.status))||state.derivativeJobs.some(job=>job.status==='pending'||job.status==='leased'),wait=delay??(active?2000:15000);state.operationTimer=setTimeout(async()=>{const reloaded=await refreshOperations();if(!reloaded)scheduleOperationRefresh()},wait)}
 
 function dashboard(){const work=taskPhaseCounts(state.tasks),healthy=state.providers.filter(provider=>provider.enabled&&['healthy','ready'].includes(provider.runtimeHealth||provider.lastHealth)).length;return`<div class="metric-grid dashboard-metrics">${metric('Projects',state.projects.length,'Viewer projects')}${metric('Ready tasks',state.tasks.filter(task=>state.outputs.some(output=>output.taskId===task.id&&(output.status==='ready'||(output.status==='published'&&output.activePublished)))).length,'Available to view and share')}${metric('Submitting',work.submitting,'Viewer upload or node-admission work')}${metric('Processing now',work.processing,`${work.queued} queued · ${work.finalizing} finalizing in Viewer`)}${metric('Provider nodes',`${healthy}/${state.providers.length}`,'Enabled and healthy')}</div><section class="project-workspace top-gap"><div class="project-toolbar"><label class="project-search"><span class="sr-only">Filter projects by name</span><input id="project-filter" type="search" value="${esc(state.projectQuery)}" placeholder="Search projects…" autocomplete="off"></label>${can('viewer.projects.write')?`<button type="button" class="secondary-button tree-toolbar-new-folder" data-action="tree-new-folder" data-id="">${treeIcon('folder')}New folder</button>`:''}</div><div id="project-list" class="project-list" role="treegrid" aria-label="Projects, folders and tasks">${projectRows()}</div></section>`}
@@ -517,6 +550,17 @@ function projectHead(project){
   return`<div class="project-head tree-row" role="row" aria-level="1" aria-expanded="${open}" data-tree-key="p:${esc(project.id)}" data-tree-project="${esc(project.id)}"${drop}><div class="project-open-cell" role="gridcell"><button type="button" class="project-open" data-action="open-project" data-id="${esc(project.id)}" data-tree-focus tabindex="-1" aria-expanded="${open}" aria-controls="project-detail-${esc(project.id)}"><span class="project-name"><strong>${esc(project.displayName)}</strong>${project.description?`<small>${esc(project.description)}</small>`:''}</span><span class="project-summary">${countLabel(tasks.length,'task')}${ready?` · ${ready} ready`:''}${sourceSets}</span><span class="project-activity">${activityChip(work.submitting,'submitting','submitting')}${activityChip(work.queued,'queued','queued')}${activityChip(work.processing,'processing','processing')}${activityChip(work.finalizing,'finalizing','finalizing')}${activityChip(failed,'needs attention','failed')}</span>${project.status==='active'?'':badge(project.status)}<span class="project-chevron" aria-hidden="true">›</span><span class="tree-drop-hint" aria-hidden="true">Drop for top level</span></button></div>${actions?`<div class="project-head-actions row-actions" role="gridcell" aria-label="Project actions">${actions}</div>`:''}</div>`;
 }
 function projectRows(){const query=state.projectQuery.trim().toLocaleLowerCase('en-US'),projects=state.projects.filter(project=>!query||project.displayName.toLocaleLowerCase('en-US').includes(query));if(!projects.length)return empty(query?'No projects match that name.':'No projects yet.');return projects.map(project=>{const open=isProjectOpen(project.id);return`<article class="project-row ${open?'selected':''}" role="none" data-project-name="${esc(project.displayName.toLocaleLowerCase('en-US'))}">${projectHead(project)}${open?projectTree(project):''}</article>`}).join('')}
+// A task submitted before its photos were ready waits on the server's preparation: show its live stage here.
+function taskSourceNotice(task){
+  if(task.latestAttempt?.status!=='pending')return'';
+  const dataset=state.datasets.find(item=>item.id===task.datasetId);if(!dataset||!['draft','finalizing'].includes(dataset.status))return'';
+  const operation=state.operations.filter(item=>item.datasetId===task.datasetId&&['upload_finalize','raw_photo_copy','import_adopt'].includes(item.type)).sort((left,right)=>Date.parse(right.createdAt||0)-Date.parse(left.createdAt||0))[0];
+  if(!operation)return'';
+  if(['failed','cancelled'].includes(operation.status))return`<small class="task-lod-notice task-source-failed">Photo preparation failed</small>`;
+  const label=operationPhaseLabel(operation);
+  return`<small class="task-lod-notice">${esc(`${label.charAt(0).toUpperCase()}${label.slice(1)} · ${operationPercent(operation)}%`)}</small>`;
+}
+function patchTaskSourceNotices(){for(const element of content.querySelectorAll('[data-task-source-notice]')){const task=state.tasks.find(item=>item.id===element.dataset.taskSourceNotice),html=task?taskSourceNotice(task):'';if(element.innerHTML!==html)element.innerHTML=html;}}
 function taskLodNotice(task){
   const outputs=state.outputs.filter(output=>output.taskId===task.id),output=outputs.find(output=>output.activePublished&&output.status==='published')||outputs.find(output=>output.status==='ready');
   if(!output)return'';
@@ -854,8 +898,8 @@ function datasetActions(dataset,projectActive){if(!projectActive)return'';const 
 function lodJobForOutput(output){return state.derivativeJobs.find(job=>job.attemptId===output.attemptId&&['mesh_tiles','lod_audit'].includes(job.type))||null}
 function recoveryOperationForOutput(outputId){return[...state.operations].filter(operation=>operation.type==='lod_recovery'&&operation.status!=='cancelled'&&(operation.sourceOutputId===outputId||operation.result?.recovery?.sourceOutputId===outputId)).sort((left,right)=>Date.parse(right.updatedAt||right.createdAt||0)-Date.parse(left.updatedAt||left.createdAt||0))[0]||null}
 function lodAction(output){if(!can('viewer.processing.write'))return'';const repair=companionRepairAction(output);if(repair)return repair;const job=lodJobForOutput(output),lod=output.lod||{},recovery=lod.recoveryAction,feedStatus=job?.status==='pending'?'queued':job?.status==='leased'?'running':job?.status,status=feedStatus||lod.status,id=job?.id||lod.jobId||output.id,retryable=Boolean(lod.canRetry||(status==='failed'&&job?.optional&&(Number(job.manualRetryCount)||0)<1));if(recovery?.kind==='new_version'&&recovery.eligible){const existing=recoveryOperationForOutput(output.id);if(existing?.status==='failed')return existing.retryable===false?button('derivative-status',existing.id,'Recovery retry exhausted',false,'disabled title="The one authorized manual recovery retry has already failed."'):button('retry-operation',existing.id,'Retry recovery',false,'title="Retry the existing recovery version without changing the current model."');if(existing){const label=existing.status==='queued'?'Recovery queued':existing.status==='leased'?'Creating recovery…':existing.status==='awaiting_derivatives'?'Generating 3D tiles…':'Recovery complete';return button('derivative-status',existing.id,label,false,'disabled')}return button('create-lod-recovery',output.id,'Create recovery version',false,`data-endpoint="${esc(recovery.endpoint)}" title="The current version remains safe while a new recovery version is built."`)}if(lod.disabledByPolicy)return button('derivative-status',id,'3D tiles disabled by server',false,`disabled title="${esc(lod.reason||'3D tile generation is disabled on this Viewer deployment.')}"`);if(['failed','fallback'].includes(status)&&retryable)return button('retry-derivative',id,'Retry 3D tiles');if(status==='queued')return button('derivative-status',id,'3D tiles queued',false,'disabled');if(status==='running')return button('derivative-status',id,'Generating 3D tiles…',false,'disabled');if(status==='available'||(status==='complete'&&job?.result?.verified))return button('derivative-status',id,'3D tiles ready',false,'disabled');if(status==='fallback')return button('derivative-status',id,'Using full mesh fallback',false,`disabled title="${esc(lod.reason||'Verified streaming tiles are unavailable.')}"`);if(lod.canGenerate)return button('generate-tiles',output.id,'Generate 3D tiles');return''}
-function taskQuickActions(task){const outputs=state.outputs.filter(item=>item.taskId===task.id),output=outputs.find(item=>item.activePublished&&item.status==='published')||outputs.find(item=>item.status==='ready'&&item.attemptId),readOnly=task.status==='archived'||state.projects.find(project=>project.id===task.projectId)?.status!=='active',items=[],more=[];let download='';if(output){const kinds=new Set(Array.isArray(output.assetKinds)?output.assetKinds:[]),published=output.activePublished&&output.status==='published';if(published&&output.viewSessionUrl)items.push(button('view-output',output.id,'View',true,'tabindex="-1"'));else if(!readOnly&&output.status==='ready'&&output.attemptId&&can('viewer.processing.publish'))items.push(button('open-review',output.attemptId,'View',true,'tabindex="-1"'));if(output.reportUrl&&kinds.has('report'))items.push(button('download-report',output.id,'Model report',false,`tabindex="-1" data-url="${esc(output.reportUrl)}"`));if(!readOnly&&canShareOutput(output))items.push(button('share-output',output.id,'Share',false,'tabindex="-1"'));if(output.downloadProducts?.length||output.downloadUrl&&kinds.size)download=menuItem('download-output',output.id,'Download model files',{extra:`data-url="${esc(output.downloadUrl)}"`})}const writable=!readOnly&&can('viewer.processing.write');if(writable){more.push(menuItem('edit-task',task.id,'Rename',{shortcut:'F2'}),menuItem('folder-move-task',task.id,'Move to…',{disabled:Array.isArray(folderCache.get(task.projectId)?.folders)?'':'Folders are still loading.'}),menuItem('duplicate-task',task.id,'Duplicate',{disabled:state.datasets.some(item=>item.id===task.datasetId&&item.status==='finalized')?'':'Its source photos are not ready.'}));}if(download)more.push(download);more.push(menuItem('task-settings',task.id,'Details & processing'),menuItem('task-files',task.id,'Files & versions'),menuItem('task-history',task.id,'Processing history'));if(!readOnly&&can('viewer.gcp.read'))more.push(menuItem('task-gcp',task.id,'Ground control points'));if(writable)more.push(MENU_SEPARATOR,menuItem('delete-task',task.id,'Delete',{danger:true,disabled:LIVE_ATTEMPT_STATUSES.has(task.latestAttempt?.status)?'Stop processing before deleting this task.':''}));items.push(treeMenu('More task actions',more.join(''),'task-more-actions'));return items.join('')}
-function taskPanel(task,row=null){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task),drag=Boolean(row)&&canDragFolderTask(task)&&treeDragAvailable();return`<article class="task-panel tree-row ${expanded?'expanded':''}" data-project-task="${esc(task.id)}"${row?` ${treeRowAttributes(row,task.projectId)}`:''}><div class="task-summary"${row?' role="gridcell"':''}${drag?` draggable="true" data-folder-drag data-id="${esc(task.id)}"`:''}>${drag?TREE_GRIP:''}<button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" data-tree-focus tabindex="-1" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-lead" aria-hidden="true"><span class="task-chevron">›</span>${treeIcon('task')}</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="${row?'gridcell':'region'}" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
+function taskQuickActions(task){const outputs=state.outputs.filter(item=>item.taskId===task.id),output=outputs.find(item=>item.activePublished&&item.status==='published')||outputs.find(item=>item.status==='ready'&&item.attemptId),readOnly=task.status==='archived'||state.projects.find(project=>project.id===task.projectId)?.status!=='active',items=[],more=[];let download='';if(output){const kinds=new Set(Array.isArray(output.assetKinds)?output.assetKinds:[]),published=output.activePublished&&output.status==='published';if(published&&output.viewSessionUrl)items.push(button('view-output',output.id,'View',true,'tabindex="-1"'));else if(!readOnly&&output.status==='ready'&&output.attemptId&&can('viewer.processing.publish'))items.push(button('open-review',output.attemptId,'View',true,'tabindex="-1"'));if(output.reportUrl&&kinds.has('report'))items.push(button('download-report',output.id,'Model report',false,`tabindex="-1" data-url="${esc(output.reportUrl)}"`));if(!readOnly&&canShareOutput(output))items.push(button('share-output',output.id,'Share',false,'tabindex="-1"'));if(output.downloadProducts?.length||output.downloadUrl&&kinds.size)download=menuItem('download-output',output.id,'Download model files',{extra:`data-url="${esc(output.downloadUrl)}"`})}const writable=!readOnly&&can('viewer.processing.write');if(writable){more.push(menuItem('edit-task',task.id,'Rename',{shortcut:'F2'}),menuItem('folder-move-task',task.id,'Move to…',{disabled:Array.isArray(folderCache.get(task.projectId)?.folders)?'':'Folders are still loading.'}),menuItem('duplicate-task',task.id,'Duplicate',{disabled:state.datasets.some(item=>item.id===task.datasetId&&item.status==='finalized')?'':'Its source photos are not ready.'}),menuItem('reprocess-task',task.id,'Reprocess',{disabled:!task.latestAttempt?.providerId?'This task has no earlier run.':task.latestAttempt.status==='ready_for_review'?'Publish this run first.':!REPROCESSABLE_STATUSES.has(task.latestAttempt.status)?'Processing is still running.':state.datasets.some(item=>item.id===task.datasetId&&item.status==='finalized')?'':'Its source photos are not ready.'}));}if(download)more.push(download);more.push(menuItem('task-settings',task.id,'Details & processing'),menuItem('task-files',task.id,'Files & versions'),menuItem('task-history',task.id,'Processing history'));if(!readOnly&&can('viewer.gcp.read'))more.push(menuItem('task-gcp',task.id,'Ground control points'));if(writable)more.push(MENU_SEPARATOR,menuItem('delete-task',task.id,'Delete',{danger:true,disabled:LIVE_ATTEMPT_STATUSES.has(task.latestAttempt?.status)?'Stop processing before deleting this task.':''}));items.push(treeMenu('More task actions',more.join(''),'task-more-actions'));return items.join('')}
+function taskPanel(task,row=null){const attempt=task.latestAttempt||{},expanded=state.expandedTaskId===task.id,dataset=state.datasets.find(item=>item.id===task.datasetId),sourceImages=task.metrics?.sourceImageCount,panelId=`task-detail-${task.id}`,quickActions=taskQuickActions(task),drag=Boolean(row)&&canDragFolderTask(task)&&treeDragAvailable();return`<article class="task-panel tree-row ${expanded?'expanded':''}" data-project-task="${esc(task.id)}"${row?` ${treeRowAttributes(row,task.projectId)}`:''}><div class="task-summary"${row?' role="gridcell"':''}${drag?` draggable="true" data-folder-drag data-id="${esc(task.id)}"`:''}>${drag?TREE_GRIP:''}<button class="task-summary-toggle" data-action="toggle-task" data-id="${esc(task.id)}" data-tree-focus tabindex="-1" aria-expanded="${expanded}" aria-controls="${esc(panelId)}"><span class="task-lead" aria-hidden="true"><span class="task-chevron">›</span>${treeIcon('task')}</span><span class="task-summary-name"><strong>${esc(task.displayName)}</strong><small>${taskTimestamp(task.createdAt)}</small>${task.latestAttempt?.status==='pending'?`<span data-task-source-notice="${esc(task.id)}">${taskSourceNotice(task)}</span>`:''}${taskLodNotice(task)}</span><span class="task-summary-stat" title="${task.metrics?.sourceImageCountSource==='registered_camera_originals'?'Original photos registered with this model version; processing input count was not recorded.':'Registered source images; unavailable counts are not estimated.'}"><strong>${sourceImages==null?'Not recorded':groupedNumber(sourceImages)}</strong><small>images</small></span><span class="task-summary-stat"><strong>${duration(attempt,task.metrics)}</strong><small>runtime</small></span>${badge(['ready_for_review','published'].includes(attempt.status||task.status)?'ready':attempt.status||task.status)}</button><div class="task-quick-actions row-actions" aria-label="${esc(task.displayName)} actions">${quickActions}</div></div><div class="task-detail-shell" id="${esc(panelId)}" role="${row?'gridcell':'region'}" aria-label="${esc(task.displayName)} details" ${expanded?'':'inert'}><div class="task-detail-motion">${expanded?taskDetail(task,dataset):''}</div></div></article>`}
 function taskFact(label,value){const display=label==='Reconstructed points'&&value!==null&&value!==undefined?groupedNumber(value):value;return`<div><dt>${esc(label)}</dt><dd>${available(display)}</dd></div>`}
 function disclosureAttributes(taskId,name){return`data-task-id="${esc(taskId)}" data-task-disclosure="${esc(name)}" ${state.taskDisclosures[taskId]?.[name]?'open':''}`}
 function taskDisclosurePanel(taskId,name,label,body,meta=''){return`<details class="task-subsection task-disclosure" ${disclosureAttributes(taskId,name)}><summary><span>${esc(label)}</span>${meta?`<small>${esc(meta)}</small>`:''}</summary><div class="task-disclosure-body">${body}</div></details>`}
@@ -876,7 +920,7 @@ function diagnosticJobLines(job){const lines=[job.result?.summary||job.summary||
 function attemptDiagnosticPanel(diagnostic,item,panelId,retryAction,retryAttributes=''){if(!diagnostic)return'';if(diagnostic.loading)return`<div class="attempt-diagnostic" id="${esc(panelId)}" role="status">Loading run diagnostics…</div>`;if(diagnostic.error)return`<div class="attempt-diagnostic load-error" id="${esc(panelId)}" role="alert"><strong>Run diagnostics could not be loaded</strong><p>${esc(diagnostic.error)}</p>${button(retryAction,item.id,'Retry',false,`${retryAttributes} aria-controls="${esc(panelId)}"`)}</div>`;const events=diagnostic.events||[],jobs=[...(diagnostic.processingJobs||[]),...(diagnostic.derivativeJobs||diagnostic.derivatives||[]),...(diagnostic.operations||[])],failure=diagnostic.errorDetail||events.find(event=>(event.state||event.status)==='failed'||event.severity==='error')||item.errorMessage&&{errorCode:item.errorCode,errorMessage:item.errorMessage,stage:item.status},logs=diagnostic.logs||[];return`<div class="attempt-diagnostic" id="${esc(panelId)}"><div class="attempt-diagnostic-grid">${failure?`<section class="diagnostic-error" role="alert"><p class="eyebrow">Failure details</p><strong>${esc(failure.errorCode||failure.code||'processing_failed')}</strong><p>${esc(failure.errorMessage||failure.summary||failure.message||item.errorMessage||'This run failed without a diagnostic summary.')}</p><small>Stage: ${esc(stageName(failure.stage||failure.phase||failure.type||item.status))}${failure.diagnosticId?` · Diagnostic ID: ${esc(failure.diagnosticId)}`:''}</small></section>`:''}<section><h4>Stage timeline</h4><ol class="stage-timeline">${events.map(event=>{const eventState=event.state||event.status||(event.severity==='error'?'failed':event.severity==='warning'?'warning':'progress');return`<li class="${esc(eventState)}"><span aria-hidden="true"></span><div><strong>${esc(stageName(event.stage||event.phase||event.type||event.eventType))}</strong><small>${dateTime(event.createdAt)} · ${esc(stageName(eventState))}</small>${event.summary||event.message?`<p>${esc(event.summary||event.message)}</p>`:''}${typeof event.details?.reason==='string'?`<p>Cleanup reason: ${esc(event.details.reason)}</p>`:''}</div></li>`}).join('')||`<li><div><strong>No stage events recorded</strong><small>The run state is ${esc(stageName(item.status))}.</small></div></li>`}</ol></section><section><h4>Jobs and derivatives</h4><div class="diagnostic-job-list">${jobs.map(job=>`<div><strong>${esc(stageName(job.type||job.jobType||job.operationType))}</strong>${badge(job.status)}${diagnosticJobLines(job).map(line=>`<small>${esc(line)}</small>`).join('')}</div>`).join('')||empty('No job details were recorded for this run.')}</div></section></div>${canRecoverExistingResult(diagnostic,can('viewer.processing.write'))?`<section class="attempt-recovery"><p>Retry importing the existing result without restarting the provider run.</p>${button('recover-existing-result',item.id,'Recover existing result',false,retryAttributes)}</section>`:''}<section class="attempt-log-section"><h4>Sanitized run output</h4>${logs.length?`<pre class="log-tail">${esc(logs.map(log=>`[${log.createdAt||''}] ${String(log.level||'info').toUpperCase()} ${log.message||''}`).join('\n'))}</pre>`:empty('No retained log output for this run.')}${diagnostic.logsTruncated?`<p class="form-note">Older output is unavailable because this log was truncated or aged out after ${esc(diagnostic.logRetentionDays||'the configured retention period')}.</p>`:''}</section></div>`}
 function attemptHistory(taskId,attempts,currentId,allowRetry=true){const detail=state.taskDetails[taskId]||{},more=Boolean(detail.nextAttemptCursor);return`<details class="task-subsection task-disclosure attempt-history" ${disclosureAttributes(taskId,'history')}><summary><span>Processing history (${attempts.length}${more?'+':''})</span><small>Every recorded run</small></summary><div class="task-disclosure-body data-list">${attempts.map(item=>{const selected=detail.selectedAttemptId===item.id,panelId=`attempt-diagnostic-${item.id}`,providerRetry=Boolean(item.providerId);return`<article class="attempt-run ${selected?'selected':''}" data-attempt-id="${esc(item.id)}"><div class="attempt-run-heading"><div><strong>${attemptLabel(item,currentId)}</strong><small>${dateTime(item.createdAt)} · ${duration(item)}${item.providerTaskId?` · Provider task ${esc(item.providerTaskId)}`:''}</small>${item.errorMessage?`<small class="attempt-error-summary">${esc(item.errorCode||'processing_failed')}: ${esc(item.errorMessage)}</small>`:''}${!providerRetry&&['failed','cancelled'].includes(item.status)?'<small>Imported runs are retried from their owning import or required-derivative operation.</small>':''}</div>${badge(item.status)}<div class="row-actions">${button('open-attempt-diagnostics',item.id,selected?'Hide details':'View diagnostics',false,`data-task-id="${esc(taskId)}" aria-expanded="${selected}" aria-controls="${esc(panelId)}"`)}${allowRetry&&providerRetry&&can('viewer.processing.write')&&['failed','cancelled'].includes(item.status)?button('retry-attempt',item.id,'Retry provider run'):''}</div></div>${selected?attemptDiagnosticPanel(detail.attemptDiagnostics?.[item.id],item,panelId,'retry-attempt-diagnostics',`data-task-id="${esc(taskId)}"`):''}</article>`}).join('')||empty('No processing attempts have been recorded.')}${more?`<div class="history-load-more">${button('load-more-attempts',taskId,'Load older runs')}</div>`:''}</div></details>`}
 function durationFromMs(value){if(!Number.isSafeInteger(value)||value<0)return'Unavailable';const total=Math.round(value/1000),hours=Math.floor(total/3600),minutes=Math.floor(total%3600/60);return hours?`${hours}h ${minutes}m`:`${minutes}m ${total%60}s`}
-function activeTaskAction(task,attempt){if(!can('viewer.processing.write')||task.status==='archived')return'';if(LIVE_ATTEMPT_STATUSES.has(attempt.status))return button('cancel-attempt',attempt.id,'Cancel');if(attempt.providerId&&['failed','cancelled'].includes(attempt.status))return button('retry-attempt',attempt.id,'Restart provider run',true);if(attempt.providerId)return button('restart-task',task.id,'Restart',false);return''}
+function activeTaskAction(task,attempt){if(!can('viewer.processing.write')||task.status==='archived')return'';if(LIVE_ATTEMPT_STATUSES.has(attempt.status))return button('cancel-attempt',attempt.id,'Cancel');if(attempt.providerId&&['failed','cancelled'].includes(attempt.status))return button('retry-attempt',attempt.id,'Restart provider run',true);if(attempt.providerId&&attempt.status!=='ready_for_review')return button('restart-task',task.id,'Restart',false);return''}
 function gcpWorkspace(taskId){return state.gcpWorkspaces[taskId]||(state.gcpWorkspaces[taskId]={setId:null,pointId:null,mode:'auto',radiusM:100,activeImage:null,imageUrl:null,draftPixel:null,editingId:null,pointCache:{}})}
 function gcpImageName(image){return String(image?.relativePath||image?.id||'Image').split('/').at(-1)}
 function gcpPointName(point){return point?.label||point?.externalId||point?.id||'Unknown point'}
@@ -1018,6 +1062,7 @@ async function action(element){
   if(action==='folder-delete')return deleteFolder(element.dataset.projectId,id);
   if(action==='folder-move-task')return moveTaskFolderModal(id);
   if(action==='duplicate-task')return duplicateTask(id);
+  if(action==='reprocess-task')return reprocessTask(id);
   if(action==='delete-task')return deleteTaskWithUndo(id);
   if(action==='open-project')return toggleTreeProject(id);
   if(action==='close-project')return toggleTreeProject(id,false);
@@ -1734,8 +1779,28 @@ content.addEventListener('toggle',event=>{
   if(menu.open){
     closeTreeMenus(menu);
     if(panel&&phoneLayout()&&typeof panel.showPopover==='function'){panel.popover='manual';try{panel.showPopover();}catch{panel.removeAttribute('popover');}}
-  }else if(panel?.hasAttribute('popover')){try{panel.hidePopover();}catch{}panel.removeAttribute('popover');}
+    else if(panel)placeTreeMenu(menu,panel);
+  }else{if(panel?.hasAttribute('popover')){try{panel.hidePopover();}catch{}panel.removeAttribute('popover');}if(panel)resetTreeMenuPlacement(menu,panel);}
 },true);
+// A desktop row menu never runs under the toast or upload tray: it opens upward when there is more room
+// above, and scrolls inside itself when neither side fits.
+function resetTreeMenuPlacement(menu,panel){menu.classList.remove('menu-up');panel.style.maxHeight='';panel.style.bottom='';delete panel.dataset.maxHeight;}
+function placeTreeMenu(menu,panel){
+  resetTreeMenuPlacement(menu,panel);
+  const summary=menu.querySelector(':scope > summary');if(!summary||panel.hasAttribute('popover'))return;
+  const anchor=summary.getBoundingClientRect(),box=panel.getBoundingClientRect(),height=panel.scrollHeight,gap=6;
+  let floor=window.innerHeight-8;
+  for(const notice of document.querySelectorAll('#workspace-notices > *')){const rect=notice.getBoundingClientRect();if(rect.width&&rect.height&&rect.left<box.right&&rect.right>box.left)floor=Math.min(floor,rect.top-8);}
+  const ceiling=Math.max(8,(document.querySelector('.workspace-header')?.getBoundingClientRect().bottom||0)+8),below=floor-(anchor.bottom+gap);
+  if(height<=below)return;
+  // Opening upward, the menu's bottom edge stays above the notices even when the row itself is behind them.
+  const upperEdge=Math.min(anchor.top-gap,floor),above=upperEdge-ceiling;
+  if(above>=below){menu.classList.add('menu-up');const lift=anchor.top-gap-upperEdge;if(lift>0)panel.style.bottom=`calc(100% + ${gap+Math.ceil(lift)}px)`;if(height>above){panel.style.maxHeight=`${Math.max(96,Math.floor(above))}px`;panel.dataset.maxHeight='';}}
+  else if(height>below){panel.style.maxHeight=`${Math.max(96,Math.floor(below))}px`;panel.dataset.maxHeight='';}
+}
+function placeOpenTreeMenu(){const menu=content.querySelector('details.tree-menu[open]'),panel=menu?.querySelector(':scope > .project-more-menu');if(panel&&!panel.hasAttribute('popover'))placeTreeMenu(menu,panel);}
+{const notices=document.querySelector('#workspace-notices');if(notices&&typeof ResizeObserver==='function')new ResizeObserver(placeOpenTreeMenu).observe(notices);}
+window.addEventListener('resize',placeOpenTreeMenu);document.addEventListener('scroll',event=>{if(!event.target?.closest?.('details.tree-menu'))placeOpenTreeMenu();},{capture:true,passive:true});
 document.addEventListener('click',event=>{if(!event.target.closest?.('details.tree-menu'))closeTreeMenus();});
 document.addEventListener('keydown',event=>{
   if(event.key==='Escape'&&content.querySelector('details.tree-menu[open]')&&!modal.open)closeTreeMenus();
@@ -1767,6 +1832,15 @@ function processModal(projectId,duplicate=null){
 // Duplicate: a new task in the same project and folder on the same source photos (not copied), with the latest run's
 // node, preset and options, named "<name> (copy)". It opens the New task dialog pre-filled, so nothing starts until the
 // user reviews it and chooses Start processing. Outputs, publication, shares and client visibility are not copied.
+// Reprocess: a new run of this task on its photos already on the server, with options changed first.
+function reprocessTask(id){
+  const task=state.tasks.find(item=>item.id===id),attempt=task?.latestAttempt;if(!task||task.status==='archived'||!attempt?.providerId||!REPROCESSABLE_STATUSES.has(attempt.status)||!can('viewer.processing.write'))return;
+  const dialog=document.createElement('dialog');dialog.className='workspace-modal new-task-modal';dialog.setAttribute('aria-label','Reprocess task');
+  const content=document.createElement('div');content.innerHTML='<div class="modal-heading"><div><p class="eyebrow"></p><h2>Reprocess</h2></div><button type="button" class="icon-button modal-close" aria-label="Close">×</button></div>';content.querySelector('.eyebrow').textContent=task.displayName;
+  dialog.append(content);document.body.append(dialog);
+  const handle=mountTaskReprocess({container:content,task,attempt,providers:state.providers,presets:state.presets,api,onCancel:()=>dialog.close(),onComplete:async()=>{dialog.close();toast('Reprocessing queued');await load();}});
+  content.querySelector('.modal-close').onclick=()=>{if(!handle.busy)dialog.close();};dialog.addEventListener('cancel',event=>{if(handle.busy)event.preventDefault();});dialog.addEventListener('close',()=>{handle.dispose();dialog.remove();},{once:true});dialog.showModal();
+}
 function duplicateTask(id){
   const task=state.tasks.find(item=>item.id===id);if(!task||task.status==='archived'||!can('viewer.processing.write'))return;
   // Trim by whole characters (never half an emoji) so the name plus " (copy)" stays within the 240-unit limit.
@@ -1845,37 +1919,190 @@ function legacyClientSharePanel(output,onlyOutputId){
   }
   return clientShareCard(output,onlyOutputId);
 }
+async function loadProjectShareSelectionCatalog(projectId,authorized){
+  const pathId=encodeURIComponent(projectId),options={recoveryGuard:authorized,headers:{'Cache-Control':'no-cache'}};
+  try{
+    const [folderResult,taskResult]=await Promise.all([
+      api(`/api/v1/projects/${pathId}/folders`,options),
+      pagedApi(`/api/v1/tasks?projectId=${pathId}`,'tasks',options,{strict:true}),
+    ]);
+    return authorized()?projectShareSelectionCatalog(projectId,folderResult?.folders,taskResult.tasks):null;
+  }catch{return null}
+}
+function projectShareSelectionCatalog(projectId,folders,tasks){
+  const validItem=item=>item?.projectId===projectId&&typeof item.id==='string'&&Boolean(item.id)
+    &&typeof item.displayName==='string';
+  if(!Array.isArray(folders)||!Array.isArray(tasks)||folders.some(folder=>!validItem(folder)
+    ||(folder.parentId!==null&&typeof folder.parentId!=='string')))return null;
+  const folderIds=new Set(folders.map(folder=>folder.id));
+  const taskIds=new Set();
+  if(folderIds.size!==folders.length||tasks.some(task=>{
+    if(!validItem(task)||task.status==='archived'||taskIds.has(task.id)
+      ||(task.folderId!==null&&!folderIds.has(task.folderId)))return true;
+    taskIds.add(task.id);
+    return false;
+  }))return null;
+  const paths=folders.map(folder=>folderPath(folders,folder.id));
+  if(paths.some(path=>path[0]?.parentId!==null||path.length>16))return null;
+  const folderNames=new Map(folders.map((folder,index)=>[folder.id,paths[index].map(item=>item.displayName).join(' / ')]));
+  const topology=JSON.stringify([
+    folders.map(folder=>[folder.id,folder.parentId]).sort(),
+    tasks.map(task=>[task.id,task.folderId]).sort(),
+  ]);
+  return {
+    folders:folders.map(folder=>({...folder,displayName:folderNames.get(folder.id)})),
+    tasks:tasks.map(task=>({id:task.id,folderId:task.folderId,name:[folderNames.get(task.folderId),task.displayName||'Untitled task'].filter(Boolean).join(' / ')})),
+    topology,
+  };
+}
+function sameShareSelectionCatalog(reviewed,current,selection){
+  if(!reviewed||!current||reviewed.topology!==current.topology)return false;
+  const labels=(items,ids,key)=>ids.map(id=>items.find(item=>item.id===id)?.[key]);
+  return JSON.stringify([
+    labels(reviewed.folders,selection.folderIds,'displayName'),
+    labels(reviewed.tasks,selection.taskIds,'name'),
+  ])===JSON.stringify([
+    labels(current.folders,selection.folderIds,'displayName'),
+    labels(current.tasks,selection.taskIds,'name'),
+  ]);
+}
 function directShareContext(onlyOutputId){
   const projectId=state.shareContext.projectId,project=state.projects.find(item=>item.id===projectId);
   const taskId=onlyOutputId?state.shareContext.taskId||null:null,task=taskId?state.tasks.find(item=>item.id===taskId):null;
   return {projectId,projectName:project?.displayName||'this project',tasks:shareableTasks(projectId,state.tasks,state.outputs),
-    entry:onlyOutputId?'task':'project',taskId,taskName:onlyOutputId?state.shareContext.taskName||'':'',
-    notifyClient:Array.isArray(state.clientDirectAccess?.capabilities)&&state.clientDirectAccess.capabilities.includes('notify_client_v1'),
+    entry:onlyOutputId?'task':'project',selectionCatalog:state.shareContext.selectionCatalog,
+    taskId,taskName:onlyOutputId?state.shareContext.taskName||'':'',
+    notifyClient:state.clientDirectAccess?.capabilities?.notifyClient===true,
     // The task and the model it was opened on must both still be there, in this project.
     targetMissing:Boolean(onlyOutputId)&&!(task?.projectId===projectId&&state.outputs.some(output=>output.id===onlyOutputId&&output.taskId===taskId))};
 }
 function directClientShareCard(onlyOutputId){
   const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
-  return card('Share with a client',`${directShareForm(context)}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,{...context,dateTime,groups:state.clientDirectGroups})}`);
+  return card('Share with a client',`${directShareForm(context)}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,
+    {...context,tasks:context.selectionCatalog?.tasks||context.tasks,folders:context.selectionCatalog?.folders||folderCache.get(context.projectId)?.folders||[],dateTime,groups:state.clientDirectGroups})}`);
 }
 function rerenderClientSharePanel(projectId,onlyOutputId){
   const panel=modalContent.querySelector('[data-client-share-panel]');
   if(panel){panel.querySelector?.('#direct-client-grant-form')?.clientPicker?.dispose();panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
 }
+async function editDirectProjectShare(projectId,button){
+  const context=state.shareContext,subject=state.adminSession?.subject,grantId=button.dataset.id;
+  const authorized=()=>state.shareContext===context&&context?.projectId===projectId
+    &&state.adminSession?.subject===subject&&publicationAuthorityLive()&&can('viewer.client_grants.manage')&&modal.open;
+  if(!authorized()||button.disabled||!editableDirectProjectGrant(state.clientDirectAccess,projectId,grantId))return;
+  button.disabled=true;
+  let access,catalog;
+  try{
+    [access,catalog]=await Promise.all([
+      loadDirectClientAccess(api,projectId),loadProjectShareSelectionCatalog(projectId,authorized),
+    ]);
+  }catch{
+    if(authorized()&&button.isConnected)toast('Could not refresh the share and its folders. Try again.',true);
+    return;
+  }finally{if(button.isConnected)button.disabled=false}
+  if(!authorized()||!button.isConnected)return;
+  const grant=editableDirectProjectGrant(access,projectId,grantId);
+  if(!grant){
+    toast('This share changed. Review the updated access list.',true);
+    return openShareModal(projectId);
+  }
+  if(!catalog){
+    toast('The project folders could not be verified. Try again.',true);return;
+  }
+  const project=state.projects.find(item=>item.id===projectId&&item.status==='active');
+  if(!project)return;
+  state.clientDirectAccess=access;
+  const edit={grant,...catalog,projectName:project.displayName||'this project'};
+  modalContent.querySelector('#direct-client-grant-form')?.clientPicker?.dispose();
+  openModal('Edit client share',directProjectShareEditForm(edit),'wide-modal');
+  const form=modalContent.querySelector('#direct-project-share-edit'),status=form.querySelector('[role="status"]');
+  const fields=form.querySelector('[data-edit-share-targets]'),mode=form.elements.mode;
+  const back=form.querySelector('[data-edit-share-back]'),submit=form.querySelector('button[type="submit"]');
+  const live=()=>authorized()&&form.isConnected&&state.clientDirectAccess===access
+    &&editableDirectProjectGrant(access,projectId,grantId)&&state.projects.some(item=>item.id===projectId&&item.status==='active');
+  const requestKeys=new Map();
+  const sync=()=>{fields.hidden=mode.value==='whole';fields.disabled=fields.hidden};
+  mode.onchange=sync;
+  back.onclick=()=>{if(live())return openShareModal(projectId)};
+  form.onsubmit=async event=>{
+    event.preventDefault();
+    if(form.shareBusy||submit.disabled||!live())return;
+    let change;
+    try{change=readDirectProjectShareEdit(form,edit)}catch(error){status.textContent=error.message;return}
+    form.shareBusy=true;
+    mode.disabled=fields.disabled=back.disabled=submit.disabled=true;
+    status.textContent='';
+    let stale=false,saved=false;
+    try{
+      const authorityAtReview=publicationAuthorityGeneration;
+      const reviewedAuthorityLive=()=>live()&&publicationAuthorityGeneration===authorityAtReview;
+      const summary=directProjectShareReviewText({summary:change.summary,permissions:grant.permissions,expiresAt:grant.expiresAt,dateTime});
+      if(!await dialogs.confirm(`This replaces the current project share. ${summary}`,{title:'Review share change',submitLabel:'Save selection'}))return;
+      if(!reviewedAuthorityLive())throw new Error('Access changed while reviewing. Review the change again.');
+      const serialized=JSON.stringify(change.body);
+      if(!requestKeys.has(serialized))requestKeys.set(serialized,crypto.randomUUID());
+      status.textContent='Updating access…';
+      const result=await api(DIRECT_CLIENT_GRANTS_PATH,{method:'POST',body:change.body,
+        headers:{'Idempotency-Key':requestKeys.get(serialized)},
+        beforeDispatch:async()=>{
+          const requireReviewed=()=>{if(!reviewedAuthorityLive())throw new Error('Access changed while reviewing. Review the change again.')};
+          requireReviewed();
+          const [latest,latestCatalog]=await Promise.all([
+            loadDirectClientAccess(api,projectId),loadProjectShareSelectionCatalog(projectId,reviewedAuthorityLive),
+          ]);
+          requireReviewed();
+          const currentGrant=editableDirectProjectGrant(latest,projectId,grantId);
+          if(!currentGrant||JSON.stringify(currentGrant)!==JSON.stringify(grant)
+            ||!sameShareSelectionCatalog(catalog,latestCatalog,change.body.selection||{folderIds:[],taskIds:[]}))
+            throw Object.assign(new Error('This share changed. Review the updated access list.'),{code:'share_changed'});
+          return requireReviewed;
+        },
+      });
+      if(!result?.grant?.grantId)throw new Error('The update could not be confirmed. Retry to check the same change.');
+      saved=true;
+      if(live()){
+        toast(result.sessionRevocation?.pending?'Share updated. Revocation of prior sessions is pending.':'Share updated');
+        return openShareModal(projectId);
+      }
+    }catch(error){
+      stale=error.code==='share_changed';
+      if(live())status.textContent=directShareErrorText(error);
+    }finally{
+      form.shareBusy=false;
+      if(form.isConnected&&!saved){back.disabled=false;mode.disabled=submit.disabled=stale;sync();if(stale)fields.disabled=true}
+    }
+  };
+}
 function bindDirectShare(form,projectId,onlyOutputId){
   const context=directShareContext(onlyOutputId),shareContext=state.shareContext,live=()=>state.shareContext===shareContext&&form.isConnected&&modal.open;
-  let picked=null,fresh=false;const read=()=>readDirectShareForm(form,{...context,tasks:directShareContext(onlyOutputId).tasks||context.tasks,known:context.tasks,fresh,clients:picked?[picked]:[]});
+  const token=state.token,subject=state.adminSession?.subject;
+  let picked=null,fresh=false,reviewed=null;const read=()=>readDirectShareForm(form,{...context,tasks:directShareContext(onlyOutputId).tasks||context.tasks,known:context.tasks,fresh,clients:picked?[picked]:[]});
   const summary=form.querySelector('[data-direct-summary]'),taskInputs=[...form.querySelectorAll('input[name="taskId"]')];
   const review=form.querySelector('[data-direct-review]'),reviewButton=form.querySelector('[data-direct-review-button]');
+  const projectTargets=form.querySelector('[data-direct-share-targets]'),mode=form.elements.mode;
+  let previousMode=mode?.value;
   // Review step: the choices are frozen and repeated in plain words before anything is sent.
   // It is the confirmation: only its Share button sends, and any change of the choices goes back through it.
   const setReviewing=on=>{
-    form.reviewing=on;if(!on)form.reviewed=null;review.hidden=!on;reviewButton.hidden=on;
+    form.reviewing=on;if(!on){form.reviewed=null;reviewed=null}review.hidden=!on;reviewButton.hidden=on;
     for(const element of form.querySelectorAll('fieldset,input[name="expiresAt"],input[name="measure"],input[name="cameras"],input[name="download"]'))element.disabled=on;
     if(!on)sync();
   };
-  const sync=()=>{const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';
-    const later=form.elements.includeLater,off=current.scope!=='project';if(later&&later.disabled!==off){later.disabled=off;later.checked=!off}summary.textContent=current.summary};
+  const sync=()=>{
+    if(mode&&mode.value!==previousMode){
+      // Except excludes unticked targets; Only includes ticked targets. A new mode needs fresh choices.
+      syncDirectProjectSelection(form,mode.value,context.selectionCatalog,{reset:true});
+      previousMode=mode.value;
+    }
+    syncDirectProjectSelection(form,mode?.value,context.selectionCatalog);
+    const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';
+    const later=form.elements.includeLater,off=current.scope!=='project';if(later&&later.disabled!==off){later.disabled=off;later.checked=!off}
+    if(mode)mode.disabled=current.scope!=='project';
+    if(projectTargets){
+      projectTargets.hidden=current.scope!=='project'||!['only','except'].includes(current.mode);
+      projectTargets.disabled=projectTargets.hidden;
+    }
+    summary.textContent=current.summary};
   form.onchange=()=>form.reviewing?setReviewing(false):sync();
   form.querySelector('[data-direct-back]').onclick=()=>setReviewing(false);
   // The second click of a double-click on Review share must not land on Share.
@@ -1897,7 +2124,7 @@ function bindDirectShare(form,projectId,onlyOutputId){
   sync();
   // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
   form.onsubmit=async event=>{
-    event.preventDefault();if(form.shareBusy)return;
+    event.preventDefault();if(form.shareBusy||!live())return;
     if(directShareContext(onlyOutputId).targetMissing){if(form.reviewing)setReviewing(false);summary.textContent=SHARE_TARGET_MISSING;return}
     let bodies,target;const choices=confirmed=>{target=read();const key=JSON.stringify([target.bodies(),target.what,target.published,target.client&&directClientKey(target.client)]);bodies=target.bodies({confirmed});return key};
     let chosen;try{chosen=choices(form.reviewing===true)}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
@@ -1913,20 +2140,37 @@ function bindDirectShare(form,projectId,onlyOutputId){
       // The review says it all; the line above it is for progress and refusals.
       summary.textContent='';
       const body=bodies[0];form.reviewed=chosen;
+      reviewed={authority:publicationAuthorityGeneration};
       form.querySelector('[data-direct-review-text]').innerHTML=directShareReviewMarkup({client:target.client,what:target.what,permissions:body.permissions,expiresAt:body.expiresAt,dateTime});
       // Focus the review, not Share: a held Enter key must not send.
       setReviewing(true);review.focus?.();return;
     }
     // What was reviewed is what is sent; anything that changed since goes back to the form.
     if(form.reviewed!==chosen){setReviewing(false);summary.textContent='Something changed since the review. Check it and review again.';return}
+
     // Inputs stay frozen while sending so the summary always matches what is being shared.
     const controls=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);
     for(const [element] of controls)element.disabled=true;
     form.shareBusy=true;form.requestKeys||=new Map();let shared=0,refusal='';summary.textContent=`Sharing… ${target.summary}`;
     try{
+      const reviewedAuthority=reviewed.authority;
+      const current=()=>live()&&state.token===token&&state.adminSession?.subject===subject
+        &&publicationAuthorityLive()&&can('viewer.client_grants.manage')&&publicationAuthorityGeneration===reviewedAuthority;
+      const requireCurrent=()=>{
+        if(!current())throw new Error('Access changed while reviewing. Close and reopen Share to review the access again.');
+      };
       for(const body of bodies){
         const serialized=JSON.stringify(body);if(!form.requestKeys.has(serialized))form.requestKeys.set(serialized,crypto.randomUUID());
-        await api(DIRECT_CLIENT_GRANTS_PATH,{method:'POST',body,headers:{'Idempotency-Key':form.requestKeys.get(serialized)}});shared++;
+        await api(DIRECT_CLIENT_GRANTS_PATH,{method:'POST',body,headers:{'Idempotency-Key':form.requestKeys.get(serialized)},
+          ...(body.selection?{beforeDispatch:async()=>{
+            requireCurrent();
+            const latestCatalog=await loadProjectShareSelectionCatalog(projectId,current);
+            requireCurrent();
+            if(!sameShareSelectionCatalog(context.selectionCatalog,latestCatalog,body.selection))
+              throw new Error('The project folders or tasks could not be verified or changed. Close and reopen Share to review the access again.');
+            return requireCurrent;
+          }}:{}),
+        });shared++;
       }
       toast(bodies.length>1?`Shared ${shared} tasks with the client`:'Shared with the client');
     }catch(error){
@@ -1949,6 +2193,9 @@ function clientShareCard(output,onlyOutputId){
   let form='';
   if(onlyOutputId&&(!output?.activePublished||output.status!=='published')){
     form=empty('Direct Operations client sharing is not available for this private ready model yet. Its verified activation and exact Operations association must be connected first; creating a public link is a separate choice, not a prerequisite for client access.');
+  }else if(!onlyOutputId){
+    // Whole-project access is a direct grant (with a selection); the server refuses new legacy project grants.
+    form=empty('New whole-project shares are direct client shares.');
   }else if(onlyOutputId&&!associations.length){
     form=empty('No unique Operations association matches this model. Set up its model association in Operations first. Other models and entire client projects will not be granted access here.');
   }else{
@@ -2123,15 +2370,23 @@ async function publicationAudience(output,projectId){
   const controller=new AbortController();
   publicationReads.add(controller);
   const read=path=>api(path,{signal:controller.signal});
-  let direct,legacy,native;
+  let direct,legacy,native,folderPath=null;
   try{
     [direct,legacy,native]=(await Promise.allSettled([loadDirectClientAccess(read,projectId),read('/api/v1/workspace/client-grants'),read('/api/v1/workspace/native-client-grants')]))
       .map(result=>result.status==='fulfilled'?result.value:null);
+    if(current()&&direct?.grants.some(grant=>grant.viewerProjectId===projectId&&grant.selection&&!grant.revokedAt)){
+      const [task,folders]=(await Promise.allSettled([
+        read(`/api/v1/tasks/${encodeURIComponent(output.taskId)}`),
+        read(`/api/v1/projects/${encodeURIComponent(projectId)}/folders`),
+      ])).map(result=>result.status==='fulfilled'?result.value:null);
+      folderPath=publicationFolderPath(task?.task,folders?.folders,{projectId,taskId:output.taskId});
+    }
   }finally{publicationReads.delete(controller)}
   if(!current())return unknown();
   const older=lists(legacy,'projects','associations','grants'),connected=lists(native,'targets','grants');
-  const complete=Boolean(can('viewer.client_grants.manage')&&direct&&!direct.grantsIncomplete&&older&&connected),clients=new Map();
-  for(const client of direct?publishAudience(direct,{projectId,taskId:output.taskId}):[])clients.set(client.key,client);
+  const directAudience=direct?publishAudience(direct,{projectId,taskId:output.taskId,folderPath}):null;
+  const complete=Boolean(directAudience?.complete&&!direct.grantsIncomplete&&older&&connected),clients=new Map();
+  for(const client of directAudience?.clients||[])clients.set(client.key,client);
   // Older Operations shares follow the model.
   const access=clientAccessSnapshot(older,connected),own=(access.associations||[]).filter(item=>output.modelId&&associationModelId(item)===output.modelId);
   const ids=new Set(own.map(item=>item.id)),projects=new Set(own.map(associationProjectId));
@@ -2220,6 +2475,7 @@ async function createOutputShare(form,projectId,onlyOutputId){
         const outcome=await api(path,{
           method:'POST',body:JSON.parse(sending.serialized),
           headers:{'Idempotency-Key':sending.key,...(receiptOnly?{'X-Viewer-Share-Receipt-Only':'true'}:{})},
+          publicShareCreate:true,
           beforeDispatch:async()=>{
             stillCurrent();
             if(!receiptOnly&&body.publishIfReady){
@@ -2357,6 +2613,8 @@ function bindShareModal(projectId,onlyOutputId,{preserveDirectForm=false}={}){
   modalContent.querySelectorAll('[data-action="edit-share"]').forEach(element=>element.onclick=()=>editShareModal(projectId,onlyOutputId,element.dataset.id));
   const directForm=modalContent.querySelector('#direct-client-grant-form');
   if(directForm&&!preserveDirectForm)bindDirectShare(directForm,projectId,onlyOutputId);
+  if(!onlyOutputId)modalContent.querySelectorAll('[data-action="edit-direct-project-share"]')
+    .forEach(element=>element.onclick=()=>editDirectProjectShare(projectId,element));
   modalContent.querySelectorAll('[data-action="revoke-direct-client-grant"]').forEach(element=>element.onclick=async()=>{
     // Pinned to this modal and row: a late answer must not touch a different Share dialog.
     const shareContext=state.shareContext,access=state.clientDirectAccess,live=()=>state.shareContext===shareContext&&state.clientDirectAccess===access&&element.isConnected&&modal.open;
@@ -2408,7 +2666,21 @@ async function digest(buffer){return[...new Uint8Array(await crypto.subtle.diges
 function uploadFiles(form){return navigationWork.trackLegacyUpload(form.elements.files.files.length,()=>performLegacyUpload(form));}
 async function performLegacyUpload(form){const files=[...form.elements.files.files],datasetId=form.elements.datasetId.value,role=form.elements.processingRole.value,total=files.reduce((sum,file)=>sum+file.size,0),progress=form.querySelector('progress');if(!files.length||files.length>128||files.some(file=>file.size>64*1024**2)||total>256*1024**2)return toast('Browser upload limit exceeded (128 files, 64 MB each, 256 MB total); use the server import folder for larger artifacts',true);state.busy=true;try{let preparedCount=0;const prepared=[];for(let index=0;index<files.length;index++){const buffer=await files[index].arrayBuffer();prepared.push({file:files[index],spec:{id:`file-${index}`,relativePath:files[index].webkitRelativePath||files[index].name,byteSize:files[index].size,sha256:await digest(buffer),contentType:files[index].type||'application/octet-stream',processingRole:role}});progress.value=Math.round(++preparedCount/files.length*15)}const created=await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}/uploads`,{method:'POST',body:{files:prepared.map(item=>item.spec)}}),upload=created.upload,token=created.uploadToken;sessionStorage.setItem('ltds-viewer-upload',JSON.stringify({datasetId,uploadId:upload.id,manifest:prepared.map(item=>item.spec)}));let sent=0;for(const item of prepared){const remote=upload.files.find(file=>file.id===item.spec.id),missing=new Set(remote.missingChunks);for(let index=0;index<remote.chunkCount;index++){const start=index*upload.chunkSize,end=Math.min(start+upload.chunkSize,item.file.size);if(missing.has(index)){const chunk=await item.file.slice(start,end).arrayBuffer(),response=await workspaceFetch(`/api/v1/admin/uploads/${encodeURIComponent(upload.id)}/files/${encodeURIComponent(item.spec.id)}/chunks/${index}`,{method:'PUT',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/octet-stream','X-Upload-Token':token,'X-Chunk-SHA256':await digest(chunk)},body:chunk});if(!response.ok)throw Error(`Chunk upload failed (${response.status})`)}sent+=end-start;progress.value=15+Math.round(sent/Math.max(total,1)*80)}}await api(`/api/v1/admin/uploads/${encodeURIComponent(upload.id)}/finalize`,{method:'POST',body:{uploadToken:token}});sessionStorage.removeItem('ltds-viewer-upload');progress.value=100;modal.close();toast('Upload finalized; processing will index the dataset');await load()}catch(error){toast(`${error.message}. Reselect the same files to resume.`,true)}finally{state.busy=false}}
 
-async function pagedApi(path,key,options){const items=[],seen=new Set();let cursor=null;do{const separator=path.includes('?')?'&':'?',page=await api(`${path}${separator}limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`,options);items.push(...(page[key]||[]));cursor=page.nextCursor||null;if(cursor&&seen.has(cursor))throw Error(`Pagination cursor repeated for ${key}`);if(cursor)seen.add(cursor)}while(cursor);return{[key]:items}}
+async function pagedApi(path,key,options,{strict=false}={}){
+  const items=[],seen=new Set(),separator=path.includes('?')?'&':'?';
+  let cursor=null;
+  do{
+    const page=await api(`${path}${separator}limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`,options);
+    if(strict&&(!Array.isArray(page?.[key])||(cursor&&page[key].length===0)||!(page.nextCursor===null
+      ||(typeof page.nextCursor==='string'&&page.nextCursor.length>0&&page[key].length>0))))
+      throw Error(`Invalid page for ${key}`);
+    items.push(...(page[key]||[]));
+    cursor=page.nextCursor||null;
+    if(cursor&&seen.has(cursor))throw Error(`Pagination cursor repeated for ${key}`);
+    if(cursor)seen.add(cursor);
+  }while(cursor);
+  return {[key]:items};
+}
 async function pagedStorage(){let first=null,cursor=null;const items=[],seen=new Set();do{const page=await api(`/api/v1/storage?limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);if(!first)first=page;items.push(...(page.trash?.items||[]));cursor=page.trash?.nextCursor||null;if(cursor&&seen.has(cursor))throw Error('Pagination cursor repeated for trash');if(cursor)seen.add(cursor)}while(cursor);return{...(first||{}),trash:{...(first?.trash||{}),items,nextCursor:null}}}
 async function refreshTrash(){state.trashLoadError=null;render();try{state.storage=await pagedStorage()}catch(error){state.trashLoadError=error.message}render()}
 async function load(){const generation=++projectDataGeneration, token=state.token, session=state.adminSession, fences=new Map(outputFences);
