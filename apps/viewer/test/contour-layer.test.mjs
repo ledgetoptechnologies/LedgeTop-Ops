@@ -178,17 +178,18 @@ test('viewer wiring: Contours panel sits with the map layer panels; mode switche
   assert.ok(contours > measure && contours < ortho);
   assert.match(html, /id="layer-contours" aria-pressed="false" aria-label="Show contour lines">Show</);
   assert.match(html, /<select id="contour-interval">/);
-  // Image export lives in the Downloads panel at the end of the sidebar, beside the products.
+  // One Download button at the end of the sidebar: the products and the orthophoto image are one dialog.
   const downloads = html.indexOf('id="panel-downloads"');
   assert.ok(downloads > html.indexOf('id="panel-pc"'));
-  assert.match(html.slice(downloads), /id="downloads-products"[\s\S]*?id="ortho-print-actions"[^>]*><button class="tool-btn" id="btn-export-image">Export image</);
-  assert.doesNotMatch(html.slice(ortho, html.indexOf('id="panel-dem"')), /btn-export-image/, 'no separate orthophoto export section');
+  assert.match(html.slice(downloads), /id="download-actions"[^>]*><button class="tool-btn" id="btn-download">Download</);
+  assert.doesNotMatch(html, /btn-export-image|downloads-products|Download products/, 'no separate export or products buttons');
   // \s* also spans CRLF in Windows checkouts.
   assert.match(main, /installPropertyLines\(\);\s*installContours\(\);/);
   assert.match(main, /propertyLines\?\.refresh\(\);\s*contourLines\?\.refresh\(\);\s*return true;/);
-  const sync = main.slice(main.indexOf('function syncMeasurementActionVisibility()'), main.indexOf('function sessionAccessLabel('));
-  assert.match(sync, /setHidden\('ortho-print-actions', !measure\)/);
-  assert.match(main, /button\.hidden = !ORTHO_URL \|\| \(SHARE_PERMISSIONS\.download !== true && !isMapMode\(state\.activeMode\)\)/, 'export needs an orthophoto and an area to export');
+  const sync = main.slice(main.indexOf('function syncMeasurementActionVisibility()'), main.indexOf('function syncOrthoExportAction('));
+  assert.match(sync, /syncOrthoExportAction\(\)/);
+  assert.match(main, /const image = Boolean\(ORTHO_URL\) && policy\.allowed && \(policy\.whole \|\| isMapMode\(state\.activeMode\)\);\s*actions\.hidden = !image && viewerProductDownloads\?\.available\?\.\(\) !== true;/, 'Download shows for an image to export or products to download');
+  assert.match(main, /image = Boolean\(ORTHO_URL\) && policy\.allowed, mapOpen = image && /, 'the dialog offers the image only with an orthophoto and the print policy');
   assert.doesNotMatch(sync, /viewerAccessAvailable|orthoPrintPermissions|orthoPrintPolicy/, 'self-contained: other tests sandbox this function');
   assert.match(main, /download: SHARE_PERMISSIONS\.download === true/);
   const exporter = main.slice(main.indexOf('const policyArea ='), main.indexOf('function pcApi()'));

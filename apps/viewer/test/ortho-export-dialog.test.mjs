@@ -80,7 +80,7 @@ test('picking tears down what it set up, even when the map was replaced meanwhil
   assert.equal(t.p.count, 0, 'a finished session no longer selects');
 });
 
-function dialog({ pixels = 200_000_000, picker: withPicker = true, run, pickParcels } = {}) {
+function dialog({ pixels = 200_000_000, picker: withPicker = true, run, pickParcels, products = null, size = null, geotiff = true, parcels = () => 0, contours = false } = {}) {
   const { document, window } = miniDocument();
   const log = { pickers: [], writables: [], runs: [], picks: 0 };
   if (withPicker) {
@@ -101,23 +101,26 @@ function dialog({ pixels = 200_000_000, picker: withPicker = true, run, pickParc
   const side = Math.round(Math.sqrt(pixels));
   const api = mountOrthoExportDialog({
     documentRef: document, windowRef: window,
-    defaults: () => ({ areas: { full: true, view: true, parcels: true }, parcelCount: 0, contoursAvailable: false, propertyAvailable: false, geotiffAvailable: true }),
-    preview: async () => ({ canvas: document.createElement('canvas'), width: side, height: side }),
+    defaults: () => ({ areas: { full: true, view: true, parcels: true }, parcelCount: parcels(), contoursAvailable: contours, propertyAvailable: false, geotiffAvailable: geotiff }),
+    preview: async () => { log.previews = (log.previews || 0) + 1; return { canvas: document.createElement('canvas'), width: size?.[0] ?? side, height: size?.[1] ?? side }; },
     run: run || (async (options, signal, extra) => { log.runs.push({ options, signal, extra }); return { blob: null, filename: options.filename, committed: Boolean(extra.writable) }; }),
     pickParcels: pickParcels || (() => { log.picks += 1; return new Promise(() => {}); }),
+    products,
   });
   api.open();
   return { api, log, handle, document };
 }
 
 const ready = async () => { await wait(160); await tick(); };
+// A real press: the pointer goes down on the control inside the dialog, then the click.
+const press = async (node) => { await node.fire("pointerdown"); return node.click(); };
 
 test('Cancel while the save picker is open: no file is created and nothing runs', async () => {
   const t = dialog();
   await ready();
   const { exportButton, cancel, status } = t.api.controls;
   assert.equal(exportButton.disabled, false);
-  void exportButton.click();
+  void press(exportButton);
   await tick();
   assert.equal(t.log.pickers.length, 1, 'save picker shown');
   assert.equal(exportButton.disabled, true, 'busy while the picker is open');
@@ -134,7 +137,7 @@ test('Cancel while the save picker is open: no file is created and nothing runs'
 test('Close while the file is opening: the writable is discarded and nothing runs', async () => {
   const t = dialog();
   await ready();
-  void t.api.controls.exportButton.click();
+  void press(t.api.controls.exportButton);
   await tick();
   t.log.pickers[0].resolve(t.handle());
   await tick();
@@ -158,7 +161,7 @@ test('a committed file is reported as saved; Cancel is off while it is being com
   } });
   await ready();
   const { exportButton, cancel, status } = t.api.controls;
-  void exportButton.click();
+  void press(exportButton);
   await tick();
   t.log.pickers[0].resolve(t.handle());
   await tick();
@@ -181,7 +184,7 @@ test('a cancel during the final check is not reported as saved', async () => {
   } });
   await ready();
   const { exportButton, cancel, status } = t.api.controls;
-  void exportButton.click();
+  void press(exportButton);
   await tick();
   await cancel.click();
   await wait(40);
@@ -218,10 +221,10 @@ test('a cancelled export that unwinds late does not reopen Cancel during a newer
   } });
   await ready();
   const { exportButton, cancel, status } = t.api.controls;
-  void exportButton.click();
+  void press(exportButton);
   await tick();
   await cancel.click();                       // A is cancelled but its run is still unwinding
-  void exportButton.click();
+  void press(exportButton);
   await tick();
   assert.equal(runs.length, 2);
   runs[1].extra.writable = {};
@@ -240,4 +243,126 @@ test('the stream checks last, right before the file is closed', async () => {
   const fs = await import('node:fs');
   const source = fs.readFileSync(new URL('../ortho-export-stream.mjs', import.meta.url), 'utf8');
   assert.match(source, /abortIf\(signal\);\s*await beforeClose\?\.\(\);\s*\} catch \(error\) \{ encoder\.abort\(\); sink\.abort\(\); throw error; \}\s*return sink\.close\(\);/);
+});
+
+// ---- the Download dialog: products and the orthophoto in one place ----------------
+
+function productsStub(items = [
+  { kind: 'ortho', label: 'Orthophoto', format: 'TIF', size: '3.7 GiB' },
+  { kind: 'dsm', label: 'Surface model (DSM)', format: 'TIF', size: '2.9 GiB' },
+]) {
+  const downloads = [];
+  return { downloads, available: () => true, list: async () => items, download: async (product) => { downloads.push(product.kind); return { fileName: product.kind }; } };
+}
+const rows = (t) => t.api.controls.list.children;
+const rowText = (t) => rows(t).map(node => node.textContent);
+const shown = (node) => { for (let n = node; n; n = n.parent) if (n.hidden) return false; return true; };
+
+test('one Download dialog: the products, with the orthophoto offered as TIFF, JPEG or PNG on its own page', async () => {
+  const products = productsStub();
+  const t = dialog({ pixels: 1_000_000, products });
+  await tick();
+  const { title, back, format, downloadButton } = t.api.controls;
+  assert.equal(title.textContent, 'Download');
+  assert.deepEqual(rowText(t), ['OrthophotoTIFF, JPEG or PNG · original 3.7 GiB', 'Surface model (DSM)TIF · 2.9 GiB']);
+  assert.equal(shown(downloadButton), false, 'no Download button on the list');
+  await press(rows(t)[1]);
+  assert.deepEqual(products.downloads, ['dsm'], 'a product row downloads that product');
+  await press(rows(t)[0]);
+  await ready();
+  assert.equal(title.textContent, 'Orthophoto');
+  assert.deepEqual(Object.entries(format.inputs).filter(([, input]) => shown(input)).map(([value]) => value), ['tif', 'jpg', 'png']);
+  assert.equal(shown(back), true);
+  await press(back);
+  assert.equal(title.textContent, 'Download');
+});
+
+test('the whole orthophoto as TIFF without layers is the original file; anything else is rendered', async () => {
+  const products = productsStub();
+  const t = dialog({ pixels: 1_000_000, products, contours: true });
+  await tick();
+  await press(rows(t)[0]);
+  await ready();
+  const { format, area, contours, dims, downloadButton } = t.api.controls;
+  format.value = 'tif'; area.value = 'full'; contours.checked = false;
+  await format.inputs.tif.fire('change');
+  await ready();
+  assert.match(dims.textContent, /^Original GeoTIFF · 3\.7 GiB$/);
+  await press(downloadButton);
+  await tick();
+  assert.deepEqual(products.downloads, ['ortho']);
+  assert.equal(t.log.runs.length, 0, 'nothing rendered for the original');
+  contours.checked = true;
+  await contours.fire('change');
+  await ready();
+  await press(downloadButton);
+  await tick();
+  assert.equal(t.log.runs.length, 1);
+  assert.equal(t.log.runs[0].options.format, 'tif');
+  assert.equal(t.log.runs[0].options.filename, 'orthophoto-contours.tif');
+});
+
+test('JPEG is offered up to 65,535 px per side and says so beyond it', async () => {
+  const t = dialog({ picker: false, size: [70_000, 400] });
+  await ready();
+  const { format, downloadButton, status } = t.api.controls;
+  format.value = 'jpg';
+  await format.inputs.jpg.fire('change');
+  await ready();
+  assert.equal(downloadButton.disabled, true);
+  assert.match(status.textContent, /JPEG holds at most 65,535 px per side/);
+  format.value = 'png';
+  await format.inputs.png.fire('change');
+  await ready();
+  assert.equal(downloadButton.disabled, false);
+});
+
+test('without products the dialog opens on the orthophoto, and TIFF needs a declared coordinate system', async () => {
+  const t = dialog({ pixels: 1_000_000, geotiff: false });
+  await ready();
+  const { title, back, format } = t.api.controls;
+  assert.equal(title.textContent, 'Orthophoto');
+  assert.equal(shown(back), false, 'nothing to go back to');
+  assert.equal(shown(format.inputs.tif), false);
+});
+
+test('regression: picking parcels never starts a download; only a press made in the reopened dialog does', async () => {
+  const products = productsStub();
+  let count = 0, finishPick;
+  const t = dialog({ pixels: 200_000_000, products, parcels: () => count,
+    pickParcels: () => new Promise((resolve) => { finishPick = resolve; }) });
+  await tick();
+  await press(rows(t)[0]);
+  await ready();
+  const { area, downloadButton } = t.api.controls;
+  area.value = 'parcels';
+  await area.inputs.parcels.fire('change');
+  await tick();
+  assert.equal(t.api.dialog.open, false, 'picking on the map');
+  count = 2; finishPick(2);
+  await tick();
+  assert.equal(t.api.dialog.open, true, 'the dialog is back');
+  await ready();
+  // A click that did not start in the reopened dialog (carried over from the map, or a script).
+  await downloadButton.click();
+  await ready();
+  const nothing = () => [t.log.runs.length, t.log.pickers.length, products.downloads.length];
+  assert.deepEqual(nothing(), [0, 0, 0], 'no export, no save picker, no product download');
+  // A held key does not answer either.
+  const held = await downloadButton.fire('keydown', { key: 'Enter', repeat: true });
+  assert.equal(held.defaultPrevented, true);
+  // An explicit press does.
+  void press(downloadButton);
+  await tick();
+  assert.equal(t.log.pickers.length, 1, 'the press starts the export');
+});
+
+test('regression: a product row needs a press made in the open dialog', async () => {
+  const products = productsStub();
+  const t = dialog({ pixels: 1_000_000, products });
+  await tick();
+  await rows(t)[1].click();
+  assert.deepEqual(products.downloads, [], 'no download from a click that did not start in the dialog');
+  await press(rows(t)[1]);
+  assert.deepEqual(products.downloads, ['dsm']);
 });
