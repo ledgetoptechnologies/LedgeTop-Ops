@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { validatePortalReleasePreflight } from '../apps/client/scripts/project-alpha-portal-receiver-preflight.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { markProductionAutoProviderFailure, productionAutoProviderEndpoint } from './production-auto-startup-diagnostics.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const PROFILE = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/production-deploy-profile.json')));
@@ -627,22 +628,35 @@ export class CloudflareReader {
   }
   async get(suffix) {
     need(/^\/workers\//.test(suffix) && !suffix.includes('..'), 'Read endpoint refused');
-    const response = await this.fetch(`https://api.cloudflare.com/client/v4/accounts/${this.account}${suffix}`, { method: 'GET', headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(30000) });
-    const bytes = await response.arrayBuffer(); need(bytes.byteLength <= 32 * 1024 * 1024, 'Read response bound exceeded');
-    let body; try { body = JSON.parse(Buffer.from(bytes)); } catch { throw new Error('Cloudflare returned invalid JSON'); }
-    need(response.status === 200 && body.success === true && body.result, 'Cloudflare metadata GET failed; no automatic retry');
-    // Only the two lists intentionally consumed as head0 may be paginated.
-    if (body.result_info?.total_pages > 1) need(/^\/workers\/scripts\/[a-z-]+\/(deployments|versions)\?per_page=1$/.test(suffix), 'Incomplete metadata inventory');
-    return body.result;
+    const signal = AbortSignal.timeout(30000); let response;
+    try {
+      response = await this.fetch(`https://api.cloudflare.com/client/v4/accounts/${this.account}${suffix}`, { method: 'GET', headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' }, redirect: 'error', signal });
+      const bytes = await response.arrayBuffer(); need(bytes.byteLength <= 32 * 1024 * 1024, 'Read response bound exceeded');
+      let body; try { body = JSON.parse(Buffer.from(bytes)); } catch { throw new Error('Cloudflare returned invalid JSON'); }
+      need(response.status === 200 && body.success === true && body.result, 'Cloudflare metadata GET failed; no automatic retry');
+      // Only the two lists intentionally consumed as head0 may be paginated.
+      if (body.result_info?.total_pages > 1) need(/^\/workers\/scripts\/[a-z-]+\/(deployments|versions)\?per_page=1$/.test(suffix), 'Incomplete metadata inventory');
+      return body.result;
+    } catch (error) {
+      // Diagnostics keep only the fixed endpoint name, the status number and whether the read timed out.
+      throw markProductionAutoProviderFailure(error, { method: 'GET', endpoint: productionAutoProviderEndpoint(suffix),
+        status: response?.status ?? null, timedOut: signal.aborted });
+    }
   }
   async getCandidateVersion(workerName, candidateVersionId, { signal } = {}) {
     const spec = Object.values(PROFILE.workers).find(row => row.name === workerName);
     need(spec && UUID.test(candidateVersionId ?? ''), 'Candidate version GET scope invalid');
     const suffix = `/workers/scripts/${workerName}/versions/${candidateVersionId}`;
-    const response = await this.fetch(`https://api.cloudflare.com/client/v4/accounts/${this.account}${suffix}`, {
-      method: 'GET', headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' },
-      redirect: 'error', signal: signal ?? AbortSignal.timeout(30_000),
-    });
+    const readSignal = signal ?? AbortSignal.timeout(30_000);
+    let response;
+    try {
+      response = await this.fetch(`https://api.cloudflare.com/client/v4/accounts/${this.account}${suffix}`, {
+        method: 'GET', headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' },
+        redirect: 'error', signal: readSignal,
+      });
+    } catch (error) {
+      throw markProductionAutoProviderFailure(error, { method: 'GET', endpoint: 'version', timedOut: readSignal.aborted });
+    }
     const bytes = await response.arrayBuffer(); need(bytes.byteLength <= 32 * 1024 * 1024, 'Read response bound exceeded');
     let body; try { body = JSON.parse(Buffer.from(bytes)); } catch { throw new Error('Cloudflare returned invalid JSON'); }
     if (response.status === 404 && body?.success === false && body.result == null

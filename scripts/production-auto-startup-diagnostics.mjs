@@ -2,12 +2,19 @@ import { isProductionAutoHoldCode, PRODUCTION_AUTO_COORDINATOR_REASONS, PRODUCTI
 
 const COORDINATOR_HOLD = 'Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed';
 const COORDINATOR_CAUSES = new Set(PRODUCTION_AUTO_COORDINATOR_REASONS.values());
+/** Causes that do not say what refused on their own, so a hold may also name the original built-in class. */
+export const PRODUCTION_AUTO_GENERIC_HOLD_CAUSES = Object.freeze(['unexpected_error', 'production_provider_refused_or_uncertain_no_retry']);
+const GENERIC_CAUSES = new Set(PRODUCTION_AUTO_GENERIC_HOLD_CAUSES);
 
 /** Fixed sub-steps inside the coordinator's prepare phase, after the old-asset verifier ran. A hold may name the
  * step that failed (never its text) so an unexpected crash can be located without exposing provider data. */
 export const PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS = Object.freeze(['old_assets_final_fence','old_assets_schema',
   'old_assets_ci','old_assets_capture','old_assets_predecessor','old_assets_complete_inventory','archive_root_html',
-  'merge_asset_ledger']);
+  'merge_asset_ledger',
+  // The post-intent revalidation every mutation runs after its intent is durable and before it is dispatched.
+  'mutation_fence_schema','mutation_fence_ci','mutation_fence_capture','mutation_fence_predecessor',
+  // The deployment read behind a stage/activation readback and the terminal reconciliation.
+  'deployment_capture']);
 const ORIGINAL_FAILURE_STEPS = new Set(PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS);
 const STARTUP_STAGES = new Set(['recipient','gate','trigger_env','trigger_file','trigger_json','trigger_shape',
   'source','adapter','coordination','unknown', ...PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS]);
@@ -54,6 +61,58 @@ function safeErrorType(error, types = NATIVE_ERROR_TYPES) {
   return null;
 }
 const failures = new WeakMap();
+/** Fixed names for the Cloudflare endpoints a release reads or writes. A provider failure is reported only as
+ * method, one of these names, the HTTP status number and whether it timed out: never a path, id, body or text. */
+export const PRODUCTION_AUTO_PROVIDER_ENDPOINTS = Object.freeze(['deployments','versions_list','version_upload','version',
+  'version_modules','settings','schedules','script_subdomain','account_subdomain','asset_session','asset_upload','script',
+  'other']);
+const PROVIDER_ENDPOINTS = new Set(PRODUCTION_AUTO_PROVIDER_ENDPOINTS);
+const PROVIDER_METHODS = new Set(['GET','POST','PUT','DELETE']);
+const ENDPOINT_PATTERNS = Object.freeze([
+  [/^\/workers\/scripts\/[a-z0-9-]+\/deployments(?:\?per_page=1)?$/u, 'deployments'],
+  [/^\/workers\/scripts\/[a-z0-9-]+\/versions\?per_page=1$/u, 'versions_list'],
+  [/^\/workers\/scripts\/[a-z0-9-]+\/versions\?bindings_inherit=strict$/u, 'version_upload'],
+  [/^\/workers\/scripts\/[a-z0-9-]+\/versions\/[a-f0-9-]+$/u, 'version'],
+  [/^\/workers\/workers\/[a-z0-9-]+\/versions\/[a-f0-9-]+\?include=modules(?:,sourcemaps)?$/u, 'version_modules'],
+  [/^\/workers\/scripts\/[a-z0-9-]+\/settings$/u, 'settings'],
+  [/^\/workers\/scripts\/[a-z0-9-]+\/schedules$/u, 'schedules'],
+  [/^\/workers\/scripts\/[a-z0-9-]+\/subdomain$/u, 'script_subdomain'],
+  [/^\/workers\/subdomain$/u, 'account_subdomain'],
+  [/^\/workers\/scripts\/[a-z0-9-]+\/assets-upload-session$/u, 'asset_session'],
+  [/^\/workers\/assets\/upload\?base64=true$/u, 'asset_upload'],
+  [/^\/workers\/scripts\/[a-z0-9-]+$/u, 'script'],
+]);
+/** Maps an account-relative Cloudflare path to its fixed endpoint name; anything unrecognized is 'other'. */
+export function productionAutoProviderEndpoint(suffix) {
+  if (typeof suffix !== 'string' || suffix.length > 512) return 'other';
+  for (const [pattern, name] of ENDPOINT_PATTERNS) if (pattern.test(suffix)) return name;
+  return 'other';
+}
+const providerFailures = new WeakMap();
+/** Record which provider request failed (the first mark wins). Only fixed vocabulary and numbers are kept. */
+export function markProductionAutoProviderFailure(error, { method, endpoint, status = null, timedOut = false } = {}) {
+  if (isRecord(error) && !providerFailures.has(error)) providerFailures.set(error, Object.freeze({
+    method: PROVIDER_METHODS.has(method) ? method : 'GET',
+    endpoint: PROVIDER_ENDPOINTS.has(endpoint) ? endpoint : 'other',
+    status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null,
+    timedOut: timedOut === true }));
+  return error;
+}
+/** A wrapper that replaces an error with a fixed-code error keeps the original's marks (never its text). */
+export function carryProductionAutoFailureMarks(from, to) {
+  if (!isRecord(from) || !isRecord(to) || from === to) return to;
+  if (failures.has(from) && !failures.has(to)) failures.set(to, failures.get(from));
+  if (providerFailures.has(from) && !providerFailures.has(to)) providerFailures.set(to, providerFailures.get(from));
+  if (!originalTypes.has(to)) {
+    const type = originalTypes.has(from) ? originalTypes.get(from) : safeErrorType(from, ORIGINAL_ERROR_TYPES);
+    if (type) originalTypes.set(to, type);
+  }
+  return to;
+}
+const PROVIDER_TEXT = new RegExp(`^(?:GET|POST|PUT|DELETE):(?:${PRODUCTION_AUTO_PROVIDER_ENDPOINTS.join('|')}):(?:[1-5][0-9]{2}|none)(?::timeout)?$`, 'u');
+function providerText(value) {
+  return value ? `${value.method}:${value.endpoint}:${value.status ?? 'none'}${value.timedOut ? ':timeout' : ''}` : null;
+}
 const syncReadbackSteps = new WeakMap();
 const SYNC_READBACK_STEPS = new Set(['classic_metadata', 'modern_modules', 'candidate_proof',
   'post_upload_capture', 'capture_validation', 'inactive_receipt']);
@@ -89,13 +148,19 @@ function coordinatorHold(error) {
   if (ownString(error, 'message') !== COORDINATOR_HOLD) return null;
   const phase = ownString(error, 'holdPhase'), cause = ownString(error, 'holdCause');
   const step = ownString(error, 'holdStep'), errorType = ownString(error, 'holdErrorType');
+  const provider = ownString(error, 'holdProvider');
+  const reconcileStep = ownString(error, 'holdReconcileStep'), reconcileProvider = ownString(error, 'holdReconcileProvider');
   const safeCause = cause && (cause === 'unexpected_error' || isProductionAutoHoldCode(cause) || COORDINATOR_CAUSES.has(cause)) ? cause : null;
   return {
     ...(PRODUCTION_AUTO_RELEASE_PHASES.includes(phase) ? { phase } : {}),
     ...(safeCause ? { cause: safeCause } : {}),
     ...(ORIGINAL_FAILURE_STEPS.has(step) ? { step } : {}),
-    // A class name only explains an unexpected crash; a reviewed code already says what refused.
-    ...(safeCause === 'unexpected_error' && ORIGINAL_ERROR_TYPE_NAMES.has(errorType) ? { errorType } : {}),
+    // A class name only explains a crash or the generic provider refusal; a specific reviewed code already says
+    // what refused.
+    ...(GENERIC_CAUSES.has(safeCause) && ORIGINAL_ERROR_TYPE_NAMES.has(errorType) ? { errorType } : {}),
+    ...(provider && PROVIDER_TEXT.test(provider) ? { provider } : {}),
+    ...(ORIGINAL_FAILURE_STEPS.has(reconcileStep) ? { reconcileStep } : {}),
+    ...(reconcileProvider && PROVIDER_TEXT.test(reconcileProvider) ? { reconcileProvider } : {}),
   };
 }
 
@@ -108,7 +173,9 @@ export function productionAutoOriginalFailureDetails(error) {
   if (!isRecord(error)) return Object.freeze({});
   const stage = failures.get(error)?.stage;
   const errorType = originalTypes.has(error) ? originalTypes.get(error) : safeErrorType(error, ORIGINAL_ERROR_TYPES);
-  return Object.freeze({ ...(ORIGINAL_FAILURE_STEPS.has(stage) ? { step: stage } : {}), ...(errorType ? { errorType } : {}) });
+  const provider = providerText(providerFailures.get(error));
+  return Object.freeze({ ...(ORIGINAL_FAILURE_STEPS.has(stage) ? { step: stage } : {}), ...(errorType ? { errorType } : {}),
+    ...(provider ? { provider } : {}) });
 }
 
 function safeChecks(value, stage) {
@@ -156,10 +223,16 @@ export function productionAutoStartupFailure(error) {
     : Object.freeze({ stage: 'unknown', reason: 'unexpected_error' });
 }
 
+function detailText({ provider, reconcileStep, reconcileProvider }) {
+  return `${provider ? `, provider=${provider}` : ''}${reconcileStep ? `, reconcile_step=${reconcileStep}` : ''}`
+    + `${reconcileProvider ? `, reconcile_provider=${reconcileProvider}` : ''}`;
+}
+
 export function formatProductionAutoReleaseHold(error) {
-  const { stage, reason, phase, cause, step, errorType, checks } = productionAutoStartupFailure(error);
+  const failure = productionAutoStartupFailure(error);
+  const { stage, reason, phase, cause, step, errorType, checks } = failure;
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
-  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${step ? `, step=${step}` : ''}${errorType ? `, error=${errorType}` : ''}`;
+  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${step ? `, step=${step}` : ''}${errorType ? `, error=${errorType}` : ''}${detailText(failure)}`;
   return `Production retained-asset release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
 }
 

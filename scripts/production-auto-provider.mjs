@@ -10,6 +10,8 @@ import { uploadAssetManifest } from "./production-auto-upload.mjs";
 import { PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from "./production-auto-cloudflare-pacer.mjs";
 import { ledgerBytes, validateAssetLedger } from "./production-auto-assets.mjs";
 import { createAssetVerifierSource, registeredHoldCode } from "./production-auto-verify.mjs";
+import { carryProductionAutoFailureMarks as carry, markProductionAutoProviderFailure,
+  productionAutoProviderEndpoint } from "./production-auto-startup-diagnostics.mjs";
 import { isOwnedInactiveAdmission, ownedInactiveProviderParentAllowed } from './production-auto-owned-inactive-admission.mjs';
 import { OWNED_INACTIVE_CLIENT_POLICY } from './production-auto-owned-inactive-policy.mjs';
 import { readOwnedUploadTagBaseline, expectedOwnedUploadAnnotations,
@@ -37,7 +39,14 @@ const VERIFIER_READINESS_ATTEMPTS = 8, VERIFIER_READINESS_MAX_MS = 15_000;
 const VERIFIER_READINESS_BACKOFF_MS = Object.freeze([250, 500, 1000, 2000, 3000, 3000, 3000]);
 const MAX_RESPONSE = 32 * 1024 * 1024, MAX_MODULE = 32 * 1024 * 1024;
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
-const fail = () => { throw Error("production_provider_refused_or_uncertain_no_retry"); };
+/** The generic refusal. It may keep the fixed marks of the error it replaces and the request it was refused on
+ * (method, endpoint name, status number, timeout); never any exception, path or response text. */
+const fail = (source, request) => {
+  const error = Error("production_provider_refused_or_uncertain_no_retry");
+  if (source) carry(source, error);
+  if (request) markProductionAutoProviderFailure(error, request);
+  throw error;
+};
 const need = value => { if (!value) fail(); };
 function retryableVerifierResponse(response, method) {
   const type = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
@@ -193,8 +202,8 @@ export class ProductionCloudflareProvider {
         // the runtime's post-journal revalidation of source/CI/schema/controls) keeps its fixed code; anything else,
         // including a getter message, stays generic. Nothing was dispatched; never retried.
         const code = registeredHoldCode(error);
-        if (code) throw Error(code);
-        fail();
+        if (code) throw carry(error, Error(code));
+        fail(error);
       }
     }
     const controller = new AbortController(); let response, reader, raw = Buffer.alloc(0), persisted = false;
@@ -246,8 +255,9 @@ export class ProductionCloudflareProvider {
         // pacer permit) keeps its registered, fixed-vocabulary hold code instead of the generic one. Still held,
         // never retried; nothing from the request or response is carried.
         const preDispatchCode = response === undefined ? registeredHoldCode(error) : null;
-        if (preDispatchCode) throw Error(preDispatchCode);
-        fail();
+        if (preDispatchCode) throw carry(error, Error(preDispatchCode));
+        fail(error, { method, endpoint: productionAutoProviderEndpoint(suffix), status: response?.status ?? null,
+          timedOut: controller.signal.aborted });
       } finally { try { void reader?.cancel().catch(() => {}); } catch {} }
     })();
     let timer;
@@ -261,8 +271,9 @@ export class ProductionCloudflareProvider {
       // Only the registered pre-dispatch gate code rethrown above passes through; a timeout or anything after a
       // response stays the generic refusal.
       const preDispatchCode = response === undefined && !controller.signal.aborted ? registeredHoldCode(error) : null;
-      if (preDispatchCode) throw Error(preDispatchCode);
-      fail();
+      if (preDispatchCode) throw carry(error, Error(preDispatchCode));
+      fail(error, { method, endpoint: productionAutoProviderEndpoint(suffix), status: response?.status ?? null,
+        timedOut: controller.signal.aborted });
     }
     finally { clearTimeout(timer); signal?.removeEventListener("abort", abortFromCaller); }
   }
@@ -310,7 +321,8 @@ export class ProductionCloudflareProvider {
       } catch {
         if (!saved) try { await this.#persist({ requestId, method: "POST", path: providerIntentPath(url, this.account),
           status: response?.status ?? null, rawResponse: raw, incomplete: true }); } catch {}
-        fail();
+        fail(undefined, { method: "POST", endpoint: url.endsWith("/assets-upload-session") ? "asset_session" : "asset_upload",
+          status: response?.status ?? null, timedOut: init.signal?.aborted === true });
       } finally { try { void reader?.cancel().catch(() => {}); } catch {} }
     };
     let pendingIntent;

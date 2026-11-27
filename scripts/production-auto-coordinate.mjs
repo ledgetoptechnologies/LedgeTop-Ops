@@ -5,7 +5,7 @@
  * Durable recordIntent must reject replay and survive the build process.
  */
 import { productionAutoHoldCause } from './production-auto-hold-codes.mjs';
-import { productionAutoOriginalFailureDetails, trackProductionAutoStartupStage,
+import { PRODUCTION_AUTO_GENERIC_HOLD_CAUSES, productionAutoOriginalFailureDetails, trackProductionAutoStartupStage,
   trackProductionAutoStartupStageAsync } from './production-auto-startup-diagnostics.mjs';
 import { createHash } from 'node:crypto';
 import { mergeAssetLedger, preserveRootHtmlArchive, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
@@ -261,14 +261,17 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
   } catch (failure) {
     // A write, verification or durable-receipt exception is not permission for
     // another mutation or rollback. Preserve only bounded normalized evidence.
-    let reconciliation = { readSucceeded: false };
+    let reconciliation = { readSucceeded: false }, reconcileFailure = {};
     if (writesAttempted) {
       try {
         const observed = state(await adapter.readDeployment());
         reconciliation = { readSucceeded: true, activeVersionId: observed.activeVersionId,
           latestVersionId: observed.latestVersionId, deploymentId: observed.deploymentId,
           controlsUnchanged: observed.controlsSHA256 === baseline?.controlsSHA256 };
-      } catch { /* retain original unknown outcome; no retry */ }
+      } catch (readFailure) {
+        // Retain the original unknown outcome; no retry. Keep only the fixed step/endpoint marks of the read.
+        reconcileFailure = productionAutoOriginalFailureDetails(readFailure);
+      }
     }
     // Persist the original failure class before/alongside reconciliation. Do
     // not serialize exception text: provider errors can contain URLs or data.
@@ -280,12 +283,18 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     // The thrown hold carries only a fixed phase and a sanitized, allowlisted cause (never exception text), so
     // the CI log can say which guard refused without exposing provider data.
     const held = new Error('Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');
-    // Optionally also the fixed sub-step the original failure was marked with and, for an unexpected crash only,
-    // its exact built-in class (prototype identity; never its name or text).
+    // Optionally also the fixed sub-step the original failure was marked with, the provider endpoint/status it
+    // was marked with, and, for an unexpected crash or the generic provider refusal only, its exact built-in
+    // class (prototype identity; never its name or text). The terminal reconciliation read adds its own step and
+    // endpoint/status the same way.
     const holdCause = productionAutoHoldCause(failure), original = productionAutoOriginalFailureDetails(failure);
     Object.defineProperties(held, { holdPhase: { value: phase }, holdCause: { value: holdCause },
       ...(original.step ? { holdStep: { value: original.step } } : {}),
-      ...(holdCause === 'unexpected_error' && original.errorType ? { holdErrorType: { value: original.errorType } } : {}) });
+      ...(PRODUCTION_AUTO_GENERIC_HOLD_CAUSES.includes(holdCause) && original.errorType
+        ? { holdErrorType: { value: original.errorType } } : {}),
+      ...(original.provider ? { holdProvider: { value: original.provider } } : {}),
+      ...(reconcileFailure.step ? { holdReconcileStep: { value: reconcileFailure.step } } : {}),
+      ...(reconcileFailure.provider ? { holdReconcileProvider: { value: reconcileFailure.provider } } : {}) });
     throw held;
   }
 }

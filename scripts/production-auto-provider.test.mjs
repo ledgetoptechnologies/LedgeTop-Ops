@@ -826,3 +826,44 @@ test("a registered refusal while recording a mutation intent keeps its code; unk
     assert.ok(!sent.includes("PUT"), `${why}: the create PUT was never sent`);
   }
 });
+
+test("a provider refusal keeps only its method, fixed endpoint name, status and timeout for the hold line", async () => {
+  const { productionAutoOriginalFailureDetails, trackProductionAutoStartupStageAsync } = await import("./production-auto-startup-diagnostics.mjs");
+  // A failed GET: endpoint name and status number only.
+  const unavailable = setup(async () => Response.json({ success: false, errors: [{ code: 10013, message: token }] }, { status: 503 }));
+  let error = await unavailable.provider.readDeployment("ledgetop-clients").catch(caught => caught);
+  assert.equal(error.message, "production_provider_refused_or_uncertain_no_retry");
+  assert.equal(productionAutoOriginalFailureDetails(error).provider, "GET:deployments:503");
+  // A failed deployment POST after its intent.
+  const refused = setup(async () => Response.json({ success: false, errors: [{ code: 10000, message: token }] }, { status: 403 }));
+  error = await refused.provider.stageVersion({ workerName: "ledgetop-ops", parentVersionId: parent, candidateVersionId: candidate, message: "s" }).catch(caught => caught);
+  assert.equal(productionAutoOriginalFailureDetails(error).provider, "POST:deployments:403");
+  // A transport failure: no status, the exact built-in class, never its text.
+  const transport = setup(async () => { throw new TypeError(`fetch failed ${token}`); });
+  error = await transport.provider.readDeployment("ledgetop-ops").catch(caught => caught);
+  assert.deepEqual({ ...productionAutoOriginalFailureDetails(error) }, { errorType: "TypeError", provider: "GET:deployments:none" });
+  // A refusal raised while recording the intent (the post-intent fence) keeps the fence's step and read marks.
+  const fenced = setup(async () => ok({ id: candidate }), { recordIntent: () => trackProductionAutoStartupStageAsync("mutation_fence_capture",
+    () => unavailable.provider.readDeployment("ledgetop-clients")) });
+  error = await fenced.provider.stageVersion({ workerName: "ledgetop-ops", parentVersionId: parent, candidateVersionId: candidate, message: "s" }).catch(caught => caught);
+  assert.equal(error.message, "production_provider_refused_or_uncertain_no_retry");
+  assert.deepEqual({ ...productionAutoOriginalFailureDetails(error) },
+    { step: "mutation_fence_capture", errorType: "Error", provider: "GET:deployments:503" });
+  for (const value of Object.values(productionAutoOriginalFailureDetails(error))) assert.ok(!value.includes(token));
+});
+
+test("fixed endpoint names cover every capture and mutation path and nothing else", async () => {
+  const { productionAutoProviderEndpoint } = await import("./production-auto-startup-diagnostics.mjs");
+  for (const [suffix, name] of [
+    ["/workers/scripts/ledgetop-ops/deployments?per_page=1", "deployments"], ["/workers/scripts/ledgetop-ops/deployments", "deployments"],
+    ["/workers/scripts/ledgetop-ops/versions?per_page=1", "versions_list"],
+    ["/workers/scripts/ledgetop-ops/versions?bindings_inherit=strict", "version_upload"],
+    [`/workers/scripts/ledgetop-ops/versions/${parent}`, "version"],
+    [`/workers/workers/ledgetop-ops/versions/${parent}?include=modules,sourcemaps`, "version_modules"],
+    ["/workers/scripts/ledgetop-ops/settings", "settings"], ["/workers/scripts/ledgetop-ops/schedules", "schedules"],
+    ["/workers/scripts/ops-ui-verify-0123456789abcdef01234567/subdomain", "script_subdomain"], ["/workers/subdomain", "account_subdomain"],
+    ["/workers/scripts/ledgetop-clients/assets-upload-session", "asset_session"], ["/workers/assets/upload?base64=true", "asset_upload"],
+    ["/workers/scripts/ops-ui-verify-0123456789abcdef01234567", "script"],
+    ["/workers/scripts/ledgetop-ops/settings?token=secret", "other"], ["/zones", "other"], [null, "other"],
+  ]) assert.equal(productionAutoProviderEndpoint(suffix), name, String(suffix));
+});

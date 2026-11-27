@@ -437,18 +437,20 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, app === 'operations' ? 'client' : 'operations'),
       expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
   };
-  const assertFence = async ({ forceFreshSchema = false, diagnosticSteps = false } = {}) => {
-    const step = (name, action) => diagnosticSteps ? trackProductionAutoStartupStageAsync(name, action) : action();
-    await step('old_assets_schema', () => checkMigrations({ forceFresh: forceFreshSchema }));
+  // stepPrefix names the fixed diagnostic sub-steps a failure is marked with: 'old_assets' (final old-asset fence)
+  // or 'mutation_fence' (the post-intent revalidation before a dispatch).
+  const assertFence = async ({ forceFreshSchema = false, stepPrefix = null } = {}) => {
+    const step = (name, action) => stepPrefix ? trackProductionAutoStartupStageAsync(`${stepPrefix}_${name}`, action) : action();
+    await step('schema', () => checkMigrations({ forceFresh: forceFreshSchema }));
     const fenceStartedMono = performance.now();
     verifiedCIStartedMono = performance.now();
-    verifiedCI = await step('old_assets_ci', () => mainCI.verify(sourceCommit));
+    verifiedCI = await step('ci', () => mainCI.verify(sourceCommit));
     need(sourceReader(ROOT, env) === sourceCommit && verifiedCI.passed === true,
       'runtime_source_or_main_drift');
     need(verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt, 'runtime_trigger_ci_run_superseded');
     const captureStartedMono = performance.now();
-    const observed = await step('old_assets_capture', () => currentCapture());
-    await step('old_assets_predecessor', () => verifyPredecessor(observed.raw));
+    const observed = await step('capture', () => currentCapture());
+    await step('predecessor', () => verifyPredecessor(observed.raw));
     if (expectedCapture) need(JSON.stringify(observed.value) === JSON.stringify(expectedCapture), 'runtime_capture_fence_drift');
     makePreflightLease(observed, Math.min(fenceStartedMono, captureStartedMono));
     return observed;
@@ -562,7 +564,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     // exact triggering CI run and provider capture after persistence, before
     // arming any expected transition or reserving a mutation permit. This is
     // evidence renewal, never a timestamp extension or a second write attempt.
-    const freshCapture = await assertFence({ forceFreshSchema: true });
+    const freshCapture = await assertFence({ forceFreshSchema: true, stepPrefix: 'mutation_fence' });
     const freshLease = preflightLease;
     need(leaseFresh(freshLease) && freshLease.sourceCommit === lease.sourceCommit
       && freshLease.mainCommit === lease.mainCommit && freshLease.runId === lease.runId
@@ -752,7 +754,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath, method, bearer: nonce.bearer, signal }),
         remove: () => provider.removeVerifier(name), readAbsent: () => provider.verifierAbsent(name) });
       ownedVerifierSourceHashes.delete(name);
-      await trackProductionAutoStartupStageAsync('old_assets_final_fence', () => assertFence({ diagnosticSteps: true }));
+      await trackProductionAutoStartupStageAsync('old_assets_final_fence', () => assertFence({ stepPrefix: 'old_assets' }));
       if (assetBootstrap) previousLedger = await trackProductionAutoStartupStageAsync('old_assets_complete_inventory',
         () => completeAssetInventoryBootstrap({ bootstrap: assetBootstrap,
           previous: ledger, verifiedAssets: result.assets, activeVersionId: baselineCapture[app].version.id, workerName, accountId }));
@@ -844,7 +846,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         message: `Retained assets release ${sourceCommit.slice(0, 12)} active` });
     },
     readDeployment: async () => {
-      const observed = await currentCapture();
+      const observed = await trackProductionAutoStartupStageAsync('deployment_capture', () => currentCapture());
       if (pendingTransition) {
         const transition = pendingTransition; pendingTransition = null;
         need(observed.value.controlsSHA256 === expectedCapture.controlsSHA256
