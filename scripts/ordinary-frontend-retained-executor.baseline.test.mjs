@@ -80,6 +80,6 @@ test('the executor selects the baseline before any capture and the production en
   assert.doesNotMatch(release, /operations\.some\(row => row\.versionId === baselineVersionId/u);
   const production = source.slice(source.indexOf('export async function executeOrdinaryFrontendRetainedProduction('),
     source.indexOf('export function validateProductionAuthorityPacketSelection('));
-  assert.match(production, /canonicalBrowserRetirementClientVersionId, operationsBaselineContract,\s*journalDirectory/u);
-  assert.match(production, /canonicalBrowserRetirementClientVersionId,\s*operationsBaselineContract,\s*reader,/u);
+  assert.match(production, /canonicalBrowserRetirementClientVersionId, operationsBaselineContract,[^}]*journalDirectory/u);
+  assert.match(production, /canonicalBrowserRetirementClientVersionId,\s*operationsBaselineContract,[^}]*reader,/u);
 });
