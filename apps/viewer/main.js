@@ -2613,6 +2613,13 @@ function installViewerMarks() {
         return [...names].map(node => node.getBoundingClientRect()).filter(box => box.width && box.height)
           .map(box => ({ x: box.left - frame.left, y: box.top - frame.top, width: box.width, height: box.height }));
       },
+      // The map's own buttons (Reset, Fullscreen, Save view image) as they are now, in the map's pixels: a mark's card stays clear of them.
+      mapControls: () => {
+        const frame = map?.getContainer().getBoundingClientRect();
+        if (!frame) return [];
+        return [...document.querySelectorAll('#floating-controls > button')].map(node => node.getBoundingClientRect()).filter(box => box.width && box.height)
+          .map(box => ({ x: box.left - frame.left, y: box.top - frame.top, width: box.width, height: box.height }));
+      },
       L, getMap: () => map,
       // Placing or drawing a mark ends any measuring tool first.
       onActivate: () => { if (state.activeTool && state.activeTool !== 'none') setTool('none'); },
