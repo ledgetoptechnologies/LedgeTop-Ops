@@ -17,7 +17,10 @@ import type { Env } from "./types";
  * slow or failing mail server cannot block or fail a share. Delivery is at
  * least once: a crash between the provider accepting a mail and its sent row
  * resends once after the lease, with the same Message-ID, as in the other
- * notification paths. A workspace of more than 200 members gets no email.
+ * notification paths. A workspace of more than 200 recipients gets no email.
+ * Recipients are current members plus the workspace's active Project Alpha
+ * portal users who have not signed in yet (an unbound principal, not blocked
+ * by email), one per address. Their key is pa-principal:<public id>.
  */
 export const SHARE_NOTICE_ACTOR = "system:viewer-share-email";
 const REQUESTED = "grant.notify.requested", ATTEMPT = "grant.notify.attempt", SENT = "grant.notify.sent", CLOSED = "grant.notify.closed";
@@ -96,6 +99,8 @@ export async function processDirectViewerShareNotices(env: Env,
         AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime(?2))
         AND (denial.scope_type='global' OR (denial.scope_type='workspace' AND denial.workspace_id=w.id AND denial.scope_public_id=w.id)))` : "";
   const members = new Map<string, Member[] | null>();
+  const principalsReady = live.length > 0 && (await db.prepare(`SELECT count(*) n FROM sqlite_master WHERE type='table'
+    AND name IN ('pa_portal_principals','portal_v2_identity_eligibility_blocks')`).first<number>("n")) === 2;
   for (const grant of live) {
     if (members.has(grant.workspace_id)) continue;
     const rows = (await db.prepare(`SELECT identity.id identity_id,lower(trim(identity.verified_email)) email
@@ -106,14 +111,29 @@ export async function processDirectViewerShareNotices(env: Env,
         AND identity.revoked_at IS NULL AND identity.verified_email IS NOT NULL AND instr(identity.verified_email,'@')>1
       WHERE w.id=?1 AND w.status='active' AND w.legacy_account_id IS NULL AND ${portalRootAccessAllowedSql(env, "w")} ${denylist}
       ORDER BY identity.id LIMIT ?3`).bind(grant.workspace_id, now, MAX_RECIPIENTS + 1).all<Member>()).results;
-    members.set(grant.workspace_id, rows.length > MAX_RECIPIENTS ? null : rows);
+    // A Project Alpha portal user who has not signed in yet has no membership,
+    // but the share is waiting for them: email their verified PA login address.
+    const waiting = principalsReady ? (await db.prepare(`SELECT 'pa-principal:'||principal.public_id identity_id,
+        lower(trim(principal.email_hint)) email
+      FROM portal_v2_workspaces w JOIN pa_portal_principals principal ON principal.workspace_id=w.id
+      WHERE w.id=?1 AND w.status='active' AND w.legacy_account_id IS NULL AND ${portalRootAccessAllowedSql(env, "w")}
+        AND principal.status='active' AND principal.identity_id IS NULL
+        AND length(trim(principal.email_hint)) BETWEEN 3 AND 320 AND instr(principal.email_hint,'@')>1
+        AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_blocks block WHERE block.status='active'
+          AND datetime(block.valid_from)<=datetime(?2) AND (block.expires_at IS NULL OR datetime(block.expires_at)>datetime(?2))
+          AND block.match_type='email' AND block.normalized_email=lower(trim(principal.email_hint)))
+      ORDER BY principal.public_id LIMIT ?3`).bind(grant.workspace_id, now, MAX_RECIPIENTS + 1).all<Member>()).results : [];
+    // One recipient per address; a signed-in member wins over their own waiting login.
+    const seen = new Set(rows.map(row => row.email));
+    const recipients = [...rows, ...waiting.filter(row => !seen.has(row.email) && seen.add(row.email))];
+    members.set(grant.workspace_id, recipients.length > MAX_RECIPIENTS ? null : recipients);
   }
   // What is already recorded for every (grant, identity), read by primary key.
   const pairs: Pair[] = [];
   for (const grant of live) {
     const list = members.get(grant.workspace_id);
     if (list === null) { await close(grant, "recipient-limit"); continue; }
-    if (!list!.length) { await close(grant, "no-current-members"); continue; }
+    if (!list!.length) { await close(grant, "no-recipients"); continue; }
     for (const member of list!) pairs.push({ grant, identity: member.identity_id });
   }
   const ids = pairs.flatMap(pair => [sentId(pair.grant.id, pair.identity),

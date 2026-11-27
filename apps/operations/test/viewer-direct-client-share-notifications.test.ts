@@ -94,6 +94,50 @@ describe('Viewer direct share client email',()=>{
   await processDirectViewerShareNotices(env,{nowMs:LATER+60*60_000,send});
   expect(sent).toHaveLength(2);
  });
+ it('emails a Project Alpha portal user who has not signed in yet, once per address, skipping blocked and revoked ones',async()=>{
+  const {database,env,sent,send}=await fixture();
+  for(const statement of [
+   `CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,identity_id TEXT,email_hint TEXT,display_name TEXT,status TEXT)`,
+   `CREATE TABLE portal_v2_identity_eligibility_blocks(id TEXT,match_type TEXT,issuer TEXT,subject TEXT,normalized_email TEXT,status TEXT,valid_from TEXT,expires_at TEXT)`,
+   // workspace-two: alice is a member; her own waiting login, a new person, a blocked, a revoked and a bound principal.
+   `INSERT INTO pa_portal_principals VALUES('workspace-two','p-alice',NULL,'ALICE@example.test','Alice','active'),
+    ('workspace-two','p-new',NULL,' New.Person@Example.test ','New Person','active'),
+    ('workspace-two','p-new-again',NULL,'new.person@example.test','New Person','active'),
+    ('workspace-two','p-blocked',NULL,'blocked@example.test','Blocked','active'),
+    ('workspace-two','p-revoked',NULL,'old@example.test','Old','revoked'),
+    ('workspace-two','p-bound','id-gone','gone@example.test','Gone','active'),
+    ('workspace-one','p-other',NULL,'other-workspace@example.test','Other','active')`,
+   `INSERT INTO portal_v2_identity_eligibility_blocks VALUES('b1','email',NULL,NULL,'blocked@example.test','active','2020-01-01T00:00:00Z',NULL)`,
+  ])await database.prepare(statement).run();
+  await share(env,projectGrant('workspace-two'),true);
+  await processDirectViewerShareNotices(env,{nowMs:LATER,send});
+  expect(recipients(sent)).toEqual(['alice@example.test','new.person@example.test']);
+  await processDirectViewerShareNotices(env,{nowMs:LATER+60*60_000,send});
+  expect(sent).toHaveLength(2);
+ });
+ it('emails an individual client whose only recipient is a waiting Project Alpha login',async()=>{
+  const {database,env,sent,send}=await fixture();
+  for(const statement of [
+   `CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,identity_id TEXT,email_hint TEXT,display_name TEXT,status TEXT)`,
+   `CREATE TABLE portal_v2_identity_eligibility_blocks(id TEXT,match_type TEXT,issuer TEXT,subject TEXT,normalized_email TEXT,status TEXT,valid_from TEXT,expires_at TEXT)`,
+   `DELETE FROM portal_v2_workspace_memberships WHERE workspace_id='workspace-two'`,
+   `INSERT INTO pa_portal_principals VALUES('workspace-two','p-solo',NULL,'solo@example.test','Solo','active')`,
+  ])await database.prepare(statement).run();
+  await share(env,projectGrant('workspace-two'),true);
+  await processDirectViewerShareNotices(env,{nowMs:LATER,send});
+  expect(recipients(sent)).toEqual(['solo@example.test']);
+  const closed=await database.prepare(`SELECT details_json FROM viewer_direct_client_grant_audit WHERE action='grant.notify.closed'`).first<string>('details_json');
+  expect(JSON.parse(closed!)).toEqual({reason:'sent'});
+ });
+ it('closes with no-recipients when nobody can be emailed',async()=>{
+  const {database,env,sent,send}=await fixture();
+  await database.prepare(`DELETE FROM portal_v2_workspace_memberships WHERE workspace_id='workspace-two'`).run();
+  await share(env,projectGrant('workspace-two'),true);
+  await processDirectViewerShareNotices(env,{nowMs:LATER,send});
+  expect(sent).toHaveLength(0);
+  const closed=await database.prepare(`SELECT details_json FROM viewer_direct_client_grant_audit WHERE action='grant.notify.closed'`).first<string>('details_json');
+  expect(JSON.parse(closed!)).toEqual({reason:'no-recipients'});
+ });
  it('sends nothing when the box is unticked or for an older caller that does not ask',async()=>{
   const {env,sent,send}=await fixture();
   await share(env,taskGrant('task-one'),false);
