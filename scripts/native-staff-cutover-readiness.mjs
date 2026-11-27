@@ -235,11 +235,22 @@ function rows(output) {
 /** Separate from the production metadata reader. It uses only installed
  * Wrangler's supported remote SELECT command through its existing credential
  * provider. It never reads or returns a private credential file. */
+/** Release credential format. Default: an API token. With the explicit
+ * LEDGETOP_RELEASE_CREDENTIAL=wrangler-oauth-v1 flag, the operator's existing
+ * Wrangler OAuth access token is also accepted; its only extra character is '.'
+ * (never first or last). The value is checked, never logged or stored. */
+export const WRANGLER_OAUTH_RELEASE_CREDENTIAL = "wrangler-oauth-v1";
+export function releaseCredentialAccepted(token, env = process.env) {
+  if (typeof token !== "string") return false;
+  if (/^[A-Za-z0-9_-]{20,1024}$/u.test(token)) return true;
+  return env?.LEDGETOP_RELEASE_CREDENTIAL === WRANGLER_OAUTH_RELEASE_CREDENTIAL
+    && /^[A-Za-z0-9_-][A-Za-z0-9._-]{18,1022}[A-Za-z0-9_-]$/u.test(token);
+}
 export function nativeStaffReadinessEnvironment(env) {
   const unsafe = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_USE_ENV_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR"];
   if (Object.entries(env).some(([key, value]) => unsafe.includes(key.toUpperCase()) && value)
     || env.CLOUDFLARE_ACCOUNT_ID !== NATIVE_STAFF_PRODUCTION_TARGET.accountId
-    || typeof env.CLOUDFLARE_API_TOKEN !== "string" || !/^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN)) fail("noninteractive_environment_required");
+    || !releaseCredentialAccepted(env.CLOUDFLARE_API_TOKEN, env)) fail("noninteractive_environment_required");
   const keys = ["SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA", "PATHEXT", "HOME"];
   return { ...Object.fromEntries(Object.entries(env).filter(([key]) => keys.includes(key.toUpperCase()))),
     CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
