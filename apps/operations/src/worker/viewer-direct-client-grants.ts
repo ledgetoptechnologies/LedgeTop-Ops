@@ -5,6 +5,7 @@ import {sqlScope} from './acl';
 import {sha256} from './crypto';
 import {portalRootAccessAllowedSql} from './client-portal-root-access';
 import {viewerServiceClient} from './viewer-integration';
+import {shareNoticeRequestStatement} from './viewer-direct-client-share-notifications';
 import {portalProjectionSourceGuard,readPortalProjectionSourceProof} from '../../../client/src/worker/project-alpha-portal-authority';
 import type {Env,StaffPrincipal} from './types';
 
@@ -350,7 +351,8 @@ function mutationStatements(database:Pick<D1Database,'prepare'>,principal:StaffP
  .bind(principal.id,idempotencyKey,action,fingerprint,id,JSON.stringify(storedResponse),now),
  database.prepare(`INSERT INTO viewer_direct_client_grant_audit VALUES(?,?,?,?,?,?,?)`)
  .bind(crypto.randomUUID(),id,action,principal.id,idempotencyKey,JSON.stringify(response),now)];}
-export async function createDirectViewerClientGrant(input:{env:Env;principal:StaffPrincipal;grant:unknown;idempotencyKey:string;request:Request})
+/** notifyClient asks for the client email. Only a new share asks; a replay or a refusal never does. */
+export async function createDirectViewerClientGrant(input:{env:Env;principal:StaffPrincipal;grant:unknown;idempotencyKey:string;request:Request;notifyClient?:boolean})
  :Promise<{grant:DirectViewerClientGrantPublicResult;replayed:boolean}>{
  const {env,principal}=input;await requireDirectViewerClientManage(env,principal);const parsed=inputSchema.safeParse(input.grant);
  if(!parsed.success||!key.safeParse(input.idempotencyKey).success)fail(400,'invalid_request','Invalid Viewer sharing request');
@@ -429,7 +431,9 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  row.claim_authority_id,row.claim_source_id,row.claim_source_workspace_id,row.claim_ownership_epoch,
  ...(operationsAuthority?[operationsAuthority.targetId,operationsAuthority.targetRevision,operationsAuthority.ownershipEpoch]:[])),
  ...mutationStatements(database,principal,input.idempotencyKey,fingerprint,id,'grant.create',result,now,
-   {version:1,grant:result,recipientAuthorityPin:pin} satisfies CreateReceiptEnvelope)]);
+   {version:1,grant:result,recipientAuthorityPin:pin} satisfies CreateReceiptEnvelope),
+ ...(input.notifyClient===true?[shareNoticeRequestStatement(database,{grantId:id,staffId:principal.id,idempotencyKey:input.idempotencyKey,now,
+   projectName:catalog.project.displayName,taskName:g.taskId?catalog.tasks[0]?.displayName:null})]:[])]);
  }catch(error){const replay=await receipt(env,principal.id,input.idempotencyKey,fingerprint);if(replay){
    const current=await recipient(env,g.sourceId,g.workspaceId),priorPin=createReceiptAuthorityPin(replay.response);
    if((priorPin&&JSON.stringify(priorPin)!==JSON.stringify(current.pin))

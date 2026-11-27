@@ -299,6 +299,7 @@ import {
 } from "./viewer-integration";
 import { registerDirectViewerClientRoutes } from "./viewer-direct-client-routes";
 import { drainDirectViewerClientGrantRevocations } from "./viewer-direct-client-grants";
+import { processDirectViewerShareNotices } from "./viewer-direct-client-share-notifications";
 import { pruneDirectViewerSessionIntents } from "./viewer-direct-client-session-issuer";
 import {
   registerViewerProcessingRoutes,
@@ -4045,6 +4046,7 @@ async function scheduled(
           processClientOpsTriageInquiryNotifications(env),
           processClientFolderGrantNotifications(env),
           processClientFolderChangeNotifications(env),
+          ...(env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED === "true" ? [processDirectViewerShareNotices(env)] : []),
         ]),
         processIncomingUploadNotifications(env),
         processClientFeedbackNotifications(env),

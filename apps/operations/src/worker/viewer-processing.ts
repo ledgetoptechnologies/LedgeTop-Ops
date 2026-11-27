@@ -423,7 +423,10 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
       grant: z.unknown().optional(),
       grantId: opaqueId.optional(),
       reason: z.string().trim().min(1).max(240).optional(),
+      notifyClient: z.boolean().optional(),
     }).strict().superRefine((value, context) => {
+      if (value.notifyClient !== undefined && (value.action !== "create" || value.connection !== "direct"))
+        context.addIssue({ code: "custom", message: "Email client is only for a new direct share" });
       // Grouping is an optional, separate read: direct connection only, with no other fields.
       if (value.action === "groups" && (value.connection !== "direct" || value.listQuery || value.idempotencyKey || value.grant || value.grantId || value.reason))
         context.addIssue({ code: "custom", message: "Groups take no fields" });
@@ -458,7 +461,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
         if(parsed.data.action==='groups')return c.json(await listDirectViewerClientGroups(c.env,principal));
         if(parsed.data.action==='create'){
           const result=await createDirectViewerClientGrant({env:c.env,principal,grant:parsed.data.grant,
-            idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw});
+            idempotencyKey:parsed.data.idempotencyKey!,request:c.req.raw,notifyClient:parsed.data.notifyClient===true});
           return c.json(result,result.replayed?200:201);
         }
         const result=await revokeDirectViewerClientGrant({env:c.env,principal,grantId:parsed.data.grantId!,
