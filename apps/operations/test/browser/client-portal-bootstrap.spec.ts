@@ -49,8 +49,16 @@ test("Client Hub stages one exact Project Alpha portal root without treating aut
   await expect(page.getByText("Workspace creation never grants access by itself.")).toBeVisible();
   // The only unique account is chosen and shown; nothing lists every client until the user types.
   await expect(page.getByRole("combobox", { name: "Existing client portal account" })).toHaveValue(account.displayName);
-  await expect(page.getByRole("option")).toHaveCount(0);
+  await expect(page.getByRole("listbox", { name: "Existing client portal account" })).toHaveCount(0);
   await page.getByRole("combobox", { name: "Project Alpha workspace root" }).fill("property");
+  const sourceBox = page.getByRole("combobox", { name: "Project Alpha workspace root" });
+  await page.getByRole("option", { name: /Example Property Management LLC — Sample project contact/ }).click();
+  // After a pick, focus returns to the box, and typing edits the text instead of wiping it.
+  await expect(sourceBox).toBeFocused();
+  await sourceBox.press("End"); await sourceBox.press("X");
+  await expect(sourceBox).toHaveValue("Example Property Management LLC — Sample project contactX");
+  await expect(page.getByRole("button", { name: "Review portal setup" })).toBeDisabled();
+  await sourceBox.press("Backspace");
   await page.getByRole("option", { name: /Example Property Management LLC — Sample project contact/ }).click();
   await expect(page.getByText("2 verified active members · 1 manager.")).toBeVisible();
   await page.getByRole("button", { name: "Review portal setup" }).click();
