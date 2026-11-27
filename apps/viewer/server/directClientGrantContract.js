@@ -55,4 +55,16 @@ function directListQuery(query) {
     ...(query.include !== undefined ? { include: query.include } : {}), ...(query.grantsCursor !== undefined ? { grantsCursor: query.grantsCursor } : {}) };
 }
 
-module.exports = { validDirectGrantInput, validDirectSnapshot, directListQuery };
+// Optional grouping of one real client's workspaces across divisions (shared-profile link only).
+// Each group is 2-4 [sourceId, workspaceId] pairs in distinct sources; no workspace is in two groups.
+const DIRECT_GROUP_LIMIT = 250;
+function validDirectGroups(value) {
+  if (!exact(value, ['groups']) || !Array.isArray(value.groups) || value.groups.length > DIRECT_GROUP_LIMIT) return false;
+  const seen = new Set();
+  return value.groups.every(group => Array.isArray(group) && group.length >= 2 && group.length <= 4
+    && new Set(group.map(pair => Array.isArray(pair) ? pair[0] : null)).size === group.length
+    && group.every(pair => Array.isArray(pair) && pair.length === 2 && source(pair[0]) && id(pair[1])
+      && !seen.has(pair[1]) && seen.add(pair[1])));
+}
+
+module.exports = { validDirectGrantInput, validDirectSnapshot, directListQuery, validDirectGroups, DIRECT_GROUP_LIMIT };

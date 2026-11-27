@@ -23,3 +23,7 @@ Apply only the new Ops migrations 0207–0209 and Client migration 0232 after th
 The private named bindings are Client → Ops `SharedProfilePortalIngress` and Ops → Client `SharedProfilePortalAuthorityReader`. Deploy entrypoints before binding their consumers. No proof-bearing public HTTP endpoint or new credential is required.
 
 Roll out reviewed duplicate pairs before single-record bootstrap, then issue exact own-client portal grants. Verify preserved PA/source/workspace IDs, parent relationships, public-link states and delivery acknowledgements. Existing legacy profile routes retain their previous behavior for records outside a shared group.
+
+## Viewer Share picker
+
+The Viewer's client Share picker and access list show workspaces joined by a reviewed two-member shared profile as one client. Operations returns these groups in one separate, optional read per Share dialog; the client list itself is unchanged. Names, emails and public IDs never group records. A missing, incomplete or ambiguous link, a slow or failed read, or an older Operations release leaves every workspace as its own row. A share is still written to one workspace that staff choose and the review names; revoking still acts on one grant.

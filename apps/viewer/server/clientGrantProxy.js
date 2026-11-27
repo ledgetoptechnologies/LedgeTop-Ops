@@ -2,12 +2,15 @@
 
 const { signViewerEvent } = require('./viewerEvents');
 const { randomUUID } = require('node:crypto');
-const { validDirectGrantInput, validDirectSnapshot, directListQuery } = require('./directClientGrantContract');
+const { validDirectGrantInput, validDirectSnapshot, directListQuery, validDirectGroups } = require('./directClientGrantContract');
 
 const REMOTE_PATH = '/api/viewer/workspace/client-grants';
 const LOCAL_PATH = '/api/v1/workspace/client-grants';
 // What Operations answers when it does not accept the shape of a request.
 const LIST_SHAPE_REFUSAL = 'Viewer client-grant request is invalid';
+// Client grouping is optional: a short wait and a small answer, or the picker keeps separate rows.
+const GROUPS_TIMEOUT_MS = 2_000;
+const GROUPS_MAX_BYTES = 128 * 1024;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 
@@ -55,6 +58,7 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       if (supplied.reason === undefined) supplied.reason = 'Revoked by staff';
       if (typeof supplied.reason !== 'string' || /[\u0000-\u001f\u007f]/.test(supplied.reason)) return invalid(res);
     }
+    if (action === 'groups' && Object.keys(req.query || {}).length) return invalid(res);
     const envelope = { subject: req.adminPrincipal.subject, action, ...(connection ? { connection } : {}) };
     if (connection === 'direct' && action === 'list') {
       const listQuery = directListQuery(req.query);
@@ -102,17 +106,18 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
         const response = await fetchImpl(url, {
           method: 'POST',
           redirect: 'error',
-          signal: AbortSignal.timeout(15_000),
+          signal: AbortSignal.timeout(action === 'groups' ? GROUPS_TIMEOUT_MS : 15_000),
           headers: { ...signed, Accept: 'application/json', 'Content-Type': 'application/json' },
           body,
         });
         upstreamStatus = response.status;
         stage = 'response_headers';
+        const limit = action === 'groups' ? GROUPS_MAX_BYTES : 1024 * 1024;
         const declared = Number(response.headers.get('content-length') || 0);
-        if (declared > 1024 * 1024) throw new Error('response_too_large');
+        if (declared > limit) throw new Error('response_too_large');
         stage = 'response_body';
         const text = await response.text();
-        if (Buffer.byteLength(text) > 1024 * 1024) throw new Error('response_too_large');
+        if (Buffer.byteLength(text) > limit) throw new Error('response_too_large');
         stage = 'response_json';
         try { return { response, payload: JSON.parse(text) }; } catch { throw new Error('invalid_response'); }
       };
@@ -144,7 +149,7 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
         return res.status(status).json({ error: 'Operations rejected the client access request', code: 'operations_request_failed' });
       }
       stage = 'response_schema';
-      if (!(connection === 'direct' ? validDirectSnapshot(payload, action) : connection === 'native' ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
+      if (!(action === 'groups' ? validDirectGroups(payload) : connection === 'direct' ? validDirectSnapshot(payload, action) : connection === 'native' ? validNativeSnapshot(payload, action) : validSnapshot(payload))) throw new Error('invalid_response');
       const status = connection === 'direct' && action === 'revoke' && payload.sessionRevocation.pending
         ? 202 : action === 'create' && !payload.replayed ? 201 : 200;
       return res.status(status).json(payload);
@@ -164,6 +169,7 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnost
       router.get(directPath, allowed, (req, res) => proxy(req, res, 'list', 'direct'));
       router.post(directPath, allowed, (req, res) => proxy(req, res, 'create', 'direct'));
       router.delete(`${directPath}/:grantId`, allowed, (req, res) => proxy(req, res, 'revoke', 'direct'));
+      router.get('/api/v1/workspace/direct-client-groups', allowed, (req, res) => proxy(req, res, 'groups', 'direct'));
       const nativePath = '/api/v1/workspace/native-client-grants';
       router.get(nativePath, allowed, (req, res) => proxy(req, res, 'list', 'native'));
       router.post(nativePath, allowed, (req, res) => proxy(req, res, 'create', 'native'));
