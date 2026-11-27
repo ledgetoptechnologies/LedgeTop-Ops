@@ -1434,6 +1434,39 @@ test('Delete moves a task to the Recycle Bin with Undo and no confirmation', {ti
   await waitFor(client,`!document.querySelector('${treeRow('t:task-quarry')}')`,'the Delete key did not delete the task');
 }));
 
+test('a task menu near the bottom opens clear of the toast and upload tray', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-menu-notices',width:1280,height:620,quarryInJohnson:true},async({client,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-quarry')}'))&&Boolean(document.querySelector('${treeRow('t:task-johnson')}'))`,'tasks unavailable');
+  const overlap=`(()=>{const menu=document.querySelector('details.task-more-actions[open] > .project-more-menu').getBoundingClientRect();return[...document.querySelectorAll('#workspace-notices > *')].filter(item=>{const r=item.getBoundingClientRect();return r.width&&r.height&&r.left<menu.right&&r.right>menu.left&&r.top<menu.bottom&&r.bottom>menu.top;}).length;})()`;
+  // A tray the size of the real one, and the toast above it.
+  await client.evaluate(`(()=>{const tray=document.createElement('aside');tray.className='task-transfer-tray';tray.innerHTML='<strong>Testing and Examples</strong><p>copying photos</p><progress max="100" value="40"></progress><div class="row-actions"><button type="button">View upload</button><button type="button">Stop / discard</button></div>';document.querySelector('#workspace-notices').append(tray);const toast=document.querySelector('#workspace-toast');toast.textContent='Task restarted';toast.style.display='flex';})()`);
+  for(const key of ['t:task-quarry','t:task-johnson']){
+    await client.evaluate(`(()=>{const row=document.querySelector('${treeRow(key)}');row.scrollIntoView({block:'end'});window.scrollBy(0,0);})()`);
+    await client.evaluate(`document.querySelector('${treeRow(key)} details.task-more-actions > summary').click()`);
+    await waitFor(client,`Boolean(document.querySelector('${treeRow(key)} details.task-more-actions[open]'))`,'menu did not open');
+    await new Promise(resolve=>setTimeout(resolve,50));
+    const debug=await client.evaluate(`JSON.stringify({menu:document.querySelector('details.task-more-actions[open] > .project-more-menu').getBoundingClientRect(),up:document.querySelector('details.task-more-actions[open]').className,max:document.querySelector('details.task-more-actions[open] > .project-more-menu').style.maxHeight,notices:[...document.querySelectorAll('#workspace-notices > *')].map(n=>n.getBoundingClientRect()),h:innerHeight})`);
+    assert.equal(await client.evaluate(overlap),0,`${key}: the open menu overlaps a notice ${debug}`);
+    const box=await client.evaluate(`(()=>{const r=document.querySelector('details.task-more-actions[open] > .project-more-menu').getBoundingClientRect();return{top:r.top,bottom:r.bottom,height:innerHeight};})()`);
+    assert.ok(box.top>=0&&box.bottom<=box.height,`${key}: the menu leaves the window`);
+    await treeScreenshot(client,`desktop-1280-task-menu-notices-${key.slice(2)}.png`);
+    await client.evaluate(`document.querySelector('${treeRow(key)} details.task-more-actions > summary').click()`);
+  }
+  // The toast and the tray stack instead of overlapping each other.
+  assert.equal(await client.evaluate(`(()=>{const a=document.querySelector('#workspace-toast').getBoundingClientRect(),b=document.querySelector('#workspace-notices > .task-transfer-tray').getBoundingClientRect();return a.bottom<=b.top;})()`),true);
+}));
+
+test('a task menu clamped by a short window scrolls inside itself', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-menu-clamped',width:1280,height:400,quarryInJohnson:true},async({client,origin})=>{
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson`});
+  await waitFor(client,`Boolean(document.querySelector('${treeRow('t:task-johnson')}'))`,'tasks unavailable');
+  await client.evaluate(`(()=>{const toast=document.querySelector('#workspace-toast');toast.textContent='Task restarted';toast.style.display='flex';document.querySelector('${treeRow('t:task-johnson')}').scrollIntoView({block:'center'});})()`);
+  await client.evaluate(`document.querySelector('${treeRow('t:task-johnson')} details.task-more-actions > summary').click()`);
+  await waitFor(client,`document.querySelector('details.task-more-actions[open] > .project-more-menu')?.hasAttribute('data-max-height')`,'the menu was not clamped');
+  await client.evaluate(`(()=>{const menu=document.querySelector('details.task-more-actions[open] > .project-more-menu');menu.scrollTop=60;menu.dispatchEvent(new Event('scroll'));})()`);
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(await client.evaluate(`document.querySelector('details.task-more-actions[open] > .project-more-menu').scrollTop`),60);
+}));
+
 test('Duplicate opens a pre-filled task dialog and creates the copy in the same folder only when started', {timeout:90000,skip:manualFixture}, async t=>withTreeBrowser(t,{name:'tree-duplicate',width:1440,height:900,
   seed:processing=>{const folder=processing.createProjectFolder('project-quarry',{displayName:'Benches'},'staff');processing.moveTaskToFolder('task-quarry',folder.id,'staff');return{folder};},
   configure:runtime=>{

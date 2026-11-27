@@ -207,8 +207,9 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/id="background-search-form"/);
   assert.match(source,/load-more-background/);
   assert.match(source,/view-all-background/);
-  assert.match(source,/knownPhases=new Set/);
-  for(const phase of ['existing_model','validating_source','materializing_recovery'])assert.ok(source.includes(phase),phase);
+  const phases=fs.readFileSync(path.join(root,'workspace-operation-progress.mjs'),'utf8');
+  assert.match(phases,/KNOWN_PHASES = new Set/);assert.match(source,/operationPhaseLabel\(operation\)/);
+  for(const phase of ['existing_model','validating_source','materializing_recovery','copying_photos'])assert.ok(phases.includes(phase),phase);
   assert.match(source,/operation\.type==='lod_recovery'/);
   assert.match(source,/Retry recovery/);
 });

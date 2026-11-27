@@ -11,6 +11,7 @@ import { canRecoverExistingResult, recoverExistingResult } from './workspace-ing
 import { createWorkspaceDialogs } from './workspace-dialogs.mjs';
 import { mountPropertyLinesSource } from './workspace-property-lines.mjs';
 import { mountNewTask } from './workspace-new-task.mjs';
+import { operationPercent, operationPhaseLabel } from './workspace-operation-progress.mjs';
 import { attemptProviderName, removeProcessingProvider } from './workspace-provider-remove.mjs';
 import { mountTaskOptions } from './workspace-task-options.mjs';
 import { createWorkspaceRecovery, relayWorkspaceRecoveryGrant } from './workspace-recovery.mjs';
@@ -438,7 +439,7 @@ function openModal(title,body,className=''){modal.className=`workspace-modal ${c
 
 function operationSource(operation){const source=operation.source||{},kind=typeof source==='string'?source:source.kind,label=({server_zip:'Server ZIP',server_folder:'Server folder',browser_upload:'Browser upload',server_mount:'Server import folder',existing_model:'Existing model'})[kind]||'Managed import';if(typeof source!=='object'||source===null)return label;if(source.browserTransferRequired&&!source.transferComplete)return`${label} · transfer pending`;if(source.browserTransferRequired&&source.transferComplete)return`${label} · transfer complete`;return label}
 function operationTitle(operation){const project=state.projects.find(item=>item.id===operation.projectId),fallback=operation.type==='raw_photo_copy'?'Copy source photos':isCompanionRepairOperation(operation)?'Restore missing products':operation.type==='lod_recovery'?'3D tile recovery version':'Background import',name=operation.result?.task?.displayName||operation.result?.displayName||fallback;return project?`${project.displayName} · ${name}`:name}
-function operationProgress(operation){const value=Number(operation.progress),percent=Math.max(0,Math.min(100,Math.round((Number.isFinite(value)?value:0)*100))),phaseLabels={existing_model:'Existing model',validating_source:'Validating recovery source',materializing_recovery:'Creating recovery version'},knownPhases=new Set(['queued','leased','assembling_upload','extracting','staging','discovering','adopting','registering','inspecting','existing_model','validating_source','materializing_recovery','awaiting_derivatives','succeeded','failed','cancelled']),raw=String(operation.phase||operation.status||'queued'),phase=phaseLabels[raw]||(knownPhases.has(raw)?raw:operation.status||'working').replaceAll('_',' '),heartbeat=operation.status==='awaiting_derivatives'?'Waiting for required derivatives':operation.heartbeatAt?`Worker heartbeat ${dateTime(operation.heartbeatAt)}`:OPERATION_ACTIVE.has(operation.status)?'Waiting for worker heartbeat':`Updated ${dateTime(operation.updatedAt)}`;return{percent,phase,heartbeat}}
+function operationProgress(operation){const percent=operationPercent(operation),phase=operationPhaseLabel(operation),heartbeat=operation.status==='awaiting_derivatives'?'Waiting for required derivatives':operation.heartbeatAt?`Worker heartbeat ${dateTime(operation.heartbeatAt)}`:OPERATION_ACTIVE.has(operation.status)?'Waiting for worker heartbeat':`Updated ${dateTime(operation.updatedAt)}`;return{percent,phase,heartbeat}}
 function backgroundMatches(values){const query=state.backgroundQuery.trim().toLocaleLowerCase('en-US');return!query||values.some(value=>String(value??'').toLocaleLowerCase('en-US').includes(query))}
 function backgroundControls(kind,shown,total){if(total<=shown)return'';return`<div class="row-actions background-list-actions">${button('load-more-background',kind,`Load ${Math.min(3,total-shown)} more`,false,`data-kind="${esc(kind)}"`)}${button('view-all-background',kind,`View all ${total}`,false,`data-kind="${esc(kind)}"`)}</div>`}
 function operationActivity(){const all=[...state.operations].sort((left,right)=>Date.parse(right.updatedAt||right.createdAt||0)-Date.parse(left.updatedAt||left.createdAt||0)),matching=all.filter(operation=>backgroundMatches([operationTitle(operation),operationSource(operation),operation.status,operation.phase,operation.errorCode])),operations=matching.slice(0,state.backgroundImportLimit),active=all.filter(operation=>OPERATION_ACTIVE.has(operation.status)).length;return`<section id="import-activity" class="import-activity content-card" aria-labelledby="import-activity-title"><div class="card-heading"><div><p class="eyebrow">Background work</p><h2 id="import-activity-title">Import activity</h2></div>${active?badge(`${active} active`):'<small>Newest imports and recoveries</small>'}</div><div class="operation-list" aria-live="polite">${operations.map(operation=>{const progress=operationProgress(operation),failed=operation.status==='failed',recovery=['lod_recovery','companion_repair'].includes(operation.type),canRetry=operation.retryable!==false&&(recovery?can('viewer.processing.write'):can('viewer.datasets.import'));return`<article class="operation-row" data-operation-id="${esc(operation.id)}"><div class="operation-heading"><div><strong>${esc(operationTitle(operation))}</strong><small>Source: ${esc(operationSource(operation))}</small></div>${badge(operation.status)}</div><div class="operation-progress"><progress value="${progress.percent}" max="100" aria-label="${esc(operationTitle(operation))} progress"></progress><strong>${progress.percent}%</strong></div><div class="operation-meta"><span>Phase: ${esc(progress.phase)}</span><span>${esc(progress.heartbeat)}</span><span>Attempt ${Math.max(1,Number(operation.attemptCount)||1)}</span></div>${failed?`<div class="operation-failure"><p>${esc(operation.errorMessage||operation.errorCode||(recovery?'The recovery failed. The existing model version remains safe.':'The import failed without additional details.'))}</p>${canRetry?button('retry-operation',operation.id,recovery?'Retry recovery':'Retry import'):''}</div>`:''}</article>`}).join('')||empty(state.backgroundQuery?'No imports or recoveries match this search.':'No imports or recoveries have been recorded yet.')}</div>${backgroundControls('imports',operations.length,matching.length)}</section>`}
@@ -1734,8 +1735,28 @@ content.addEventListener('toggle',event=>{
   if(menu.open){
     closeTreeMenus(menu);
     if(panel&&phoneLayout()&&typeof panel.showPopover==='function'){panel.popover='manual';try{panel.showPopover();}catch{panel.removeAttribute('popover');}}
-  }else if(panel?.hasAttribute('popover')){try{panel.hidePopover();}catch{}panel.removeAttribute('popover');}
+    else if(panel)placeTreeMenu(menu,panel);
+  }else{if(panel?.hasAttribute('popover')){try{panel.hidePopover();}catch{}panel.removeAttribute('popover');}if(panel)resetTreeMenuPlacement(menu,panel);}
 },true);
+// A desktop row menu never runs under the toast or upload tray: it opens upward when there is more room
+// above, and scrolls inside itself when neither side fits.
+function resetTreeMenuPlacement(menu,panel){menu.classList.remove('menu-up');panel.style.maxHeight='';panel.style.bottom='';delete panel.dataset.maxHeight;}
+function placeTreeMenu(menu,panel){
+  resetTreeMenuPlacement(menu,panel);
+  const summary=menu.querySelector(':scope > summary');if(!summary||panel.hasAttribute('popover'))return;
+  const anchor=summary.getBoundingClientRect(),box=panel.getBoundingClientRect(),height=panel.scrollHeight,gap=6;
+  let floor=window.innerHeight-8;
+  for(const notice of document.querySelectorAll('#workspace-notices > *')){const rect=notice.getBoundingClientRect();if(rect.width&&rect.height&&rect.left<box.right&&rect.right>box.left)floor=Math.min(floor,rect.top-8);}
+  const ceiling=Math.max(8,(document.querySelector('.workspace-header')?.getBoundingClientRect().bottom||0)+8),below=floor-(anchor.bottom+gap);
+  if(height<=below)return;
+  // Opening upward, the menu's bottom edge stays above the notices even when the row itself is behind them.
+  const upperEdge=Math.min(anchor.top-gap,floor),above=upperEdge-ceiling;
+  if(above>=below){menu.classList.add('menu-up');const lift=anchor.top-gap-upperEdge;if(lift>0)panel.style.bottom=`calc(100% + ${gap+Math.ceil(lift)}px)`;if(height>above){panel.style.maxHeight=`${Math.max(96,Math.floor(above))}px`;panel.dataset.maxHeight='';}}
+  else if(height>below){panel.style.maxHeight=`${Math.max(96,Math.floor(below))}px`;panel.dataset.maxHeight='';}
+}
+function placeOpenTreeMenu(){const menu=content.querySelector('details.tree-menu[open]'),panel=menu?.querySelector(':scope > .project-more-menu');if(panel&&!panel.hasAttribute('popover'))placeTreeMenu(menu,panel);}
+{const notices=document.querySelector('#workspace-notices');if(notices&&typeof ResizeObserver==='function')new ResizeObserver(placeOpenTreeMenu).observe(notices);}
+window.addEventListener('resize',placeOpenTreeMenu);document.addEventListener('scroll',event=>{if(!event.target?.closest?.('details.tree-menu'))placeOpenTreeMenu();},{capture:true,passive:true});
 document.addEventListener('click',event=>{if(!event.target.closest?.('details.tree-menu'))closeTreeMenus();});
 document.addEventListener('keydown',event=>{
   if(event.key==='Escape'&&content.querySelector('details.tree-menu[open]')&&!modal.open)closeTreeMenus();
