@@ -10,7 +10,7 @@ import { capture, CloudflareReader, deploymentSourceCommit, hash, canonical, nee
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
   OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE,
   ordinaryFrontendPreflightDescriptor, resourcesShape } from './production-deploy.mjs';
-import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET, releaseCredentialAccepted } from './native-staff-cutover-readiness.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT, validateOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority.mjs';
 import { readOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority-reader.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT, validatePost0226StaffPreservationReview } from './ordinary-frontend-authority-post0226.mjs';
@@ -813,7 +813,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
   canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId, operationsBaselineContract,
   journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
-    && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
+    && releaseCredentialAccepted(env.CLOUDFLARE_API_TOKEN, env),
   'Cloudflare account and API token are required by the explicitly invoked production executor');
   validateBuildEnvironment(env);
   needFn(path.isAbsolute(artifactSourceRoot ?? ''), 'Pinned frontend artifact source checkout is required separately from executor source');
@@ -841,7 +841,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     needFn(!staffReviewPath && !frontendAuthorityReviewPath, 'Post-0226 preservation review cannot be combined with another authority packet');
   validateProductionAuthorityPacketSelection({ app, review, frontendReview, post0226Review });
   const assetVerifierProvider = createJournaledAssetVerifierProvider({ accountId: env.CLOUDFLARE_ACCOUNT_ID,
-    token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE, journalDirectory, sourceCommit: planSourceCommit });
+    token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE, journalDirectory, sourceCommit: planSourceCommit, env });
   return executeOrdinaryFrontendRetainedRelease({ app, plan, profile, expectedDeploymentVersions,
     assetVerifierProvider, staffAuthorityContract, staffCutoverReview: review, frontendAuthorityReview: frontendReview,
     post0226StaffPreservationReview: post0226Review,
@@ -869,9 +869,9 @@ export function validateProductionAuthorityPacketSelection({ app, review, fronte
 
 /** Bind every temporary verifier mutation intent to the already validated plan. */
 export function createJournaledAssetVerifierProvider({ accountId, token, fetchImpl = fetch, profile = PROFILE,
-  journalDirectory, sourceCommit, Provider = ProductionCloudflareProvider } = {}) {
+  journalDirectory, sourceCommit, Provider = ProductionCloudflareProvider, env = process.env } = {}) {
   needFn(accountId === NATIVE_STAFF_PRODUCTION_TARGET.accountId && typeof token === 'string'
-    && /^[A-Za-z0-9_-]{20,1024}$/u.test(token) && typeof fetchImpl === 'function'
+    && releaseCredentialAccepted(token, env) && typeof fetchImpl === 'function'
     && path.isAbsolute(journalDirectory ?? '') && HEX40.test(sourceCommit ?? '') && typeof Provider === 'function',
   'Temporary asset verifier provider identity invalid');
   const recordIntent = intent => appendProviderIntent(journalDirectory, { ...intent, sourceCommit });
