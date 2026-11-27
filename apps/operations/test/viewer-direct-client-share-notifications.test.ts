@@ -137,6 +137,15 @@ describe('Viewer direct share client email',()=>{
   await processDirectViewerShareNotices(env,{nowMs:LATER,send});
   expect(recipients(sent)).toEqual(['alice@example.test','bob@example.test']);
  });
+ it('linked workspaces shared in two clicks under a minute apart still email a shared member once',async()=>{
+  const {env,database,sent,send}=await fixture();
+  const first=await share(env,projectGrant('workspace-one'),true);await share(env,projectGrant('workspace-two'),true);
+  await database.prepare(`UPDATE viewer_direct_client_grant_audit SET created_at=? WHERE id=?`)
+   .bind(new Date(Date.now()-90_000).toISOString(),`vdcg-notify:${first.grant.grantId}`).run();
+  await processDirectViewerShareNotices(env,{nowMs:Date.now()+10_000,send});
+  await processDirectViewerShareNotices(env,{nowMs:LATER,send});
+  expect(recipients(sent)).toEqual(['alice@example.test','bob@example.test']);
+ });
  it('waits a short moment so a multi-task share is gathered first',async()=>{
   const {env,sent,send}=await fixture();
   await share(env,taskGrant(),true);
