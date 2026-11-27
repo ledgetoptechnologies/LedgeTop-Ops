@@ -116,6 +116,7 @@ test('a product download hands one ticket to the browser, and nothing once acces
   assert.equal(g.clicked.length, 0, 'no ticket once download permission is gone');
   assert.equal(g.mounted.available(), false);
   f.mounted.destroy(); g.mounted.destroy();
+});
 
 test('the model report button follows its own permission, apart from other downloads',async()=>{
   assert.equal(reportPermitted({download:true}),true,'an older link or session: the report came with downloads');
@@ -167,5 +168,4 @@ test('a session renewal (refresh with nothing changed) leaves a products list lo
   release({ok:true,json:async()=>({products:[{kind:'report',grantUrl:'/session-products/token/model/report/download-grants'}]})});await pending;
   assert.deepEqual(calls2.map(call=>call[1]),[undefined,'POST'],'the report download went ahead');
   mounted2.destroy();
-});
 });
