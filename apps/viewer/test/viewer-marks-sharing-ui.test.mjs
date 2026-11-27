@@ -125,7 +125,7 @@ test('shareAll uses actual capability and only existing eligible owned marks, pr
   await p.store.create(mark('View', { visibility: 'shared', access: 'view' }));
   await other.marks.setScope(f.scope('ops', 'staff-b'));
   await other.store.create(mark('Other', { visibility: 'private' }));
-  await p.button('Marks').click();
+  await p.q('.viewer-mark-layers').click();
   assert.equal(visible(p.button('Share all')), true);
   f.requests.length = 0;
   await p.button('Share all').click();
@@ -261,7 +261,7 @@ test('shareAll failure does not claim sharing succeeded or hide the retry action
   t.after(() => p.marks.dispose());
   await p.marks.setScope(f.scope('ops', 'staff-a'));
   const current = await p.store.create(mark('Private', { visibility: 'private' }));
-  await p.button('Marks').click(); await p.button('Share all').click();
+  await p.q('.viewer-mark-layers').click(); await p.button('Share all').click();
   assert.equal(p.store.find(current.id).visibility, 'private');
   assert.match(p.text(), /Too many requests/);
   assert.equal(visible(p.button('Share all')), true);
