@@ -326,3 +326,74 @@ test('Apply changes the ticked marks still shown, and the count says so', async 
   await p.confirm();
   assert.deepEqual([p.store.find(north.id).visibility, p.store.find(south.id).visibility], ['shared', 'private']);
 });
+
+const confirmButton = (p, text) => p.q('.viewer-mark-confirm').querySelectorAll('button').find(node => node.textContent === text);
+
+test('while the question is open the selection and choice are locked; a change that slips through drops the question', async t => {
+  const f = await openMarksPanel(t), p = f.mount();
+  t.after(() => p.marks.dispose());
+  await p.marks.setScope(f.scope('ops', 'staff-a'));
+  const alpha = await p.store.create(mark('Alpha', { visibility: 'private' }));
+  const bravo = await p.store.create(mark('Bravo', { visibility: 'private' }));
+  await p.q('.viewer-mark-layers').click();
+  await p.button('Select').click();
+  await row(p, 'Alpha').click();
+  await choose(p, 'shared-view');
+  await p.button('Apply').click();
+  assert.match(p.q('.viewer-mark-confirm').textContent, /1 mark to Shared, view only/);
+  for (const [what, node] of [['tick', tick(p, 'Bravo')], ['row', row(p, 'Bravo')], ['All', p.button('All')], ['None', p.button('None')],
+    ['choice', p.q('[name=bulkVisibility]')], ['account', p.q('[name=bulkAccount]')], ['search', p.q('[name=markSearch]')]])
+    assert.equal(node.disabled, true, `${what} locked while the question is open`);
+  // A change that reaches the controls anyway (a script, a stale event) is never applied under the old question.
+  await choose(p, 'private');
+  assert.equal(visible(p.q('.viewer-mark-confirm')), false, 'choice changed: the question is gone');
+  await choose(p, 'shared-view');
+  await p.button('Apply').click();
+  tick(p, 'Bravo').disabled = false; tick(p, 'Bravo').checked = true;
+  await tick(p, 'Bravo').fire('change');
+  f.requests.length = 0;
+  if (visible(p.q('.viewer-mark-confirm'))) await p.confirm();
+  assert.deepEqual([p.store.find(alpha.id).visibility, p.store.find(bravo.id).visibility], ['private', 'private'], 'nothing changed under a stale question');
+  assert.deepEqual(writes(f.requests), []);
+});
+
+test('closing the list drops an open question; it does not come back when the list reopens', async t => {
+  const f = await openMarksPanel(t), p = f.mount();
+  t.after(() => p.marks.dispose());
+  await p.marks.setScope(f.scope('ops', 'staff-a'));
+  const one = await p.store.create(mark('One', { visibility: 'private' }));
+  await p.q('.viewer-mark-layers').click();
+  await p.button('Share all').click();
+  assert.equal(visible(p.q('.viewer-mark-confirm')), true);
+  await p.q('[aria-label="Close marks"]').click();
+  await p.q('.viewer-mark-layers').click();
+  assert.equal(visible(p.q('.viewer-mark-confirm')), false, 'no stale question after reopening');
+  f.requests.length = 0;
+  await confirmButton(p, 'Change').fire('pointerdown');
+  await confirmButton(p, 'Change').click();
+  assert.equal(p.store.find(one.id).visibility, 'private');
+  assert.deepEqual(writes(f.requests), []);
+});
+
+test('ticking by keyboard keeps the focus on the same mark\'s tick or row', async t => {
+  const f = await openMarksPanel(t), p = f.mount();
+  t.after(() => p.marks.dispose());
+  await p.marks.setScope(f.scope('ops', 'staff-a'));
+  for (const name of ['Alpha', 'Bravo']) await p.store.create(mark(name, { visibility: 'private' }));
+  await p.q('.viewer-mark-layers').click();
+  await p.button('Select').click();
+  tick(p, 'Bravo').focus();
+  tick(p, 'Bravo').checked = true;
+  await tick(p, 'Bravo').fire('change');
+  assert.ok(p.dom.document.activeElement === tick(p, 'Bravo'), 'focus stays on the Bravo tick');
+  row(p, 'Alpha').focus();
+  await row(p, 'Alpha').click();
+  assert.ok(p.dom.document.activeElement === row(p, 'Alpha'), 'focus stays on the Alpha row');
+  assert.match(p.q('.viewer-mark-select-count').textContent, /^2 selected$/);
+  p.button('All').focus();
+  await p.button('None').click();
+  p.button('All').focus();
+  await p.button('All').click();
+  assert.equal(p.button('All').disabled, true);
+  assert.ok(p.dom.document.activeElement === p.button('None'), 'focus moves to None when All is spent');
+});
