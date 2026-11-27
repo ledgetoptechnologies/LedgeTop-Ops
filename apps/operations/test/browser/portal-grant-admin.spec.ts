@@ -72,7 +72,7 @@ test("an unavailable workspace rollout points administrators to safe Client Hub 
   await expect(workspaceTab).toBeDisabled();
   const status = page.getByRole("status").filter({hasText: "2 existing folder links require migration review"});
   await expect(status).toBeVisible();
-  await expect(status.getByRole("link", {name: "Open Client Hub portal setup"})).toHaveAttribute("href", "/clients#client-portal-setup");
+  await expect(status.getByRole("link", {name: "Open Client Hub portal setup"})).toHaveCount(0);
   expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") || call.path.startsWith("/api/delivery/native-grants") || call.path.startsWith("/api/delivery/client-share-recipients"))).toBe(false);
 });
 

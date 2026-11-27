@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { filterPickerOptions, type PickerOption } from "../src/client/SearchFirstPicker";
 
@@ -24,13 +24,20 @@ describe("search-first picker", () => {
 
 const read = (file: string) => readFileSync(new URL(`../src/client/${file}`, import.meta.url), "utf8").replaceAll("\r\n", "\n");
 describe("no form lists every client", () => {
-  it("uses the search-first picker instead of a select of all accounts or Project Alpha clients", () => {
-    const app = read("OperationsApp.tsx"), bootstrap = read("ClientPortalBootstrap.tsx");
+  it("uses the search-first picker instead of a select of all accounts", () => {
+    const app = read("OperationsApp.tsx");
     expect(app).not.toContain('<select name="accountId"');
     expect(app).not.toContain("function ClientAccountRootActivation(");
     expect(app).toContain("<SearchFirstPicker");
-    expect(bootstrap).not.toMatch(/<select value=\{account\?\.id/);
-    expect(bootstrap).not.toMatch(/<select value=\{source\?\.clientId/);
-    expect(bootstrap.match(/<SearchFirstPicker/g)).toHaveLength(2);
+  });
+});
+
+describe("no legacy portal screens", () => {
+  it("the Clients page has no portal coverage card or legacy exceptions screen, and nothing links to it", () => {
+    expect(existsSync(new URL("../src/client/ClientPortalBootstrap.tsx", import.meta.url))).toBe(false);
+    expect(existsSync(new URL("../src/client/ClientPortalBootstrap.css", import.meta.url))).toBe(false);
+    const sources = ["ClientHub.tsx", "OperationsApp.tsx"].map(read).join(" ");
+    for (const text of ["ClientPortalBootstrap", "Portal workspace coverage", "Review legacy exceptions", "#client-portal-setup", "canManagePortalSetup"])
+      expect(sources).not.toContain(text);
   });
 });
