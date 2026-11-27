@@ -6,9 +6,12 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const express = require('express');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const v8 = require('node:v8');
+const vm = require('node:vm');
 const auth = require('../server/auth');
 const assets = require('../server/assets');
 const { config } = require('../server/config');
@@ -100,7 +103,7 @@ test('verified delivery reproduces res.sendFile statuses, headers and bodies', a
   }
 });
 
-async function managedFixture(t, { aged = true } = {}) {
+async function managedFixture(t, { aged = true, orthoChunks = (chunks) => chunks } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-delivery-life-'));
   const modelsMount = path.join(root, 'models');
   fs.mkdirSync(modelsMount, { recursive: true });
@@ -114,6 +117,8 @@ async function managedFixture(t, { aged = true } = {}) {
   const tileset = Buffer.from('{"asset":{"version":"1.1"},"root":{}}');
   const files = { ortho: write('task/ortho.tif', ortho), tile: write('task/tiles/0/tile.b3dm', tile), dsm: write('task/dsm.tif', dsm) };
   write('task/tiles/tileset.json', tileset);
+  write('task/shots.geojson', '{}');
+  const photos = { 'small.jpg': crypto.randomBytes(50_000), 'large.jpg': crypto.randomBytes(CHUNK + 999) };
   const manifest = [{ relativePath: 'tileset.json', byteSize: tileset.length, sha256: sha256(tileset) }, { relativePath: '0/tile.b3dm', byteSize: tile.length, sha256: sha256(tile) }];
   const database = openDatabase(path.join(root, 'viewer.sqlite'));
   const repository = new ViewerRepository(database);
@@ -123,11 +128,16 @@ async function managedFixture(t, { aged = true } = {}) {
     displayName: 'Delivery model', status: 'ready', sourceLocator: {}, versionMetadata: {},
     assets: [
       { kind: 'dsm', rootKey: 'models', relativePath: 'task/dsm.tif', format: 'tif', byteSize: dsm.length, sha256: sha256(dsm), storageMode: 'managed', published: true },
-      { kind: 'ortho', rootKey: 'models', relativePath: 'task/ortho.tif', format: 'tif', byteSize: ortho.length, sha256: sha256(ortho), chunks: chunksOf(ortho), storageMode: 'managed', published: true },
+      { kind: 'ortho', rootKey: 'models', relativePath: 'task/ortho.tif', format: 'tif', byteSize: ortho.length, sha256: sha256(ortho), chunks: orthoChunks(chunksOf(ortho)), storageMode: 'managed', published: true },
       { kind: 'tiles', rootKey: 'models', relativePath: 'task/tiles/tileset.json', format: '3dtiles', byteSize: tileset.length, sha256: sha256(tileset), manifestSha256: sha256(JSON.stringify(manifest)), manifestFiles: manifest, storageMode: 'managed', published: true },
+      { kind: 'shots', rootKey: 'models', relativePath: 'task/shots.geojson', format: 'geojson', byteSize: 2, sha256: sha256('{}'), storageMode: 'managed', published: true },
     ],
     makeActive: true,
   });
+  repository.replaceCameraPhotos(versionId, Object.entries(photos).map(([filename, body]) => {
+    files[filename] = write(`task/photos/${filename}`, body);
+    return { filename, rootKey: 'models', relativePath: `task/photos/${filename}`, contentType: 'image/jpeg', byteSize: body.length, sha256: sha256(body) };
+  }));
   repository.createViewerSession({ tokenHash: auth.hashToken(token), modelId, modelVersionId: versionId, subject: 'ops:test', audience: 'ops', permissions: { view: true }, expiresAt: new Date(Date.now() + 120_000).toISOString() });
   // Real published assets are long settled; let the fixture age past the
   // racily-clean window so in-place rewrites always change ctime.
@@ -154,7 +164,8 @@ async function managedFixture(t, { aged = true } = {}) {
     fs.rmSync(root, { recursive: true, force: true });
   });
   const base = `http://127.0.0.1:${server.address().port}/session-assets/${token}/${modelId}/models/task`;
-  return { base, files, bodies: { ortho, tile, dsm }, integrity, root };
+  const photoBase = `http://127.0.0.1:${server.address().port}/session-camera-photos/${token}/${modelId}`;
+  return { base, photoBase, files, bodies: { ortho, tile, dsm, ...photos }, integrity, root, repository, database, modelId, versionId };
 }
 
 async function attempt(url, headers = {}) {
@@ -368,12 +379,14 @@ async function serveShifty(t, { eligible, chunkSize, range, bytesCacheMaxBytes }
   t.after(async () => { hooks.afterVerify = null; await close(server); });
   // Switch the bytes the moment verification has passed.
   hooks.afterVerify = async () => { contents.current = tampered; };
-  let body = null, aborted = false, status = null;
+  let aborted = false, status = null;
+  const parts = [];
   try {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/asset`, range ? { headers: { range: `bytes=${range[0]}-${range[1]}` } } : {});
     status = response.status;
-    body = Buffer.from(await response.arrayBuffer());
+    for await (const part of response.body) parts.push(Buffer.from(part));
   } catch { aborted = true; }
+  const body = Buffer.concat(parts);
   hooks.afterVerify = null;
   const [from, to] = range || [0, good.length - 1];
   return { status, body, aborted, expected: good.subarray(from, to + 1), tampered: tampered.subarray(from, to + 1), hashed, from, to };
@@ -398,6 +411,14 @@ for (const [label, chunkSize, range] of [
 ]) {
   test(`${label}: the bytes sent are the bytes that were hashed`, async (t) => {
     const result = await serveShifty(t, { eligible: true, chunkSize, range });
+    if (chunkSize) {
+      // Only the first region is hashed before the headers; the next one is
+      // hashed right before it is sent, sees the switched bytes and aborts.
+      assert.equal(result.aborted, true, 'a later region that fails its hash never completes the response');
+      assert.deepEqual(result.body, result.expected.subarray(0, result.body.length), 'only verified bytes were sent');
+      assert.deepEqual([...new Set(result.hashed.map(({ offset }) => offset))], [0, chunkSize], 'sending stopped at the first bad region');
+      return;
+    }
     assert.equal(result.aborted, false);
     assert.equal(result.status, range ? 206 : 200);
     assert.deepEqual(result.body, result.expected, 'sent bytes are the verified bytes, not the switched ones on disk');
@@ -610,3 +631,421 @@ for (const eligible of [false, true]) {
     assert.deepEqual(Buffer.from(await after.arrayBuffer()), h.body);
   });
 }
+
+// Counts the bytes hashed by the shared integrity cache.
+function countHashed(t, integrity) {
+  const hashed = [];
+  const hashRegion = integrity.hashRegion.bind(integrity);
+  integrity.hashRegion = async (...args) => { hashed.push({ offset: args[2], size: args[3] }); return hashRegion(...args); };
+  t.after(() => { delete integrity.hashRegion; });
+  return hashed;
+}
+
+// node:http, because fetch() adds `Cache-Control: no-cache` to conditional
+// requests, which turns every 304 into a full response.
+function request(url, { method = 'GET', headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    http.request(url, { method, headers, agent: false }, (response) => {
+      const parts = [];
+      response.on('data', (part) => parts.push(part));
+      response.on('error', reject);
+      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(parts) }));
+    }).on('error', reject).end();
+  });
+}
+
+for (const platform of ['linux', 'win32']) {
+  test(`304, HEAD, 412 and 416 hash nothing (${platform === 'linux' ? 'cached' : 'uncached'} path), and a tampered file still never serves`, async (t) => {
+    const f = await managedFixture(t, { aged: false });
+    f.integrity.platform = platform;
+    const hashed = countHashed(t, f.integrity);
+    const urls = {
+      ortho: [`${f.base}/ortho.tif`, f.files.ortho, f.bodies.ortho],
+      tile: [`${f.base}/tiles/0/tile.b3dm`, f.files.tile, f.bodies.tile],
+      dsm: [`${f.base}/dsm.tif`, f.files.dsm, f.bodies.dsm],
+      photo: [`${f.photoBase}/small.jpg`, f.files['small.jpg'], f.bodies['small.jpg']],
+      'large photo': [`${f.photoBase}/large.jpg`, f.files['large.jpg'], f.bodies['large.jpg']],
+    };
+    for (const [label, [url, file, body]] of Object.entries(urls)) {
+      const { etag, 'last-modified': modified } = (await request(url, { method: 'HEAD' })).headers;
+      const bodyless = async (note, expected) => {
+        hashed.length = 0;
+        const results = {
+          head: await request(url, { method: 'HEAD' }),
+          headRange: await request(url, { method: 'HEAD', headers: { range: 'bytes=1000-1999' } }),
+          notModified: await request(url, { headers: { 'if-none-match': etag } }),
+          notModifiedRange: await request(url, { headers: { 'if-none-match': etag, range: 'bytes=1000-1999' } }),
+          notModifiedSince: await request(url, { headers: { 'if-modified-since': modified } }),
+          preconditionFailed: await request(url, { headers: { 'if-match': '"other"' } }),
+          unsatisfiable: await request(url, { headers: { range: `bytes=${body.length}-` } }),
+        };
+        assert.deepEqual(Object.fromEntries(Object.entries(results).map(([name, { status }]) => [name, status])), expected, `${label} ${note}`);
+        assert.deepEqual(hashed, [], `${label} ${note}: nothing is hashed`);
+        for (const [name, { body: sent }] of Object.entries(results)) if (!['preconditionFailed', 'unsatisfiable'].includes(name) && results[name].status !== 404) assert.equal(sent.length, 0, `${label} ${note} ${name}`);
+        return results;
+      };
+      const ok = { head: 200, headRange: 206, notModified: 304, notModifiedRange: 304, notModifiedSince: 304, preconditionFailed: 412, unsatisfiable: 416 };
+      const results = await bodyless('intact', ok);
+      assert.equal(results.head.headers['content-length'], String(body.length));
+      assert.equal(results.headRange.headers['content-range'], `bytes 1000-1999/${body.length}`);
+      assert.equal(results.unsatisfiable.headers['content-range'], `bytes */${body.length}`);
+
+      // Same size, same mtime, different bytes: the worst case for a response
+      // that hashes nothing. No body is ever sent for it.
+      const { atime, mtime } = fs.statSync(file);
+      const tampered = Buffer.from(body); for (let i = 0; i < tampered.length; i += 4096) tampered[i] ^= 0xff;
+      fs.writeFileSync(file, tampered); fs.utimesSync(file, atime, mtime);
+      f.integrity.clear();
+      const tamperedTag = (await request(url, { method: 'HEAD' })).headers.etag;
+      assert.equal(tamperedTag, etag);
+      await bodyless('tampered, mtime restored', ok);
+      assert.equal((await request(url)).status, 404, `${label}: a tampered body is refused`);
+      assert.equal((await request(url, { headers: { range: 'bytes=0-999' } })).status, 404);
+      // Tampering that leaves its normal mtime: validators no longer match, so
+      // revalidation becomes a body request and is refused.
+      fs.utimesSync(file, new Date(), new Date(Date.now() + 5000));
+      assert.equal((await request(url, { headers: { 'if-none-match': etag } })).status, 404, label);
+      assert.equal((await request(url, { headers: { 'if-modified-since': modified } })).status, 404, label);
+
+      // A wrong size is visible without hashing and refuses everything.
+      fs.writeFileSync(file, body.subarray(1));
+      const refused = Object.fromEntries(Object.keys(ok).map((name) => [name, 404]));
+      await bodyless('wrong size', refused);
+      fs.writeFileSync(file, body);
+    }
+    // No registered record: refused, as before.
+    f.database.prepare("DELETE FROM model_asset_files WHERE relative_path='0/tile.b3dm'").run();
+    hashed.length = 0;
+    for (const options of [{ method: 'HEAD' }, { headers: { 'if-none-match': '*' } }, { headers: { range: 'bytes=999999999-' } }, { headers: { 'if-match': '"x"' } }]) {
+      assert.equal((await request(urls.tile[0], options)).status, 404, JSON.stringify(options));
+    }
+    assert.deepEqual(hashed, []);
+  });
+}
+
+test('a response without a body still needs chunk rows that cover what it describes', async (t) => {
+  const f = await managedFixture(t, { aged: false, orthoChunks: (chunks) => chunks.filter(({ chunkIndex }) => chunkIndex !== 1) });
+  const url = `${f.base}/ortho.tif`;
+  const status = async (range, extra = {}) => (await request(url, { method: 'HEAD', headers: { ...(range ? { range } : {}), ...extra } })).status;
+  assert.equal(await status(null), 404, 'the whole file is not covered');
+  assert.equal(await status('bytes=0-99'), 206);
+  assert.equal(await status(`bytes=${CHUNK + 10}-${CHUNK + 20}`), 404, 'inside the gap');
+  assert.equal(await status(`bytes=${CHUNK - 10}-${CHUNK + 20}`), 404, 'into the gap');
+  assert.equal(await status(`bytes=${CHUNK + 10}-${2 * CHUNK + 20}`), 404, 'out of the gap');
+  assert.equal(await status(`bytes=${2 * CHUNK}-${2 * CHUNK + 20}`), 206);
+  const etag = `W/"${f.bodies.ortho.length.toString(16)}-${fs.statSync(f.files.ortho).mtime.getTime().toString(16)}"`;
+  assert.equal((await request(url, { headers: { 'if-none-match': etag } })).status, 404);
+  assert.equal((await request(url, { headers: { 'if-none-match': etag, range: 'bytes=0-99' } })).status, 304);
+  assert.equal((await request(url)).status, 404, 'a full response is refused before any byte');
+});
+
+for (const [label, setup] of [
+  ['cached', {}],
+  ['cached, file larger than the byte cache', { bytesCacheMaxBytes: CHUNK }],
+  ['uncached', { platform: 'win32' }],
+]) {
+  test(`a large response hashes one region before its first byte and each region once (${label})`, async (t) => {
+    const f = await managedFixture(t);
+    const saved = f.integrity.bytesCacheMaxBytes;
+    t.after(() => { f.integrity.bytesCacheMaxBytes = saved; });
+    Object.assign(f.integrity, setup);
+    const hashed = [];
+    const hashRegion = f.integrity.hashRegion.bind(f.integrity);
+    let open;
+    const gate = new Promise((resolve) => { open = resolve; });
+    f.integrity.hashRegion = async (...args) => { hashed.push(args[2]); if (args[2] > 0) await gate; return hashRegion(...args); };
+    t.after(() => { delete f.integrity.hashRegion; });
+    const response = await fetch(`${f.base}/ortho.tif`);
+    assert.equal(response.status, 200, 'headers arrive while the second region is not hashed yet');
+    const reader = response.body.getReader();
+    const parts = [];
+    let received = 0;
+    while (received < CHUNK) { const { value } = await reader.read(); parts.push(Buffer.from(value)); received += value.length; }
+    assert.equal(received, CHUNK, 'exactly the verified first region is available');
+    assert.deepEqual(hashed, [0, CHUNK], 'the second region is hashed next, before its bytes are sent');
+    open();
+    for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(Buffer.from(value)); }
+    assert.deepEqual(Buffer.concat(parts), f.bodies.ortho);
+    assert.deepEqual(hashed, [0, CHUNK, 2 * CHUNK, 3 * CHUNK], 'each region hashed once, in order');
+    // The server releases the last region just after the client has received it.
+    await until(() => f.integrity.bufferedBytes === 0, 'all budget returned');
+  });
+
+  test(`corruption in the first region is a clean error, in a later region an aborted transfer (${label})`, async (t) => {
+    const f = await managedFixture(t, { aged: false });
+    const saved = f.integrity.bytesCacheMaxBytes;
+    t.after(() => { f.integrity.bytesCacheMaxBytes = saved; });
+    Object.assign(f.integrity, setup);
+    const good = f.bodies.ortho;
+    for (const bad of [0, 1, 3]) {
+      const tampered = Buffer.from(good); tampered[bad * CHUNK + 77] ^= 0xff;
+      fs.writeFileSync(f.files.ortho, tampered);
+      f.integrity.clear();
+      for (const range of [null, [5, good.length - 5]]) {
+        const response = await fetch(`${f.base}/ortho.tif`, range ? { headers: { range: `bytes=${range[0]}-${range[1]}` } } : {});
+        if (bad === 0) { assert.equal(response.status, 404); await response.arrayBuffer(); continue; }
+        assert.equal(response.status, range ? 206 : 200);
+        const parts = [];
+        let completed = true;
+        try { for await (const part of response.body) parts.push(Buffer.from(part)); } catch { completed = false; }
+        const sent = Buffer.concat(parts), from = range ? range[0] : 0;
+        assert.equal(completed, false, `region ${bad}: never a complete response`);
+        assert.ok(from + sent.length <= bad * CHUNK, `region ${bad}: no byte of the bad region was sent`);
+        assert.deepEqual(sent, good.subarray(from, from + sent.length), 'every byte sent was verified');
+      }
+      // A range that does not touch the bad region still serves.
+      const elsewhere = bad === 2 ? 0 : 2 * CHUNK;
+      assert.equal((await request(`${f.base}/ortho.tif`, { headers: { range: `bytes=${elsewhere}-${elsewhere + 99}` } })).status, 206);
+    }
+    for (let i = 0; i < 100 && f.integrity.bufferedBytes; i += 1) await sleep(5);
+    assert.equal(f.integrity.bufferedBytes, 0, 'aborted responses return their budget');
+  });
+}
+
+test('concurrent full responses share the check of every region', async (t) => {
+  const f = await managedFixture(t);
+  const hashed = countHashed(t, f.integrity);
+  const bodies = await Promise.all([1, 2, 3, 4].map(() => request(`${f.base}/ortho.tif`)));
+  for (const { status, body } of bodies) { assert.equal(status, 200); assert.deepEqual(body, f.bodies.ortho); }
+  assert.equal(hashed.length, 4, 'one hash per region for four responses');
+  assert.equal(f.integrity.pending.size, 0);
+});
+
+test('a response that already started waits for buffer budget past the 503 queue bound', async () => {
+  const cache = new AssetIntegrityCache({ ...localPosix, bufferedBudgetBytes: 100, maxQueuedStreams: 1 });
+  await cache.reserve(100);
+  const first = cache.reserve(10);
+  await assert.rejects(cache.reserve(10), { code: 'integrity_busy' });
+  const started = Array.from({ length: 7 }, () => cache.reserve(10, null, true));
+  await assert.rejects(cache.reserve(10, null, true), { code: 'integrity_busy' }, 'the longer queue is bounded too');
+  cache.unreserve(100);
+  await Promise.all([first, ...started]);
+  cache.unreserve(80);
+  assert.equal(cache.bufferedBytes, 0);
+});
+
+test('a range loads only the chunk rows around it', async (t) => {
+  const f = await managedFixture(t, { aged: false });
+  const loaded = [];
+  const getChunks = f.repository.getModelAssetChunks.bind(f.repository);
+  f.repository.getModelAssetChunks = (...args) => { const rows = getChunks(...args); loaded.push(rows.map(({ chunkIndex }) => chunkIndex)); return rows; };
+  const rowsFor = async (options) => { loaded.length = 0; const { status } = await request(`${f.base}/ortho.tif`, options); return [status, ...loaded]; };
+  const range = (start, end) => ({ headers: { range: `bytes=${start}-${end}` } });
+  assert.deepEqual(await rowsFor(range(0, 9)), [206, [0]]);
+  assert.deepEqual(await rowsFor(range(CHUNK, CHUNK)), [206, [1]]);
+  assert.deepEqual(await rowsFor(range(CHUNK - 1, CHUNK)), [206, [0, 1]]);
+  assert.deepEqual(await rowsFor(range(3 * CHUNK + 5, f.bodies.ortho.length - 1)), [206, [3]]);
+  assert.deepEqual(await rowsFor({}), [200, [0, 1, 2, 3]], 'a full response checks the whole table');
+  assert.deepEqual(await rowsFor({ method: 'HEAD' }), [200, [0, 1, 2, 3]]);
+});
+
+// A cache whose region checks wait on a gate, over one small real file.
+async function gatedCache(t, options = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-delivery-gate-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'asset.bin'), body = crypto.randomBytes(2 * 64 * 1024);
+  fs.writeFileSync(file, body);
+  const chunks = [0, 64 * 1024].map((offset) => ({ byteOffset: offset, byteSize: 64 * 1024, sha256: sha256(body.subarray(offset, offset + 64 * 1024)) }));
+  const cache = new AssetIntegrityCache({ ...localPosix, wallNow: () => Date.now() + 60_000, ...options });
+  const gates = []; // one entry per check that reached its read
+  const hashRegion = cache.hashRegion.bind(cache);
+  let gateOffset = 0;
+  cache.hashRegion = async (...args) => {
+    if (args[2] === gateOffset) await new Promise((resolve) => { gates.push(resolve); });
+    return hashRegion(...args);
+  };
+  const stat = fs.statSync(file, { bigint: true });
+  return { cache, file, stat, body, chunks, gates, setGateOffset: (value) => { gateOffset = value; },
+    slice: (signal, started = false) => cache.verifiedSlice(file, stat, { kind: 'chunk', offset: 0, size: 64 * 1024, sha256: chunks[0].sha256 }, 0, 100, { signal, started }),
+    check: (signal) => cache.verifyChunk(file, stat, chunks[0], { signal }) };
+}
+async function until(condition, label) {
+  for (let i = 0; i < 400; i += 1) { if (condition()) return; await sleep(5); }
+  assert.fail(`timed out: ${label}`);
+}
+const subscriptions = (cache) => [...cache.sharedOwners.values()].reduce((sum, set) => sum + set.size, 0);
+const idle = (cache) => ({ sharedOwners: cache.sharedOwners.size, bufferedBytes: cache.bufferedBytes, bufferWaiters: cache.bufferWaiters.length, sharedWaiters: cache.sharedWaiters, pending: cache.pending.size, activeStreams: cache.activeStreams });
+const IDLE = { sharedOwners: 0, bufferedBytes: 0, bufferWaiters: 0, sharedWaiters: 0, pending: 0, activeStreams: 0 };
+
+for (const kind of ['slice', 'check']) {
+  test(`a cancelled follower stops waiting for another request's check at once (${kind})`, async (t) => {
+    const g = await gatedCache(t);
+    const owner = g[kind]();
+    await until(() => g.gates.length === 1, 'owner reached its read');
+    const held = g.cache.bufferedBytes;
+    const controller = new AbortController();
+    const follower = g[kind](controller.signal), other = g[kind]();
+    await until(() => g.cache.sharedWaiters === 2, 'followers wait');
+    assert.equal(g.cache.bufferedBytes, held, 'a follower holds no budget');
+    controller.abort();
+    await assert.rejects(follower, { name: 'AbortError' }, 'while the owner is still blocked');
+    assert.equal(g.cache.sharedWaiters, 1);
+    assert.equal(g.cache.stats.cancelled, 1);
+    const late = new AbortController();
+    late.abort();
+    await assert.rejects(g[kind](late.signal), { name: 'AbortError' }, 'already gone');
+    assert.equal(g.cache.sharedWaiters, 1);
+    g.gates[0]();
+    for (const result of await Promise.all([owner, other])) { assert.ok(result); result.release?.(); }
+    assert.equal(g.gates.length, 1, 'the region was hashed once');
+    assert.deepEqual(idle(g.cache), IDLE);
+  });
+
+  test(`followers and budget waiters share one bounded queue (${kind})`, async (t) => {
+    const g = await gatedCache(t, { maxQueuedStreams: 3, bufferedBudgetBytes: 64 * 1024 });
+    const owner = g[kind]();
+    await until(() => g.gates.length === 1, 'owner reached its read');
+    const followers = [g[kind](), g[kind]()];
+    await until(() => g.cache.sharedWaiters === 2, 'followers wait');
+    const free = g.cache.bufferedBudgetBytes - g.cache.bufferedBytes;
+    if (free) await g.cache.reserve(free);
+    const budget = g.cache.reserve(10); // the third waiter
+    await assert.rejects(g[kind](), { code: 'integrity_busy' }, 'a follower past the bound');
+    await assert.rejects(g.cache.reserve(10), { code: 'integrity_busy' }, 'a budget waiter past the bound');
+    assert.equal(g.cache.sharedWaiters, 2);
+    if (kind === 'slice') {
+      // Responses that already started may wait longer, up to 8 times as many.
+      const started = Array.from({ length: 21 }, () => g.slice(null, true));
+      await until(() => g.cache.sharedWaiters === 23, 'started followers wait');
+      await assert.rejects(g.slice(null, true), { code: 'integrity_busy' });
+      followers.push(...started);
+    }
+    assert.equal(g.cache.stats.peakSharedWaiters, kind === 'slice' ? 23 : 2);
+    budget.then(() => g.cache.unreserve(10));
+    g.gates[0]();
+    if (free) g.cache.unreserve(free);
+    const release = async (promise) => { const result = await promise; assert.ok(result); result.release?.(); };
+    await Promise.all([owner, ...followers].map(release));
+    assert.equal(g.gates.length, 1);
+    assert.deepEqual(idle(g.cache), IDLE);
+  });
+}
+
+for (const kind of ['slice', 'check']) {
+  test(`thousands of joins and aborts retain nothing on a pending check (${kind})`, async (t) => {
+    const BOUND = 16;
+    const g = await gatedCache(t, { maxQueuedStreams: BOUND });
+    const owner = g[kind]();
+    await until(() => g.gates.length === 1, 'owner reached its read');
+    const [inflight] = g.cache.pending.values();
+    let reactions = 0;
+    inflight.then = (...args) => { reactions += 1; return Promise.prototype.then.apply(inflight, args); };
+    const refs = []; // one object per finished follower, which nothing else keeps
+    const join = async (count) => {
+      const controllers = Array.from({ length: count }, () => new AbortController());
+      const followers = controllers.map((controller) => { refs.push(new WeakRef(controller.signal)); return assert.rejects(g[kind](controller.signal), { name: 'AbortError' }); });
+      await until(() => g.cache.sharedWaiters === count, 'followers wait');
+      assert.equal(subscriptions(g.cache), count);
+      await assert.rejects(g[kind](), { code: 'integrity_busy' }, 'the bound still holds');
+      for (const controller of controllers) {
+        const before = subscriptions(g.cache);
+        controller.abort();
+        assert.equal(subscriptions(g.cache), before - 1, 'removed at once, before the slot is free');
+      }
+      await Promise.all(followers);
+      assert.deepEqual([g.cache.sharedWaiters, subscriptions(g.cache)], [0, 0]);
+    };
+    for (let round = 0; round < 200; round += 1) await join(BOUND);
+    assert.equal(refs.length, 3200);
+    assert.equal(reactions, 1, 'one callback on the pending check for 3200 joins');
+    assert.equal(g.cache.sharedOwners.size, 1);
+    assert.equal(g.cache.stats.peakSharedWaiters, BOUND);
+    // The finished followers themselves can be collected while the owner waits.
+    v8.setFlagsFromString('--expose-gc');
+    const gc = vm.runInNewContext('gc');
+    const alive = () => refs.filter((ref) => ref.deref()).length;
+    for (let i = 0; i < 50 && alive() > BOUND; i += 1) { await sleep(10); gc(); }
+    assert.ok(alive() <= BOUND, `${alive()} of 3200 finished followers are still held`);
+    // The check still notifies whoever is waiting when it settles.
+    const last = [g[kind](), g[kind]()];
+    await until(() => g.cache.sharedWaiters === 2, 'late followers wait');
+    g.gates[0]();
+    for (const result of await Promise.all([owner, ...last])) { assert.ok(result); result.release?.(); }
+    assert.equal(g.gates.length, 1, 'hashed once');
+    assert.deepEqual(idle(g.cache), IDLE);
+  });
+}
+
+test('when the owner goes away, its followers still get verified bytes and the queue drains', async (t) => {
+  const g = await gatedCache(t);
+  const controller = new AbortController();
+  const owner = g.slice(controller.signal);
+  await until(() => g.gates.length === 1, 'owner reached its read');
+  const followers = [g.slice(), g.check()];
+  await until(() => g.cache.sharedWaiters === 2, 'followers wait');
+  controller.abort();
+  const pump = setInterval(() => g.gates.forEach((open) => open()), 5);
+  await assert.rejects(owner, { name: 'AbortError' });
+  const [piece, ok] = await Promise.all(followers);
+  clearInterval(pump);
+  assert.deepEqual(piece.bytes, g.body.subarray(0, 100));
+  piece.release();
+  assert.equal(ok, true);
+  await until(() => g.cache.pending.size === 0, 'nothing pending');
+  assert.deepEqual(idle(g.cache), IDLE);
+});
+
+for (const [label, gateOffset] of [['before its headers', 0], ['after its headers', 64 * 1024]]) {
+  test(`a client that disconnects while waiting for a shared check ${label} releases its file handle at once`, async (t) => {
+    const g = await gatedCache(t);
+    g.setGateOffset(gateOffset);
+    const closed = [];
+    let requests = 0;
+    const app = express();
+    app.get('/asset', async (req, res) => {
+      const id = requests;
+      requests += 1;
+      const opened = await openForDelivery(g.file);
+      const closeHandle = opened.handle.close.bind(opened.handle);
+      opened.handle.close = async () => { await closeHandle(); closed.push(id); };
+      await deliverVerified(req, res, { ...opened, filePath: g.file, cache: g.cache,
+        verify: async (range, signal) => {
+          for (const chunk of g.chunks) if (chunk.byteOffset <= range.end && !await g.cache.verifyChunk(g.file, opened.stat, chunk, { handle: opened.handle, signal })) return false;
+          return true;
+        },
+        regions: () => g.chunks.map((c) => ({ kind: 'chunk', offset: c.byteOffset, size: c.byteSize, sha256: c.sha256 })),
+        onFailure: () => res.sendStatus(404), onError: (error) => res.sendStatus(error.status || 500) });
+    });
+    const server = await listen(app);
+    t.after(() => close(server));
+    const url = `http://127.0.0.1:${server.address().port}/asset`;
+    const owner = request(url);
+    await until(() => g.gates.length === 1, 'owner reached its read');
+    const client = http.get(url, { agent: false }, (response) => response.on('error', () => {}).resume());
+    client.on('error', () => {});
+    await until(() => g.cache.sharedWaiters === 1, 'the second request waits for the first');
+    client.destroy();
+    await until(() => closed.length === 1, 'its handle closes while the owner is still blocked');
+    assert.deepEqual(closed, [1]);
+    assert.equal(g.cache.sharedWaiters, 0);
+    g.gates[0]();
+    const served = await owner;
+    assert.equal(served.status, 200);
+    assert.deepEqual(served.body, g.body, 'the owner is unaffected');
+    await until(() => closed.length === 2, 'the owner handle closes');
+    assert.deepEqual(idle(g.cache), IDLE);
+  });
+}
+
+test('a follower past the bound gets 503 before its headers and its file handle closes', async (t) => {
+  const f = await managedFixture(t);
+  const saved = f.integrity.maxQueuedStreams;
+  t.after(() => { f.integrity.maxQueuedStreams = saved; delete f.integrity.hashRegion; });
+  f.integrity.maxQueuedStreams = 2;
+  let open;
+  const gate = new Promise((resolve) => { open = resolve; });
+  const hashRegion = f.integrity.hashRegion.bind(f.integrity);
+  f.integrity.hashRegion = async (...args) => { await gate; return hashRegion(...args); };
+  const url = `${f.base}/tiles/0/tile.b3dm`;
+  const waiting = [request(url)];
+  await until(() => f.integrity.pending.size === 1, 'owner');
+  waiting.push(request(url), request(url));
+  await until(() => f.integrity.sharedWaiters === 2, 'two followers');
+  const refused = await request(url);
+  assert.deepEqual([refused.status, refused.headers['retry-after']], [503, '1']);
+  assert.equal(f.integrity.sharedWaiters, 2);
+  open();
+  for (const { status, body } of await Promise.all(waiting)) { assert.equal(status, 200); assert.deepEqual(body, f.bodies.tile); }
+  await until(() => f.integrity.bufferedBytes === 0, 'all budget returned');
+  assert.deepEqual(idle(f.integrity), IDLE);
+});

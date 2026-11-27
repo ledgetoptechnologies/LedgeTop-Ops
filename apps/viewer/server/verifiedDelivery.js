@@ -6,21 +6,26 @@
 // Before this module, routes verified an asset's bytes by path and then
 // res.sendFile() reopened the path, so a file replaced or rewritten between
 // the check and the send could be served unverified. Here the file is opened
-// once; the exact byte range that will be sent is verified through that
-// descriptor (assetIntegrityCache keys on its fstat identity) and the
-// descriptor identity is re-checked before the first byte. Then:
+// once; every registered byte that is sent is verified through that descriptor
+// (assetIntegrityCache keys on its fstat identity) and the descriptor identity
+// is re-checked before the first byte. Then:
 //
 // - Assets with registered regions (4 MiB chunks, or a whole file small enough
 //   to buffer: tiles, EPT nodes, small photos) send exactly the bytes that were
 //   hashed: each region is read once into memory through the descriptor,
-//   hashed, and that buffer (sliced to the range) is what gets written. A
-//   region whose bytes no longer match aborts the response. Where results are
-//   not remembered (non-POSIX or network filesystems), the pre-header check
-//   hands its buffers to the same response through a per-request carry, so
-//   each region is still read and hashed once per request; regions beyond the
-//   carry are hashed right before they are sent. The carry is reserved whole,
-//   once, before anything is read; a response never waits for buffer budget
-//   while holding some (see assetIntegrityCache.createCarry).
+//   hashed, and that buffer (sliced to the range) is what gets written. Only
+//   the first region of the body is hashed before the headers: a mismatch
+//   there is a clean error. Every other region is hashed right before its own
+//   bytes are written, so a mismatch in it aborts the response: the client
+//   gets a broken transfer, never a complete one. Where results are not
+//   remembered (non-POSIX or network filesystems), the pre-header check hands
+//   its buffer to the same response through a per-request carry, so each
+//   region is still read and hashed once per request. The carry is reserved
+//   whole, once, before anything is read; a response never waits for buffer
+//   budget while holding some (see assetIntegrityCache.createCarry).
+// - Responses that send no file bytes (304, 412, 416 and every HEAD) hash
+//   nothing. They still require a valid registered record: it exists, the size
+//   matches, and its chunk rows cover the requested range or the whole file.
 // - Large whole-file assets with no chunk records (legacy rasters) are
 //   OUTSIDE the byte-integrity guarantee above, by decision: they keep the
 //   behaviour inherited from before (the whole file is hashed on every
@@ -45,8 +50,9 @@
 // Busy handling: when buffer budget or the check queue is exhausted
 // (integrity_busy), a request that has not sent any body byte gets 503 with
 // Retry-After: 1 and none of the response headers set for the file. Once body
-// bytes have been sent, the status line is committed, so the response is
-// aborted (socket destroyed) and the client retries the request.
+// bytes have been sent, the status line is committed: the response waits for
+// budget in a longer bounded queue (it holds none meanwhile) and, only if that
+// is full too, is aborted (socket destroyed) and the client retries.
 //
 // Response headers and statuses mirror send@0.19 (what res.sendFile uses):
 // Accept-Ranges, Cache-Control default, Last-Modified, weak ETag, Content-Type
@@ -184,7 +190,7 @@ async function sendRegions(res, cache, filePath, stat, handle, regions, start, e
     if (signal.aborted) return;
     if (region.offset > position || region.offset + region.size <= position) throw new Error('asset region table does not cover the response');
     const sliceEnd = Math.min(end + 1, region.offset + region.size);
-    const piece = await cache.verifiedSlice(filePath, stat, region, position, sliceEnd, { handle, signal, carry });
+    const piece = await cache.verifiedSlice(filePath, stat, region, position, sliceEnd, { handle, signal, carry, started: res.headersSent });
     if (!piece) throw new Error('asset bytes failed verification during delivery');
     try {
       let flushed = true;
@@ -207,8 +213,12 @@ function busyError(error) { return error?.code === 'integrity_busy'; }
 function abortError(error) { return error?.name === 'AbortError'; }
 
 // Delivers an opened file. Ownership of `handle` passes to this function.
-//   verify(range|null, signal) -> Promise<boolean>; range is the exact
-//     {start,end} served for a 206, null when the whole file is served.
+//   check(range|null) -> boolean; the registered record exists, matches the
+//     file size and covers the range (null: the whole file). Hashes nothing.
+//   verify(range|null, signal, carry) -> Promise<boolean>; hashes the regions
+//     of `range` (null: the whole file). With `regions`, it is called for the
+//     part of the body inside the first region only. Without `check` it also
+//     decides responses that send no file bytes.
 //   onFailure()      -> route response for failed integrity (before any byte)
 //   beforeSend()     -> optional; re-checks authorization after the last wait
 //                       before the response (see top); returns false after
@@ -217,7 +227,7 @@ function abortError(error) { return error?.name === 'AbortError'; }
 //   headers          -> route headers applied once verification has passed.
 //   regions(start,end) -> registered regions covering the body, in order, to
 //                       send exactly-hashed bytes; null to stream (see top).
-async function deliverVerified(req, res, { handle, stat, filePath, verify, onFailure, onError, beforeSend = null, headers = {}, regions = null, cache = assetIntegrityCache }) {
+async function deliverVerified(req, res, { handle, stat, filePath, verify, check = null, onFailure, onError, beforeSend = null, headers = {}, regions = null, cache = assetIntegrityCache }) {
   const identity = fileIdentity(stat);
   const size = Number(stat.size);
   const controller = new AbortController();
@@ -244,33 +254,43 @@ async function deliverVerified(req, res, { handle, stat, filePath, verify, onFai
     const etag = get('ETag') ?? defaults.find(([name]) => name === 'ETag')?.[1];
     const lastModified = get('Last-Modified') ?? defaults.find(([name]) => name === 'Last-Modified')?.[1];
 
-    let outcome = 200, range = null;
+    let outcome = 200, range = null, unsatisfiable = false;
     const h = req.headers;
+    if (typeof h.range === 'string' && BYTES_RANGE_REGEXP.test(h.range)) {
+      let ranges = req.range(size, { combine: true });
+      if (!rangeFresh(h, etag, lastModified)) ranges = -2;
+      if (ranges === -1) unsatisfiable = true;
+      else if (ranges !== -2 && ranges !== undefined && ranges.length === 1) range = { start: ranges[0].start, end: ranges[0].end };
+    }
     if (h['if-match'] || h['if-unmodified-since'] || h['if-none-match'] || h['if-modified-since']) {
       const statusCode = res.statusCode;
       if (preconditionFailed(h, etag, lastModified)) outcome = 412;
       else if (((statusCode >= 200 && statusCode < 300) || statusCode === 304) && fresh(h, etag, lastModified)) outcome = 304;
     }
-    if (outcome === 200 && typeof h.range === 'string' && BYTES_RANGE_REGEXP.test(h.range)) {
-      let ranges = req.range(size, { combine: true });
-      if (!rangeFresh(h, etag, lastModified)) ranges = -2;
-      if (ranges === -1) outcome = 416;
-      else if (ranges !== -2 && ranges !== undefined && ranges.length === 1) { outcome = 206; range = { start: ranges[0].start, end: ranges[0].end }; }
-    }
+    if (outcome === 200) outcome = unsatisfiable ? 416 : range ? 206 : 200;
 
     // The body this response will send, and its registered regions.
     const bodyRange = req.method === 'HEAD' ? null
       : outcome === 206 ? range
         : outcome === 200 && size > 0 ? { start: 0, end: size - 1 } : null;
     const plan = bodyRange && typeof regions === 'function' ? regions(bodyRange.start, bodyRange.end) : null;
+    const noBody = req.method === 'HEAD' || outcome === 304 || outcome === 412 || outcome === 416;
+    // The part of the body to hash before the headers.
+    let verifyRange = outcome === 206 ? range : null;
+    if (plan?.length && plan[0].offset <= bodyRange.start && plan[0].offset + plan[0].size > bodyRange.start) {
+      verifyRange = { start: bodyRange.start, end: Math.min(bodyRange.end, plan[0].offset + plan[0].size - 1) };
+    }
 
     let verified;
     try {
-      if (plan && !await cache.filesystemCacheable(filePath, stat.dev)) {
-        carry = cache.createCarry();
-        await cache.reserveCarry(carry, cache.carryBytesFor(plan), controller.signal);
+      verified = check ? await check(range) : true;
+      if (verified && !(check && noBody)) {
+        if (plan && !await cache.filesystemCacheable(filePath, stat.dev)) {
+          carry = cache.createCarry();
+          await cache.reserveCarry(carry, cache.carryBytesFor(plan.slice(0, 1)), controller.signal);
+        }
+        verified = await verify(verifyRange, controller.signal, carry);
       }
-      verified = await verify(outcome === 206 ? range : null, controller.signal, carry);
     } catch (error) {
       if (abortError(error) || controller.signal.aborted) return;
       if (busyError(error)) {

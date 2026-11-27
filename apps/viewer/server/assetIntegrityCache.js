@@ -52,14 +52,19 @@ const INLINE_HASH_MAX_BYTES = 1024 * 1024;
 const RACY_WINDOW_MS = 2_000;
 const MAX_CONCURRENT_STREAMS = 8;
 // Streamed checks waiting for a slot; beyond this, requests get a fast 503.
-// The same bound applies to requests waiting for buffer budget.
+// The same bound applies to requests waiting for buffer budget together with
+// those waiting for another request's check of the same region.
 const MAX_QUEUED_STREAMS = 64;
+// A response whose headers are already sent cannot get a 503, only an aborted
+// transfer. It may therefore wait for the buffer budget in a longer (still
+// bounded) queue: this many times the bound above. It holds no budget itself.
+const STARTED_QUEUE_FACTOR = 8;
 // Verified region bytes (4 MiB chunks, small whole files) kept so responses
 // can send exactly the bytes that were hashed without re-reading them.
 const VERIFIED_BYTES_CACHE_MAX_BYTES = 256 * 1024 * 1024;
 // Uncached path (no remembered results): verified region bytes one response
-// may hold from its pre-header check until they are sent, so each region is
-// read and hashed once per request. Regions beyond this are hashed when sent.
+// may hold from its pre-header check until they are sent, so a region is read
+// and hashed once per request. Regions beyond this are hashed when sent.
 const REQUEST_CARRY_MAX_BYTES = 16 * 1024 * 1024;
 // Linux statfs f_type magic numbers of local filesystems where ctime is
 // kernel-maintained and attributes are not cached remotely.
@@ -133,11 +138,13 @@ class AssetIntegrityCache {
     this.generation = 0;
     this.bufferedBytes = 0;
     this.bufferWaiters = [];
+    this.sharedWaiters = 0; // requests waiting for another request's check
+    this.sharedOwners = new Map(); // pending check -> Set of its waiters' callbacks
     this.carryMaxBytes = Math.max(0, Number(carryMaxBytes) || 0);
     this.bytesCacheMaxBytes = Math.max(0, Number(bytesCacheMaxBytes) || 0);
     this.bytes = new Map(); // region key -> { buffer, until }
     this.bytesTotal = 0;
-    this.stats = { carried: 0, legacy: 0, bytesHits: 0, bytesMisses: 0, hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, uncached: 0, busy: 0, cancelled: 0 };
+    this.stats = { carried: 0, legacy: 0, bytesHits: 0, bytesMisses: 0, hits: 0, misses: 0, failures: 0, racy: 0, streamed: 0, peakBufferedBytes: 0, peakStreams: 0, peakSharedWaiters: 0, uncached: 0, busy: 0, cancelled: 0 };
   }
 
   clear() {
@@ -160,10 +167,11 @@ class AssetIntegrityCache {
   //
   // Budget rule (no hold-and-wait): a response either reserves its whole carry
   // at once, before it reads anything and while it holds no other budget, or
-  // takes no carry. Regions that do not fit the carry are never reserved
-  // during the check; they are hashed when sent, one at a time, after the
-  // carry has been fully released (acquire, hash, write, release). So no
-  // response ever waits for budget while holding budget.
+  // takes no carry. deliverVerified carries the first region only; a region
+  // that does not fit the carry is never reserved during the check. All other
+  // regions are hashed when sent, one at a time, after the carry has been
+  // fully released (acquire, hash, write, release). So no response ever waits
+  // for budget while holding budget.
   createCarry() { return { budget: 0, reserved: 0, held: 0, entries: new Map(), deferred: 0, closed: false }; }
 
   // Bytes of the leading regions that fit one carry (capped by the global budget).
@@ -238,8 +246,56 @@ class AssetIntegrityCache {
     }
   }
 
+  waitQueueFull(started) {
+    return this.bufferWaiters.length + this.sharedWaiters >= this.maxQueuedStreams * (started ? STARTED_QUEUE_FACTOR : 1);
+  }
+
+  // The waiters of one pending check. The check's promise gets a single
+  // callback, whatever the number of requests that join or leave, so a request
+  // that went away leaves nothing behind on it.
+  sharedSubscribers(inflight) {
+    let subscribers = this.sharedOwners.get(inflight);
+    if (!subscribers) {
+      subscribers = new Set();
+      this.sharedOwners.set(inflight, subscribers);
+      const settled = () => {
+        this.sharedOwners.delete(inflight);
+        for (const notify of subscribers) notify();
+        subscribers.clear();
+      };
+      inflight.then(settled, settled);
+    }
+    return subscribers;
+  }
+
+  // Waits until another request's check settles, whatever its result. Holds no
+  // budget, counts against the bounded wait queue (fails fast with
+  // integrity_busy when it is full), and stops at once when this request goes
+  // away, so its file handle is released without waiting for the other request.
+  async awaitShared(inflight, signal = null, started = false) {
+    if (signal?.aborted) throw abortError();
+    if (this.waitQueueFull(started)) { this.stats.busy += 1; throw busyError(); }
+    this.sharedWaiters += 1;
+    this.stats.peakSharedWaiters = Math.max(this.stats.peakSharedWaiters, this.sharedWaiters);
+    const subscribers = this.sharedSubscribers(inflight);
+    try {
+      await new Promise((resolve, reject) => {
+        const onAbort = () => {
+          subscribers.delete(notify); // before the slot is freed below
+          this.stats.cancelled += 1;
+          reject(abortError());
+        };
+        const notify = () => { signal?.removeEventListener('abort', onAbort); resolve(); };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        subscribers.add(notify);
+      });
+    } finally {
+      this.sharedWaiters -= 1;
+    }
+  }
+
   // Waits (FIFO, bounded) until `size` bytes fit in the global buffer budget.
-  reserve(size, signal = null) {
+  reserve(size, signal = null, started = false) {
     if (signal?.aborted) return Promise.reject(abortError());
     if (size > this.bufferedBudgetBytes) { this.stats.busy += 1; return Promise.reject(busyError()); }
     if (!this.bufferWaiters.length && this.bufferedBytes + size <= this.bufferedBudgetBytes) {
@@ -247,7 +303,7 @@ class AssetIntegrityCache {
       this.stats.peakBufferedBytes = Math.max(this.stats.peakBufferedBytes, this.bufferedBytes);
       return Promise.resolve();
     }
-    if (this.bufferWaiters.length >= this.maxQueuedStreams) { this.stats.busy += 1; return Promise.reject(busyError()); }
+    if (this.waitQueueFull(started)) { this.stats.busy += 1; return Promise.reject(busyError()); }
     return new Promise((resolve, reject) => {
       const onAbort = () => {
         const index = this.bufferWaiters.indexOf(waiter);
@@ -277,7 +333,7 @@ class AssetIntegrityCache {
   // a copy of bytes hashed earlier for this exact identity (kept in memory) or
   // read now through `handle` and hashed before being returned. The caller
   // must call release() once the bytes have been written. null = mismatch.
-  async verifiedSlice(filePath, stat, region, start, endExclusive, { handle = null, signal = null, carry = null } = {}) {
+  async verifiedSlice(filePath, stat, region, start, endExclusive, { handle = null, signal = null, carry = null, started = false, waited = false } = {}) {
     const identity = fileIdentity(stat);
     const key = this.regionKey(filePath, identity, region);
     const carried = carry && !carry.closed ? carry.entries.get(key) : undefined;
@@ -304,7 +360,7 @@ class AssetIntegrityCache {
       // it keeps alive. A small slice: copy it so eviction can free the rest.
       const length = endExclusive - start, view = length * 2 >= entry.buffer.length;
       const accounted = view ? entry.buffer.length : length;
-      await this.reserve(accounted, signal);
+      await this.reserve(accounted, signal, started);
       this.stats.bytesHits += 1;
       const slice = entry.buffer.subarray(start - region.offset, endExclusive - region.offset);
       const bytes = view ? slice : Buffer.from(slice);
@@ -312,19 +368,44 @@ class AssetIntegrityCache {
       return { bytes, release: () => { if (!released) { released = true; this.unreserve(accounted); } } };
     }
     if (entry) { this.bytes.delete(key); this.bytesTotal -= entry.buffer.length; }
-    this.stats.bytesMisses += 1;
+    // Another request is hashing this region: wait for it (holding no budget),
+    // then use the bytes it kept. If it kept none, hash them here.
+    const inflight = eligible && !waited ? this.pending.get(key) : undefined;
+    if (inflight) {
+      await this.awaitShared(inflight, signal, started);
+      return this.verifiedSlice(filePath, stat, region, start, endExclusive, { handle, signal, carry, started, waited: true });
+    }
     const capacity = region.toEof ? region.size + 1 : region.size;
-    await this.reserve(capacity, signal);
+    await this.reserve(capacity, signal, started);
+    // Another request may have started (or finished) this region meanwhile.
+    if (eligible && !waited && (this.pending.has(key) || this.bytes.get(key)?.until > this.now())) {
+      this.unreserve(capacity);
+      return this.verifiedSlice(filePath, stat, region, start, endExclusive, { handle, signal, carry, started, waited });
+    }
+    this.stats.bytesMisses += 1;
+    if (eligible && started) this.stats.misses += 1; // the first region was counted when it was checked
     let handedOut = false;
     try {
       const generation = this.generation;
-      const result = await this.hashRegion(filePath, identity, region.offset, region.size, { toEof: Boolean(region.toEof), handle, signal, preReserved: true });
-      if (!result?.buffer || result.digest !== region.sha256) return null;
-      if (eligible && result.cacheable && generation === this.generation) {
-        this.storeBytes(key, result.buffer);
-        this.verified.set(key, this.now() + this.ttlMs);
-        while (this.verified.size > this.maxEntries) this.verified.delete(this.verified.keys().next().value);
+      const hashing = (async () => {
+        const result = await this.hashRegion(filePath, identity, region.offset, region.size, { toEof: Boolean(region.toEof), handle, signal, preReserved: true });
+        if (!result?.buffer || result.digest !== region.sha256) return null;
+        if (eligible && result.cacheable && generation === this.generation) {
+          this.storeBytes(key, result.buffer);
+          this.verified.set(key, this.now() + this.ttlMs);
+          while (this.verified.size > this.maxEntries) this.verified.delete(this.verified.keys().next().value);
+        }
+        return result;
+      })();
+      // Requests for the same region share this check, as in remember().
+      if (eligible && !this.pending.has(key)) {
+        const shared = hashing.then(Boolean, (error) => { if (isAbort(error) || isBusy(error)) throw error; return false; })
+          .finally(() => { if (this.pending.get(key) === shared) this.pending.delete(key); });
+        shared.catch(() => {}); // the owner reports its own cancellation
+        this.pending.set(key, shared);
       }
+      const result = await hashing;
+      if (!result) { this.stats.failures += 1; return null; }
       handedOut = true;
       let released = false;
       return { bytes: result.buffer.subarray(start - region.offset, endExclusive - region.offset), release: () => { if (!released) { released = true; this.unreserve(capacity); } } };
@@ -405,6 +486,7 @@ class AssetIntegrityCache {
     }
     const inflight = this.pending.get(key);
     if (inflight) {
+      await this.awaitShared(inflight, signal);
       try { return await inflight; } catch (error) {
         // The request that owned the shared check went away; check for this one.
         if (isAbort(error) && !signal?.aborted) return this.verifyAlone(verify, signal);
