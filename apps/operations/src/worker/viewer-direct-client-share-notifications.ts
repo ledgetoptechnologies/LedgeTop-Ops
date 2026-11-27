@@ -71,12 +71,12 @@ export async function processDirectViewerShareNotices(env: Env,
     WHERE request.id>='vdcg-notify:' AND request.id<'vdcg-notify;' AND request.action=? AND request.id='vdcg-notify:'||g.id
       AND NOT EXISTS(SELECT 1 FROM viewer_direct_client_grant_audit closed WHERE closed.id='vdcg-notify-closed:'||g.id)
     ORDER BY request.created_at,g.id LIMIT ?`).bind(REQUESTED, MAX_GRANTS).all<OpenGrant>()).results;
-  // The Viewer posts a multi-task share one task at a time. Hold every open request for a project
-  // and workspace until the newest of them is a minute old, so one click becomes one email.
+  // The Viewer posts a multi-task share one task at a time, and linked workspaces one at a time. Hold
+  // every open request for a Viewer project until the newest of them is a minute old: one email.
   const newest = new Map<string, number>();
-  for (const grant of open) { const key = JSON.stringify([grant.viewer_project_id, grant.workspace_id]);
+  for (const grant of open) { const key = grant.viewer_project_id;
     newest.set(key, Math.max(newest.get(key) ?? 0, Date.parse(grant.requested_at))); }
-  const settled = (grant: OpenGrant) => newest.get(JSON.stringify([grant.viewer_project_id, grant.workspace_id]))! <= nowMs - GRACE_MS;
+  const settled = (grant: OpenGrant) => newest.get(grant.viewer_project_id)! <= nowMs - GRACE_MS;
   let closed = 0, sent = 0;
   const close = async (grant: OpenGrant, reason: string) => {
     try { await auditRow(db, closedId(grant.id), grant.id, CLOSED, SHARE_NOTICE_ACTOR, closedId(grant.id), { reason }, now).run(); closed++; }
