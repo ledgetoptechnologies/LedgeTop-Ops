@@ -66,7 +66,7 @@ async function late(route: Route, json: unknown) {try {await route.fulfill({json
 test("one client search routes a connected-workspace person to its own review, create and revoke", async ({page}) => {
   const calls = await mock(page); await openPanel(page);
   await client(page).fill("casey");
-  const option = page.getByRole("option", {name: /Casey Coastal/}); await expect(option).toContainText(division(targetB.sourceId)); await expect(option).toContainText(targetB.workspaceName);
+  const option = page.getByRole("option", {name: /Casey Coastal/}); await expect(option).not.toContainText(division(targetB.sourceId)); await expect(option).toContainText(targetB.workspaceName);
   await option.click();
   await expect(page.getByText(`Project (the only one available for this person): ${targetB.projectName}`, {exact: false})).toBeVisible();
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("collaborator");
@@ -82,7 +82,7 @@ test("one client search routes a connected-workspace person to its own review, c
   expect(calls.find(call => call.path === "/api/delivery/client-share-recipients")?.query.get("folderRef")).toBe("folder-acme");
   // A connected-workspace person never reaches the primary grant routes.
   expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") && call.method === "POST")).toBe(false);
-  await expect(accessList(page)).toContainText(`${division(targetB.sourceId)} · ${targetB.workspaceName} · ${targetB.projectName}`);
+  await expect(accessList(page)).toContainText(`${targetB.workspaceName} · ${targetB.projectName}`); await expect(accessList(page)).not.toContainText(division(targetB.sourceId));
   page.once("dialog", dialog => {expect(dialog.message()).toContain(targetB.workspaceName); return dialog.accept();});
   await page.getByRole("button", {name: /^Revoke connected access\s*: Casey Coastal$/}).click();
   await expect(page.getByRole("status").filter({hasText: "Connected workspace access revoked"})).toBeVisible();
