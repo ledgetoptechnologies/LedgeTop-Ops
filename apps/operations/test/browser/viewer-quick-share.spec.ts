@@ -209,24 +209,17 @@ test("a duplicate reported after an unconfirmed share is not treated as a failur
   expect(sent[1]!.body).toEqual(sent[0]!.body);
 });
 
-test("a whole-project share needs the separate future-models opt-in", async ({ page }) => {
-  const calls = await mockOps(page, MANAGER, (url, method, route) =>
-    url.pathname === "/api/viewer/direct-client-grants" && method === "POST"
-      ? route.fulfill({ status: 201, json: { grant: grant({ taskId: null, scopeType: "project", includeFuturePublished: true }), replayed: false } }) : undefined);
-  const dialog = await openShare(page, "Whole project");
-  await expect(dialog.getByRole("heading", { name: "Share Seawall survey (whole project)" })).toBeVisible();
-  await findClient(dialog, "Coastal");
-  await dialog.getByRole("option", { name: /Coastal Engineering/ }).click();
-  const optIn = dialog.getByRole("checkbox", { name: "Also share every model published to this project later" });
-  await expect(optIn).not.toBeChecked();
-  await expect(dialog.getByRole("button", { name: "Review share" })).toBeDisabled();
-  await optIn.check();
-  await dialog.getByRole("button", { name: "Review share" }).click();
-  await expect(dialog.getByRole("region", { name: "Review share" })).toContainText("including every model published to it later");
-  await dialog.getByRole("button", { name: "Share", exact: true }).click();
-  await expect(dialog.getByRole("status").filter({ hasText: "Shared with Coastal Engineering" })).toBeVisible();
-  expect(posts(calls)[0]!.body).toMatchObject({ workspaceId: "ws-coastal", viewerProjectId: "vp-seawall", taskId: null,
-    scopeType: "project", includeFuturePublished: true, confirmedScope: true, expiresAt: null });
+test("Quick share offers only models and points whole-project sharing to Viewer without sending", async ({ page }) => {
+  const calls = await mockOps(page, MANAGER);
+  await page.goto("/viewer");
+  await expect(page.getByText("Share whole projects from the Viewer.")).toBeVisible();
+  await findProject(page, "Seawall");
+  await page.getByRole("list", { name: "Viewer projects" }).getByRole("button", { name: /Seawall survey/ }).click();
+  const models = page.getByRole("list", { name: "Published models in Seawall survey" });
+  await expect(models.getByRole("button")).toHaveCount(2);
+  await expect(models.getByRole("button", { name: /Whole project/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open in Viewer" }).first()).toBeVisible();
+  expect(posts(calls)).toHaveLength(0);
 });
 
 test("a client whose connection changed is reloaded, never substituted", async ({ page }) => {
@@ -280,6 +273,37 @@ test("existing client shares for the model are listed and can be stopped", async
   expect(deleted.body).toEqual({ reason: "Revoked by staff" });
 });
 
+for (const mode of ["only", "except"]) test(`saved ${mode} selection is distinguished from confirmed model access`, async ({ page }) => {
+  const restricted = grant({ grantId: "restricted", scopeType: "project", taskId: null, includeFuturePublished: true,
+    selection: { version: 1, mode, folderIds: ["00000000-0000-4000-8000-000000000001"], taskIds: [] } });
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname === "/api/viewer/direct-client-grants" && method === "GET")
+      return route.fulfill({ json: clientWorkspace(url, clients, [restricted]) });
+    if (url.pathname === "/api/viewer/direct-client-grants" && method === "POST")
+      return route.fulfill({ status: 201, json: { grant: grant(), replayed: false } });
+    return undefined;
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await expect(dialog.getByText("Restricted project shares", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Restricted project · Model coverage not confirmed", { exact: false })).toBeVisible();
+  await expect(dialog.getByText("Already shared with", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /Stop sharing/ })).toHaveCount(0);
+  await findClient(dialog, "Harbor");
+  const option = dialog.getByRole("option", { name: /Harbor Authority/ });
+  await expect(option).not.toContainText("Already has access");
+  await option.click();
+  await dialog.getByRole("button", { name: "Review share" }).click();
+  await expect(dialog.getByText(/already has this model through/)).toHaveCount(0);
+  await expect(dialog.getByText(/Their restricted project share stays as it is/)).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Share", exact: true })).toBeEnabled();
+  await dialog.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(dialog.getByRole("status").filter({ hasText: "Shared with Harbor Authority" })).toBeVisible();
+  expect(posts(calls).map(call => call.body)).toEqual([{ sourceId: clients[1]!.sourceId, workspaceId: clients[1]!.workspaceId,
+    viewerProjectId: "vp-seawall", taskId: "task-ortho", scopeType: "task", includeFuturePublished: false,
+    confirmedScope: true, expiresAt: null, permissions: { measure: true, cameras: false, download: false } }]);
+  expect(calls.filter(call => call.method === "DELETE")).toEqual([]);
+});
+
 test("public links are offered only for a single model with a public version", async ({ page }) => {
   const calls = await mockOps(page, MANAGER, (url, method, route) => {
     if (url.pathname === "/api/viewer/models/model-ortho/shares" && method === "GET") return route.fulfill({ json: { shares: [] } });
@@ -289,10 +313,6 @@ test("public links are offered only for a single model with a public version", a
     return undefined;
   });
   let dialog = await openShare(page, "Seawall 3D mesh");
-  await expect(dialog.getByRole("tab", { name: "Public link" })).toBeDisabled();
-  await dialog.getByRole("button", { name: "Close" }).click();
-  await page.getByRole("list", { name: "Published models in Seawall survey" }).getByRole("button", { name: /Whole project/ }).click();
-  dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("tab", { name: "Public link" })).toBeDisabled();
   await dialog.getByRole("button", { name: "Close" }).click();
   await page.getByRole("list", { name: "Published models in Seawall survey" }).getByRole("button", { name: /Seawall orthomosaic/ }).click();

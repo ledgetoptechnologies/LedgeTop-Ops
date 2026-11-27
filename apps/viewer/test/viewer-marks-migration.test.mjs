@@ -33,7 +33,10 @@ function snapshot(db) {
   const objects = db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => ({ ...row }));
   const rows = {};
   for (const { type, name } of objects) {
-    if (type === 'table') rows[name] = db.prepare(`SELECT * FROM ${quote(name)} ORDER BY rowid`).all().map(row => ({ ...row }));
+    if (type !== 'table') continue;
+    const primaryKey = db.prepare('SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk').all(name);
+    const order = primaryKey.map(column => quote(column.name)).join(', ') || 'rowid';
+    rows[name] = db.prepare(`SELECT * FROM ${quote(name)} ORDER BY ${order}`).all().map(row => ({ ...row }));
   }
   return { objects, rows };
 }
@@ -237,7 +240,7 @@ test('90 adds only the sharing tables, survives the previous build, and is refus
   withMigrations(item => item.version <= 86, () => applyMigrations(db));
   const before = snapshot(db);
   db.close();
-  const current = open();
+  const current = open(item => item.version <= 90);
   const after = snapshot(current), added = ['viewer_mark_authors', 'viewer_mark_history', 'viewer_mark_shares'];
   assert.deepEqual(after.objects.filter(row => !added.includes(row.name)), before.objects);
   assert.deepEqual(after.objects.filter(row => added.includes(row.name)).map(row => row.name), added);
@@ -250,7 +253,7 @@ test('90 adds only the sharing tables, survives the previous build, and is refus
   const previous = open(item => item.version <= 86);
   healthy(previous);
   previous.close();
-  const again = open();
+  const again = open(item => item.version <= 90);
   assert.equal(new marksRepository.ViewerMarkRepository(again).get(staff, mark.id).visibility, 'shared');
   again.exec("UPDATE models SET active_version_id=NULL; DELETE FROM viewer_sessions; DELETE FROM model_versions; DELETE FROM models WHERE id='synthetic-model'");
   assert.equal(again.prepare('SELECT count(*) n FROM viewer_mark_shares').get().n, 0);
@@ -258,6 +261,56 @@ test('90 adds only the sharing tables, survives the previous build, and is refus
   again.exec('ALTER TABLE viewer_mark_shares ADD COLUMN extra TEXT');
   again.close();
   assert.throws(() => open(), { code: 'viewer_migration_history_conflict' });
+});
+
+test('schema 90 to 92 preserves populated Marks data, sharing behavior and the landed ledger', t => {
+  const { db } = populated(t, 86);
+  withMigrations(item => item.version <= 90, () => applyMigrations(db));
+  const repository = new marksRepository.ViewerMarkRepository(db);
+  const staff = { ...principal, audience: 'ops', subject: 'staff-a' };
+  const client = { ...principal, session: { sourceAuthorization: { type: 'direct_client_grant', id: 'synthetic-grant', version: 1 },
+    permissions: { personalMeasurements: true } } };
+  const categoryId = crypto.randomUUID();
+  repository.createCategory(staff, { id: categoryId, name: 'Synthetic category', color: '#3366ff', icon: 'flag' });
+  // Legacy account rows can remain even though current served sharing does not add them.
+  db.prepare('INSERT INTO viewer_mark_accounts(model_id,account_key,first_seen_at,last_seen_at) VALUES (?,?,?,?)')
+    .run(principal.modelId, 'direct_client_grant:synthetic-grant', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z');
+  const input = { ...pin(), categoryId, note: 'Synthetic staff note' };
+  const { mark } = repository.create(staff, input);
+  repository.update(staff, mark.id, { ...input, name: 'Updated synthetic pin', revision: mark.revision });
+  repository.create(client, { ...pin(), name: 'Private client pin' });
+  const before = snapshot(db);
+  const markTables = ['viewer_marks', 'viewer_mark_categories', 'viewer_mark_accounts',
+    'viewer_mark_shares', 'viewer_mark_authors', 'viewer_mark_history'];
+  for (const name of markTables) assert.ok(before.rows[name].length > 0, `${name} fixture must be populated`);
+  const visibleBefore = [repository.get(staff, mark.id), repository.get(client, mark.id), repository.list(client)];
+  assert.equal(visibleBefore[0].visibility, 'shared');
+  assert.equal(visibleBefore[1].editable, true);
+  assert.equal(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v, 90);
+
+  applyMigrations(db);
+  assert.equal(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v, 92,
+    'schema 90 must advance to 92 through the additive first-share migrations');
+  const after = snapshot(db);
+  assert.deepEqual(after.rows.schema_migrations.filter(row => row.version <= 90), before.rows.schema_migrations);
+  assert.deepEqual(after.rows.schema_migrations.filter(row => row.version > 90).map(({ version, name }) => [version, name]),
+    [[91, 'task_authorization_generations'], [92, 'restricted_viewer_session_lifecycle']]);
+  for (const name of markTables) {
+    assert.deepEqual(after.rows[name], before.rows[name], `${name}: every stored value survives`);
+    assert.deepEqual(after.objects.filter(row => row.name === name), before.objects.filter(row => row.name === name));
+  }
+  for (const [name, rows] of Object.entries(before.rows)) {
+    if (name !== 'schema_migrations' && name !== 'session_grants') assert.deepEqual(after.rows[name], rows, name);
+  }
+  assert.equal(MIGRATIONS.find(item => item.version === 90).verify(db), true);
+  assert.equal(MIGRATIONS.find(item => item.version === 91).verify(db), true);
+  assert.equal(MIGRATIONS.find(item => item.version === 92).verify(db), true);
+  assert.deepEqual([repository.get(staff, mark.id), repository.get(client, mark.id), repository.list(client)], visibleBefore);
+  assert.equal(db.prepare('SELECT count(*) n FROM task_authorization_generations').get().n,
+    db.prepare('SELECT count(*) n FROM processing_tasks').get().n);
+  healthy(db);
+  applyMigrations(db);
+  assert.deepEqual(snapshot(db), after, 're-running 92 is a no-op');
 });
 
 test('a later reserved number (87) can land before or after 84', t => {
@@ -268,7 +321,14 @@ test('a later reserved number (87) can land before or after 84', t => {
     try {
       withMigrations(item => item.version !== (first === '87' ? 84 : 87), () => applyMigrations(db));
       applyMigrations(db);
-      assert.deepEqual(ledger(db).slice(-5).map(([version]) => version), [84, 85, 86, 87, 90]);
+      const applied = new Map(ledger(db));
+      assert.equal(applied.get(84), NAME);
+      assert.equal(applied.get(85), 'processing_provider_removal');
+      assert.equal(applied.get(86), 'trash_container_purge_started');
+      assert.equal(applied.get(87), 'synthetic_87');
+      assert.equal(applied.get(90), 'viewer_mark_sharing');
+      assert.equal(applied.get(91), 'task_authorization_generations');
+      assert.equal(applied.get(92), 'restricted_viewer_session_lifecycle');
       assert.equal(marks.verify(db), true);
       healthy(db);
     } finally { MIGRATIONS.splice(MIGRATIONS.indexOf(later), 1); }

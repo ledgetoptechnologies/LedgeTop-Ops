@@ -59,7 +59,7 @@ async function fixture(t){
   // Like ViewerRepository.getModel: only published assets, the full list kept non-enumerable.
   const publishedOnly=m=>{const v={...m.activeVersion,assets:m.activeVersion.assets.filter(a=>Boolean(a.published))};Object.defineProperty(v,'lodVerificationAssets',{value:m.activeVersion.assets,enumerable:false});return {...m,activeVersion:v};};
   const repository={resolveModelId:id=>id==='model'?id:null,getModel:id=>id==='model'?publishedOnly(model):null,getModelVersion:(id,versionId)=>id==='model'&&versionId==='version'?model:null,
-    getViewerSessionByHash:hash=>hash===auth.hashToken(viewerToken)?session:null,viewerSessionLive:value=>!!value&&!value.revokedAt&&Date.parse(value.expiresAt)>Date.now(),rateLimited:()=>false,getModelAssetChunks:()=>[],getPublicShare:()=>null,publicShareLive:()=>false};
+    getViewerSessionByHash:hash=>hash===auth.hashToken(viewerToken)?session:null,readSnapshot:read=>read(),viewerSessionLive:value=>!!value&&!value.revokedAt&&Date.parse(value.expiresAt)>Date.now(),rateLimited:()=>false,getModelAssetChunks:()=>[],getPublicShare:()=>null,publicShareLive:()=>false};
   const processing={database:{},getModelOutput:id=>id==='version'?output:null,getAdminSessionByHash:hash=>hash===auth.hashToken(adminToken)?staff:null,adminSessionLive:value=>!!value&&!value.revokedAt&&Date.parse(value.expiresAt)>Date.now()};
   assetsRouter.setRepository(repository);assetsRouter.setProcessingRepository(processing);
   const app=express();app.use(express.json());app.use(assetsRouter);app.use(createProcessingApi({repository,processing,storage:{resolve:(_root,relative)=>path.join(root,relative)}}));

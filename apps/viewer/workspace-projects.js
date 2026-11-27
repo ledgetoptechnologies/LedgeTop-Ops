@@ -23,6 +23,7 @@ import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setW
 import { folderAncestry, folderIsEmpty, folderTaskCounts, limitOpenProjects, projectTreeRows, readTreeState, treeKeyAction, writeTreeState } from './workspace-folder-tree.mjs';
 const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
 import { DIRECT_CLIENT_GRANTS_PATH, SHARE_TARGET_MISSING, bindClientPicker, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, directShareReviewMarkup, loadDirectClientAccess, loadDirectClientGroups, directClientGroupOf, directDestinationMarkup, publishAudience, publishAudienceNames, publishAudienceText, readDirectShareForm, directClientKey, shareableTasks } from './workspace-direct-client-share.mjs';
+import { directProjectShareEditForm, directProjectShareReviewText, editableDirectProjectGrant, publicationFolderPath, readDirectProjectShareEdit, syncDirectProjectSelection } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -236,16 +237,17 @@ async function openShareModal(projectId,onlyOutputId=null){
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
   })();
-  // Direct sharing has its own authority and must not wait for project lookups.
+  // Direct sharing uses its own access and folder reads. Legacy Operations lookups are independent.
   if(context.clientLoading)void(async()=>{
+    const catalogRead=onlyOutputId?null:loadProjectShareSelectionCatalog(projectId,()=>current()&&can('viewer.client_grants.manage'));
     // One grouping read per open, alongside the access list. The client panel waits for both (grouping gives up
     // after a short wait), so the picker's grouping is fixed before any row is shown and never changes after.
     const grouping=loadDirectClientGroups(api).catch(()=>new Map());
     let access=null;
     try{access=await loadDirectClientAccess(api,projectId);}catch{}
-    const groups=await grouping;
+    const [groups,catalog]=await Promise.all([grouping,catalogRead]);
     if(!current()||!can('viewer.client_grants.manage'))return;
-    state.clientDirectAccess=access;state.clientDirectGroups=groups;context.directQuery='';
+    state.clientDirectAccess=access;state.clientDirectGroups=groups;context.directQuery='';context.selectionCatalog=catalog;
     if(context.loading)return;
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
@@ -348,7 +350,7 @@ function publicationAuthorityLive(){
 }
 function beginWorkspaceReauthorization(){if(!state.adminSession||!state.token||!validOpsOrigin(sessionStorage.getItem(OPS_ORIGIN_KEY)))return false;void workspaceRecovery.pause();return true}
 function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;invalidatePublicationAuthority();invalidateFolderAuthorization();const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);sessionStorage.removeItem('ltds-viewer-workspace-session');state.token=null;state.adminSession=null;state.pendingOutputShares?.clear();state.clientAccess=null;state.clientNativeAccess=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
-async function workspaceFetch(path,init={},beforeDispatch){
+async function workspaceFetch(path,init={},beforeDispatch,publicShareCreate=false){
   await workspaceRecovery.wait(init.signal);
   if(workspaceRenewal&&workspaceRenewal.expiresAtMs<=Date.now()){
     const renewed=await workspaceRenewal.waitForRenewal({signal:init.signal,whileExpired:true});
@@ -362,7 +364,7 @@ async function workspaceFetch(path,init={},beforeDispatch){
   };
   if(beforeDispatch)(await beforeDispatch())();
   let response=await dispatch();
-  const isRecordedReceipt=response=>(Boolean(beforeDispatch)||init.headers?.['X-Viewer-Share-Receipt-Only']==='true')
+  const isRecordedReceipt=response=>(publicShareCreate||init.headers?.['X-Viewer-Share-Receipt-Only']==='true')
     &&(response.headers?.get('Idempotency-Replayed')==='true'||response.headers?.get('X-Viewer-Share-Receipt-Recorded')==='true');
   if(response.status!==401||isRecordedReceipt(response))return response;
   // Renewal retains the bearer but replaces the authenticated session envelope.
@@ -388,7 +390,7 @@ async function workspaceFetch(path,init={},beforeDispatch){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch}={}){
+async function api(path,{method='GET',body,headers={},signal,recoveryGuard,beforeDispatch,publicShareCreate=false}={}){
   const requestToken=state.token,requestSession=state.adminSession;
   // A background read that races session expiry waits for silent renewal
   // instead of signing the tab out. Its answer is discarded either way: it was
@@ -411,7 +413,7 @@ async function api(path,{method='GET',body,headers={},signal,recoveryGuard,befor
     if(response.status===401&&workspaceRenewal&&await renewedAfterUnauthorized())
       throw Object.assign(Error('Access was renewed; this request was not applied.'),{code:'recovery_session_changed'});
     assertRequestCurrent();
-  }else response=await workspaceFetch(path,init,beforeDispatch);
+  }else response=await workspaceFetch(path,init,beforeDispatch,publicShareCreate);
   let payload;
   try{payload=await response.json()}catch{}
   assertRequestCurrent();
@@ -420,7 +422,7 @@ async function api(path,{method='GET',body,headers={},signal,recoveryGuard,befor
     throw Object.assign(responseError('Operations client access request failed',response.status),
       clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));
   }
-  const shareRequest=Boolean(beforeDispatch)||init.headers['X-Viewer-Share-Receipt-Only']==='true';
+  const shareRequest=publicShareCreate||init.headers['X-Viewer-Share-Receipt-Only']==='true';
   const receiptReplayed=shareRequest&&response.headers?.get('Idempotency-Replayed')==='true';
   const receiptRecorded=shareRequest&&response.headers?.get('X-Viewer-Share-Receipt-Recorded')==='true';
   if(!response.ok&&(receiptReplayed||receiptRecorded)){
@@ -433,7 +435,7 @@ async function api(path,{method='GET',body,headers={},signal,recoveryGuard,befor
   if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);
   if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),
     payload?.code?{code:payload.code,grantId:payload.grantId}:{});
-  if(beforeDispatch&&response.status!==201)throw new Error('The link request outcome could not be read. Retry to check it.');
+  if(publicShareCreate&&response.status!==201)throw new Error('The link request outcome could not be read. Retry to check it.');
   return receiptReplayed?{...payload,receiptReplayed:true}:payload;
 }
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
@@ -1917,36 +1919,189 @@ function legacyClientSharePanel(output,onlyOutputId){
   }
   return clientShareCard(output,onlyOutputId);
 }
+async function loadProjectShareSelectionCatalog(projectId,authorized){
+  const pathId=encodeURIComponent(projectId),options={recoveryGuard:authorized,headers:{'Cache-Control':'no-cache'}};
+  try{
+    const [folderResult,taskResult]=await Promise.all([
+      api(`/api/v1/projects/${pathId}/folders`,options),
+      pagedApi(`/api/v1/tasks?projectId=${pathId}`,'tasks',options,{strict:true}),
+    ]);
+    return authorized()?projectShareSelectionCatalog(projectId,folderResult?.folders,taskResult.tasks):null;
+  }catch{return null}
+}
+function projectShareSelectionCatalog(projectId,folders,tasks){
+  const validItem=item=>item?.projectId===projectId&&typeof item.id==='string'&&Boolean(item.id)
+    &&typeof item.displayName==='string';
+  if(!Array.isArray(folders)||!Array.isArray(tasks)||folders.some(folder=>!validItem(folder)
+    ||(folder.parentId!==null&&typeof folder.parentId!=='string')))return null;
+  const folderIds=new Set(folders.map(folder=>folder.id));
+  const taskIds=new Set();
+  if(folderIds.size!==folders.length||tasks.some(task=>{
+    if(!validItem(task)||task.status==='archived'||taskIds.has(task.id)
+      ||(task.folderId!==null&&!folderIds.has(task.folderId)))return true;
+    taskIds.add(task.id);
+    return false;
+  }))return null;
+  const paths=folders.map(folder=>folderPath(folders,folder.id));
+  if(paths.some(path=>path[0]?.parentId!==null||path.length>16))return null;
+  const folderNames=new Map(folders.map((folder,index)=>[folder.id,paths[index].map(item=>item.displayName).join(' / ')]));
+  const topology=JSON.stringify([
+    folders.map(folder=>[folder.id,folder.parentId]).sort(),
+    tasks.map(task=>[task.id,task.folderId]).sort(),
+  ]);
+  return {
+    folders:folders.map(folder=>({...folder,displayName:folderNames.get(folder.id)})),
+    tasks:tasks.map(task=>({id:task.id,folderId:task.folderId,name:[folderNames.get(task.folderId),task.displayName||'Untitled task'].filter(Boolean).join(' / ')})),
+    topology,
+  };
+}
+function sameShareSelectionCatalog(reviewed,current,selection){
+  if(!reviewed||!current||reviewed.topology!==current.topology)return false;
+  const labels=(items,ids,key)=>ids.map(id=>items.find(item=>item.id===id)?.[key]);
+  return JSON.stringify([
+    labels(reviewed.folders,selection.folderIds,'displayName'),
+    labels(reviewed.tasks,selection.taskIds,'name'),
+  ])===JSON.stringify([
+    labels(current.folders,selection.folderIds,'displayName'),
+    labels(current.tasks,selection.taskIds,'name'),
+  ]);
+}
 function directShareContext(onlyOutputId){
   const projectId=state.shareContext.projectId,project=state.projects.find(item=>item.id===projectId);
   const taskId=onlyOutputId?state.shareContext.taskId||null:null,task=taskId?state.tasks.find(item=>item.id===taskId):null;
   return {projectId,projectName:project?.displayName||'this project',tasks:shareableTasks(projectId,state.tasks,state.outputs),
-    entry:onlyOutputId?'task':'project',taskId,taskName:onlyOutputId?state.shareContext.taskName||'':'',
+    entry:onlyOutputId?'task':'project',selectionCatalog:state.shareContext.selectionCatalog,
+    taskId,taskName:onlyOutputId?state.shareContext.taskName||'':'',
     // The task and the model it was opened on must both still be there, in this project.
     targetMissing:Boolean(onlyOutputId)&&!(task?.projectId===projectId&&state.outputs.some(output=>output.id===onlyOutputId&&output.taskId===taskId))};
 }
 function directClientShareCard(onlyOutputId){
   const context=directShareContext(onlyOutputId),access=state.clientDirectAccess;
-  return card('Share with a client',`${directShareForm(context)}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,{...context,dateTime,groups:state.clientDirectGroups})}`);
+  return card('Share with a client',`${directShareForm(context)}<h3 class="direct-share-heading">Clients with access</h3>${directGrantRows(access,
+    {...context,tasks:context.selectionCatalog?.tasks||context.tasks,folders:context.selectionCatalog?.folders||folderCache.get(context.projectId)?.folders||[],dateTime,groups:state.clientDirectGroups})}`);
 }
 function rerenderClientSharePanel(projectId,onlyOutputId){
   const panel=modalContent.querySelector('[data-client-share-panel]');
   if(panel){panel.querySelector?.('#direct-client-grant-form')?.clientPicker?.dispose();panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
 }
+async function editDirectProjectShare(projectId,button){
+  const context=state.shareContext,subject=state.adminSession?.subject,grantId=button.dataset.id;
+  const authorized=()=>state.shareContext===context&&context?.projectId===projectId
+    &&state.adminSession?.subject===subject&&publicationAuthorityLive()&&can('viewer.client_grants.manage')&&modal.open;
+  if(!authorized()||button.disabled||!editableDirectProjectGrant(state.clientDirectAccess,projectId,grantId))return;
+  button.disabled=true;
+  let access,catalog;
+  try{
+    [access,catalog]=await Promise.all([
+      loadDirectClientAccess(api,projectId),loadProjectShareSelectionCatalog(projectId,authorized),
+    ]);
+  }catch{
+    if(authorized()&&button.isConnected)toast('Could not refresh the share and its folders. Try again.',true);
+    return;
+  }finally{if(button.isConnected)button.disabled=false}
+  if(!authorized()||!button.isConnected)return;
+  const grant=editableDirectProjectGrant(access,projectId,grantId);
+  if(!grant){
+    toast('This share changed. Review the updated access list.',true);
+    return openShareModal(projectId);
+  }
+  if(!catalog){
+    toast('The project folders could not be verified. Try again.',true);return;
+  }
+  const project=state.projects.find(item=>item.id===projectId&&item.status==='active');
+  if(!project)return;
+  state.clientDirectAccess=access;
+  const edit={grant,...catalog,projectName:project.displayName||'this project'};
+  modalContent.querySelector('#direct-client-grant-form')?.clientPicker?.dispose();
+  openModal('Edit client share',directProjectShareEditForm(edit),'wide-modal');
+  const form=modalContent.querySelector('#direct-project-share-edit'),status=form.querySelector('[role="status"]');
+  const fields=form.querySelector('[data-edit-share-targets]'),mode=form.elements.mode;
+  const back=form.querySelector('[data-edit-share-back]'),submit=form.querySelector('button[type="submit"]');
+  const live=()=>authorized()&&form.isConnected&&state.clientDirectAccess===access
+    &&editableDirectProjectGrant(access,projectId,grantId)&&state.projects.some(item=>item.id===projectId&&item.status==='active');
+  const requestKeys=new Map();
+  const sync=()=>{fields.hidden=mode.value==='whole';fields.disabled=fields.hidden};
+  mode.onchange=sync;
+  back.onclick=()=>{if(live())return openShareModal(projectId)};
+  form.onsubmit=async event=>{
+    event.preventDefault();
+    if(form.shareBusy||submit.disabled||!live())return;
+    let change;
+    try{change=readDirectProjectShareEdit(form,edit)}catch(error){status.textContent=error.message;return}
+    form.shareBusy=true;
+    mode.disabled=fields.disabled=back.disabled=submit.disabled=true;
+    status.textContent='';
+    let stale=false,saved=false;
+    try{
+      const authorityAtReview=publicationAuthorityGeneration;
+      const reviewedAuthorityLive=()=>live()&&publicationAuthorityGeneration===authorityAtReview;
+      const summary=directProjectShareReviewText({summary:change.summary,permissions:grant.permissions,expiresAt:grant.expiresAt,dateTime});
+      if(!await dialogs.confirm(`This replaces the current project share. ${summary}`,{title:'Review share change',submitLabel:'Save selection'}))return;
+      if(!reviewedAuthorityLive())throw new Error('Access changed while reviewing. Review the change again.');
+      const serialized=JSON.stringify(change.body);
+      if(!requestKeys.has(serialized))requestKeys.set(serialized,crypto.randomUUID());
+      status.textContent='Updating access…';
+      const result=await api(DIRECT_CLIENT_GRANTS_PATH,{method:'POST',body:change.body,
+        headers:{'Idempotency-Key':requestKeys.get(serialized)},
+        beforeDispatch:async()=>{
+          const requireReviewed=()=>{if(!reviewedAuthorityLive())throw new Error('Access changed while reviewing. Review the change again.')};
+          requireReviewed();
+          const [latest,latestCatalog]=await Promise.all([
+            loadDirectClientAccess(api,projectId),loadProjectShareSelectionCatalog(projectId,reviewedAuthorityLive),
+          ]);
+          requireReviewed();
+          const currentGrant=editableDirectProjectGrant(latest,projectId,grantId);
+          if(!currentGrant||JSON.stringify(currentGrant)!==JSON.stringify(grant)
+            ||!sameShareSelectionCatalog(catalog,latestCatalog,change.body.selection||{folderIds:[],taskIds:[]}))
+            throw Object.assign(new Error('This share changed. Review the updated access list.'),{code:'share_changed'});
+          return requireReviewed;
+        },
+      });
+      if(!result?.grant?.grantId)throw new Error('The update could not be confirmed. Retry to check the same change.');
+      saved=true;
+      if(live()){
+        toast(result.sessionRevocation?.pending?'Share updated. Revocation of prior sessions is pending.':'Share updated');
+        return openShareModal(projectId);
+      }
+    }catch(error){
+      stale=error.code==='share_changed';
+      if(live())status.textContent=directShareErrorText(error);
+    }finally{
+      form.shareBusy=false;
+      if(form.isConnected&&!saved){back.disabled=false;mode.disabled=submit.disabled=stale;sync();if(stale)fields.disabled=true}
+    }
+  };
+}
 function bindDirectShare(form,projectId,onlyOutputId){
   const context=directShareContext(onlyOutputId),shareContext=state.shareContext,live=()=>state.shareContext===shareContext&&form.isConnected&&modal.open;
-  let picked=null,fresh=false;const read=()=>readDirectShareForm(form,{...context,tasks:directShareContext(onlyOutputId).tasks||context.tasks,known:context.tasks,fresh,clients:picked?[picked]:[]});
+  const token=state.token,subject=state.adminSession?.subject;
+  let picked=null,fresh=false,reviewed=null;const read=()=>readDirectShareForm(form,{...context,tasks:directShareContext(onlyOutputId).tasks||context.tasks,known:context.tasks,fresh,clients:picked?[picked]:[]});
   const summary=form.querySelector('[data-direct-summary]'),taskInputs=[...form.querySelectorAll('input[name="taskId"]')];
   const review=form.querySelector('[data-direct-review]'),reviewButton=form.querySelector('[data-direct-review-button]');
+  const projectTargets=form.querySelector('[data-direct-share-targets]'),mode=form.elements.mode;
+  let previousMode=mode?.value;
   // Review step: the choices are frozen and repeated in plain words before anything is sent.
   // It is the confirmation: only its Share button sends, and any change of the choices goes back through it.
   const setReviewing=on=>{
-    form.reviewing=on;if(!on)form.reviewed=null;review.hidden=!on;reviewButton.hidden=on;
+    form.reviewing=on;if(!on){form.reviewed=null;reviewed=null}review.hidden=!on;reviewButton.hidden=on;
     for(const element of form.querySelectorAll('fieldset,input[name="expiresAt"],input[name="measure"],input[name="cameras"],input[name="download"]'))element.disabled=on;
     if(!on)sync();
   };
-  const sync=()=>{const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';
-    const later=form.elements.includeLater,off=current.scope!=='project';if(later&&later.disabled!==off){later.disabled=off;later.checked=!off}summary.textContent=current.summary};
+  const sync=()=>{
+    if(mode&&mode.value!==previousMode){
+      // Except excludes unticked targets; Only includes ticked targets. A new mode needs fresh choices.
+      syncDirectProjectSelection(form,mode.value,context.selectionCatalog,{reset:true});
+      previousMode=mode.value;
+    }
+    syncDirectProjectSelection(form,mode?.value,context.selectionCatalog);
+    const current=read();for(const input of taskInputs)input.disabled=current.scope!=='tasks';
+    const later=form.elements.includeLater,off=current.scope!=='project';if(later&&later.disabled!==off){later.disabled=off;later.checked=!off}
+    if(mode)mode.disabled=current.scope!=='project';
+    if(projectTargets){
+      projectTargets.hidden=current.scope!=='project'||!['only','except'].includes(current.mode);
+      projectTargets.disabled=projectTargets.hidden;
+    }
+    summary.textContent=current.summary};
   form.onchange=()=>form.reviewing?setReviewing(false):sync();
   form.querySelector('[data-direct-back]').onclick=()=>setReviewing(false);
   // The second click of a double-click on Review share must not land on Share.
@@ -1968,7 +2123,7 @@ function bindDirectShare(form,projectId,onlyOutputId){
   sync();
   // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
   form.onsubmit=async event=>{
-    event.preventDefault();if(form.shareBusy)return;
+    event.preventDefault();if(form.shareBusy||!live())return;
     if(directShareContext(onlyOutputId).targetMissing){if(form.reviewing)setReviewing(false);summary.textContent=SHARE_TARGET_MISSING;return}
     let bodies,target;const choices=confirmed=>{target=read();const key=JSON.stringify([target.bodies(),target.what,target.published,target.client&&directClientKey(target.client)]);bodies=target.bodies({confirmed});return key};
     let chosen;try{chosen=choices(form.reviewing===true)}catch(error){if(form.reviewing)setReviewing(false);summary.textContent=error.message;return}
@@ -1984,20 +2139,37 @@ function bindDirectShare(form,projectId,onlyOutputId){
       // The review says it all; the line above it is for progress and refusals.
       summary.textContent='';
       const body=bodies[0];form.reviewed=chosen;
+      reviewed={authority:publicationAuthorityGeneration};
       form.querySelector('[data-direct-review-text]').innerHTML=directShareReviewMarkup({client:target.client,what:target.what,permissions:body.permissions,expiresAt:body.expiresAt,dateTime});
       // Focus the review, not Share: a held Enter key must not send.
       setReviewing(true);review.focus?.();return;
     }
     // What was reviewed is what is sent; anything that changed since goes back to the form.
     if(form.reviewed!==chosen){setReviewing(false);summary.textContent='Something changed since the review. Check it and review again.';return}
+
     // Inputs stay frozen while sending so the summary always matches what is being shared.
     const controls=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);
     for(const [element] of controls)element.disabled=true;
     form.shareBusy=true;form.requestKeys||=new Map();let shared=0,refusal='';summary.textContent=`Sharing… ${target.summary}`;
     try{
+      const reviewedAuthority=reviewed.authority;
+      const current=()=>live()&&state.token===token&&state.adminSession?.subject===subject
+        &&publicationAuthorityLive()&&can('viewer.client_grants.manage')&&publicationAuthorityGeneration===reviewedAuthority;
+      const requireCurrent=()=>{
+        if(!current())throw new Error('Access changed while reviewing. Close and reopen Share to review the access again.');
+      };
       for(const body of bodies){
         const serialized=JSON.stringify(body);if(!form.requestKeys.has(serialized))form.requestKeys.set(serialized,crypto.randomUUID());
-        await api(DIRECT_CLIENT_GRANTS_PATH,{method:'POST',body,headers:{'Idempotency-Key':form.requestKeys.get(serialized)}});shared++;
+        await api(DIRECT_CLIENT_GRANTS_PATH,{method:'POST',body,headers:{'Idempotency-Key':form.requestKeys.get(serialized)},
+          ...(body.selection?{beforeDispatch:async()=>{
+            requireCurrent();
+            const latestCatalog=await loadProjectShareSelectionCatalog(projectId,current);
+            requireCurrent();
+            if(!sameShareSelectionCatalog(context.selectionCatalog,latestCatalog,body.selection))
+              throw new Error('The project folders or tasks could not be verified or changed. Close and reopen Share to review the access again.');
+            return requireCurrent;
+          }}:{}),
+        });shared++;
       }
       toast(bodies.length>1?`Shared ${shared} tasks with the client`:'Shared with the client');
     }catch(error){
@@ -2020,6 +2192,9 @@ function clientShareCard(output,onlyOutputId){
   let form='';
   if(onlyOutputId&&(!output?.activePublished||output.status!=='published')){
     form=empty('Direct Operations client sharing is not available for this private ready model yet. Its verified activation and exact Operations association must be connected first; creating a public link is a separate choice, not a prerequisite for client access.');
+  }else if(!onlyOutputId){
+    // Whole-project access is a direct grant (with a selection); the server refuses new legacy project grants.
+    form=empty('New whole-project shares are direct client shares.');
   }else if(onlyOutputId&&!associations.length){
     form=empty('No unique Operations association matches this model. Set up its model association in Operations first. Other models and entire client projects will not be granted access here.');
   }else{
@@ -2194,15 +2369,23 @@ async function publicationAudience(output,projectId){
   const controller=new AbortController();
   publicationReads.add(controller);
   const read=path=>api(path,{signal:controller.signal});
-  let direct,legacy,native;
+  let direct,legacy,native,folderPath=null;
   try{
     [direct,legacy,native]=(await Promise.allSettled([loadDirectClientAccess(read,projectId),read('/api/v1/workspace/client-grants'),read('/api/v1/workspace/native-client-grants')]))
       .map(result=>result.status==='fulfilled'?result.value:null);
+    if(current()&&direct?.grants.some(grant=>grant.viewerProjectId===projectId&&grant.selection&&!grant.revokedAt)){
+      const [task,folders]=(await Promise.allSettled([
+        read(`/api/v1/tasks/${encodeURIComponent(output.taskId)}`),
+        read(`/api/v1/projects/${encodeURIComponent(projectId)}/folders`),
+      ])).map(result=>result.status==='fulfilled'?result.value:null);
+      folderPath=publicationFolderPath(task?.task,folders?.folders,{projectId,taskId:output.taskId});
+    }
   }finally{publicationReads.delete(controller)}
   if(!current())return unknown();
   const older=lists(legacy,'projects','associations','grants'),connected=lists(native,'targets','grants');
-  const complete=Boolean(can('viewer.client_grants.manage')&&direct&&!direct.grantsIncomplete&&older&&connected),clients=new Map();
-  for(const client of direct?publishAudience(direct,{projectId,taskId:output.taskId}):[])clients.set(client.key,client);
+  const directAudience=direct?publishAudience(direct,{projectId,taskId:output.taskId,folderPath}):null;
+  const complete=Boolean(directAudience?.complete&&!direct.grantsIncomplete&&older&&connected),clients=new Map();
+  for(const client of directAudience?.clients||[])clients.set(client.key,client);
   // Older Operations shares follow the model.
   const access=clientAccessSnapshot(older,connected),own=(access.associations||[]).filter(item=>output.modelId&&associationModelId(item)===output.modelId);
   const ids=new Set(own.map(item=>item.id)),projects=new Set(own.map(associationProjectId));
@@ -2291,6 +2474,7 @@ async function createOutputShare(form,projectId,onlyOutputId){
         const outcome=await api(path,{
           method:'POST',body:JSON.parse(sending.serialized),
           headers:{'Idempotency-Key':sending.key,...(receiptOnly?{'X-Viewer-Share-Receipt-Only':'true'}:{})},
+          publicShareCreate:true,
           beforeDispatch:async()=>{
             stillCurrent();
             if(!receiptOnly&&body.publishIfReady){
@@ -2428,6 +2612,8 @@ function bindShareModal(projectId,onlyOutputId,{preserveDirectForm=false}={}){
   modalContent.querySelectorAll('[data-action="edit-share"]').forEach(element=>element.onclick=()=>editShareModal(projectId,onlyOutputId,element.dataset.id));
   const directForm=modalContent.querySelector('#direct-client-grant-form');
   if(directForm&&!preserveDirectForm)bindDirectShare(directForm,projectId,onlyOutputId);
+  if(!onlyOutputId)modalContent.querySelectorAll('[data-action="edit-direct-project-share"]')
+    .forEach(element=>element.onclick=()=>editDirectProjectShare(projectId,element));
   modalContent.querySelectorAll('[data-action="revoke-direct-client-grant"]').forEach(element=>element.onclick=async()=>{
     // Pinned to this modal and row: a late answer must not touch a different Share dialog.
     const shareContext=state.shareContext,access=state.clientDirectAccess,live=()=>state.shareContext===shareContext&&state.clientDirectAccess===access&&element.isConnected&&modal.open;
@@ -2479,7 +2665,21 @@ async function digest(buffer){return[...new Uint8Array(await crypto.subtle.diges
 function uploadFiles(form){return navigationWork.trackLegacyUpload(form.elements.files.files.length,()=>performLegacyUpload(form));}
 async function performLegacyUpload(form){const files=[...form.elements.files.files],datasetId=form.elements.datasetId.value,role=form.elements.processingRole.value,total=files.reduce((sum,file)=>sum+file.size,0),progress=form.querySelector('progress');if(!files.length||files.length>128||files.some(file=>file.size>64*1024**2)||total>256*1024**2)return toast('Browser upload limit exceeded (128 files, 64 MB each, 256 MB total); use the server import folder for larger artifacts',true);state.busy=true;try{let preparedCount=0;const prepared=[];for(let index=0;index<files.length;index++){const buffer=await files[index].arrayBuffer();prepared.push({file:files[index],spec:{id:`file-${index}`,relativePath:files[index].webkitRelativePath||files[index].name,byteSize:files[index].size,sha256:await digest(buffer),contentType:files[index].type||'application/octet-stream',processingRole:role}});progress.value=Math.round(++preparedCount/files.length*15)}const created=await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}/uploads`,{method:'POST',body:{files:prepared.map(item=>item.spec)}}),upload=created.upload,token=created.uploadToken;sessionStorage.setItem('ltds-viewer-upload',JSON.stringify({datasetId,uploadId:upload.id,manifest:prepared.map(item=>item.spec)}));let sent=0;for(const item of prepared){const remote=upload.files.find(file=>file.id===item.spec.id),missing=new Set(remote.missingChunks);for(let index=0;index<remote.chunkCount;index++){const start=index*upload.chunkSize,end=Math.min(start+upload.chunkSize,item.file.size);if(missing.has(index)){const chunk=await item.file.slice(start,end).arrayBuffer(),response=await workspaceFetch(`/api/v1/admin/uploads/${encodeURIComponent(upload.id)}/files/${encodeURIComponent(item.spec.id)}/chunks/${index}`,{method:'PUT',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/octet-stream','X-Upload-Token':token,'X-Chunk-SHA256':await digest(chunk)},body:chunk});if(!response.ok)throw Error(`Chunk upload failed (${response.status})`)}sent+=end-start;progress.value=15+Math.round(sent/Math.max(total,1)*80)}}await api(`/api/v1/admin/uploads/${encodeURIComponent(upload.id)}/finalize`,{method:'POST',body:{uploadToken:token}});sessionStorage.removeItem('ltds-viewer-upload');progress.value=100;modal.close();toast('Upload finalized; processing will index the dataset');await load()}catch(error){toast(`${error.message}. Reselect the same files to resume.`,true)}finally{state.busy=false}}
 
-async function pagedApi(path,key,options){const items=[],seen=new Set();let cursor=null;do{const separator=path.includes('?')?'&':'?',page=await api(`${path}${separator}limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`,options);items.push(...(page[key]||[]));cursor=page.nextCursor||null;if(cursor&&seen.has(cursor))throw Error(`Pagination cursor repeated for ${key}`);if(cursor)seen.add(cursor)}while(cursor);return{[key]:items}}
+async function pagedApi(path,key,options,{strict=false}={}){
+  const items=[],seen=new Set(),separator=path.includes('?')?'&':'?';
+  let cursor=null;
+  do{
+    const page=await api(`${path}${separator}limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`,options);
+    if(strict&&(!Array.isArray(page?.[key])||(cursor&&page[key].length===0)||!(page.nextCursor===null
+      ||(typeof page.nextCursor==='string'&&page.nextCursor.length>0&&page[key].length>0))))
+      throw Error(`Invalid page for ${key}`);
+    items.push(...(page[key]||[]));
+    cursor=page.nextCursor||null;
+    if(cursor&&seen.has(cursor))throw Error(`Pagination cursor repeated for ${key}`);
+    if(cursor)seen.add(cursor);
+  }while(cursor);
+  return {[key]:items};
+}
 async function pagedStorage(){let first=null,cursor=null;const items=[],seen=new Set();do{const page=await api(`/api/v1/storage?limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);if(!first)first=page;items.push(...(page.trash?.items||[]));cursor=page.trash?.nextCursor||null;if(cursor&&seen.has(cursor))throw Error('Pagination cursor repeated for trash');if(cursor)seen.add(cursor)}while(cursor);return{...(first||{}),trash:{...(first?.trash||{}),items,nextCursor:null}}}
 async function refreshTrash(){state.trashLoadError=null;render();try{state.storage=await pagedStorage()}catch(error){state.trashLoadError=error.message}render()}
 async function load(){const generation=++projectDataGeneration, token=state.token, session=state.adminSession, fences=new Map(outputFences);

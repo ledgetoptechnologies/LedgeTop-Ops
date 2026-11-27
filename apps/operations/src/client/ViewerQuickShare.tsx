@@ -1,4 +1,4 @@
-import type { ViewerPublicShareSummary } from "@ltds/shared";
+import type { ViewerProjectSelection, ViewerPublicShareSummary } from "@ltds/shared";
 import { Dialog, EmptyState, StatusPill } from "@ltds/ui";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { api, ApiError } from "./api";
@@ -14,10 +14,11 @@ export type DirectShareGrant = {
   scopeType: "project" | "task"; includeFuturePublished: boolean;
   permissions: { measure: boolean; cameras: boolean; download: boolean };
   expiresAt: string | null; revokedAt: string | null; createdAt: string; clientDisplayName: string | null;
+  selection?: ViewerProjectSelection;
 };
 type GrantWorkspace = { clients: DirectShareClient[]; clientsNextCursor: string | null; grants: DirectShareGrant[];
   grantsNextCursor?: string | null; grantsIncomplete?: boolean };
-/** What is being shared: a whole Viewer project (and its future published models) or one published task. */
+/** Quick share sends only published tasks. A null task is refused before sending. */
 export type ViewerShareTarget = { project: { viewerProjectId: string; name: string }; task: ViewerCatalogTask | null };
 
 const opaque = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -104,22 +105,20 @@ export async function loadDirectShareWorkspace(fetchJson: (path: string) => Prom
   return { ...first, grants, grantsNextCursor: cursor, grantsIncomplete: !!cursor };
 }
 
-/** Grants that already cover this exact target: the project grant, or a grant for the same task. */
+/** Confirmed coverage only. The catalog has no folder ancestry to resolve saved project selections. */
 export function grantsForTarget(grants: DirectShareGrant[], target: ViewerShareTarget): DirectShareGrant[] {
   return grants.filter(grant => !grant.revokedAt && grant.viewerProjectId === target.project.viewerProjectId
-    && (grant.scopeType === "project" || (target.task !== null && grant.taskId === target.task.taskId)));
+    && (grant.scopeType === "project" ? grant.selection === undefined
+      : target.task !== null && grant.taskId === target.task.taskId));
 }
 
-/**
- * The exact grant body. A whole-project share also covers models published later, so it
- * needs the separate, reviewed opt-in; without it there is no project share to send.
- */
+/** The exact task grant body. Whole-project sharing belongs in Viewer. */
 export function directShareBody(target: ViewerShareTarget, client: DirectShareClient,
-  permissions: DirectShareGrant["permissions"], expiresAt: string | null, includeFuturePublished: boolean) {
-  if (!target.task && !includeFuturePublished) throw new Error("A whole-project share needs the future-models opt-in");
+  permissions: DirectShareGrant["permissions"], expiresAt: string | null) {
+  if (!target.task) throw new Error("Share whole projects from the Viewer");
   return {
     sourceId: client.sourceId, workspaceId: client.workspaceId, viewerProjectId: target.project.viewerProjectId,
-    taskId: target.task?.taskId ?? null, scopeType: target.task ? "task" : "project", includeFuturePublished: !target.task && includeFuturePublished,
+    taskId: target.task.taskId, scopeType: "task", includeFuturePublished: false,
     confirmedScope: true, expiresAt, permissions,
   };
 }
@@ -215,11 +214,11 @@ const LINK_HELD = "We still can't confirm this link, and it's too old to retry s
 
 type PendingDirectShare = {
   body: string; key: string; sentAt: number; clientName: string; client: DirectShareClient; permissions: DirectShareGrant["permissions"];
-  neverExpires: boolean; expiryDay: string; expiresAt: string | null; includeFuture: boolean;
+  neverExpires: boolean; expiryDay: string; expiresAt: string | null;
 };
 type PendingPublicLink = { body: string; key: string; sentAt: number; label: string; expiryDay: string; neverExpires: boolean; download: boolean; cameras: boolean; units: "imperial" | "metric" };
 
-/** Search Viewer projects, pick a published model (or the whole project), then share it. */
+/** Search Viewer projects, pick a published model, then share it. */
 export function ViewerQuickShare({ canCreatePublic, canRevokePublic, onOpenViewer, opening = false }: {
   canCreatePublic: boolean; canRevokePublic: boolean; onOpenViewer?: () => void; opening?: boolean;
 }) {
@@ -300,10 +299,7 @@ export function ViewerQuickShare({ canCreatePublic, canRevokePublic, onOpenViewe
       <div className="viewer-quick-share-crumb"><button type="button" className="button-ghost button-small" onClick={back}>Back to search</button><strong>{project.name}</strong>{openViewer}</div>
       {taskError && <div className="notice error" role="alert">{taskError} <button type="button" className="button-ghost button-small" onClick={() => void loadTasks(project, null)}>Retry</button></div>}
       {!tasks && !taskError && <p className="viewer-quick-share-loading" role="status">Loading published models…</p>}
-      {/* A whole-project share needs something published, so it isn't offered for an empty project. */}
       {tasks && tasks.tasks.length > 0 && <ul className="viewer-quick-share-list" aria-label={`Published models in ${tasks.project.name}`}>
-        <li><button type="button" onClick={() => setTarget({ project: tasks.project, task: null })}>
-          <strong>Whole project</strong><small>Every published model, plus any published later</small></button></li>
         {tasks.tasks.map(task => <li key={task.taskId}><button type="button" onClick={() => setTarget({ project: tasks.project, task })}>
           <strong>{task.title}</strong><small>Published {chicagoDate(task.publishedAt)}</small></button></li>)}
       </ul>}
@@ -339,6 +335,9 @@ export function ViewerShareDialog({ target, onClose, canCreatePublic, canRevokeP
   };
   const publicReason = !target.task ? "Public links share one model. Choose a published model to create one."
       : "This model doesn't have a public-link version yet.";
+  if (!target.task) return <Dialog open onClose={onClose} title="Share from Viewer">
+    <p>Share whole projects from the Viewer.</p>
+  </Dialog>;
   return <Dialog open onClose={onClose} dismissible={!locked} size="lg" title={`Share ${label}`}
     description={target.task ? `From ${target.project.name}` : "Shares every published model in this project, and models published to it later."}>
     <div className="share-mode-selector ltds-segmented" role="tablist" aria-label="Sharing method">
@@ -382,8 +381,6 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   const [permissions, setPermissions] = useState(DEFAULT_PERMISSIONS);
   const [neverExpires, setNeverExpires] = useState(true);
   const [expiryDay, setExpiryDay] = useState("");
-  const [includeFuture, setIncludeFuture] = useState(false);
-  const needsFutureOptIn = !target.task && !includeFuture;
   const [reviewing, setReviewing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -443,6 +440,8 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   const changeQuery = (value: string) => { search.current += 1; setResults(null); setActive(-1); setSearchError(""); setQuery(value); };
 
   const existing = workspace ? grantsForTarget(workspace.grants, target) : [];
+  const restricted = (workspace?.grants ?? []).filter(grant => !grant.revokedAt
+    && grant.viewerProjectId === target.project.viewerProjectId && grant.scopeType === "project" && grant.selection !== undefined);
   const expiresAt = unconfirmed && pending.current ? pending.current.expiresAt : neverExpires ? null : futureChicagoEndOfDay(expiryDay);
   const today = chicagoToday();
   const businessCount = new Set((client ? [client] : results?.clients ?? []).map(item => item.businessName)).size;
@@ -452,7 +451,7 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   const viaProject = !sameScope && clientGrants.some(grant => grant.scopeType === "project");
   const pick = (next: DirectShareClient | null) => {
     if (busy || unconfirmed) return;
-    setClient(next); setReviewing(false); setIncludeFuture(false); setError(""); setMessage(""); pending.current = null;
+    setClient(next); setReviewing(false); setError(""); setMessage(""); pending.current = null;
     if (!next) changeQuery("");
   };
   const onSearchKey = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -472,7 +471,7 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
     try {
       await api("/api/viewer/direct-client-grants", { method: "POST", headers: { "Idempotency-Key": attempt.key }, body: attempt.body });
       pending.current = null; setUnconfirmed(false); setReviewing(false); setClient(null);
-      setPermissions(DEFAULT_PERMISSIONS); setNeverExpires(true); setExpiryDay(""); setIncludeFuture(false);
+      setPermissions(DEFAULT_PERMISSIONS); setNeverExpires(true); setExpiryDay("");
       setMessage(`Shared with ${attempt.clientName}. They'll see it in their Ledge Top portal.`);
       changeQuery(""); void load();
     } catch (caught) {
@@ -510,9 +509,9 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
       if (pending.current && Date.now() - pending.current.sentAt > RETRY_WINDOW_MS) { hold(); return; }
       void send(); return;
     }
-    if (!client || busy || needsFutureOptIn || sameScope || (!neverExpires && !expiresAt)) return;
-    pending.current = { body: JSON.stringify(directShareBody(target, client, permissions, expiresAt, includeFuture)), key: crypto.randomUUID(), sentAt: Date.now(),
-      clientName: client.displayName, client, permissions, neverExpires, expiryDay, expiresAt, includeFuture };
+    if (!client || !target.task || busy || sameScope || (!neverExpires && !expiresAt)) return;
+    pending.current = { body: JSON.stringify(directShareBody(target, client, permissions, expiresAt)), key: crypto.randomUUID(), sentAt: Date.now(),
+      clientName: client.displayName, client, permissions, neverExpires, expiryDay, expiresAt };
     void send();
   };
   const revoke = async (grant: DirectShareGrant) => {
@@ -537,6 +536,9 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
       <div><span>{grant.clientDisplayName ?? "Client"}</span><small>{grant.scopeType === "project" ? "Whole project" : "This model"} · {chicagoDate(grant.expiresAt)}{grant.permissions.download ? " · downloads allowed" : ""}</small></div>
       <button type="button" className="button-ghost button-small viewer-stop-share" disabled={busy || unconfirmed} onClick={() => void revoke(grant)}>Stop sharing</button>
     </li>)}</ul></div>}
+    {restricted.length > 0 && <div className="viewer-direct-share-existing"><strong>Restricted project shares</strong><ul>{restricted.map(grant => <li key={grant.grantId}>
+      <div><span>{grant.clientDisplayName ?? "Client"}</span><small>Restricted project · Model coverage not confirmed · {chicagoDate(grant.expiresAt)}</small></div>
+    </li>)}</ul><p>Manage these saved selections in the Viewer. This model's folder membership isn't available here.</p></div>}
     {loadError && <div className="notice error" role="alert">{loadError} <button type="button" className="button-ghost button-small" onClick={() => void load()}>Retry</button></div>}
     {!client ? <>
       <label htmlFor="viewer-direct-share-client-search">Client or organization</label>
@@ -571,11 +573,7 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
         <label className="viewer-share-check"><input type="checkbox" checked={neverExpires} onChange={event => setNeverExpires(event.target.checked)} /> Never (until you stop sharing)</label>
         {!neverExpires && <label>Last day (Central time)<input type="date" required min={today} value={expiryDay} onChange={event => setExpiryDay(event.target.value)} /></label>}
       </fieldset>
-      {!target.task && <fieldset disabled={busy || unconfirmed} className="viewer-direct-share-future"><legend>Whole project</legend>
-        <label className="viewer-share-check"><input type="checkbox" checked={includeFuture} onChange={event => { setIncludeFuture(event.target.checked); setReviewing(false); }} /> Also share every model published to this project later</label>
-        <small>A whole-project share always includes future models. To share only what's published now, go back and choose a single model.</small>
-      </fieldset>}
-      {!reviewing ? <button type="button" className="button-orange" disabled={needsFutureOptIn || (!neverExpires && !expiresAt)} onClick={() => setReviewing(true)}>Review share</button>
+      {!reviewing ? <button type="button" className="button-orange" disabled={!neverExpires && !expiresAt} onClick={() => setReviewing(true)}>Review share</button>
         : <section className="viewer-direct-share-review" aria-label="Review share">
           <p>Share <strong>{target.task ? target.task.title : `all of ${target.project.name}`}</strong> with <strong>{client.displayName}</strong>
             {target.task ? "" : ", including every model published to it later"}. Access {expiresAt ? `ends ${chicagoDate(expiresAt)}` : "doesn't expire"}. {permissionSentence(permissions)}</p>
@@ -584,6 +582,8 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
             To change their access, stop sharing above, then share again.</p>}
           {!unconfirmed && viaProject && <p className="viewer-direct-share-note">{client.displayName} already has this model through a whole-project share.
             This adds a separate share for this model with the options above; their whole-project access stays as it is.</p>}
+          {!unconfirmed && restricted.some(grant => sameClient(grant, client)) && <p className="viewer-direct-share-note">We can't confirm whether their restricted project share includes this model.
+            This adds a separate share for this model. Their restricted project share stays as it is.</p>}
           {errorNotice}
           <div className="actions">
             {held ? <button type="button" className="button-ghost" onClick={() => void load()}>Check again</button>
