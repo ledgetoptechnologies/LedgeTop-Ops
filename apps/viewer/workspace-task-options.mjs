@@ -95,6 +95,20 @@ export function createTaskOptionsModel({ provider = null, presetOptions = {} } =
   ] };
 }
 
+// NodeODM help strings are Python argparse templates. The node default is already shown before the help, so a
+// "Default: %(default)s" sentence is dropped; any other placeholder gets the real value.
+export function optionHelpText(spec) {
+  const value = spec?.value === undefined || spec?.value === null || spec?.value === '' ? '' : String(spec.value);
+  const choices = Array.isArray(spec?.domain) ? spec.domain.map(String).join(', ') : '';
+  return String(spec?.help || '')
+    .replace(/\s*\(?\bdefaults?\b\s*(?:is|:|=)?\s*['"]?%\(default\)s['"]?\)?\s*\.?/gi, ' ')
+    .replace(/%\(default\)s/g, value)
+    .replace(/%\(choices\)s/g, choices)
+    .replace(/%%/g, '%')
+    .replace(/\s+([.,;:])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 export function mountTaskOptions({ container, provider = null, presetOptions = {}, title = 'Advanced processing options', helpText = 'Edit settings directly for this task. Reset restores the preset or node default. Changes do not modify your saved preset.', modifiedLabel = 'Modified for this task' }) {
   const model = createTaskOptionsModel({ provider, presetOptions }), document = container.ownerDocument;
   const root = document.createElement('details'); root.className = 'task-options-editor';
@@ -109,7 +123,7 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
     list.replaceChildren(); rows = []; status.textContent = '';
     for (const entry of model.entries()) {
       const { spec } = entry, row = document.createElement('fieldset'), legend = document.createElement('legend'); legend.textContent = spec.name; row.append(legend);
-      const info = document.createElement('p'); info.className = 'form-note'; info.textContent = `${entry.inheritedFrom}: ${entry.inherited === undefined || entry.inherited === null ? 'not specified' : String(entry.inherited)}. ${spec.help || ''}`; row.append(info);
+      const info = document.createElement('p'); info.className = 'form-note'; info.textContent = `${entry.inheritedFrom}: ${entry.inherited === undefined || entry.inherited === null ? 'not specified' : String(entry.inherited)}. ${optionHelpText(spec)}`; row.append(info);
       const reset = document.createElement('button'); reset.type = 'button'; reset.textContent = entry.missing?'Remove retained change':'Reset'; reset.setAttribute('aria-label', entry.missing?`Remove retained change ${spec.name}`:`Reset ${spec.name} to ${entry.inheritedFrom.toLowerCase()}`); row.append(reset);
       const domain = taskOptionDomain(spec), choices = spec.type === 'bool' ? null : domain?.values;
       const control = document.createElement(choices ? 'select' : 'input'); control.setAttribute('aria-label', `${spec.name} override`);
@@ -131,7 +145,7 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
       }
       reset.addEventListener('click', () => { if (disabled || !entry.overridden&&!model.entries().find(item=>item.spec.name===spec.name)?.overridden) return; model.setOverride(spec.name, undefined);if(entry.missing){render();return}showValue(entry.inherited); showModified(false); status.textContent = ''; });
       control.addEventListener('input', save); control.addEventListener('change', save);
-      rows.push({ element: row, search: `${spec.name} ${spec.help || ''}`.toLowerCase() }); list.append(row);
+      rows.push({ element: row, search: `${spec.name} ${optionHelpText(spec)}`.toLowerCase() }); list.append(row);
     }
     if (!rows.length) status.textContent = 'Select a node with available processing capabilities.';
     else status.textContent=model.validate().errors.map(error=>`${error.name}: ${error.message}`).join(' ');

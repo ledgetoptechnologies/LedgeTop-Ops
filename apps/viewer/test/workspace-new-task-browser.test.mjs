@@ -36,6 +36,7 @@ const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('C
  if(url==='/api/v1/datasets'){if(window.fixture.failDatasetCreate){window.fixture.failDatasetCreate=false;throw new Error('Dataset request interrupted');}return{dataset:{id:'dataset'}};}
  if(url.endsWith('/uploads'))return{uploadToken:'scoped',upload:{id:'upload',datasetId:'dataset',status:'open',chunkSize:2,files:opts.body.files.map(file=>({...file,chunkCount:Math.ceil(file.byteSize/2),missingChunks:Array.from({length:Math.ceil(file.byteSize/2)},(_,i)=>i)}))}};
  if(url.endsWith('/finalize')){datasetStatus='finalizing';return{operation:{id:'assemble',status:'queued'}};}
+ if(url.startsWith('/api/v1/operations/')&&window.fixture.nextOperation){const operation=window.fixture.nextOperation;window.fixture.nextOperation=null;return{operation};}
  if(url.startsWith('/api/v1/operations/')){if(window.fixture.holdOperation){window.fixture.operationSignal=opts.signal;await new Promise(resolve=>window.fixture.releaseOperation=resolve);}if(opts.signal?.aborted)throw new DOMException('Cancelled','AbortError');datasetStatus=mode==='failed'?'draft':'finalized';return{operation:{id:'operation',status:mode==='failed'?'failed':'succeeded',errorMessage:'Copy validation failed'}};}
  if(url==='/api/v1/datasets/dataset')return{dataset:{id:'dataset',projectId:'project',status:datasetStatus}};
  if(url==='/api/v1/task-submissions'){submitCount++;if(mode==='pc'&&submitCount===1)throw new Error('Temporary submission failure');return{task:{id:'task'}};}
@@ -183,6 +184,14 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       const saved=await client.eval("fixture.calls.filter(x=>x.url==='/api/v1/processing/presets'&&x.method==='POST')");assert.equal(saved.length,2);assert.deepEqual(saved[1].body.options,{'auto-boundary':false,crop:0});assert.equal(saved[0].headers['Idempotency-Key'],saved[1].headers['Idempotency-Key']);assert.equal(await client.eval("document.querySelector('[name=presetId]').value"),'saved-preset');assert.equal(await client.eval("fixture.calls.some(x=>x.url==='/api/v1/task-submissions')"),false);
       await client.eval(`const control=document.querySelector('[aria-label="crop"]');control.value='5';control.dispatchEvent(new Event('input'));document.querySelector('[data-edit-options]').click();document.querySelector('[data-edit-options]').click()`);assert.equal(await client.eval("document.querySelector('[aria-label=\"crop\"]').value"),'5');
       await client.eval("document.querySelector('[name=presetId]').value='preset';document.querySelector('[name=presetId]').dispatchEvent(new Event('change'))");assert.equal(await client.eval("document.querySelector('[aria-label=\"Reset crop to preset\"]').disabled"),true);assert.equal(await client.eval("document.querySelector('[aria-label=\"crop\"]').value"),'2');await client.eval('fixture.close()');await delay(60);
+    });
+    await t.test('upload tray shows the server stage and percent from the operation',async()=>{
+      await client.eval("fixture.mount('server',{allowBackground:true});fixture.nextOperation={id:'copy',status:'leased',phase:'copying_photos',progress:.42};fixture.holdOperation=true;document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));
+      await client.eval("document.querySelector('[data-pick]').click();fixture.submit()");await until(()=>client.eval('!!fixture.releaseOperation'));await client.eval('fixture.close()');await delay(50);
+      assert.equal(await client.eval("document.querySelector('.task-transfer-tray p').textContent"),'Copying photos · 42%');
+      assert.equal(await client.eval("document.querySelector('.task-transfer-tray progress').value"),42);
+      assert.doesNotMatch(await client.eval("document.querySelector('.task-transfer-tray').textContent"),/keep this browser tab open/i);
+      await client.eval("document.querySelector('[data-discard-upload]').click();fixture.holdOperation=false;fixture.releaseOperation();fixture.releaseOperation=null");await delay(60);
     });
     await t.test('background preparation survives dialog close, reopens, completes and leaves unrelated dialog untouched',async()=>{
       await client.eval("fixture.mount('server',{allowBackground:true});fixture.holdOperation=true;document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));assert.equal(await client.eval('fixture.leaveBlocked()'),false);

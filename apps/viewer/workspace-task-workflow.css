@@ -20,3 +20,12 @@
 .authenticated-share-options>.content-card{margin-top:14px}
 @media(max-width:1000px){.public-share-first{grid-template-columns:1fr}}
 @media(max-width:720px){.task-quick-actions{display:flex;flex-wrap:wrap}.task-quick-actions>button{flex:1 1 auto;width:auto}.task-quick-actions>.task-more-actions{margin-left:auto}.task-more-actions>summary{height:44px}}
+
+/* Toast and upload tray share one bottom-right column, so they stack instead of overlapping. */
+#workspace-notices{position:fixed;right:max(20px,env(safe-area-inset-right));bottom:max(20px,env(safe-area-inset-bottom));z-index:80;display:flex;flex-direction:column;align-items:flex-end;gap:10px;width:min(390px,calc(100vw - 40px));pointer-events:none}
+#workspace-notices>*{pointer-events:auto}
+#workspace-notices>#workspace-toast{position:static;max-width:100%}
+#workspace-notices>.task-transfer-tray{position:static;width:100%}
+/* A row menu that would run into the notices or the window bottom opens upward and scrolls if still too tall. */
+.tree-menu.menu-up>.project-more-menu{top:auto;bottom:calc(100% + 6px)}
+.tree-menu>.project-more-menu[data-max-height]{overflow:auto;overscroll-behavior:contain}

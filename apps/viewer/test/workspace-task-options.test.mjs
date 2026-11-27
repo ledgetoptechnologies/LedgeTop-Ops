@@ -136,3 +136,12 @@ test('preset context labels are configurable and restricted settings cannot be c
   const required=list.children[1].children[3];assert.equal(required.checked,true);assert.equal(required.disabled,true);required.checked=false;required.listeners.change();assert.deepEqual(editor.getOptions(),{count:8});
   editor.setDisabled(true);const disabled=list.children[0].children[3];disabled.value='2';disabled.listeners.input();assert.deepEqual(editor.getOptions(),{count:8});
 });
+
+test('option help never shows a raw argparse placeholder',async()=>{
+  const { optionHelpText } = await import('../workspace-task-options.mjs');
+  assert.equal(optionHelpText(odmChoiceSpecs[0]),'End processing at this stage. Can be one of: dataset, split, merge, opensfm, openmvs, odm_filterpoints, odm_meshing, mvs_texturing, odm_georeferencing, odm_dem, odm_orthophoto, odm_report, odm_postprocess.');
+  assert.equal(optionHelpText({help:'Orthophoto resolution in cm / pixel. Default: %(default)s',value:5}),'Orthophoto resolution in cm / pixel.');
+  assert.equal(optionHelpText({help:'Use %(default)s threads, 100%% of them.',value:4}),'Use 4 threads, 100% of them.');
+  assert.equal(optionHelpText({help:'Plain help.'}),'Plain help.');
+  for(const spec of odmChoiceSpecs)assert.doesNotMatch(optionHelpText(spec),/%\(/);
+});
