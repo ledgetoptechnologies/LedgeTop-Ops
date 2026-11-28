@@ -13,7 +13,9 @@ export function nextActiveOption(active: number, key: string, count: number): nu
 }
 
 /** The one client search box for every Share dialog. Each dialog runs its own search and
- * passes the matches in; focus stays in the box, arrows move the highlight, Enter picks it. */
+ * passes the matches in; focus stays in the box, arrows move the highlight, Enter picks it.
+ * Nothing is highlighted until an arrow key is pressed, and typing drops the highlight, so
+ * Enter never picks from an older list. */
 export function ClientSearchBox<T>({ id, query, onQueryChange, items, itemKey, renderItem, onPick, status, error, onRetry, disabled = false }: {
   id: string; query: string; onQueryChange: (value: string) => void;
   /** Matches for the current text; null before a search has answered. */
@@ -31,14 +33,14 @@ export function ClientSearchBox<T>({ id, query, onQueryChange, items, itemKey, r
     const moved = nextActiveOption(active, event.key, count);
     if (moved !== null) { event.preventDefault(); setActive(moved); return; }
     if (event.key === "Enter") { event.preventDefault(); const chosen = items?.[active]; if (chosen && !disabled) onPick(chosen); return; }
-    // Escape clears the text first; only an empty box lets Escape close the dialog.
-    if (event.key === "Escape" && query) { event.preventDefault(); event.stopPropagation(); onQueryChange(""); }
+    // Escape with matches showing clears the search; otherwise it is left to the dialog (which closes).
+    if (event.key === "Escape" && count > 0) { event.preventDefault(); event.stopPropagation(); setActive(-1); onQueryChange(""); }
   };
   return <div className="client-search">
     <label htmlFor={id}>{CLIENT_SEARCH_LABEL}</label>
     <input id={id} type="search" role="combobox" aria-autocomplete="list" aria-controls={listId} aria-expanded={count > 0}
       aria-activedescendant={active >= 0 && active < count ? optionId(active) : undefined}
-      value={query} onChange={event => onQueryChange(event.target.value)} onKeyDown={onKeyDown} disabled={disabled}
+      value={query} onChange={event => { setActive(-1); onQueryChange(event.target.value); }} onKeyDown={onKeyDown} disabled={disabled}
       placeholder="Type a client or organization" maxLength={100} autoComplete="off" />
     {error && <div className="notice error" role="alert">{error}{onRetry && <> <button type="button" className="button-ghost button-small" onClick={onRetry}>Retry</button></>}</div>}
     <ul id={listId} className="client-search-list" role="listbox" aria-label="Matching clients" hidden={!count}>

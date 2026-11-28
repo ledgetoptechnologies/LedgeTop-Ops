@@ -1609,13 +1609,13 @@ tbody tr:last-child td { border: 0; }
 .viewer-quick-share > header h3, .viewer-quick-share > h3 { margin: 0; }
 .viewer-quick-share > header p { margin: .3rem 0 0; color: var(--muted); }
 /* 700, not 800: without Inter installed, Windows renders 800 as Segoe UI Black, which reads as a different typeface. */
-.viewer-quick-share-search, .viewer-direct-share > label, .viewer-direct-share-form fieldset > label:not(.viewer-share-check) { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 700; }
+.viewer-quick-share-search, .viewer-direct-share > label, .viewer-direct-share .client-search > label, .viewer-direct-share-form fieldset > label:not(.viewer-share-check) { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 700; }
 .viewer-quick-share-search input, .viewer-direct-share input[type="search"], .viewer-direct-share input[type="date"] { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
 .viewer-quick-share-list { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
-.viewer-quick-share-list button button { display: grid; gap: .2rem; width: 100%; min-height: 48px; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fafb; color: var(--ink); grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: start; text-align: left; font-weight: 400; cursor: pointer; }
-.viewer-quick-share-list button:hover button:hover { border-color: var(--orange, #ee5007); }
-.viewer-quick-share-list strong strong { overflow-wrap: anywhere; }
-.viewer-quick-share-list small small, .viewer-quick-share-loading, .viewer-quick-share-empty { color: var(--muted); margin: 0; }
+.viewer-quick-share-list button { display: grid; gap: .2rem; width: 100%; min-height: 48px; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fafb; color: var(--ink); grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: start; text-align: left; font-weight: 400; cursor: pointer; }
+.viewer-quick-share-list button:hover { border-color: var(--orange, #ee5007); }
+.viewer-quick-share-list strong { overflow-wrap: anywhere; }
+.viewer-quick-share-list small, .viewer-quick-share-loading, .viewer-quick-share-empty { color: var(--muted); margin: 0; }
 .viewer-quick-share-crumb { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; min-width: 0; }
 .viewer-quick-share-crumb strong { overflow-wrap: anywhere; }
 .viewer-quick-share-pointer { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0; color: var(--muted); }
