@@ -964,7 +964,7 @@ test("permission-gated current-folder sharing uses the normalized active folder 
   // An unlinked folder offers the client workspace link as its own step.
   await page.getByRole("button", { name: "Link folder to a client workspace" }).click();
   await expect(page.getByRole("alert").filter({ hasText: "not linked to a Client Portal workspace" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open Client Hub portal setup" })).toHaveAttribute("href", "/clients#client-portal-setup");
+  await expect(page.getByRole("link", { name: "Open Client Hub portal setup" })).toHaveCount(0);
   expect(authenticatedFolderRef).toBe(Buffer.from("Jobs/Clients/DC Construction").toString("base64url"));
   await expect(page.getByRole("button", { name: "Create link" })).toHaveCount(0);
   await page.keyboard.press("Escape");

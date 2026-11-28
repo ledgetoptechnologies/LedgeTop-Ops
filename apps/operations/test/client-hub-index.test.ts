@@ -32,14 +32,14 @@ async function fixture() {
     CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,display_name TEXT,email_hint TEXT,status TEXT,PRIMARY KEY(workspace_id,public_id));
     CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,revoked_at TEXT);
     CREATE TABLE client_service_requests(id TEXT PRIMARY KEY,account_id TEXT);
-    CREATE TABLE portal_v2_workspace_memberships(id TEXT PRIMARY KEY,workspace_id TEXT,identity_id TEXT);
+    CREATE TABLE portal_v2_workspace_memberships(id TEXT PRIMARY KEY,workspace_id TEXT,identity_id TEXT,status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,expires_at TEXT);
     CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT,source_generation TEXT,source_sequence INTEGER,status TEXT,complete INTEGER);
     CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT,source_sequence INTEGER);
     CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,parent_public_id TEXT,active INTEGER,source_version TEXT);
     CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT PRIMARY KEY,projection_source_id TEXT,source_workspace_id TEXT);
     CREATE TABLE pa_portal_source_authorities(source_id TEXT PRIMARY KEY,state TEXT,active_revision INTEGER);
     CREATE TABLE pa_portal_source_authority_revisions(source_id TEXT,revision INTEGER);
-    INSERT INTO portal_v2_workspace_memberships VALUES('membership','workspace','identity');
+    INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id) VALUES('membership','workspace','identity');
   `);
   return { ops, delivery, env: { OPS_DB: ops, DELIVERY_DB: delivery, PROJECT_ALPHA_API_V2_CONNECTIONS: apiV2Connections } };
 }
@@ -282,6 +282,35 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
       { root_namespace: "business", public_id: "standalone", contact_count: 1 },
       { root_namespace: "portal", public_id: "portal-only", contact_count: 1 },
     ]);
+  });
+
+  it("does not call an individual's workspace ready when nobody can sign in to it", async () => {
+    const { ops, delivery, env } = await fixture();
+    const clientPublicId = "d".repeat(32);
+    await ops.prepare("INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('individual','Individual',NULL,1,?)")
+      .bind(JSON.stringify({ public_id: clientPublicId, email: "individual@example.test" })).run();
+    await delivery.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status)
+      VALUES('individual-workspace','standalone_client',NULL,?,'Individual','active')`).bind(clientPublicId).run();
+    await projectWorkspace(delivery, "individual-workspace", "standalone_client", clientPublicId);
+    await finish(env);
+    const status = () => ops.prepare("SELECT workspace_id,portal_status FROM client_hub_roots WHERE public_id='individual'").first();
+    // The client's own PA email is not a portal user: only a projected principal or a member is.
+    expect(await status()).toEqual({ workspace_id: "individual-workspace", portal_status: "no_sign_in" });
+
+    await delivery.prepare("INSERT INTO pa_portal_principals VALUES('individual-workspace','person','Individual','individual@example.test','active')").run();
+    await nextCycle(ops); await finish(env);
+    expect(await status()).toEqual({ workspace_id: "individual-workspace", portal_status: "active" });
+
+    // A revoked principal and an expired member do not count; an active member does.
+    await delivery.prepare("UPDATE pa_portal_principals SET status='revoked' WHERE workspace_id='individual-workspace'").run();
+    await delivery.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,expires_at)
+      VALUES('expired','individual-workspace','old-identity','2000-01-01 00:00:00')`).run();
+    await nextCycle(ops); await finish(env);
+    expect(await status()).toEqual({ workspace_id: "individual-workspace", portal_status: "no_sign_in" });
+    await delivery.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id)
+      VALUES('member','individual-workspace','identity')`).run();
+    await nextCycle(ops); await finish(env);
+    expect(await status()).toEqual({ workspace_id: "individual-workspace", portal_status: "active" });
   });
 
   it("backfills more than 500 roots with bounded pages and resumes from its persisted checkpoint", async () => {

@@ -32,9 +32,12 @@ test('one-off Client recovery budgets all custody and head reads without changin
   }
   assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 243,
     ownedInactiveSupersession: true }), 5676);
-  for (const workerName of ['ledgetop-ops', 'ledgetop-ops-sync'])
-    assert.throws(() => modeledProductionAutoGitHubCoreCalls({ workerName, bucketCount: 0,
-      ownedInactiveSupersession: true }), /production_auto_github_budget_input_invalid/u);
+  // v5 journal-derived supersession may also run on the Operations lane; Ops Sync never supersedes.
+  for (const bucketCount of [0, 1, 28])
+    assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops', bucketCount, ownedInactiveSupersession: true }),
+      modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops', bucketCount }) + bucketCount + 26);
+  assert.throws(() => modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops-sync', bucketCount: 0,
+    ownedInactiveSupersession: true }), /production_auto_github_budget_input_invalid/u);
   for (const value of ['true', 'false', 1, null])
     assert.throws(() => modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 1,
       ownedInactiveSupersession: value }), /production_auto_github_budget_input_invalid/u);

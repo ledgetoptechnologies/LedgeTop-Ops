@@ -157,7 +157,22 @@ async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWork
   return matches.values().next().value ?? null;
 }
 
+/** Same rule as the Client Hub index: an active Project Alpha workspace that no
+ * one can sign in to (no active principal, no active member) is not ready. */
 async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRow> {
+  const live = await liveDetailRootWithoutSignInCheck(env, root);
+  if (live.portal_status !== "active" || !live.workspace_id || !live.source_id.startsWith("project-alpha:")) return live;
+  // Display only: if the sign-in tables cannot be read, keep the live status.
+  const reach = await database(env).prepare(`SELECT w.legacy_account_id,
+      (SELECT count(*) FROM pa_portal_principals principal WHERE principal.workspace_id=w.id AND principal.status='active') principals,
+      (SELECT count(*) FROM portal_v2_workspace_memberships member WHERE member.workspace_id=w.id AND member.status='active'
+        AND member.revoked_at IS NULL AND (member.expires_at IS NULL OR datetime(member.expires_at)>datetime('now'))) members
+    FROM portal_v2_workspaces w WHERE w.id=?`).bind(live.workspace_id)
+    .first<{ legacy_account_id: string | null; principals: number; members: number }>().catch(() => null);
+  return reach && !reach.legacy_account_id && reach.principals === 0 && reach.members === 0 ? { ...live, portal_status: "no_sign_in" } : live;
+}
+
+async function liveDetailRootWithoutSignInCheck(env: Env, root: WorkspaceRow): Promise<WorkspaceRow> {
   const visibility = root.root_namespace === "business" && root.source_id.startsWith("project-alpha:")
     ? await requireProjectAlphaReadOrNativeMappingVisibility(env, root.source_id, root.public_id, root.kind)
     : await requireProjectAlphaReadVisibility(env, root.source_id);

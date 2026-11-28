@@ -2,9 +2,10 @@
 
 Operations automatically reconciles an already exact-linked primary Project
 Alpha client account into its portal workspace after a successful Project
-Alpha synchronization. Client Hub exposes **Portal workspace coverage** for
-status and legacy exceptions. It is not a general identity-matching or
-account-creation tool.
+Alpha synchronization. There is no manual coverage screen: legacy accounts
+that are not exact-linked are not projected, and blocked exceptions are read
+from the reconciliation counts below. This is not a general identity-matching
+or account-creation tool.
 
 The workflow separates four facts which must not be collapsed:
 
@@ -62,11 +63,9 @@ email is never sufficient proof of identity or access.
 3. Confirm the post-sync `client_portal.primary_workspace_reconciliation`
    counts. Any conflict or manual-review count is a blocked exception, not a
    reason to widen matching.
-4. Open **Client Hub → Portal workspace coverage** with global
-   `operations.manage` authority and review any remaining legacy exceptions.
-5. Open the projected client workspace and verify Portal logins, membership, sign-in
+4. Open the projected client workspace and verify Portal logins, membership, sign-in
    blocks and content grants before inviting the pilot user.
-6. Run the signed-in, expiry, revocation, unauthorized and cross-tenant Access
+5. Run the signed-in, expiry, revocation, unauthorized and cross-tenant Access
    acceptance checks on both client portal domains before broad rollout.
 
 The automatic path is enabled independently from PA-native first-login

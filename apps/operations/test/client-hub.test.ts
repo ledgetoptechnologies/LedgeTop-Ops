@@ -431,6 +431,12 @@ describe("Client Hub bounded detail collections", () => {
       pages: { accounts: { reason: "not_applicable" }, authenticatedDeliveryGrants: { reason: "not_applicable" } },
     });
     expect((await app.request(path + "/identities/pa-child-login/access", {}, env)).status).toBe(200);
+    // Nobody can sign in to a workspace with no active portal principal and no member: not "ready".
+    await applySql(delivery, `CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,identity_id TEXT,email_hint TEXT,display_name TEXT,status TEXT);
+      CREATE TABLE portal_v2_workspace_memberships(id TEXT PRIMARY KEY,workspace_id TEXT,identity_id TEXT,status TEXT,revoked_at TEXT,expires_at TEXT);`);
+    await expect((await app.request(path, {}, env)).json()).resolves.toMatchObject({ client: { portal_status: "no_sign_in" } });
+    await delivery.prepare("INSERT INTO pa_portal_principals VALUES('workspace-secondary','p1',NULL,'login@example.test','Login','active')").run();
+    await expect((await app.request(path, {}, env)).json()).resolves.toMatchObject({ client: { portal_status: "active" } });
     // The source-qualified public ID cannot be reinterpreted as a primary
     // client. A similarly shaped route must never borrow another tenant's
     // workspace or identity collection.

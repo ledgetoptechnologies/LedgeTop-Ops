@@ -687,7 +687,7 @@ test('default recipient loader returns the pinned record accepted by journal and
     writeFileSync(path.join(directory, 'production-auto-token.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-token.mjs')));
     writeFileSync(path.join(directory, 'production-auto-journal.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-journal.mjs')));
     for (const module of ['production-auto-owned-inactive-policy.mjs', 'production-auto-owned-inactive-admission.mjs',
-      'production-auto-upload-tag.mjs', 'production-auto-predecessor.mjs'])
+      'production-auto-owned-inactive-v5.mjs', 'production-auto-upload-tag.mjs', 'production-auto-predecessor.mjs'])
       writeFileSync(path.join(directory, module), readFileSync(path.join(sourceDirectory, module)));
     // Keep the recipient override isolated while resolving the actual shared
     // deployment shapes/profile from their real source-relative location.

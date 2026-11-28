@@ -313,3 +313,25 @@ test("a registered code from create survives cleanup (reads are already their ow
     assert.deepEqual(calls.slice(-2), ["remove", "absent"], `${why}: cleanup still ran once`);
   }
 });
+
+test("a failed asset verification keeps the original failure's fixed step and endpoint marks, never its text", async () => {
+  const { markProductionAutoProviderFailure, trackProductionAutoStartupStageAsync, productionAutoOriginalFailureDetails } =
+    await import("./production-auto-startup-diagnostics.mjs");
+  const { registeredHoldCode } = await import("./production-auto-verify.mjs");
+  const base = { entries: [entry], fetchAsset: async (_row, { method }) => response(method), remove: async () => {}, readAbsent: async () => true };
+  // As on 2026-11-28: the verifier enable was refused inside the post-intent fence by a failed capture read.
+  const error = await executeAssetVerification({ ...base, create: () => trackProductionAutoStartupStageAsync("mutation_fence_capture", async () => {
+    throw markProductionAutoProviderFailure(Error("production_provider_refused_or_uncertain_no_retry"),
+      { method: "GET", endpoint: "deployments", status: 429 }); }) }).catch(caught => caught);
+  assert.equal(error.message, "production_provider_refused_or_uncertain_no_retry");
+  assert.deepEqual({ ...productionAutoOriginalFailureDetails(error) },
+    { step: "mutation_fence_capture", errorType: "Error", provider: "GET:deployments:429" });
+  // The main-CI reader carries its fixed code in an own `code` property; it now names the hold instead of the generic.
+  const ci = Object.assign(Error("Exact main CI read failed; automatic release held"), { code: "production_auto_ci_read_failed" });
+  assert.equal(registeredHoldCode(ci), "production_auto_ci_read_failed");
+  const viaVerifier = await executeAssetVerification({ ...base, create: async () => { throw ci; } }).catch(caught => caught);
+  assert.equal(viaVerifier.message, "production_auto_ci_read_failed");
+  // Unregistered, getter or non-string codes never name a hold.
+  for (const value of [Object.assign(Error("x"), { code: "timeout" }), Object.defineProperty(Error("x"), "code", { get: () => "production_auto_ci_read_failed" }),
+    Object.assign(Error("x"), { code: 7 })]) assert.equal(registeredHoldCode(value), null);
+});
