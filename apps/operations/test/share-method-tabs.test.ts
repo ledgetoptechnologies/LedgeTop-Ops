@@ -40,3 +40,14 @@ describe("one Share dialog for files, folders and models", () => {
       "share-mode-description"]) expect(sources).not.toContain(blurb);
   });
 });
+
+describe("one dialog shell", () => {
+  it("the Data page Share dialog uses the same Dialog shell as the model Share dialog", () => {
+    const app = read("OperationsApp.tsx");
+    const share = app.slice(app.indexOf("function ShareDialog("), app.indexOf("\nfunction ",app.indexOf("function ShareDialog(") + 10));
+    expect(share).toContain("<Dialog open onClose={close} dismissible={!locked} size=\"lg\" title={`Share ${targetLabel}`}");
+    expect(share).not.toContain('className="share-dialog"');
+    expect(share).not.toContain("handleDialogKeyDown");
+    expect(read("ViewerQuickShare.tsx")).toContain("<Dialog open onClose={onClose} dismissible={!locked} size=\"lg\"");
+  });
+});
