@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
 const user = {
   id: "staff-grant-admin", email: "admin@example.test", displayName: "Grant Admin",
@@ -38,7 +38,9 @@ async function mockPrimary(page: Page, override?: (route: Route, call: GrantCall
 const client = (page: Page) => page.getByRole("combobox", {name: "Client", exact: true});
 const accessList = (page: Page) => page.getByLabel("Client access for this folder");
 async function openPrimary(page: Page) {await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click(); await page.getByRole("tab", {name: "Client Workspace"}).click(); await expect(page.getByRole("button", {name: "Refresh access"})).toBeEnabled(); await page.locator("dialog[open]").evaluate(element => Promise.all(element.getAnimations({subtree: true}).map(animation => animation.finished))); await expect(page.getByRole("combobox", {name: "Portal connection"})).toHaveCount(0);}
-async function selectPrimary(page: Page, query = "Acme", name: RegExp = /Acme Organization/) {const input = client(page); await input.fill(query); await expect(page.getByRole("option", {name})).toBeVisible(); await input.press("ArrowDown"); await expect(page.getByRole("option").first()).toBeFocused(); await page.getByRole("option", {name}).press("Enter");}
+async function selectPrimary(page: Page, query = "Acme", name: RegExp = /Acme Organization/) {const input = client(page); await input.fill(query); await expect(page.getByRole("option", {name})).toBeVisible(); await chooseWithKeys(input, page.getByRole("option", {name}));}
+// The shared client box keeps focus in the input; arrow keys move the highlighted match and Enter picks it.
+async function chooseWithKeys(input: Locator, option: Locator) {for (let step = 0; step < 20 && await option.getAttribute("aria-selected") !== "true"; step += 1) await input.press("ArrowDown"); await expect(option).toHaveAttribute("aria-selected", "true"); await expect(input).toBeFocused(); await input.press("Enter");}
 async function reviewPrimary(page: Page, kind = "collaborator") {await selectPrimary(page); await page.getByRole("combobox", {name: "Recipient role"}).selectOption(kind); await page.getByRole("button", {name: "Review authenticated access"}).click(); await expect(page.getByRole("region", {name: "Review authenticated portal access"})).toBeVisible();}
 async function latePrimary(route: Route, json: unknown) {try {await route.fulfill({json});} catch {/* Aborted after context changed. */}}
 
@@ -503,7 +505,7 @@ for (const width of [375, 1280]) test(`primary project access review stays reada
     await expect(candidate.locator("strong")).toHaveCSS("color", "rgb(21, 27, 34)"); await expect(candidate.locator("small")).toHaveCSS("color", "rgb(21, 27, 34)");
   };
   await readableCandidate("rgb(255, 255, 255)"); await candidate.hover(); await readableCandidate("rgb(255, 244, 237)");
-  await audience.hover(); await audience.press("ArrowDown"); await expect(candidate).toBeFocused(); await readableCandidate("rgb(255, 244, 237)");
+  await audience.hover(); await audience.press("ArrowDown"); await expect(candidate).toHaveAttribute("aria-selected", "true"); await expect(audience).toBeFocused(); await readableCandidate("rgb(255, 244, 237)");
   await page.screenshot({path: info.outputPath(`primary-access-audience-${width}.png`)});
   await page.keyboard.press("Enter"); await page.getByRole("combobox", {name: "Recipient role"}).selectOption("collaborator"); await page.getByRole("button", {name: "Review authenticated access"}).click();
   const review = page.getByRole("region", {name: "Review authenticated portal access"}); await expect(review).toBeVisible(); await review.scrollIntoViewIfNeeded(); await expect(review.getByRole("button", {name: "Grant authenticated access", exact: true})).toBeVisible(); expect(await page.locator("body").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true); await page.screenshot({path: info.outputPath(`primary-access-terms-${width}.png`)});

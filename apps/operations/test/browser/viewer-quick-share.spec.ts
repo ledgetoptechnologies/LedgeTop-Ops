@@ -73,7 +73,7 @@ async function openShare(page: Page, item: string) {
 }
 /** Clients are only listed after typing in the dialog's client search. */
 async function findClient(dialog: Locator, name: string) {
-  await dialog.getByRole("combobox", { name: "Client or organization" }).fill(name);
+  await dialog.getByRole("combobox", { name: "Client", exact: true }).fill(name);
 }
 
 test("the 3D models page is one overview; old section links land on it", async ({ page }) => {
@@ -239,7 +239,7 @@ test("a client whose connection changed is reloaded, never substituted", async (
   await expect(dialog.getByRole("alert")).toHaveText("Something changed with this client. Choose them again from the list.");
   // The choice is dropped and the search starts over; nothing is chosen in its place.
   await expect(dialog.getByRole("button", { name: "Change" })).toHaveCount(0);
-  await expect(dialog.getByRole("combobox", { name: "Client or organization" })).toHaveValue("");
+  await expect(dialog.getByRole("combobox", { name: "Client", exact: true })).toHaveValue("");
   await expect(dialog.getByRole("option")).toHaveCount(0);
   await findClient(dialog, "Harbor");
   await expect(dialog.getByText("No clients match that name.")).toBeVisible();
