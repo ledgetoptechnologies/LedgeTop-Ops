@@ -22,8 +22,8 @@ export function registeredHoldCode(error) {
 const TARGETS = { "ledgetop-ops": "https://ops.ledgetop.app", "ledgetop-clients": "https://portal.ledgetop.app" };
 const HASH = /^[a-f0-9]{64}$/u, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 // totalBytes bounds the retained union one byte-verification pass fetches and holds in memory. Retained history
-// grows every release (no automatic pruning yet); 384 MiB keeps the measured worst pass (Operations, 600 files:
-// about 3 minutes including journal writes) well inside the 300 s verification window.
+// grows every release (no automatic pruning yet). The release runtime verifies with concurrency 3; serially the
+// 2026-11-13 Operations pass moved 207.5 MB in <=181 s, so 384 MiB in parallel stays well inside the 300 s window.
 export const ASSET_VERIFICATION_LIMITS = Object.freeze({ files: 1024, fileBytes: 16 * 1024 * 1024,
   totalBytes: 384 * 1024 * 1024 });
 const { fileBytes: MAX_FILE, totalBytes: MAX_TOTAL, files: MAX_FILES } = ASSET_VERIFICATION_LIMITS;

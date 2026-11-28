@@ -12,7 +12,8 @@ const SHA = /^[a-f0-9]{64}$/;
 const REQUEST_MS = 30_000;
 const MAX_RESPONSE = 8 * 1024 * 1024;
 const MAX_PAYLOAD = 32 * 1024 * 1024;
-const MAX_RESOLVED = 256 * 1024 * 1024;
+// Matches the 384 MiB byte-verification bound: Cloudflare may request any part of the verified union.
+const MAX_RESOLVED = 384 * 1024 * 1024;
 const need = (condition, message) => { if (!condition) throw new Error(message); };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
