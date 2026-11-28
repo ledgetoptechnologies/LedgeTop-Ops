@@ -193,7 +193,8 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     let previous = validateAssetLedger(await adapter.readLedger({ baseline: copy(baseline) }), { workerName, accountId });
     // Bound the union this release will actually carry: paths retired more than 49 h ago are dropped by the merge.
     need(Array.isArray(built.assets?.entries), 'Verifier asset inventory is unavailable');
-    const parentCutoverAt = new Date(Date.parse(baseline.deployedAt) + 1).toISOString();
+    // The parent's cutover on the provider clock, capped at this runner's clock so skew can never cause a hold.
+    const parentCutoverAt = new Date(Math.min(Date.parse(baseline.deployedAt) + 1, Date.now())).toISOString();
     const plannedPrune = new Set(planAssetRetention({ previous, buildPaths: built.assets.entries.map(row => row?.path),
       observedAt: new Date().toISOString(), parentCutoverAt }).pruned);
     verifierBounds(previous.assets.filter(row => !plannedPrune.has(row.path)), built.assets.entries);
