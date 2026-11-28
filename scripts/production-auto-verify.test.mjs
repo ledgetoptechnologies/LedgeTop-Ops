@@ -82,7 +82,17 @@ test("target, version, manifest resource bounds and namespace restrictions are v
   assert.match(createAssetVerifierSource({ ...input, workerName: "ledgetop-clients", origin: "https://portal.ledgetop.app" }), /portal\.ledgetop\.app/u);
 });
 
-test('bounded 471-file Operations inventory of 152255343 bytes fits while inventories above 256 MiB fail before any fetch', async () => {
+test('the live 681-file Operations union fits while inventories above 384 MiB fail before any fetch', async () => {
+  assert.equal(ASSET_VERIFICATION_LIMITS.totalBytes, 384 * 1024 * 1024);
+  // 2026-11-28: the live Operations ledger alone is 681 files / 250.7 MiB; with a new build it exceeded the former
+  // 256 MiB bound and every Operations release held before any write.
+  const live = Array.from({ length: 700 }, (_, i) => ({ ...entry, path: i === 0 ? '/index.html' : `/assets/live-${String(i).padStart(3, '0')}.js`,
+    size: 400_000, sha256: String(i + 1).padStart(64, '0') }));
+  assert.ok(live.reduce((sum, row) => sum + row.size, 0) > 256 * 1024 * 1024);
+  assert.doesNotThrow(() => createAssetVerifierSource({ ...options(createAssetVerificationNonce()), entries: live }));
+});
+
+test('bounded 471-file Operations inventory of 152255343 bytes fits while inventories above the bound fail before any fetch', async () => {
   const targetBytes = 152_255_343, count = 471, base = Math.floor(targetBytes / count), extra = targetBytes % count;
   const opsRows = Array.from({ length: count }, (_, i) => ({
     path: i === 0 ? '/index.html' : `/assets/ops-${String(i).padStart(3, '0')}.js`,
@@ -95,7 +105,7 @@ test('bounded 471-file Operations inventory of 152255343 bytes fits while invent
 
   const tooLarge = Array.from({ length: 1000 }, (_, i) => ({ ...entry,
     path: i === 0 ? '/index.html' : `/assets/large-${String(i).padStart(3, '0')}.js`,
-    size: 269_000, sha256: String(i + 1).padStart(64, '0') }));
+    size: 410_000, sha256: String(i + 1).padStart(64, '0') }));
   assert.ok(tooLarge.reduce((sum, row) => sum + row.size, 0) > ASSET_VERIFICATION_LIMITS.totalBytes);
   let calls = 0;
   await assert.rejects(collectVerifiedAssets({ entries: tooLarge, fetchAsset: async () => { calls++; return response('GET'); } }));

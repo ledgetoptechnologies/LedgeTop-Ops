@@ -21,8 +21,11 @@ export function registeredHoldCode(error) {
 // https://developers.cloudflare.com/workers/versions-and-deployments/version-overrides/
 const TARGETS = { "ledgetop-ops": "https://ops.ledgetop.app", "ledgetop-clients": "https://portal.ledgetop.app" };
 const HASH = /^[a-f0-9]{64}$/u, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+// totalBytes bounds the retained union one byte-verification pass fetches and holds in memory. Retained history
+// grows every release (no automatic pruning yet); 384 MiB keeps the measured worst pass (Operations, 600 files:
+// about 3 minutes including journal writes) well inside the 300 s verification window.
 export const ASSET_VERIFICATION_LIMITS = Object.freeze({ files: 1024, fileBytes: 16 * 1024 * 1024,
-  totalBytes: 256 * 1024 * 1024 });
+  totalBytes: 384 * 1024 * 1024 });
 const { fileBytes: MAX_FILE, totalBytes: MAX_TOTAL, files: MAX_FILES } = ASSET_VERIFICATION_LIMITS;
 const fail = () => { throw Error("static_asset_verification_refused"); };
 const need = value => { if (!value) fail(); };
