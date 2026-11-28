@@ -325,6 +325,9 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         selectedApp: app, token,
         allowAssetAssociationRotation: app === 'operations' || app === 'client', allowUnselectedRecapture: false, fetchImpl: apiFetch,
         ...(ownedInactiveWitness || ownedInactiveV5Custody ? { baselineAllowLatest: currentLatestAllowance() } : {}),
+        // A held run's own verified zero-percent stage is the starting deployment: capture it with its exact weights.
+        ...(ownedInactiveV5Custody?.stagedDeploymentId && verifiedDeploymentVersions
+          ? { baselineExpectedDeploymentVersions: { [app]: verifiedDeploymentVersions } } : {}),
       });
       const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
         : verifiedDeploymentVersions;
@@ -623,14 +626,23 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     const versions = (await provider.get(`${pre}/versions?per_page=1`))?.items;
     const deployed = Array.isArray(deployments) && deployments.length >= 1 ? deployments[0]?.versions : null;
     const latest = Array.isArray(versions) && versions.length >= 1 ? versions[0]?.id : null;
-    if (!Array.isArray(deployed) || deployed.length !== 1 || deployed[0]?.percentage !== 100
-      || !UUID.test(latest ?? '') || deployed[0].version_id === latest) return;
+    // Either the parent alone at 100% with a newer inactive latest, or a [parent 100, latest 0] stage.
+    const parentOnly = Array.isArray(deployed) && deployed.length === 1 && deployed[0]?.percentage === 100
+      && deployed[0].version_id !== latest;
+    const stagedLatest = Array.isArray(deployed) && deployed.length === 2
+      && deployed.some(row => row?.percentage === 100 && row.version_id !== latest)
+      && deployed.some(row => row?.percentage === 0 && row.version_id === latest);
+    if (!UUID.test(latest ?? '') || !(parentOnly || stagedLatest)) return;
     const reader = journalFactory({ token: env.GITHUB_TOKEN, workerName, sourceCommit,
       ciRunId: triggerRun.runId, ciRunAttempt: triggerRun.runAttempt,
       workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT),
       recipient: recipientLoader(), responseDirectory: path.join(ROOT, '.backups', 'production-auto-release', workerName, sourceCommit),
       fetchImpl: githubFetch });
     ownedInactiveV5Custody = await reader.readOwnedInactiveV5Custody({ latestVersionId: latest });
+    need(stagedLatest === (ownedInactiveV5Custody.stagedDeploymentId !== null), 'owned_inactive_v5_custody_refused');
+    // Until this run's own transition, every capture expects exactly that held stage's weights.
+    if (stagedLatest) verifiedDeploymentVersions = [{ versionId: ownedInactiveV5Custody.parentVersionId, percentage: 100 },
+      { versionId: ownedInactiveV5Custody.candidateVersionId, percentage: 0 }];
   };
   const adapter = {
     ...(ownedInactiveEnabled ? { ownedInactiveInitialStateAllowed: ({ ci, baseline }) =>

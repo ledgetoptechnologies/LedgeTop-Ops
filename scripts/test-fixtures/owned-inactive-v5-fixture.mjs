@@ -9,17 +9,23 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 const JOBS = { 'ledgetop-clients': ['release-client', 'Run exact-main CI-fenced Client release', 'client'],
   'ledgetop-ops': ['release-operations', 'Run exact-main CI-fenced Operations release', 'operations'] };
 
+export const STAGED_DEPLOYMENT_ID = '00000000-0000-4000-8000-000000000600';
 export function mintOwnedInactiveV5Allowance({ workerName, parentVersionId, supersededVersionId, newSourceCommit,
-  oldSourceCommit = 'a'.repeat(40) }) {
+  oldSourceCommit = 'a'.repeat(40), staged = false }) {
   const [jobName, stepName, app] = JOBS[workerName];
   const module = Buffer.from('export default {}'), ledger = Buffer.from('{"ledger":true}');
   const releaseId = sha(`${workerName}\n${oldSourceCommit}`), runId = 9001, artifactId = 7001, digest = 'd'.repeat(64);
   const request = n => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`;
-  const phases = [['temporary-verifier-create', 'PUT'], ['asset-session', 'POST'], ['worker-version-upload', 'POST']];
+  const phases = [['temporary-verifier-create', 'PUT'], ['asset-session', 'POST'], ['worker-version-upload', 'POST'],
+    ...(staged ? [['stage-zero-percent', 'POST'], ['temporary-verifier-create', 'PUT'], ['temporary-verifier-enable', 'POST']] : [])];
   const intents = phases.map(([phase, method], i) => ({ automaticRetry: false, hashes: [], method, phase, requestId: request(i + 1),
-    sequence: i + 1, workerName, ...(phase === 'worker-version-upload' ? { parentVersionId,
-      modules: { '__ops_release_ledger.json': sha(ledger), 'index.js': sha(module), 'index.js.map': '7'.repeat(64) } } : {}) }));
-  const responses = intents.map(intent => ({ ciphertextBytes: 1, ciphertextFile: `responses/${intent.requestId}.sealed.json`,
+    sequence: i + 1, workerName, ...(phase.startsWith('temporary-verifier-') ? { temporaryWorkerName: 'ops-ui-verify-0123456789abcdef01234567' } : {}),
+    ...(phase === 'worker-version-upload' ? { parentVersionId,
+      modules: { '__ops_release_ledger.json': sha(ledger), 'index.js': sha(module), 'index.js.map': '7'.repeat(64) } } : {}),
+    ...(phase === 'stage-zero-percent' ? { parentVersionId, candidateVersionId: supersededVersionId,
+      versions: [{ percentage: 100, versionId: parentVersionId }, { percentage: 0, versionId: supersededVersionId }] } : {}) }));
+  // A staged held run's last write (the verifier enable) was never acknowledged.
+  const responses = intents.filter(intent => !(staged && intent.phase === 'temporary-verifier-enable')).map(intent => ({ ciphertextBytes: 1, ciphertextFile: `responses/${intent.requestId}.sealed.json`,
     ciphertextSha256: 'f'.repeat(64), errorCodes: [], providerAcknowledged: true, requestId: intent.requestId, responseBytes: 1,
     responseSha256: '9'.repeat(64), status: 200 }));
   const op = { artifact: { artifactId, digestSha256: digest, name: `production-auto-${releaseId}`, releaseStepConclusion: 'failure',
@@ -30,8 +36,10 @@ export function mintOwnedInactiveV5Allowance({ workerName, parentVersionId, supe
     receipts: [
       { controlsSHA256: '5'.repeat(64), ownedUploadTagBaseline: null, parentVersionId, phase: 'prepare', status: 'started', writesAttempted: false },
       { ledgerSHA256: sha(ledger), phase: 'prepare', status: 'prepared' },
-      { candidateVersionId: supersededVersionId, failureCode: 'release_candidate_readback_failed', phase: 'candidate-readback',
-        status: 'held', writesAttempted: true }] };
+      ...(staged ? [{ candidateVersionId: supersededVersionId, phase: 'candidate-readback', status: 'inactive-verified' },
+        { candidateVersionId: supersededVersionId, deploymentId: STAGED_DEPLOYMENT_ID, phase: 'stage-zero', status: 'zero-percent-verified' }] : []),
+      { candidateVersionId: supersededVersionId, failureCode: staged ? 'release_candidate_assets_failed' : 'release_candidate_readback_failed',
+        phase: staged ? 'candidate-assets' : 'candidate-readback', status: 'held', writesAttempted: true }] };
   const document = { operations: [op], schemaVersion: 1, sequence: 1, workerName };
   const custody = verifyJournalOwnedInactiveCustody({ workerName, latestVersionId: supersededVersionId, sourceCommit: newSourceCommit,
     journalHead: 'c'.repeat(40), journalBytes: Buffer.from(canonical(document) + '\n', 'utf8'),
@@ -47,7 +55,10 @@ export function mintOwnedInactiveV5Allowance({ workerName, parentVersionId, supe
   const annotations = { 'workers/tag': `auto-${oldSourceCommit.slice(0, 12)}`,
     'workers/message': `Retained assets release ${oldSourceCommit.slice(0, 12)}`, 'workers/triggered_by': 'version_upload' };
   const snapshot = { [app]: {
-    deployment: { id: request(500), created_on: '2026-11-27T17:30:36.136610Z', versions: [{ version_id: parentVersionId, percentage: 100 }] },
+    deployment: staged
+      ? { id: STAGED_DEPLOYMENT_ID, created_on: '2026-11-27T23:24:00.000000Z', versions: [{ version_id: parentVersionId, percentage: 100 },
+        { version_id: supersededVersionId, percentage: 0 }] }
+      : { id: request(500), created_on: '2026-11-27T17:30:36.136610Z', versions: [{ version_id: parentVersionId, percentage: 100 }] },
     latest: supersededVersionId, version: { id: parentVersionId, resources: structuredClone(resources) },
     modern: { id: parentVersionId, assets: { config: {} } },
     latestVersion: { id: supersededVersionId, annotations: structuredClone(annotations),

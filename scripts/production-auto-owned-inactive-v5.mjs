@@ -49,6 +49,13 @@ const BIND_STEP = 'Bind encrypted artifact id and digest to the durable journal'
 const PRE_UPLOAD_PHASES = new Set(['temporary-verifier-create', 'temporary-verifier-enable', 'temporary-verifier-delete',
   'asset-session', 'asset-bucket']);
 const HELD_FAILURES = new Set(['release_candidate_readback_failed', 'release_stage_zero_failed']);
+// A held run that verified its own zero-percent stage may only have failed while proving the candidate's bytes.
+const STAGED_HELD_FAILURES = new Set(['release_candidate_assets_failed']);
+const VERIFIER_PHASES = new Set(['temporary-verifier-create', 'temporary-verifier-enable', 'temporary-verifier-delete']);
+/** The exact zero-percent stage a held run makes: parent at 100%, its candidate at 0% (order-insensitive). */
+const stagedRows = (rows, parent, candidate, key) => Array.isArray(rows) && rows.length === 2
+  && rows.some(row => row?.[key] === parent && row.percentage === 100) && rows.some(row => row?.[key] === candidate && row.percentage === 0)
+  && rows.every(row => Object.keys(row).length === 2);
 
 const custodies = new WeakMap(), allowances = new WeakMap();
 
@@ -104,20 +111,25 @@ function selectHeldOperation(document, workerName, latestVersionId) {
 function verifyReceipts(op, latestVersionId) {
   const receipts = list(op.receipts, 64);
   const statuses = receipts.map(row => plain(row).status);
+  const middle = statuses.slice(2, -1).join(',');
   need(receipts.length >= 3 && statuses[0] === 'started' && statuses[1] === 'prepared' && statuses.at(-1) === 'held'
-    && statuses.slice(2, -1).every(status => status === 'inactive-verified') && statuses.length <= 4);
+    && ['', 'inactive-verified', 'inactive-verified,zero-percent-verified'].includes(middle));
+  const staged = middle.endsWith('zero-percent-verified');
   const [started, prepared] = receipts, held = receipts.at(-1);
+  const stage = staged ? receipts.at(-2) : null;
+  need(!staged || (stage.phase === 'stage-zero' && UUID.test(stage.deploymentId ?? '')));
   need(started.phase === 'prepare' && started.writesAttempted === false && UUID.test(started.parentVersionId ?? '')
     && SHA.test(started.controlsSHA256 ?? '') && Object.hasOwn(started, 'ownedUploadTagBaseline')
     && (started.ownedUploadTagBaseline === null || /^auto-[a-f0-9]{12}$/u.test(started.ownedUploadTagBaseline)));
   need(prepared.phase === 'prepare' && prepared.ledgerSHA256 === op.runtime?.ledgerSha256);
   for (const row of receipts.slice(2, -1)) need(row.candidateVersionId === latestVersionId);
-  need(held.writesAttempted === true && held.candidateVersionId === latestVersionId && HELD_FAILURES.has(held.failureCode));
+  need(held.writesAttempted === true && held.candidateVersionId === latestVersionId
+    && (staged ? STAGED_HELD_FAILURES : HELD_FAILURES).has(held.failureCode));
   return { parentVersionId: started.parentVersionId, controlsSHA256: started.controlsSHA256,
-    ownedUploadTagBaseline: started.ownedUploadTagBaseline };
+    ownedUploadTagBaseline: started.ownedUploadTagBaseline, stagedDeploymentId: staged ? stage.deploymentId : null };
 }
 
-function verifyIntents(op, parentVersionId) {
+function verifyIntents(op, parentVersionId, latestVersionId, staged) {
   const intents = list(op.intents, 512), responses = list(op.responses, 512);
   const byRequest = new Map();
   for (const value of responses) {
@@ -144,9 +156,26 @@ function verifyIntents(op, parentVersionId) {
     && upload.modules['index.js'] === op.runtime.moduleSha256
     && upload.modules['__ops_release_ledger.json'] === op.runtime.ledgerSha256);
   const after = intents.slice(uploadIndex + 1);
-  // At most the one stage-zero intent may follow, and it was never acknowledged: no response row at all.
-  need(after.length <= 1 && after.every(intent => intent.phase === 'stage-zero-percent' && !byRequest.has(intent.requestId)
-    && intent.parentVersionId === parentVersionId));
+  if (!staged) {
+    // At most the one stage-zero intent may follow, and it was never acknowledged: no response row at all.
+    need(after.length <= 1 && after.every(intent => intent.phase === 'stage-zero-percent' && !byRequest.has(intent.requestId)
+      && intent.parentVersionId === parentVersionId));
+  } else {
+    // Its own acknowledged zero-percent stage of exactly [parent 100, candidate 0], then only the temporary asset
+    // verifier's own create/enable/delete (any outcome). Never an activation or any other write.
+    const [stage, ...verifier] = after;
+    need(stage?.phase === 'stage-zero-percent' && acknowledged(stage) && byRequest.get(stage.requestId).status === 200
+      && stage.parentVersionId === parentVersionId && stage.candidateVersionId === latestVersionId
+      && stagedRows(stage.versions, parentVersionId, latestVersionId, 'versionId')
+      && verifier.length <= 3 && verifier.every(intent => VERIFIER_PHASES.has(intent.phase)
+        && (!byRequest.has(intent.requestId) || acknowledged(intent))));
+    // One temporary verifier only, in its fixed create -> enable -> delete order and methods. Its outcome may be
+    // unknown (a created helper can be left behind; it serves nothing of the Worker and is listed for cleanup).
+    const order = [['temporary-verifier-create', 'PUT'], ['temporary-verifier-enable', 'POST'], ['temporary-verifier-delete', 'DELETE']];
+    need(verifier.every((intent, i) => intent.phase === order[i][0] && intent.method === order[i][1]
+      && /^ops-ui-verify-[a-f0-9]{24}$/u.test(intent.temporaryWorkerName ?? '')
+      && intent.temporaryWorkerName === verifier[0].temporaryWorkerName));
+  }
   // Every response belongs to an intent; nothing else was recorded as acknowledged.
   need([...byRequest.keys()].every(id => ids.has(id)));
 }
@@ -205,7 +234,7 @@ export function verifyJournalOwnedInactiveCustody({ workerName, latestVersionId,
       && Number.isSafeInteger(op.workflow.runId) && op.workflow.runId > 0
       && Number.isSafeInteger(op.workflow.runAttempt) && op.workflow.runAttempt > 0);
     const started = verifyReceipts(op, latestVersionId);
-    verifyIntents(op, started.parentVersionId);
+    verifyIntents(op, started.parentVersionId, latestVersionId, started.stagedDeploymentId !== null);
     verifyRun(op, run, jobs, artifact, worker);
     const custody = deepFreeze({ schemaVersion: 1, kind: 'owned-inactive-v5-custody', workerName, app: worker.app,
       journalHead, journalDocumentSHA256: sha256(journalBytes), operationSHA256: sha256(Buffer.from(canonical(op), 'utf8')),
@@ -213,6 +242,7 @@ export function verifyJournalOwnedInactiveCustody({ workerName, latestVersionId,
       oldCreatedAt: op.createdAt, artifactDigestSHA256: op.artifact.digestSha256,
       parentVersionId: started.parentVersionId, candidateVersionId: latestVersionId,
       controlsSHA256: started.controlsSHA256, ownedUploadTagBaseline: started.ownedUploadTagBaseline,
+      stagedDeploymentId: started.stagedDeploymentId,
       moduleSHA256: op.runtime.moduleSha256, ledgerSHA256: op.runtime.ledgerSha256, newSourceCommit: sourceCommit });
     custodies.set(custody, true);
     return custody;
@@ -246,10 +276,16 @@ export function verifyOwnedInactiveLiveState(custody, { snapshot, projectedContr
     const state = snapshot?.[custody.app];
     const parent = custody.parentVersionId, candidate = custody.candidateVersionId;
     need(state?.version?.id === parent && state.modern?.id === parent && state.latest === candidate
-      && state.latestVersion?.id === candidate && state.latestModern?.id === candidate
-      && canonical(state.deployment?.versions) === canonical([{ version_id: parent, percentage: 100 }])
-      && iso(new Date(Date.parse(state.deployment?.created_on)).toISOString())
-      && Date.parse(state.deployment.created_on) < Date.parse(custody.oldCreatedAt));
+      && state.latestVersion?.id === candidate && state.latestModern?.id === candidate);
+    if (custody.stagedDeploymentId === null) {
+      need(canonical(state.deployment?.versions) === canonical([{ version_id: parent, percentage: 100 }])
+        && iso(new Date(Date.parse(state.deployment?.created_on)).toISOString())
+        && Date.parse(state.deployment.created_on) < Date.parse(custody.oldCreatedAt));
+    } else {
+      // The live deployment is exactly the one the held run recorded as verified at zero percent: nothing deployed since.
+      need(state.deployment?.id === custody.stagedDeploymentId
+        && stagedRows(state.deployment.versions, parent, candidate, 'version_id'));
+    }
     assertOwnedUploadAnnotations(state, { workerName: custody.workerName, sourceCommit: custody.oldSourceCommit,
       candidateVersionId: candidate });
     need(state.latestVersion.resources?.script?.last_deployed_from === 'api'
@@ -260,7 +296,7 @@ export function verifyOwnedInactiveLiveState(custody, { snapshot, projectedContr
     need(projectedControlsSHA256 === custody.controlsSHA256);
     const allowance = deepFreeze({ schemaVersion: 1, kind: 'owned-inactive-v5-allowance', workerName: custody.workerName,
       app: custody.app, parentVersionId: parent, supersededVersionId: candidate, supersededReleaseId: custody.oldReleaseId,
-      newSourceCommit: custody.newSourceCommit });
+      newSourceCommit: custody.newSourceCommit, stagedDeploymentId: custody.stagedDeploymentId });
     allowances.set(allowance, custody);
     return allowance;
   } catch { throw Error('owned_inactive_v5_custody_refused'); }
@@ -274,7 +310,10 @@ export function ownedInactiveV5BaselineAllowed(allowance, { workerName, sourceCo
     return isOwnedInactiveV5Allowance(allowance) && allowance.workerName === workerName
       && allowance.newSourceCommit === sourceCommit && baseline?.activeVersionId === allowance.parentVersionId
       && baseline.latestVersionId === allowance.supersededVersionId
-      && canonical(baseline.versions) === canonical([{ versionId: allowance.parentVersionId, percentage: 100 }]);
+      && (allowance.stagedDeploymentId === null
+        ? canonical(baseline.versions) === canonical([{ versionId: allowance.parentVersionId, percentage: 100 }])
+        : baseline.deploymentId === allowance.stagedDeploymentId
+          && stagedRows(baseline.versions, allowance.parentVersionId, allowance.supersededVersionId, 'versionId'));
   } catch { return false; }
 }
 
@@ -284,6 +323,9 @@ export function ownedInactiveV5ProviderParentAllowed(allowance, { workerName, pa
     return isOwnedInactiveV5Allowance(allowance) && allowance.workerName === workerName
       && parentVersionId === allowance.parentVersionId && state?.version?.id === allowance.parentVersionId
       && state.latest === allowance.supersededVersionId
-      && canonical(state.deployment?.versions) === canonical([{ version_id: allowance.parentVersionId, percentage: 100 }]);
+      && (allowance.stagedDeploymentId === null
+        ? canonical(state.deployment?.versions) === canonical([{ version_id: allowance.parentVersionId, percentage: 100 }])
+        : state.deployment?.id === allowance.stagedDeploymentId
+          && stagedRows(state.deployment.versions, allowance.parentVersionId, allowance.supersededVersionId, 'version_id'));
   } catch { return false; }
 }
