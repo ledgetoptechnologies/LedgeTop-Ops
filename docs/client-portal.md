@@ -35,6 +35,13 @@ grant; every data surface remains empty until staff explicitly share it.
 Service-enabled project links require an exact PA client match;
 organization-only links are view-only.
 
+A Project Alpha client with no organization is an individual client. Project
+Alpha makes the client's own email their portal principal, whatever the
+client's type field says, under its usual unique-email, conflict and revocation
+checks. Operations shows such a workspace as **No portal sign-in**, not
+**Portal ready**, while it has no active principal and no active member, and the
+Viewer Share dialog warns that a share to it reaches nobody yet.
+
 Operations exposes this boundary under **Team → Staff** and **Team → Clients**.
 The Clients directory is an eligibility directory, not a list of data grants.
 Administrators may opt a principal out before or after first login using an

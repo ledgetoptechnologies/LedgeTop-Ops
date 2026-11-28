@@ -81,7 +81,7 @@ describe('direct Viewer client picker search',()=>{
   expect((await list(env,{q:'HARBOR'})).clients.map(client=>client.workspaceId)).toEqual(['ws-name']);
   const org=(await list(env,{q:'lakeside'})).clients;
   expect(org).toEqual([{sourceId:'project-alpha:primary',workspaceId:'ws-org',displayName:'Pat Example',businessName:'Division A',
-   rootType:'organization',organizationName:'Lakeside Builders'}]);
+   rootType:'organization',signInReady:false,organizationName:'Lakeside Builders'}]);
   const email=await list(env,{q:'Owner@Lakes-Mail'});
   expect(email.clients.map(client=>client.workspaceId)).toEqual(['ws-email']);
   // The email is matched, never returned.
@@ -114,7 +114,24 @@ describe('direct Viewer client picker search',()=>{
  });
  it('still searches names when the principal table is unavailable',async()=>{
   const {env}=await fixture([{id:'ws-one',name:'Alpha Client'}],{principals:false});
-  expect((await list(env,{q:'alpha'})).clients.map(client=>client.workspaceId)).toEqual(['ws-one']);
+  const clients=(await list(env,{q:'alpha'})).clients;
+  expect(clients.map(client=>client.workspaceId)).toEqual(['ws-one']);
+  // Without the sign-in tables the picker cannot tell, so it does not warn.
+  expect(clients[0]).not.toHaveProperty('signInReady');
+ });
+ it('says whether anyone can sign in to each client',async()=>{
+  const {env,database}=await fixture([
+   {id:'ws-principal',name:'Sign A',emails:[['a@one.example','active']]},
+   {id:'ws-nobody',name:'Sign B'},
+   {id:'ws-revoked',name:'Sign C',emails:[['c@three.example','revoked',{membership:'revoked'}]]},
+  ]);
+  // A member without a projected principal can still sign in.
+  await database.prepare(`INSERT INTO portal_v2_workspace_memberships VALUES('member-only','ws-nobody','identity-x','active',NULL,NULL)`).run();
+  await database.prepare(`INSERT INTO portal_v2_workspace_memberships VALUES('expired','ws-revoked','identity-y','active',NULL,'2000-01-01 00:00:00')`).run();
+  const ready=Object.fromEntries((await list(env,{q:'sign'})).clients.map(client=>[client.workspaceId,client.signInReady]));
+  expect(ready).toEqual({'ws-principal':true,'ws-nobody':true,'ws-revoked':false});
+  await database.prepare(`DELETE FROM portal_v2_workspace_memberships WHERE id='member-only'`).run();
+  expect((await list(env,{q:'sign b'})).clients[0]?.signInReady).toBe(false);
  });
  it('orders by name then a stable id and pages across ties with no duplicates or gaps',async()=>{
   const clients:Client[]=[
