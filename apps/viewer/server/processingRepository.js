@@ -706,15 +706,17 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const n=this.database.prepare('SELECT COALESCE(MAX(attempt_number),0)+1 AS n FROM processing_attempts WHERE task_id=?').get(task.id).n;
       const markCount=Number(this.database.prepare('SELECT COUNT(*) count FROM gcp_image_correspondences WHERE task_id=?').get(task.id).count);
       if(markCount>100000)throw Object.assign(new Error('task has too many GCP image correspondences'),{code:'too_many_gcp_correspondences'});
-      // Before schema 93 (older fixtures and upgrade rehearsals) every point is a control.
+      // Before schema 93 (older fixtures and upgrade rehearsals) every point is a control;
+      // before schema 19 there is no import provenance or ellipsoidal height.
       const roleColumn=this.database.prepare('PRAGMA table_info(gcp_points)').all().some(column=>column.name==='role')?'points.role':"'control'";
+      const hasProvenance=Boolean(this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gcp_import_provenance'").get());
       const marks=this.database.prepare(`SELECT points.id pointId,points.external_id externalId,points.label,${roleColumn} role,
-        points.longitude,points.latitude,points.elevation_m elevationM,points.ellipsoidal_height_m ellipsoidalHeightM,
-        provenance.vertical_datum verticalDatum,
+        points.longitude,points.latitude,points.elevation_m elevationM,${hasProvenance?'points.ellipsoidal_height_m':'NULL'} ellipsoidalHeightM,
+        ${hasProvenance?'provenance.vertical_datum':'NULL'} verticalDatum,
         marks.pixel_x pixelX,marks.pixel_y pixelY,files.relative_path relativePath
         FROM gcp_image_correspondences marks
         JOIN gcp_points points ON points.id=marks.gcp_point_id
-        LEFT JOIN gcp_import_provenance provenance ON provenance.set_id=points.set_id
+        ${hasProvenance?'LEFT JOIN gcp_import_provenance provenance ON provenance.set_id=points.set_id':''}
         JOIN dataset_files files ON files.id=marks.dataset_file_id
         WHERE marks.task_id=? ORDER BY points.external_id,files.relative_path,marks.id`).all(task.id);
       // Controls go to ODM; checkpoints stay out of the solve and are frozen for the accuracy report.
