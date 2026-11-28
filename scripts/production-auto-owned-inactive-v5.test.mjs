@@ -227,3 +227,77 @@ test('the live state refuses anything that is not exactly the held run\'s untouc
   assert.throws(() => verifyOwnedInactiveLiveState(structuredClone(custody), { snapshot: liveSnapshot(), projectedControlsSHA256: '5'.repeat(64) }),
     REFUSED, 'a copied custody grants nothing');
 });
+
+// A held run that verified its own zero-percent stage and then failed while proving the candidate's bytes.
+const STAGE_DEPLOYMENT = '44444444-4444-4444-8444-444444444444';
+function staged(v) {
+  const op = held(v);
+  const stage = op.intents[6];
+  op.responses.push({ ...op.responses[0], requestId: stage.requestId, ciphertextFile: `responses/${stage.requestId}.sealed.json`, status: 200 });
+  const verifier = (n, phase, method, acked) => {
+    const requestId = uuid(80 + n);
+    op.intents.push({ ...op.intents[0], phase, method, requestId, sequence: op.intents.length + 1 });
+    if (acked) op.responses.push({ ...op.responses[0], requestId, ciphertextFile: `responses/${requestId}.sealed.json` });
+  };
+  verifier(1, 'temporary-verifier-create', 'PUT', true);
+  verifier(2, 'temporary-verifier-enable', 'POST', false);
+  op.receipts.splice(3, 0, { candidateVersionId: CANDIDATE, deploymentId: STAGE_DEPLOYMENT, phase: 'stage-zero',
+    recordedAt: '2026-11-27T23:26:00.000Z', status: 'zero-percent-verified' });
+  Object.assign(op.receipts.at(-1), { failureCode: 'release_candidate_assets_failed', phase: 'candidate-assets',
+    reconciliation: { readSucceeded: true }, reconciliationCode: 'read_succeeded' });
+}
+const stagedLive = (mutate = () => {}) => liveSnapshot(s => {
+  s.deployment = { id: STAGE_DEPLOYMENT, created_on: '2026-11-27T23:26:00.000000Z',
+    versions: [{ version_id: PARENT, percentage: 100 }, { version_id: CANDIDATE, percentage: 0 }] };
+  mutate(s);
+});
+
+test('a held run\'s own verified zero-percent stage is superseded only from exactly that recorded deployment', () => {
+  const custody = verifyJournalOwnedInactiveCustody(input(staged));
+  assert.equal(custody.stagedDeploymentId, STAGE_DEPLOYMENT);
+  const allowance = verifyOwnedInactiveLiveState(custody, { snapshot: stagedLive(), projectedControlsSHA256: '5'.repeat(64) });
+  assert.equal(allowance.stagedDeploymentId, STAGE_DEPLOYMENT);
+  const baseline = { activeVersionId: PARENT, latestVersionId: CANDIDATE, deploymentId: STAGE_DEPLOYMENT,
+    versions: [{ versionId: CANDIDATE, percentage: 0 }, { versionId: PARENT, percentage: 100 }] };
+  assert.equal(ownedInactiveV5BaselineAllowed(allowance, { workerName: 'ledgetop-clients', sourceCommit: NEW, baseline }), true);
+  for (const [why, changed] of Object.entries({
+    'another deployment id': { ...baseline, deploymentId: OTHER },
+    'the parent alone': { ...baseline, versions: [{ versionId: PARENT, percentage: 100 }] },
+    'the candidate live': { ...baseline, versions: [{ versionId: PARENT, percentage: 0 }, { versionId: CANDIDATE, percentage: 100 }] },
+    'a partial rollout': { ...baseline, versions: [{ versionId: PARENT, percentage: 90 }, { versionId: CANDIDATE, percentage: 10 }] },
+  })) assert.equal(ownedInactiveV5BaselineAllowed(allowance, { workerName: 'ledgetop-clients', sourceCommit: NEW, baseline: changed }), false, why);
+  const state = stagedLive().client;
+  assert.equal(ownedInactiveV5ProviderParentAllowed(allowance, { workerName: 'ledgetop-clients', parentVersionId: PARENT, state }), true);
+  assert.equal(ownedInactiveV5ProviderParentAllowed(allowance, { workerName: 'ledgetop-clients', parentVersionId: PARENT,
+    state: { ...state, deployment: { ...state.deployment, id: OTHER } } }), false);
+  // A parent-only custody never covers a staged deployment, and a staged custody never covers the parent alone.
+  assert.throws(() => verifyOwnedInactiveLiveState(verifyJournalOwnedInactiveCustody(input()),
+    { snapshot: stagedLive(), projectedControlsSHA256: '5'.repeat(64) }), REFUSED);
+  assert.throws(() => verifyOwnedInactiveLiveState(custody, { snapshot: liveSnapshot(), projectedControlsSHA256: '5'.repeat(64) }), REFUSED);
+});
+
+test('a staged held run refuses anything beyond its own stage and asset verifier', () => {
+  const cases = {
+    'an unacknowledged stage': v => { const op = held(v); op.responses = op.responses.filter(r => r.requestId !== op.intents[6].requestId); },
+    'a stage of other weights': v => { held(v).intents[6].versions = [{ percentage: 90, versionId: PARENT }, { percentage: 10, versionId: CANDIDATE }]; },
+    'a stage of another candidate': v => { held(v).intents[6].candidateVersionId = OTHER; },
+    'an activation after the stage': v => { const op = held(v); op.intents.push({ ...op.intents[6], phase: 'activate-candidate',
+      requestId: uuid(90), sequence: op.intents.length + 1 }); },
+    'an asset write after the stage': v => { const op = held(v); op.intents.push({ ...op.intents[3], requestId: uuid(91), sequence: op.intents.length + 1 }); },
+    'four verifier writes': v => { const op = held(v); op.intents.push({ ...op.intents[0], phase: 'temporary-verifier-delete', requestId: uuid(92),
+      sequence: op.intents.length + 1 }, { ...op.intents[0], requestId: uuid(93), sequence: op.intents.length + 2 }); },
+    'a stage receipt without its deployment': v => { delete held(v).receipts[3].deploymentId; },
+    'candidate assets that were verified': v => { held(v).receipts.splice(4, 0, { candidateVersionId: CANDIDATE, phase: 'candidate-assets',
+      status: 'candidate-assets-verified' }); },
+    'a held stage-zero failure after a verified stage': v => { held(v).receipts.at(-1).failureCode = 'release_stage_zero_failed'; },
+  };
+  for (const [why, mutate] of Object.entries(cases))
+    assert.throws(() => verifyJournalOwnedInactiveCustody(input(v => { staged(v); mutate(v); })), REFUSED, why);
+  const custody = verifyJournalOwnedInactiveCustody(input(staged));
+  for (const [why, mutate] of Object.entries({
+    'another deployment id': s => { s.deployment.id = OTHER; },
+    'other weights': s => { s.deployment.versions = [{ version_id: PARENT, percentage: 90 }, { version_id: CANDIDATE, percentage: 10 }]; },
+    'the candidate live': s => { s.deployment.versions = [{ version_id: CANDIDATE, percentage: 100 }, { version_id: PARENT, percentage: 0 }]; },
+  })) assert.throws(() => verifyOwnedInactiveLiveState(custody, { snapshot: stagedLive(mutate), projectedControlsSHA256: '5'.repeat(64) }),
+    REFUSED, why);
+});

@@ -901,3 +901,24 @@ test("v5 owned-inactive allowance binds once before any write and covers exactly
     supersededVersionId: "00000000-0000-4000-8000-000000000005", newSourceCommit: sourceCommit }));
   await assert.rejects(other.provider.createInactiveVersion(supersedingInput()), /refused_or_uncertain/u); assert.equal(calls, 0);
 });
+
+test("a staged v5 allowance lets the superseding upload start from exactly that held run's [parent 100, superseded 0] stage", async () => {
+  const { mintOwnedInactiveV5Allowance, STAGED_DEPLOYMENT_ID } = await import("./test-fixtures/owned-inactive-v5-fixture.mjs");
+  const superseded = "00000000-0000-4000-8000-000000000003", next = "00000000-0000-4000-8000-000000000004";
+  const stagedInput = () => { const input = creation(); input.state.latest = superseded;
+    input.state.deployment = { id: STAGED_DEPLOYMENT_ID, versions: [{ version_id: parent, percentage: 100 }, { version_id: superseded, percentage: 0 }] };
+    return input; };
+  const mint = staged => mintOwnedInactiveV5Allowance({ workerName: "ledgetop-ops", parentVersionId: parent, supersededVersionId: superseded,
+    newSourceCommit: sourceCommit, staged });
+  let calls = 0; const ok1 = setup(async () => { calls++; return ok({ id: next }); });
+  ok1.provider.bindOwnedInactiveV5Allowance(mint(true));
+  assert.equal((await ok1.provider.createInactiveVersion(stagedInput())).id, next); assert.equal(calls, 1);
+  // A parent-only allowance does not cover the staged start; nothing covers another deployment id.
+  calls = 0; const wrongKind = setup(async () => { calls++; return ok({ id: next }); });
+  wrongKind.provider.bindOwnedInactiveV5Allowance(mint(false));
+  await assert.rejects(wrongKind.provider.createInactiveVersion(stagedInput()), /refused_or_uncertain/u); assert.equal(calls, 0);
+  const moved = setup(async () => { calls++; return ok({ id: next }); });
+  moved.provider.bindOwnedInactiveV5Allowance(mint(true));
+  const input = stagedInput(); input.state.deployment.id = "00000000-0000-4000-8000-000000000999";
+  await assert.rejects(moved.provider.createInactiveVersion(input), /refused_or_uncertain/u); assert.equal(calls, 0);
+});

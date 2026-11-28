@@ -350,7 +350,10 @@ export class ProductionCloudflareProvider {
     if (supersedingV5) this.#ownedInactiveV5Allowance = null;
     const superseding = supersedingV5 || state.latest !== parentId && ownedInactiveProviderParentAllowed(
       this.#ownedInactiveAdmission, this.#ownedInactiveIdentity, state);
-    need((state.latest === parentId || superseding) && state.modern?.id === parentId && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
+    // A v5 supersession already proved the exact starting deployment: the parent alone, or that held run's own
+    // recorded [parent 100, superseded 0] stage (same deployment id).
+    need((state.latest === parentId || superseding) && state.modern?.id === parentId
+      && (same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }]) || supersedingV5)
       && same(scriptRuntimeShape(state.version.resources?.script_runtime), scriptRuntimeShape(spec.runtime))
       && samePinnedRootAssetConfig(state.modern.assets?.config, spec.metadata.assets?.config) && jwt(assetCompletionToken));
     need(modules && Object.keys(modules).sort().join() === "js,sourceMap");
