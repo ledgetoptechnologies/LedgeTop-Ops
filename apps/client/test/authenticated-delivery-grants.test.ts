@@ -244,23 +244,33 @@ describe("authenticated delivery grant live authorization", () => {
 
   // Hub 2496ea83 step A: a file grant can't be stored yet, can't change scope, and is invisible to every client reader.
   it("refuses to store a file grant, refuses to change a grant's scope, and never shows a file grant to a client", async () => {
-    const insertFile = (id: string, binding: string, version: string) => db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,
+    const grant = (id: string, binding: string, version: string, objectPath: string | null) => db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,
       audience_type,audience_public_id,audience_source_version,reason_code,created_by_staff_id,object_path)
-      VALUES (?,?,1,'workspace-a',?,?,'organization','org-a','org-v1','client_delivery','staff-a','report.pdf')`).bind(id, id, binding, version);
-    await expect(insertFile("file-refused", "binding-a", "binding-v1").run()).rejects.toThrow(/file grants are not enabled/);
-    await expect(db.prepare("UPDATE portal_v2_authenticated_delivery_grants SET object_path='report.pdf' WHERE id='grant-a-v1'").run()).rejects.toThrow(/object_path is immutable/);
+      VALUES (?,?,1,'workspace-a',?,?,'department','department-a','department-v1','client_delivery','staff-a',?)`).bind(id, id, binding, version, objectPath);
+    const binding = (id: string, prefix: string) => db.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_version)
+      VALUES (?,'workspace-a','project','project-department',?,?)`).bind(id, prefix, `${id}-v1`).run();
+    // Control: the same department audience on a sibling folder of the same project, granted as a folder, is visible.
+    await binding("binding-control", "clients/control/");
+    await grant("control-grant-v1", "binding-control", "binding-control-v1", null).run();
+    expect(await authorizeAuthenticatedDeliveryGrant(env, principal, "workspace-a", "binding-control")).toBe(true);
+    expect([...await listAuthorizedAuthenticatedDeliveryPrefixes(env, principal, "workspace-a")]).toContain("clients/control/");
+    // Closed until step B: no file grant can be stored, and a live grant's scope can't be changed.
+    await binding("binding-file", "clients/file-only/");
+    await expect(grant("file-refused", "binding-file", "binding-file-v1", "report.pdf").run()).rejects.toThrow(/file grants are not enabled/);
+    await expect(db.prepare("UPDATE portal_v2_authenticated_delivery_grants SET object_path='report.pdf' WHERE id='control-grant-v1'").run()).rejects.toThrow(/object_path is immutable/);
+    expect(await authorizeAuthenticatedDeliveryGrant(env, principal, "workspace-a", "binding-control")).toBe(true);
     // Simulate step B storing a file grant on a folder no folder grant covers: no reader may treat it as folder access.
-    await db.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_version)
-      VALUES ('binding-file','workspace-a','project','project-a','clients/file-only/','binding-file-v1')`).run();
+    const closed = await db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='portal_v2_authenticated_delivery_grants_file_scope_closed'").first<string>("sql");
     await db.prepare("DROP TRIGGER portal_v2_authenticated_delivery_grants_file_scope_closed").run();
     try {
-      await insertFile("file-grant-v1", "binding-file", "binding-file-v1").run();
+      await grant("file-grant-v1", "binding-file", "binding-file-v1", "report.pdf").run();
       expect(await db.prepare("SELECT count(*) n FROM portal_v2_authenticated_delivery_grants WHERE id='file-grant-v1'").first("n")).toBe(1);
       expect(await db.prepare("SELECT count(*) n FROM portal_v2_folder_delivery_grants WHERE id='file-grant-v1'").first("n")).toBe(0);
       expect(await authorizeAuthenticatedDeliveryGrant(env, principal, "workspace-a", "binding-file")).toBe(false);
       expect([...await listAuthorizedAuthenticatedDeliveryPrefixes(env, principal, "workspace-a")]).not.toContain("clients/file-only/");
     } finally {
-      await db.prepare("DELETE FROM portal_v2_authenticated_delivery_grants WHERE id='file-grant-v1'").run().catch(() => undefined);
+      await db.prepare(closed!).run();
     }
+    await expect(grant("file-refused-again", "binding-file", "binding-file-v1", "other.pdf").run()).rejects.toThrow(/file grants are not enabled/);
   });
 });
