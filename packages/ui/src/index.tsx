@@ -131,6 +131,10 @@ export function Dialog({ open, onClose, title, description, children, footer, si
   return <dialog ref={ref} className={`ltds-dialog ltds-dialog-${size}`} aria-labelledby={titleId}
     aria-describedby={description ? descriptionId : undefined}
     onCancel={event => { event.preventDefault(); if (dismissible) onClose(); }}
+    // A browser lets a page refuse only one Escape in a row, so a locked dialog stops Escape before it becomes a close request.
+    onKeyDown={event => { if (event.key === "Escape" && !dismissible) event.preventDefault(); }}
+    // If the browser closes it anyway, a dialog that is still open in the app is shown again rather than left half-closed.
+    onClose={() => { const dialog = ref.current; if (open && dialog && !dialog.open) { if (dismissible) onClose(); else if (typeof dialog.showModal === "function") dialog.showModal(); } }}
     onMouseDown={event => { if (dismissible && event.target === event.currentTarget) onClose(); }}>
     <div className="ltds-dialog-panel">
       <header className="ltds-dialog-header">

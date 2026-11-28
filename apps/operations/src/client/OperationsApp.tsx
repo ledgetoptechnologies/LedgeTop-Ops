@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { OPERATIONS_APP_API, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerPlatformOverview } from "@ltds/shared";
-import { AccountMenu, Brand, Card, EmptyState, Loading, LoadError, LtMark, loadFailureText, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
+import { AccountMenu, Brand, Card, Dialog, EmptyState, Loading, LoadError, LtMark, loadFailureText, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
 import { ApiError, api, setCsrf, setSessionActor } from "./api";
@@ -5526,43 +5526,8 @@ function ShareDialog({
   const methodChosen = useRef(false);
   useEffect(() => { if (!methodChosen.current) setShareMode(workspaceDefault ? "workspace" : "public"); }, [workspaceDefault]);
   const chooseShareMode = (mode: ShareMethod) => { methodChosen.current = true; setShareMode(mode); };
-  const dialog = useRef<HTMLDivElement>(null);
-  const closeButton = useRef<HTMLButtonElement>(null);
-  const opener = useRef<HTMLElement | null>(null);
-  const closeRef = useRef(close);
   const [grantBusy, setGrantBusy] = useState(false);
   const locked = busy || grantBusy;
-  const busyRef = useRef(locked);
-  closeRef.current = close;
-  busyRef.current = locked;
-
-  useEffect(() => {
-    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    queueMicrotask(() => closeButton.current?.focus());
-    return () => {
-      const target = opener.current;
-      queueMicrotask(() => { if (target?.isConnected) target.focus(); });
-    };
-  }, []);
-
-  const handleDialogKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape" && !busyRef.current) {
-      event.preventDefault();
-      closeRef.current();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusable = [...(dialog.current?.querySelectorAll<HTMLElement>(
-      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
-    ) ?? [])].filter(element => element.getClientRects().length > 0);
-    if (!focusable.length) return;
-    const first = focusable[0]!, last = focusable[focusable.length - 1]!;
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault(); last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault(); first.focus();
-    }
-  };
 
   useEffect(() => {
     let mounted = true;
@@ -5675,21 +5640,7 @@ function ShareDialog({
   }
 
   return (
-    <div className="modal-backdrop">
-      <div ref={dialog} className="share-dialog" role="dialog" aria-modal="true" aria-label={`Share ${targetLabel}`} onKeyDown={handleDialogKeyDown}>
-        <Card
-        title={`Share ${targetLabel}`}
-        action={
-          <button
-            ref={closeButton}
-            className="button-ghost button-small"
-            onClick={close}
-            disabled={locked}
-          >
-            Close
-          </button>
-        }
-      >
+    <Dialog open onClose={close} dismissible={!locked} size="lg" title={`Share ${targetLabel}`}>
         <div className="share-folder-path">
           <span>{fileTarget ? "File" : "Folder"}</span>
           <code>{fileTarget ? displayName(folder) : folder.prefix}</code>
@@ -6028,9 +5979,7 @@ function ShareDialog({
         }
           </ShareMethodPanel>
         )}
-        </Card>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 function FilePreview({

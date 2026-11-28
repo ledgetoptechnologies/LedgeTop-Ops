@@ -53,6 +53,8 @@ async function openPanel(page: Page) {
   await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click();
   await page.getByRole("tab", {name: "Client Workspace"}).click();
   await expect(client(page)).toBeEnabled();
+  // Sizes are measured once the dialog has finished scaling in.
+  await page.locator("dialog[open]").evaluate(element => Promise.all(element.getAnimations({subtree: true}).map(animation => animation.finished)));
   await expect(page.getByRole("combobox", {name: "Portal connection"})).toHaveCount(0);
 }
 async function pick(page: Page, query: string, name: RegExp) {await client(page).fill(query); await page.getByRole("option", {name}).click();}

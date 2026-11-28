@@ -927,11 +927,15 @@ test("permission-gated current-folder sharing uses the normalized active folder 
   await expect(publicTab).toHaveAttribute("tabindex", "-1");
   await expect(page.getByRole("tabpanel", { name: "Client Workspace" })).toHaveAttribute("id", "share-method-panel-workspace");
   await expect(dialog.getByText(/Choose an exact individual|This does not create a public link/)).toHaveCount(0);
+  // The same modal shell as the model Share dialog; its body scrolls. Measured once the opening animation ends.
+  await dialog.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished)));
   const layout = await dialog.evaluate(element => {
-    const bounds = element.getBoundingClientRect(), style = getComputedStyle(element);
-    return { top: bounds.top, bottom: bounds.bottom, viewportHeight: innerHeight,
-      overflowY: style.overflowY, clientHeight: element.clientHeight, scrollHeight: element.scrollHeight };
+    const bounds = element.getBoundingClientRect(), body = element.querySelector(".ltds-dialog-body");
+    return { tag: element.tagName, shell: element.classList.contains("ltds-dialog"), top: bounds.top, bottom: bounds.bottom, viewportHeight: innerHeight,
+      overflowY: body ? getComputedStyle(body).overflowY : "" };
   });
+  expect(layout.tag).toBe("DIALOG");
+  expect(layout.shell).toBe(true);
   expect(layout.top).toBeGreaterThanOrEqual(0);
   expect(layout.bottom).toBeLessThanOrEqual(layout.viewportHeight);
   expect(layout.overflowY).toBe("auto");
