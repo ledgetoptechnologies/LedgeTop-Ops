@@ -50,6 +50,7 @@ import { AdminAuditHistory } from "./AdminAuditHistory";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { NativeDeliveryGrantPanel, type ShareHistoryState } from "./NativeDeliveryGrantPanel";
 import { ClientSharePicker } from "./ClientSharePicker";
+import { ShareMethodPanel, ShareMethodTabs, type ShareMethod } from "./ShareMethodTabs";
 import { SearchFirstPicker } from "./SearchFirstPicker";
 import { backendForSource, type ClientShareBackendState, type ClientShareRecipient } from "./client-share-routing";
 import { deliveryViewCountText } from "./delivery-view-count";
@@ -5520,11 +5521,14 @@ function ShareDialog({
   const [recipientOptions, setRecipientOptions] = useState<ShareDirectoryAudience[]>([]);
   const [recipientSearchError, setRecipientSearchError] = useState("");
   const [imageLocationMapEnabled, setImageLocationMapEnabled] = useState(false);
-  const [shareMode, setShareMode] = useState<"public" | "workspace">("public");
+  const workspaceDefault = !fileTarget && authenticatedGrantsEnabled && canManageAuthenticatedGrants;
+  const [shareMode, setShareMode] = useState<ShareMethod>(() => workspaceDefault ? "workspace" : "public");
+  // Until staff pick a tab, the default follows access that loads or changes while the dialog is open.
+  const methodChosen = useRef(false);
+  useEffect(() => { if (!methodChosen.current) setShareMode(workspaceDefault ? "workspace" : "public"); }, [workspaceDefault]);
+  const chooseShareMode = (mode: ShareMethod) => { methodChosen.current = true; setShareMode(mode); };
   const dialog = useRef<HTMLDivElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
-  const publicShareTab = useRef<HTMLButtonElement>(null);
-  const workspaceShareTab = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLElement | null>(null);
   const closeRef = useRef(close);
   const [grantBusy, setGrantBusy] = useState(false);
@@ -5559,23 +5563,6 @@ function ShareDialog({
     } else if (!event.shiftKey && document.activeElement === last) {
       event.preventDefault(); first.focus();
     }
-  };
-
-  const handleShareModeKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    if (busyRef.current) return;
-    const tabs = authenticatedGrantsEnabled
-      ? [{ mode: "public" as const, ref: publicShareTab }, { mode: "workspace" as const, ref: workspaceShareTab }]
-      : [{ mode: "public" as const, ref: publicShareTab }];
-    const current = Math.max(0, tabs.findIndex(tab => tab.mode === shareMode));
-    const next = event.key === "Home" ? 0
-      : event.key === "End" ? tabs.length - 1
-        : event.key === "ArrowRight" ? (current + 1) % tabs.length
-          : (current - 1 + tabs.length) % tabs.length;
-    const tab = tabs[next]!;
-    setShareMode(tab.mode);
-    tab.ref.current?.focus();
   };
 
   useEffect(() => {
@@ -5708,42 +5695,11 @@ function ShareDialog({
           <span>{fileTarget ? "File" : "Folder"}</span>
           <code>{fileTarget ? displayName(folder) : folder.prefix}</code>
         </div>
-        {!fileTarget && <div className="share-mode-selector ltds-segmented" role="tablist" aria-label="Sharing method">
-          <button
-            ref={publicShareTab}
-            id="share-mode-tab-public"
-            type="button"
-            role="tab"
-            aria-selected={shareMode === "public"}
-            aria-controls="share-mode-panel-public"
-            tabIndex={shareMode === "public" ? 0 : -1}
-            className={shareMode === "public" ? "active" : "button-ghost"}
-            onClick={() => setShareMode("public")}
-            onKeyDown={handleShareModeKeyDown}
-            disabled={locked}
-          >Public link</button>
-          <button
-            ref={workspaceShareTab}
-            id="share-mode-tab-workspace"
-            type="button"
-            role="tab"
-            aria-selected={shareMode === "workspace"}
-            aria-controls="share-mode-panel-workspace"
-            tabIndex={shareMode === "workspace" ? 0 : -1}
-            className={shareMode === "workspace" ? "active" : "button-ghost"}
-            onClick={() => setShareMode("workspace")}
-            onKeyDown={handleShareModeKeyDown}
-            disabled={locked || !authenticatedGrantsEnabled}
-            title={!authenticatedGrantsEnabled ? authenticatedGrantReadinessMessage : undefined}
-          >Client Workspace</button>
-        </div>}
+        {!fileTarget && <ShareMethodTabs mode={shareMode} onChange={chooseShareMode} locked={locked}
+          disabledReason={authenticatedGrantsEnabled ? {} : { workspace: authenticatedGrantReadinessMessage }} />}
         {!fileTarget && !authenticatedGrantsEnabled && <div className="notice" role="status">{authenticatedGrantReadinessMessage} <a href="/clients#client-portal-setup">Open Client Hub portal setup</a> to check readiness.</div>}
         {!fileTarget && shareMode === "workspace" ? (
-          <section id="share-mode-panel-workspace" className="share-mode-panel" role="tabpanel" aria-labelledby="share-mode-tab-workspace">
-            <header>
-              <strong>Authenticated Client Workspace access</strong>
-              <small>Choose an exact individual, a department, or an organization. Access covers this folder and every nested folder and file. This does not create a public link.</small>
-            </header>
+          <ShareMethodPanel mode="workspace">
             {authenticatedGrantsEnabled
               ? canManageAuthenticatedGrants
                 ? <AuthenticatedDeliveryGrantPanel folder={folder} canRevoke={canRevoke} creationEnabled={authenticatedGrantCreationEnabled} embedded onBusyChange={setGrantBusy} />
@@ -5753,10 +5709,9 @@ function ShareDialog({
               <summary>Advanced client-created link policy</summary>
               <ClientDelegatedFolderProvisioning folder={folder} />
             </details>}
-          </section>
+          </ShareMethodPanel>
         ) : (
-          <section id={!fileTarget ? "share-mode-panel-public" : undefined}
-            role={!fileTarget ? "tabpanel" : undefined} aria-labelledby={!fileTarget ? "share-mode-tab-public" : undefined}>
+          <ShareMethodPanel mode="public" plain={fileTarget}>
           {activeLoadError ? <div className="notice error" role="alert">
             <strong>Share status unavailable.</strong> {activeLoadError}
             <div className="actions">
@@ -5767,7 +5722,6 @@ function ShareDialog({
           </div>
         : active === undefined ? <Loading /> :
           <>
-            {!fileTarget && <p className="share-mode-description">Create a bearer link for anyone who receives the complete URL. Use an access code when the content should not be open to everyone holding the link.</p>}
             {shown && !result && (
               <div className="current-share">
                 <div>
@@ -6073,7 +6027,7 @@ function ShareDialog({
             )}
           </>
         }
-          </section>
+          </ShareMethodPanel>
         )}
         </Card>
       </div>

@@ -2,6 +2,7 @@ import type { ViewerProjectSelection, ViewerPublicShareSummary } from "@ltds/sha
 import { Dialog, EmptyState, StatusPill } from "@ltds/ui";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { api, ApiError } from "./api";
+import { ShareMethodPanel, ShareMethodTabs, type ShareMethod } from "./ShareMethodTabs";
 
 /** Count and update time are optional until the Viewer catalog source provides them. */
 export type ViewerCatalogProject = { viewerProjectId: string; name: string; publishedTaskCount?: number | null; updatedAt?: string | null };
@@ -315,28 +316,18 @@ export function ViewerQuickShare({ canCreatePublic, canRevokePublic, onOpenViewe
   </section>;
 }
 
-type ShareMode = "workspace" | "public";
-
-/** Share one target, with the same Public link / Client Workspace choice as the Data share dialog. */
+/** Share one target, with the same Client Workspace / Public link tabs as the Data share dialog. */
 export function ViewerShareDialog({ target, onClose, canCreatePublic, canRevokePublic }: {
   target: ViewerShareTarget; onClose: () => void; canCreatePublic: boolean; canRevokePublic: boolean;
 }) {
   const publicAvailable = !!target.task?.modelId;
-  const [mode, setMode] = useState<ShareMode>("workspace");
+  const [mode, setMode] = useState<ShareMethod>("workspace");
   const [busy, setBusy] = useState(false), [unconfirmed, setUnconfirmed] = useState(false);
   const onStateChange = useCallback((nextBusy: boolean, nextUnconfirmed: boolean) => { setBusy(nextBusy); setUnconfirmed(nextUnconfirmed); }, []);
   // The method and the dialog stay fixed while a share is in flight or unconfirmed. Its idempotency receipt is scoped to
   // this staff sign-in and expires, so an unconfirmed share is only retried from here, never from a later reopen.
   const locked = busy || unconfirmed;
-  const workspaceTab = useRef<HTMLButtonElement>(null), publicTab = useRef<HTMLButtonElement>(null);
   const label = target.task ? target.task.title : `${target.project.name} (whole project)`;
-  const onTabKey = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || !publicAvailable) return;
-    event.preventDefault();
-    const next: ShareMode = event.key === "Home" ? "workspace" : event.key === "End" ? "public" : mode === "workspace" ? "public" : "workspace";
-    setMode(next);
-    (next === "workspace" ? workspaceTab : publicTab).current?.focus();
-  };
   const publicReason = !target.task ? "Public links share one model. Choose a published model to create one."
       : "This model doesn't have a public-link version yet.";
   if (!target.task) return <Dialog open onClose={onClose} title="Share from Viewer">
@@ -344,25 +335,12 @@ export function ViewerShareDialog({ target, onClose, canCreatePublic, canRevokeP
   </Dialog>;
   return <Dialog open onClose={onClose} dismissible={!locked} size="lg" title={`Share ${label}`}
     description={target.task ? `From ${target.project.name}` : "Shares every published model in this project, and models published to it later."}>
-    <div className="share-mode-selector ltds-segmented" role="tablist" aria-label="Sharing method">
-      <button ref={workspaceTab} id="viewer-share-tab-workspace" type="button" role="tab" aria-selected={mode === "workspace"}
-        aria-controls="viewer-share-panel-workspace" tabIndex={mode === "workspace" ? 0 : -1} className={mode === "workspace" ? "active" : "button-ghost"}
-        disabled={locked} onClick={() => setMode("workspace")} onKeyDown={onTabKey}>Client Workspace</button>
-      <button ref={publicTab} id="viewer-share-tab-public" type="button" role="tab" aria-selected={mode === "public"}
-        aria-controls="viewer-share-panel-public" tabIndex={mode === "public" ? 0 : -1} className={mode === "public" ? "active" : "button-ghost"}
-        disabled={locked || !publicAvailable} title={!publicAvailable ? publicReason : undefined}
-        onClick={() => setMode("public")} onKeyDown={onTabKey}>Public link</button>
-    </div>
+    <ShareMethodTabs mode={mode} onChange={setMode} locked={locked} disabledReason={publicAvailable ? {} : { public: publicReason }} />
     {mode === "workspace"
-      ? <section id="viewer-share-panel-workspace" className="share-mode-panel" role="tabpanel" aria-labelledby="viewer-share-tab-workspace">
-        <header><strong>Client Workspace access</strong>
-          <small>Choose a client or organization. They'll see it in their Ledge Top portal after signing in. This does not create a public link.</small></header>
-        <DirectClientSharePanel target={target} onStateChange={onStateChange} />
-      </section>
-      : <section id="viewer-share-panel-public" className="share-mode-panel" role="tabpanel" aria-labelledby="viewer-share-tab-public">
-        <p className="share-mode-description">Create a link for anyone who receives the complete URL. Add a password when the model shouldn't be open to everyone holding the link.</p>
+      ? <ShareMethodPanel mode="workspace"><DirectClientSharePanel target={target} onStateChange={onStateChange} /></ShareMethodPanel>
+      : <ShareMethodPanel mode="public">
         <ViewerPublicLinkPanel modelId={target.task!.modelId!} canCreate={canCreatePublic} canRevoke={canRevokePublic} onStateChange={onStateChange} />
-      </section>}
+      </ShareMethodPanel>}
   </Dialog>;
 }
 
@@ -440,6 +418,8 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
     return () => window.clearTimeout(timer);
   }, [query, runSearch]);
   useEffect(() => () => { run.current += 1; search.current += 1; }, []);
+  // The match list scrolls, so the option chosen with the arrow keys is kept in view.
+  useEffect(() => { if (active >= 0) document.getElementById(`viewer-direct-share-client-${active}`)?.scrollIntoView?.({ block: "nearest" }); }, [active]);
   // A new search drops the previous results at once, so Enter or a click can't pick from an old list.
   const changeQuery = (value: string) => { search.current += 1; setResults(null); setActive(-1); setSearchError(""); setQuery(value); };
 

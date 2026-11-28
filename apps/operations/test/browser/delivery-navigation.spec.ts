@@ -918,13 +918,15 @@ test("permission-gated current-folder sharing uses the normalized active folder 
   await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
   const publicTab = page.getByRole("tab", { name: "Public link" });
   const workspaceTab = page.getByRole("tab", { name: "Client Workspace" });
-  await expect(publicTab).toHaveAttribute("aria-selected", "true");
-  await expect(publicTab).toHaveAttribute("aria-controls", "share-mode-panel-public");
-  await expect(publicTab).toHaveAttribute("tabindex", "0");
-  await expect(workspaceTab).toHaveAttribute("aria-controls", "share-mode-panel-workspace");
-  await expect(workspaceTab).toHaveAttribute("tabindex", "-1");
-  await expect(page.getByRole("tabpanel", { name: "Public link" })).toHaveAttribute("id", "share-mode-panel-public");
-  await expect(page.getByRole("button", { name: "Create link" })).toBeVisible();
+  // Same tabs as the model Share dialog: Client Workspace first and chosen.
+  await expect(dialog.getByRole("tab")).toHaveText(["Client Workspace", "Public link"]);
+  await expect(workspaceTab).toHaveAttribute("aria-selected", "true");
+  await expect(workspaceTab).toHaveAttribute("aria-controls", "share-method-panel-workspace");
+  await expect(workspaceTab).toHaveAttribute("tabindex", "0");
+  await expect(publicTab).toHaveAttribute("aria-controls", "share-method-panel-public");
+  await expect(publicTab).toHaveAttribute("tabindex", "-1");
+  await expect(page.getByRole("tabpanel", { name: "Client Workspace" })).toHaveAttribute("id", "share-method-panel-workspace");
+  await expect(dialog.getByText(/Choose an exact individual|This does not create a public link/)).toHaveCount(0);
   const layout = await dialog.evaluate(element => {
     const bounds = element.getBoundingClientRect(), style = getComputedStyle(element);
     return { top: bounds.top, bottom: bounds.bottom, viewportHeight: innerHeight,
@@ -933,29 +935,28 @@ test("permission-gated current-folder sharing uses the normalized active folder 
   expect(layout.top).toBeGreaterThanOrEqual(0);
   expect(layout.bottom).toBeLessThanOrEqual(layout.viewportHeight);
   expect(layout.overflowY).toBe("auto");
-  expect(layout.scrollHeight).toBeGreaterThan(layout.clientHeight);
   expect(activePrefix).toBe("Jobs/Clients/DC Construction/");
   expect(activeItemRef).toBeNull();
-  expect(authenticatedFolderRef).toBe("");
 
-  await publicTab.focus();
-  await publicTab.press("ArrowRight");
-  await expect(workspaceTab).toBeFocused();
-  await expect(workspaceTab).toHaveAttribute("aria-selected", "true");
-  await expect(workspaceTab).toHaveAttribute("tabindex", "0");
-  await expect(publicTab).toHaveAttribute("tabindex", "-1");
-  await expect(page.getByRole("tabpanel", { name: "Client Workspace" })).toHaveAttribute("id", "share-mode-panel-workspace");
-  await expect(page.getByRole("tabpanel", { name: "Public link" })).toHaveCount(0);
-  await workspaceTab.press("Home");
+  await workspaceTab.focus();
+  await workspaceTab.press("ArrowRight");
   await expect(publicTab).toBeFocused();
-  await expect(page.getByRole("tabpanel", { name: "Public link" })).toBeVisible();
-  await publicTab.press("End");
+  await expect(publicTab).toHaveAttribute("aria-selected", "true");
+  await expect(publicTab).toHaveAttribute("tabindex", "0");
+  await expect(workspaceTab).toHaveAttribute("tabindex", "-1");
+  await expect(page.getByRole("tabpanel", { name: "Public link" })).toHaveAttribute("id", "share-method-panel-public");
+  await expect(page.getByRole("button", { name: "Create link" })).toBeVisible();
+  await expect(dialog.getByText(/Create a bearer link for anyone/)).toHaveCount(0);
+  await expect(page.getByRole("tabpanel", { name: "Client Workspace" })).toHaveCount(0);
+  await publicTab.press("Home");
   await expect(workspaceTab).toBeFocused();
   await expect(page.getByRole("tabpanel", { name: "Client Workspace" })).toBeVisible();
-  await workspaceTab.press("ArrowLeft");
+  await workspaceTab.press("End");
   await expect(publicTab).toBeFocused();
-  await publicTab.press("ArrowRight");
+  await expect(page.getByRole("tabpanel", { name: "Public link" })).toBeVisible();
+  await publicTab.press("ArrowLeft");
   await expect(workspaceTab).toBeFocused();
+  await expect(page.getByRole("tabpanel", { name: "Client Workspace" })).toBeVisible();
   // An unlinked folder offers the client workspace link as its own step.
   await page.getByRole("button", { name: "Link folder to a client workspace" }).click();
   await expect(page.getByRole("alert").filter({ hasText: "not linked to a Client Portal workspace" })).toBeVisible();
