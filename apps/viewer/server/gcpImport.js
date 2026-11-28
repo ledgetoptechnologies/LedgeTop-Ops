@@ -38,6 +38,10 @@ function text(value, maximum, field, { required = false } = {}) {
 }
 
 function number(value, field, minimum, maximum) {
+  // Number('') and Number([]) are zero; neither is a supplied coordinate.
+  if ((typeof value !== 'number' && typeof value !== 'string') ||
+      (typeof value === 'string' && !value.trim()))
+    throw invalid(`${field} must contain a number`);
   const parsed = typeof value === 'number' ? value : Number(String(value).trim());
   if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum)
     throw invalid(`${field} is outside its accepted range`);
@@ -89,7 +93,10 @@ function parseEmlid(source, declarations = {}) {
   const inferredUnit = ftUsMarkers >= 2 ? 'ftUS' : meterMarkers >= 2 ? 'm' : null;
   const declaredUnit = declarations.linearUnit == null ? null : String(declarations.linearUnit);
   if (declaredUnit && !['m', 'ftUS'].includes(declaredUnit)) throw invalid('linearUnit must be m or ftUS');
-  if (inferredUnit && declaredUnit && inferredUnit !== declaredUnit)
+  // One explicit annotation is not enough to infer units for every axis, but
+  // it still rules out a contradictory declaration. Never relabel ftUS as m.
+  const annotatedUnit = ftUsMarkers ? 'ftUS' : meterMarkers ? 'm' : null;
+  if (annotatedUnit && declaredUnit && annotatedUnit !== declaredUnit)
     throw invalid('declared linearUnit does not match Emlid CS name');
   const linearUnit = inferredUnit || declaredUnit;
   if (!linearUnit) throw invalid('Emlid units are not explicit; preview and confirm linearUnit');

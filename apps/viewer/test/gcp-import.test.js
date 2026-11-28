@@ -4,6 +4,69 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { parseGcpInterchange, confirmationToken } = require('../server/gcpImport');
 
+test('generic CSV rejects empty or whitespace coordinates and elevations instead of importing zero', () => {
+  const header = 'point_id,label,latitude,longitude,elevation_m\n';
+  for (const column of [2, 3, 4]) {
+    for (const missing of ['', '   ']) {
+      const row = ['A', 'A', '44', '-88', '250'];
+      row[column] = missing;
+      assert.throws(() => parseGcpInterchange({ format: 'generic-csv-v1',
+        content: header + row.join(',') + '\n' }),
+      error => error.code === 'invalid_gcp_input', `column ${column}, missing ${JSON.stringify(missing)}`);
+    }
+  }
+});
+
+test('Emlid CSV rejects missing values in every required numeric column', () => {
+  const header = 'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\n';
+  for (const column of [1, 2, 3, 4, 5, 6]) {
+    for (const missing of ['', '   ']) {
+      const row = ['A', '500000', '4900000', '250', '44', '-88', '220', 'Projected CRS (m) + vertical height (m)'];
+      row[column] = missing;
+      assert.throws(() => parseGcpInterchange({ format: 'emlid-all-columns-v1',
+        content: header + row.join(',') + '\n' }),
+      error => error.code === 'invalid_gcp_input', `column ${column}, missing ${JSON.stringify(missing)}`);
+    }
+  }
+});
+
+test('GeoJSON rejects array-shaped coordinate values instead of coercing them to numbers', () => {
+  for (const column of [0, 1, 2]) {
+    for (const malformed of [[], [0]]) {
+      const coordinates = [-88, 44, 250];
+      coordinates[column] = malformed;
+      assert.throws(() => parseGcpInterchange({ format: 'generic-geojson-v1',
+        content: JSON.stringify({ type: 'FeatureCollection', features: [{
+          type: 'Feature', properties: { point_id: 'A', label: 'A' },
+          geometry: { type: 'Point', coordinates },
+        }] }) }), error => error.code === 'invalid_gcp_input');
+    }
+  }
+});
+
+test('numeric zero remains valid in generic CSV, GeoJSON and Emlid inputs', () => {
+  const inputs = [
+    { format: 'generic-csv-v1', content: 'point_id,label,latitude,longitude,elevation_m\nZ,Z, 0 ,0,0\n' },
+    { format: 'generic-geojson-v1', content: JSON.stringify({ type: 'FeatureCollection', features: [{
+      type: 'Feature', properties: { point_id: 'Z', label: 'Z' },
+      geometry: { type: 'Point', coordinates: [0, 0, 0] },
+    }] }) },
+    { format: 'emlid-all-columns-v1', content:
+      'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nZ,0,0,0,0,0,0,Projected CRS (m) + vertical height (m)\n' },
+  ];
+  for (const input of inputs) {
+    const point = parseGcpInterchange(input).points[0];
+    assert.equal(point.latitude, 0);
+    assert.equal(point.longitude, 0);
+    assert.equal(point.elevationM, 0);
+    if (input.format === 'emlid-all-columns-v1') {
+      assert.equal(point.easting, 0);
+      assert.equal(point.northing, 0);
+      assert.equal(point.ellipsoidalHeightM, 0);
+    }
+  }
+});
+
 test('generic CSV GCP interchange normalizes EPSG:4326 coordinates and metric elevations', () => {
   const parsed = parseGcpInterchange({
     format: 'generic-csv-v1',
@@ -86,4 +149,39 @@ test('Emlid metric projected systems remain metric and ambiguous units require c
   const confirmed = parseGcpInterchange({ format: 'emlid-all-columns-v1', declarations: { linearUnit: 'm' },
     content: `${header}M-1,500000,4900000,250,44,-88,220,Projected CRS\n` });
   assert.equal(confirmed.provenance.linearUnit, 'm');
+});
+
+test('blank survey numbers reject instead of becoming zero while explicit zeros remain valid', () => {
+  for (const column of ['latitude', 'longitude', 'elevation_m']) {
+    const header = ['point_id', 'label', 'latitude', 'longitude', 'elevation_m'];
+    for (const blank of ['', '   ', '\t']) {
+      const values = ['A', 'Target', '0', '0', '0']; values[header.indexOf(column)] = blank;
+      assert.throws(() => parseGcpInterchange({ format: 'generic-csv-v1', content: `${header.join(',')}\n${values.join(',')}\n` }),
+        error => error.code === 'invalid_gcp_input' && error.message.includes(column));
+    }
+  }
+  const zero = parseGcpInterchange({ format: 'generic-csv-v1', content: 'point_id,label,latitude,longitude,elevation_m\nA,Target,0,0,0\n' });
+  assert.equal(zero.points[0].latitude, 0); assert.equal(zero.points[0].longitude, 0); assert.equal(zero.points[0].elevationM, 0);
+  for (const value of ['', ' ', [], false, null]) {
+    assert.throws(() => parseGcpInterchange({ format: 'generic-geojson-v1', content: JSON.stringify({ type: 'FeatureCollection',
+      features: [{ type: 'Feature', properties: { point_id: 'A', label: 'Target' }, geometry: { type: 'Point', coordinates: [0, value, 0] } }] }) }),
+    { code: 'invalid_gcp_input' });
+  }
+});
+
+test('single explicit Emlid unit marker cannot be overridden by conflicting declarations', () => {
+  const header = 'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\n';
+  for (const [unit, conflicting] of [['ftUS', 'm'], ['m', 'ftUS']]) {
+    const content = `${header}A,1,2,3,44,-88,2,Projected CRS (${unit})\n`;
+    assert.throws(() => parseGcpInterchange({ format: 'emlid-all-columns-v1', content, declarations: { linearUnit: conflicting } }), /does not match/);
+    assert.throws(() => parseGcpInterchange({ format: 'emlid-all-columns-v1', content }), /preview and confirm/);
+    const confirmed = parseGcpInterchange({ format: 'emlid-all-columns-v1', content, declarations: { linearUnit: unit } });
+    assert.equal(confirmed.provenance.linearUnit, unit);
+    assert.ok(Math.abs(confirmed.points[0].elevationM - 3 * (unit === 'ftUS' ? 1200 / 3937 : 1)) < 1e-12);
+  }
+  for (const field of ['Easting', 'Northing', 'Elevation', 'Latitude', 'Longitude', 'Ellipsoidal height']) {
+    const columns = header.trim().split(','), row = ['A', '1', '2', '3', '44', '-88', '2', 'Projected CRS (m) + height (m)'];
+    row[columns.indexOf(field)] = ' ';
+    assert.throws(() => parseGcpInterchange({ format: 'emlid-all-columns-v1', content: `${header}${row.join(',')}\n` }), { code: 'invalid_gcp_input' });
+  }
 });

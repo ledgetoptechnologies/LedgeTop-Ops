@@ -62,7 +62,7 @@ The Emlid Flow CSV export with all columns. Required: Name, Easting, Northing, E
 
 ## Image assistance
 
-Dataset finalization indexes JPEG dimensions, capture time, GPS longitude/latitude, and altitude when those EXIF values exist. Selecting a GCP asks Viewer for up to 200 dataset images ranked by camera-to-GCP great-circle distance. This is only a search suggestion: geographic proximity does not prove that a point is visible in an image. An operator must inspect an image and explicitly save its pixel correspondence.
+Dataset finalization indexes JPEG dimensions, capture time, GPS longitude/latitude, and altitude when those EXIF values exist. Selecting a GCP asks Viewer for up to 200 dataset images ranked by camera-to-GCP great-circle distance. By default the panel lists photos whose camera position is within 50 ft (15.24 m) of the point; staff can change the radius (shown in feet or metres per their display units) or switch to Auto radius or Nearest images. The API keeps metres (`radiusM`) and uses the same 50 ft default when no mode is given. This is only a search suggestion: geographic proximity does not prove that a point is visible in an image. An operator must inspect an image and explicitly save its pixel correspondence.
 
 Raw image bytes flow directly from the Viewer origin to the authenticated Ops browser. They do not pass through the Operations Worker, are sent with private no-store headers, and are never public assets.
 
