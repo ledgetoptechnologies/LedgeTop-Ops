@@ -1232,3 +1232,12 @@ test('pinned recipient validates while independent release and artifact policy g
     error => error.message === 'artifact_completion_disabled' && !error.message.includes('private-github-token'));
   assert.equal(requests, 0);
 });
+
+test('both release byte-verification passes run with the qualified bounded concurrency of 3', async () => {
+  const { PRODUCTION_AUTO_ASSET_VERIFICATION_CONCURRENCY } = await import('./production-auto-runtime.mjs');
+  assert.equal(PRODUCTION_AUTO_ASSET_VERIFICATION_CONCURRENCY, 3);
+  const source = fs.readFileSync(new URL('./production-auto-runtime.mjs', import.meta.url), 'utf8');
+  const calls = source.split('executeAssetVerification({').slice(1).map(rest => rest.slice(0, 200));
+  assert.equal(calls.length, 2, 'the prior-asset and candidate-asset passes');
+  for (const call of calls) assert.match(call, /concurrency: PRODUCTION_AUTO_ASSET_VERIFICATION_CONCURRENCY,/u);
+});

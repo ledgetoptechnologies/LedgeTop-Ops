@@ -51,6 +51,9 @@ import { formatProductionAutoReleaseHold, markProductionAutoStartupFailure, trac
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INTENT_FENCE_MAX_AGE_MS = 30_000;
+// Bounded parallel byte verification (#808, qualified at 3 in the retained executor): keeps a pass over the
+// 384 MiB verifier bound well inside the 300 s window (serial measured ~1.15 MB/s on the 2026-11-13 Ops pass).
+export const PRODUCTION_AUTO_ASSET_VERIFICATION_CONCURRENCY = 3;
 const POST0226_RECEIPT_MAX_AGE_MS = 60_000;
 const SHA = /^[a-f0-9]{64}$/u, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const WORKERS = Object.freeze({ operations: { name: 'ledgetop-ops', origin: 'https://ops.ledgetop.app' },
@@ -797,6 +800,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         ? assetBootstrapVerificationEntries(ledger, verificationLedger)
         : assetVerifierEntries(ledger);
       const result = await executeAssetVerification({ entries: verificationEntries, timeoutMs: 300_000,
+        concurrency: PRODUCTION_AUTO_ASSET_VERIFICATION_CONCURRENCY,
         create: async () => {
           const proof = await provider.createVerifier({ name, workerName, origin: target.origin, entries: verificationEntries,
             nonceHash: nonce.nonceHash, versionId: baselineCapture[app].version.id });
@@ -918,7 +922,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       need(distinct, 'runtime_candidate_asset_route_not_distinguishable');
       const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName(), entries = assetVerifierEntries(ledger);
       const before = await assertFence();
-      const result = await executeAssetVerification({ entries, timeoutMs: 300_000,
+      const result = await executeAssetVerification({ entries, timeoutMs: 300_000, concurrency: PRODUCTION_AUTO_ASSET_VERIFICATION_CONCURRENCY,
         create: async () => {
           const proof = await provider.createVerifier({ name, workerName, origin: target.origin, entries, nonceHash: nonce.nonceHash, versionId });
           ownedVerifierSourceHashes.set(name, proof.sourceSHA256);
