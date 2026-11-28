@@ -275,7 +275,21 @@ function safeReceipt(value, workerName, sourceCommit, releaseKind) {
   if (value.files !== undefined) { need(Number.isSafeInteger(value.files) && value.files >= 0 && value.files <= 20_000); out.files = value.files; }
   if (value.minimumRetentionHours !== undefined) { need(value.minimumRetentionHours === 48); out.minimumRetentionHours = 48; }
   if (value.automaticPruning !== undefined) { need(value.automaticPruning === false); out.automaticPruning = false; }
-  if (value.allHistoricalAssetsCarried !== undefined) { need(value.allHistoricalAssetsCarried === true); out.allHistoricalAssetsCarried = true; }
+  // A v2 ledger merge may drop paths retired more than 49 h earlier: the prepared receipt lists them, and the final
+  // receipt says honestly whether every historical asset was carried, with the count dropped.
+  if (value.prunedPaths !== undefined) {
+    need(Array.isArray(value.prunedPaths) && value.prunedPaths.length <= 1024 && value.status === 'prepared'
+      && value.prunedPaths.every((item, i) => typeof item === 'string' && item.length <= 1024 && /^\/[A-Za-z0-9._/-]+$/u.test(item)
+        && item !== '/index.html' && (i === 0 || value.prunedPaths[i - 1] < item)));
+    out.prunedPaths = [...value.prunedPaths];
+  }
+  if (value.prunedAssets !== undefined) { need(Number.isSafeInteger(value.prunedAssets) && value.prunedAssets >= 0 && value.prunedAssets <= 1024);
+    out.prunedAssets = value.prunedAssets; }
+  if (value.allHistoricalAssetsCarried !== undefined) {
+    need(typeof value.allHistoricalAssetsCarried === 'boolean'
+      && value.allHistoricalAssetsCarried === ((value.prunedAssets ?? 0) === 0));
+    out.allHistoricalAssetsCarried = value.allHistoricalAssetsCarried;
+  }
   if (value.verifiedActive !== undefined) { need(value.verifiedActive === true); out.verifiedActive = true; }
   if (value.writesAttempted !== undefined) { need(typeof value.writesAttempted === 'boolean'); out.writesAttempted = value.writesAttempted; }
   if (value.failureCode !== undefined) {
@@ -374,7 +388,7 @@ function storedOperation(op) {
   }
   for (const row of op.receipts) need(row && Object.getPrototypeOf(row) === Object.prototype
     && Object.keys(row).every(key => ['status','phase','controlsSHA256','ledgerSHA256','moduleSHA256','parentVersionId','candidateVersionId','deploymentId','files',
-      'minimumRetentionHours','automaticPruning','allHistoricalAssetsCarried','verifiedActive','writesAttempted','cutoverObservedAt',
+      'minimumRetentionHours','automaticPruning','allHistoricalAssetsCarried','prunedPaths','prunedAssets','verifiedActive','writesAttempted','cutoverObservedAt',
       'earliestPermittedPruningAt','reconciliation','failureCode','reconciliationCode','recordedAt','ownedInactiveAdmissionSHA256','ownedUploadTagBaseline'].includes(key))
     && ['started','prepared','inactive-verified','zero-percent-verified','candidate-assets-verified','verified','held'].includes(row.status)
     && Number.isFinite(Date.parse(row.recordedAt)) && new Date(row.recordedAt).toISOString() === row.recordedAt);
@@ -475,7 +489,8 @@ function verifiedOperationEvidence(op) {
       || final.verifiedActive !== true || final.ledgerSHA256 !== op.runtime.ledgerSha256
       || !SHA.test(final.ledgerSHA256 ?? '') || !UUID.test(final.candidateVersionId ?? '')
       || !UUID.test(final.deploymentId ?? '') || final.minimumRetentionHours !== 48
-      || final.automaticPruning !== false || final.allHistoricalAssetsCarried !== true
+      || final.automaticPruning !== false || typeof final.allHistoricalAssetsCarried !== 'boolean'
+      || final.allHistoricalAssetsCarried !== ((final.prunedAssets ?? 0) === 0)
       || !isProviderUtcTimestamp(final.cutoverObservedAt)
       || !Number.isFinite(Date.parse(final.earliestPermittedPruningAt ?? ''))
       || Date.parse(final.earliestPermittedPruningAt) < Date.parse(minimumRetainedUntil(final.cutoverObservedAt, 48))) return false;

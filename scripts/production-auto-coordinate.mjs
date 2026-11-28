@@ -8,7 +8,7 @@ import { productionAutoHoldCause } from './production-auto-hold-codes.mjs';
 import { PRODUCTION_AUTO_GENERIC_HOLD_CAUSES, productionAutoOriginalFailureDetails, trackProductionAutoStartupStage,
   trackProductionAutoStartupStageAsync } from './production-auto-startup-diagnostics.mjs';
 import { createHash } from 'node:crypto';
-import { mergeAssetLedger, preserveRootHtmlArchive, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
+import { mergeAssetLedger, planAssetRetention, preserveRootHtmlArchive, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS } from './production-auto-verify.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy,
@@ -108,7 +108,7 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
   need(adapter && methods.every(name => typeof adapter[name] === 'function'), 'Release adapters are incomplete');
   need(workerName !== 'ledgetop-ops' || typeof adapter.post0226Preservation === 'function'
     || typeof adapter.staffReadiness === 'function', 'Operations release requires a staff-preservation adapter');
-  let phase = 'initial', baseline, candidateVersionId, ledgerSHA256, writesAttempted = false;
+  let phase = 'initial', baseline, candidateVersionId, ledgerSHA256, writesAttempted = false, prunedPaths = [];
   let staffPins;
   const preservationPolicy = typeof adapter.post0226Preservation === 'function'
     ? loadPinnedProductionAutoPost0226PreservationPolicy() : null;
@@ -191,7 +191,11 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     const built = await adapter.build({ sourceCommit, workerName });
     need(built?.sourceCommit === sourceCommit && SHA.test(built.moduleSHA256), 'Build source/module pin is invalid');
     let previous = validateAssetLedger(await adapter.readLedger({ baseline: copy(baseline) }), { workerName, accountId });
-    verifierBounds(previous.assets, built.assets?.entries);
+    // Bound the union this release will actually carry: paths retired more than 49 h ago are dropped by the merge.
+    need(Array.isArray(built.assets?.entries), 'Verifier asset inventory is unavailable');
+    const plannedPrune = new Set(planAssetRetention({ previous, buildPaths: built.assets.entries.map(row => row?.path),
+      observedAt: new Date().toISOString() }).pruned);
+    verifierBounds(previous.assets.filter(row => !plannedPrune.has(row.path)), built.assets.entries);
     const old = await adapter.readOldAssets({ ledger: copy(previous), baseline: copy(baseline) });
     need(old instanceof Map && built.assets?.payloads instanceof Map, 'Old/new asset payloads are unavailable');
     if (typeof adapter.completeInventory === 'function') {
@@ -206,13 +210,17 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     const retained = trackProductionAutoStartupStage('archive_root_html', () => preserveRootHtmlArchive({
       application: workerName === 'ledgetop-ops' ? 'operations' : 'client',
       previous, previousAssetBytes: old, current: built.assets }));
-    const payloads = retained.current.payloads;
+    const allPayloads = retained.current.payloads;
     const ledger = trackProductionAutoStartupStage('merge_asset_ledger', () => mergeAssetLedger({ previous, current: retained.current,
       workerName, accountId, sourceCommit, parentVersionId: baseline.activeVersionId, observedAt: new Date().toISOString() }));
     verifierBounds(ledger.assets);
     ledgerSHA256 = hash(ledgerBytes(ledger));
+    const carried = new Set(ledger.assets.map(row => row.path));
+    prunedPaths = previous.assets.map(row => row.path).filter(assetPath => !carried.has(assetPath)).sort();
+    // Only the carried union's bytes go forward (exactly the ledger, as before pruning existed).
+    const payloads = new Map(ledger.assets.map(row => [row.path, allPayloads.get(row.path)]));
     await record('prepared', { ledgerSHA256, files: ledger.assets.length, rootHtmlArchive: retained.archive,
-      automaticPruning: false, minimumRetentionHours: 48 });
+      automaticPruning: false, minimumRetentionHours: 48, prunedPaths: [...prunedPaths] });
     phase = 'upload';
     let versionIntents = 0;
     const upload = await adapter.upload({ sourceCommit, workerName, baseline: copy(baseline), build: built,
@@ -259,7 +267,8 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     const receipt = { candidateVersionId, parentVersionId: baseline.activeVersionId, ledgerSHA256,
       deploymentId: active.deploymentId, cutoverObservedAt: active.deployedAt,
       earliestPermittedPruningAt: minimumRetainedUntil(active.deployedAt, 48),
-      minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
+      minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: prunedPaths.length === 0,
+      prunedAssets: prunedPaths.length,
       files: ledger.assets.length, rootHtmlArchive: retained.archive, verifiedActive: true };
     phase = 'complete'; await record('verified', receipt); return receipt;
   } catch (failure) {
