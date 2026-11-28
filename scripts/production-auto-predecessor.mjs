@@ -53,7 +53,8 @@ export function validateProductionAutoPredecessorProof(proof, expected) {
     && proof.startedReceipt.parentVersionId === proof.finalReceipt?.parentVersionId
     && SHA.test(proof.startedReceipt?.controlsSHA256 ?? '')
     && proof.finalReceipt?.minimumRetentionHours === 48 && proof.finalReceipt?.automaticPruning === false
-    && proof.finalReceipt?.allHistoricalAssetsCarried === true
+    && typeof proof.finalReceipt?.allHistoricalAssetsCarried === 'boolean'
+    && proof.finalReceipt.allHistoricalAssetsCarried === ((proof.finalReceipt.prunedAssets ?? 0) === 0)
     && UUID.test(proof.finalReceipt?.parentVersionId ?? '')
     && UUID.test(proof.finalReceipt?.candidateVersionId ?? '') && UUID.test(proof.finalReceipt?.deploymentId ?? ''),
   'runtime_predecessor_proof_invalid');

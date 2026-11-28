@@ -22,7 +22,7 @@ test('rejects directory symlinks/junctions without following their bytes',()=>fi
 test('rejects hardlinks',()=>fixture(root=>{fs.linkSync(path.join(root,'index.html'),path.join(root,'assets','linked.js'));assert.throws(()=>collectFrontendAssets(root),/nonregular/);}));
 test('rejects oversized files before reading bytes',()=>fixture(root=>{const f=path.join(root,'assets','large.js');fs.writeFileSync(f,'');fs.truncateSync(f,ASSET_LIMITS.fileBytes+1);assert.throws(()=>collectFrontendAssets(root),/file_size/);}));
 test('canonical JSON round trips with exact worker/account identity',()=>{const l=ledger();assert.deepEqual(validateAssetLedger(JSON.parse(ledgerBytes(l)),identity),l);assert.equal(ledgerBytes(l).toString(),JSON.stringify(l)+'\n');assert.deepEqual(providerManifest(l),Object.fromEntries(l.assets.map(a=>[a.path,{hash:a.providerHash,size:a.size}])));});
-test('holds on wrong identities, policy, metadata and unknown/prototype keys',()=>{for(const change of[{workerName:'other'},{accountId:'c'.repeat(32)},{minimumRetentionHours:47},{minimumRetentionHours:72},{automaticPruning:true},{schemaVersion:2},{sourceCommit:'x'},{parentVersionId:'x'},{observedAt:'2026-10-23'},{extra:true}])assert.throws(()=>validateAssetLedger({...ledger(),...change},identity));const polluted=clone(ledger());Object.defineProperty(polluted,'__proto__',{value:'no',enumerable:true});assert.throws(()=>validateAssetLedger(polluted,identity));assert.throws(()=>validateAssetLedger(Object.assign(Object.create({}),ledger()),identity));});
+test('holds on wrong identities, policy, metadata and unknown/prototype keys',()=>{for(const change of[{workerName:'other'},{accountId:'c'.repeat(32)},{minimumRetentionHours:47},{minimumRetentionHours:72},{automaticPruning:true},{schemaVersion:3},{schemaVersion:1},{sourceCommit:'x'},{parentVersionId:'x'},{observedAt:'2026-10-23'},{extra:true}])assert.throws(()=>validateAssetLedger({...ledger(),...change},identity));const polluted=clone(ledger());Object.defineProperty(polluted,'__proto__',{value:'no',enumerable:true});assert.throws(()=>validateAssetLedger(polluted,identity));assert.throws(()=>validateAssetLedger(Object.assign(Object.create({}),ledger()),identity));});
 test('rejects malformed asset paths including encoded traversal and provider controls',()=>{for(const p of['/../x','/assets/./x','/assets//x','//host/x','/x%2Ejs','/x?y','/x#y','/x\\y','/x\ny','/assets/.env','/wrangler.json','/_headers','/constructor/x','/__proto__/x','/prototype','/x.pem','/assets/NUL.js','/assets/x.']){const l=ledger();l.assets[0].path=p;assert.throws(()=>validateAssetLedger(l,identity),p);}});
 test('rejects duplicate, case-colliding, unsorted and prototype-bearing entry records',()=>{for(const mutate of[l=>l.assets.push(clone(l.assets[0])),l=>l.assets.reverse(),l=>l.assets.unshift({...l.assets[0],path:'/assets/OLD.js'}),l=>l.assets[0]={...l.assets[0],extra:true},l=>Object.setPrototypeOf(l.assets[0],{extra:true}),l=>Object.defineProperty(l.assets,'extra',{value:true})]){const l=ledger();mutate(l);assert.throws(()=>validateAssetLedger(l,identity));}});
 test('requires bounded counts, byte totals, MIME and index',()=>{for(const mutate of[l=>l.assets=[],l=>l.assets=l.assets.filter(a=>a.path!='/index.html'),l=>l.assets[0].size=-1,l=>l.assets[0].size=ASSET_LIMITS.fileBytes+1,l=>l.assets[0].mime='text/html\r\nX: y',l=>l.assets[0].providerHash='x',l=>l.assets[0].sha256='x']){const l=ledger();mutate(l);assert.throws(()=>validateAssetLedger(l,identity));}const l=ledger();l.assets=Array.from({length:17},(_,i)=>({...l.assets[0],path:'/assets/'+String(i).padStart(2,'0')+'.js',size:ASSET_LIMITS.fileBytes}));l.assets.push({...ledger().assets[1]});assert.throws(()=>validateAssetLedger(l,identity),/total_bytes/);});
@@ -90,3 +90,67 @@ test('does not recompute opaque provider hashes even when new build has identica
 test('holds mismatched payload digest, missing payloads, injected extras and fabricated new provider hashes',()=>{for(const mutate of[c=>c.payloads.set('/assets/old.js',Buffer.from('bad')),c=>c.payloads.delete('/index.html'),c=>c.payloads.set('/extra.js',Buffer.from('extra')),c=>c.entries[0].providerHash='c'.repeat(32)]){const current=inventory();mutate(current);assert.throws(()=>mergeAssetLedger({...meta,previous:null,current}));}});
 test('holds provider-hash collision with distinct bytes',()=>{const l=ledger();l.assets[1].providerHash=l.assets[0].providerHash;assert.throws(()=>validateAssetLedger(l,identity),/provider_hash_collision/);});
 test('refuses time regression and does not mutate supplied inventories or prior ledger',()=>{const previous=ledger(),current=inventory();const before=JSON.stringify(previous),entries=JSON.stringify(current.entries);mergeAssetLedger({...meta,previous,current});assert.equal(JSON.stringify(previous),before);assert.equal(JSON.stringify(current.entries),entries);assert.throws(()=>mergeAssetLedger({...meta,observedAt:'2026-10-22T12:00:00.000Z',previous,current}),/time_regressed/);});
+
+test('ledger v2 retires paths left out of the build and prunes them only 49 h after they retired', async () => {
+  const { planAssetRetention, RETIRED_PRUNE_AFTER_MS } = await import('./production-auto-assets.mjs');
+  assert.equal(RETIRED_PRUNE_AFTER_MS, 49 * 3600 * 1000);
+  const at = hours => new Date(Date.parse('2026-10-23T12:00:00.000Z') + hours * 3600 * 1000).toISOString();
+  const release = (previous, files, hours, extra = new Map()) => {
+    const current = inventory(files);
+    for (const row of previous?.assets ?? []) if (!current.payloads.has(row.path))
+      current.payloads.set(row.path, extra.get(row.path) ?? Buffer.from(row.path === '/assets/old.js' ? 'old' : row.path.slice(8, -3)));
+    return mergeAssetLedger({ ...meta, observedAt: at(hours), previous, current, prune: true });
+  };
+  // R0 (v1-era start): index + a + b. R1 drops b: b retires at R1, never before.
+  const r0 = release(null, { '/index.html': 'h0', '/assets/a.js': 'a', '/assets/b.js': 'b' }, 0);
+  assert.equal(r0.schemaVersion, 2); assert.deepEqual(r0.retired, {});
+  const r1 = release(r0, { '/index.html': 'h1', '/assets/a.js': 'a' }, 1);
+  assert.deepEqual(r1.retired, { '/assets/b.js': at(1) });
+  // 48 h after R1 (inside retention + margin) b is still carried; 50 h after it is dropped.
+  const r2 = release(r1, { '/index.html': 'h2', '/assets/a.js': 'a' }, 49);
+  assert.ok(r2.assets.some(row => row.path === '/assets/b.js')); assert.deepEqual(r2.retired, { '/assets/b.js': at(1) });
+  const r3 = release(r2, { '/index.html': 'h3', '/assets/a.js': 'a' }, 51);
+  assert.equal(r3.assets.some(row => row.path === '/assets/b.js'), false); assert.deepEqual(r3.retired, {});
+  // A path that returns to the build is no longer retired.
+  const r4 = release(r1, { '/index.html': 'h4', '/assets/a.js': 'a', '/assets/b.js': 'b' }, 2);
+  assert.deepEqual(r4.retired, {});
+  // A v1 prior: everything outside the new build retires now (it may still be in the parent's build).
+  const v1 = { ...r0, schemaVersion: 1 }; delete v1.retired;
+  const fromV1 = release(validateAssetLedger(v1, identity), { '/index.html': 'h5' }, 100);
+  assert.deepEqual(Object.keys(fromV1.retired), ['/assets/a.js', '/assets/b.js']);
+  assert.ok(Object.values(fromV1.retired).every(value => value === at(100)));
+  // The plan never touches the new build and is pure.
+  assert.deepEqual(planAssetRetention({ previous: r1, buildPaths: ['/index.html', '/assets/a.js', '/assets/b.js'], observedAt: at(200) }).pruned, []);
+  assert.deepEqual(planAssetRetention({ previous: r1, buildPaths: ['/index.html'], observedAt: at(200) }).pruned, ['/assets/b.js']);
+});
+
+test('ledger v2 retired entries must name carried, non-index paths at or before the observation time', () => {
+  const l = ledger();
+  for (const retired of [{ '/assets/missing.js': l.observedAt }, { '/index.html': l.observedAt },
+    { '/assets/old.js': '2026-10-24T00:00:00.000Z' }, { '/assets/old.js': 'yesterday' }, { '/assets/old.js': 7 }])
+    assert.throws(() => validateAssetLedger({ ...l, retired }, identity), /asset_retired_/u, JSON.stringify(retired));
+  assert.deepEqual(validateAssetLedger({ ...l, retired: { '/assets/old.js': l.observedAt } }, identity).retired, { '/assets/old.js': l.observedAt });
+  // The merge needs every historical payload, and exactly those it does not carry are pruned.
+  const prior = mergeAssetLedger({ ...meta, previous: null, current: inventory({ '/index.html': 'h', '/assets/old.js': 'old' }) });
+  const current = inventory({ '/index.html': 'new' });
+  assert.throws(() => mergeAssetLedger({ ...meta, observedAt: '2026-10-23T13:00:00.000Z', previous: prior, current }), /payload_inventory_not_exact/u);
+});
+
+test('pruning is opt-in; kept paths and the parent cutover anchor retention conservatively', async () => {
+  const { planAssetRetention } = await import('./production-auto-assets.mjs');
+  const at = hours => new Date(Date.parse('2026-10-23T12:00:00.000Z') + hours * 3600 * 1000).toISOString();
+  const r0 = mergeAssetLedger({ ...meta, previous: null, current: inventory({ '/index.html': 'h0', '/assets/b.js': 'b' }) });
+  const withOld = files => { const c = inventory(files); c.payloads.set('/assets/b.js', Buffer.from('b')); return c; };
+  const r1 = mergeAssetLedger({ ...meta, observedAt: at(1), previous: r0, current: withOld({ '/index.html': 'h1' }), prune: true });
+  // Default (every caller except the release coordinator): nothing is dropped, retirement is still recorded.
+  const kept = mergeAssetLedger({ ...meta, observedAt: at(100), previous: r1, current: withOld({ '/index.html': 'h2' }) });
+  assert.ok(kept.assets.some(row => row.path === '/assets/b.js')); assert.deepEqual(kept.retired, { '/assets/b.js': at(1) });
+  assert.throws(() => mergeAssetLedger({ ...meta, observedAt: at(100), previous: r1, current: withOld({ '/index.html': 'h2' }), prune: 'yes' }));
+  // keepPaths (the archive of the root HTML being replaced) is never retired or dropped.
+  assert.deepEqual(planAssetRetention({ previous: r1, buildPaths: ['/index.html'], observedAt: at(100), keepPaths: ['/assets/b.js'] }),
+    { retired: {}, pruned: [] });
+  // A path the parent's release retired is anchored at the parent's real cutover when that was later.
+  const plan = planAssetRetention({ previous: r1, buildPaths: ['/index.html'], observedAt: at(50), parentCutoverAt: at(2) });
+  assert.deepEqual(plan, { retired: { '/assets/b.js': at(2) }, pruned: [] }, 'at(1) + 49 h would prune; at(2) keeps');
+  assert.throws(() => planAssetRetention({ previous: r1, buildPaths: [], observedAt: at(1), parentCutoverAt: at(5) }), /retention_input/u);
+});

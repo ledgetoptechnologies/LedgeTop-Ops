@@ -12,6 +12,15 @@ export const ASSET_LIMITS = Object.freeze({ files: 20_000, fileBytes: 32 * 1024 
 const SHA = /^[a-f0-9]{64}$/u, HASH = /^[a-f0-9]{32}$/u;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 const LEDGER_KEYS = ['schemaVersion','workerName','accountId','sourceCommit','parentVersionId','observedAt','minimumRetentionHours','automaticPruning','assets'];
+// Ledger v2 adds `retired`: for each retained path that is no longer part of the serving build, the observedAt of
+// the release whose build first left it out. Paths absent from `retired` are in the current build. A merge drops a
+// retired path only once RETIRED_PRUNE_AFTER_MS has passed since it retired: the 48 h minimum retention plus a 1 h
+// margin for the retiring release's own cutover. `automaticPruning: false` keeps its meaning: nothing is ever
+// deleted outside a reviewed release merge.
+const LEDGER_V2_KEYS = [...LEDGER_KEYS, 'retired'];
+export const RETIRED_PRUNE_AFTER_MS = 49 * 60 * 60 * 1000;
+const isoMs = value => typeof value === 'string' && value.length === 24 && Number.isFinite(Date.parse(value))
+  && new Date(value).toISOString() === value;
 const ENTRY_KEYS = ['path','size','sha256','mime','providerHash'];
 const CONTROL = new Set(['.assetsignore','.dev.vars','wrangler.json']);
 const IGNORE = 'wrangler.json\n.dev.vars\n';
@@ -71,11 +80,27 @@ function entries(values) {
   need(values.some(v=>v.path==='/index.html'),'asset_index_missing');
   return values.map(v=>({path:v.path,size:v.size,sha256:v.sha256,mime:v.mime,providerHash:v.providerHash}));
 }
-function canonicalLedger(v) { return {schemaVersion:1,workerName:v.workerName,accountId:v.accountId,sourceCommit:v.sourceCommit,
-  parentVersionId:v.parentVersionId,observedAt:v.observedAt,minimumRetentionHours:48,automaticPruning:false,assets:entries(v.assets)}; }
+function canonicalRetired(retired, assets, observedAt) {
+  need(retired && Object.getPrototypeOf(retired) === Object.prototype && Reflect.ownKeys(retired).every(key => typeof key === 'string'),
+    'asset_retired_shape_invalid');
+  const paths = new Set(assets.map(row => row.path)), out = {};
+  for (const key of Object.keys(retired).sort()) {
+    const descriptor = Object.getOwnPropertyDescriptor(retired, key);
+    need(descriptor && Object.hasOwn(descriptor, 'value') && paths.has(key) && key !== '/index.html'
+      && isoMs(descriptor.value) && Date.parse(descriptor.value) <= Date.parse(observedAt), 'asset_retired_entry_invalid');
+    out[key] = descriptor.value;
+  }
+  return out;
+}
+function canonicalLedger(v) {
+  const assets = entries(v.assets);
+  return {schemaVersion:v.schemaVersion,workerName:v.workerName,accountId:v.accountId,sourceCommit:v.sourceCommit,
+    parentVersionId:v.parentVersionId,observedAt:v.observedAt,minimumRetentionHours:48,automaticPruning:false,assets,
+    ...(v.schemaVersion === 2 ? { retired: canonicalRetired(v.retired, assets, v.observedAt) } : {})};
+}
 export function validateAssetLedger(ledger, expected) {
   need(exact(expected,['workerName','accountId']),'asset_expected_identity_invalid');identity(expected.workerName,expected.accountId);
-  need(exact(ledger,LEDGER_KEYS)&&ledger.schemaVersion===1,'asset_ledger_shape_invalid');
+  need(exact(ledger,LEDGER_KEYS)&&ledger.schemaVersion===1 || exact(ledger,LEDGER_V2_KEYS)&&ledger.schemaVersion===2,'asset_ledger_shape_invalid');
   need(ledger.workerName===expected.workerName&&ledger.accountId===expected.accountId,'asset_ledger_identity_mismatch');
   need(typeof ledger.sourceCommit==='string'&&/^[a-f0-9]{40}$/u.test(ledger.sourceCommit)&&typeof ledger.parentVersionId==='string'&&UUID.test(ledger.parentVersionId),'asset_source_identity_invalid');
   need(typeof ledger.observedAt==='string'&&ledger.observedAt.length===24&&Number.isFinite(Date.parse(ledger.observedAt))&&new Date(ledger.observedAt).toISOString()===ledger.observedAt,'asset_observation_time_invalid');
@@ -191,15 +216,50 @@ export function preserveRootHtmlArchive({application,previous,previousAssetBytes
   return {current:{entries:entries([...current.entries]),payloads},archive:{sourcePath:'/index.html',path:archivePath,
     size:priorIndex.size,sha256:digest,mime:'text/html',transportPath:`/_ui/${application}/${digest.slice(0,40)}/`}};
 }
+/** Which prior paths a release at observedAt may drop, and when every kept path retired. Pure: no bytes.
+ * A v1 prior records no retirement times, so every prior path outside the new build retires at this release (it
+ * may still be in the parent's serving build). A v2 prior's unretired paths are the parent's build: those left out
+ * of the new build retire now; already-retired paths keep their time and are dropped once RETIRED_PRUNE_AFTER_MS
+ * has passed. Nothing in the new build is ever retired or dropped. */
+export function planAssetRetention({ previous, buildPaths, observedAt, keepPaths = [], parentCutoverAt = null }) {
+  need(isoMs(observedAt) && Array.isArray(buildPaths) && buildPaths.every(value => typeof value === 'string')
+    && Array.isArray(keepPaths) && keepPaths.every(value => typeof value === 'string')
+    && (parentCutoverAt === null || isoMs(parentCutoverAt) && Date.parse(parentCutoverAt) <= Date.parse(observedAt)),
+    'asset_retention_input_invalid');
+  // keepPaths: rows this release must carry although they are not in its build (the archive of the root HTML that
+  // is being replaced). They are treated as part of the build: never retired or dropped here.
+  const build = new Set([...buildPaths, ...keepPaths]), retired = {}, pruned = [];
+  const priorRetired = previous?.schemaVersion === 2 ? previous.retired : {};
+  if (previous) need(Date.parse(observedAt) >= Date.parse(previous.observedAt), 'asset_observation_time_regressed');
+  for (const row of previous?.assets ?? []) {
+    if (build.has(row.path)) continue;
+    // A path the parent's own release retired kept serving (in the grandparent build) until that release's cutover,
+    // which the provider records as the parent deployment time: anchor its retention there, never earlier.
+    let since = Object.hasOwn(priorRetired, row.path) ? priorRetired[row.path] : observedAt;
+    if (parentCutoverAt !== null && since === previous.observedAt && Date.parse(parentCutoverAt) > Date.parse(since)) since = parentCutoverAt;
+    if (Date.parse(observedAt) - Date.parse(since) > RETIRED_PRUNE_AFTER_MS) pruned.push(row.path);
+    else retired[row.path] = since;
+  }
+  return Object.freeze({ retired, pruned: pruned.sort() });
+}
 /** Previous JSON must be externally tied to a verified complete live inventory.
  * This pure builder cannot prove that bootstrap or any remote association.
  * current.entries lists the new build; current.payloads must also contain every
- * historical byte payload retained by the coordinator. No path ages out here. */
-export function mergeAssetLedger({previous,current,workerName,accountId,sourceCommit,parentVersionId,observedAt}) {
+ * historical byte payload retained by the coordinator. A historical path ages out
+ * only through planAssetRetention (retired more than 49 h before this release). */
+// prune: only the automatic release coordinator drops retired paths (with its own receipts). Every other caller
+// keeps carrying all history exactly as before (it still records retirement times in the v2 ledger).
+export function mergeAssetLedger({previous,current,workerName,accountId,sourceCommit,parentVersionId,observedAt,
+  prune=false,keepPaths=[],parentCutoverAt=null}) {
   identity(workerName,accountId);need(exact(current,['entries','payloads'])&&current.payloads instanceof Map,'asset_current_inventory_invalid');
+  need(typeof prune==='boolean','asset_retention_input_invalid');
   const incoming=entries(current.entries), prior=previous===null?null:validateAssetLedger(previous,{workerName,accountId});
+  const plan=planAssetRetention({ previous: prior, buildPaths: incoming.map(v=>v.path), observedAt, keepPaths, parentCutoverAt });
+  const retention=prune?plan:{retired:{...plan.retired,...Object.fromEntries(plan.pruned.map(p=>[p,
+    Object.hasOwn(prior?.retired??{},p)?prior.retired[p]:observedAt]))},pruned:[]};
+  const prunedPaths=new Set(retention.pruned);
   const union=new Map(),casePaths=new Map();
-  for(const v of prior?.assets??[]) {union.set(v.path,v);casePaths.set(v.path.toLowerCase(),v.path);}
+  for(const v of prior?.assets??[]) {if(prunedPaths.has(v.path))continue;union.set(v.path,v);casePaths.set(v.path.toLowerCase(),v.path);}
   for(const v of incoming) {
     const bytes=verifiedBytes(v,current.payloads),old=union.get(v.path),collision=casePaths.get(v.path.toLowerCase());
     need(!collision||collision===v.path,'asset_path_case_collision');
@@ -212,11 +272,13 @@ export function mergeAssetLedger({previous,current,workerName,accountId,sourceCo
     union.set(v.path,retained);casePaths.set(v.path.toLowerCase(),v.path);
   }
   const merged=[...union.values()].sort(sort);entries(merged);
-  need(current.payloads.size===merged.length,'asset_payload_inventory_not_exact');
+  // The caller supplies every historical payload; pruned paths are exactly the ones not carried forward.
+  need(current.payloads.size===merged.length+prunedPaths.size&&[...prunedPaths].every(p=>current.payloads.has(p)&&!union.has(p)),
+    'asset_payload_inventory_not_exact');
   for(const v of merged)verifiedBytes(v,current.payloads);
   if(prior)need(Date.parse(observedAt)>=Date.parse(prior.observedAt),'asset_observation_time_regressed');
-  return validateAssetLedger({schemaVersion:1,workerName,accountId,sourceCommit,parentVersionId,observedAt,
-    minimumRetentionHours:48,automaticPruning:false,assets:merged},{workerName,accountId});
+  return validateAssetLedger({schemaVersion:2,workerName,accountId,sourceCommit,parentVersionId,observedAt,
+    minimumRetentionHours:48,automaticPruning:false,assets:merged,retired:retention.retired},{workerName,accountId});
 }
 export function providerManifest(ledger) {
   const valid=validateAssetLedger(ledger,{workerName:ledger?.workerName,accountId:ledger?.accountId});

@@ -64,7 +64,10 @@ export const PRODUCTION_AUTO_HOLD_CODES = Object.freeze([
   'asset_release_proof_payload_inventory_invalid',
   'asset_release_proof_reserved_namespace_collision',
   'asset_release_proof_size_invalid',
+  'asset_retention_input_invalid',
   'asset_retention_policy_invalid',
+  'asset_retired_entry_invalid',
+  'asset_retired_shape_invalid',
   'asset_root_html_application_invalid',
   'asset_root_html_archive_collision',
   'asset_root_html_archive_input_invalid',
@@ -383,6 +386,7 @@ export const PRODUCTION_AUTO_COORDINATOR_REASONS = Object.freeze(new Map([
   ['Release deployment weights are invalid', 'coordinator_release_deployment_weights_are_invalid'],
   ['Release source is dirty, superseded or unrecognized', 'coordinator_release_source_is_dirty_superseded_or_unrecognized'],
   ['Release target/source is invalid', 'coordinator_release_target_source_is_invalid'],
+  ['Root HTML archive is not carried', 'coordinator_root_html_archive_is_not_carried'],
   ['Upload intent is invalid', 'coordinator_upload_intent_is_invalid'],
   ['Verifier asset inventory is unavailable', 'coordinator_verifier_asset_inventory_is_unavailable'],
 ]));

@@ -563,3 +563,44 @@ test('an owned zero-percent stage passes the initial gate only with its staged a
   const moved = stagedFixture(); moved.current().deploymentId = DEPLOY; moved.adapter.ownedInactiveInitialStateAllowed = hook(mint(true));
   await assert.rejects(moved.run(), /held/); assert.equal(moved.events.includes('build'), false);
 });
+
+test('a v2 ledger path retired more than 49 h ago is dropped, listed in the prepared receipt and reported in the final receipt', async () => {
+  const f = fixture();
+  // The previous release had already retired /assets/old.js long ago; this release does not ship it.
+  Object.assign(f.previous, { schemaVersion: 2, retired: { '/assets/old.js': '2026-10-20T00:00:00.000Z' } });
+  const result = await f.run();
+  assert.equal(result.verifiedActive, true);
+  assert.equal(f.ledger().assets.some(row => row.path === '/assets/old.js'), false, 'not carried, not uploaded, not verified');
+  assert.equal(f.uploadedPayloads().has('/assets/old.js'), false);
+  const prepared = f.receipts.find(row => row.status === 'prepared'), final = f.receipts.at(-1);
+  assert.deepEqual(prepared.prunedPaths, ['/assets/old.js']);
+  assert.equal(final.allHistoricalAssetsCarried, false); assert.equal(final.prunedAssets, 1);
+  assert.equal(result.allHistoricalAssetsCarried, false); assert.equal(result.prunedAssets, 1);
+  // Without a retirement record nothing is dropped and the receipts say so.
+  const kept = fixture(); const keptResult = await kept.run();
+  assert.equal(keptResult.allHistoricalAssetsCarried, true); assert.equal(keptResult.prunedAssets, 0);
+  assert.deepEqual(kept.receipts.find(row => row.status === 'prepared').prunedPaths, []);
+});
+
+test('the verifier bound is checked against the union this release will carry, after retention pruning', async () => {
+  const big = 15 * 1024 * 1024;
+  const make = retiredAt => {
+    const f = fixture(), build = f.adapter.build;
+    // 26 old 15 MiB files (390 MiB) were all retired at retiredAt; the new build is small.
+    const oldRows = Array.from({ length: 26 }, (_, i) => ({ path: `/assets/legacy-${String(i).padStart(2, '0')}.js`, size: big,
+      sha256: String(i + 1).padStart(64, '0'), mime: 'application/javascript', providerHash: String(i + 1).padStart(32, '0') }));
+    f.previous.assets = [...f.previous.assets, ...oldRows].sort((a, b) => a.path < b.path ? -1 : 1);
+    Object.assign(f.previous, { schemaVersion: 2, retired: Object.fromEntries(oldRows.map(row => [row.path, retiredAt])) });
+    f.adapter.build = async input => build(input);
+    return f;
+  };
+  // Retired long ago: the planned union fits, so the run passes the prepare bound check (it reads old bytes next).
+  const pruned = make('2026-10-20T00:00:00.000Z');
+  await pruned.run().catch(() => {});
+  assert.equal(pruned.events.includes('old-bytes'), true);
+  // Retired just now (inside retention): the union still exceeds the bound and holds before any old-byte read.
+  const recent = make(new Date(Date.now() - 3600_000).toISOString().replace(/\.\d{3}Z$/u, '.000Z'));
+  recent.previous.observedAt = new Date().toISOString();
+  await assert.rejects(recent.run(), /held/);
+  assert.equal(recent.events.includes('old-bytes'), false); assert.equal(recent.intents.length, 0);
+});

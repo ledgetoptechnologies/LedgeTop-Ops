@@ -908,3 +908,25 @@ test('both documented tree Location forms are accepted (/trees/<sha> as GitHub d
     assert.equal(api.refs.size, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('receipts list pruned paths on prepare and report the carried flag consistently with the pruned count', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const run = journal(api, dir, { sourceCommit: 'c'.repeat(40), ciRunId: 101, workflowRunId: 124, runtime: RUNTIME });
+    const base = { schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40) };
+    await run.receipt({ ...base, status: 'started', phase: 'prepare', parentVersionId: '11111111-1111-4111-8111-111111111111',
+      controlsSHA256: '4'.repeat(64), writesAttempted: false, ownedUploadTagBaseline: null });
+    const prepared = { ...base, status: 'prepared', phase: 'prepare', ledgerSHA256: RUNTIME.ledgerSha256, files: 3,
+      minimumRetentionHours: 48, automaticPruning: false };
+    for (const [why, prunedPaths] of Object.entries({ unsorted: ['/assets/b.js', '/assets/a.js'], index: ['/index.html'],
+      duplicate: ['/assets/a.js', '/assets/a.js'], relative: ['assets/a.js'], query: ['/assets/a.js?x'] }))
+      await assert.rejects(run.receipt({ ...prepared, prunedPaths }), undefined, why);
+    for (const [why, flags] of Object.entries({ 'carried but pruned': { allHistoricalAssetsCarried: true, prunedAssets: 2 },
+      'not carried, nothing pruned': { allHistoricalAssetsCarried: false }, 'not carried, zero pruned': { allHistoricalAssetsCarried: false, prunedAssets: 0 },
+      'non-boolean flag': { allHistoricalAssetsCarried: 'false', prunedAssets: 1 } }))
+      await assert.rejects(run.receipt({ ...prepared, ...flags }), undefined, why);
+    await run.receipt({ ...prepared, prunedPaths: ['/assets/a.js', '/assets/b.js'] });
+    const stored = run.snapshot().operations[0].receipts.at(-1);
+    assert.deepEqual(stored.prunedPaths, ['/assets/a.js', '/assets/b.js']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

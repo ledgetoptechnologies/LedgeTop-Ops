@@ -46,12 +46,19 @@ test('Sync predecessor proof rechecks journal, artifact and CI binding fields af
       parentVersionId: '33333333-3333-4333-8333-333333333333',
       candidateVersionId: '11111111-1111-4111-8111-111111111111', deploymentId: '22222222-2222-4222-8222-222222222222' } };
   assert.equal(validateProductionAutoPredecessorProof(proof, expected), proof);
+  // A predecessor that pruned retired assets reports it honestly and is still a valid proof.
+  const pruned = structuredClone(proof); Object.assign(pruned.finalReceipt, { allHistoricalAssetsCarried: false, prunedAssets: 3 });
+  assert.equal(validateProductionAutoPredecessorProof(pruned, expected), pruned);
   for (const mutate of [
     value => { value.artifact = null; },
     value => { value.ci.runAttempt += 1; },
     value => { value.artifact.digestSha256 = 'not-a-digest'; },
     value => { value.finalReceipt.ledgerSHA256 = '6'.repeat(64); },
     value => { value.finalReceipt.candidateVersionId = 'not-a-version'; },
+    // Pruning must be reported consistently: not carried needs a positive count, carried needs none.
+    value => { value.finalReceipt.allHistoricalAssetsCarried = false; },
+    value => { value.finalReceipt.prunedAssets = 3; },
+    value => { value.finalReceipt.allHistoricalAssetsCarried = 'false'; value.finalReceipt.prunedAssets = 3; },
   ]) {
     const invalid = structuredClone(proof); mutate(invalid);
     assert.throws(() => validateProductionAutoPredecessorProof(invalid, expected));
