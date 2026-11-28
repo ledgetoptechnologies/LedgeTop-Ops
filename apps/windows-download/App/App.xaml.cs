@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Windows;
 using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
@@ -12,16 +13,17 @@ public partial class App : Application
         // The release channel is compiled in; setup checks and source construction finish before the window exists.
         StartupPlan plan;
         try {
-            plan = Backends.Startup.Choose(ReleaseProfiles.Compiled(typeof(App).Assembly), e.Args,
+            var metadata = typeof(App).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>().ToArray();
+            plan = Backends.Startup.Choose(ReleaseProfiles.Compiled(metadata), e.Args,
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), AppContext.BaseDirectory, ReleaseProfiles.For);
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), AppContext.BaseDirectory, ReleaseProfiles.For, metadata);
         } catch (Exception) {
             plan = new(null, "Ledge Top Files couldn't start on this PC. Restart it, and if this keeps happening, ask your Ledge Top contact to check the installation.",
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Ledge Top"), null);
         }
         var window = new MainWindow();
         if (plan.Access is { } access) {
-            // Real sources: ask which files to open (unless remembered), then sign in to that kind only.
+            // The qualified staging build starts with client sign-in. Other builds keep their usual access choice.
             var session = new FilesSession(window, access, plan.Downloads, plan.Tag);
             window.CloseWith(session.DisposeAsync);
             window.Show();

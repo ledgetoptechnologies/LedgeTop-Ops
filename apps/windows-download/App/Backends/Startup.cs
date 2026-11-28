@@ -1,3 +1,4 @@
+using System.Reflection;
 using LedgeTop.Files.Presentation;
 
 namespace LedgeTop.Files.Backends;
@@ -10,7 +11,10 @@ public sealed record StartupPlan(IFilesBackend? Backend, string? Problem, string
 /// Real sources open one kind of files at a time. <see cref="Create"/> builds only the chosen source from the fixed,
 /// trusted setup; nothing signs in until the person has chosen. The remembered choice is a convenience, not authority.
 /// </summary>
-public sealed record AccessChoice(Func<AccessMode, IFilesBackend> Create, IReadOnlyList<AccessMode> Modes, AccessPreference Preference);
+public sealed record AccessChoice(Func<AccessMode, IFilesBackend> Create, IReadOnlyList<AccessMode> Modes, AccessPreference Preference)
+{
+    internal bool StartWithClientSignIn { get; init; }
+}
 
 /// <summary>
 /// Chooses how this copy runs. A packaged release (channel compiled in) uses only its compiled profile and its own
@@ -41,7 +45,12 @@ public static class Startup
         Path.Combine(localAppData, "LedgeTop", "Files", channelFolder, "queue");
 
     public static StartupPlan Choose((bool Packaged, ReleaseChannel? Channel) compiled, IReadOnlyList<string> arguments,
-        string localAppData, string userProfile, string installDirectory, Func<ReleaseChannel, ReleaseProfile?> profiles)
+        string localAppData, string userProfile, string installDirectory, Func<ReleaseChannel, ReleaseProfile?> profiles) =>
+        Choose(compiled, arguments, localAppData, userProfile, installDirectory, profiles, []);
+
+    internal static StartupPlan Choose((bool Packaged, ReleaseChannel? Channel) compiled, IReadOnlyList<string> arguments,
+        string localAppData, string userProfile, string installDirectory, Func<ReleaseChannel, ReleaseProfile?> profiles,
+        IEnumerable<AssemblyMetadataAttribute> metadata)
     {
         var downloads = Path.Combine(userProfile, "Downloads", "Ledge Top");
         if (compiled.Packaged) {
@@ -54,7 +63,8 @@ public static class Startup
             if (helper is null) return new(null, UnreviewedProblem, downloads, tag);
             var settings = new LiveSettings(profile.PortalApplicationUrl, profile.StaffApplicationUrl, helper, profile.CloudflaredSha256);
             var folder = channel == ReleaseChannel.Pilot ? "pilot" : "stable";
-            return Choice(settings, localAppData, folder, downloads, tag) ?? new(null, HelperProblem, downloads, tag);
+            var useClientPolicy = ReleaseProfiles.EnablesClientPolicy(compiled, profile, metadata);
+            return Choice(settings, localAppData, folder, downloads, tag, useClientPolicy) ?? new(null, HelperProblem, downloads, tag);
         }
         if (arguments.Contains("--demo") || arguments.Contains("--demo-signed-in")) {
             var root = Path.Combine(Path.GetTempPath(), "LedgeTopFilesDemo");
@@ -74,13 +84,15 @@ public static class Startup
     /// Offers client deliveries, plus company files when this setup includes the staff application. The pinned helper
     /// is checked now, so a missing or changed helper is reported before anyone is asked to choose or sign in.
     /// </summary>
-    private static StartupPlan? Choice(LiveSettings settings, string localAppData, string folder, string downloads, string? tag)
+    private static StartupPlan? Choice(LiveSettings settings, string localAppData, string folder, string downloads, string? tag,
+        bool useClientPolicy = false)
     {
         var root = StateRoot(localAppData, folder);
         // Check the helper itself, without building either source: each source is only built after it is chosen,
         // and the chosen source checks the helper again before it is used.
         if (!HelperTrusted(settings.CloudflaredPath, settings.CloudflaredSha256)) return null;
         AccessMode[] modes = settings.StaffApplicationUrl is null ? [AccessMode.Client] : [AccessMode.Client, AccessMode.Employee];
-        return new(null, null, downloads, tag, new AccessChoice(mode => new LiveBackend(settings, root, mode), modes, AccessPreference.For(localAppData, folder)));
+        return new(null, null, downloads, tag, new AccessChoice(mode => new LiveBackend(settings, root, mode, useClientPolicy), modes,
+            AccessPreference.For(localAppData, folder)) { StartWithClientSignIn = useClientPolicy });
     }
 }
