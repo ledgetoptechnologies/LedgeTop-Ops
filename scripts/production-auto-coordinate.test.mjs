@@ -511,3 +511,28 @@ test('the read-only probe drives the real coordinator to the first write boundar
   assert.deepEqual(counts.entered, counts.completed, 'every read step before the boundary completed');
   for (const step of ['sourceFence', 'ciGate', 'capture', 'build', 'readLedger']) assert.ok(counts.entered.includes(step), step);
 });
+
+test('a v5 baseline whose newest version is inactive refuses without an allowance and passes the gate only with one', async () => {
+  const { ownedInactiveV5BaselineAllowed } = await import('./production-auto-owned-inactive-v5.mjs');
+  const { mintOwnedInactiveV5Allowance } = await import('./test-fixtures/owned-inactive-v5-fixture.mjs');
+  // The runtime installs this exact hook on every v5 lane; without a proven allowance it must refuse.
+  const hook = allowance => ({ baseline }) => ownedInactiveV5BaselineAllowed(allowance, { workerName: 'ledgetop-ops', sourceCommit: COMMIT, baseline });
+  for (const allowance of [null, undefined, { kind: 'owned-inactive-v5-allowance', supersededVersionId: CANDIDATE, parentVersionId: PARENT }]) {
+    const f = fixture(); f.current().latestVersionId = CANDIDATE;
+    f.adapter.ownedInactiveInitialStateAllowed = hook(allowance);
+    await assert.rejects(f.run(), /held/);
+    assert.equal(f.intents.length, 0); assert.equal(f.events.includes('build'), false, 'refused at the initial gate');
+    assert.equal(f.receipts.some(row => row?.status === 'started'), false);
+  }
+  const real = mintOwnedInactiveV5Allowance({ workerName: 'ledgetop-ops', parentVersionId: PARENT, supersededVersionId: CANDIDATE,
+    newSourceCommit: COMMIT });
+  const f = fixture(); f.current().latestVersionId = CANDIDATE;
+  f.adapter.ownedInactiveInitialStateAllowed = hook(real);
+  await f.run().catch(() => {});
+  assert.equal(f.events.includes('build'), true, 'a proven allowance passes the initial gate');
+  // A split deployment is still refused even with the allowance.
+  const split = fixture(); split.current().latestVersionId = CANDIDATE;
+  split.current().versions = [{ versionId: PARENT, percentage: 90 }, { versionId: CANDIDATE, percentage: 10 }];
+  split.adapter.ownedInactiveInitialStateAllowed = hook(real);
+  await assert.rejects(split.run(), /held/); assert.equal(split.events.includes('build'), false);
+});

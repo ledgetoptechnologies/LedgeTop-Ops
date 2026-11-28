@@ -103,6 +103,7 @@ export const PRODUCTION_AUTO_HOLD_CODES = Object.freeze([
   'preservation_capture_or_metadata_stale',
   'owned_inactive_admission_refused',
   'owned_inactive_custody_refused',
+  'owned_inactive_v5_custody_refused',
   'owned_inactive_journal_head_refused',
   'preservation_current_evidence_invalid',
   'preservation_current_evidence_stale_or_invalid',

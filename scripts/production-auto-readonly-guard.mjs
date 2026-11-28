@@ -32,6 +32,10 @@ const GITHUB_REPO_READS = [
   /^\/actions\/workflows\/ci\.yml\/runs\?branch=main&event=push&head_sha=[a-f0-9]{40}&per_page=100$/u,
   /^\/actions\/runs\/[1-9][0-9]*\/jobs\?filter=latest&per_page=100$/u,
   /^\/actions\/artifacts\/[1-9][0-9]*$/u,
+  // v5 owned-inactive custody (read-only): the Worker journal ref and its commit/tree/blob, and the held run itself.
+  /^\/git\/ref\/heads\/ltds-production-auto-journal-(?:ledgetop-clients|ledgetop-ops)$/u,
+  /^\/git\/(?:commits|trees|blobs)\/[a-f0-9]{40}$/u,
+  /^\/actions\/runs\/[1-9][0-9]*$/u,
 ];
 const CLOUDFLARE_ACCOUNT_READS = [
   new RegExp(`^workers/scripts/${WORKER}$`, 'u'),
