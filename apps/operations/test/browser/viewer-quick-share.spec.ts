@@ -429,7 +429,7 @@ test("Client Workspace is the first and selected method", async ({ page }) => {
 test("a long client match list scrolls inside the dialog", async ({ page }) => {
   await mockOps(page, MANAGER);
   const dialog = await openShare(page, "Seawall orthomosaic");
-  const list = dialog.locator("#viewer-direct-share-client-list");
+  const list = dialog.getByRole("listbox", { name: "Matching clients", includeHidden: true });
   const style = await list.evaluate(element => { const css = getComputedStyle(element); return { overflowY: css.overflowY, maxHeight: css.maxHeight }; });
   expect(style.overflowY).toBe("auto");
   expect(style.maxHeight).not.toBe("none");

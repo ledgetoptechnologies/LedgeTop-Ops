@@ -1,7 +1,8 @@
 import type { ViewerProjectSelection, ViewerPublicShareSummary } from "@ltds/shared";
 import { Dialog, EmptyState, StatusPill } from "@ltds/ui";
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { api, ApiError } from "./api";
+import { ClientSearchBox } from "./ClientSearchBox";
 import { ShareMethodPanel, ShareMethodTabs, type ShareMethod } from "./ShareMethodTabs";
 
 /** Count and update time are optional until the Viewer catalog source provides them. */
@@ -82,14 +83,7 @@ export async function searchDirectShareClients(fetchJson: (path: string) => Prom
 }
 
 /** Arrow, Home and End keys over a result list; null when the key does not move the selection. */
-export function nextActiveOption(active: number, key: string, count: number): number | null {
-  if (!count) return null;
-  if (key === "ArrowDown") return active < 0 ? 0 : Math.min(count - 1, active + 1);
-  if (key === "ArrowUp") return active < 0 ? count - 1 : Math.max(0, active - 1);
-  if (key === "Home") return 0;
-  if (key === "End") return count - 1;
-  return null;
-}
+export { nextActiveOption } from "./ClientSearchBox";
 
 export const DIRECT_SHARE_GRANT_PAGE_LIMIT = 50;
 /** Loads every page of this project's grants (the server pages grants 100 at a time), and no clients:
@@ -356,7 +350,6 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   // Client search results: null until two characters are typed and the answer arrives.
   const [results, setResults] = useState<{ clients: DirectShareClient[]; more: boolean } | null>(null);
   const [searchError, setSearchError] = useState("");
-  const [active, setActive] = useState(-1);
   const search = useRef(0);
   const [blocked, setBlocked] = useState("");
   const [client, setClient] = useState<DirectShareClient | null>(null);
@@ -401,10 +394,10 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
     try {
       const value = await searchDirectShareClients(path => api<unknown>(path), target.project.viewerProjectId, q);
       if (current !== search.current) return;
-      setResults(value); setActive(value?.clients.length ? 0 : -1);
+      setResults(value);
     } catch (caught) {
       if (current !== search.current) return;
-      setResults(null); setActive(-1);
+      setResults(null);
       const status = statusOf(caught);
       if (status === 404) setBlocked("Client Workspace sharing isn't turned on yet.");
       else if (status === 403) setBlocked("Administrator access is required to share with clients.");
@@ -418,10 +411,8 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
     return () => window.clearTimeout(timer);
   }, [query, runSearch]);
   useEffect(() => () => { run.current += 1; search.current += 1; }, []);
-  // The match list scrolls, so the option chosen with the arrow keys is kept in view.
-  useEffect(() => { if (active >= 0) document.getElementById(`viewer-direct-share-client-${active}`)?.scrollIntoView?.({ block: "nearest" }); }, [active]);
   // A new search drops the previous results at once, so Enter or a click can't pick from an old list.
-  const changeQuery = (value: string) => { search.current += 1; setResults(null); setActive(-1); setSearchError(""); setQuery(value); };
+  const changeQuery = (value: string) => { search.current += 1; setResults(null); setSearchError(""); setQuery(value); };
 
   const existing = workspace ? grantsForTarget(workspace.grants, target) : [];
   const restricted = (workspace?.grants ?? []).filter(grant => !grant.revokedAt
@@ -437,13 +428,6 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
     if (busy || unconfirmed) return;
     setClient(next); setReviewing(false); setError(""); setMessage(""); pending.current = null;
     if (!next) changeQuery("");
-  };
-  const onSearchKey = (event: KeyboardEvent<HTMLInputElement>) => {
-    const count = results?.clients.length ?? 0;
-    const moved = nextActiveOption(active, event.key, count);
-    if (moved !== null) { event.preventDefault(); setActive(moved); return; }
-    if (event.key === "Enter") { event.preventDefault(); const chosen = results?.clients[active]; if (chosen) pick(chosen); return; }
-    if (event.key === "Escape" && query) { event.preventDefault(); changeQuery(""); }
   };
 
   const send = async () => {
@@ -525,26 +509,18 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
     </li>)}</ul><p>Manage these saved selections in the Viewer. This model's folder membership isn't available here.</p></div>}
     {loadError && <div className="notice error" role="alert">{loadError} <button type="button" className="button-ghost button-small" onClick={() => void load()}>Retry</button></div>}
     {!client ? <>
-      <label htmlFor="viewer-direct-share-client-search">Client or organization</label>
-      <input id="viewer-direct-share-client-search" type="search" role="combobox" aria-autocomplete="list" aria-controls="viewer-direct-share-client-list"
-        aria-expanded={!!results?.clients.length} aria-activedescendant={results && active >= 0 ? `viewer-direct-share-client-${active}` : undefined}
-        value={query} onChange={event => changeQuery(event.target.value)} onKeyDown={onSearchKey} placeholder="Type 2 or more letters" maxLength={120} autoComplete="off" />
-      {searchError && <div className="notice error" role="alert">{searchError} <button type="button" className="button-ghost button-small" onClick={() => void runSearch(query)}>Retry</button></div>}
-      <ul id="viewer-direct-share-client-list" className="viewer-direct-share-clients" role="listbox" aria-label="Matching clients" hidden={!results?.clients.length}>
-        {(results?.clients ?? []).map((item, index) => {
-          const via = businessLabel(item.businessName, businessCount);
-          return <li key={`${item.sourceId}/${item.workspaceId}`} id={`viewer-direct-share-client-${index}`} role="option" aria-selected={index === active}
-            className={index === active ? "active" : undefined} onMouseDown={event => event.preventDefault()} onClick={() => pick(item)}>
-            <strong>{item.displayName}</strong>
-            {via && <small>{via}</small>}
-            {existing.some(grant => sameClient(grant, item)) && <small className="viewer-direct-share-has-access">Already has access</small>}
-            {item.signInReady === false && <small className="viewer-direct-share-no-sign-in">No portal sign-in yet</small>}
-          </li>;
-        })}
-      </ul>
-      <p className="viewer-quick-share-empty" role="status">{!searchReady(query) || searchError ? "" : !results ? "Searching…"
-        : !results.clients.length ? "No clients match that name."
-        : results.more ? `Showing the first ${QUICK_SHARE_RESULT_LIMIT}. Keep typing to narrow the list.` : ""}</p>
+      <ClientSearchBox id="viewer-direct-share-client-search" query={query} onQueryChange={changeQuery}
+        items={results?.clients ?? null} itemKey={item => `${item.sourceId}/${item.workspaceId}`} onPick={item => pick(item)}
+        renderItem={item => { const via = businessLabel(item.businessName, businessCount); return <>
+          <strong>{item.displayName}</strong>
+          {via && <small>{via}</small>}
+          {existing.some(grant => sameClient(grant, item)) && <small className="viewer-direct-share-has-access">Already has access</small>}
+          {item.signInReady === false && <small className="viewer-direct-share-no-sign-in">No portal sign-in yet</small>}
+        </>; }}
+        error={searchError || undefined} onRetry={() => void runSearch(query)}
+        status={!searchReady(query) || searchError ? "" : !results ? "Searching…"
+          : !results.clients.length ? "No clients match that name."
+          : results.more ? `Showing the first ${QUICK_SHARE_RESULT_LIMIT}. Keep typing to narrow the list.` : ""} />
     </> : <form className="viewer-direct-share-form" onSubmit={confirm}>
       <div className="viewer-direct-share-recipient"><div><strong>{client.displayName}</strong>{business && <small>{business}</small>}</div>
         <button type="button" className="button-ghost button-small" disabled={busy || unconfirmed} onClick={() => pick(null)}>Change</button></div>
