@@ -146,7 +146,7 @@ async function currentUpsertProof(database: D1DatabaseSession, command: Verified
           JOIN portal_native_staff_grant_events publication
             ON publication.grant_id=native_grant.grant_id AND publication.authorization_id=native_grant.authorization_id
             AND publication.action='published'
-          JOIN portal_v2_authenticated_delivery_grants published_grant
+          JOIN portal_v2_folder_delivery_grants published_grant
             ON published_grant.id=native_grant.grant_id AND published_grant.workspace_id=native_binding.workspace_id
             AND published_grant.folder_binding_id=folder.id AND published_grant.binding_source_version=folder.source_version
             AND published_grant.status='active' AND published_grant.revoked_at IS NULL

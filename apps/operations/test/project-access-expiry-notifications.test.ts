@@ -4,7 +4,7 @@ import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/worker/types";
 import { buildSmtpMessage } from "../src/worker/mailer";
-import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { applyFileGrantScope, splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
   dispatchProjectAccessExpiryNotices,
   processProjectAccessExpiryNotifications,
@@ -177,6 +177,7 @@ describe("project access expiry processor", {timeout: 90_000}, () => {
       CREATE TABLE portal_v2_authenticated_delivery_grant_audit(id TEXT PRIMARY KEY,grant_id TEXT);
       CREATE TABLE portal_native_staff_grant_events(id TEXT PRIMARY KEY,grant_id TEXT,authorization_id TEXT,action TEXT);`);
     await db.batch(splitD1MigrationStatements(authorityHistoryMigration).map(sql=>db.prepare(sql)));
+    await applyFileGrantScope(db);
     const expiry=new Date().toISOString(),createdAt=new Date(Date.now()-100).toISOString();
     await db.batch([
       db.prepare(`INSERT INTO portal_project_access_terms VALUES('history-terms','workspace-a','project-alpha:one','project-a','collaborator','specific_date',?)`).bind(expiry),

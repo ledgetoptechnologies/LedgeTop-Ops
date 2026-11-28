@@ -2,7 +2,7 @@ import { readFileSync,readdirSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll,beforeAll,beforeEach,describe,expect,it,vi } from 'vitest';
 import { Hono } from 'hono';
-import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
+import { applyFileGrantScope, splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
 import { provisionPortalSourceAuthority,setPortalSourceAuthorityState } from '../../client/src/worker/project-alpha-portal-authority';
 import { registerProjectAlphaConnector,setProjectAlphaConnectorState,type ProjectAlphaConnectorEnvironment } from '../src/worker/project-alpha-connectors';
 import { createNativeDeliveryGrant,previewNativeDeliveryGrant,revokeNativeDeliveryGrant,listNativeDeliveryGrants,
@@ -101,6 +101,7 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
     for(const [db,path,cap] of [[ops,new URL('../migrations/',import.meta.url),'0040'],[delivery,new URL('../../client/migrations/',import.meta.url),'0197']] as const)
       for(const name of readdirSync(path).filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n.slice(0,4)<=cap).sort())
         await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
+    await applyFileGrantScope(delivery);
     const primaryCredential={snapshotApiKey:'primary-snapshot-key',eventCurrent:{keyId:'primary-key',algorithm:'ed25519',value:key(1)}},
       secondaryCredential={snapshotApiKey:'secondary-snapshot-key',eventCurrent:{keyId:'secondary-key',algorithm:'ed25519',value:key(2)},
         portalCurrent:{keyId:'portal-key',value:'secondary-portal-secret-at-least-thirty-two-bytes'}};

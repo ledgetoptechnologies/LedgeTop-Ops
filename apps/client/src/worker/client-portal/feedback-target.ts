@@ -152,21 +152,21 @@ function proofParts(native: boolean,termsReady=false): ProofPart[] {
   parts.push(rowsProof(`SELECT id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version,status,revoked_at
     FROM portal_v2_folder_bindings WHERE workspace_id=${workspace} AND id=${binding}`,
     ["id", "owner_scope_type", "owner_public_id", "r2_prefix", "source_type", "source_version", "status", "revoked_at"], 1));
-  for (const table of ["portal_v2_authenticated_delivery_grants", "project_alpha_delivery_portal_grants"]) {
+  for (const table of ["portal_v2_folder_delivery_grants", "project_alpha_delivery_portal_grants"]) {
     parts.push(rowsProof(`SELECT id,binding_source_version,audience_type,audience_public_id,audience_source_version,grant_version,
-      ${projectAccessReadColumns('grant_record',termsReady&&table==='portal_v2_authenticated_delivery_grants')}
+      ${projectAccessReadColumns('grant_record',termsReady&&table==='portal_v2_folder_delivery_grants')}
       FROM ${table} grant_record WHERE workspace_id=${workspace} AND folder_binding_id=${binding} AND status='active'
         AND revoked_at IS NULL AND (expires_at IS NULL OR datetime(expires_at)>datetime('now')) ORDER BY id`,
       ["id", "binding_source_version", "audience_type", "audience_public_id", "audience_source_version", "grant_version","access_terms_id","terms_project_id","terms_live"], 100));
   }
   parts.push(rowsProof(`SELECT r.grant_id,r.principal_public_id,r.identity_id,r.principal_source_version
-    FROM portal_v2_authenticated_delivery_grant_recipients r JOIN portal_v2_authenticated_delivery_grants g ON g.id=r.grant_id
+    FROM portal_v2_authenticated_delivery_grant_recipients r JOIN portal_v2_folder_delivery_grants g ON g.id=r.grant_id
     WHERE r.workspace_id=${workspace} AND r.identity_id=${globalIdentity} AND g.folder_binding_id=${binding} ORDER BY r.grant_id`,
     ["grant_id", "principal_public_id", "identity_id", "principal_source_version"], 100));
   parts.push(rowsProof(`SELECT p.public_id,p.identity_id,p.email_hint,p.source_version,p.status FROM pa_portal_principals p
     WHERE p.workspace_id=${workspace} AND (p.identity_id=${globalIdentity} OR p.public_id IN (
       SELECT principal_public_id FROM portal_v2_identity_eligibility_bindings WHERE workspace_id=${workspace} AND identity_id=${globalIdentity}
-      UNION SELECT audience_public_id FROM portal_v2_authenticated_delivery_grants WHERE workspace_id=${workspace} AND folder_binding_id=${binding} AND audience_type='principal'
+      UNION SELECT audience_public_id FROM portal_v2_folder_delivery_grants WHERE workspace_id=${workspace} AND folder_binding_id=${binding} AND audience_type='principal'
       UNION SELECT audience_public_id FROM project_alpha_delivery_portal_grants WHERE workspace_id=${workspace} AND folder_binding_id=${binding}
     )) ORDER BY p.public_id`, ["public_id", "identity_id", "email_hint", "source_version", "status"]));
   const ancestry = `RECURSIVE ${input}, generation AS (SELECT active_generation_id id FROM portal_v2_directory_checkpoints WHERE workspace_id=${workspace}),

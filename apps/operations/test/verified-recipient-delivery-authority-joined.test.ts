@@ -3,7 +3,7 @@ import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createVerifiedRecipientDeliveryAuthorityReceipt, type VerifiedRecipientDeliveryAuthorityCommand } from
   "@ltds/shared/verified-recipient-delivery-authority";
-import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { applyFileGrantScope, splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { dispatchNextVerifiedRecipientDeliveryAuthority, enqueueVerifiedRecipientDeliveryAuthority,
   listVerifiedRecipientDeliveryAuthoritiesForEnrollment } from
   "../src/worker/verified-recipient-delivery-authority-ledger";
@@ -149,6 +149,7 @@ describe("verified recipient delivery authority joined minimal protocol integrat
       const clientMigration=readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),"utf8");
       await deliveryDb.batch(splitD1MigrationStatements(clientMigration).map(statement=>deliveryDb.prepare(statement)));
     }
+    await applyFileGrantScope(deliveryDb);
   }, 30_000);
   afterEach(async () => runtime.dispose());
 

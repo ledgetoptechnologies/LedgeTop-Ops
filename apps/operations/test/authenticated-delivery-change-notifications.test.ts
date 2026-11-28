@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { applyFileGrantScope, splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { provisionPortalSourceAuthority, reservePrimaryPortalSigningKeys, setPortalSourceAuthorityState,
   type PortalAuthorityConnectorIdentity } from "../../client/src/worker/project-alpha-portal-authority";
 import {
@@ -54,6 +54,7 @@ describe("exact authenticated delivery change notifications — migrated real D1
       .bind(before.workspace).run()).rejects.toThrow();
     await expect(db.prepare("UPDATE portal_v2_authenticated_delivery_grants SET grant_version=2 WHERE id=?")
       .bind(before.grant).run()).rejects.toThrow();
+    await applyFileGrantScope(db);
     env = {DELIVERY_DB:db,AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED:"true",DELIVERY_BASE_URL:"https://client.example.test",
       PROJECT_ALPHA_PORTAL_HMAC_SECRET:"primary-portal-hmac-test-key-material-at-least-thirty-two-bytes",
       PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:{bell_secondary:{portalCurrent:{keyId:"bell-secondary-current",
