@@ -126,6 +126,10 @@ test('custody refuses anything the journal and the held run do not prove', () =>
     'an unknown write before the upload': v => { held(v).intents[3].phase = 'temporary-verifier-rename'; },
     'a response that belongs to no intent': v => { const op = held(v);
       op.responses.push({ ...op.responses[0], requestId: uuid(97), ciphertextFile: `responses/${uuid(97)}.sealed.json` }); },
+    'a later write hidden behind an unparsable date': v => { const later = heldOperation({ source: '8'.repeat(40), stageZero: false });
+      later.createdAt = 'tomorrow'; later.updatedAt = 'tomorrow';
+      later.receipts = later.receipts.slice(0, 2); later.intents = later.intents.slice(0, 1); later.responses = later.responses.slice(0, 1);
+      v.document.operations.push(later); },
     'two operations updated at the same time': v => { v.document.operations[0].updatedAt = held(v).updatedAt; },
     'a later operation that recorded a write': v => { const later = heldOperation({ source: '8'.repeat(40), stageZero: false });
       later.createdAt = '2026-11-28T00:00:00.000Z'; later.updatedAt = '2026-11-28T00:05:00.000Z';

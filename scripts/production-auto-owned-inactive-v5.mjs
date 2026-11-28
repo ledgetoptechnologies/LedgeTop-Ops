@@ -89,8 +89,10 @@ function selectHeldOperation(document, workerName, latestVersionId) {
   // later run that held before preparing; anything that may have written after it refuses.
   need(iso(op.updatedAt) && operations.filter(row => row.updatedAt === op.updatedAt).length === 1);
   for (const row of operations) {
+    // Every operation's timestamps must parse before comparing; an unparsable date would otherwise skip a row.
+    need(iso(row.createdAt) && iso(row.updatedAt));
     if (row === op || !(Date.parse(row.updatedAt) > Date.parse(op.updatedAt) || Date.parse(row.createdAt) > Date.parse(op.createdAt))) continue;
-    need(iso(row.updatedAt) && list(row.intents, 512).length === 0 && list(row.responses, 512).length === 0
+    need(list(row.intents, 512).length === 0 && list(row.responses, 512).length === 0
       && list(row.receipts, 64).every(receipt => plain(receipt).writesAttempted !== true));
   }
   need(op.workerName === workerName && op.releaseKind === 'retained-assets' && op.state === 'held'
