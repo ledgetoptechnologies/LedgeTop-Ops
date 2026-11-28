@@ -105,6 +105,8 @@ test('the live runtime follows the node\'s own processing time on each poll',asy
   const hours=3*3_600_000;
   await poll(hours);
   assert.ok(elapsed()>=hours&&elapsed()<hours+5_000,`after a Viewer restart the node's ${hours} ms wins, got ${elapsed()}`);
+  await poll(undefined);
+  assert.ok(elapsed()>=hours,"a poll without the node's time keeps the node's start");
   const settled=events();
   await poll(hours+15_000);await poll(hours+30_000);
   assert.equal(events(),settled,'steady polls of the same run record nothing new');

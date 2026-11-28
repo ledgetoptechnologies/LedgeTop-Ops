@@ -1,7 +1,4 @@
 'use strict';
-// Poll jitter on the node's elapsed time stays well inside this; a real move of the start does not.
-const ENGINE_START_TOLERANCE_MS = 30_000;
-
 const crypto = require('node:crypto');
 const path = require('node:path');
 const { canonicalProjectSelection, projectSelectionPredicate } = require('./projectSelection');
@@ -22,6 +19,8 @@ const {
   stable,
 }=require('../lod-converter-policy.cjs');
 const CONTROLLED_CONVERTER_COMMAND_SHA256_SET=new Set(ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256);
+// Poll jitter on the node's elapsed time stays well inside this; a real move of the start does not.
+const ENGINE_START_TOLERANCE_MS = 30_000;
 
 const BUILT_IN_PRESETS = [
   ['standard', 'Standard', { 'feature-quality': 'high', 'pc-quality': 'medium' }],
@@ -761,7 +760,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   }
 
   // Running attempts only (unless anyStatus): attempt id -> the latest recorded engine start (ms)
-  // for the attempt's current provider task.
+  // for the attempt's current provider task, in insertion order (processing_events is append-only).
   engineStartTimes(attemptIds, { anyStatus = false } = {}) {
     if (attemptIds.length === 0) return new Map();
     const rows = this.database.prepare(`
@@ -772,7 +771,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
           OR substr(e.id,1,length(a.id)+length(a.provider_task_id)+17)='engine-started:' || a.id || ':' || a.provider_task_id || ':')
       WHERE e.event_type='processing_attempt.engine_started'
         AND e.attempt_id IN (${attemptIds.map(() => '?').join(',')})
-      ORDER BY e.created_at, e.rowid
+      ORDER BY e.rowid
     `).all(...attemptIds);
     const starts = new Map();
     for (const row of rows) {
