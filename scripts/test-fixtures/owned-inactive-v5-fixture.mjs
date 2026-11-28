@@ -19,7 +19,8 @@ export function mintOwnedInactiveV5Allowance({ workerName, parentVersionId, supe
   const phases = [['temporary-verifier-create', 'PUT'], ['asset-session', 'POST'], ['worker-version-upload', 'POST'],
     ...(staged ? [['stage-zero-percent', 'POST'], ['temporary-verifier-create', 'PUT'], ['temporary-verifier-enable', 'POST']] : [])];
   const intents = phases.map(([phase, method], i) => ({ automaticRetry: false, hashes: [], method, phase, requestId: request(i + 1),
-    sequence: i + 1, workerName, ...(phase === 'worker-version-upload' ? { parentVersionId,
+    sequence: i + 1, workerName, ...(phase.startsWith('temporary-verifier-') ? { temporaryWorkerName: 'ops-ui-verify-0123456789abcdef01234567' } : {}),
+    ...(phase === 'worker-version-upload' ? { parentVersionId,
       modules: { '__ops_release_ledger.json': sha(ledger), 'index.js': sha(module), 'index.js.map': '7'.repeat(64) } } : {}),
     ...(phase === 'stage-zero-percent' ? { parentVersionId, candidateVersionId: supersededVersionId,
       versions: [{ percentage: 100, versionId: parentVersionId }, { percentage: 0, versionId: supersededVersionId }] } : {}) }));

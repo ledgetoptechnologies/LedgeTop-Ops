@@ -553,8 +553,12 @@ test('an owned zero-percent stage passes the initial gate only with its staged a
   }
   // The staged allowance admits it; this run then stages its own candidate over the old 0% row.
   const f = stagedFixture(); f.adapter.ownedInactiveInitialStateAllowed = hook(mint(true));
+  const stage = f.adapter.stageZero; let staged;
+  f.adapter.stageZero = async input => { staged = structuredClone(input); return stage(input); };
   await f.run().catch(() => {});
   assert.equal(f.events.includes('build'), true);
+  // This run stages its own candidate: [parent 100, new 0]; the old 0% row is not carried.
+  assert.deepEqual(staged?.versions, [{ versionId: PARENT, percentage: 100 }, { versionId: CANDIDATE, percentage: 0 }]);
   // A deployment other than the recorded one still refuses.
   const moved = stagedFixture(); moved.current().deploymentId = DEPLOY; moved.adapter.ownedInactiveInitialStateAllowed = hook(mint(true));
   await assert.rejects(moved.run(), /held/); assert.equal(moved.events.includes('build'), false);

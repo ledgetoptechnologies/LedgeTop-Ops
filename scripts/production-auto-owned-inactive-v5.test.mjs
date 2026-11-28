@@ -286,6 +286,11 @@ test('a staged held run refuses anything beyond its own stage and asset verifier
     'an asset write after the stage': v => { const op = held(v); op.intents.push({ ...op.intents[3], requestId: uuid(91), sequence: op.intents.length + 1 }); },
     'four verifier writes': v => { const op = held(v); op.intents.push({ ...op.intents[0], phase: 'temporary-verifier-delete', requestId: uuid(92),
       sequence: op.intents.length + 1 }, { ...op.intents[0], requestId: uuid(93), sequence: op.intents.length + 2 }); },
+    'verifier writes out of order': v => { const op = held(v); op.intents.at(-1).phase = 'temporary-verifier-delete'; op.intents.at(-1).method = 'DELETE'; },
+    'a second verifier name': v => { held(v).intents.at(-1).temporaryWorkerName = 'ops-ui-verify-ffffffffffffffffffffffff'; },
+    'a verifier write naming the production Worker': v => { const op = held(v); op.intents.at(-2).temporaryWorkerName = 'ledgetop-clients';
+      op.intents.at(-1).temporaryWorkerName = 'ledgetop-clients'; },
+    'a verifier write with another method': v => { held(v).intents.at(-1).method = 'DELETE'; },
     'a stage receipt without its deployment': v => { delete held(v).receipts[3].deploymentId; },
     'candidate assets that were verified': v => { held(v).receipts.splice(4, 0, { candidateVersionId: CANDIDATE, phase: 'candidate-assets',
       status: 'candidate-assets-verified' }); },

@@ -169,6 +169,12 @@ function verifyIntents(op, parentVersionId, latestVersionId, staged) {
       && stagedRows(stage.versions, parentVersionId, latestVersionId, 'versionId')
       && verifier.length <= 3 && verifier.every(intent => VERIFIER_PHASES.has(intent.phase)
         && (!byRequest.has(intent.requestId) || acknowledged(intent))));
+    // One temporary verifier only, in its fixed create -> enable -> delete order and methods. Its outcome may be
+    // unknown (a created helper can be left behind; it serves nothing of the Worker and is listed for cleanup).
+    const order = [['temporary-verifier-create', 'PUT'], ['temporary-verifier-enable', 'POST'], ['temporary-verifier-delete', 'DELETE']];
+    need(verifier.every((intent, i) => intent.phase === order[i][0] && intent.method === order[i][1]
+      && /^ops-ui-verify-[a-f0-9]{24}$/u.test(intent.temporaryWorkerName ?? '')
+      && intent.temporaryWorkerName === verifier[0].temporaryWorkerName));
   }
   // Every response belongs to an intent; nothing else was recorded as acknowledged.
   need([...byRequest.keys()].every(id => ids.has(id)));
