@@ -133,7 +133,7 @@ test('migration 83 preserves populated schema 42 and refuses incompatible ledger
   const laterMigrations=MIGRATIONS.splice(laterStart);
   try{applyMigrations(db);}
   finally{MIGRATIONS.push(...laterMigrations);}
-  assert.deepEqual(laterMigrations.map(entry=>entry.version),[48,83,84,85,86,90,91,92]);
+  assert.deepEqual(laterMigrations.map(entry=>entry.version),[48,83,84,85,86,90,91,92,93]);
   const [folderMigration,migration,marksMigration]=laterMigrations;
   const generationMigration=laterMigrations.find(entry=>entry.version===91);
   assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,42);

@@ -23,7 +23,7 @@ const context=vm.createContext({state,projectDataGeneration:0,draggedFolderTask:
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
   context.attemptProviderName=attemptProviderName;context.REPROCESSABLE_STATUSES=REPROCESSABLE_STATUSES;
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
-  vm.runInContext([...names,'taskOutputStage','logPanel'].map(declaration).concat(
+  vm.runInContext([...names,'gcpPointOptionName','taskOutputStage','logPanel'].map(declaration).concat(
     sourceBetween('function applyWorkspaceView(', '\nfunction validateWorkspaceView('),
     sourceBetween('function folderPath(', '\nconst content='),
     sourceBetween('const TREE_ICONS={', '\nfunction treeIcon('),
@@ -264,10 +264,13 @@ test('GCP route denies missing read permission and archived task/project without
 test('read-only GCP route keeps coordinates/images readable but removes every mutation form/action',()=>{
   const f=fixture(['viewer.gcp.read']);
   f.context.gcpWorkspace=()=>({setId:'set',pointId:'point',activeImage:{id:'image'},imageUrl:'blob:fixture',draftPixel:{pixelX:10,pixelY:20}});
-  f.state.taskDetails.task.gcp={sets:[{id:'set',displayName:'Survey',pointCount:1}],points:[{id:'point',latitude:44,longitude:-89,elevationM:240}],candidates:[{id:'image'}],correspondences:[{id:'mark',pointId:'point',imageFileId:'image',pixelX:10,pixelY:20}]};
+  f.state.taskDetails.task.gcp={sets:[{id:'set',displayName:'Survey',pointCount:1}],points:[{id:'point',role:'checkpoint',latitude:44,longitude:-89,elevationM:240}],candidates:[{id:'image'}],correspondences:[{id:'mark',pointId:'point',imageFileId:'image',pixelX:10,pixelY:20}]};
   f.context.taskAction('task-gcp','task');
   assert.match(f.content.innerHTML,/gcp-set-select|gcp-point-select/);assert.match(f.content.innerHTML,/blob:fixture/);assert.match(f.content.innerHTML,/Saved correspondences/);
   assert.doesNotMatch(f.content.innerHTML,/gcp-import-form|gcp-mark-form|data-action="gcp-(?:edit|delete)-mark"/);
+  assert.match(f.content.innerHTML,/<option value="point" selected>point · checkpoint<\/option>/);
+  assert.match(f.content.innerHTML,/<dt>Role<\/dt><dd>Checkpoint<\/dd>/);
+  assert.doesNotMatch(f.content.innerHTML,/gcp-role-select/);
   vm.runInContext(declaration('markGcpImage'),f.context);
   assert.doesNotThrow(()=>f.context.markGcpImage({get currentTarget(){throw Error('read-only clicks must stop before coordinate mutation');}}));
 });
