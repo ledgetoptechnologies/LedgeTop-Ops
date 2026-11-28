@@ -51,6 +51,7 @@ class GcpRepository {
       elevationM: Number(row.elevation_m), description: row.description,
       easting: row.easting == null ? null : Number(row.easting), northing: row.northing == null ? null : Number(row.northing),
       ellipsoidalHeightM: row.ellipsoidal_height_m == null ? null : Number(row.ellipsoidal_height_m),
+      role: row.role || 'control',
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
   }
@@ -115,10 +116,10 @@ class GcpRepository {
         VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id,provenance.adapter,provenance.coordinateSystem,provenance.verticalDatum,provenance.linearUnit,
           provenance.elevationSource||null,provenance.geographicCrossCheck||null,sourceSha256,createdBy||null,timestamp);
       const insert = this.database.prepare(`INSERT INTO gcp_points(id,set_id,external_id,label,latitude,longitude,elevation_m,
-        description,created_at,updated_at,easting,northing,ellipsoidal_height_m) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+        description,created_at,updated_at,easting,northing,ellipsoidal_height_m,role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       for (const point of points)
         insert.run(pointId(id, point.externalId), id, point.externalId, point.label, point.latitude, point.longitude,
-          point.elevationM, point.description, timestamp, timestamp, point.easting ?? null, point.northing ?? null, point.ellipsoidalHeightM ?? null);
+          point.elevationM, point.description, timestamp, timestamp, point.easting ?? null, point.northing ?? null, point.ellipsoidalHeightM ?? null, point.role || 'control');
       return this.getSet(id, true);
     });
   }
@@ -132,13 +133,15 @@ class GcpRepository {
       longitude: patch.longitude === undefined ? current.longitude : patch.longitude,
       elevationM: patch.elevationM === undefined ? current.elevationM : patch.elevationM,
       description: patch.description === undefined ? current.description : bounded(patch.description, 2000) || null,
+      role: patch.role === undefined ? current.role : patch.role,
     };
     if (!next.label || !finite(next.latitude) || next.latitude < -90 || next.latitude > 90 ||
       !finite(next.longitude) || next.longitude < -180 || next.longitude > 180 ||
-      !finite(next.elevationM) || next.elevationM < -12000 || next.elevationM > 100000)
+      !finite(next.elevationM) || next.elevationM < -12000 || next.elevationM > 100000 ||
+      !['control', 'checkpoint'].includes(next.role))
       throw Object.assign(new Error('invalid GCP point'), { code: 'invalid_gcp_point' });
-    this.database.prepare(`UPDATE gcp_points SET label=?,latitude=?,longitude=?,elevation_m=?,description=?,updated_at=? WHERE id=?`)
-      .run(next.label, next.latitude, next.longitude, next.elevationM, next.description, now(), id);
+    this.database.prepare(`UPDATE gcp_points SET label=?,latitude=?,longitude=?,elevation_m=?,description=?,role=?,updated_at=? WHERE id=?`)
+      .run(next.label, next.latitude, next.longitude, next.elevationM, next.description, next.role, now(), id);
     return this.getPoint(id);
   }
 

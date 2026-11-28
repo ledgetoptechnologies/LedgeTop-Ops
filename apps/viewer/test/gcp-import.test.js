@@ -14,7 +14,7 @@ test('generic CSV GCP interchange normalizes EPSG:4326 coordinates and metric el
   assert.match(parsed.sourceSha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(parsed.points, [{
     externalId: 'GCP-01', label: 'North, target', latitude: 44.5001,
-    longitude: -88.1002, elevationM: 243.84, description: 'painted nail',
+    longitude: -88.1002, elevationM: 243.84, description: 'painted nail', role: 'control',
   }]);
 });
 

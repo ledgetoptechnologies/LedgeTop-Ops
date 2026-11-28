@@ -704,19 +704,44 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   createAttempt(input) {
     return this.transaction(()=>{ const task=this.getTask(input.taskId); if(!task||task.status==='archived') throw new Error('task is not processable'); const provider=input.providerId&&this.getProvider(input.providerId);if(!provider||!provider.enabled)throw Object.assign(new Error('an enabled processing provider is required'),{code:'provider_unavailable'});const datasetId=input.datasetId||task.datasetId,dataset=this.getDataset(datasetId),project=this.getProject(task.projectId);if(!dataset||dataset.status!=='finalized'||dataset.projectId!==task.projectId||!project||project.status!=='active')throw new Error('dataset and project must be active and finalized');const active=task.activeAttemptId&&this.getAttempt(task.activeAttemptId);if(active&&!['failed','cancelled','published'].includes(active.status))throw Object.assign(new Error('task already has an active attempt'),{code:'attempt_in_progress'});
       const n=this.database.prepare('SELECT COALESCE(MAX(attempt_number),0)+1 AS n FROM processing_attempts WHERE task_id=?').get(task.id).n;
-      const id=crypto.randomUUID(),t=now(); this.database.prepare(`INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,provider_id,provider_task_id,preset_id,options_json,capability_fingerprint,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)`).run(id,task.id,dataset.id,n,input.providerId,input.providerTaskId||crypto.randomUUID(),input.presetId||null,JSON.stringify(input.options||{}),input.capabilityFingerprint||null,input.createdBy||null,t,t);
       const markCount=Number(this.database.prepare('SELECT COUNT(*) count FROM gcp_image_correspondences WHERE task_id=?').get(task.id).count);
       if(markCount>100000)throw Object.assign(new Error('task has too many GCP image correspondences'),{code:'too_many_gcp_correspondences'});
-      const marks=this.database.prepare(`SELECT points.longitude,points.latitude,points.elevation_m elevationM,
+      // Before schema 93 (older fixtures and upgrade rehearsals) every point is a control;
+      // before schema 19 there is no import provenance or ellipsoidal height.
+      const roleColumn=this.database.prepare('PRAGMA table_info(gcp_points)').all().some(column=>column.name==='role')?'points.role':"'control'";
+      const hasProvenance=Boolean(this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gcp_import_provenance'").get());
+      const marks=this.database.prepare(`SELECT points.id pointId,points.external_id externalId,points.label,${roleColumn} role,
+        points.longitude,points.latitude,points.elevation_m elevationM,${hasProvenance?'points.ellipsoidal_height_m':'NULL'} ellipsoidalHeightM,
+        ${hasProvenance?'provenance.vertical_datum':'NULL'} verticalDatum,
         marks.pixel_x pixelX,marks.pixel_y pixelY,files.relative_path relativePath
         FROM gcp_image_correspondences marks
         JOIN gcp_points points ON points.id=marks.gcp_point_id
+        ${hasProvenance?'LEFT JOIN gcp_import_provenance provenance ON provenance.set_id=points.set_id':''}
         JOIN dataset_files files ON files.id=marks.dataset_file_id
         WHERE marks.task_id=? ORDER BY points.external_id,files.relative_path,marks.id`).all(task.id);
-      const gcpList=odmGcpList(marks);
+      // Controls go to ODM; checkpoints stay out of the solve and are frozen for the accuracy report.
+      const controls=marks.filter(mark=>mark.role!=='checkpoint'),checkpointMarks=marks.filter(mark=>mark.role==='checkpoint');
+      const gcpList=odmGcpList(controls);
       if(gcpList&&Buffer.byteLength(gcpList)>16*1024*1024)throw Object.assign(new Error('generated ODM GCP input is too large'),{code:'gcp_snapshot_too_large'});
+      // ODM georeferences from EXIF and ignores gcp_list.txt when use-exif is on (several presets set it).
+      const options={...(input.options||{}),...(gcpList?{'use-exif':false}:{})};
+      const id=crypto.randomUUID(),t=now(); this.database.prepare(`INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,provider_id,provider_task_id,preset_id,options_json,capability_fingerprint,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)`).run(id,task.id,dataset.id,n,input.providerId,input.providerTaskId||crypto.randomUUID(),input.presetId||null,JSON.stringify(options),input.capabilityFingerprint||null,input.createdBy||null,t,t);
       if(gcpList)this.database.prepare(`INSERT INTO processing_attempt_gcp_snapshots(attempt_id,sha256,content_text,correspondence_count,created_at)
-        VALUES (?,?,?,?,?)`).run(id,crypto.createHash('sha256').update(gcpList).digest('hex'),gcpList,marks.length,t);
+        VALUES (?,?,?,?,?)`).run(id,crypto.createHash('sha256').update(gcpList).digest('hex'),gcpList,controls.length,t);
+      if(checkpointMarks.length){
+        const points=new Map();
+        for(const mark of checkpointMarks){
+          if(!points.has(mark.pointId))points.set(mark.pointId,{pointId:mark.pointId,externalId:mark.externalId,label:mark.label,latitude:mark.latitude,longitude:mark.longitude,
+            elevationM:mark.elevationM,ellipsoidalHeightM:mark.ellipsoidalHeightM??null,verticalDatum:mark.verticalDatum||null,marks:[]});
+          points.get(mark.pointId).marks.push({image:path.basename(String(mark.relativePath)),pixelX:mark.pixelX,pixelY:mark.pixelY});
+        }
+        const datums=new Set([...points.values()].map(point=>point.verticalDatum).filter(Boolean));
+        const content=JSON.stringify({schemaVersion:1,attemptId:id,heights:'elevationM is the imported Elevation in metres (NAVD88 for NAVD88 projects)',
+          verticalDatum:datums.size===1?[...datums][0]:null,points:[...points.values()]});
+        if(Buffer.byteLength(content)>16*1024*1024)throw Object.assign(new Error('checkpoint snapshot is too large'),{code:'gcp_snapshot_too_large'});
+        this.database.prepare(`INSERT INTO processing_attempt_gcp_checkpoints(attempt_id,sha256,content_json,checkpoint_count,created_at) VALUES (?,?,?,?,?)`)
+          .run(id,crypto.createHash('sha256').update(content).digest('hex'),content,points.size,t);
+      }
       this.captureNewAttemptProvenance(id,provider,t);
       this.database.prepare(`INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,created_at,updated_at) VALUES (?,?,'submit','pending',?,?,?)`).run(crypto.randomUUID(),id,t,t,t);
       this.database.prepare("UPDATE processing_tasks SET active_attempt_id=?,status='queued',updated_at=? WHERE id=?").run(id,t,task.id);
@@ -811,6 +836,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const evidence=providerResultEvidence(attempt,status,now());if(!evidence)return false;
     this.database.prepare('UPDATE processing_attempt_provenance SET provider_result_json=? WHERE attempt_id=? AND provider_result_json IS NULL').run(JSON.stringify(evidence),attempt.id);return true;
   });}
+  getAttemptGcpCheckpoints(id){const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_checkpoints WHERE attempt_id=?').get(id);if(!row)return null;if(crypto.createHash('sha256').update(row.content_json).digest('hex')!==row.sha256)throw Object.assign(new Error('attempt checkpoint snapshot failed its integrity check'),{code:'gcp_checkpoints_changed'});return{attemptId:row.attempt_id,sha256:row.sha256,content:JSON.parse(row.content_json),checkpointCount:Number(row.checkpoint_count),createdAt:row.created_at};}
   getAttemptGcpSnapshot(id){const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(id);return row?{attemptId:row.attempt_id,sha256:row.sha256,content:row.content_text,correspondenceCount:Number(row.correspondence_count),createdAt:row.created_at}:null;}
   provenanceJob(jobId,owner,type){return this.database.prepare(`SELECT j.* FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id WHERE j.id=? AND j.job_type=? AND j.status='leased' AND j.lease_owner=? AND j.lease_expires_at>? AND a.status NOT IN ('cancelled','failed','published')`).get(jobId,type,owner,now());}
   getAttemptTransferProvenance(id){const row=this.database.prepare('SELECT initialization_json,archive_json FROM processing_attempt_transfer_provenance WHERE attempt_id=?').get(id);return row?{initialization:json(row.initialization_json,null),archive:json(row.archive_json,null)}:null;}

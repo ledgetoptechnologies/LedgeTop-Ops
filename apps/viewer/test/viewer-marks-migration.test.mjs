@@ -289,12 +289,12 @@ test('schema 90 to 92 preserves populated Marks data, sharing behavior and the l
   assert.equal(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v, 90);
 
   applyMigrations(db);
-  assert.equal(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v, 92,
-    'schema 90 must advance to 92 through the additive first-share migrations');
+  assert.equal(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v, 93,
+    'schema 90 must advance to 93 through the additive first-share and GCP role migrations');
   const after = snapshot(db);
   assert.deepEqual(after.rows.schema_migrations.filter(row => row.version <= 90), before.rows.schema_migrations);
   assert.deepEqual(after.rows.schema_migrations.filter(row => row.version > 90).map(({ version, name }) => [version, name]),
-    [[91, 'task_authorization_generations'], [92, 'restricted_viewer_session_lifecycle']]);
+    [[91, 'task_authorization_generations'], [92, 'restricted_viewer_session_lifecycle'], [93, 'gcp_point_roles']]);
   for (const name of markTables) {
     assert.deepEqual(after.rows[name], before.rows[name], `${name}: every stored value survives`);
     assert.deepEqual(after.objects.filter(row => row.name === name), before.objects.filter(row => row.name === name));

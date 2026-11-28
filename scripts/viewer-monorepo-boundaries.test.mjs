@@ -33,6 +33,8 @@ const reviewedFolderMigration = { version: 48, name: 'project_organizational_fol
 const reviewedAuthorizationGenerationMigration = { version: 91, name: 'task_authorization_generations' };
 const reviewedRestrictedSessionLifecycleMigration = { version: 92, name: 'restricted_viewer_session_lifecycle' };
 const reviewedRestrictedSessionLifecycleSqlSha256 = '9f562ccdcf1923d52b3298527f8a25d64033cea9b1b8e507c2575defd697d243';
+const reviewedGcpRolesMigration = { version: 93, name: 'gcp_point_roles' };
+const reviewedGcpRolesSqlSha256 = '35741fb2eb5a77d0bb24c1f2a4c42c3ee535a0a079b66f37e4a229ac49be8adc';
 const reviewedTimerMigration = { version: 83, name: 'provider_engine_processing_elapsed' };
 const reviewedTimerSqlSha256 = 'c8b8205fbcf5b066030223c1176527f347ffc1bf4861b6ccf32e5845000f3214';
 // Schema 84 is below the pinned maximum (it was reserved before 85 and 86 shipped), so
@@ -40,7 +42,7 @@ const reviewedTimerSqlSha256 = 'c8b8205fbcf5b066030223c1176527f347ffc1bf4861b6cc
 // candidate image is checked for it by name.
 const reviewedMarksMigration = { version: 84, name: 'viewer_coordinate_marks' };
 const reviewedMarksSqlSha256 = 'a52d3f8dca73392f6032d080364e50e2eb1253fb62083f5f7f57943c848d69ab';
-const attestedMigrations = [reviewedMarksMigration, { version: 90, name: 'viewer_mark_sharing' }, reviewedAuthorizationGenerationMigration, reviewedRestrictedSessionLifecycleMigration];
+const attestedMigrations = [reviewedMarksMigration, { version: 90, name: 'viewer_mark_sharing' }, reviewedAuthorizationGenerationMigration, reviewedRestrictedSessionLifecycleMigration, reviewedGcpRolesMigration];
 const imageSchemaQuery = '            try{process.stdout.write(String(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version));}\n';
 const reviewedImageSchemaQuery = `            try {
               const readMigration=db.prepare("SELECT name FROM schema_migrations WHERE version=?");
@@ -55,7 +57,7 @@ const reviewedTrashPurgeMigration = { version: 86, name: 'trash_container_purge_
 const reviewedTrashPurgeSqlSha256 = '52576879d42af94bde93b510d936442a8d6e407e559068bbb1874442b2d61f8b';
 const reviewedMarkSharingMigration = { version: 90, name: 'viewer_mark_sharing' };
 const reviewedMarkSharingSqlSha256 = 'cb17340d0a549ba04ece26cfb31aec4253d02a6cf3ad771eb1be114f656c15dc';
-const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "92"';
+const reviewedCandidateSchemaPin = 'EXPECTED_SCHEMA_VERSION: "93"';
 const reviewedConverter = {
   patchSha256: 'fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c',
   lockSetSha256: 'b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98',
@@ -76,8 +78,9 @@ const reviewedConverter = {
 // Schema 91 adds the monotonic per-task
 // authorization generation that fences restricted client credentials and requires
 // 48 (its earlier reservation, 52, was never shipped). Schema 92 guards redemption
-// and renewal of restricted Viewer credentials. The candidate image verification
-// and attestation pins advance from the upstream 38 to 92; the other runtime,
+// and renewal of restricted Viewer credentials. Schema 93 adds the ground control
+// point role (control or checkpoint) and immutable per-attempt checkpoint lists.
+// The candidate image verification and attestation pins advance from the upstream 38 to 93; the other runtime,
 // numerical, promotion and digest
 // guards remain fully compared.
 // The reviewed Obj2Tiles build updates its bounded-concurrency patch and adds
@@ -355,10 +358,10 @@ test('No script writes the Viewer image to a registry', () => {
   assert.deepEqual(writers.filter(file => !file.endsWith('.test.mjs')), []);
 });
 
-test('Viewer publication preserves the reviewed migrations through schema 92', () => {
+test('Viewer publication preserves the reviewed migrations through schema 93', () => {
   const migrations = MIGRATIONS.filter(({ version }) => version >= reviewedAckMigrations[0].version);
   assert.deepEqual(migrations.map(({ version, name }) => ({ version, name })),
-    [...reviewedAckMigrations, reviewedFolderMigration, reviewedTimerMigration, reviewedMarksMigration, reviewedProviderRemovalMigration, reviewedTrashPurgeMigration, reviewedMarkSharingMigration, reviewedAuthorizationGenerationMigration, reviewedRestrictedSessionLifecycleMigration], 'another schema advance requires a new explicit gate review');
+    [...reviewedAckMigrations, reviewedFolderMigration, reviewedTimerMigration, reviewedMarksMigration, reviewedProviderRemovalMigration, reviewedTrashPurgeMigration, reviewedMarkSharingMigration, reviewedAuthorizationGenerationMigration, reviewedRestrictedSessionLifecycleMigration, reviewedGcpRolesMigration], 'another schema advance requires a new explicit gate review');
   const timer = migrations.find(({ version }) => version === reviewedTimerMigration.version);
   const sqlSha256 = createHash('sha256').update(timer.sql.replace(/\r\n/g, '\n')).digest('hex');
   assert.equal(sqlSha256, reviewedTimerSqlSha256, 'migration 83 SQL must match the reviewed timer schema');
@@ -372,6 +375,8 @@ test('Viewer publication preserves the reviewed migrations through schema 92', (
   assert.equal(createHash('sha256').update(sharing.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedMarkSharingSqlSha256, 'migration 90 SQL must match the reviewed mark-sharing schema');
   const restrictedSessions = migrations.find(({ version }) => version === reviewedRestrictedSessionLifecycleMigration.version);
   assert.equal(createHash('sha256').update(restrictedSessions.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedRestrictedSessionLifecycleSqlSha256, 'migration 92 SQL must match the reviewed lifecycle schema');
+  const gcpRoles = migrations.find(({ version }) => version === reviewedGcpRolesMigration.version);
+  assert.equal(createHash('sha256').update(gcpRoles.sql.replace(/\r\n/g, '\n')).digest('hex'), reviewedGcpRolesSqlSha256, 'migration 93 SQL must match the reviewed GCP roles schema');
 });
 
 test('The candidate image check refuses missing or renamed Marks and authorization migrations', () => {

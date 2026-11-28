@@ -8,6 +8,18 @@ function scalar(value, field) {
   return Number.isInteger(number) ? String(number) : number.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
 }
 
+// ODM splits lines on whitespace and keeps everything after the image name as
+// the point's name, so a label becomes one whitespace-free token.
+function labelToken(value) {
+  return String(value ?? '').normalize('NFKC').replace(/[\u0000-\u001f\u007f]/g, '').trim().replace(/\s+/g, '_').slice(0, 160);
+}
+
+// Header EPSG:4326: x = longitude, y = latitude (the Emlid file's geographic
+// coordinates). z = the point's Elevation in metres, i.e. NAVD88 orthometric
+// height for an Emlid NAVD88 project. ODM reprojects x/y to a WGS84 UTM zone and
+// passes z through untouched (it has no vertical datum handling), so the DSM,
+// point cloud and model come out in the same NAVD88 heights the Viewer shows.
+// Rows are controls only; checkpoints never reach the solve.
 function odmGcpList(rows) {
   if (!Array.isArray(rows) || !rows.length) return null;
   const lines = ['EPSG:4326'];
@@ -20,9 +32,10 @@ function odmGcpList(rows) {
     lines.push([
       scalar(row.longitude, 'longitude'), scalar(row.latitude, 'latitude'), scalar(row.elevationM, 'elevation'),
       scalar(row.pixelX, 'pixel X'), scalar(row.pixelY, 'pixel Y'), imageName,
+      ...(labelToken(row.label) ? [labelToken(row.label)] : []),
     ].join(' '));
   }
   return `${lines.join('\n')}\n`;
 }
 
-module.exports = { odmGcpList };
+module.exports = { odmGcpList, labelToken };

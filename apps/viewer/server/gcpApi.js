@@ -90,7 +90,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   });
 
   router.patch('/api/v1/gcp-points/:id', authorize('viewer.gcp.write'), mutate, (req, res) => {
-    if (!onlyKeys(req.body, ['label', 'latitude', 'longitude', 'elevationM', 'description']))
+    if (!onlyKeys(req.body, ['label', 'latitude', 'longitude', 'elevationM', 'description', 'role']))
       return error(res, 400, 'invalid_gcp_point');
     try {
       const point = gcp.updatePoint(req.params.id, req.body);

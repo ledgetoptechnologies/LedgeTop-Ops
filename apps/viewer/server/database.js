@@ -2342,6 +2342,30 @@ const MIGRATIONS = [
       && database.prepare(`SELECT count(*) AS count FROM sqlite_master WHERE type='trigger' AND name IN
         ('session_grants_require_restricted_redemption','viewer_sessions_deny_restricted_renewal')`).get().count === 2;
   }},
+  // A ground control point is either a control (used in the solve) or a checkpoint
+  // (kept out of gcp_list.txt and frozen per attempt for the accuracy report).
+  {version:93,name:'gcp_point_roles',sql:`
+    ALTER TABLE gcp_points ADD COLUMN role TEXT NOT NULL DEFAULT 'control' CHECK(role IN ('control','checkpoint'));
+    CREATE TABLE processing_attempt_gcp_checkpoints (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id) ON DELETE CASCADE,
+      sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+      content_json TEXT NOT NULL,
+      checkpoint_count INTEGER NOT NULL CHECK(checkpoint_count > 0),
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER processing_attempt_gcp_checkpoints_no_update
+    BEFORE UPDATE ON processing_attempt_gcp_checkpoints
+    BEGIN SELECT RAISE(ABORT,'gcp_checkpoints_immutable'); END;
+    CREATE TRIGGER processing_attempt_gcp_checkpoints_no_delete
+    BEFORE DELETE ON processing_attempt_gcp_checkpoints
+    WHEN EXISTS (SELECT 1 FROM processing_attempts WHERE id=OLD.attempt_id)
+    BEGIN SELECT RAISE(ABORT,'gcp_checkpoints_immutable'); END;
+  `,verify(database){
+    const role=database.prepare('PRAGMA table_info(gcp_points)').all().find(column=>column.name==='role');
+    return Boolean(role&&role.notnull===1&&role.dflt_value==="'control'")
+      && database.prepare(`SELECT count(*) AS count FROM sqlite_master WHERE (type='table' AND name='processing_attempt_gcp_checkpoints')
+        OR (type='trigger' AND name IN ('processing_attempt_gcp_checkpoints_no_update','processing_attempt_gcp_checkpoints_no_delete'))`).get().count === 3;
+  }},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;

@@ -34,7 +34,7 @@ test('schema 90 to 92 retains every session_grants field and defaults restricted
   const ledger = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all();
   assert.equal(db.prepare('PRAGMA table_info(session_grants)').all().some(row => row.name === 'restricted_redemption'), false);
   applyMigrations(db);
-  assert.equal(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v, 92);
+  assert.equal(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v, 93);
   assert.deepEqual(db.prepare('SELECT * FROM schema_migrations WHERE version<=90 ORDER BY version').all(), ledger);
   const after = db.prepare('SELECT * FROM session_grants ORDER BY id').all();
   assert.deepEqual(after.map(({ restricted_redemption, ...row }) => {

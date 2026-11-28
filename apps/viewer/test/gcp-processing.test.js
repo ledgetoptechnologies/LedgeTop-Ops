@@ -46,6 +46,6 @@ test('submit uploads the immutable attempt GCP snapshot as a private auxiliary g
   assert.equal(uploads[0][0].relativePath,'photo.jpg');
   assert.equal(uploads[1][0].relativePath,'gcp_list.txt');
   assert.ok(Buffer.isBuffer(uploads[1][0].buffer));
-  assert.equal(uploads[1][0].buffer.toString('utf8'),'EPSG:4326\n-88.1 44.5 250 25 75 photo.jpg\n');
+  assert.equal(uploads[1][0].buffer.toString('utf8'),'EPSG:4326\n-88.1 44.5 250 25 75 photo.jpg A\n');
   assert.equal(c.processing.getAttemptSubmission(attempt.id).submissionPhase,'committed');
 });
