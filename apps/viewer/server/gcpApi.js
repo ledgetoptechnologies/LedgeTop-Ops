@@ -182,6 +182,30 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     }
   });
 
+  // Checkpoints frozen for an attempt and, once its DSM exists, their vertical residuals.
+  router.get('/api/v1/attempts/:id/gcp-checkpoints', authorize('viewer.gcp.read'), async (req, res, next) => {
+    const attempt = processing.getAttempt(req.params.id);
+    if (!attempt) return error(res, 404, 'attempt_not_found');
+    try {
+      const frozen = processing.getAttemptGcpCheckpoints(attempt.id);
+      if (!frozen) return res.json({ attemptId: attempt.id, checkpoints: [], reportStatus: 'no_checkpoints', report: null });
+      const checkpoints = frozen.content.points;
+      const dsm = attempt.resultModelVersionId && processing.database.prepare("SELECT root_key,relative_path FROM model_assets WHERE version_id=? AND kind='dsm'").get(attempt.resultModelVersionId);
+      if (!dsm) return res.json({ attemptId: attempt.id, checkpoints, reportStatus: attempt.resultModelVersionId ? 'no_dsm' : 'awaiting_output', report: null });
+      let dsmPath;
+      try { dsmPath = storage.resolve(dsm.root_key, dsm.relative_path, { mustExist: true }); }
+      catch { return res.json({ attemptId: attempt.id, checkpoints, reportStatus: 'dsm_unavailable', report: null }); }
+      const { checkpointReport } = await import('./gcpCheckpointReport.mjs');
+      try {
+        const report = await checkpointReport({ checkpoints, dsmPath });
+        return res.json({ attemptId: attempt.id, checkpoints, reportStatus: 'ready', report });
+      } catch (caught) {
+        if (String(caught?.code || '').startsWith('checkpoint_report_')) return res.json({ attemptId: attempt.id, checkpoints, reportStatus: caught.code, report: null });
+        throw caught;
+      }
+    } catch (caught) { return next(caught); }
+  });
+
   router.get('/api/v1/tasks/:taskId/gcp-correspondences', authorize('viewer.gcp.read'), (req, res) => {
     const task = gcp.task(req.params.taskId);
     if (!task) return error(res, 404, 'task_not_found');
