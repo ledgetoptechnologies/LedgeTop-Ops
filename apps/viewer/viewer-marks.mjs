@@ -71,6 +71,15 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   // Unsaved work, kept for this person and model. Nothing is kept or cleared until the stored draft was looked at.
   const recovery = createMarkDraftRecovery({ storage: () => window.sessionStorage });
   let draftChecked = false, draftBaseline = null;
+  // The draft whose Save is running: Save shows Saving… and a second press waits on the first.
+  let saving = null, savedTimer = null;
+  const idleWaiters = new Set();
+  // Resolves when no other change is running, or false after a bound.
+  const whenIdle = (ms = 35_000) => store.state.busy ? new Promise(resolve => {
+    const done = value => { idleWaiters.delete(done); clearTimeout(timer); resolve(value); };
+    const timer = setTimeout(() => done(false), ms);
+    idleWaiters.add(done);
+  }) : Promise.resolve(true);
   // A saved mark moves only while this is on, and only on Save.
   let moving = false;
   let deleteForGood = null;
@@ -885,7 +894,8 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const hideMove = !showMove;
     if (moveRow.hidden !== hideMove) syncMapKeys();
     moveRow.hidden = moveCancel.disabled = hideMove;
-    moveSave.disabled = !showMove || state.busy;
+    moveSave.disabled = !showMove || state.busy || (Boolean(draft) && saving === draft);
+    moveSave.textContent = showMove && draft && saving === draft ? 'Saving…' : 'Save';
     stripTitle.textContent = showMove ? `Move ${draft.name}` : placing ? `Add ${TYPE_LABEL[mode].toLowerCase()}` : '';
     const focusedChip = [...chips.children].find(chip => chip === document.activeElement)?.dataset.chip;
     chips.replaceChildren(...(placing ? placeChoices().map(choice => {
@@ -1028,6 +1038,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
 
   function render() {
+    if (!store.state.busy) for (const done of [...idleWaiters]) done(true);
     const { state } = store;
     const active = document.activeElement;
     const asked = questionStands();
@@ -1074,7 +1085,9 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
       card.setAttribute('aria-label', draft.id ? 'Edit ' + draft.name : 'New mark');
       editorTitle.textContent = (draft.id ? 'Edit ' : 'New ') + TYPE_LABEL[draft.geometry.type].toLowerCase();
       for (const control of [nameInput, categoryInput, noteInput, elevationInput, visibilitySelect, accountSelect, pointCoords, saveButton, ...picker.controls])
-        control.disabled = !editable || state.busy;
+        control.disabled = !editable || state.busy || saving === draft;
+      saveButton.textContent = saving === draft ? 'Saving…' : 'Save';
+      saveButton.setAttribute('aria-busy', String(saving === draft));
       picker.render(draft);
       renderSuggestions();
       pointCoordsField.hidden = draft.geometry.type !== 'Point';
@@ -1554,7 +1567,25 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
   }
   on(editor, 'submit', event => { event.preventDefault(); return saveDraft(); });
   async function saveDraft() {
-    if (!draft || !canWrite() || (moving && !canMoveDraft())) return;
+    if (!draft || saving === draft) return;
+    // Refused access already says why; otherwise say that nothing was saved.
+    if (!canWrite() || (moving && !canMoveDraft())) {
+      if (savedTimer) { clearTimeout(savedTimer); savedTimer = null; }
+      const lost = (store.state.blocked || !store.state.ready) && store.state.message;
+      message(lost || 'This mark can’t be saved here.');
+      return;
+    }
+    const open = draft;
+    saving = open;
+    if (savedTimer) { clearTimeout(savedTimer); savedTimer = null; }
+    render();
+    try { await saveOpenDraft(open); } finally { if (saving === open) saving = null; render(); }
+  }
+  // A change already running (a share, an undo) finishes first; this Save then goes out by itself.
+  async function saveOpenDraft(open) {
+    if (store.state.busy && !await whenIdle()) { message('Another change is still saving. Nothing was saved yet: try again.'); return; }
+    if (draft !== open) return;
+    if (!store.state.ready || store.state.blocked) { message(store.state.message || 'Marks aren’t loaded right now, so nothing was saved. Try again in a moment.'); return; }
     // Enter or Save can arrive without a change event: never save the coordinates
     // the field showed before. Invalid text keeps the editor open and writes nothing.
     if (!applyPointCoordinates()) return;
@@ -1566,7 +1597,7 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     // A category typed in full and saved without leaving the box still gives its look.
     const named = chosenCategory();
     if (named && draft.categoryId !== named.id) Object.assign(changes, categoryStyle(named));
-    const held = store.hold(), open = draft, starter = chosenStarter(), fresh = newCategoryName();
+    const held = store.hold(), starter = chosenStarter(), fresh = newCategoryName();
     if (starter) {
       const made = await store.addStarter(starter);
       if (!made || !held.live() || draft !== open || !canWrite()) return;
@@ -1593,12 +1624,15 @@ export function mountViewerMarks({ panel, overlay = panel, L, getMap, request = 
     const saved = current && revision ? await store.update(current, changes, { sending, revision }) : await store.create({ ...changes, id: open.id || open.newId }, { sending });
     if (!held.live()) return;
     if (!saved && !refused && ['mark_revision_conflict', 'mark_id_conflict'].includes(store.state.failure)) open.told = store.find(open.id || open.newId)?.revision ?? null;
-    if (!saved) return;
+    // Never quiet: a refusal without its own message still says nothing was saved.
+    if (!saved) { if (held.live() && !store.state.message) message('Could not save the change. Try again.'); return; }
     reveal(saved);
     // Cancelled, or something else opened meanwhile: the mark is saved, the rest is not this one's to change.
     if (draft !== open) { render(); return; }
     const kept = open.id === saved.id;
     closeCard();
+    message('Saved.');
+    savedTimer = setTimeout(() => { savedTimer = null; if (store.state.message === 'Saved.') message(''); }, 2_500);
     // An edited mark goes back to its card, a new one to its pin.
     if (kept) { selectedId = saved.id; render(); editButton.focus?.({ preventScroll: true }); } else layer.focusPin(saved.id);
   }
