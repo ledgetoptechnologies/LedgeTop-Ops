@@ -104,3 +104,39 @@ test('omitted GCP search settings use 50 feet and never silently expand for fewe
     const response=await fetch(`${route}&radiusM=${radius}`,{headers:auth});assert.equal(response.status,400);
   }
 });
+
+test('attempt checkpoint report waits for output, then compares the DSM with surveyed NAVD88 elevations',async(t)=>{
+  const {base,dataset,database,imagePath}=await fixture(t),processing=new ProcessingRepository(database),auth={authorization:'Bearer admin'};
+  const content='point_id,label,latitude,longitude,elevation_m,role\nA,A,44.5,-89.5,250,control\nCHK,CHK,44.50001,-89.50001,249.9,checkpoint\n';
+  const imported=await (await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers:{...auth,'content-type':'application/json','idempotency-key':'roles'},
+    body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content})})).json();
+  const task=processing.createTask({projectId:processing.getDataset(dataset.id).projectId,datasetId:dataset.id,displayName:'Model'});
+  const gcp=new (require('../server/gcpRepository').GcpRepository)(database);
+  for(const point of imported.points)gcp.createCorrespondence({taskId:task.id,pointId:point.id,imageFileId:'image-one',pixelX:1,pixelY:1});
+  const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
+  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),route=`${base}/api/v1/attempts/${attempt.id}/gcp-checkpoints`;
+  assert.equal((await fetch(route)).status,401);
+  const waiting=await (await fetch(route,{headers:auth})).json();
+  assert.equal(waiting.reportStatus,'awaiting_output');assert.equal(waiting.report,null);
+  assert.deepEqual(waiting.checkpoints.map(point=>point.externalId),['CHK']);
+  const at=new Date().toISOString(),dsmRelative=`${crypto.randomUUID()}/dsm.tif`;
+  database.prepare("INSERT INTO models(id,provider,provider_model_id,display_name,status,created_at,updated_at) VALUES ('m1','local','m1','Model','ready',?,?)").run(at,at);
+  database.prepare("INSERT INTO model_versions(id,model_id,provider_version_id,source_locator_json,status,created_at,updated_at) VALUES ('v1','m1','v1','{}','ready',?,?)").run(at,at);
+  database.prepare("INSERT INTO model_assets(id,version_id,kind,root_key,relative_path,format,created_at) VALUES ('a1','v1','dsm','datasets',?,'tif',?)").run(dsmRelative,at);
+  processing.setAttemptResult(attempt.id,'m1','v1');
+  // The fixture's storage resolves every path under <root>/datasets; the DSM file does not exist yet.
+  const dsmFile=path.join(path.dirname(path.dirname(imagePath)),...dsmRelative.split('/'));
+  const {writeArrayBuffer}=await import('geotiff'),{createUtmProjection}=await import('../utm-conversion.mjs');
+  const [e,n]=createUtmProjection({zoneLon0Deg:-87}).latLonToUtm(44.50001,-89.50001);
+  fs.mkdirSync(path.dirname(dsmFile),{recursive:true});
+  fs.writeFileSync(dsmFile,Buffer.from(writeArrayBuffer(new Float32Array(36).fill(250),{width:6,height:6,ModelPixelScale:[1,1,0],ModelTiepoint:[0,0,0,e-3,n+3,0],ProjectedCSTypeGeoKey:32616,GTModelTypeGeoKey:1,GTRasterTypeGeoKey:1})));
+  const ready=await (await fetch(route,{headers:auth})).json();
+  assert.equal(ready.reportStatus,'ready');
+  assert.equal(ready.report.points[0].externalId,'CHK');
+  assert.ok(Math.abs(ready.report.points[0].dzM-0.1)<1e-4,JSON.stringify(ready.report.points[0]));
+  assert.ok(Math.abs(ready.report.summary.rmseZM-0.1)<1e-4);
+  const none=processing.createTask({projectId:processing.getDataset(dataset.id).projectId,datasetId:dataset.id,displayName:'No marks'});
+  const plain=processing.createAttempt({taskId:none.id,providerId:provider.id,options:{}});
+  assert.equal((await (await fetch(`${base}/api/v1/attempts/${plain.id}/gcp-checkpoints`,{headers:auth})).json()).reportStatus,'no_checkpoints');
+  assert.equal((await fetch(`${base}/api/v1/attempts/missing/gcp-checkpoints`,{headers:auth})).status,404);
+});

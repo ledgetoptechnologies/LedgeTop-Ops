@@ -17,7 +17,7 @@ function gcpUiFixture() {
     field: (label, name, attrs) => `<label>${label}<input name="${name}" ${attrs}></label>`,
     button: () => '', badge: () => '', toast() { context.toasts++; }, toasts: 0, refreshes: 0,
     async refreshGcpWorkspace() { context.refreshes++; } };
-  for (const name of ['gcpWorkspace', 'gcpPanel', 'refreshGcpCandidates']) {
+  for (const name of ['gcpWorkspace', 'gcpPanel', 'refreshGcpCandidates', 'gcpCheckpointSection', 'gcpHeight', 'gcpPointOptionName', 'gcpPointName']) {
     const declaration = source.match(new RegExp(`^(?:async )?function ${name}\\([^\\n]+$`, 'm'))?.[0];
     assert.ok(declaration, name);
     vm.runInNewContext(declaration, context);
@@ -111,4 +111,31 @@ test('staff set each point as control or checkpoint, and checkpoints are labelle
   assert.match(source, /\/api\/v1\/gcp-points\/\$\{encodeURIComponent\(pointId\)\}`,\{method:'PATCH',body:\{role\}\}/);
   assert.match(source, /querySelectorAll\('\.gcp-role-select'\)\.forEach\(select=>select\.onchange=\(\)=>changeGcpRole\(/);
   assert.match(source, /point\?\.role==='checkpoint'\?' · checkpoint':''/);
+});
+
+test('the GCP panel shows checkpoint accuracy for the task latest run', () => {
+  assert.match(source, /\/api\/v1\/attempts\/\$\{encodeURIComponent\(latestAttemptId\)\}\/gcp-checkpoints/);
+  assert.match(source, /<h4>Checkpoint accuracy<\/h4>/);
+  assert.match(source, /<th>Checkpoint<\/th><th>Surveyed<\/th><th>DSM<\/th><th>DSM − surveyed<\/th>/);
+  assert.match(source, /RMSE \$\{esc\(gcpHeight\(summary\.rmseZM,units\)\)\}/);
+  assert.match(source, /vertical only/);
+  assert.match(source, /awaiting_output:'Waiting for this run to finish\.'/);
+  assert.ok(css.includes('.gcp-checkpoint-table'));
+});
+
+test('checkpoint accuracy renders residuals in feet, statuses for unmeasured points, and nothing without checkpoints', () => {
+  const context = gcpUiFixture();
+  assert.equal(context.gcpCheckpointSection({ reportStatus: 'no_checkpoints', checkpoints: [] }, 'imperial'), '');
+  const ready = context.gcpCheckpointSection({ reportStatus: 'ready', checkpoints: [], report: {
+    summary: { rmseZM: 0.03048, meanZM: -0.01524, measuredCount: 1, checkpointCount: 2 },
+    points: [{ externalId: 'CHK1', label: 'CHK1', elevationM: 100, dsmZM: 100.03048, dzM: 0.03048, status: 'measured' },
+      { externalId: 'CHK2', label: 'CHK2', elevationM: 101, dsmZM: null, dzM: null, status: 'outside_dsm' }] } }, 'imperial');
+  assert.match(ready, /RMSE 0\.10 ft/);
+  assert.match(ready, /mean -0\.05 ft/);
+  assert.match(ready, /<td>CHK1<\/td><td>328\.08 ft<\/td><td>328\.18 ft<\/td><td>\+0\.10 ft<\/td>/);
+  assert.match(ready, /<td>CHK2<\/td>.*Outside DSM/);
+  const waiting = context.gcpCheckpointSection({ reportStatus: 'awaiting_output', report: null,
+    checkpoints: [{ externalId: 'CHK1', label: 'CHK1', elevationM: 100 }] }, 'metric');
+  assert.match(waiting, /Waiting for this run to finish\./);
+  assert.match(waiting, /<td>CHK1<\/td><td>100\.000 m<\/td><td>—<\/td><td>—<\/td>/);
 });

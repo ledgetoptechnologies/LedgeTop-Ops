@@ -27,6 +27,10 @@ When an attempt is created:
 - Checkpoint marks are frozen with their surveyed position, Elevation and ellipsoidal height in the immutable `processing_attempt_gcp_checkpoints` row for the accuracy report.
 - If the attempt has a `gcp_list.txt`, its options get `use-exif: false`. ODM georeferences from photo GPS and ignores the GCP file when `use-exif` is on, and the Large 3D and High-Res presets set it.
 
+## Checkpoint accuracy
+
+`GET /api/v1/attempts/:id/gcp-checkpoints` (`viewer.gcp.read`) returns the attempt's frozen checkpoints and, once the attempt has a DSM, the vertical check: the DSM height at each checkpoint's surveyed position (bilinear between pixel centres) minus its surveyed Elevation, with mean, RMSE and largest residual. Both sides are in the same NAVD88 frame because `gcp_list.txt` gives ODM that Elevation. Points outside the DSM or on nodata are listed but not scored. The DSM must be in a WGS84 UTM projection, as ODM writes it. Horizontal error is not measured. The task's GCP panel shows this for its latest run.
+
 ## gcp_list.txt and heights
 
 ```text
@@ -77,6 +81,7 @@ Raw image bytes flow directly from the Viewer origin to the authenticated Ops br
 | `PATCH/DELETE /api/v1/gcp-points/:id` | `viewer.gcp.write` | Correct or remove a point |
 | `GET /api/v1/datasets/:datasetId/gcp-images` | `viewer.gcp.read` | Read indexed image positions/ranking |
 | `GET /api/v1/datasets/:datasetId/gcp-images/:fileId/content` | `viewer.gcp.read` | Stream one private source image |
+| `GET /api/v1/attempts/:id/gcp-checkpoints` | `viewer.gcp.read` | Frozen checkpoints and their vertical residuals |
 | `GET/POST /api/v1/tasks/:taskId/gcp-correspondences` | `viewer.gcp.read` / `viewer.gcp.write` | List or save task marks |
 | `PATCH/DELETE /api/v1/gcp-correspondences/:id` | `viewer.gcp.write` | Correct or remove a mark |
 
