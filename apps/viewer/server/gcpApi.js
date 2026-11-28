@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { GcpRepository } = require('./gcpRepository');
-const { parseGcpInterchange, confirmationToken } = require('./gcpImport');
+const { parseGcpInterchange, confirmationToken, detectGcpFormat, MAX_SOURCE_BYTES } = require('./gcpImport');
 const { hashFile } = require('./storageManager');
 const { DEFAULT_GCP_SEARCH_MODE, DEFAULT_GCP_RADIUS_M, MAX_GCP_RADIUS_M } = require('./gcpSearchPolicy.mjs');
 
@@ -23,6 +23,70 @@ function fail(error, res, respond) {
 
 function mountGcpRoutes(router, { repository, processing, storage, authorize, mutate, error }) {
   const gcp = new GcpRepository(processing.database);
+
+  // CSV files uploaded with a dataset that may hold survey points (an Emlid export, for example).
+  const csvFiles = (datasetId) => processing.database.prepare(`SELECT files.id,files.relative_path,files.byte_size,files.sha256,
+      datasets.root_key,datasets.relative_path dataset_relative_path FROM dataset_files files JOIN datasets ON datasets.id=files.dataset_id
+      WHERE files.dataset_id=? AND lower(files.relative_path) LIKE '%.csv' ORDER BY files.relative_path,files.id LIMIT 50`).all(datasetId);
+  const readCsv = async (file) => {
+    if (Number(file.byte_size) > MAX_SOURCE_BYTES) throw Object.assign(new Error('GCP input is too large'), { code: 'gcp_input_too_large' });
+    const absolute = storage.resolve(file.root_key, path.posix.join(file.dataset_relative_path, file.relative_path), { mustExist: true });
+    const bytes = await fs.promises.readFile(absolute);
+    if (bytes.length !== Number(file.byte_size) || require('node:crypto').createHash('sha256').update(bytes).digest('hex') !== file.sha256)
+      throw Object.assign(new Error('the file changed after upload'), { code: 'gcp_source_changed' });
+    return bytes.toString('utf8');
+  };
+  const importedSetId = (datasetId, fileId) => processing.database.prepare('SELECT id FROM gcp_sets WHERE dataset_id=? AND source_file_id=? ORDER BY created_at LIMIT 1').get(datasetId, fileId)?.id || null;
+
+  router.get('/api/v1/datasets/:datasetId/gcp-sources', authorize('viewer.gcp.read'), async (req, res, next) => {
+    if (!gcp.dataset(req.params.datasetId)) return error(res, 404, 'dataset_not_found');
+    try {
+      const sources = [];
+      for (const file of csvFiles(req.params.datasetId)) {
+        const source = { fileId: file.id, name: file.relative_path, format: null, pointCount: 0, checkpointCount: 0, coordinateSystem: null,
+          linearUnit: null, importable: false, error: null, importedSetId: importedSetId(req.params.datasetId, file.id) };
+        try {
+          const content = await readCsv(file), format = detectGcpFormat(content);
+          source.format = format;
+          if (format) {
+            const parsed = parseGcpInterchange({ format, content });
+            Object.assign(source, { pointCount: parsed.points.length, checkpointCount: parsed.points.filter((point) => point.role === 'checkpoint').length,
+              coordinateSystem: parsed.provenance.coordinateSystem, linearUnit: parsed.provenance.linearUnit, importable: true });
+          }
+        } catch (caught) { source.error = String(caught?.message || caught?.code || 'unreadable').replace(/[\r\n\t]+/g, ' ').slice(0, 200); }
+        sources.push(source);
+      }
+      return res.json({ sources });
+    } catch (caught) { return next(caught); }
+  });
+
+  // Import a dataset's own uploaded file. Only explicit, unambiguous files: units come from the file, never a guess.
+  router.post('/api/v1/datasets/:datasetId/gcp-sets/import-source', authorize('viewer.gcp.write'), mutate, async (req, res, next) => {
+    if (!onlyKeys(req.body, ['fileId', 'displayName']) || typeof req.body.fileId !== 'string' || req.body.fileId.length > 128)
+      return error(res, 400, 'invalid_gcp_import');
+    const file = csvFiles(req.params.datasetId).find((row) => row.id === req.body.fileId);
+    if (!file) return error(res, 404, 'gcp_source_not_found');
+    try {
+      const existing = importedSetId(req.params.datasetId, file.id);
+      if (existing) { const set = gcp.getSet(existing, true); return res.status(200).json({ set, points: set.points }); }
+      let content;
+      try { content = await readCsv(file); }
+      catch (caught) { if (caught?.code === 'gcp_source_changed') return error(res, 409, 'gcp_source_changed', 'The file changed after upload.'); throw caught; }
+      const format = detectGcpFormat(content);
+      if (!format) return error(res, 400, 'unsupported_gcp_format', 'This CSV is not an Emlid export or a GCP CSV.');
+      const parsed = parseGcpInterchange({ format, content });
+      const displayName = typeof req.body.displayName === 'string' && req.body.displayName.trim() ? req.body.displayName.trim().slice(0, 160) : path.posix.basename(file.relative_path);
+      const set = gcp.importSet({ datasetId: req.params.datasetId, displayName, sourceFormat: format, sourceFileId: file.id, sourceFilename: path.posix.basename(file.relative_path),
+        sourceSha256: parsed.sourceSha256, sourceContent: content, crs: parsed.crs, elevationUnits: parsed.elevationUnits, provenance: parsed.provenance,
+        points: parsed.points, createdBy: req.actorId });
+      repository.audit({ actorType: 'admin', actorId: req.actorId, action: 'gcp.set_imported', entityType: 'gcp_set', entityId: set.id,
+        details: { datasetId: set.datasetId, sourceFormat: format, pointCount: set.pointCount, sourceFileId: file.id } });
+      return res.status(201).json({ set, points: set.points });
+    } catch (caught) {
+      if (caught?.code && String(caught.code).startsWith('ERR_')) return next(caught);
+      return fail(caught, res, error);
+    }
+  });
 
   router.get('/api/v1/datasets/:datasetId/gcp-sets', authorize('viewer.gcp.read'), (req, res) => {
     if (!gcp.dataset(req.params.datasetId)) return error(res, 404, 'dataset_not_found');

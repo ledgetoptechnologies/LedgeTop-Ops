@@ -226,6 +226,19 @@ function parseGcpInterchange({ format, content, declarations }) {
   };
 }
 
+// Which supported CSV layout a file uses, from its header row alone; null if none.
+function detectGcpFormat(content) {
+  if (typeof content !== 'string') return null;
+  const firstLine = content.replace(/^\uFEFF/, '').split(/\r?\n/, 1)[0];
+  if (!firstLine) return null;
+  let headers;
+  try { headers = normalizedHeaders(parseCsvRows(firstLine)[0] || []); } catch { return null; }
+  if (EMLID_REQUIRED.every((column) => headers.includes(column))) return 'emlid-all-columns-v1';
+  const generic = new Set([...CSV_REQUIRED, 'description', 'role']);
+  if (CSV_REQUIRED.every((column) => headers.includes(column)) && headers.every((column) => generic.has(column))) return 'generic-csv-v1';
+  return null;
+}
+
 function confirmationToken(parsed) {
   return crypto.createHash('sha256').update(JSON.stringify({ sourceSha256: parsed.sourceSha256, provenance: parsed.provenance, pointCount: parsed.points.length })).digest('hex');
 }
@@ -237,4 +250,5 @@ module.exports = {
   EMLID_REQUIRED,
   parseGcpInterchange,
   confirmationToken,
+  detectGcpFormat,
 };
