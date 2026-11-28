@@ -867,3 +867,58 @@ test("fixed endpoint names cover every capture and mutation path and nothing els
     ["/workers/scripts/ledgetop-ops/settings?token=secret", "other"], ["/zones", "other"], [null, "other"],
   ]) assert.equal(productionAutoProviderEndpoint(suffix), name, String(suffix));
 });
+
+test("v5 owned-inactive allowance binds once before any write and covers exactly one superseding upload", async () => {
+  const { mintOwnedInactiveV5Allowance } = await import("./test-fixtures/owned-inactive-v5-fixture.mjs");
+  const superseded = "00000000-0000-4000-8000-000000000003", next = "00000000-0000-4000-8000-000000000004";
+  const mint = () => mintOwnedInactiveV5Allowance({ workerName: "ledgetop-ops", parentVersionId: parent,
+    supersededVersionId: superseded, newSourceCommit: sourceCommit });
+  const supersedingInput = () => { const input = creation(); input.state.latest = superseded; return input; };
+  // Refused after a write has started.
+  const started = setup(async () => ok({ id: candidate }));
+  await started.provider.stageVersion({ workerName: "ledgetop-ops", parentVersionId: parent, candidateVersionId: candidate, message: "s" });
+  assert.throws(() => started.provider.bindOwnedInactiveV5Allowance(mint()), /refused_or_uncertain/u);
+  // Refused for a copy, and refused a second time.
+  const twice = setup(async () => ok({ id: next }));
+  assert.throws(() => twice.provider.bindOwnedInactiveV5Allowance(structuredClone(mint())), /refused_or_uncertain/u);
+  twice.provider.bindOwnedInactiveV5Allowance(mint());
+  assert.throws(() => twice.provider.bindOwnedInactiveV5Allowance(mint()), /refused_or_uncertain/u);
+  // Without an allowance the superseding upload is refused before send.
+  let calls = 0; const none = setup(async () => { calls++; return ok({ id: next }); });
+  await assert.rejects(none.provider.createInactiveVersion(supersedingInput()), /refused_or_uncertain/u); assert.equal(calls, 0);
+  // With it: one upload; a second upload over the same superseded latest is refused before send.
+  calls = 0; const once = setup(async () => { calls++; return ok({ id: next }); });
+  once.provider.bindOwnedInactiveV5Allowance(mint());
+  assert.equal((await once.provider.createInactiveVersion(supersedingInput())).id, next); assert.equal(calls, 1);
+  await assert.rejects(once.provider.createInactiveVersion(supersedingInput()), /refused_or_uncertain/u); assert.equal(calls, 1);
+  // An upload acknowledged with the superseded id is refused.
+  const echo = setup(async () => ok({ id: superseded }));
+  echo.provider.bindOwnedInactiveV5Allowance(mint());
+  await assert.rejects(echo.provider.createInactiveVersion(supersedingInput()), /refused_or_uncertain/u);
+  // An allowance for another superseded version does not cover this latest.
+  calls = 0; const other = setup(async () => { calls++; return ok({ id: next }); });
+  other.provider.bindOwnedInactiveV5Allowance(mintOwnedInactiveV5Allowance({ workerName: "ledgetop-ops", parentVersionId: parent,
+    supersededVersionId: "00000000-0000-4000-8000-000000000005", newSourceCommit: sourceCommit }));
+  await assert.rejects(other.provider.createInactiveVersion(supersedingInput()), /refused_or_uncertain/u); assert.equal(calls, 0);
+});
+
+test("a staged v5 allowance lets the superseding upload start from exactly that held run's [parent 100, superseded 0] stage", async () => {
+  const { mintOwnedInactiveV5Allowance, STAGED_DEPLOYMENT_ID } = await import("./test-fixtures/owned-inactive-v5-fixture.mjs");
+  const superseded = "00000000-0000-4000-8000-000000000003", next = "00000000-0000-4000-8000-000000000004";
+  const stagedInput = () => { const input = creation(); input.state.latest = superseded;
+    input.state.deployment = { id: STAGED_DEPLOYMENT_ID, versions: [{ version_id: parent, percentage: 100 }, { version_id: superseded, percentage: 0 }] };
+    return input; };
+  const mint = staged => mintOwnedInactiveV5Allowance({ workerName: "ledgetop-ops", parentVersionId: parent, supersededVersionId: superseded,
+    newSourceCommit: sourceCommit, staged });
+  let calls = 0; const ok1 = setup(async () => { calls++; return ok({ id: next }); });
+  ok1.provider.bindOwnedInactiveV5Allowance(mint(true));
+  assert.equal((await ok1.provider.createInactiveVersion(stagedInput())).id, next); assert.equal(calls, 1);
+  // A parent-only allowance does not cover the staged start; nothing covers another deployment id.
+  calls = 0; const wrongKind = setup(async () => { calls++; return ok({ id: next }); });
+  wrongKind.provider.bindOwnedInactiveV5Allowance(mint(false));
+  await assert.rejects(wrongKind.provider.createInactiveVersion(stagedInput()), /refused_or_uncertain/u); assert.equal(calls, 0);
+  const moved = setup(async () => { calls++; return ok({ id: next }); });
+  moved.provider.bindOwnedInactiveV5Allowance(mint(true));
+  const input = stagedInput(); input.state.deployment.id = "00000000-0000-4000-8000-000000000999";
+  await assert.rejects(moved.provider.createInactiveVersion(input), /refused_or_uncertain/u); assert.equal(calls, 0);
+});

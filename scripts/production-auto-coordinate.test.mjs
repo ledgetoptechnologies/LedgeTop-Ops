@@ -511,3 +511,55 @@ test('the read-only probe drives the real coordinator to the first write boundar
   assert.deepEqual(counts.entered, counts.completed, 'every read step before the boundary completed');
   for (const step of ['sourceFence', 'ciGate', 'capture', 'build', 'readLedger']) assert.ok(counts.entered.includes(step), step);
 });
+
+test('a v5 baseline whose newest version is inactive refuses without an allowance and passes the gate only with one', async () => {
+  const { ownedInactiveV5BaselineAllowed } = await import('./production-auto-owned-inactive-v5.mjs');
+  const { mintOwnedInactiveV5Allowance } = await import('./test-fixtures/owned-inactive-v5-fixture.mjs');
+  // The runtime installs this exact hook on every v5 lane; without a proven allowance it must refuse.
+  const hook = allowance => ({ baseline }) => ownedInactiveV5BaselineAllowed(allowance, { workerName: 'ledgetop-ops', sourceCommit: COMMIT, baseline });
+  for (const allowance of [null, undefined, { kind: 'owned-inactive-v5-allowance', supersededVersionId: CANDIDATE, parentVersionId: PARENT }]) {
+    const f = fixture(); f.current().latestVersionId = CANDIDATE;
+    f.adapter.ownedInactiveInitialStateAllowed = hook(allowance);
+    await assert.rejects(f.run(), /held/);
+    assert.equal(f.intents.length, 0); assert.equal(f.events.includes('build'), false, 'refused at the initial gate');
+    assert.equal(f.receipts.some(row => row?.status === 'started'), false);
+  }
+  const real = mintOwnedInactiveV5Allowance({ workerName: 'ledgetop-ops', parentVersionId: PARENT, supersededVersionId: CANDIDATE,
+    newSourceCommit: COMMIT });
+  const f = fixture(); f.current().latestVersionId = CANDIDATE;
+  f.adapter.ownedInactiveInitialStateAllowed = hook(real);
+  await f.run().catch(() => {});
+  assert.equal(f.events.includes('build'), true, 'a proven allowance passes the initial gate');
+  // A split deployment is still refused even with the allowance.
+  const split = fixture(); split.current().latestVersionId = CANDIDATE;
+  split.current().versions = [{ versionId: PARENT, percentage: 90 }, { versionId: CANDIDATE, percentage: 10 }];
+  split.adapter.ownedInactiveInitialStateAllowed = hook(real);
+  await assert.rejects(split.run(), /held/); assert.equal(split.events.includes('build'), false);
+});
+
+test('an owned zero-percent stage passes the initial gate only with its staged allowance, then is replaced by this run\'s stage', async () => {
+  const { ownedInactiveV5BaselineAllowed } = await import('./production-auto-owned-inactive-v5.mjs');
+  const { mintOwnedInactiveV5Allowance, STAGED_DEPLOYMENT_ID } = await import('./test-fixtures/owned-inactive-v5-fixture.mjs');
+  const OLD = '33333333-3333-4333-8333-333333333333';
+  const hook = allowance => ({ baseline }) => ownedInactiveV5BaselineAllowed(allowance, { workerName: 'ledgetop-ops', sourceCommit: COMMIT, baseline });
+  const stagedFixture = () => { const f = fixture(); Object.assign(f.current(), { latestVersionId: OLD, deploymentId: STAGED_DEPLOYMENT_ID,
+    versions: [{ versionId: PARENT, percentage: 100 }, { versionId: OLD, percentage: 0 }] }); return f; };
+  const mint = staged => mintOwnedInactiveV5Allowance({ workerName: 'ledgetop-ops', parentVersionId: PARENT, supersededVersionId: OLD,
+    newSourceCommit: COMMIT, staged });
+  // No allowance, or a parent-only allowance, refuses the staged start.
+  for (const allowance of [null, mint(false)]) {
+    const f = stagedFixture(); f.adapter.ownedInactiveInitialStateAllowed = hook(allowance);
+    await assert.rejects(f.run(), /held/); assert.equal(f.events.includes('build'), false); assert.equal(f.intents.length, 0);
+  }
+  // The staged allowance admits it; this run then stages its own candidate over the old 0% row.
+  const f = stagedFixture(); f.adapter.ownedInactiveInitialStateAllowed = hook(mint(true));
+  const stage = f.adapter.stageZero; let staged;
+  f.adapter.stageZero = async input => { staged = structuredClone(input); return stage(input); };
+  await f.run().catch(() => {});
+  assert.equal(f.events.includes('build'), true);
+  // This run stages its own candidate: [parent 100, new 0]; the old 0% row is not carried.
+  assert.deepEqual(staged?.versions, [{ versionId: PARENT, percentage: 100 }, { versionId: CANDIDATE, percentage: 0 }]);
+  // A deployment other than the recorded one still refuses.
+  const moved = stagedFixture(); moved.current().deploymentId = DEPLOY; moved.adapter.ownedInactiveInitialStateAllowed = hook(mint(true));
+  await assert.rejects(moved.run(), /held/); assert.equal(moved.events.includes('build'), false);
+});

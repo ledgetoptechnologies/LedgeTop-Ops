@@ -31,7 +31,8 @@ import { createInstalledSchemaPreservationV2Session, isProductionInstalledSchema
   from './production-auto-migration-profile/installed-schema-preservation-v2/installed-schema-preservation-v2.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor,
   projectVerifiedProductionAutoPredecessorTagSettings } from './production-auto-journal.mjs';
-import { readOwnedUploadTagBaseline } from './production-auto-upload-tag.mjs';
+import { readOwnedUploadTagBaseline, projectOwnedUploadTagSettings } from './production-auto-upload-tag.mjs';
+import { verifyOwnedInactiveLiveState, ownedInactiveV5BaselineAllowed } from './production-auto-owned-inactive-v5.mjs';
 import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredecessor,
   validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
@@ -176,7 +177,7 @@ export function productionAutoHeldSyncAllowance(laneProfile, snapshot, pins = HE
     ? { 'ops-sync': pins.latestVersionId } : {};
 }
 function validatedCapture(snapshot, workerName, baselineAssetsConfig, baselineAssets, candidateVersionId, expectedDeploymentVersions,
-  ownedInactiveWitness = null, ownedInactiveIdentity = null, laneProfile = PROFILE) {
+  ownedInactiveWitness = null, ownedInactiveIdentity = null, laneProfile = PROFILE, ownedInactiveV5Latest = null) {
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client';
   const profile = structuredClone(laneProfile);
   const preservationPreflight = productionAutoInstalledPreflight(laneProfile, app);
@@ -185,7 +186,8 @@ function validatedCapture(snapshot, workerName, baselineAssetsConfig, baselineAs
   // upload intentionally replaces that association; the fixed asset config,
   // every other protected control, and actual served bytes remain pinned.
   const allowLatest = { ...productionAutoHeldSyncAllowance(laneProfile, snapshot), ...(candidateVersionId ? { [app]: candidateVersionId }
-    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) } : {}) };
+    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) }
+      : ownedInactiveV5Latest ? { [app]: ownedInactiveV5Latest } : {}) };
   if (baselineAssetsConfig === undefined) validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight,
     expectedDeploymentVersions: expectedDeploymentVersions ? { [app]: expectedDeploymentVersions } : {} });
   else {
@@ -257,6 +259,9 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     ciRunId: triggerRun.runId, ciRunAttempt: triggerRun.runAttempt,
     workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT) }) : null;
   let ownedInactiveWitness = null, ownedInactiveAdmission = null, ownedCustodyJournal = null;
+  // v5: journal-derived custody of this Worker's own inactive latest version from a held run (see
+  // production-auto-owned-inactive-v5.mjs), and the live-state allowance proven at the baseline capture.
+  let ownedInactiveV5Custody = null, ownedInactiveV5Allowance = null, ownedInactiveV5Checked = false;
   const cloudflarePacer = cloudflarePacerFactory
     ? cloudflarePacerFactory({ fetchImpl, accountId, ...(readonlyRefusals ? { readonlyRefusals } : {}) }) : null;
   // A read-only diagnostic adapter exists only with the native paced transport composed with the canonical guard;
@@ -290,7 +295,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   };
   const assertGitHubQuota = bucketCount => assertProductionAutoGitHubQuota({ workerName,
     bucketCount: Number.isSafeInteger(bucketCount) ? bucketCount : 0, callsMade: githubCoreCalls.count,
-    ...(ownedInactiveEnabled ? { ownedInactiveSupersession: true } : {}),
+    ...(ownedInactiveEnabled || ownedInactiveV5Custody ? { ownedInactiveSupersession: true } : {}),
     token: env.GITHUB_TOKEN, fetchImpl: apiFetch });
   const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: githubFetch });
   need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch');
@@ -311,14 +316,18 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   // AUTO_PROFILE it is refused here: PRODUCTION_AUTO_OWNED_INACTIVE_SUPERSESSION_ENABLED must stay false.
   need(!ownedInactiveEnabled || usesV4SchemaPreservation, 'runtime_owned_inactive_profile_refused');
   const currentLatestAllowance = () => candidateVersionId ? { [app]: candidateVersionId }
-    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) } : {};
+    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) }
+      : ownedInactiveV5Custody ? { [app]: ownedInactiveV5Custody.candidateVersionId } : {};
   const checkMigrations = async ({ forceFresh = false } = {}) => {
     if (usesV4SchemaPreservation || usesV5SchemaPreservation) {
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
         sourceCommit, ...(usesV5SchemaPreservation ? { canonicalV5Profile: profile } : { canonicalV4Profile: profile }),
         selectedApp: app, token,
         allowAssetAssociationRotation: app === 'operations' || app === 'client', allowUnselectedRecapture: false, fetchImpl: apiFetch,
-        ...(ownedInactiveWitness ? { baselineAllowLatest: currentLatestAllowance() } : {}),
+        ...(ownedInactiveWitness || ownedInactiveV5Custody ? { baselineAllowLatest: currentLatestAllowance() } : {}),
+        // A held run's own verified zero-percent stage is the starting deployment: capture it with its exact weights.
+        ...(ownedInactiveV5Custody?.stagedDeploymentId && verifiedDeploymentVersions
+          ? { baselineExpectedDeploymentVersions: { [app]: verifiedDeploymentVersions } } : {}),
       });
       const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
         : verifiedDeploymentVersions;
@@ -366,7 +375,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     const raw = await capture(provider, { selectedApp: app, expectedDeploymentVersions, allowUnselectedRecapture: false });
     const checked = validatedCapture(raw, workerName, baselineCapture?.[app]?.modern.assets?.config,
       baselineCapture?.[app]?.modern.assets,
-      candidateVersionId, expectedWeights, ownedInactiveWitness, ownedInactiveIdentity, profile);
+      candidateVersionId, expectedWeights, ownedInactiveWitness, ownedInactiveIdentity, profile,
+      ownedInactiveV5Custody?.candidateVersionId ?? null);
     if (ownedInactiveWitness && !candidateVersionId)
       verifyOwnedInactivePendingCapture(ownedInactiveAdmission ?? ownedInactiveWitness, ownedInactiveIdentity,
         checked, productionAutoControlsSHA256(checked, app));
@@ -605,9 +615,41 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       persistResponse: value => { need(journal, 'runtime_journal_not_claimed'); return journal.persistResponse(value); },
       beforeDispatch, profile });
   };
+  /** v5 only, before any schema or capture read: if this Worker's newest version is not the one version deployed
+   * at 100%, read the journal-derived custody of that version. Without custody the normal strict latest check
+   * refuses later, unchanged. The read is GET-only (Cloudflare heads, then the journal and the held run). */
+  const readOwnedInactiveV5Custody = async () => {
+    ownedInactiveV5Checked = true;
+    ensureProvider();
+    const pre = `/workers/scripts/${workerName}`;
+    const deployments = (await provider.get(`${pre}/deployments?per_page=1`))?.deployments;
+    const versions = (await provider.get(`${pre}/versions?per_page=1`))?.items;
+    const deployed = Array.isArray(deployments) && deployments.length >= 1 ? deployments[0]?.versions : null;
+    const latest = Array.isArray(versions) && versions.length >= 1 ? versions[0]?.id : null;
+    // Either the parent alone at 100% with a newer inactive latest, or a [parent 100, latest 0] stage.
+    const parentOnly = Array.isArray(deployed) && deployed.length === 1 && deployed[0]?.percentage === 100
+      && deployed[0].version_id !== latest;
+    const stagedLatest = Array.isArray(deployed) && deployed.length === 2
+      && deployed.some(row => row?.percentage === 100 && row.version_id !== latest)
+      && deployed.some(row => row?.percentage === 0 && row.version_id === latest);
+    if (!UUID.test(latest ?? '') || !(parentOnly || stagedLatest)) return;
+    const reader = journalFactory({ token: env.GITHUB_TOKEN, workerName, sourceCommit,
+      ciRunId: triggerRun.runId, ciRunAttempt: triggerRun.runAttempt,
+      workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT),
+      recipient: recipientLoader(), responseDirectory: path.join(ROOT, '.backups', 'production-auto-release', workerName, sourceCommit),
+      fetchImpl: githubFetch });
+    ownedInactiveV5Custody = await reader.readOwnedInactiveV5Custody({ latestVersionId: latest });
+    need(stagedLatest === (ownedInactiveV5Custody.stagedDeploymentId !== null), 'owned_inactive_v5_custody_refused');
+    // Until this run's own transition, every capture expects exactly that held stage's weights.
+    if (stagedLatest) verifiedDeploymentVersions = [{ versionId: ownedInactiveV5Custody.parentVersionId, percentage: 100 },
+      { versionId: ownedInactiveV5Custody.candidateVersionId, percentage: 0 }];
+  };
   const adapter = {
     ...(ownedInactiveEnabled ? { ownedInactiveInitialStateAllowed: ({ ci, baseline }) =>
-      ownedInactiveCoordinatorStateAllowed(ownedInactiveAdmission, { accountId, workerName, sourceCommit, ci, baseline }) } : {}),
+      ownedInactiveCoordinatorStateAllowed(ownedInactiveAdmission, { accountId, workerName, sourceCommit, ci, baseline }) }
+      : usesV5SchemaPreservation ? { ownedInactiveInitialStateAllowed: ({ ci, baseline }) => ci?.passed === true
+        && ci.sourceCommit === sourceCommit && ci.runId === triggerRun.runId && ci.runAttempt === triggerRun.runAttempt
+        && ownedInactiveV5BaselineAllowed(ownedInactiveV5Allowance, { workerName, sourceCommit, baseline }) } : {}),
     sourceFence: async () => {
       preflightLease = null;
       if (ownedInactiveEnabled && !ownedInactiveWitness) {
@@ -624,6 +666,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         const custody = await ownedCustodyJournal.readPinnedOwnedInactiveCustody();
         ownedInactiveWitness = createOwnedInactiveCaptureWitness({ custody, identity: ownedInactiveIdentity, ci: earlyCI });
       }
+      if (usesV5SchemaPreservation && !ownedInactiveEnabled && !ownedInactiveV5Checked) await readOwnedInactiveV5Custody();
       await checkMigrations();
       const sourceStartedMono = performance.now();
       const source = sourceReader(ROOT, env), mainCommit = await mainCI.mainCommit();
@@ -679,6 +722,15 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       if (!baselineCapture) {
         if (ownedInactiveWitness) ownedInactiveAdmission = finalizeOwnedInactiveAdmission({ witness: ownedInactiveWitness,
           identity: ownedInactiveIdentity, ci: verifiedCI, snapshot: observed.raw, baseline: observed.value });
+        if (ownedInactiveV5Custody) {
+          const custody = ownedInactiveV5Custody;
+          const projected = { ...observed.raw, [app]: { ...observed.raw[app], settings: projectOwnedUploadTagSettings(observed.raw[app],
+            { workerName, sourceCommit: custody.oldSourceCommit, candidateVersionId: custody.candidateVersionId },
+            custody.ownedUploadTagBaseline) } };
+          ownedInactiveV5Allowance = verifyOwnedInactiveLiveState(custody, { snapshot: observed.raw,
+            projectedControlsSHA256: productionAutoControlsSHA256(projected, app) });
+          ensureProvider(); provider.bindOwnedInactiveV5Allowance(ownedInactiveV5Allowance);
+        }
         baselineCapture = observed.raw; expectedCapture = observed.value;
       }
       else if (pendingTransition) {

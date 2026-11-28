@@ -177,7 +177,11 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     baseline = state(await adapter.capture());
     const parentOnly = weights(baseline.versions) === weights([{ versionId: baseline.activeVersionId, percentage: 100 }]);
     const normalBaseline = baseline.latestVersionId === baseline.activeVersionId && parentOnly;
-    const ownedInactiveBaseline = !normalBaseline && parentOnly
+    // An owned-inactive start is the parent alone at 100% with a newer inactive latest, or the parent at 100% with
+    // that latest staged at 0%; the adapter's hook must prove the run owns it (exact parent/latest/deployment).
+    const stagedLatest = weights(baseline.versions) === weights([{ versionId: baseline.activeVersionId, percentage: 100 },
+      { versionId: baseline.latestVersionId, percentage: 0 }]) && baseline.latestVersionId !== baseline.activeVersionId;
+    const ownedInactiveBaseline = !normalBaseline && (parentOnly || stagedLatest)
       && typeof adapter.ownedInactiveInitialStateAllowed === 'function'
       && adapter.ownedInactiveInitialStateAllowed({ ci: initialCI, baseline: copy(baseline) });
     need(normalBaseline || ownedInactiveBaseline,

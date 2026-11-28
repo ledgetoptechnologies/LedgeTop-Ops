@@ -19,6 +19,7 @@ import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 import { OWNED_INACTIVE_CLIENT_POLICY as OWNED_POLICY, verifyPinnedOwnedInactiveCustody } from './production-auto-owned-inactive-policy.mjs';
 import { isOwnedInactiveAdmission, claimOwnedInactiveAdmission,
   ownedInactiveExpectedAdmissionDigest } from './production-auto-owned-inactive-admission.mjs';
+import { verifyJournalOwnedInactiveCustody } from './production-auto-owned-inactive-v5.mjs';
 import { validOwnedUploadTagBaseline, projectOwnedUploadTagSettings } from './production-auto-upload-tag.mjs';
 import { validateLiveProductionAutoPredecessor } from './production-auto-predecessor.mjs';
 
@@ -724,6 +725,26 @@ export class ProductionAutoJournal {
       const run = await this.#request(`/actions/runs/${OWNED_POLICY.oldReleaseRunId}`);
       const jobs = await this.#request(`/actions/runs/${OWNED_POLICY.oldReleaseRunId}/jobs?filter=latest&per_page=100`);
       return verifyPinnedOwnedInactiveCustody({ journalHead: head, journalBytes: loaded.bytes, artifact, run, jobs });
+    } finally { release(); }
+  }
+  /** v5 read-only custody for this Worker's inactive latest version: the current journal document plus the held
+   * run, its jobs and its bound artifact. Never claims a source, writes, or changes the journal cache. */
+  async readOwnedInactiveV5Custody({ latestVersionId } = {}) {
+    const release = this.#beginRead();
+    try {
+      need(this.#runtime === null && !this.#claimed && this.#ownedExpectedHead === null && !this.#ownedCompletionOnly
+        && this.#identity.releaseKind === 'retained-assets' && UUID.test(latestVersionId ?? ''));
+      const head = await this.#readHead(); need(head !== null);
+      const loaded = await this.#readDocument(head);
+      const named = loaded.document.operations.filter(op => op.receipts.some(row => row.candidateVersionId === latestVersionId));
+      need(named.length === 1 && named[0].artifact && Number.isSafeInteger(named[0].artifact.artifactId)
+        && Number.isSafeInteger(named[0].workflow?.runId));
+      const op = named[0];
+      const run = await this.#request(`/actions/runs/${op.workflow.runId}`);
+      const jobs = await this.#request(`/actions/runs/${op.workflow.runId}/jobs?filter=latest&per_page=100`);
+      const artifact = await this.#request(`/actions/artifacts/${op.artifact.artifactId}`);
+      return verifyJournalOwnedInactiveCustody({ workerName: this.#identity.workerName, latestVersionId,
+        sourceCommit: this.#identity.sourceCommit, journalHead: head, journalBytes: loaded.bytes, run, jobs, artifact });
     } finally { release(); }
   }
   prepareOwnedInactiveRuntime({ runtime, admission }) {

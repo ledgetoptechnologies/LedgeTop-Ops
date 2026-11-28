@@ -1,14 +1,18 @@
 import { createHash, randomBytes } from "node:crypto";
 import { compatibleAssetMime } from "./production-auto-assets.mjs";
 import { isProductionAutoHoldCode } from "./production-auto-hold-codes.mjs";
+import { carryProductionAutoFailureMarks } from "./production-auto-startup-diagnostics.mjs";
 
 /** A registered hold code carried as the error's own string message (no getters read), else null. */
 export function registeredHoldCode(error) {
   if ((typeof error !== "object" || error === null) && typeof error !== "function") return null;
-  let message;
-  try { const d = Object.getOwnPropertyDescriptor(error, "message"); message = d && Object.hasOwn(d, "value") ? d.value : null; }
-  catch { return null; }
-  return isProductionAutoHoldCode(message) ? message : null;
+  // The fixed code is the message, or (as for the main-CI reader) an own data `code` property; never a getter.
+  const own = key => { try { const d = Object.getOwnPropertyDescriptor(error, key); return d && Object.hasOwn(d, "value") ? d.value : null; }
+    catch { return null; } };
+  const message = own("message");
+  if (isProductionAutoHoldCode(message)) return message;
+  const code = own("code");
+  return isProductionAutoHoldCode(code) ? code : null;
 }
 
 // Temporary static-byte verification only. Provider creation/deletion, exact
@@ -182,9 +186,9 @@ export async function executeAssetVerification({ create, fetchAsset, remove, rea
   manifest(entries); for (const fn of [create, fetchAsset, remove, readAbsent]) need(typeof fn === "function");
   need(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 300_000
     && Number.isSafeInteger(concurrency) && concurrency >= 1 && concurrency <= 3);
-  let assets, failure = false, removed = false, absent = false, createAttempted = false, cause = null;
+  let assets, failure = false, removed = false, absent = false, createAttempted = false, cause = null, original = null;
   try { notCancelled(signal); createAttempted = true; await create(); assets = await collectVerifiedAssets({ entries, fetchAsset, signal, timeoutMs, concurrency }); }
-  catch (error) { failure = true; cause = registeredHoldCode(error); }
+  catch (error) { failure = true; cause = registeredHoldCode(error); original = error; }
   finally {
     if (createAttempted) {
       try { await remove(); removed = true; } catch { failure = true; }
@@ -193,7 +197,8 @@ export async function executeAssetVerification({ create, fetchAsset, remove, rea
   }
   // Cleanup has run either way. A registered, fixed-vocabulary code from create/read (e.g. a pre-dispatch gate)
   // names the hold; anything else stays the generic refusal. The outcome is still a hold.
-  if (failure || !removed || !absent) throw Error(cause ?? "static_asset_verification_refused");
+  // The thrown hold keeps the original failure's fixed step/endpoint marks (never its text).
+  if (failure || !removed || !absent) throw carryProductionAutoFailureMarks(original, Error(cause ?? "static_asset_verification_refused"));
   return { assets, receipt: { staticBytesVerified: true, temporaryWorkerRemoved: true, absenceVerified: true,
     versionOverrideAppliedVerified: false, productionUnchangedVerified: false, automaticRetry: false } };
 }
