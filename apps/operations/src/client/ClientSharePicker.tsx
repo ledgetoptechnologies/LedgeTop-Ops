@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ClientSearchBox } from "./ClientSearchBox";
 import { api } from "./api";
 import { anyTruncated, recipientDetail, recipientDetails, validClientShareRecipientSearch, type ClientShareBackendState, type ClientShareRecipient } from "./client-share-routing";
 
-const INPUT_ID = "client-share-recipient-search", LIST_ID = "client-share-recipient-options";
+const INPUT_ID = "client-share-recipient-search";
 
 /** One client search across both grant back ends. Filters as you type; the
  * chosen row is carried by its id-based key, never by its display text. */
@@ -43,31 +44,15 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [folderId, query, selected, disabled, onPrimaryState]);
   useEffect(() => () => request.current?.abort(), []);
-  const move = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (!["ArrowDown", "ArrowUp", "Escape"].includes(event.key)) return;
-    event.preventDefault();
-    if (event.key === "Escape") { event.stopPropagation(); document.getElementById(INPUT_ID)?.focus(); return; }
-    const all = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []);
-    const index = all.indexOf(event.currentTarget);
-    all[event.key === "ArrowDown" ? Math.min(all.length - 1, index + 1) : Math.max(0, index - 1)]?.focus();
-  };
   const details = recipientDetails(options);
   return <div className="client-share-picker">
-    <label htmlFor={INPUT_ID}>Client</label>
-    <input id={INPUT_ID} type="search" role="combobox" aria-autocomplete="list" aria-expanded={options.length > 0} aria-controls={LIST_ID}
-      autoComplete="off" placeholder="Type a client, organization or email" value={query} disabled={disabled} maxLength={100}
-      onKeyDown={event => { if (event.key !== "ArrowDown") return; const first = document.getElementById(LIST_ID)?.querySelector<HTMLButtonElement>('[role="option"]'); if (first) { event.preventDefault(); first.focus(); } }}
-      onChange={event => { typed.current = true; setQuery(event.target.value); setStatus(""); setError(""); setPartial(""); if (selected) onSelect(null); }} />
-    {loading && <small role="status">Searching clients…</small>}
-    {options.length > 0 && <div id={LIST_ID} className="client-workspace-typeahead" role="listbox" aria-label="Matching clients">
-      {options.map(option => <button type="button" role="option" key={option.key} aria-selected={selected?.key === option.key} disabled={disabled}
-        onKeyDown={move} onClick={() => { onSelect(option); setQuery(option.displayName); setOptions([]); setStatus(""); }}>
-        <strong>{option.displayName}</strong><small>{details.get(option.key)}</small>
-      </button>)}
-    </div>}
-    {status && <small className="workspace-search-guidance" role="status">{status}</small>}
-    {error && <small className="error" role="alert">{error}</small>}
-    {partial && <small className="error" role="alert">{partial}</small>}
+    <ClientSearchBox id={INPUT_ID} query={query} disabled={disabled}
+      onQueryChange={value => { typed.current = true; setQuery(value); setStatus(""); setError(""); setPartial(""); if (selected) onSelect(null); }}
+      items={options} itemKey={option => option.key}
+      renderItem={option => <><strong>{option.displayName}</strong><small>{details.get(option.key)}</small></>}
+      onPick={option => { onSelect(option); setQuery(option.displayName); setOptions([]); setStatus(""); }}
+      status={loading ? "Searching clients…" : status}
+      error={error || partial ? <>{error}{error && partial ? " " : ""}{partial}</> : undefined} />
     {selected && <small className="selected-audience-note" data-testid="client-share-selection">Selected: {selected.displayName} · {details.get(selected.key) ?? recipientDetail(selected)}</small>}
   </div>;
 }

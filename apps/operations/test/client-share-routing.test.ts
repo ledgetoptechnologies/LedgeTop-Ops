@@ -131,7 +131,7 @@ describe("combined client share dialog source", () => {
   it("filters as the user types against the combined endpoint and carries the id-based key", () => {
     expect(picker).toContain("/api/delivery/client-share-recipients?");
     expect(picker).toContain("window.setTimeout(");
-    expect(picker).toContain("key={option.key} aria-selected={selected?.key === option.key}");
+    expect(picker).toContain("itemKey={option => option.key}");
     expect(picker).toContain("validClientShareRecipientSearch(result)");
   });
 });
