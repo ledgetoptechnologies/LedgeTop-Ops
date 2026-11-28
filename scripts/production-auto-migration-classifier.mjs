@@ -20,7 +20,7 @@
 import { DatabaseSync, constants as C } from 'node:sqlite';
 
 export const MIGRATION_CLASSIFIER_VERSION = 2;
-export const PERMISSION_TABLE_PATTERN = /(^|_)(permissions?|roles?|staff|delegations?|grants?|shares?|shared|acl|authority|authorities|authorizations?|members?|memberships?|admissions?|capabilities|ceilings|bindings?|entitlements?|identit(?:y|ies)|denials?|eligibility|invitations?|invites?|access|admins?|administrators?|users?|keys?|credentials?|secrets?|tokens?|sessions?|polic(?:y|ies)|assignments?|enrollments?|revocations?|oauth|owners?|managers?|recipients?|signing|auth|logins?|passwords?|peers?|approvals?|approvers?|visibility|scopes?|onboarding)(_|$)/u;
+export const PERMISSION_TABLE_PATTERN = /(^|_)(permissions?|roles?|staff|delegations?|grants?|shares?|shared|acl|authority|authorities|authorizations?|members?|memberships?|admissions?|capabilities|ceilings|bindings?|entitlements?|identit(?:y|ies)|denials?|eligibility|invitations?|invites?|access|admins?|administrators?|users?|keys?|credentials?|secrets?|tokens?|sessions?|polic(?:y|ies)|assignments?|enrollments?|revocations?|oauth|owners?|managers?|recipients?|signing|auth|logins?|passwords?|peers?|approvals?|approvers?|visibility|scopes?|onboarding|publications?|workspaces?)(_|$)/u;
 // A column added to an existing table whose name suggests it decides access always needs review.
 const ACCESS_COLUMN_PATTERN = /(^|_)(can|allow|allowed|is_admin|admin|role|roles|scope|scopes|access|enabled|visible|visibility|permission|permissions|grant|grants|share|shared|owner|public|manager|managers|user|users|staff|member|members|delegate|delegates|approver|approvers|recipient|recipients)(_|$)/iu;
 // A new table or view whose definition (columns, CHECK values) speaks of access decisions is permission-changing.
@@ -86,7 +86,10 @@ function tokenForm(statement) {
     if (form === 'create-view') return { form, object: unquote(match[1]) };
     if (form === 'add-column') {
       if (/\bADD\s+(?:COLUMN\s+)?\S+[\s\S]*\b(?:PRIMARY\s+KEY|UNIQUE)\b/iu.test(text)) return { form: 'unknown' };
-      return { form, table: unquote(match[1]) };
+      // The statement's own column definition: SQLite may store an added column before table-level constraints,
+      // so the stored-SQL diff alone cannot be relied on to see its REFERENCES/CHECK.
+      const constrained = /\b(?:REFERENCES|CHECK|COLLATE|GENERATED|DEFAULT)\b|\bON\s+(?:DELETE|UPDATE)\b|\bAS\s*\(/iu.test(text.slice(match[0].length));
+      return { form, table: unquote(match[1]), constrained };
     }
     if (form === 'insert-values') {
       if (/\bON\s+CONFLICT\b|\bRETURNING\b/iu.test(text)) return { form: 'unknown' };
@@ -221,6 +224,7 @@ function classifyOne(db, { name, sql }, split) {
   // Token forms that the authorizer/diff must corroborate.
   for (const form of forms) {
     if (form.form === 'add-column' && !altered.has(form.table.toLowerCase())) reasons.add('add_column_not_observed');
+    if (form.form === 'add-column' && form.constrained) reasons.add('added_column_constraint');
     if (form.form === 'insert-values' && !created.tables.has(form.table.toLowerCase())) reasons.add('insert_into_existing_table');
     if (form.form === 'create-table' && !added.some(row => row.type === 'table' && row.name.toLowerCase() === form.object.toLowerCase())) reasons.add('create_table_not_observed');
   }

@@ -1488,6 +1488,7 @@
    "permission": true,
    "permissionTables": [
     "operations_portal_folder_reservation_heads",
+    "operations_portal_workspace_current_reserve_commands",
     "operations_portal_workspace_effective_permissions",
     "operations_portal_workspace_effective_portal_permissions",
     "operations_portal_workspace_live_command_authority",
@@ -1502,10 +1503,17 @@
    "permission": true,
    "permissionTables": [
     "operations_portal_workspace_publication_audit",
+    "operations_portal_workspace_publication_checkpoints",
     "operations_portal_workspace_publication_commands",
+    "operations_portal_workspace_publication_current_checkpoints",
+    "operations_portal_workspace_publication_directory_sources",
+    "operations_portal_workspace_publication_folder_sources",
+    "operations_portal_workspace_publication_heads",
     "operations_portal_workspace_publication_live_commands",
     "operations_portal_workspace_publication_outbox",
-    "operations_portal_workspace_publication_receipts"
+    "operations_portal_workspace_publication_project_sources",
+    "operations_portal_workspace_publication_receipts",
+    "operations_portal_workspace_publication_snapshots"
    ]
   },
   {
@@ -1524,7 +1532,8 @@
     "operations_portal_native_recipient_live_owner_authority",
     "operations_portal_native_recipient_operation_commits",
     "operations_portal_native_recipient_operations",
-    "operations_portal_native_workspace_authority_heads"
+    "operations_portal_native_workspace_authority_heads",
+    "operations_portal_workspace_reservation_heads"
    ]
   },
   {
@@ -1534,7 +1543,9 @@
    "permission": true,
    "permissionTables": [
     "operations_portal_workspace_publication_cancellation_audit",
-    "operations_portal_workspace_publication_cancellation_receipts"
+    "operations_portal_workspace_publication_cancellation_receipts",
+    "operations_portal_workspace_publication_outbox",
+    "operations_portal_workspace_publication_receipts"
    ]
   },
   {
@@ -1566,7 +1577,8 @@
     "operations_portal_native_workspace_cleanup_invocations",
     "operations_portal_native_workspace_cleanup_live_commands",
     "operations_portal_native_workspace_cleanup_outbox",
-    "operations_portal_native_workspace_cleanup_receipts"
+    "operations_portal_native_workspace_cleanup_receipts",
+    "operations_portal_workspace_reservation_heads"
    ]
   },
   {
@@ -1923,6 +1935,7 @@
    "permissionTables": [
     "operations_portal_native_delivery_authority_heads",
     "operations_portal_native_delivery_cancellation_current_home",
+    "operations_portal_native_delivery_cancellation_current_publication",
     "operations_portal_native_delivery_cancellation_intents"
    ]
   },
@@ -1948,8 +1961,11 @@
    "name": "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_native_delivery_cancellation_current_publication",
+    "operations_portal_workspace_delivery_cancellation_checkpoints"
+   ]
   },
   {
    "name": "0198_native_directory_active_binding_revision_refresh.sql",
@@ -2262,10 +2278,12 @@
   },
   {
    "name": "0224_windows_portal_publication_chain_index.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_workspace_publication_commands"
+   ]
   },
   {
    "name": "0225_native_staff_lifecycle_bridge.sql",
@@ -2775,7 +2793,8 @@
     "portal_v2_identities",
     "portal_v2_invitation_entitlements",
     "portal_v2_invitations",
-    "portal_v2_workspace_memberships"
+    "portal_v2_workspace_memberships",
+    "portal_v2_workspaces"
    ]
   },
   {
@@ -3122,7 +3141,8 @@
    "permissionTables": [
     "client_project_grants",
     "portal_v2_identity_eligibility_legacy_bridges",
-    "portal_v2_legacy_member_bridges"
+    "portal_v2_legacy_member_bridges",
+    "portal_v2_workspaces"
    ]
   },
   {
@@ -3131,8 +3151,10 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "pa_portal_workspace_sources",
     "portal_v2_identity_eligibility_legacy_bridges",
-    "portal_v2_legacy_member_bridges"
+    "portal_v2_legacy_member_bridges",
+    "portal_v2_workspaces"
    ]
   },
   {
@@ -3233,7 +3255,13 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "pa_portal_workspace_sources",
     "portal_v2_invitations",
+    "portal_v2_workspaces",
+    "portal_workspace_address_book_states",
+    "portal_workspace_address_contact_audit",
+    "portal_workspace_address_contact_commands",
+    "portal_workspace_address_contact_fences",
     "portal_workspace_address_contacts"
    ]
   },
@@ -3540,10 +3568,12 @@
     "client_account_members",
     "client_identity_links",
     "client_member_project_grants",
+    "portal_legacy_bootstrap_workspaces",
     "portal_v2_entitlements",
     "portal_v2_folder_bindings",
     "portal_v2_legacy_member_bridges",
-    "portal_v2_workspace_memberships"
+    "portal_v2_workspace_memberships",
+    "portal_v2_workspaces"
    ]
   },
   {
@@ -3808,10 +3838,16 @@
   },
   {
    "name": "0223_operations_portal_workspace_publications.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_workspace_publication_commands",
+    "operations_portal_workspace_publication_heads",
+    "operations_portal_workspace_publication_history",
+    "operations_portal_workspace_publication_receipts",
+    "operations_portal_workspace_publication_snapshots"
+   ]
   },
   {
    "name": "0224_operations_portal_native_recipient_authority.sql",
@@ -3830,8 +3866,11 @@
    "name": "0225_operations_portal_workspace_publication_cancellations.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_workspace_publication_cancellations",
+    "operations_portal_workspace_publication_commands"
+   ]
   },
   {
    "name": "0226_operations_portal_native_workspace_cleanup.sql",

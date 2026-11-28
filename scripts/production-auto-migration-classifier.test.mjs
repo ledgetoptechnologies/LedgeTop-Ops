@@ -121,3 +121,14 @@ CREATE TRIGGER audit_notes_g BEFORE INSERT ON audit_notes BEGIN SELECT RAISE(IGN
   const view = classify('CREATE VIEW effective_permissions AS SELECT id FROM clients;');
   assert.equal(view.permission, true); assert.equal(view.automatic, false);
 });
+
+test('an added column constraint is seen even when the table ends with a table-level constraint', () => {
+  const files = [BASE, { name: '0002_t.sql', sql: 'CREATE TABLE pairs (a TEXT, b TEXT, x TEXT, PRIMARY KEY (a, b));' }];
+  for (const sql of ['ALTER TABLE pairs ADD COLUMN parent_id TEXT REFERENCES clients(id) ON DELETE CASCADE;',
+    "ALTER TABLE pairs ADD COLUMN kind TEXT CHECK (kind <> '');", 'ALTER TABLE pairs ADD COLUMN label TEXT COLLATE NOCASE;']) {
+    const result = classifyMigrationSequence({ files: [...files, { name: '0003_c.sql', sql }], split })[2];
+    assert.equal(result.automatic, false, sql); assert.ok(result.reasons.includes('added_column_constraint'), sql);
+  }
+  assert.ok(PERMISSION_TABLE_PATTERN.test('portal_v2_workspaces'));
+  assert.ok(PERMISSION_TABLE_PATTERN.test('operations_portal_workspace_publication_heads'));
+});
