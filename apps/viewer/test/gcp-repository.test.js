@@ -102,13 +102,13 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
   const first=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),firstSnapshot=processing.getAttemptGcpSnapshot(first.id);
   assert.equal(firstSnapshot.correspondenceCount,1);
-  assert.equal(firstSnapshot.content,'EPSG:4326\n-88.1 44.5 250 120.5 240.25 near.jpg\n');
+  assert.equal(firstSnapshot.content,'EPSG:4326\n-88.1 44.5 250 120.5 240.25 near.jpg A\n');
   assert.equal(firstSnapshot.sha256,crypto.createHash('sha256').update(firstSnapshot.content).digest('hex'));
 
   gcp.updateCorrespondence(mark.id,{pixelX:121,pixelY:241});
   assert.equal(processing.getAttemptGcpSnapshot(first.id).content,firstSnapshot.content);
   processing.cancelAttempt(first.id);
   const second=processing.retryAttempt(first.id,'ops:1'),secondSnapshot=processing.getAttemptGcpSnapshot(second.id);
-  assert.match(secondSnapshot.content,/ 121 241 near\.jpg\n$/);
+  assert.match(secondSnapshot.content,/ 121 241 near\.jpg A\n$/);
   assert.notEqual(secondSnapshot.sha256,firstSnapshot.sha256);
 });

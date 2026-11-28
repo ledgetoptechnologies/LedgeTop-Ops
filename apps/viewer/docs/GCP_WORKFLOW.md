@@ -17,6 +17,28 @@ Ground control is part of the default-off processing platform. It is available o
   attempt reuses its checksum-bound snapshot; retry creates a new Attempt and
   freezes a new snapshot from the correspondences current at retry time.
 
+## Control points and checkpoints
+
+Every point has a role: `control` (default) or `checkpoint`. Emlid imports set `checkpoint` when the point's Code is CP, CHK, check or checkpoint; generic CSV takes an optional `role` column and GeoJSON an optional `properties.role`. Staff can change a role in the task's GCP panel (`PATCH /api/v1/gcp-points/:id` with `role`).
+
+When an attempt is created:
+
+- Control marks become `gcp_list.txt`. Checkpoint marks never reach ODM.
+- Checkpoint marks are frozen with their surveyed position, Elevation and ellipsoidal height in the immutable `processing_attempt_gcp_checkpoints` row for the accuracy report.
+- If the attempt has a `gcp_list.txt`, its options get `use-exif: false`. ODM georeferences from photo GPS and ignores the GCP file when `use-exif` is on, and the Large 3D and High-Res presets set it.
+
+## gcp_list.txt and heights
+
+```text
+EPSG:4326
+<longitude> <latitude> <elevation_m> <pixel_x> <pixel_y> <image_name> <label>
+```
+
+- x/y are the point's geographic coordinates as imported (for Emlid, its Latitude/Longitude). ODM converts them to a WGS84 UTM zone for the reconstruction.
+- z is the point's Elevation in metres: NAVD88 orthometric height for a NAVD88 Emlid project, converted from US survey feet when the CS name says ftUS. It is never the ellipsoidal height.
+- ODM applies no vertical datum or geoid: it passes z through unchanged, so the georeferenced DSM, point cloud and model come out in the same NAVD88 heights the Viewer shows and measures. Feeding ellipsoidal heights would put every product tens of metres off (the geoid separation, about 34 m in parts of the US), which is the miss an earlier test recorded.
+- The label is the point name with whitespace replaced by `_`; ODM keeps it as the point name.
+
 ## Generic interchange v1
 
 The API accepts at most 2 MiB and 5,000 points in either of these explicit formats:
@@ -34,9 +56,9 @@ GCP-01,North target,44.500100,-88.100200,243.84,Painted nail
 
 A GeoJSON `FeatureCollection` containing only 3D `Point` features. Coordinates are `[longitude, latitude, elevation_m]`; `properties.point_id` and `properties.label` are required, and `properties.description` is optional.
 
-## Emlid adapter gate
+## Emlid Flow CSV (`emlid-all-columns-v1`)
 
-No Emlid column names, coordinate order, height datum, units, or CRS are inferred. A representative Emlid export and its known coordinate interpretation are required before adding a separately versioned Emlid adapter. Until then, export or transform the data to one of the generic formats above.
+The Emlid Flow CSV export with all columns. Required: Name, Easting, Northing, Elevation, Latitude, Longitude, Ellipsoidal height and CS name; Code and Description are optional. All rows must share one CS name, which sets the linear unit (m or ftUS); if it doesn't, staff choose it in the preview. Elevation is stored in metres and used as the height; Ellipsoidal height is kept for checks and the accuracy report. Staff confirm the preview before the set is saved.
 
 ## Image assistance
 

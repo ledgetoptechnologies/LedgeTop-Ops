@@ -58,3 +58,11 @@ test('marking layout is bounded responsive and preserves exact import provenance
   assert.match(source, /preview\.provenance\?\.coordinateSystem/);
   assert.doesNotMatch(source, /NAD83 \/ Wisconsin Central|value="NAVD88"/);
 });
+
+test('staff set each point as control or checkpoint, and checkpoints are labelled in the point list', () => {
+  assert.match(source, /class="gcp-role-select"/);
+  assert.match(source, /<option value="control"[^>]*>Control<\/option><option value="checkpoint"[^>]*>Checkpoint<\/option>/);
+  assert.match(source, /\/api\/v1\/gcp-points\/\$\{encodeURIComponent\(pointId\)\}`,\{method:'PATCH',body:\{role\}\}/);
+  assert.match(source, /querySelectorAll\('\.gcp-role-select'\)\.forEach\(select=>select\.onchange=\(\)=>changeGcpRole\(/);
+  assert.match(source, /point\?\.role==='checkpoint'\?' · checkpoint':''/);
+});

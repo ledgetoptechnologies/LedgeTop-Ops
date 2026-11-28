@@ -7,6 +7,21 @@ const MAX_POINTS = 5000;
 const CSV_REQUIRED = ['point_id', 'label', 'latitude', 'longitude', 'elevation_m'];
 const EMLID_REQUIRED = ['name', 'easting', 'northing', 'elevation', 'latitude', 'longitude', 'ellipsoidal height', 'cs name'];
 
+const CHECKPOINT_CODES = new Set(['cp', 'chk', 'check', 'checkpoint', 'check point', 'check-point', 'check_point']);
+
+// Explicit role column (generic formats): blank means control, anything unknown is rejected.
+function explicitRole(value, field) {
+  const normalized = value == null ? '' : String(value).trim().toLowerCase();
+  if (!normalized || normalized === 'control' || normalized === 'gcp') return 'control';
+  if (normalized === 'checkpoint') return 'checkpoint';
+  throw invalid(`${field} must be control or checkpoint`);
+}
+
+// Emlid "Code" is free text; only well-known checkpoint codes make a checkpoint.
+function emlidRole(code) {
+  return CHECKPOINT_CODES.has(String(code || '').trim().toLowerCase()) ? 'checkpoint' : 'control';
+}
+
 function invalid(message, code = 'invalid_gcp_input') {
   return Object.assign(new Error(message), { code });
 }
@@ -39,6 +54,7 @@ function canonicalPoint(value, index) {
     longitude: number(value.longitude, `point ${index + 1} longitude`, -180, 180),
     elevationM: number(value.elevationM, `point ${index + 1} elevation_m`, -12000, 100000),
     description: text(value.description, 2000, `point ${index + 1} description`),
+    role: explicitRole(value.role, `point ${index + 1} role`),
   };
   if (value.easting != null) point.easting = number(value.easting, `point ${index + 1} easting`, -100000000, 100000000);
   if (value.northing != null) point.northing = number(value.northing, `point ${index + 1} northing`, -100000000, 100000000);
@@ -91,6 +107,7 @@ function parseEmlid(source, declarations = {}) {
       elevationM, latitude: record.latitude, longitude: record.longitude,
       ellipsoidalHeightM,
       description: record.description || null,
+      role: emlidRole(record.code),
     };
   }));
   return { points, provenance: { adapter: 'emlid-all-columns-v1', coordinateSystem, verticalDatum, linearUnit, elevationSource: 'Elevation', geographicCrossCheck: 'Latitude/Longitude/Ellipsoidal height' } };
@@ -142,7 +159,7 @@ function parseCsv(source) {
   if (new Set(headers).size !== headers.length) throw invalid('CSV headers must be unique');
   for (const required of CSV_REQUIRED)
     if (!headers.includes(required)) throw invalid(`CSV is missing required column ${required}`);
-  const allowed = new Set([...CSV_REQUIRED, 'description']);
+  const allowed = new Set([...CSV_REQUIRED, 'description', 'role']);
   if (headers.some((header) => !allowed.has(header)))
     throw invalid('CSV contains unsupported columns; use the documented generic-v1 schema');
   return validatePoints(rows.slice(1).map((cells, index) => {
@@ -155,6 +172,7 @@ function parseCsv(source) {
       longitude: record.longitude,
       elevationM: record.elevation_m,
       description: record.description,
+      role: record.role,
     };
   }));
 }
@@ -179,6 +197,7 @@ function parseGeoJson(source) {
       latitude: feature.geometry.coordinates[1],
       elevationM: feature.geometry.coordinates[2],
       description: properties.description,
+      role: properties.role,
     };
   }));
 }
