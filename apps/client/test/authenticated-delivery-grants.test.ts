@@ -241,4 +241,26 @@ describe("authenticated delivery grant live authorization", () => {
       audience_type,audience_public_id,audience_source_version,reason_code,expires_at,created_by_staff_id)
       VALUES ('bad-date','bad-date',1,'workspace-a','binding-a','binding-v1','project','project-a','project-v1','test','not-a-date','staff-a')`).run()).rejects.toThrow();
   });
+
+  // Hub 2496ea83 step A: a file grant can't be stored yet, can't change scope, and is invisible to every client reader.
+  it("refuses to store a file grant, refuses to change a grant's scope, and never shows a file grant to a client", async () => {
+    const insertFile = (id: string, binding: string, version: string) => db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants(id,logical_grant_id,grant_version,workspace_id,folder_binding_id,binding_source_version,
+      audience_type,audience_public_id,audience_source_version,reason_code,created_by_staff_id,object_path)
+      VALUES (?,?,1,'workspace-a',?,?,'organization','org-a','org-v1','client_delivery','staff-a','report.pdf')`).bind(id, id, binding, version);
+    await expect(insertFile("file-refused", "binding-a", "binding-v1").run()).rejects.toThrow(/file grants are not enabled/);
+    await expect(db.prepare("UPDATE portal_v2_authenticated_delivery_grants SET object_path='report.pdf' WHERE id='grant-a-v1'").run()).rejects.toThrow(/object_path is immutable/);
+    // Simulate step B storing a file grant on a folder no folder grant covers: no reader may treat it as folder access.
+    await db.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_version)
+      VALUES ('binding-file','workspace-a','project','project-a','clients/file-only/','binding-file-v1')`).run();
+    await db.prepare("DROP TRIGGER portal_v2_authenticated_delivery_grants_file_scope_closed").run();
+    try {
+      await insertFile("file-grant-v1", "binding-file", "binding-file-v1").run();
+      expect(await db.prepare("SELECT count(*) n FROM portal_v2_authenticated_delivery_grants WHERE id='file-grant-v1'").first("n")).toBe(1);
+      expect(await db.prepare("SELECT count(*) n FROM portal_v2_folder_delivery_grants WHERE id='file-grant-v1'").first("n")).toBe(0);
+      expect(await authorizeAuthenticatedDeliveryGrant(env, principal, "workspace-a", "binding-file")).toBe(false);
+      expect([...await listAuthorizedAuthenticatedDeliveryPrefixes(env, principal, "workspace-a")]).not.toContain("clients/file-only/");
+    } finally {
+      await db.prepare("DELETE FROM portal_v2_authenticated_delivery_grants WHERE id='file-grant-v1'").run().catch(() => undefined);
+    }
+  });
 });

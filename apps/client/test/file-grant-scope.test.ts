@@ -45,10 +45,11 @@ const CLIENT_FACING = [
   "apps/client/src/worker/client-portal/authenticated-delivery-grants.ts",
   "apps/client/src/worker/client-portal/feedback-target.ts",
   "apps/client/src/worker/client-portal/native-feedback-target.ts",
-  "apps/client/src/worker/client-portal/project-access-authority-history.ts",
   "apps/client/src/worker/verified-recipient-delivery-authority.ts",
   "packages/shared/src/authenticated-delivery-authority.ts",
 ];
+// project-access-authority-history.ts keeps the table: it records grant create, revoke and expiry history for the
+// Ops write paths, which must see every grant (through the view a file grant's history proof would be missing).
 // The Ops Worker's client notifications (change and expiry notices) move to exact-file matching in step B,
 // in the same Ops deploy that first lets staff create a file grant.
 describe("client-facing readers never see a file grant before it is enforced", () => {
