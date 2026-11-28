@@ -9,7 +9,7 @@ export type ViewerCatalogProject = { viewerProjectId: string; name: string; publ
 export type ViewerCatalogTask = { taskId: string; title: string; publishedAt: string; modelId: string | null };
 type ProjectPage = { projects: ViewerCatalogProject[]; nextCursor: string | null };
 type TaskPage = { project: { viewerProjectId: string; name: string }; tasks: ViewerCatalogTask[]; nextCursor: string | null };
-export type DirectShareClient = { sourceId: string; workspaceId: string; displayName: string; businessName: string };
+export type DirectShareClient = { sourceId: string; workspaceId: string; displayName: string; businessName: string; signInReady?: boolean };
 export type DirectShareGrant = {
   grantId: string; sourceId: string; workspaceId: string; viewerProjectId: string; taskId: string | null;
   scopeType: "project" | "task"; includeFuturePublished: boolean;
@@ -538,6 +538,7 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
             <strong>{item.displayName}</strong>
             {via && <small>{via}</small>}
             {existing.some(grant => sameClient(grant, item)) && <small className="viewer-direct-share-has-access">Already has access</small>}
+            {item.signInReady === false && <small className="viewer-direct-share-no-sign-in">No portal sign-in yet</small>}
           </li>;
         })}
       </ul>
@@ -547,6 +548,8 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
     </> : <form className="viewer-direct-share-form" onSubmit={confirm}>
       <div className="viewer-direct-share-recipient"><div><strong>{client.displayName}</strong>{business && <small>{business}</small>}</div>
         <button type="button" className="button-ghost button-small" disabled={busy || unconfirmed} onClick={() => pick(null)}>Change</button></div>
+      {client.signInReady === false && <p className="notice warning" role="status">Nobody can sign in to this client's portal yet, so they won't see this share.
+        Project Alpha has no portal login for them yet; the Portal access card on the client in Project Alpha shows why.</p>}
       <fieldset disabled={busy || unconfirmed}><legend>They can</legend>
         <label className="viewer-share-check"><input type="checkbox" checked disabled /> View the model</label>
         <label className="viewer-share-check"><input type="checkbox" checked={permissions.measure} onChange={event => setPermissions({ ...permissions, measure: event.target.checked })} /> Take measurements</label>

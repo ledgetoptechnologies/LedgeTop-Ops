@@ -245,9 +245,14 @@ export async function readDirectViewerClientGrants(env:Env,input:{sourceId:strin
  ${input.grantId?'AND id=?':''} ORDER BY id LIMIT 101`).bind(input.sourceId,input.workspaceId,...(input.grantId?[input.grantId]:[])).all<DirectViewerClientGrantRow>();
  if(rows.results.length>100)fail(503,'grant_limit','Client Viewer grant limit exceeded');return (await resolveRestrictedGrants(env, rows.results)).filter(row => row !== null);
 }
-type PickerRecipient=Recipient&{sort_name?:string;workspace_display_name?:string};
+type PickerRecipient=Recipient&{sort_name?:string;workspace_display_name?:string;sign_in_ready?:number|null};
 export interface DirectViewerPickerClient {sourceId:string;workspaceId:string;displayName:string;businessName:string;
- organizationName?:string|null;rootType?:'organization'|'standalone_client'}
+ organizationName?:string|null;rootType?:'organization'|'standalone_client';signInReady?:boolean}
+/** True when someone can sign in to the workspace: an active projected portal principal or an
+ * active, unrevoked, unexpired member. A grant to a workspace without either reaches nobody. */
+const SIGN_IN_READY_SQL=`(EXISTS(SELECT 1 FROM pa_portal_principals ready_principal WHERE ready_principal.workspace_id=w.id AND ready_principal.status='active')
+ OR EXISTS(SELECT 1 FROM portal_v2_workspace_memberships ready_member WHERE ready_member.workspace_id=w.id AND ready_member.status='active'
+  AND ready_member.revoked_at IS NULL AND (ready_member.expires_at IS NULL OR datetime(ready_member.expires_at)>datetime('now')))) sign_in_ready`;
 function base64url(text:string){let binary='';for(const byte of new TextEncoder().encode(text))binary+=String.fromCharCode(byte);
  return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 export function encodeDirectViewerClientCursor(sortName:string,workspaceId:string){return `v1.${base64url(JSON.stringify([sortName,workspaceId]))}`;}
@@ -280,9 +285,9 @@ async function pickerRows(env:Env,database:Pick<D1Database,'prepare'>,q:z.infer<
  const search=q.q??'';
  if(q.include===undefined)return database.prepare(`${recipientSql(env)} AND w.id>? AND (?='' OR instr(lower(root.display_name),lower(?))>0)
  ORDER BY w.id LIMIT ?`).bind(q.cursor??'',search,search,q.limit+1).all<PickerRecipient>();
- const after=q.cursor?decodeDirectViewerClientCursor(q.cursor):null,email=search!==''&&await principalEmailSearchReady(database);
+ const after=q.cursor?decodeDirectViewerClientCursor(q.cursor):null,schemaReady=await principalEmailSearchReady(database),email=search!==''&&schemaReady;
  return database.prepare(`SELECT * FROM (SELECT recipient.*,lower(recipient.display_name) sort_name FROM (
- ${recipientSql(env).replace('SELECT w.id,','SELECT w.id,w.display_name workspace_display_name,')}
+ ${recipientSql(env).replace('SELECT w.id,',`SELECT w.id,w.display_name workspace_display_name,${schemaReady?SIGN_IN_READY_SQL:'NULL sign_in_ready'},`)}
  AND (?='' OR instr(lower(root.display_name),lower(?))>0 OR instr(lower(w.display_name),lower(?))>0
  ${email?`OR EXISTS(SELECT 1 FROM pa_portal_principals principal
   JOIN portal_v2_identities identity ON identity.id=principal.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
@@ -313,7 +318,7 @@ export async function listDirectViewerClientGrantWorkspace(env:Env,principal:Sta
     businessName:businessNames.get(row.project_alpha_source_id)!};
    if(picker==='legacy'){clients.push(base);continue;}
    const organization=row.workspace_display_name?.trim()||'';
-   clients.push({...base,rootType:row.root_type,
+   clients.push({...base,rootType:row.root_type,...(row.sign_in_ready===null||row.sign_in_ready===undefined?{}:{signInReady:row.sign_in_ready===1}),
     organizationName:organization&&organization.toLowerCase()!==row.display_name.trim().toLowerCase()?organization:null});}
   // The cursor follows the last row read, so rows skipped above never cause a gap or repeat.
   const last=page.at(-1);

@@ -111,15 +111,23 @@ async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
         WHERE grant_row.revoked_at IS NULL AND ${accountMatch}) project_count,
       (SELECT count(*) FROM client_service_requests request JOIN client_accounts account ON account.id=request.account_id
         WHERE ${accountMatch}) request_count,
-      (SELECT count(*) FROM pa_portal_principals principal WHERE principal.workspace_id=wanted.workspace_id AND principal.status='active') principal_count
+      (SELECT count(*) FROM pa_portal_principals principal WHERE principal.workspace_id=wanted.workspace_id AND principal.status='active') principal_count,
+      (SELECT count(*) FROM portal_v2_workspace_memberships member WHERE member.workspace_id=wanted.workspace_id AND member.status='active'
+        AND member.revoked_at IS NULL AND (member.expires_at IS NULL OR datetime(member.expires_at)>datetime('now'))) member_count
     FROM wanted
-  `).bind(...values).all<Omit<Facts, "portal_status" | "legacy_account_id">>()).results;
-  return counts.map(fact => {
+  `).bind(...values).all<Omit<Facts, "portal_status" | "legacy_account_id"> & { member_count: number }>()).results;
+  return counts.map(({ member_count, ...fact }) => {
     const link = linked.get(key(fact));
     const root = roots.find(root => key(root) === key(fact))!;
+    const workspace = link?.workspace;
+    // An active Project Alpha workspace is reachable only through a projected
+    // portal principal or an existing member. Without either, nobody can sign
+    // in to it, so it must not read as ready.
+    const unreachable = workspace?.status === "active" && root.source_id.startsWith("project-alpha:")
+      && !workspace.legacy_account_id && fact.principal_count === 0 && member_count === 0;
     return { ...fact, legacy_account_id: root.root_namespace === "account" ? root.public_id
       : root.source_id === PA ? link?.workspace?.legacy_account_id ?? null : null,
-      portal_status: root.root_namespace === "review" ? "review_only" : link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
+      portal_status: root.root_namespace === "review" ? "review_only" : unreachable ? "no_sign_in" : link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
         : root.root_namespace === "business" && root.mapping_status !== "mapped" ? "mapping_unavailable"
           : root.source_id === PA ? "not_provisioned" : "not_supported") };
   });

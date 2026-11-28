@@ -1638,6 +1638,7 @@ tbody tr:last-child td { border: 0; }
 .viewer-direct-share-review .notice, .viewer-share-form-error .notice { margin: 0; }
 .viewer-direct-share-note { color: var(--amber); }
 .viewer-direct-share-clients .viewer-direct-share-has-access { color: var(--green); font-weight: 700; }
+.viewer-direct-share-clients .viewer-direct-share-no-sign-in { color: var(--orange); font-weight: 700; }
 .viewer-share-form-error { grid-column: 1 / -1; }
 /* A quiet danger action: stopping access shouldn't outweigh the share itself. */
 .viewer-stop-share.button-ghost { background: transparent; color: var(--red); box-shadow: inset 0 0 0 1px #e7b9bf; }
