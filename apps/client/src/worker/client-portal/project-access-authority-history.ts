@@ -84,17 +84,17 @@ export function projectAccessGrantEvent(db:Database,input:{grantId:string;
   const provenTerms=requiredProofs.length?`CASE WHEN ${requiredProofs.join(' AND ')} THEN terms.id ELSE '__invalid_grant_proof__' END`:'terms.id';
   const requiredFallback=requiredProofs.length?`UNION ALL
     SELECT ?,'__missing_workspace__','__missing_source__','__missing_project__','__missing_terms__','authenticated_delivery_grant',?,?,'__required_proof_missing__',?,?,NULL,COALESCE(?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-    WHERE NOT EXISTS(SELECT 1 FROM portal_v2_authenticated_delivery_grants target
+    WHERE NOT EXISTS(SELECT 1 FROM portal_v2_folder_delivery_grants target
       JOIN portal_project_access_terms target_terms ON target_terms.id=target.access_terms_id AND target_terms.workspace_id=target.workspace_id
       JOIN portal_v2_folder_bindings target_binding ON target_binding.id=target.folder_binding_id AND target_binding.workspace_id=target.workspace_id
         AND target_binding.owner_scope_type='project' AND target_binding.owner_public_id=target_terms.project_public_id
       WHERE target.id=? AND target.access_terms_id IS NOT NULL)
-      AND (NOT EXISTS(SELECT 1 FROM portal_v2_authenticated_delivery_grants existing WHERE existing.id=?)
-        OR EXISTS(SELECT 1 FROM portal_v2_authenticated_delivery_grants term_backed WHERE term_backed.id=? AND term_backed.access_terms_id IS NOT NULL))`:'';
+      AND (NOT EXISTS(SELECT 1 FROM portal_v2_folder_delivery_grants existing WHERE existing.id=?)
+        OR EXISTS(SELECT 1 FROM portal_v2_folder_delivery_grants term_backed WHERE term_backed.id=? AND term_backed.access_terms_id IS NOT NULL))`:'';
   return db.prepare(`INSERT INTO portal_project_access_authority_events
     (id,workspace_id,source_id,project_public_id,access_terms_id,authority_type,authority_id,producer_event_key,event_kind,actor_type,actor_id,subject_identity_id,occurred_at)
     SELECT ?,terms.workspace_id,terms.source_id,terms.project_public_id,${provenTerms},'authenticated_delivery_grant',grant_record.id,?,?,?,?,NULL,COALESCE(?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-    FROM portal_v2_authenticated_delivery_grants grant_record
+    FROM portal_v2_folder_delivery_grants grant_record
     LEFT JOIN portal_project_access_terms terms ON terms.id=grant_record.access_terms_id AND terms.workspace_id=grant_record.workspace_id
     LEFT JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id AND binding.workspace_id=grant_record.workspace_id
       AND binding.owner_scope_type='project' AND binding.owner_public_id=terms.project_public_id
@@ -130,7 +130,7 @@ export async function reconcileProjectAccessAuthorityExpiries(db:BatchDatabase,n
           WHEN julianday(grant_record.expires_at)<julianday(CASE WHEN terms.mode='specific_date' THEN terms.expires_at ELSE deadline.deadline_at END) THEN grant_record.expires_at
           ELSE (CASE WHEN terms.mode='specific_date' THEN terms.expires_at ELSE deadline.deadline_at END) END
         ,grant_record.status,grant_record.revoked_at,grant_record.created_at,NULL
-      FROM portal_v2_authenticated_delivery_grants grant_record
+      FROM portal_v2_folder_delivery_grants grant_record
       JOIN portal_project_access_terms terms ON terms.id=grant_record.access_terms_id AND terms.workspace_id=grant_record.workspace_id
       LEFT JOIN portal_project_access_deadlines deadline ON deadline.access_terms_id=terms.id
       WHERE grant_record.status IN('active','expired','revoked')

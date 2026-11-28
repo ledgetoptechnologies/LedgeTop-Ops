@@ -1,7 +1,7 @@
 import { readFileSync,readdirSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll,beforeAll,describe,expect,it } from 'vitest';
-import { splitD1MigrationStatements } from './helpers/d1-migrations';
+import { applyFileGrantScope, splitD1MigrationStatements } from './helpers/d1-migrations';
 import { authorizeNativePortalReadTarget,authorizePortalWorkspaceCapability,listPortalWorkspaceHierarchy,
   type NativePortalReadContext,type PortalAuthorizationEnv } from '../src/worker/client-portal/workspace-v2';
 import { authorizeAuthenticatedDeliveryGrant,listAuthorizedAuthenticatedDeliveryPrefixes } from '../src/worker/client-portal/authenticated-delivery-grants';
@@ -17,6 +17,7 @@ describe('per-grant project terms on current authorization reads',{timeout:60_00
     db=await runtime.getD1Database('DELIVERY_DB') as D1Database;
     for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0173_').sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await applyFileGrantScope(db);
     await db.prepare(`CREATE TABLE portal_primary_staff_bindings(
       binding_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,state TEXT NOT NULL
     )`).run();

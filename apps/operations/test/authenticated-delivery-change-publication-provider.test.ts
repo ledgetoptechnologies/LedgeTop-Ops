@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { applyFileGrantScope, splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { reservePrimaryPortalSigningKeys } from "../../client/src/worker/project-alpha-portal-authority";
 import { primaryProjectionCheckpointStatement, primaryProjectionSourceStatements, primaryStaffReceiptStatement } from "./helpers/primary-delivery-fixture";
 import {
@@ -39,6 +39,7 @@ describe("authenticated delivery publication provider fence — migrated real D1
       "0209_authenticated_delivery_change_recipient_events.sql",
     ]) await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`, import.meta.url), "utf8"))
       .map(sql => db.prepare(sql)));
+    await applyFileGrantScope(db);
     env = { DELIVERY_DB: db, AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED: "true",
       PROJECT_ALPHA_PORTAL_HMAC_SECRET: "primary-portal-hmac-test-key-material-at-least-thirty-two-bytes" } as Env;
     await reservePrimaryPortalSigningKeys(env);

@@ -1,7 +1,7 @@
 import {readFileSync,readdirSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
 import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from 'vitest';
-import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
+import { applyFileGrantScope, splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
 import {createAuthenticatedDeliveryGrant,previewAuthenticatedDeliveryGrant,listAuthenticatedDeliveryGrants,revokeAuthenticatedDeliveryGrant,
   restoreAuthenticatedDeliveryGrant,searchAuthenticatedDeliveryGrantAudiences,type AuthenticatedDeliveryGrantInput} from '../src/worker/authenticated-delivery-grants';
 import {authorizeAuthenticatedDeliveryGrant,listAuthorizedAuthenticatedDeliveryPrefixes} from '../../client/src/worker/client-portal/authenticated-delivery-grants';
@@ -108,6 +108,7 @@ describe('primary staff project access terms and real customer history',{timeout
         await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
     await delivery.batch(splitD1MigrationStatements(readFileSync(
       new URL('../../client/migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8')).map(sql=>delivery.prepare(sql)));
+    await applyFileGrantScope(delivery);
     env={OPS_DB:ops,DELIVERY_DB:delivery,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',AUTHENTICATED_DELIVERY_CREATION_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',
       PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true'} as Env;
     await ops.batch([

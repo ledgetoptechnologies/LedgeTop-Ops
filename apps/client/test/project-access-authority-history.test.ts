@@ -1,7 +1,7 @@
 import {readFileSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
 import {afterEach,beforeEach,describe,expect,it} from 'vitest';
-import {splitD1MigrationStatements} from './helpers/d1-migrations';
+import { applyFileGrantScope, splitD1MigrationStatements } from './helpers/d1-migrations';
 import {projectAccessAuthorityHistoryReady,projectAccessGrantEvent,projectAccessInvitationEvent,reconcileProjectAccessAuthorityExpiries}
   from '../src/worker/client-portal/project-access-authority-history';
 
@@ -29,6 +29,7 @@ describe('project access authority history',{timeout:60_000,concurrent:false},()
     await db.exec(foundation.replace(/\s*\n\s*/g,' '));
     const migration=readFileSync(new URL('../migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8');
     await db.batch(splitD1MigrationStatements(migration).map(sql=>db.prepare(sql)));
+    await applyFileGrantScope(db);
     await db.batch([
       db.prepare(`INSERT INTO portal_project_access_terms VALUES('terms-a','workspace-a','project-alpha:one','project-a','specific_date','2099-01-01T00:00:00Z')`),
       db.prepare(`INSERT INTO portal_v2_folder_bindings VALUES('binding-a','workspace-a','project','project-a')`),

@@ -94,7 +94,7 @@ function authorizationGuard(env:Env,context:NativePortalReadContext,principal:Ve
     AND datetime(entitlement.valid_from)<=datetime('now') AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))
     AND entitlement.scope_type||':'||entitlement.scope_public_id IN (SELECT value FROM json_each(?)))`);
     bindings.push(context.workspaceId,context.identityId,capability,scopeJson);}
-  if(grant){const table=grant.source==='staff'?'portal_v2_authenticated_delivery_grants':'project_alpha_delivery_portal_grants';
+  if(grant){const table=grant.source==='staff'?'portal_v2_folder_delivery_grants':'project_alpha_delivery_portal_grants';
     parts.push(`EXISTS(SELECT 1 FROM portal_v2_folder_bindings binding JOIN ${table} grant_record
       ON grant_record.workspace_id=binding.workspace_id AND grant_record.folder_binding_id=binding.id
       WHERE binding.workspace_id=? AND binding.id=? AND binding.source_version=? AND binding.r2_prefix=? AND binding.owner_scope_type=? AND binding.owner_public_id=?

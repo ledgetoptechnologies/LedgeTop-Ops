@@ -8,7 +8,7 @@ import {
   AuthenticatedContentAuditUnavailableError,
 } from "../src/worker/client-portal/authenticated-content-audit";
 import type { Env } from "../src/worker/types";
-import { splitD1MigrationStatements } from "./helpers/d1-migrations";
+import { applyFileGrantScope, splitD1MigrationStatements } from "./helpers/d1-migrations";
 
 const migration = readFileSync(new URL("../migrations/0187_authenticated_content_audit.sql", import.meta.url), "utf8");
 const secret = "test-authenticated-content-audit-secret-that-is-long-enough";
@@ -75,6 +75,7 @@ describe("authenticated content audit foundation", () => {
 
   async function applyMigration(collectionStartedAt?: string): Promise<void> {
     await database.batch(splitD1MigrationStatements(migration).map(statement => database.prepare(statement)));
+    await applyFileGrantScope(database);
     if (collectionStartedAt) {
       await database.prepare(
         "UPDATE portal_authenticated_content_history_state SET collection_started_at=? WHERE singleton=1",

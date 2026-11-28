@@ -86,7 +86,7 @@ async function candidates(
       AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
     LEFT JOIN portal_v2_authenticated_delivery_grant_recipients recipient
       ON recipient.workspace_id=membership.workspace_id AND recipient.identity_id=identity.id
-    JOIN portal_v2_authenticated_delivery_grants grant_record
+    JOIN portal_v2_folder_delivery_grants grant_record
       ON grant_record.workspace_id=membership.workspace_id
       AND (grant_record.audience_type<>'principal' OR grant_record.id=recipient.grant_id)
       AND grant_record.status='active' AND grant_record.revoked_at IS NULL
@@ -406,7 +406,7 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
         AND ${portalRootAccessAllowedSql(env.CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED === "true", "workspace")}
         AND ${primaryWorkspaceAccount("workspace")}
         ${claimSql}
-      JOIN portal_v2_authenticated_delivery_grants grant_record
+      JOIN portal_v2_folder_delivery_grants grant_record
         ON grant_record.workspace_id=workspace.id AND grant_record.status='active'
         AND grant_record.revoked_at IS NULL
         AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))

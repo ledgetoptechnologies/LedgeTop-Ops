@@ -48,10 +48,9 @@ const CLIENT_FACING = [
   "apps/client/src/worker/client-portal/project-access-authority-history.ts",
   "apps/client/src/worker/verified-recipient-delivery-authority.ts",
   "packages/shared/src/authenticated-delivery-authority.ts",
-  "apps/operations/src/worker/authenticated-delivery-change-notifications.ts",
-  "apps/operations/src/worker/project-access-expiry-notifications.ts",
-  "apps/operations/src/worker/project-access-expiry-companion-notifications.ts",
 ];
+// The Ops Worker's client notifications (change and expiry notices) move to exact-file matching in step B,
+// in the same Ops deploy that first lets staff create a file grant.
 describe("client-facing readers never see a file grant before it is enforced", () => {
   it.each(CLIENT_FACING)("%s reads grants only through the folder-only view", path => {
     const source = read(path);

@@ -67,7 +67,7 @@ async function pilotEligible(env: Env, principal: VerifiedClientPrincipal): Prom
       JOIN pa_portal_principals p ON p.workspace_id=e.workspace_id AND p.public_id=e.principal_public_id
         AND p.status='active' AND p.source_version=e.principal_source_version
         AND (p.identity_id IS NULL OR p.identity_id=i.id)
-      JOIN portal_v2_authenticated_delivery_grants g ON g.id=e.grant_id AND g.workspace_id=e.workspace_id
+      JOIN portal_v2_folder_delivery_grants g ON g.id=e.grant_id AND g.workspace_id=e.workspace_id
         AND g.grant_version=e.grant_version AND g.status='active' AND g.revoked_at IS NULL
         AND (g.expires_at IS NULL OR datetime(g.expires_at)>datetime('now'))
       JOIN portal_v2_folder_bindings b ON b.id=g.folder_binding_id AND b.workspace_id=g.workspace_id

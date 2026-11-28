@@ -1,7 +1,7 @@
 import {readFileSync} from "node:fs";
 import {afterEach,beforeEach,describe,expect,it,vi} from "vitest";
 import {Miniflare} from "miniflare";
-import {splitD1MigrationStatements} from "./helpers/d1-migrations";
+import { applyFileGrantScope, splitD1MigrationStatements } from "./helpers/d1-migrations";
 vi.mock("cloudflare:workers",()=>({WorkerEntrypoint:class{}}));
 import {applyVerifiedRecipientDeliveryAuthority,getVerifiedRecipientDeliveryAuthorityStatus} from "../src/worker/verified-recipient-delivery-authority";
 import {applyVerifiedRecipientDeliveryAuthorityRpc,getVerifiedRecipientDeliveryAuthorityStatusRpc} from "../src/worker/verified-recipient-delivery-authority-entrypoint";
@@ -114,6 +114,7 @@ describe("verified-recipient Client resource authority",()=>{
     for(const name of ["0221_verified_recipient_delivery_authority.sql","0222_verified_recipient_delivery_cross_manager_revoke.sql"]){
       await migrate(db,name);
     }
+    await applyFileGrantScope(db);
   });
   afterEach(async()=>mf.dispose());
 

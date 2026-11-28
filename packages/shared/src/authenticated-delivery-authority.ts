@@ -99,7 +99,7 @@ export function authenticatedDeliveryChangeAuthoritySql(
       AND policy.workspace_id=batch.workspace_id AND policy.source_id=batch.source_id
       AND policy.principal_public_id=batch.principal_public_id AND policy.principal_source_version=batch.principal_source_version
       AND policy.policy_version=batch.policy_version AND policy.access_notice_enabled=1 AND policy.change_mode<>'off'
-    JOIN portal_v2_authenticated_delivery_grants grant_record ON grant_record.id=batch.grant_id
+    JOIN portal_v2_folder_delivery_grants grant_record ON grant_record.id=batch.grant_id
       AND grant_record.grant_version=batch.grant_version AND grant_record.logical_grant_id=batch.logical_grant_id
       AND grant_record.workspace_id=batch.workspace_id AND grant_record.folder_binding_id=batch.folder_binding_id
       AND grant_record.binding_source_version=batch.binding_source_version AND grant_record.audience_type='principal'
@@ -181,7 +181,7 @@ export function authenticatedDeliveryChangeAuthoritySql(
             AND eligibility_block.subject=identity.subject)
             OR (eligibility_block.match_type='email' AND eligibility_block.normalized_email=lower(trim(identity.verified_email)))) )
       AND NOT EXISTS(SELECT 1 FROM portal_authenticated_delivery_notification_policies other_policy
-        JOIN portal_v2_authenticated_delivery_grants other_grant ON other_grant.id=other_policy.grant_id
+        JOIN portal_v2_folder_delivery_grants other_grant ON other_grant.id=other_policy.grant_id
           AND other_grant.grant_version=other_policy.grant_version AND other_grant.logical_grant_id=other_policy.logical_grant_id
           AND other_grant.workspace_id=other_policy.workspace_id AND other_grant.audience_type='principal'
           AND other_grant.audience_public_id=other_policy.principal_public_id

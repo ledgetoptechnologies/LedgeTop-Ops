@@ -154,7 +154,7 @@ function authorityFence(input: AuthenticatedContentStart,env:AuditEnv): Authorit
     bindings:[],
   };
   const grantTable = input.grantSource === "staff"
-    ? "portal_v2_authenticated_delivery_grants"
+    ? "portal_v2_folder_delivery_grants"
     : "project_alpha_delivery_portal_grants";
   const publication = input.grantSource === "staff"
     ? `AND EXISTS(SELECT 1 FROM portal_native_staff_grants publication

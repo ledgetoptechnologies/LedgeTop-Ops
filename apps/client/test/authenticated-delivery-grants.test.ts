@@ -1,3 +1,4 @@
+import { applyFileGrantScope } from "./helpers/d1-migrations";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import denialMigration from "../migrations/0136_portal_v2_identity_denials.sql?raw";
@@ -58,6 +59,7 @@ describe("authenticated delivery grant live authorization", () => {
     `));
     await db.exec(executable(denialMigration));
     await db.exec(executable(grantMigration));
+    await applyFileGrantScope(db);
     await db.exec(executable(`
       INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES
         ('identity-a','https://access.test','subject-a','person@example.test'),
