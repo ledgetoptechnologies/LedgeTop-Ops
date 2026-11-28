@@ -840,7 +840,12 @@ test("authenticated delivery controls are session-gated by the read-only pilot p
     "projectAccessAuthorityMutationsEnabled", "portal_primary_staff_bindings", "pa_portal_projection_checkpoints",
     "unreceipted_bindings", "primary_projection_unavailable", "readiness_check_unavailable",
   ]) assert(readiness.includes(prerequisite), `${prerequisite} is missing from authenticated delivery readiness`);
-  assert(ui.includes("disabled={locked || !authenticatedGrantsEnabled}"));
+  // The workspace method stays disabled (with the readiness reason) until grants are ready; the shared tab set
+  // applies both the lock and that per-method reason.
+  assert(ui.includes("disabledReason={authenticatedGrantsEnabled ? {} : { workspace: authenticatedGrantReadinessMessage }}"));
+  const tabs = read("apps/operations/src/client/ShareMethodTabs.tsx");
+  assert(tabs.includes("const enabled = { workspace: !disabledReason.workspace, public: !disabledReason.public };"));
+  assert(tabs.includes("disabled={locked || !enabled[item.mode]}"));
   // The workspace tab, Close and Escape also lock while an embedded grant or folder link is in flight or unconfirmed.
   assert(ui.includes("const locked = busy || grantBusy;"));
   assert(ui.includes("embedded onBusyChange={setGrantBusy}"));
