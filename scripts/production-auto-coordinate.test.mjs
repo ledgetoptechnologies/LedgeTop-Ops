@@ -421,6 +421,47 @@ test('a held release names the fixed failing step and, for an unexpected crash o
   assert.doesNotMatch(line, /error=|ProviderLeak/u);
 });
 
+test('a stage-zero generic provider refusal names its fence step, endpoint/status and the reconciliation read', async () => {
+  const { formatProductionAutoReleaseHold, markProductionAutoStartupFailure, trackProductionAutoStartupStageAsync,
+    markProductionAutoProviderFailure, carryProductionAutoFailureMarks } = await import('./production-auto-startup-diagnostics.mjs');
+  const f = fixture();
+  // As on 2026-11-27: the post-intent fence's capture GET fails, the provider re-raises its generic refusal
+  // (keeping the marks), and the terminal reconciliation read fails too.
+  f.adapter.stageZero = async () => {
+    let inner;
+    try {
+      await trackProductionAutoStartupStageAsync('mutation_fence_capture', async () => {
+        throw markProductionAutoProviderFailure(Error('Cloudflare metadata GET failed; no automatic retry'),
+          { method: 'GET', endpoint: 'deployments', status: 503 });
+      });
+    } catch (error) { inner = error; }
+    throw carryProductionAutoFailureMarks(inner, Error('production_provider_refused_or_uncertain_no_retry'));
+  };
+  f.adapter.readDeployment = () => trackProductionAutoStartupStageAsync('deployment_capture', async () => {
+    throw markProductionAutoProviderFailure(new DOMException('https://x.test?token=abc', 'TimeoutError'),
+      { method: 'GET', endpoint: 'settings', timedOut: true });
+  });
+  let error;
+  try { await f.run(); } catch (caught) { error = caught; }
+  markProductionAutoStartupFailure(error, 'coordination');
+  const line = formatProductionAutoReleaseHold(error);
+  assert.match(line, /phase=stage-zero, cause=production_provider_refused_or_uncertain_no_retry, step=mutation_fence_capture, error=Error, provider=GET:deployments:503, reconcile_step=deployment_capture, reconcile_provider=GET:settings:none:timeout\)/u);
+  assert.doesNotMatch(line, /token|x\.test|metadata GET/u);
+  assert.equal(Object.keys(error).length, 0, 'hold details stay non-enumerable');
+});
+
+test('a forged provider or reconciliation detail outside the fixed vocabulary is not reported', async () => {
+  const { formatProductionAutoReleaseHold, markProductionAutoStartupFailure } = await import('./production-auto-startup-diagnostics.mjs');
+  const e = Error('Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');
+  Object.defineProperties(e, { holdPhase: { value: 'stage-zero' }, holdCause: { value: 'production_provider_refused_or_uncertain_no_retry' },
+    holdProvider: { value: 'GET:/accounts/abc/workers:503' }, holdReconcileStep: { value: 'client_jane_smith' },
+    holdReconcileProvider: { get() { return 'GET:deployments:503'; } } });
+  markProductionAutoStartupFailure(e, 'coordination');
+  const line = formatProductionAutoReleaseHold(e);
+  assert.match(line, /phase=stage-zero, cause=production_provider_refused_or_uncertain_no_retry\)/u);
+  assert.doesNotMatch(line, /provider=|reconcile_|accounts|jane/u);
+});
+
 test('a forged hold step or class outside the allowlist, or a class beside a reviewed code, is not reported', async () => {
   const { formatProductionAutoReleaseHold, markProductionAutoStartupFailure } = await import('./production-auto-startup-diagnostics.mjs');
   const forge = props => { const e = Error('Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');

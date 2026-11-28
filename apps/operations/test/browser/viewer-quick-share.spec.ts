@@ -420,6 +420,19 @@ test("Client Workspace is the first and selected method", async ({ page }) => {
   const tabs = dialog.getByRole("tab");
   await expect(tabs).toHaveText(["Client Workspace", "Public link"]);
   await expect(tabs.first()).toHaveAttribute("aria-selected", "true");
+  // The same tabs as the Data page Share dialog: same ids, same panel, no blurb.
+  await expect(tabs.first()).toHaveAttribute("aria-controls", "share-method-panel-workspace");
+  await expect(dialog.getByRole("tabpanel", { name: "Client Workspace" })).toHaveAttribute("id", "share-method-panel-workspace");
+  await expect(dialog.getByText(/portal after signing in|does not create a public link/)).toHaveCount(0);
+});
+
+test("a long client match list scrolls inside the dialog", async ({ page }) => {
+  await mockOps(page, MANAGER);
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  const list = dialog.locator("#viewer-direct-share-client-list");
+  const style = await list.evaluate(element => { const css = getComputedStyle(element); return { overflowY: css.overflowY, maxHeight: css.maxHeight }; });
+  expect(style.overflowY).toBe("auto");
+  expect(style.maxHeight).not.toBe("none");
 });
 
 test("a client who already has access is marked, and the review says what sharing again does", async ({ page }) => {
