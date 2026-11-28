@@ -221,15 +221,22 @@ export function preserveRootHtmlArchive({application,previous,previousAssetBytes
  * may still be in the parent's serving build). A v2 prior's unretired paths are the parent's build: those left out
  * of the new build retire now; already-retired paths keep their time and are dropped once RETIRED_PRUNE_AFTER_MS
  * has passed. Nothing in the new build is ever retired or dropped. */
-export function planAssetRetention({ previous, buildPaths, observedAt }) {
-  need(isoMs(observedAt) && Array.isArray(buildPaths) && buildPaths.every(value => typeof value === 'string'),
+export function planAssetRetention({ previous, buildPaths, observedAt, keepPaths = [], parentCutoverAt = null }) {
+  need(isoMs(observedAt) && Array.isArray(buildPaths) && buildPaths.every(value => typeof value === 'string')
+    && Array.isArray(keepPaths) && keepPaths.every(value => typeof value === 'string')
+    && (parentCutoverAt === null || isoMs(parentCutoverAt) && Date.parse(parentCutoverAt) <= Date.parse(observedAt)),
     'asset_retention_input_invalid');
-  const build = new Set(buildPaths), retired = {}, pruned = [];
+  // keepPaths: rows this release must carry although they are not in its build (the archive of the root HTML that
+  // is being replaced). They are treated as part of the build: never retired or dropped here.
+  const build = new Set([...buildPaths, ...keepPaths]), retired = {}, pruned = [];
   const priorRetired = previous?.schemaVersion === 2 ? previous.retired : {};
   if (previous) need(Date.parse(observedAt) >= Date.parse(previous.observedAt), 'asset_observation_time_regressed');
   for (const row of previous?.assets ?? []) {
     if (build.has(row.path)) continue;
-    const since = Object.hasOwn(priorRetired, row.path) ? priorRetired[row.path] : observedAt;
+    // A path the parent's own release retired kept serving (in the grandparent build) until that release's cutover,
+    // which the provider records as the parent deployment time: anchor its retention there, never earlier.
+    let since = Object.hasOwn(priorRetired, row.path) ? priorRetired[row.path] : observedAt;
+    if (parentCutoverAt !== null && since === previous.observedAt && Date.parse(parentCutoverAt) > Date.parse(since)) since = parentCutoverAt;
     if (Date.parse(observedAt) - Date.parse(since) > RETIRED_PRUNE_AFTER_MS) pruned.push(row.path);
     else retired[row.path] = since;
   }
@@ -240,10 +247,16 @@ export function planAssetRetention({ previous, buildPaths, observedAt }) {
  * current.entries lists the new build; current.payloads must also contain every
  * historical byte payload retained by the coordinator. A historical path ages out
  * only through planAssetRetention (retired more than 49 h before this release). */
-export function mergeAssetLedger({previous,current,workerName,accountId,sourceCommit,parentVersionId,observedAt}) {
+// prune: only the automatic release coordinator drops retired paths (with its own receipts). Every other caller
+// keeps carrying all history exactly as before (it still records retirement times in the v2 ledger).
+export function mergeAssetLedger({previous,current,workerName,accountId,sourceCommit,parentVersionId,observedAt,
+  prune=false,keepPaths=[],parentCutoverAt=null}) {
   identity(workerName,accountId);need(exact(current,['entries','payloads'])&&current.payloads instanceof Map,'asset_current_inventory_invalid');
+  need(typeof prune==='boolean','asset_retention_input_invalid');
   const incoming=entries(current.entries), prior=previous===null?null:validateAssetLedger(previous,{workerName,accountId});
-  const retention=planAssetRetention({ previous: prior, buildPaths: incoming.map(v=>v.path), observedAt });
+  const plan=planAssetRetention({ previous: prior, buildPaths: incoming.map(v=>v.path), observedAt, keepPaths, parentCutoverAt });
+  const retention=prune?plan:{retired:{...plan.retired,...Object.fromEntries(plan.pruned.map(p=>[p,
+    Object.hasOwn(prior?.retired??{},p)?prior.retired[p]:observedAt]))},pruned:[]};
   const prunedPaths=new Set(retention.pruned);
   const union=new Map(),casePaths=new Map();
   for(const v of prior?.assets??[]) {if(prunedPaths.has(v.path))continue;union.set(v.path,v);casePaths.set(v.path.toLowerCase(),v.path);}

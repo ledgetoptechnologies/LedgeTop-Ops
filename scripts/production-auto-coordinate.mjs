@@ -193,8 +193,9 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     let previous = validateAssetLedger(await adapter.readLedger({ baseline: copy(baseline) }), { workerName, accountId });
     // Bound the union this release will actually carry: paths retired more than 49 h ago are dropped by the merge.
     need(Array.isArray(built.assets?.entries), 'Verifier asset inventory is unavailable');
+    const parentCutoverAt = new Date(Date.parse(baseline.deployedAt) + 1).toISOString();
     const plannedPrune = new Set(planAssetRetention({ previous, buildPaths: built.assets.entries.map(row => row?.path),
-      observedAt: new Date().toISOString() }).pruned);
+      observedAt: new Date().toISOString(), parentCutoverAt }).pruned);
     verifierBounds(previous.assets.filter(row => !plannedPrune.has(row.path)), built.assets.entries);
     const old = await adapter.readOldAssets({ ledger: copy(previous), baseline: copy(baseline) });
     need(old instanceof Map && built.assets?.payloads instanceof Map, 'Old/new asset payloads are unavailable');
@@ -212,8 +213,10 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
       previous, previousAssetBytes: old, current: built.assets }));
     const allPayloads = retained.current.payloads;
     const ledger = trackProductionAutoStartupStage('merge_asset_ledger', () => mergeAssetLedger({ previous, current: retained.current,
-      workerName, accountId, sourceCommit, parentVersionId: baseline.activeVersionId, observedAt: new Date().toISOString() }));
+      workerName, accountId, sourceCommit, parentVersionId: baseline.activeVersionId, observedAt: new Date().toISOString(),
+      prune: true, keepPaths: retained.archive ? [retained.archive.path] : [], parentCutoverAt }));
     verifierBounds(ledger.assets);
+    need(!retained.archive || ledger.assets.some(row => row.path === retained.archive.path), 'Root HTML archive is not carried');
     ledgerSHA256 = hash(ledgerBytes(ledger));
     const carried = new Set(ledger.assets.map(row => row.path));
     prunedPaths = previous.assets.map(row => row.path).filter(assetPath => !carried.has(assetPath)).sort();

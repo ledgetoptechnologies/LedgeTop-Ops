@@ -99,7 +99,7 @@ test('ledger v2 retires paths left out of the build and prunes them only 49 h af
     const current = inventory(files);
     for (const row of previous?.assets ?? []) if (!current.payloads.has(row.path))
       current.payloads.set(row.path, extra.get(row.path) ?? Buffer.from(row.path === '/assets/old.js' ? 'old' : row.path.slice(8, -3)));
-    return mergeAssetLedger({ ...meta, observedAt: at(hours), previous, current });
+    return mergeAssetLedger({ ...meta, observedAt: at(hours), previous, current, prune: true });
   };
   // R0 (v1-era start): index + a + b. R1 drops b: b retires at R1, never before.
   const r0 = release(null, { '/index.html': 'h0', '/assets/a.js': 'a', '/assets/b.js': 'b' }, 0);
@@ -134,4 +134,23 @@ test('ledger v2 retired entries must name carried, non-index paths at or before 
   const prior = mergeAssetLedger({ ...meta, previous: null, current: inventory({ '/index.html': 'h', '/assets/old.js': 'old' }) });
   const current = inventory({ '/index.html': 'new' });
   assert.throws(() => mergeAssetLedger({ ...meta, observedAt: '2026-10-23T13:00:00.000Z', previous: prior, current }), /payload_inventory_not_exact/u);
+});
+
+test('pruning is opt-in; kept paths and the parent cutover anchor retention conservatively', async () => {
+  const { planAssetRetention } = await import('./production-auto-assets.mjs');
+  const at = hours => new Date(Date.parse('2026-10-23T12:00:00.000Z') + hours * 3600 * 1000).toISOString();
+  const r0 = mergeAssetLedger({ ...meta, previous: null, current: inventory({ '/index.html': 'h0', '/assets/b.js': 'b' }) });
+  const withOld = files => { const c = inventory(files); c.payloads.set('/assets/b.js', Buffer.from('b')); return c; };
+  const r1 = mergeAssetLedger({ ...meta, observedAt: at(1), previous: r0, current: withOld({ '/index.html': 'h1' }), prune: true });
+  // Default (every caller except the release coordinator): nothing is dropped, retirement is still recorded.
+  const kept = mergeAssetLedger({ ...meta, observedAt: at(100), previous: r1, current: withOld({ '/index.html': 'h2' }) });
+  assert.ok(kept.assets.some(row => row.path === '/assets/b.js')); assert.deepEqual(kept.retired, { '/assets/b.js': at(1) });
+  assert.throws(() => mergeAssetLedger({ ...meta, observedAt: at(100), previous: r1, current: withOld({ '/index.html': 'h2' }), prune: 'yes' }));
+  // keepPaths (the archive of the root HTML being replaced) is never retired or dropped.
+  assert.deepEqual(planAssetRetention({ previous: r1, buildPaths: ['/index.html'], observedAt: at(100), keepPaths: ['/assets/b.js'] }),
+    { retired: {}, pruned: [] });
+  // A path the parent's release retired is anchored at the parent's real cutover when that was later.
+  const plan = planAssetRetention({ previous: r1, buildPaths: ['/index.html'], observedAt: at(50), parentCutoverAt: at(2) });
+  assert.deepEqual(plan, { retired: { '/assets/b.js': at(2) }, pruned: [] }, 'at(1) + 49 h would prune; at(2) keeps');
+  assert.throws(() => planAssetRetention({ previous: r1, buildPaths: [], observedAt: at(1), parentCutoverAt: at(5) }), /retention_input/u);
 });

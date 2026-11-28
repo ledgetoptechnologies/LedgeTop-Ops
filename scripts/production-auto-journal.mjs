@@ -441,6 +441,10 @@ function storedOperation(op) {
     const prepared = op.receipts.filter(row => row.status === 'prepared');
     need(prepared.length <= 1 && (!prepared.length || prepared[0].ledgerSHA256 === op.runtime.ledgerSha256)
       && (!['verified-pending-artifact','verified'].includes(op.state) || prepared.length === 1));
+    // The final receipt's pruned count is exactly the prepared receipt's dropped-path list.
+    const verifiedRow = op.receipts.find(row => row.status === 'verified');
+    if (verifiedRow && prepared.length === 1)
+      need((verifiedRow.prunedAssets ?? 0) === (prepared[0].prunedPaths?.length ?? 0));
   }
   if (op.artifact !== null) need(exact(op.artifact, ['artifactId','digestSha256','name','runId','runAttempt','uploadStepConclusion','releaseStepConclusion'])
     && Number.isSafeInteger(op.artifact.artifactId) && op.artifact.artifactId > 0 && SHA.test(op.artifact.digestSha256)
