@@ -19,8 +19,12 @@
  */
 import { DatabaseSync, constants as C } from 'node:sqlite';
 
-export const MIGRATION_CLASSIFIER_VERSION = 1;
-export const PERMISSION_TABLE_PATTERN = /(^|_)(permissions?|roles?|staff|delegations?|grants?|shares?|shared|acl|authority|authorities|authorizations?|members?|memberships?|admissions?|capabilities|ceilings|bindings?)(_|$)/u;
+export const MIGRATION_CLASSIFIER_VERSION = 2;
+export const PERMISSION_TABLE_PATTERN = /(^|_)(permissions?|roles?|staff|delegations?|grants?|shares?|shared|acl|authority|authorities|authorizations?|members?|memberships?|admissions?|capabilities|ceilings|bindings?|entitlements?|identit(?:y|ies)|denials?|eligibility|invitations?|invites?|access|admins?|administrators?|users?|keys?|credentials?|secrets?|tokens?|sessions?|polic(?:y|ies)|assignments?|enrollments?|revocations?|oauth|owners?|managers?|recipients?|signing|auth|logins?|passwords?|peers?|approvals?|approvers?|visibility|scopes?|onboarding)(_|$)/u;
+// A column added to an existing table whose name suggests it decides access always needs review.
+const ACCESS_COLUMN_PATTERN = /(^|_)(can|allow|allowed|is_admin|admin|role|roles|scope|scopes|access|enabled|visible|visibility|permission|permissions|grant|grants|share|shared|owner|public|manager|managers|user|users|staff|member|members|delegate|delegates|approver|approvers|recipient|recipients)(_|$)/iu;
+// A new table or view whose definition (columns, CHECK values) speaks of access decisions is permission-changing.
+const ACCESS_CONTENT_PATTERN = /(?:^|[^A-Za-z0-9])(?:grants?|granted|revoke[sd]?|permissions?|roles?|admins?|access|entitlements?|credentials?|tokens?|secrets?|passwords?|delegat(?:e|es|ion|ions))(?:[^A-Za-z0-9]|$)|_(?:grants?|revoked?|permissions?|roles?|admin|access|token|secret)(?:_|[^A-Za-z0-9]|$)/iu;
 const SETUP = /^PRAGMA\s+defer_foreign_keys\s*=\s*(?:on|off|true|false|1|0)\s*;?\s*$/iu;
 const RESERVED = /^(?:d1_migrations|sqlite_.*|_cf_.*)$/iu;
 const IDENT = String.raw`(?:"(?:[^"]|"")+"|\x60(?:[^\x60]|\x60\x60)+\x60|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_$]*)`;
@@ -38,10 +42,15 @@ const FORMS = Object.freeze([
 // A guard trigger: on a table created in the same file, and its body only reads/raises (no writes anywhere).
 // Text between BEGIN and the final END; any write keyword in it (even inside a message) needs review.
 function guardTriggerBody(sql) {
-  const text = stripComments(String(sql ?? ''));
+  // The raw stored text, never comment-stripped: a '--' or '/*' inside a RAISE message must not hide what follows.
+  // Any write/DDL keyword anywhere in the body (even inside a message or comment) needs review, as does
+  // RAISE(IGNORE), which silently drops rows rather than guarding.
+  const text = String(sql ?? '');
   const start = text.search(/\bBEGIN\b/iu), end = text.search(/\bEND\s*;?\s*$/iu);
   if (start < 0 || end <= start) return false;
-  return !/\b(?:INSERT|UPDATE|DELETE|REPLACE|UPSERT|DROP|ALTER|CREATE|PRAGMA|ATTACH)\b/iu.test(text.slice(start + 5, end));
+  const body = text.slice(start + 5, end);
+  return /\bRAISE\s*\(/iu.test(body) && !/\bRAISE\s*\(\s*IGNORE\b/iu.test(body)
+    && !/\b(?:INSERT|UPDATE|DELETE|REPLACE|UPSERT|DROP|ALTER|CREATE|PRAGMA|ATTACH|DETACH|VACUUM|REINDEX|WITH)\b/iu.test(body);
 }
 const unquote = value => {
   const v = value.trim();
@@ -185,14 +194,27 @@ function classifyOne(db, { name, sql }, split) {
   for (const row of added) {
     if (row.type === 'trigger' && !(created.tables.has(row.tbl_name.toLowerCase()) && guardTriggerBody(row.sql))) reasons.add('trigger_not_guard');
     else if (!['table', 'index', 'view', 'trigger'].includes(row.type)) reasons.add(`new_${row.type}`);
-    if (row.type === 'table' && PERMISSION_TABLE_PATTERN.test(row.name.toLowerCase())) permissionTables.add(row.name.toLowerCase());
+    if (['table', 'view'].includes(row.type) && (PERMISSION_TABLE_PATTERN.test(row.name.toLowerCase())
+      || ACCESS_CONTENT_PATTERN.test(String(row.sql ?? '').replace(/^\s*CREATE\s+(?:TABLE|VIEW)\s+\S+/iu, '')))) permissionTables.add(row.name.toLowerCase());
     if (row.type === 'index' && PERMISSION_TABLE_PATTERN.test(row.tbl_name.toLowerCase())) permissionTables.add(row.tbl_name.toLowerCase());
   }
   for (const table of altered) {
     if (!beforeTables.has(table)) { reasons.add('alter_unknown_table'); continue; }
     const prior = beforeColumns.get(table), now = columns(db, table);
     if (now.length <= prior.length || JSON.stringify(now.slice(0, prior.length)) !== JSON.stringify(prior)) { reasons.add('columns_changed'); continue; }
-    for (const column of now.slice(prior.length)) if (column.pk || (column.notnull && column.dflt_value === null)) reasons.add('added_column_not_nullable_without_default');
+    for (const column of now.slice(prior.length)) {
+      if (column.pk || (column.notnull && column.dflt_value === null)) reasons.add('added_column_not_nullable_without_default');
+      // A default is written into every existing row: that changes existing data, so it needs review.
+      if (column.dflt_value !== null) reasons.add('added_column_default_on_existing_rows');
+      if (ACCESS_COLUMN_PATTERN.test(column.name)) permissionTables.add(table);
+    }
+    // REFERENCES/CHECK on an added column can block or cascade later writes to other tables.
+    const tableSql = String(after.find(row => row.type === 'table' && row.name.toLowerCase() === table)?.sql ?? '');
+    const priorSql = String(before.find(row => row.type === 'table' && row.name.toLowerCase() === table)?.sql ?? '');
+    if (/\b(?:REFERENCES|CHECK|COLLATE|GENERATED|AS\s*\()/iu.test(tableSql.slice(priorSql.length - 1))) reasons.add('added_column_constraint');
+    // An existing trigger or view over this table may depend on its column list (SELECT *, positional inserts).
+    const word = new RegExp(`(^|[^A-Za-z0-9_])${table.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}([^A-Za-z0-9_]|$)`, 'iu');
+    if (before.some(row => ['trigger', 'view'].includes(row.type) && word.test(String(row.sql ?? '')))) reasons.add('altered_table_has_triggers_or_views');
     if (PERMISSION_TABLE_PATTERN.test(table)) permissionTables.add(table);
   }
   for (const table of seeded) if (PERMISSION_TABLE_PATTERN.test(table)) permissionTables.add(table);

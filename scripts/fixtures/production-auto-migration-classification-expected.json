@@ -1,5 +1,5 @@
 {
- "classifierVersion": 1,
+ "classifierVersion": 2,
  "operations": [
   {
    "name": "0001_operations.sql",
@@ -7,7 +7,11 @@
    "additive": true,
    "permission": true,
    "permissionTables": [
+    "idempotency_keys",
+    "integration_keys",
     "operation_staff",
+    "pa_project_assignments",
+    "pa_users",
     "permissions",
     "role_permissions",
     "roles",
@@ -33,8 +37,8 @@
   },
   {
    "name": "0003_airspace_retention.sql",
-   "automatic": true,
-   "additive": true,
+   "automatic": false,
+   "additive": false,
    "permission": false,
    "permissionTables": []
   },
@@ -44,6 +48,9 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "integration_reconciliation",
+    "pa_application_entitlements",
+    "pa_operation_assignments",
     "staff_users"
    ]
   },
@@ -53,37 +60,45 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "pa_application_entitlements",
+    "pa_application_entitlements_legacy",
     "role_permissions",
     "roles"
    ]
   },
   {
    "name": "0006_airspace_sync_fingerprints.sql",
-   "automatic": true,
-   "additive": true,
-   "permission": false,
-   "permissionTables": []
-  },
-  {
-   "name": "0007_pa_projection_fingerprints.sql",
-   "automatic": true,
-   "additive": true,
-   "permission": false,
-   "permissionTables": []
-  },
-  {
-   "name": "0008_project_units_task_assignments.sql",
    "automatic": false,
    "additive": false,
    "permission": false,
    "permissionTables": []
   },
   {
-   "name": "0009_project_managers.sql",
-   "automatic": true,
+   "name": "0007_pa_projection_fingerprints.sql",
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_projection_fingerprints"
+   ]
+  },
+  {
+   "name": "0008_project_units_task_assignments.sql",
+   "automatic": false,
+   "additive": false,
+   "permission": true,
+   "permissionTables": [
+    "pa_task_assignments"
+   ]
+  },
+  {
+   "name": "0009_project_managers.sql",
+   "automatic": false,
+   "additive": true,
+   "permission": true,
+   "permissionTables": [
+    "pa_projects"
+   ]
   },
   {
    "name": "0010_delivery_reliability.sql",
@@ -91,6 +106,7 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "audit_retention_policies",
     "permissions",
     "role_permissions"
    ]
@@ -103,6 +119,7 @@
    "permissionTables": [
     "local_staff_role_assignments",
     "permissions",
+    "r2_upload_sessions",
     "role_permissions"
    ]
   },
@@ -122,7 +139,8 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "dropbox_import_authorizations"
+    "dropbox_import_authorizations",
+    "dropbox_import_oauth_states"
    ]
   },
   {
@@ -165,8 +183,11 @@
    "name": "0018_browser_upload_intents.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "r2_upload_sessions",
+    "r2_upload_sessions_legacy_0018"
+   ]
   },
   {
    "name": "0019_browser_upload_conflict_resolution.sql",
@@ -187,15 +208,17 @@
   },
   {
    "name": "0021_project_alpha_sync_hardening.sql",
-   "automatic": true,
-   "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "automatic": false,
+   "additive": false,
+   "permission": true,
+   "permissionTables": [
+    "integration_reconciliation"
+   ]
   },
   {
    "name": "0022_r2_operation_retries.sql",
-   "automatic": true,
-   "additive": true,
+   "automatic": false,
+   "additive": false,
    "permission": false,
    "permissionTables": []
   },
@@ -280,15 +303,24 @@
    "name": "0032_client_hub_directory.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_hub_directory_state"
+   ]
   },
   {
    "name": "0033_projection_sources.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_application_entitlements",
+    "pa_operation_assignments",
+    "pa_project_assignments",
+    "pa_projection_record_ids",
+    "pa_task_assignments",
+    "pa_users"
+   ]
   },
   {
    "name": "0034_client_hub_projection_sources.sql",
@@ -301,8 +333,11 @@
    "name": "0035_project_alpha_connectors.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_connector_revisions",
+    "pa_connector_signing_keys"
+   ]
   },
   {
    "name": "0036_business_parties.sql",
@@ -315,22 +350,34 @@
    "name": "0037_client_business_activity.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_business_activity",
+    "pa_operation_assignments",
+    "pa_project_assignments",
+    "pa_task_assignments"
+   ]
   },
   {
    "name": "0038_project_alpha_snapshot_recovery.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_snapshot_recovery_attempts",
+    "pa_snapshot_recovery_scheduler",
+    "pa_snapshot_recovery_sources"
+   ]
   },
   {
    "name": "0039_portal_connector_coordination.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_connector_portal_coordination",
+    "pa_connector_portal_write_permits"
+   ]
   },
   {
    "name": "0040_native_delivery_authorizations.sql",
@@ -364,6 +411,9 @@
    "permission": true,
    "permissionTables": [
     "permissions",
+    "project_operational_contact_assignments",
+    "project_operational_live_write_fences",
+    "project_operational_write_fences",
     "role_permissions"
    ]
   },
@@ -371,8 +421,11 @@
    "name": "0044_project_operational_copy_forward.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_operational_copy_receipts",
+    "project_operational_live_copy_fences"
+   ]
   },
   {
    "name": "0045_organization_operational_contacts.sql",
@@ -380,6 +433,8 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "organization_operational_contact_assignments",
+    "organization_operational_live_write_fences",
     "permissions",
     "role_permissions"
    ]
@@ -395,8 +450,10 @@
    "name": "0047_project_memory_staff_attachments.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_memory_attachment_live_write_fences"
+   ]
   },
   {
    "name": "0048_business_party_lifecycle.sql",
@@ -416,8 +473,10 @@
    "name": "0050_project_alpha_draft_quote_credentials.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_connector_draft_quote_credentials"
+   ]
   },
   {
    "name": "0051_client_hub_internal_notes.sql",
@@ -433,22 +492,29 @@
    "name": "0052_project_operational_reassignment_recovery.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_operational_contact_assignments",
+    "project_operational_live_recovery_fences"
+   ]
   },
   {
    "name": "0053_project_internal_notes.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_internal_note_live_write_fences"
+   ]
   },
   {
    "name": "0054_project_alpha_directory_outbox.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_directory_outbox"
+   ]
   },
   {
    "name": "0055_operations_directory_authority.sql",
@@ -470,7 +536,9 @@
    "additive": true,
    "permission": true,
    "permissionTables": [
+    "native_directory_assignments",
     "native_directory_grants",
+    "native_directory_resource_scopes",
     "native_staff_admissions"
    ]
   },
@@ -480,7 +548,11 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "native_directory_create_admissions"
+    "native_directory_create_admissions",
+    "native_directory_enrollments",
+    "native_directory_resource_scopes",
+    "operations_directory_live_write_fences",
+    "operations_directory_write_fences"
    ]
   },
   {
@@ -520,8 +592,10 @@
    "name": "0062_project_alpha_project_outbox.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_project_outbox"
+   ]
   },
   {
    "name": "0063_project_alpha_project_adoption.sql",
@@ -550,8 +624,10 @@
    "name": "0066_operations_directory_original_actor_subject.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_directory_audit"
+   ]
   },
   {
    "name": "0067_native_staff_management_authority.sql",
@@ -568,8 +644,10 @@
    "name": "0068_native_staff_control_plane.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "native_staff_control_plane_candidates"
+   ]
   },
   {
    "name": "0069_native_staff_management_commands.sql",
@@ -586,7 +664,7 @@
   {
    "name": "0070_native_staff_pending_onboarding.sql",
    "automatic": false,
-   "additive": true,
+   "additive": false,
    "permission": true,
    "permissionTables": [
     "native_staff_pending_onboarding"
@@ -627,6 +705,13 @@
    "permissionTables": [
     "native_staff_management_commands",
     "native_staff_management_fences",
+    "native_staff_onboarding_create_authority",
+    "native_staff_onboarding_create_grant_ceiling_failures",
+    "native_staff_onboarding_create_grant_target_failures",
+    "native_staff_onboarding_create_membership_failures",
+    "native_staff_onboarding_create_proposed_grants",
+    "native_staff_onboarding_create_records",
+    "native_staff_onboarding_create_uncovered_grant_memberships",
     "native_staff_pending_onboarding"
    ]
   },
@@ -638,6 +723,14 @@
    "permissionTables": [
     "native_staff_management_commands",
     "native_staff_management_fences",
+    "native_staff_onboarding_approve_authority",
+    "native_staff_onboarding_approve_grant_ceiling_failures",
+    "native_staff_onboarding_approve_grant_target_failures",
+    "native_staff_onboarding_approve_materialized",
+    "native_staff_onboarding_approve_membership_failures",
+    "native_staff_onboarding_approve_proposed_grants",
+    "native_staff_onboarding_approve_records",
+    "native_staff_onboarding_approve_uncovered_grant_memberships",
     "native_staff_pending_onboarding"
    ]
   },
@@ -664,36 +757,52 @@
    "name": "0077_client_onboarding_submissions.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_invitations",
+    "client_onboarding_submissions"
+   ]
   },
   {
    "name": "0078_client_onboarding_issuance.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_issuance_commands",
+    "client_onboarding_live_issuances",
+    "client_onboarding_submissions"
+   ]
   },
   {
    "name": "0079_client_onboarding_rate_limits.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_rate_limits"
+   ]
   },
   {
    "name": "0080_client_onboarding_handoffs.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_handoffs",
+    "client_onboarding_reveal_audit"
+   ]
   },
   {
    "name": "0081_operations_directory_relationships.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_directory_client_organization_history",
+    "operations_directory_live_relationship_fences",
+    "operations_directory_relationship_write_fences"
+   ]
   },
   {
    "name": "0082_operations_directory_intent_relationship_dependencies.sql",
@@ -708,6 +817,12 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "client_onboarding_all_decision_scopes",
+    "client_onboarding_decision_fences",
+    "client_onboarding_decision_rejection_scopes",
+    "client_onboarding_decision_scope_targets",
+    "client_onboarding_decisions",
+    "client_onboarding_live_decision_fences",
     "native_directory_create_admissions"
    ]
   },
@@ -733,8 +848,10 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "native_project_command_proofs",
     "native_project_grant_generations",
     "native_project_grants",
+    "native_project_live_command_proofs",
     "operations_shared_project_revisions",
     "operations_shared_projects"
    ]
@@ -750,8 +867,10 @@
    "name": "0088_project_alpha_api_v2_incident_alerts.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_api_v2_incident_alerts"
+   ]
   },
   {
    "name": "0089_project_alpha_api_v2_monitor_lifecycle.sql",
@@ -774,7 +893,8 @@
    "permission": true,
    "permissionTables": [
     "native_integration_control_grant_history",
-    "native_integration_control_grants"
+    "native_integration_control_grants",
+    "project_alpha_api_v2_monitor_operator_audit"
    ]
   },
   {
@@ -791,31 +911,48 @@
   },
   {
    "name": "0093_native_integration_alert_reconciliation.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "native_integration_alert_reconciliation_commands",
+    "native_integration_alert_reconciliation_fences"
+   ]
   },
   {
    "name": "0094_client_onboarding_submission_notifications.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_review_notification_events",
+    "client_onboarding_review_notification_recipients",
+    "client_onboarding_submissions"
+   ]
   },
   {
    "name": "0095_client_onboarding_notification_scan.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_notification_scan_checkpoints"
+   ]
   },
   {
    "name": "0096_native_workforce_foundation.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "native_workforce_bonus_adjustments",
+    "native_workforce_bonus_reviews",
+    "native_workforce_bonus_submissions",
+    "native_workforce_commands",
+    "native_workforce_time_entries",
+    "native_workforce_time_reviews",
+    "native_workforce_time_submissions"
+   ]
   },
   {
    "name": "0097_native_workforce_authority.sql",
@@ -829,17 +966,22 @@
   },
   {
    "name": "0098_native_workforce_time_record_receipts.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "native_workforce_time_record_receipts"
+   ]
   },
   {
    "name": "0099_native_workforce_time_submit_review_receipts.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "native_workforce_time_review_receipts",
+    "native_workforce_time_submit_receipts"
+   ]
   },
   {
    "name": "0100_native_workforce_authority_grant_change_receipts.sql",
@@ -882,17 +1024,21 @@
   },
   {
    "name": "0104_client_onboarding_prefill_disclosures.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_prefill_disclosures"
+   ]
   },
   {
    "name": "0105_client_onboarding_disclosure_recipient.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_prefill_disclosures"
+   ]
   },
   {
    "name": "0106_client_onboarding_prefill_binding_commands.sql",
@@ -927,6 +1073,8 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "native_workforce_time_beneficiary_selection_issuance_receipts",
+    "native_workforce_time_beneficiary_selection_issuances",
     "native_workforce_time_beneficiary_selection_issuer_ceilings",
     "native_workforce_time_beneficiary_selection_issuer_delegations"
    ]
@@ -937,8 +1085,10 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "native_workforce_time_beneficiary_selection_lifecycle_audits",
     "native_workforce_time_beneficiary_selection_lifecycle_ceilings",
-    "native_workforce_time_beneficiary_selection_lifecycle_delegations"
+    "native_workforce_time_beneficiary_selection_lifecycle_delegations",
+    "native_workforce_time_beneficiary_selection_lifecycle_receipts"
    ]
   },
   {
@@ -963,7 +1113,7 @@
   {
    "name": "0113_project_alpha_existing_directory_binding_acquired_mapping_receipts.sql",
    "automatic": false,
-   "additive": true,
+   "additive": false,
    "permission": true,
    "permissionTables": [
     "project_alpha_existing_directory_binding_acquired_mapping_receipts"
@@ -991,8 +1141,8 @@
   },
   {
    "name": "0116_project_alpha_acquired_canonical_mapping_activation.sql",
-   "automatic": true,
-   "additive": true,
+   "automatic": false,
+   "additive": false,
    "permission": false,
    "permissionTables": []
   },
@@ -1000,13 +1150,15 @@
    "name": "0117_project_alpha_native_owner_epoch_claims.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_acquired_native_owner_claims"
+   ]
   },
   {
    "name": "0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql",
    "automatic": false,
-   "additive": true,
+   "additive": false,
    "permission": true,
    "permissionTables": [
     "project_alpha_existing_directory_binding_revision_refresh_commands",
@@ -1028,7 +1180,8 @@
    "permission": true,
    "permissionTables": [
     "operations_shared_project_revisions",
-    "operations_shared_projects"
+    "operations_shared_projects",
+    "project_alpha_project_v2_canonical_intents"
    ]
   },
   {
@@ -1062,15 +1215,18 @@
   },
   {
    "name": "0124_project_alpha_project_adoption_review_evidence.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_project_adoption_review_evidence",
+    "project_alpha_project_adoption_review_reservations"
+   ]
   },
   {
    "name": "0125_project_alpha_existing_directory_binding_activation.sql",
    "automatic": false,
-   "additive": true,
+   "additive": false,
    "permission": true,
    "permissionTables": [
     "project_alpha_existing_directory_binding_activation_receipts"
@@ -1110,10 +1266,12 @@
   },
   {
    "name": "0130_project_alpha_project_adoption_review_producer.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_project_adoption_review_producer_receipts"
+   ]
   },
   {
    "name": "0131_project_alpha_project_active_directory_mapping_guards.sql",
@@ -1129,15 +1287,20 @@
    "name": "0132_operations_directory_acquired_relationship_dependencies.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_decisions"
+   ]
   },
   {
    "name": "0133_project_alpha_directory_relationship_outbox.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_directory_live_relationship_commands",
+    "project_alpha_directory_relationship_outbox"
+   ]
   },
   {
    "name": "0134_native_directory_create_admission_relationships.sql",
@@ -1164,10 +1327,12 @@
   },
   {
    "name": "0137_project_alpha_directory_reconciliation_scheduler.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_directory_reconciliation_scheduler"
+   ]
   },
   {
    "name": "0138_project_alpha_directory_reconciliation_review.sql",
@@ -1175,6 +1340,7 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "project_alpha_directory_reconciliation_actions",
     "project_alpha_existing_directory_binding_acquired_mapping_receipts",
     "project_alpha_existing_directory_binding_review_evidence"
    ]
@@ -1190,8 +1356,10 @@
    "name": "0140_client_onboarding_one_time_reveal.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_reveal_consumptions"
+   ]
   },
   {
    "name": "0141_deferred_directory_client_materialization.sql",
@@ -1244,10 +1412,13 @@
   },
   {
    "name": "0146_ops_customer_service_enrollments.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_customer_service_enrollment_mutations",
+    "operations_customer_service_enrollments"
+   ]
   },
   {
    "name": "0147_client_portal_authority_v3_permissions.sql",
@@ -1261,17 +1432,24 @@
   },
   {
    "name": "0148_client_portal_recipient_enrollment.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_portal_recipient_enrollment_intents",
+    "client_portal_recipient_enrollment_operation_commits",
+    "client_portal_recipient_enrollment_operations"
+   ]
   },
   {
    "name": "0149_client_portal_recipient_enrollment_sql_fences.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_portal_recipient_enrollment_intents",
+    "client_portal_recipient_enrollment_operations"
+   ]
   },
   {
    "name": "0150_client_portal_recipient_enrollment_cancellation.sql",
@@ -1279,7 +1457,11 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "client_portal_authority_v2_outbox"
+    "client_portal_authority_v2_outbox",
+    "client_portal_recipient_enrollment_cancellations",
+    "client_portal_recipient_enrollment_intents",
+    "client_portal_recipient_enrollment_operation_commits",
+    "client_portal_recipient_enrollment_operations"
    ]
   },
   {
@@ -1295,22 +1477,36 @@
     "verified_recipient_delivery_authority_heads",
     "verified_recipient_delivery_authority_outbox",
     "verified_recipient_delivery_authority_receipts",
-    "verified_recipient_delivery_authority_tombstones"
+    "verified_recipient_delivery_authority_tombstones",
+    "verified_recipient_delivery_effective_permissions"
    ]
   },
   {
    "name": "0152_operations_portal_workspace_reservations.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_folder_reservation_heads",
+    "operations_portal_workspace_effective_permissions",
+    "operations_portal_workspace_effective_portal_permissions",
+    "operations_portal_workspace_live_command_authority",
+    "operations_portal_workspace_reservation_commands",
+    "operations_portal_workspace_reservation_heads"
+   ]
   },
   {
    "name": "0153_operations_portal_workspace_publication_outbox.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_workspace_publication_audit",
+    "operations_portal_workspace_publication_commands",
+    "operations_portal_workspace_publication_live_commands",
+    "operations_portal_workspace_publication_outbox",
+    "operations_portal_workspace_publication_receipts"
+   ]
   },
   {
    "name": "0154_operations_portal_native_recipient_authority.sql",
@@ -1324,6 +1520,10 @@
     "operations_portal_native_authority_outbox",
     "operations_portal_native_authority_receipts",
     "operations_portal_native_recipient_authority_heads",
+    "operations_portal_native_recipient_intents",
+    "operations_portal_native_recipient_live_owner_authority",
+    "operations_portal_native_recipient_operation_commits",
+    "operations_portal_native_recipient_operations",
     "operations_portal_native_workspace_authority_heads"
    ]
   },
@@ -1331,15 +1531,21 @@
    "name": "0155_operations_portal_workspace_publication_cancellations.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_workspace_publication_cancellation_audit",
+    "operations_portal_workspace_publication_cancellation_receipts"
+   ]
   },
   {
    "name": "0156_operations_portal_workspace_publication_invocations.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_workspace_publication_invocation_audit",
+    "operations_portal_workspace_publication_invocations"
+   ]
   },
   {
    "name": "0157_operations_portal_native_workspace_cleanup.sql",
@@ -1351,8 +1557,16 @@
     "operations_portal_native_authority_commands",
     "operations_portal_native_recipient_authority_heads",
     "operations_portal_native_recipient_authority_heads_v2",
+    "operations_portal_native_recipient_operations",
     "operations_portal_native_workspace_authority_heads",
-    "operations_portal_native_workspace_authority_heads_v2"
+    "operations_portal_native_workspace_authority_heads_v2",
+    "operations_portal_native_workspace_cleanup_commands",
+    "operations_portal_native_workspace_cleanup_finalizations",
+    "operations_portal_native_workspace_cleanup_invocation_audit",
+    "operations_portal_native_workspace_cleanup_invocations",
+    "operations_portal_native_workspace_cleanup_live_commands",
+    "operations_portal_native_workspace_cleanup_outbox",
+    "operations_portal_native_workspace_cleanup_receipts"
    ]
   },
   {
@@ -1376,15 +1590,22 @@
    "name": "0159_operations_portal_native_delivery_recovery_invocations.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_native_delivery_recovery_invocation_audit",
+    "operations_portal_native_delivery_recovery_invocations"
+   ]
   },
   {
    "name": "0160_operations_portal_native_recipient_labels.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_native_recipient_intents",
+    "operations_portal_native_recipient_labels",
+    "operations_portal_native_recipient_operations"
+   ]
   },
   {
    "name": "0161_project_alpha_api_v2_inventory_observations.sql",
@@ -1395,17 +1616,21 @@
   },
   {
    "name": "0162_project_alpha_directory_read_adoption_claims.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_directory_read_adoption_reviews"
+   ]
   },
   {
    "name": "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_directory_read_adoption_field_review_receipts"
+   ]
   },
   {
    "name": "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
@@ -1430,17 +1655,22 @@
   },
   {
    "name": "0167_project_alpha_directory_read_adoption_finalizations.sql",
-   "automatic": true,
-   "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "automatic": false,
+   "additive": false,
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_directory_read_adoption_finalizations"
+   ]
   },
   {
    "name": "0168_project_alpha_directory_read_adoption_local_profiles.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_directory_read_adoption_local_profile_fences",
+    "project_alpha_directory_read_adoption_local_profile_receipts"
+   ]
   },
   {
    "name": "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
@@ -1490,8 +1720,10 @@
    "name": "0174_project_alpha_directory_preserved_external_identity.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "_project_alpha_directory_preserved_identity_migration_assertion"
+   ]
   },
   {
    "name": "0175_operations_directory_acquired_parent_enrollment_identity.sql",
@@ -1522,6 +1754,7 @@
    "permissionTables": [
     "operations_shared_project_revisions",
     "operations_shared_projects",
+    "project_alpha_project_inbound_proposals",
     "project_alpha_project_inbound_resolution_authorizations"
    ]
   },
@@ -1529,8 +1762,11 @@
    "name": "0179_project_alpha_acquired_native_identity_collision.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "_project_alpha_acquired_identity_migration_assertion",
+    "project_alpha_acquired_native_owner_claims"
+   ]
   },
   {
    "name": "0180_project_alpha_project_v2_recovery_authorization.sql",
@@ -1540,6 +1776,9 @@
    "permissionTables": [
     "operations_shared_project_revisions",
     "operations_shared_projects",
+    "project_alpha_project_v2_live_post_ack_authorizations",
+    "project_alpha_project_v2_live_recovery_authorizations",
+    "project_alpha_project_v2_live_settlement_proofs",
     "project_alpha_project_v2_post_ack_authorizations",
     "project_alpha_project_v2_recovery_authorizations"
    ]
@@ -1548,8 +1787,11 @@
    "name": "0181_project_alpha_directory_create_generation_recovery.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_directory_create_generation_recoveries",
+    "project_alpha_directory_create_generation_recovery_successors"
+   ]
   },
   {
    "name": "0182_project_alpha_directory_relationship_recovery_guard.sql",
@@ -1571,8 +1813,14 @@
    "name": "0184_project_alpha_directory_relationship_generation_recovery.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "project_alpha_directory_effective_relationship_commands",
+    "project_alpha_directory_live_relationship_generation_recoveries",
+    "project_alpha_directory_relationship_generation_recoveries",
+    "project_alpha_directory_relationship_generation_recovery_reviews",
+    "project_alpha_directory_relationship_recovery_outbox"
+   ]
   },
   {
    "name": "0185_project_alpha_directory_binding_generation_epochs.sql",
@@ -1599,10 +1847,12 @@
   },
   {
    "name": "0188_client_hub_native_project_preparations.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_hub_native_project_preparations"
+   ]
   },
   {
    "name": "0189_client_hub_native_project_uncertain_recovery.sql",
@@ -1610,6 +1860,8 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "client_hub_native_project_live_recovery_authorizations",
+    "client_hub_native_project_post_ack_continuations",
     "client_hub_native_project_recovery_authorizations"
    ]
   },
@@ -1619,7 +1871,8 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "operations_shared_projects"
+    "operations_shared_projects",
+    "project_alpha_project_v2_update_activation_fences"
    ]
   },
   {
@@ -1632,11 +1885,17 @@
     "operations_portal_native_billing_authority_heads",
     "operations_portal_native_billing_authority_outbox",
     "operations_portal_native_billing_authority_receipts",
+    "operations_portal_native_billing_current_finalization_actor",
+    "operations_portal_native_billing_current_finalization_entity",
+    "operations_portal_native_billing_current_finalization_lineage",
+    "operations_portal_native_billing_effective_finalization_actor",
     "operations_portal_native_billing_grant_finalizations",
+    "operations_portal_native_billing_live_authority",
     "operations_portal_native_billing_permission_commands",
     "operations_portal_native_billing_permission_generations",
     "operations_portal_native_billing_permission_revocations",
     "operations_portal_native_billing_permissions",
+    "operations_portal_workspace_effective_billing_permissions",
     "permissions"
    ]
   },
@@ -1644,8 +1903,10 @@
    "name": "0192_ops_service_definition_authority.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_service_definition_mutations"
+   ]
   },
   {
    "name": "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
@@ -1660,7 +1921,9 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "operations_portal_native_delivery_authority_heads"
+    "operations_portal_native_delivery_authority_heads",
+    "operations_portal_native_delivery_cancellation_current_home",
+    "operations_portal_native_delivery_cancellation_intents"
    ]
   },
   {
@@ -1730,6 +1993,11 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "native_directory_enrollments",
+    "operations_directory_lifecycle_events",
+    "operations_directory_lifecycle_fences",
+    "operations_directory_live_lifecycle_fences",
+    "project_alpha_directory_lifecycle_outbox",
     "project_alpha_existing_directory_binding_acquired_mapping_receipts",
     "project_alpha_existing_directory_binding_acquisition_commands",
     "project_alpha_existing_directory_binding_acquisition_response_receipts",
@@ -1739,10 +2007,13 @@
   {
    "name": "0202_reviewed_import_enrollment.sql",
    "automatic": false,
-   "additive": true,
+   "additive": false,
    "permission": true,
    "permissionTables": [
-    "reviewed_import_enrollment_admissions"
+    "effective_native_directory_enrollments",
+    "reviewed_import_enrollment_admissions",
+    "reviewed_import_enrollment_live_admissions",
+    "reviewed_import_enrollment_receipts"
    ]
   },
   {
@@ -1759,6 +2030,10 @@
    "permission": true,
    "permissionTables": [
     "native_project_lifecycle_authorizations",
+    "native_project_lifecycle_commands",
+    "native_project_lifecycle_live_authorizations",
+    "native_project_lifecycle_post_attempts",
+    "native_project_lifecycle_refreshes",
     "operations_shared_project_revisions",
     "operations_shared_projects",
     "project_alpha_project_inbound_resolution_authorizations"
@@ -1766,10 +2041,14 @@
   },
   {
    "name": "0205_native_billing_source_authority.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_native_billing_source_commands",
+    "operations_portal_native_billing_source_heads",
+    "operations_portal_native_billing_source_live_authority"
+   ]
   },
   {
    "name": "0206_native_directory_existing_import.sql",
@@ -1780,6 +2059,8 @@
     "native_directory_create_admissions",
     "native_directory_existing_import_binding_intents",
     "native_directory_existing_import_execution_admissions",
+    "native_directory_existing_import_identity_translations",
+    "native_directory_existing_import_live_reviews",
     "project_alpha_existing_directory_binding_activation_receipts",
     "project_alpha_existing_directory_binding_review_evidence"
    ]
@@ -1817,9 +2098,14 @@
    "permission": true,
    "permissionTables": [
     "native_directory_shared_profile_commands",
+    "operations_directory_live_portal_write_fences",
+    "operations_directory_live_staff_write_fences",
+    "operations_directory_portal_write_fences",
     "shared_profile_authority_recoveries",
     "shared_profile_authority_recovery_audit",
+    "shared_profile_authority_recovery_owners",
     "shared_profile_authority_recovery_steps",
+    "shared_profile_portal_ack_witnesses",
     "shared_profile_portal_audit",
     "shared_profile_portal_authority_heads"
    ]
@@ -1838,8 +2124,10 @@
    "name": "0211_native_directory_create_observations.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "native_directory_create_observation_dispatch"
+   ]
   },
   {
    "name": "0212_primary_portal_directory_correspondence.sql",
@@ -1848,6 +2136,8 @@
    "permission": true,
    "permissionTables": [
     "native_directory_shared_profile_commands",
+    "portal_directory_correspondence_heads",
+    "portal_directory_correspondence_receipts",
     "shared_profile_portal_grants",
     "shared_profile_portal_write_fences"
    ]
@@ -1856,15 +2146,22 @@
    "name": "0213_client_onboarding_notification_attempts.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_review_notification_recipients"
+   ]
   },
   {
    "name": "0214_client_onboarding_portal_activation.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_decisions",
+    "client_onboarding_portal_activation_intents",
+    "client_onboarding_portal_activation_proofs",
+    "client_onboarding_portal_activation_scan"
+   ]
   },
   {
    "name": "0215_local_project_division_authority.sql",
@@ -1877,8 +2174,10 @@
    "name": "0216_client_onboarding_existing_company.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_decision_fences"
+   ]
   },
   {
    "name": "0217_client_onboarding_shared_company_plans.sql",
@@ -1886,6 +2185,7 @@
    "additive": true,
    "permission": true,
    "permissionTables": [
+    "client_onboarding_live_shared_company_plans",
     "client_onboarding_shared_company_plan_children",
     "client_onboarding_shared_company_plan_seals",
     "client_onboarding_shared_company_plans"
@@ -1897,9 +2197,14 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "client_onboarding_decisions",
+    "client_onboarding_live_shared_company_execution_fences",
+    "client_onboarding_live_shared_contact_creation_fences",
+    "client_onboarding_portal_activation_proofs",
     "client_onboarding_shared_company_approvals",
     "client_onboarding_shared_company_child_receipts",
     "client_onboarding_shared_company_execution_fences",
+    "client_onboarding_shared_company_parent_heads",
     "client_onboarding_shared_contact_creation_fences",
     "native_directory_create_admissions",
     "native_directory_shared_profiles"
@@ -1911,6 +2216,7 @@
    "additive": true,
    "permission": true,
    "permissionTables": [
+    "ops_agent_principals",
     "ops_agent_read_grants"
    ]
   },
@@ -1946,6 +2252,10 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "ops_employee_read_commands",
+    "ops_employee_read_content_starts",
+    "ops_employee_read_issuers",
+    "ops_employee_read_mutation_audit",
     "permissions",
     "role_permissions"
    ]
@@ -1965,6 +2275,7 @@
    "permissionTables": [
     "native_staff_access_reconciliation",
     "native_staff_access_reconciliation_events",
+    "native_staff_lifecycle_control_plane_candidates",
     "native_staff_lifecycle_fences",
     "native_staff_pending_onboarding",
     "staff_users"
@@ -1991,6 +2302,10 @@
    "permission": true,
    "permissionTables": [
     "owner_intel_bindings",
+    "owner_intel_business_aliases",
+    "owner_intel_businesses",
+    "owner_intel_competitor_projections",
+    "owner_intel_control",
     "owner_intel_read_grants"
    ]
   },
@@ -2001,7 +2316,8 @@
    "permission": true,
    "permissionTables": [
     "ci_ingest_binding_epochs",
-    "ci_ingest_producer_bindings"
+    "ci_ingest_producer_bindings",
+    "ci_ingest_producer_keys"
    ]
   },
   {
@@ -2010,15 +2326,27 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "owner_intel_source_bindings"
+    "owner_intel_source_batch_guards",
+    "owner_intel_source_bindings",
+    "owner_intel_source_control",
+    "owner_intel_source_epoch_audit",
+    "owner_intel_source_epochs",
+    "owner_intel_source_inbox",
+    "owner_intel_source_kind_heads",
+    "owner_intel_source_projections",
+    "owner_intel_source_range_heads",
+    "owner_intel_source_subject_heads"
    ]
   },
   {
    "name": "0230_app_release_pilot.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "app_release_pilot_eligibilities",
+    "app_release_pilot_revocations"
+   ]
   },
   {
    "name": "0231_owner_google_ads_summary.sql",
@@ -2026,7 +2354,16 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "owner_intel_google_ads_bindings"
+    "owner_intel_google_ads_batch_guards",
+    "owner_intel_google_ads_bindings",
+    "owner_intel_google_ads_control",
+    "owner_intel_google_ads_epoch_audit",
+    "owner_intel_google_ads_epochs",
+    "owner_intel_google_ads_inbox",
+    "owner_intel_google_ads_projections",
+    "owner_intel_google_ads_range_heads",
+    "owner_intel_google_ads_subject_heads",
+    "owner_intel_source_inbox"
    ]
   },
   {
@@ -2076,7 +2413,9 @@
    "permissionTables": [
     "staff_operations_access_catalog",
     "staff_operations_access_commands",
+    "staff_operations_access_native_hires",
     "staff_operations_access_state",
+    "staff_operations_access_targets",
     "staff_permission_overrides"
    ]
   },
@@ -2084,15 +2423,24 @@
    "name": "0247_client_onboarding_destination_target_proofs.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_decisions",
+    "client_onboarding_handoffs",
+    "client_onboarding_issuance_commands",
+    "client_onboarding_target_proofs"
+   ]
   },
   {
    "name": "0248_client_onboarding_invite_mail_outbox.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_onboarding_invite_mail_outbox",
+    "client_onboarding_reveal_audit",
+    "client_onboarding_reveal_consumptions"
+   ]
   }
  ],
  "client": [
@@ -2102,6 +2450,7 @@
    "additive": true,
    "permission": true,
    "permissionTables": [
+    "api_keys",
     "shares",
     "staff_users"
    ]
@@ -2166,8 +2515,10 @@
    "name": "0090_aliases_incoming_requests.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "file_requests"
+   ]
   },
   {
    "name": "0091_client_notifications.sql",
@@ -2175,13 +2526,14 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "delivery_notifications",
     "shares"
    ]
   },
   {
    "name": "0092_preview_derivative_identity.sql",
-   "automatic": true,
-   "additive": true,
+   "automatic": false,
+   "additive": false,
    "permission": false,
    "permissionTables": []
   },
@@ -2198,7 +2550,9 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "cloud_transfer_authorizations"
+    "cloud_oauth_states",
+    "cloud_transfer_authorizations",
+    "cloud_transfer_items"
    ]
   },
   {
@@ -2215,7 +2569,9 @@
    "permission": true,
    "permissionTables": [
     "client_delivery_grants",
+    "client_identity_links",
     "client_project_grants",
+    "client_service_requests",
     "shares"
    ]
   },
@@ -2225,16 +2581,20 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "client_access_sync_outbox",
+    "client_account_invitations",
     "client_account_members",
     "client_member_project_grants"
    ]
   },
   {
    "name": "0098_client_access_sync_processing.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_access_sync_outbox"
+   ]
   },
   {
    "name": "0099_client_portal_request_notifications.sql",
@@ -2272,8 +2632,11 @@
    "name": "0103_client_portal_workspace.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_folder_associations",
+    "request_admin_audit"
+   ]
   },
   {
    "name": "0104_service_request_thread.sql",
@@ -2288,6 +2651,7 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "client_folder_associations",
     "client_folder_grant_mutations",
     "client_folder_grant_notifications"
    ]
@@ -2352,10 +2716,14 @@
   },
   {
    "name": "0115_client_workspace_notifications.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_folder_change_notifications",
+    "client_folder_notification_preferences",
+    "client_portal_notifications"
+   ]
   },
   {
    "name": "0116_incoming_upload_hardening.sql",
@@ -2368,15 +2736,19 @@
    "name": "0117_service_request_v2.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_service_request_drafts"
+   ]
   },
   {
    "name": "0118_staff_work_area_revisions.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "request_pa_artifacts"
+   ]
   },
   {
    "name": "0119_client_request_attachments.sql",
@@ -2398,7 +2770,11 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "portal_v2_entitlements",
     "portal_v2_folder_bindings",
+    "portal_v2_identities",
+    "portal_v2_invitation_entitlements",
+    "portal_v2_invitations",
     "portal_v2_workspace_memberships"
    ]
   },
@@ -2415,6 +2791,9 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "portal_v2_invitation_commands",
+    "portal_v2_invitation_email_outbox",
+    "portal_v2_invitation_rate_limits",
     "portal_v2_membership_audit"
    ]
   },
@@ -2435,8 +2814,12 @@
    "name": "0125_project_alpha_portal_projection.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_portal_entitlement_intents",
+    "pa_portal_principals",
+    "pa_portal_projection_entitlements"
+   ]
   },
   {
    "name": "0126_delivery_share_recipient_snapshots.sql",
@@ -2452,8 +2835,11 @@
    "name": "0127_portal_invitation_secret_scrub.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_v2_invitation_email_outbox",
+    "portal_v2_invitations"
+   ]
   },
   {
    "name": "0128_project_alpha_catalog_compatibility.sql",
@@ -2484,8 +2870,10 @@
    "name": "0131_video_thumbnail_recovery_backfill.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "legacy_video_thumbnail_recovery"
+   ]
   },
   {
    "name": "0132_portal_v2_legacy_member_bridges.sql",
@@ -2494,6 +2882,7 @@
    "permission": true,
    "permissionTables": [
     "client_account_members",
+    "client_identity_links",
     "client_member_project_grants",
     "client_project_grants",
     "portal_v2_legacy_member_bridges",
@@ -2504,8 +2893,12 @@
    "name": "0133_portal_invitation_access_enrollment_receipts.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_v2_invitation_access_enrollment_receipts",
+    "portal_v2_invitation_email_outbox",
+    "portal_v2_invitations"
+   ]
   },
   {
    "name": "0134_rejected_request_attachment_submit_guard.sql",
@@ -2518,15 +2911,20 @@
    "name": "0135_security_scan_followups.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_v2_invitation_access_enrollment_revocations"
+   ]
   },
   {
    "name": "0136_portal_v2_identity_denials.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_v2_identity_denial_audit",
+    "portal_v2_identity_denials"
+   ]
   },
   {
    "name": "0137_authenticated_delivery_grants.sql",
@@ -2537,15 +2935,21 @@
     "portal_v2_authenticated_delivery_grant_audit",
     "portal_v2_authenticated_delivery_grant_mutations",
     "portal_v2_authenticated_delivery_grant_recipients",
-    "portal_v2_authenticated_delivery_grants"
+    "portal_v2_authenticated_delivery_grants",
+    "portal_v2_identity_denial_invariant_lock",
+    "portal_v2_identity_denial_mutations"
    ]
   },
   {
    "name": "0138_viewer_model_associations.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "viewer_association_mutation_receipts",
+    "viewer_model_associations",
+    "viewer_session_issuance_receipts"
+   ]
   },
   {
    "name": "0139_thumbnail_claim_queue_index.sql",
@@ -2582,8 +2986,10 @@
    "name": "0143_viewer_session_revocation_outbox.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "viewer_session_revocation_outbox"
+   ]
   },
   {
    "name": "0144_viewer_client_grants.sql",
@@ -2601,7 +3007,11 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "portal_v2_identity_eligibility_bindings"
+    "portal_v2_identity_eligibility_bindings",
+    "portal_v2_identity_eligibility_block_audit",
+    "portal_v2_identity_eligibility_block_mutations",
+    "portal_v2_identity_eligibility_blocks",
+    "portal_v2_identity_eligibility_legacy_bridges"
    ]
   },
   {
@@ -2620,7 +3030,11 @@
    "permission": true,
    "permissionTables": [
     "project_alpha_delivery_guest_authority",
-    "project_alpha_delivery_portal_grants"
+    "project_alpha_delivery_intent_audit",
+    "project_alpha_delivery_intent_receipts",
+    "project_alpha_delivery_intent_revocation_receipts",
+    "project_alpha_delivery_portal_grants",
+    "project_alpha_delivery_portal_notification_outbox"
    ]
   },
   {
@@ -2650,24 +3064,32 @@
   },
   {
    "name": "0151_thumbnail_render_not_before.sql",
-   "automatic": true,
-   "additive": true,
+   "automatic": false,
+   "additive": false,
    "permission": false,
    "permissionTables": []
   },
   {
    "name": "0152_portal_identity_read_indexes.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_v2_entitlements",
+    "portal_v2_identity_eligibility_blocks",
+    "portal_v2_invitations"
+   ]
   },
   {
    "name": "0153_client_folder_notification_batches.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_folder_notification_batch_items",
+    "client_folder_notification_batches",
+    "client_folder_notification_object_state"
+   ]
   },
   {
    "name": "0154_notification_batch_controls.sql",
@@ -2678,10 +3100,12 @@
   },
   {
    "name": "0155_client_feedback.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "client_feedback_notification_outbox"
+   ]
   },
   {
    "name": "0156_catalog_source_isolation.sql",
@@ -2697,6 +3121,7 @@
    "permission": true,
    "permissionTables": [
     "client_project_grants",
+    "portal_v2_identity_eligibility_legacy_bridges",
     "portal_v2_legacy_member_bridges"
    ]
   },
@@ -2706,6 +3131,7 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "portal_v2_identity_eligibility_legacy_bridges",
     "portal_v2_legacy_member_bridges"
    ]
   },
@@ -2716,6 +3142,8 @@
    "permission": true,
    "permissionTables": [
     "project_alpha_delivery_guest_authority",
+    "project_alpha_delivery_intent_revocation_receipts",
+    "project_alpha_delivery_intent_revocation_receipts_source",
     "project_alpha_delivery_portal_grants"
    ]
   },
@@ -2730,8 +3158,11 @@
    "name": "0161_portal_delivery_notification_batches.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_delivery_notification_batches",
+    "portal_delivery_notification_items"
+   ]
   },
   {
    "name": "0162_portal_source_authorities.sql",
@@ -2741,7 +3172,8 @@
    "permissionTables": [
     "pa_portal_source_authorities",
     "pa_portal_source_authority_audit",
-    "pa_portal_source_authority_revisions"
+    "pa_portal_source_authority_revisions",
+    "pa_portal_source_signing_keys"
    ]
   },
   {
@@ -2765,29 +3197,56 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "portal_v2_authenticated_delivery_grants"
+    "portal_project_access_current_lifecycle",
+    "portal_project_access_deadlines",
+    "portal_project_access_terms",
+    "portal_project_access_write_fences",
+    "portal_project_invitation_fences",
+    "portal_v2_authenticated_delivery_grants",
+    "portal_v2_entitlements",
+    "portal_v2_invitation_entitlements",
+    "portal_v2_invitations",
+    "portal_workspace_invitation_policies"
    ]
   },
   {
    "name": "0165_workspace_invitation_approvals.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_v2_invitation_commands",
+    "portal_v2_invitation_email_outbox",
+    "portal_v2_invitation_entitlements",
+    "portal_v2_invitations",
+    "portal_workspace_invitation_approval_fences",
+    "portal_workspace_invitation_approvals",
+    "portal_workspace_invitation_publications",
+    "portal_workspace_invitation_request_audit",
+    "portal_workspace_invitation_request_commands",
+    "portal_workspace_invitation_requests"
+   ]
   },
   {
    "name": "0166_workspace_address_book.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_v2_invitations",
+    "portal_workspace_address_contacts"
+   ]
   },
   {
    "name": "0167_workspace_peer_administrators.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_workspace_peer_admin_audit",
+    "portal_workspace_peer_admin_commands",
+    "portal_workspace_peer_admin_fences"
+   ]
   },
   {
    "name": "0168_project_alpha_service_assignments.sql",
@@ -2795,8 +3254,18 @@
    "additive": true,
    "permission": true,
    "permissionTables": [
+    "pa_service_assignment_checkpoints",
+    "pa_service_assignment_entity_state",
+    "pa_service_assignment_generation_items",
+    "pa_service_assignment_generation_pages",
+    "pa_service_assignment_generations",
+    "pa_service_assignment_projection_audit",
+    "pa_service_assignment_projection_receipts",
     "pa_service_assignment_receiver_grants",
-    "pa_service_assignment_source_capabilities"
+    "pa_service_assignment_receiver_workspaces",
+    "pa_service_assignment_source_capabilities",
+    "pa_service_assignment_write_fences",
+    "pa_service_assignments"
    ]
   },
   {
@@ -2806,15 +3275,29 @@
    "permission": true,
    "permissionTables": [
     "client_delegated_share_events",
+    "portal_project_access_companion_notice_audit",
+    "portal_project_access_companion_notice_outbox",
+    "portal_project_access_companion_recipient_claims",
+    "portal_project_access_companion_recipient_reservations",
+    "portal_project_access_notice_audit",
+    "portal_project_access_notice_outbox",
+    "portal_v2_invitations",
     "portal_v2_membership_audit"
    ]
   },
   {
    "name": "0170_authenticated_delivery_change_notifications.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_authenticated_delivery_change_batch_items",
+    "portal_authenticated_delivery_change_batches",
+    "portal_authenticated_delivery_change_object_versions",
+    "portal_authenticated_delivery_notification_policies",
+    "portal_authenticated_delivery_notification_policy_audit",
+    "portal_authenticated_delivery_notification_policy_mutations"
+   ]
   },
   {
    "name": "0171_secondary_workspace_membership_management.sql",
@@ -2824,13 +3307,16 @@
    "permissionTables": [
     "portal_secondary_workspace_invitation_authority",
     "portal_secondary_workspace_membership_fences",
-    "portal_v2_workspace_memberships"
+    "portal_v2_invitations",
+    "portal_v2_workspace_memberships",
+    "portal_workspace_invitation_requests",
+    "portal_workspace_invitation_requests_0165"
    ]
   },
   {
    "name": "0172_project_access_authority_history.sql",
    "automatic": false,
-   "additive": true,
+   "additive": false,
    "permission": true,
    "permissionTables": [
     "portal_project_access_authority_events",
@@ -2841,22 +3327,38 @@
    "name": "0173_invitation_request_foreign_key_repair.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_v2_invitation_commands",
+    "portal_v2_invitation_email_outbox",
+    "portal_v2_invitation_entitlements",
+    "portal_v2_invitations",
+    "portal_workspace_invitation_approvals",
+    "portal_workspace_invitation_approvals_0173",
+    "portal_workspace_invitation_publications",
+    "portal_workspace_invitation_request_audit",
+    "portal_workspace_invitation_request_audit_0173",
+    "portal_workspace_invitation_request_commands",
+    "portal_workspace_invitation_request_commands_0173"
+   ]
   },
   {
    "name": "0174_service_assignment_request_policy.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_service_assignments"
+   ]
   },
   {
    "name": "0175_authenticated_delivery_notification_policy_consistency.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_authenticated_delivery_notification_policies"
+   ]
   },
   {
    "name": "0176_secondary_invitation_delegation_recheck.sql",
@@ -2864,7 +3366,10 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
-    "portal_secondary_workspace_invitation_authority"
+    "portal_secondary_workspace_invitation_authority",
+    "portal_v2_invitation_email_outbox",
+    "portal_v2_invitation_entitlements",
+    "portal_v2_invitations"
    ]
   },
   {
@@ -2897,10 +3402,12 @@
   },
   {
    "name": "0181_service_assignment_request_policy_reviews.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_service_assignment_request_policy_reviews"
+   ]
   },
   {
    "name": "0182_portal_delivery_notification_source_ready.sql",
@@ -2929,6 +3436,8 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "client_service_request_drafts",
+    "client_service_requests",
     "portal_native_request_storage_bindings"
    ]
   },
@@ -2936,15 +3445,19 @@
    "name": "0186_delivery_notification_authority_provenance.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "delivery_notifications"
+   ]
   },
   {
    "name": "0187_authenticated_content_audit.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_authenticated_content_events"
+   ]
   },
   {
    "name": "0188_native_feedback_completion_notices.sql",
@@ -2969,24 +3482,36 @@
   },
   {
    "name": "0190_portal_contact_assignments_v4.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_portal_projection_contact_assignment_contracts",
+    "pa_portal_projection_contact_assignments",
+    "portal_v2_contact_assignment_contracts",
+    "portal_v2_contact_assignments"
+   ]
   },
   {
    "name": "0191_portal_projection_wire_contract_claim.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_portal_projection_contact_assignment_contracts"
+   ]
   },
   {
    "name": "0192_contact_assignment_billing_independence.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "pa_portal_projection_contact_assignments",
+    "pa_portal_projection_contact_assignments_v2",
+    "portal_v2_contact_assignments",
+    "portal_v2_contact_assignments_v2"
+   ]
   },
   {
    "name": "0193_bulk_download_parts.sql",
@@ -3013,7 +3538,9 @@
    "permission": true,
    "permissionTables": [
     "client_account_members",
+    "client_identity_links",
     "client_member_project_grants",
+    "portal_v2_entitlements",
     "portal_v2_folder_bindings",
     "portal_v2_legacy_member_bridges",
     "portal_v2_workspace_memberships"
@@ -3028,10 +3555,15 @@
   },
   {
    "name": "0197_portal_root_access_policy.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_v2_root_access_policies",
+    "portal_v2_root_access_policy_audit",
+    "portal_v2_root_access_policy_lock",
+    "portal_v2_root_access_policy_mutations"
+   ]
   },
   {
    "name": "0198_incoming_upload_owner_notifications.sql",
@@ -3074,10 +3606,13 @@
   },
   {
    "name": "0202_native_delivery_recipient_events.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "native_delivery_recipient_event_state",
+    "native_delivery_recipient_events"
+   ]
   },
   {
    "name": "0203_primary_delivery_authority.sql",
@@ -3091,10 +3626,12 @@
   },
   {
    "name": "0204_delivery_change_receipts.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_authenticated_delivery_change_receipt_targets"
+   ]
   },
   {
    "name": "0205_authenticated_delivery_change_sequence.sql",
@@ -3114,8 +3651,10 @@
    "name": "0207_delivery_change_projection.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "portal_authenticated_delivery_change_projection_jobs"
+   ]
   },
   {
    "name": "0208_authenticated_delivery_change_batch_provider_identity.sql",
@@ -3128,8 +3667,13 @@
    "name": "0209_authenticated_delivery_change_recipient_events.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "authenticated_delivery_recipient_event_email_controls",
+    "authenticated_delivery_recipient_event_state",
+    "authenticated_delivery_recipient_events",
+    "portal_authenticated_delivery_change_batches"
+   ]
   },
   {
    "name": "0210_client_delegated_share_expiry_health.sql",
@@ -3151,15 +3695,19 @@
    "name": "0212_incoming_upload_archive_inventory.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "file_request_upload_archive_inventory"
+   ]
   },
   {
    "name": "0213_incoming_rclone_promotion.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "file_request_upload_promotion_outbox"
+   ]
   },
   {
    "name": "0214_ops_inventory_catalog_staging.sql",
@@ -3253,6 +3801,7 @@
    "additive": false,
    "permission": true,
    "permissionTables": [
+    "portal_verified_recipient_delivery_0222_assert",
     "portal_verified_recipient_delivery_authority_audit",
     "portal_verified_recipient_delivery_authority_heads"
    ]
@@ -3296,24 +3845,35 @@
   },
   {
    "name": "0227_operations_portal_native_delivery_authority.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_native_delivery_commands",
+    "operations_portal_native_delivery_heads",
+    "operations_portal_native_delivery_history",
+    "operations_portal_native_delivery_live_heads",
+    "operations_portal_native_delivery_locally_authorized_commands",
+    "operations_portal_native_delivery_receipts"
+   ]
   },
   {
    "name": "0228_operations_portal_native_content_start_audit.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_native_content_start_events"
+   ]
   },
   {
    "name": "0229_operations_portal_native_delivery_regrant.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_native_delivery_replacements"
+   ]
   },
   {
    "name": "0230_operations_portal_native_delivery_terminal_cancellations.sql",
@@ -3361,22 +3921,27 @@
    "permissionTables": [
     "portal_pa_membership_reenrollment_receipts",
     "portal_secondary_workspace_invitation_authority",
+    "portal_v2_invitations",
     "portal_v2_workspace_memberships"
    ]
   },
   {
    "name": "0235_windows_portal_successor_candidates.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "operations_portal_native_delivery_successor_candidates"
+   ]
   },
   {
    "name": "0236_windows_portal_successor_content_start_audit.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "windows_portal_successor_content_start_events"
+   ]
   },
   {
    "name": "0237_viewer_direct_client_grants.sql",
@@ -3392,10 +3957,12 @@
   },
   {
    "name": "0238_viewer_direct_session_intents.sql",
-   "automatic": true,
+   "automatic": false,
    "additive": true,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "viewer_direct_client_session_intents"
+   ]
   },
   {
    "name": "0239_native_project_assignment_proof_v3.sql",
@@ -3417,8 +3984,11 @@
    "name": "0241_app_release_pilot.sql",
    "automatic": false,
    "additive": false,
-   "permission": false,
-   "permissionTables": []
+   "permission": true,
+   "permissionTables": [
+    "app_release_pilot_eligibilities",
+    "app_release_pilot_revocations"
+   ]
   },
   {
    "name": "0242_client_ops_triage_inquiries.sql",

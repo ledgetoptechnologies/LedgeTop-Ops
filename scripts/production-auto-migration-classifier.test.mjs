@@ -42,7 +42,6 @@ test('additive forms apply automatically', () => {
   auto('CREATE TABLE audit_notes (id TEXT PRIMARY KEY, body TEXT); CREATE UNIQUE INDEX audit_notes_body ON audit_notes(body);');
   auto('CREATE INDEX clients_name ON clients(name);');
   auto('ALTER TABLE clients ADD COLUMN notes TEXT;');
-  auto("ALTER TABLE clients ADD COLUMN tier TEXT NOT NULL DEFAULT 'basic';");
   auto("CREATE TABLE audit_notes (id TEXT PRIMARY KEY); INSERT INTO audit_notes (id) VALUES ('seed');");
   auto('CREATE VIEW client_names AS SELECT name FROM clients;');
   auto("PRAGMA foreign_keys = ON;\nCREATE TABLE audit_notes (id TEXT PRIMARY KEY);");
@@ -91,4 +90,34 @@ test('classification is pure: earlier files are replayed, nothing outside memory
   assert.deepEqual(first, second);
   assert.equal(first[2].automatic, true, 'the index sees the table created by the earlier file');
   assert.throws(() => classifyMigrationSequence({ files: [{ name: 'x' }], split }), /input_invalid/u);
+});
+
+test('review regressions: hidden trigger writes, defaults on existing rows, constraints, dependent triggers, wider permission names', () => {
+  // A '--' or '/*' inside a RAISE message must not hide a write that follows.
+  review(`CREATE TABLE audit_notes (id TEXT PRIMARY KEY);
+CREATE TRIGGER audit_notes_g AFTER INSERT ON audit_notes BEGIN SELECT RAISE(ABORT,'--'); UPDATE staff_roles SET role='admin';
+END;`, 'trigger_not_guard');
+  review(`CREATE TABLE audit_notes (id TEXT PRIMARY KEY);
+CREATE TRIGGER audit_notes_g AFTER INSERT ON audit_notes BEGIN SELECT RAISE(ABORT,'/*'); UPDATE staff_roles SET role='admin'; SELECT '*/'; END;`, 'trigger_not_guard');
+  review(`CREATE TABLE audit_notes (id TEXT PRIMARY KEY);
+CREATE TRIGGER audit_notes_g BEFORE INSERT ON audit_notes BEGIN SELECT RAISE(IGNORE); END;`, 'trigger_not_guard');
+  // A default is written into every existing row.
+  review('ALTER TABLE clients ADD COLUMN can_download INTEGER NOT NULL DEFAULT 1;', 'added_column_default_on_existing_rows');
+  review("ALTER TABLE clients ADD COLUMN tier TEXT DEFAULT 'basic';", 'added_column_default_on_existing_rows');
+  // REFERENCES/CHECK on an added column.
+  review('ALTER TABLE clients ADD COLUMN role_id TEXT REFERENCES staff_roles(id) ON DELETE CASCADE;', 'added_column_constraint');
+  review("ALTER TABLE clients ADD COLUMN kind TEXT CHECK (kind IN ('a','b'));", 'added_column_constraint');
+  // An existing trigger over the altered table.
+  const withTrigger = classifyMigrationSequence({ files: [BASE,
+    { name: '0002_t.sql', sql: "CREATE TRIGGER clients_ins AFTER INSERT ON clients BEGIN SELECT RAISE(ABORT, 'x') WHERE NEW.name = ''; END;" },
+    { name: '0003_c.sql', sql: 'ALTER TABLE clients ADD COLUMN notes TEXT;' }], split })[2];
+  assert.ok(withTrigger.reasons.includes('altered_table_has_triggers_or_views'));
+  // Authorization tables beyond the original list, and access-named columns.
+  for (const name of ['api_keys', 'pa_users', 'portal_v2_identities', 'portal_v2_entitlements', 'portal_v2_invitations',
+    'portal_v2_root_access_policies', 'pa_portal_projection_contact_assignments', 'viewer_sessions', 'x_oauth_states', 'enrollments'])
+    assert.ok(PERMISSION_TABLE_PATTERN.test(name), name);
+  const access = classify('ALTER TABLE clients ADD COLUMN can_view TEXT;');
+  assert.equal(access.permission, true); assert.equal(access.automatic, false);
+  const view = classify('CREATE VIEW effective_permissions AS SELECT id FROM clients;');
+  assert.equal(view.permission, true); assert.equal(view.automatic, false);
 });
