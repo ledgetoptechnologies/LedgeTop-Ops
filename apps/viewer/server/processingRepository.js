@@ -1,4 +1,6 @@
 'use strict';
+// Poll jitter on the node's elapsed time stays well inside this; a real move of the start does not.
+const ENGINE_START_TOLERANCE_MS = 30_000;
 
 const crypto = require('node:crypto');
 const path = require('node:path');
@@ -739,29 +741,38 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     return new Map(rows.map(row => [row.attempt_id, row.elapsed_ms]));
   }
 
-  // When the processing node started this provider task, recorded once from the first
-  // running observation: the node's own elapsed time when it reports one, otherwise the
-  // observation itself (at most one reconcile interval late). Never the upload time.
+  // When the processing node started this provider task, on the node's own clock: each running
+  // poll derives it from the node's elapsed time, so a Viewer restart or update never restarts the
+  // count. A start that moves (first seen without the node's time, or the node ran the task again)
+  // is re-recorded; steady polls add nothing. A node that reports no elapsed time keeps the first
+  // running observation.
   recordEngineStart(attempt, observation) {
     if (observation?.status !== 'running' || !attempt.providerTaskId || observation.uuid !== attempt.providerTaskId) return;
-    const id = `engine-started:${attempt.id}:${attempt.providerTaskId}`;
-    if (this.database.prepare('SELECT 1 FROM processing_events WHERE id=?').get(id)) return;
+    const base = `engine-started:${attempt.id}:${attempt.providerTaskId}`;
     const observedAt = Date.now(), elapsed = observation.processingTime;
-    const startedAtMs = Number.isSafeInteger(elapsed) && elapsed >= 0 && elapsed <= observedAt ? observedAt - elapsed : observedAt;
+    const nodeClock = Number.isSafeInteger(elapsed) && elapsed >= 0 && elapsed <= observedAt;
+    const startedAtMs = nodeClock ? observedAt - elapsed : observedAt;
+    const current = this.engineStartTimes([attempt.id], { anyStatus: true }).get(attempt.id);
+    if (current !== undefined && (!nodeClock || Math.abs(current - startedAtMs) <= ENGINE_START_TOLERANCE_MS)) return;
+    const id = current === undefined ? base : `${base}:${startedAtMs}`;
+    if (this.database.prepare('SELECT 1 FROM processing_events WHERE id=?').get(id)) return;
     this.recordProcessingEvent({ id, attemptId: attempt.id, eventType: 'processing_attempt.engine_started', phase: 'running',
       details: { providerTaskId: attempt.providerTaskId, engineStartedAt: new Date(startedAtMs).toISOString() } });
   }
 
-  // Running attempts only: attempt id -> engine start (ms) for the attempt's current provider task.
-  engineStartTimes(attemptIds) {
+  // Running attempts only (unless anyStatus): attempt id -> the latest recorded engine start (ms)
+  // for the attempt's current provider task.
+  engineStartTimes(attemptIds, { anyStatus = false } = {}) {
     if (attemptIds.length === 0) return new Map();
     const rows = this.database.prepare(`
       SELECT e.attempt_id, e.details_json
       FROM processing_events e
-      JOIN processing_attempts a ON a.id=e.attempt_id AND a.status='running'
-        AND e.id='engine-started:' || a.id || ':' || a.provider_task_id
+      JOIN processing_attempts a ON a.id=e.attempt_id ${anyStatus ? '' : "AND a.status='running'"}
+        AND (e.id='engine-started:' || a.id || ':' || a.provider_task_id
+          OR substr(e.id,1,length(a.id)+length(a.provider_task_id)+17)='engine-started:' || a.id || ':' || a.provider_task_id || ':')
       WHERE e.event_type='processing_attempt.engine_started'
         AND e.attempt_id IN (${attemptIds.map(() => '?').join(',')})
+      ORDER BY e.created_at, e.rowid
     `).all(...attemptIds);
     const starts = new Map();
     for (const row of rows) {

@@ -73,3 +73,42 @@ test('a running attempt reports live elapsed time from when the node started it'
     assert.ok(value.processingElapsedMs>=600_000&&value.processingElapsedMs<610_000,`elapsed ${value.processingElapsedMs}`);
   }
 });
+
+// The node's own clock wins on every poll. A start first recorded without the node's elapsed time
+// (or from an older Viewer) moves to the node's value, a node that restarts the task moves it
+// later, and steady polls of the same run add nothing.
+test('the live runtime follows the node\'s own processing time on each poll',async t=>{
+  const db=openDatabase(':memory:');t.after(()=>db.close());
+  const processing=new ProcessingRepository(db);
+  const project=processing.createProject({displayName:'Node clock'});
+  const data=processing.createDataset({projectId:project.id,displayName:'Synthetic photos',storageMode:'managed',rootKey:'datasets',relativePath:'fixture-photos'});
+  processing.finalizeDataset(data.id,[{relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}],'b'.repeat(64));
+  const task=processing.createTask({projectId:project.id,datasetId:data.id,displayName:'Long task'});
+  const provider=processing.upsertProvider({type:'nodeodm',displayName:'Fixture',endpoint:'http://127.0.0.1:3000',enabled:true});
+  let info;
+  const adapter=new NodeOdmProvider({endpoint:provider.endpoint,fetchImpl:async url=>Response.json(new URL(url).pathname.endsWith('/info')?info:[])});
+  let attempt=processing.createAttempt({taskId:task.id,providerId:provider.id});
+  db.prepare("UPDATE processing_jobs SET status='complete' WHERE attempt_id=?").run(attempt.id);
+  db.prepare("UPDATE processing_attempts SET status='queued_upstream' WHERE id=?").run(attempt.id);
+  processing.enqueueJob(attempt.id,'reconcile');
+  attempt=processing.getAttempt(attempt.id);
+  const poll=async processingTime=>{
+    info={uuid:attempt.providerTaskId,status:{code:20},processingTime,imagesCount:1,progress:40};
+    db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").run(attempt.id);
+    await processReconcile(processing.claimJob('node-clock-fixture'),{processing,config:{},adapterFactory:()=>adapter});
+  };
+  const elapsed=()=>Date.now()-processing.engineStartTimes([attempt.id]).get(attempt.id);
+  const events=()=>db.prepare("SELECT COUNT(*) AS n FROM processing_events WHERE attempt_id=? AND event_type='processing_attempt.engine_started'").get(attempt.id).n;
+
+  await poll(undefined);
+  assert.ok(elapsed()<5_000,'without the node\'s time the first observation is the best start');
+  const hours=3*3_600_000;
+  await poll(hours);
+  assert.ok(elapsed()>=hours&&elapsed()<hours+5_000,`after a Viewer restart the node's ${hours} ms wins, got ${elapsed()}`);
+  const settled=events();
+  await poll(hours+15_000);await poll(hours+30_000);
+  assert.equal(events(),settled,'steady polls of the same run record nothing new');
+  assert.ok(elapsed()>=hours&&elapsed()<hours+5_000);
+  await poll(60_000);
+  assert.ok(elapsed()>=60_000&&elapsed()<65_000,`a node that restarts the task counts from its new start, got ${elapsed()}`);
+});
